@@ -261,8 +261,12 @@ export function recoverPiSpawnReservation(
   return recovered[0] ?? null;
 }
 
+/** One write grant a spawn batch issued, at the spawn slot it was issued for. */
+export type PiIssuedWriteGrant = Readonly<{ slot: number; token: string }>;
+
 export interface PiParentSessionRuntime {
-  readonly issuedWriteGrants: Map<string, readonly string[]>;
+  /** Per tool call, the grants it issued and has not yet revoked, in slot order. */
+  readonly issuedWriteGrants: Map<string, readonly PiIssuedWriteGrant[]>;
   readonly spawnReservations: Map<string, PiSpawnReservation>;
 }
 
@@ -288,9 +292,9 @@ export type PiParentSessions = Readonly<{
   get: (sessionId: PiSessionId) => PiParentSessionRuntime | undefined;
   /** The session's runtime, created empty on first use. */
   runtimeFor: (sessionId: PiSessionId) => PiParentSessionRuntime;
-  /** Retain exactly these unrevoked write-grant tokens for the tool call
-   *  (none: forget its grants), then prune the session if it owes nothing. */
-  retainWriteGrantDebt: (sessionId: PiSessionId, toolCallId: string, tokens: readonly string[]) => void;
+  /** Retain exactly these unrevoked write grants for the tool call (none:
+   *  forget its grants), then prune the session if it owes nothing. */
+  retainWriteGrantDebt: (sessionId: PiSessionId, toolCallId: string, grants: readonly PiIssuedWriteGrant[]) => void;
   /** Retain the reservation while it still names a roster entry or pointer
    *  lease (otherwise forget it), then prune the session if it owes nothing. */
   retainSpawnCleanupDebt: (sessionId: PiSessionId, toolCallId: string, reservation: PiSpawnReservation) => void;
@@ -314,8 +318,8 @@ export function createPiParentSessions(): PiParentSessions {
   return Object.freeze({
     get: (sessionId: PiSessionId) => runtimes.get(sessionId),
     runtimeFor,
-    retainWriteGrantDebt: (sessionId: PiSessionId, toolCallId: string, tokens: readonly string[]) => {
-      if (tokens.length > 0) runtimeFor(sessionId).issuedWriteGrants.set(toolCallId, Object.freeze([...tokens]));
+    retainWriteGrantDebt: (sessionId: PiSessionId, toolCallId: string, grants: readonly PiIssuedWriteGrant[]) => {
+      if (grants.length > 0) runtimeFor(sessionId).issuedWriteGrants.set(toolCallId, Object.freeze([...grants]));
       else runtimes.get(sessionId)?.issuedWriteGrants.delete(toolCallId);
       pruneIfIdle(sessionId);
     },

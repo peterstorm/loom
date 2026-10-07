@@ -3,6 +3,7 @@ import fc from "fast-check";
 import {
   collectDenseArray,
   exactRecordErrors,
+  hasExactKeys,
   isPlainRecord,
   isRecord,
   parseExactRecord,
@@ -112,6 +113,23 @@ describe("parseExactRecord", () => {
     fc.assert(fc.property(fc.oneof(fc.constant(null), fc.string(), fc.integer(), fc.array(fc.anything())), (value) => {
       expect(parseExactRecord(value, ["kind"], "root")).toEqual({ ok: false, problem: "not-plain-record" });
     }));
+  });
+});
+
+describe("hasExactKeys", () => {
+  it("agrees with the sorted own-key comparison it replaced, in any key order", () => {
+    fc.assert(fc.property(fieldList, fieldList, (keys, present) => {
+      const record = recordOf(present);
+      const sortedJoin = JSON.stringify(Object.keys(record).sort()) === JSON.stringify([...keys].sort());
+      expect(hasExactKeys(record, keys)).toBe(sortedJoin);
+      expect(hasExactKeys(record, [...keys].reverse())).toBe(sortedJoin);
+    }));
+  });
+
+  it("ignores inherited and symbol keys and never checks the prototype", () => {
+    expect(hasExactKeys({}, ["toString"])).toBe(false);
+    expect(hasExactKeys({ kind: "x", [Symbol("hidden")]: true }, ["kind"])).toBe(true);
+    expect(hasExactKeys(Object.assign(Object.create({ inherited: true }) as object, { kind: "x" }), ["kind"])).toBe(true);
   });
 });
 

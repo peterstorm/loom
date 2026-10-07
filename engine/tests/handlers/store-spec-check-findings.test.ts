@@ -691,6 +691,53 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     }
   });
 
+  it("a torn final turn names its corruption on stderr while the legacy read still fails closed", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpRoot = join(tmpdir(), `spec-check-torn-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    const tmpDir = realpathSync.native(tmpRoot);
+    const statePath = join(tmpDir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, tasks: [], wave_gates: {},
+    }));
+    const report = "SPEC_CHECK_WAVE: 1\nHIGH: delivered only through the handback\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 1\nSPEC_CHECK_VERDICT: PASSED";
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [
+        { type: "tool_use", id: "h1", name: "SubagentHandback", input: { message: report } },
+      ] } }),
+      JSON.stringify({ type: "user", message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "h1", content: "delivered", is_error: false },
+      ] } }),
+      '{"type":"attachment","torn',
+    ].join("\n") + "\n");
+    const session = `spec-check-torn-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), []);
+      expect(result.kind).toBe("passthrough");
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(text).toMatch(/spec-check final turn is malformed \(.*line.*\)/);
+      // The handback's HIGH line is invisible to the legacy read, so the counts
+      // cannot reconcile: no wrong report is accepted.
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("derives and consumes the transcript when agent_transcript_path is absent", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const tmpRoot = join(tmpdir(), `spec-check-derived-${Date.now()}`);

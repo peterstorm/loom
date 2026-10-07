@@ -102,14 +102,14 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/orchestration",
 ]);
 
-/** The traits of the orchestration operation a route names, or null when the
- *  route is not the orchestration helper or names no known operation. */
-function orchestrationOperationTraits(
-  hookType: string | undefined,
-  handlerName: string | undefined,
-  extraArgs: readonly string[],
-) {
-  if (hookType !== "helper" || handlerName !== "orchestration") return null;
+function isOrchestrationHelper(hookType: string | undefined, handlerName: string | undefined): boolean {
+  return hookType === "helper" && handlerName === "orchestration";
+}
+
+/** The traits of the orchestration operation the helper's arguments name, or
+ *  null when they name no known operation. Callers establish the route is the
+ *  orchestration helper. */
+function orchestrationOperationTraits(extraArgs: readonly string[]) {
   const operation = parseOrchestrationOperation(extraArgs[0]);
   return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
 }
@@ -123,7 +123,8 @@ export function piRuntimeHandshakeRequired(
 ): boolean {
   if (hookType === "init-state") return true;
   if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
-  return orchestrationOperationTraits(hookType, handlerName, extraArgs)?.runtimeSkew !== "available";
+  if (!isOrchestrationHelper(hookType, handlerName)) return true;
+  return orchestrationOperationTraits(extraArgs)?.runtimeSkew !== "available";
 }
 
 /** Whether a route reads stdin to end-of-input. Hook routes always receive
@@ -135,8 +136,8 @@ export function routeConsumesStdin(
   handlerName: string | undefined,
   extraArgs: readonly string[] = [],
 ): boolean {
-  if (hookType === "helper" && handlerName === "orchestration") {
-    return orchestrationOperationTraits(hookType, handlerName, extraArgs)?.input === "stdin";
+  if (isOrchestrationHelper(hookType, handlerName)) {
+    return orchestrationOperationTraits(extraArgs)?.input === "stdin";
   }
   return true;
 }

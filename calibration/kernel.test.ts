@@ -1,18 +1,18 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { including, nonEmpty } from "./kernel";
+import { nonEmpty } from "./kernel";
 
-describe("NonEmpty constructors", () => {
+describe("NonEmpty constructor", () => {
   it("proves a list non-empty, or returns null for an empty one", () => {
     expect(nonEmpty([])).toBeNull();
     expect(nonEmpty([1, 2])).toEqual([1, 2]);
   });
 
-  it("inserts one item between two lists, keeping both orders (property)", () => {
-    fc.assert(fc.property(fc.array(fc.integer()), fc.integer(), fc.array(fc.integer()), (before, item, after) => {
-      const joined = including(before, item, after);
-      expect(joined).toEqual([...before, item, ...after]);
-      expect(Object.isFrozen(joined)).toBe(true);
+  it("keeps every item in order and freezes the proof (property)", () => {
+    fc.assert(fc.property(fc.array(fc.integer(), { minLength: 1 }), (values) => {
+      const proven = nonEmpty(values);
+      expect(proven).toEqual(values);
+      expect(Object.isFrozen(proven)).toBe(true);
     }));
   });
 });

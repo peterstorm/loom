@@ -158,6 +158,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/parse-spec.ts": ["node:crypto"],
       "engine/src/core/panel-kernel.ts": ["node:path"],
       "engine/src/core/phase-artifact-paths.ts": ["node:path"],
+      // The one Pi agent-directory rule: `~` expansion and the agents/<name>.md
+      // join are pure path math, and a `file://` selection is read as its path
+      // with fileURLToPath — string conversion, no filesystem.
+      "engine/src/core/pi-agent-directory.ts": ["node:path", "node:url"],
       // The retained predecessor-archive codec inflates an inline gzip archive
       // in memory under an explicit output bound — pure decompression, no I/O.
       "engine/src/core/predecessor-archive.ts": ["node:zlib"],

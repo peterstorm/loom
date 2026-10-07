@@ -36,7 +36,8 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
 import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
-import { buildPiRoutingContext } from "../../utils/model-routing-context";
+import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
+import { piAgentDefinitionPath } from "../../core/pi-agent-directory";
 
 type PiAgentDefinitionLookup =
   | Readonly<{ kind: "found"; path: string }>
@@ -44,8 +45,7 @@ type PiAgentDefinitionLookup =
   | Readonly<{ kind: "unreadable"; path: string; error: string }>;
 
 function piAgentDefinition(agentName: string): PiAgentDefinitionLookup {
-  const home = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
-  const path = join(home, "agents", `${agentName}.md`);
+  const path = piAgentDefinitionPath(activeAgentDir(), agentName);
   try {
     lstatSync(path);
     return { kind: "found", path };

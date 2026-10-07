@@ -10,10 +10,12 @@
  *   retention decision (identical bytes are a no-op, different bytes are
  *   refused — never overwritten) and the decision record.
  * - `recordWindow` and `decideRetainedWindow` sequence them over the store:
- *   a window that will dispatch resolves every preregistered case input
- *   first, so an unresolvable workload is refused before anything is
- *   written; the window record is written before dispatch and CLOSED (end
- *   time and observation count) before the blinded packet is derived, so a
+ *   a window that will dispatch loads its corpus and resolves every
+ *   preregistered case input first, so an unloadable or unresolvable
+ *   workload is refused before anything is written, while a window that
+ *   will not dispatch loads nothing and is always retained; the window
+ *   record is written before dispatch and CLOSED (end time and observation
+ *   count) before the blinded packet is derived, so a
  *   window whose rubric cannot assess it still records how it ended; every
  *   decision is the current `release-decision.json` AND an append-only log
  *   line.
@@ -34,8 +36,7 @@ import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type Qualit
 import { rubricAssessment } from "./pilot-rubric";
 import { contentDigest } from "./pilot-vocabulary";
 import { blind, blindedPacket, dispatchSchedule, type SampleRecord } from "./pilot-window";
-import { resolveWindowInputs, type CaseInput, type ChangedPathsOf, type WorkloadFixtures } from "./pilot-workload";
-
+import { resolveWindowInputs, type ChangedPathsOf, type WindowInputs, type WorkloadFixtures } from "./pilot-workload";
 
 // ---------------------------------------------------------------------------
 // The window's files and the store port
@@ -303,7 +304,7 @@ function decideAndRecord(store: WindowStore, inputs: DecisionInputs): Result<Dec
  *  as zero escapes. */
 function retainBlindedPacket(
   store: WindowStore, record: WindowRecord, prereg: Preregistration,
-  samples: readonly SampleRecord[], inputs: ReadonlyMap<string, CaseInput>,
+  samples: readonly SampleRecord[], inputs: WindowInputs,
 ): Result<BlindingKey, string> {
   const blinded = blind(record.windowId, samples);
   store.write(WINDOW_FILES.key, jsonText(blinded.key));
@@ -316,10 +317,13 @@ function retainBlindedPacket(
 
 /** The fixed workload a dispatched window renders: the fixture file, the
  *  corpus the reviewer cells' sources name, and the revision-derived
- *  changed-path lookup (git in the shell, a constant in tests). */
+ *  changed-path lookup (git in the shell, a constant in tests). The corpus is
+ *  loaded through a port that only a dispatching window invokes, so a window
+ *  that never dispatches (a blocked preflight, `--preflight-only`) is retained
+ *  whatever state the corpus is in. */
 export type WindowWorkload = Readonly<{
   fixtures: WorkloadFixtures;
-  corpusCases: readonly CalibrationCase[];
+  loadCorpusCases: () => Result<readonly CalibrationCase[], string>;
   changedPathsOf: ChangedPathsOf;
 }>;
 
@@ -339,51 +343,70 @@ export type WindowRun = Readonly<{
   now: () => string;
 }>;
 
-/** The window's case inputs: resolved only when it dispatches, refused whole if any case cannot be. */
-function windowInputs(run: WindowRun): Result<ReadonlyMap<string, CaseInput>, string> {
-  if (run.record.dispatch.kind !== "dispatched") return ok(new Map());
-  const { fixtures, corpusCases, changedPathsOf } = run.workload;
-  const inputs = resolveWindowInputs(run.preregistration.prereg, fixtures, corpusCases, changedPathsOf);
-  return inputs.ok
-    ? inputs
-    : err(`window ${run.record.windowId} cannot dispatch: its preregistered case inputs do not resolve:${issueList(inputs.error)}`);
+/** A dispatching window's case inputs: the corpus loaded and every
+ *  preregistered case resolved, or the refusal naming why it cannot dispatch. */
+function resolveDispatchInputs(run: WindowRun): Result<WindowInputs, string> {
+  const cannotDispatch = `window ${run.record.windowId} cannot dispatch`;
+  const { fixtures, loadCorpusCases, changedPathsOf } = run.workload;
+  const corpusCases = loadCorpusCases();
+  if (!corpusCases.ok) return err(`${cannotDispatch}: its workload corpus does not load: ${corpusCases.error}`);
+  const inputs = resolveWindowInputs(run.preregistration.prereg, fixtures, corpusCases.value, changedPathsOf);
+  return inputs.ok ? inputs : err(`${cannotDispatch}: its preregistered case inputs do not resolve:${issueList(inputs.error)}`);
+}
+
+type OpenedWindow = Readonly<{ records: readonly SampleRecord[]; inputs: WindowInputs }>;
+
+/** Open the window record and run what its dispatch plan says — the one
+ *  decision about whether the window dispatches. A dispatching window
+ *  resolves its inputs BEFORE the record is written, so an unresolvable
+ *  workload is refused with nothing written; a window that does not dispatch
+ *  loads and resolves nothing. Every sample is persisted as it lands. */
+async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, string>> {
+  const { store, record } = run;
+  const open = (): void => store.write(WINDOW_FILES.window, jsonText(record));
+  if (record.dispatch.kind !== "dispatched") {
+    open();
+    return ok(Object.freeze({ records: Object.freeze([]), inputs: new Map() }));
+  }
+  const inputs = resolveDispatchInputs(run);
+  if (!inputs.ok) return inputs;
+  open();
+  const records = await dispatchSchedule({
+    windowId: record.windowId,
+    prereg: run.preregistration.prereg,
+    fixtures: run.workload.fixtures,
+    inputs: inputs.value,
+    dispatch: run.dispatch,
+    now: run.monotonicNow,
+    onSample: (landed) => {
+      const { sample } = landed;
+      store.append(WINDOW_FILES.observations, `${JSON.stringify(sample)}\n`);
+      if (landed.kind === "accepted") {
+        store.append(WINDOW_FILES.payloads, `${JSON.stringify({ pairId: sample.pairId, arm: sample.arm, payload: landed.acceptedPayload })}\n`);
+      }
+    },
+    onPair: run.onPair,
+  });
+  return ok(Object.freeze({ records, inputs: inputs.value }));
 }
 
 /**
- * One `--pilot` window: resolve its inputs (refusing before anything is
- * written), open it (never over a retained one), run the matched dispatch
- * with every sample persisted as it lands (an interrupted window keeps
- * everything observed), close the window record, retain the blinding key,
- * packet and rubric assessment, then decide.
+ * One `--pilot` window: open it (never over a retained one; a dispatching
+ * window resolves its inputs first, refusing before anything is written), run
+ * the matched dispatch with every sample persisted as it lands (an
+ * interrupted window keeps everything observed), close the window record,
+ * retain the blinding key, packet and rubric assessment, then decide.
  */
 export async function recordWindow(run: WindowRun): Promise<Result<DecisionOutcome, string>> {
   const { store, record } = run;
   if (store.read(WINDOW_FILES.window) !== null) {
     return err(`window ${store.locate("")} already exists; a retained window is never overwritten`);
   }
-  const inputs = windowInputs(run);
-  if (!inputs.ok) return inputs;
-  store.write(WINDOW_FILES.window, jsonText(record));
-  const records = record.dispatch.kind === "dispatched"
-    ? await dispatchSchedule({
-        windowId: record.windowId,
-        prereg: run.preregistration.prereg,
-        fixtures: run.workload.fixtures,
-        inputs: inputs.value,
-        dispatch: run.dispatch,
-        now: run.monotonicNow,
-        onSample: (landed) => {
-          const { sample } = landed;
-          store.append(WINDOW_FILES.observations, `${JSON.stringify(sample)}\n`);
-          if (landed.kind === "accepted") {
-            store.append(WINDOW_FILES.payloads, `${JSON.stringify({ pairId: sample.pairId, arm: sample.arm, payload: landed.acceptedPayload })}\n`);
-          }
-        },
-        onPair: run.onPair,
-      })
-    : [];
+  const opened = await openAndDispatch(run);
+  if (!opened.ok) return opened;
+  const { records, inputs } = opened.value;
   store.write(WINDOW_FILES.window, jsonText(closeWindow(record, run.now(), records.length)));
-  const key = retainBlindedPacket(store, record, run.preregistration.prereg, records, inputs.value);
+  const key = retainBlindedPacket(store, record, run.preregistration.prereg, records, inputs);
   if (!key.ok) return key;
   return decideAndRecord(store, {
     preregistration: run.preregistration,

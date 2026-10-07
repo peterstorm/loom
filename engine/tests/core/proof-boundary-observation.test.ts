@@ -5,6 +5,7 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { isBareGitSha } from "../fixtures/git-sha-oracle";
 import {
   parseProofBoundaryObservation,
   renderProofBoundaryNotice,
@@ -40,7 +41,7 @@ describe("parseProofBoundaryObservation", () => {
 
   it("property: a captured revision is admitted exactly when it is a bare 40- or 64-hex SHA", () => {
     fc.assert(fc.property(fc.string({ maxLength: 70 }), (revision) => {
-      const admitted = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(revision);
+      const admitted = isBareGitSha(revision);
       expect(parseProofBoundaryObservation({ kind: "captured", revision }).ok).toBe(admitted);
     }), { numRuns: 200 });
   });

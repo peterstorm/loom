@@ -87,19 +87,30 @@ const productionPiChildWriteGrantPorts: PiChildWriteGrantPorts = Object.freeze({
 /** The roster entry a failed activation had already written. */
 type PartialChildBinding = Readonly<{ sessionId: SessionId; agentId: AgentId }>;
 
+/** A rejected activation's outstanding cleanup authority, keyed by the child
+ *  session the shell stores it under. */
+export type RejectedChildWriteGrantDebt = Readonly<{
+  sessionId: SessionId;
+  grant: Extract<ActiveChildWriteGrant, { kind: "roster-cleanup-pending" }>;
+}>;
+
 /**
  * What a rejected activation still owes: when its partial roster entry could
  * not be removed, that entry stays as `roster-cleanup-pending` authority so
  * shutdown retries it; a clean (or never-made) partial binding owes nothing.
- * Pure; the shell stores the answer. A failed bind leaves no pointer lease,
- * so the roster entry is the only debt this half of the lifecycle can hold.
+ * Pure; the shell stores the answer under the session it names. A failed bind
+ * leaves no pointer lease, so the roster entry is the only debt this half of
+ * the lifecycle can hold.
  */
 export function rejectedChildWriteGrantDebt(
   partial: PartialChildBinding | null,
   cleanupErrors: readonly string[],
-): Extract<ActiveChildWriteGrant, { kind: "roster-cleanup-pending" }> | null {
+): RejectedChildWriteGrantDebt | null {
   return partial !== null && cleanupErrors.length > 0
-    ? { kind: "roster-cleanup-pending", agentId: partial.agentId, pointerBinding: null }
+    ? {
+        sessionId: partial.sessionId,
+        grant: { kind: "roster-cleanup-pending", agentId: partial.agentId, pointerBinding: null },
+      }
     : null;
 }
 
@@ -163,7 +174,7 @@ async function rejectChildWriteGrant(
     ports.writeStderr(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
   }
   const debt = rejectedChildWriteGrantDebt(partial, cleanupErrors);
-  if (partial !== null && debt !== null) grants.active.set(partial.sessionId, debt);
+  if (debt !== null) grants.active.set(debt.sessionId, debt.grant);
   const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}` +
     cleanupFailureSuffix(cleanupErrors);
   ports.writeStderr(message + "\n");

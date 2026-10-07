@@ -18,8 +18,9 @@
  *   child; the emission-enabled arm goes through the INSTALLED production
  *   launcher's `runRpcAgent` readiness barrier (AD-4, loaded through the
  *   `loadLauncher` port — `importRpcLauncher` in production, a plain fake in
- *   tests) with the issued binding
- *   provisioned in `LOOM_EMISSION_BINDING`. Both load the STAGED Loom runtime
+ *   tests) with the issued binding (minted upstream by the pure
+ *   `pilot-binding.ts`; this adapter only consumes it) provisioned in
+ *   `LOOM_EMISSION_BINDING`. Both load the STAGED Loom runtime
  *   (`-ne -e <checkout>/pi/extension.ts`) so the arms share one frozen,
  *   content-addressed runtime. No provider serializer exists here: Pi's own
  *   resolver serializes every request.
@@ -28,20 +29,19 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { match } from "ts-pattern";
-import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../engine/src/core/emission-tool";
 import { parseFinalPayload } from "../../engine/src/core/harness-capture";
 import { observeEmissionCalls } from "../../engine/src/core/emission-observation";
 import { selectCanonicalPayload, selectVerdictSource } from "../../engine/src/core/emission-ingestion";
 import { parseContextDigest } from "../../engine/src/core/orchestration-contract/identity";
 import { piEmissionCallFrames, piResultFinalPayloadCandidates } from "../../pi/transcript-adapter";
 import {
-  EMISSION_READINESS_COMMAND,
-  EMISSION_READINESS_ENTRY_TYPE,
   LOOM_EMISSION_BINDING_ENV,
 } from "../../pi/emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../pi/emission-readiness-protocol";
 import { decideReadinessGate, parseReadinessStageObservation } from "../../pi/emission-readiness-gate";
 import { err, ok, type Result } from "../kernel";
-import { piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine } from "../pi-json-stream";
+import { isRecord, piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine, type PiMessage } from "../pi-json-stream";
+import type { CellBinding } from "./pilot-binding";
 import {
   classifyEmissionToolError,
   type AttemptObservation,
@@ -51,32 +51,6 @@ import {
   type ToolError,
 } from "./pilot-observation";
 import { contentDigest, PILOT_CELLS, type CellKey, type PilotArm } from "./pilot-vocabulary";
-
-// ---------------------------------------------------------------------------
-// Issued binding per cell (path-refined, minted by the engine's one mint)
-// ---------------------------------------------------------------------------
-
-export type CellBinding =
-  | Readonly<{ path: "reviewer"; binding: IssuedEmissionBindingOf<"reviewer-payload">; contextDigest: string }>
-  | Readonly<{ path: "verdict"; binding: IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict">; contextDigest: string }>;
-
-/** Mint the issued binding for one attempt through `issueEmissionBinding`; the
- *  context digest is the content address of the exact prompt the child gets. */
-export function mintCellBinding(cell: CellKey, requestId: string, prompt: string): Result<CellBinding, string> {
-  const contextDigest = parseContextDigest(contentDigest(prompt));
-  if (!contextDigest.ok) return err(contextDigest.error.message);
-  const producer = PILOT_CELLS[cell];
-  if (producer.kind === "reviewer-payload") {
-    const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: producer.version });
-    return minted.ok
-      ? ok(Object.freeze({ path: "reviewer" as const, binding: minted.value, contextDigest: contextDigest.value }))
-      : err(minted.error.message);
-  }
-  const minted = issueEmissionBinding({ requestId, kind: producer.kind, version: producer.version });
-  return minted.ok
-    ? ok(Object.freeze({ path: "verdict" as const, binding: minted.value, contextDigest: contextDigest.value }))
-    : err(minted.error.message);
-}
 
 // ---------------------------------------------------------------------------
 // Pure transcript classification
@@ -98,9 +72,6 @@ export type AttemptClassification = Readonly<{
    *  arms, so a blinded assessor cannot infer the arm from formatting). */
   acceptedPayload: unknown;
 }>;
-
-type Rec = Readonly<Record<string, unknown>>;
-const isRecord = (value: unknown): value is Rec => typeof value === "object" && value !== null && !Array.isArray(value);
 
 const encoder = new TextEncoder();
 
@@ -234,7 +205,7 @@ export type TranscriptInput =
   | (TranscriptCommon & Readonly<{ arm: "extraction-only"; launch: ExtractionLaunchEnd }>);
 
 /** The counters of the emission tool's calls and results in one transcript. */
-function emissionCounters(toolName: string, records: readonly Rec[], assistantIndices: readonly number[]) {
+function emissionCounters(toolName: string, records: readonly PiMessage[], assistantIndices: readonly number[]) {
   const callIds = new Set<string>();
   for (const message of records) {
     if (message["role"] !== "assistant" || !Array.isArray(message["content"])) continue;

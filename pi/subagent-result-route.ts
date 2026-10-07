@@ -43,12 +43,11 @@ export type PiResultNotice = Readonly<{ stderr: string; processingError: string 
 const notice = (stderr: string, processingError: string | null = null): PiResultNotice =>
   Object.freeze({ stderr, processingError });
 
-/** Results under these agent types are Loom orchestration evidence. */
+/** Results under these agent types are Loom orchestration evidence: exactly
+ *  the agents a named applier settles (`piResultApplier`), so the agent
+ *  roster is classified in one place. */
 export const isLoomOwnedResultAgent = (agentType: string): boolean =>
-  PHASE_AGENT_MAP[agentType] !== undefined ||
-  IMPL_AGENTS.has(agentType) ||
-  isReviewAgent(agentType) ||
-  agentType === "spec-check-invoker";
+  piResultApplier(agentType, false).kind !== "none";
 
 /** A result whose agent is not the agent its slot reserved is ignored, before
  *  any capture; under run authority that is a processing error. `null`: the

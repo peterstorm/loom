@@ -1,8 +1,9 @@
 /**
  * Pi's JSON event stream (`pi --mode json`) — PURE: what one stdout line means,
- * what a stream as a whole yields, and the text a message carries. The one
- * place that knows Pi's event and message-content shape, shared by the historical corpus core (`corpus-calibration.ts`) and the
- * AD-11 pilot's extraction arm (`grammar-constrained-decoding/pilot-dispatch.ts`).
+ * what a stream as a whole yields, what a Pi record is, and the text a message
+ * carries. The one place that knows Pi's event and message-content shape,
+ * shared by the historical corpus core (`corpus-calibration.ts`) and the AD-11
+ * pilot's Pi adapter (`grammar-constrained-decoding/pilot-dispatch.ts`).
  *
  * Every `message_end` event's message is kept, in stream order; every other
  * event is ignored. Any malformed line — not JSON, or JSON that is not an event
@@ -26,7 +27,9 @@ export type PiJsonLine =
   | Readonly<{ kind: "message"; message: PiMessage }>
   | Readonly<{ kind: "malformed"; detail: string }>;
 
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+/** What a Pi record is — an event, a message, a content block or a readiness
+ *  entry: a plain JSON object. */
+export const isRecord = (value: unknown): value is PiMessage =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const IGNORED: PiJsonLine = Object.freeze({ kind: "ignored" as const });
@@ -63,5 +66,5 @@ export function foldPiJsonStream(stdout: string): Result<readonly PiMessage[], s
 export function piContentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.filter(isRecord).filter((block) => block["type"] === "text").map((block) => String(block["text"] ?? "")).join("");
+  return content.flatMap((block) => (isRecord(block) && block["type"] === "text" ? [String(block["text"] ?? "")] : [])).join("");
 }

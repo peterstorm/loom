@@ -4,7 +4,7 @@ import { evaluatePilot, type CellOutcome, type PilotEvaluation } from "./pilot-c
 import type { SampleObservation } from "./pilot-observation";
 import type { PreflightDecision } from "./pilot-preflight";
 import { buildPairSchedule, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
-import { parseQualityAssessment, type BlindingKey, type QualityAssessment } from "./pilot-quality";
+import type { BlindingKey, QualityAssessment } from "./pilot-quality";
 import {
   ACCEPT_EMISSION,
   ACCEPT_EXTRACTION,
@@ -19,8 +19,10 @@ import { CELL_KEYS, type CellKey, type PilotArm } from "./pilot-vocabulary";
 /**
  * The release decision at its one entry point, `evaluatePilot`: per-cell
  * measurements, every guardrail and the decision derived from them. The
- * parsed inputs are pinned at their own seams (pilot-preregistration,
- * pilot-observation, pilot-preflight, pilot-statistics test suites).
+ * parsed inputs and the quality comparison are pinned at their own seams
+ * (pilot-preregistration, pilot-observation, pilot-preflight,
+ * pilot-statistics and pilot-quality test suites); here AS-016 is pinned
+ * only as it reaches the release decision.
  */
 
 type SampleSpec = Readonly<{ ms: number; attempts: readonly AttemptSpec[] }>;
@@ -353,16 +355,6 @@ describe("escaped-defect severity (AS-016)", () => {
         : matchedArms(pair, arm)));
     const quality = measured(result.cells, "judge-verdict/v1").measurement.quality;
     expect(quality?.observedEscapes.filter((escape) => escape.observedBy.includes("terminal-failure")).length).toBe(100);
-  });
-
-  it("parses assessor ids as path-safe tokens (they name the retained file)", () => {
-    const assessment = (assessorId: string) => ({ schemaVersion: 1, assessorId, method: "m", blinded: true, entries: [] });
-    expect(parseQualityAssessment(assessment("human-blind-1")).ok).toBe(true);
-    expect(parseQualityAssessment(assessment("rubric-v1.2_b")).ok).toBe(true);
-    for (const unsafe of ["../escape", "a/b", ".hidden", "", "a b", "x".repeat(65)]) {
-      expect(parseQualityAssessment(assessment(unsafe)).ok, unsafe).toBe(false);
-    }
-    expect(parseQualityAssessment({ ...assessment("ok"), blinded: false }).ok).toBe(false);
   });
 
   it("refuses an assessment naming a defect the case does not have", () => {

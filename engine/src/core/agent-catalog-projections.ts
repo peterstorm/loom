@@ -53,9 +53,9 @@ export function isStandaloneReviewAgent(agent: string): boolean {
 }
 
 /**
- * The producer-kind vocabulary for structured payload emission — the spec
- * glossary's "Payload producer" term as data (the CONTEXT.md glossary entries
- * land with the tool-primary docs): which structured payload an Agent emits.
+ * The producer-kind vocabulary for structured payload emission — the
+ * CONTEXT.md **Payload Producer** term as data: which structured payload an
+ * Agent emits.
  * The review-verifier Agent is genuinely dual-payload — reviewer-payload for
  * standalone/wave reviews, refutation-verdict for `/review-pr` panel verdicts
  * — so a kind-keyed-only scoping cannot express it, and the `arch-panel` kind

@@ -8,14 +8,17 @@
  * only moves bytes across the Run Directory, behind three entry points the
  * orchestration façade calls:
  *
- *   - `driveRegisteredPanel` replays the run's journal through the dispatch
- *     program and drives deterministic operations until the next external
+ *   - `driveRegisteredPanel` reads the run's journal, hands it to the core's
+ *     `nextPanelProgramAction` replay, and drives deterministic operations until the next external
  *     boundary: materializing and reserving a spawn batch, re-emitting the
  *     pending requests, or reporting done/blocked;
  *   - `resumeRegisteredPanel` first settles every captured-but-unsettled
  *     attempt, then drives;
  *   - `submitRegisteredPanelAttempt` settles one submitted attempt, records
  *     its outcome, then drives.
+ *
+ * Both settlement paths share `settleAndRecordPanelAttempt`, the one
+ * derive-logical-id, settle, then record sequence.
  *
  * Underneath them, `resolvePanelAttemptVerdictSource` reads one attempt's
  * durable panel-verdict-source record (after the issuance joins hold) and
@@ -37,23 +40,17 @@ import {
 } from "../../../core/orchestration-contract";
 import type { PanelVerdictSource, PanelVerdictSourceRecord } from "../../../core/panel-verdict-source";
 import { captureKey } from "../../../core/harness-capture";
-import {
-  reduceArchitectureProgram,
-  reduceRefutationProgram,
-  startArchitectureDispatchProgram,
-  startRefutationDispatchProgram,
-  type PanelProgramAction,
-  type SpawnRequest as PanelSpawnRequest,
-} from "../../../core/panel-program";
+import type { PanelProgramAction, SpawnRequest as PanelSpawnRequest } from "../../../core/panel-program";
 import { lowerModelProfile, resolveModelProfile } from "../../../core/model-profiles";
-import { translateLegacyPanelJournal } from "../../../core/legacy-archive";
 import {
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
   logicalPanelRequestId,
+  nextPanelProgramAction,
   parsePanelVerdictSourceRecordBytes,
   selectPanelAttemptVerdictSource,
   settlePanelAttempt,
+  type NextPanelProgramAction,
   type PanelAttempt,
   type PanelAttemptVerdictSource,
   type PanelOperationEvidence,
@@ -343,39 +340,14 @@ async function materializePanelAction(
   }) };
 }
 
-/** The panel program has no next action: its issued requests await results. */
-const AWAIT_RESULTS = Object.freeze({ type: "await-results" as const });
-
+/** The journal read; the replay itself is the core's `nextPanelProgramAction`. */
 async function nextRegisteredPanelAction(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
-): Promise<ProgramParse<PanelProgramAction | Readonly<{ type: "await-results" }>>> {
+): Promise<ProgramParse<NextPanelProgramAction>> {
   const records = await handle.readEvents();
-  const translated = translateLegacyPanelJournal(registration.kind, {
-    input: registration.input,
-    events: records.map(({ event }) => event),
-  });
-  if (!translated.ok) return { ok: false, message: translated.error };
-
-  if (translated.value.panel === "architecture") {
-    let step = startArchitectureDispatchProgram(translated.value.input);
-    if (!step.ok) return { ok: false, message: step.errors.join("\n") };
-    for (const event of translated.value.events) {
-      const reduced = reduceArchitectureProgram(step.value.state, event);
-      if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
-      step = { ok: true, value: reduced.value };
-    }
-    return { ok: true, value: step.value.action ?? AWAIT_RESULTS };
-  }
-
-  let step = startRefutationDispatchProgram(translated.value.input);
-  if (!step.ok) return { ok: false, message: step.errors.join("\n") };
-  for (const event of translated.value.events) {
-    const reduced = reduceRefutationProgram(step.value.state, event);
-    if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
-    step = { ok: true, value: reduced.value };
-  }
-  return { ok: true, value: step.value.action ?? AWAIT_RESULTS };
+  const next = nextPanelProgramAction(registration, records.map(({ event }) => event));
+  return next.ok ? next : { ok: false, message: next.error };
 }
 
 /**
@@ -433,6 +405,26 @@ export async function driveRegisteredPanel(
 // ---------------------------------------------------------------------------
 
 /**
+ * Settle ONE attempt's raw bytes and record how it settled: the logical id is
+ * derived, the attempt settled through its verdict source, then its outcome
+ * appended under the reserved slot's dedup key. Both settlement entry points
+ * go through here, so the logical-id/dedup-key pairing `appendSpawnOutcome`
+ * owns has one caller sequence; they differ only in where `raw` comes from.
+ */
+async function settleAndRecordPanelAttempt(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+  request: AgentRequestAuthority,
+  raw: string,
+): Promise<ProgramParse<true>> {
+  const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
+  const settled = await settlePanelAttemptSubmission({ handle, registration, request, logicalRequestId, raw });
+  if (!settled.ok) return { ok: false, message: settled.error };
+  await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settled.value.problem);
+  return { ok: true, value: true };
+}
+
+/**
  * Settle one submitted attempt through its resolved verdict source, record how
  * it settled, and drive the panel to its next external boundary.
  */
@@ -442,10 +434,8 @@ export async function submitRegisteredPanelAttempt(
   request: AgentRequestAuthority,
   raw: string,
 ): Promise<FacadeDriveResult> {
-  const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
-  const settled = await settlePanelAttemptSubmission({ handle, registration, request, logicalRequestId, raw });
-  if (!settled.ok) return { ok: false, message: settled.error };
-  await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settled.value.problem);
+  const recorded = await settleAndRecordPanelAttempt(handle, registration, request, raw);
+  if (!recorded.ok) return recorded;
   return driveRegisteredPanel(handle, registration);
 }
 
@@ -478,23 +468,15 @@ async function reconcileCapturedPanelResults(
 
   for (const request of issued.value) {
     if (!captured.value.has(captureKey(request.slotId, request.attempt))) continue;
-    const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
-    if (settled.has(`${logicalRequestId}:${request.attempt}`)) continue;
+    if (settled.has(`${logicalPanelRequestId(request.requestId, request.attempt)}:${request.attempt}`)) continue;
     const bytes = handle.readTranscriptBytes(request);
     if (!bytes.ok) return { ok: false, message: bytes.error.message };
     // The verdict-source seam resolves this attempt's emission evidence — the
     // durable record's replay when one was published, otherwise the extraction
     // baseline — and the submission decision runs over exactly that resolution
     // (the same policy every later scan of the same attempt reproduces).
-    const settledAttempt = await settlePanelAttemptSubmission({
-      handle,
-      registration,
-      request,
-      logicalRequestId,
-      raw: Buffer.from(bytes.value).toString("utf-8"),
-    });
-    if (!settledAttempt.ok) return { ok: false, message: settledAttempt.error };
-    await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settledAttempt.value.problem);
+    const recorded = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
+    if (!recorded.ok) return recorded;
   }
   return { ok: true, value: true };
 }

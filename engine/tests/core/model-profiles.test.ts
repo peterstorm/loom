@@ -33,6 +33,7 @@ import {
   panelJudgeProfileCarriers,
 } from "../../src/core/agent-catalog-projections";
 import { classifyPiSpawnItems, parsePiSpawnItems } from "../../src/core/pi-spawn-input";
+import { ORCHESTRATION_PROGRAMS } from "../../src/core/orchestration-contract/programs";
 
 const EXPECTED_PROFILES = {
   implementation: {
@@ -169,7 +170,8 @@ describe("qualified-local reviewer issuance", () => {
 });
 
 describe("the one profile-eligibility rule", () => {
-  const programs = ["architecture-panel", "refutation-panel", "wave-gate", "standalone-review", "unknown", 7, null];
+  // `null` is a program that did not parse: it elects nothing.
+  const programs = [...ORCHESTRATION_PROGRAMS, null];
 
   it("admits a role's catalog profile in every program, and only qualified-local-review besides", () => {
     for (const policy of AGENT_POLICIES) for (const program of programs) for (const id of LLM_PROFILE_IDS) {
@@ -245,8 +247,49 @@ describe("Pi spawn input parsing", () => {
         { agent: "comment-analyzer", task: "" },
       ] },
     ]) {
-      expect(parsePiSpawnItems(raw).ok).toBe(false);
+      expect(parsePiSpawnItems(raw)).toMatchObject({ ok: false, error: { kind: "malformed-spawn-input" } });
     }
+  });
+
+  it("names a structural boundary failure apart from an unknown Agent", () => {
+    expect(classifyPiSpawnItems("not an object")).toEqual({
+      ok: false, error: { kind: "malformed-spawn-input", message: "Pi subagent input must be an object" },
+    });
+    expect(classifyPiSpawnItems({ chain: [{ agent: "code-reviewer", task: "  " }] })).toEqual({
+      ok: false,
+      error: { kind: "malformed-spawn-input", message: "Pi subagent item 1 must contain a non-empty agent and task" },
+    });
+    expect(classifyPiSpawnItems({ tasks: [{ agent: "loom:ghost", task: "x" }] })).toMatchObject({
+      ok: false, error: { kind: "unknown-agent" },
+    });
+    expect(classifyPiSpawnItems({ tasks: [
+      { agent: "code-reviewer", task: "Loom review" },
+      { agent: "external-agent", task: "outside workflow" },
+    ] })).toEqual({
+      ok: false,
+      error: { kind: "unknown-agent", message: "Pi subagent batches must not mix Loom-owned and external agents" },
+    });
+    expect(parsePiSpawnItems({ agent: "external-agent", task: "x" })).toMatchObject({
+      ok: false, error: { kind: "unknown-agent" },
+    });
+  });
+
+  it("property: a classified Loom-owned batch carries every item, in order, with its resolved Agent", () => {
+    const loomAgents = AGENT_POLICIES.map(({ agent }) => agent);
+    fc.assert(fc.property(
+      fc.array(fc.record({
+        agent: fc.constantFrom(...loomAgents).chain((agent) => fc.constantFrom(agent, `loom:${agent}`)),
+        task: fc.string({ minLength: 1 }).filter((task) => task.trim() !== ""),
+      }), { minLength: 1, maxLength: 6 }),
+      (tasks) => {
+        const classified = classifyPiSpawnItems({ tasks });
+        expect(classified.ok).toBe(true);
+        if (!classified.ok || classified.value.kind !== "loom-owned") throw new Error("expected a Loom-owned batch");
+        expect(classified.value.items).toEqual(tasks.map(({ agent, task }) => ({
+          agent: agent.startsWith("loom:") ? agent.slice("loom:".length) : agent, task,
+        })));
+      },
+    ));
   });
 
   it("does not count vacuous single fields as a second mode beside a populated batch", () => {

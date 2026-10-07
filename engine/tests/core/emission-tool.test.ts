@@ -336,11 +336,10 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
 });
 
 describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", () => {
-  const JUDGE_BINDING = mintedBinding("judge-verdict", "v1");
   const validJudgeArgs = validJudgeArguments("extensibility");
 
   it("acknowledges valid arguments with the minimal terminating result — never echoing the payload", () => {
-    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, validJudgeArgs);
+    const outcome = acknowledgeEmissionExecution(JUDGE_V1, validJudgeArgs);
     expect(outcome.kind).toBe("acknowledged");
     if (outcome.kind === "acknowledged") {
       expect(outcome.acknowledgment.terminate).toBe(true);
@@ -355,8 +354,8 @@ describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", (
 
   it("carries the refusal the shell must THROW — the admission's own code and message, never a shell-invented string", () => {
     const args = { criterion: "extensibility", rankings: [{ candidate: "candidate-x.md", score: 11, fatal_flaw: null, strongest_idea: "out of domain" }] };
-    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, args);
-    const direct = admitIssuedEmissionArguments(JUDGE_BINDING, args);
+    const outcome = acknowledgeEmissionExecution(JUDGE_V1, args);
+    const direct = admitIssuedEmissionArguments(JUDGE_V1, args);
     expect(outcome.kind).toBe("refused");
     expect(direct.kind).toBe("refused");
     if (outcome.kind === "refused" && direct.kind === "refused") {
@@ -366,19 +365,19 @@ describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", (
   });
 
   it("refuses whitespace-only prose the harness validator admits — the shell is engine-authoritative", () => {
-    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, whitespaceOnlyArguments("judge-verdict"));
+    const outcome = acknowledgeEmissionExecution(JUDGE_V1, whitespaceOnlyArguments("judge-verdict"));
     expect(outcome).toMatchObject({ kind: "refused", code: "invalid-schema" });
   });
 
   it("is frozen at every arm — a caller-side push cannot widen the outcome behind the shell", () => {
-    const acknowledged = acknowledgeEmissionExecution(JUDGE_BINDING, validJudgeArgs);
+    const acknowledged = acknowledgeEmissionExecution(JUDGE_V1, validJudgeArgs);
     expect(Object.isFrozen(acknowledged)).toBe(true);
     if (acknowledged.kind === "acknowledged") {
       expect(Object.isFrozen(acknowledged.acknowledgment)).toBe(true);
       expect(Object.isFrozen(acknowledged.acknowledgment.content)).toBe(true);
       expect(Object.isFrozen(acknowledged.acknowledgment.content[0])).toBe(true);
     }
-    const refused = acknowledgeEmissionExecution(JUDGE_BINDING, { criterion: "x", rankings: [] });
+    const refused = acknowledgeEmissionExecution(JUDGE_V1, { criterion: "x", rankings: [] });
     expect(Object.isFrozen(refused)).toBe(true);
   });
 });
@@ -566,7 +565,7 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
 
 describe("the execute shell and the engine selection share ONE admission", () => {
   it("decides the recorded string-typed wire form and its canonical form identically in the shell and the selection", () => {
-    const binding = mintedBinding("reviewer-payload", "v2");
+    const binding = REVIEWER_V2;
     // The recorded transport class the unconstrained route produces: a
     // string-typed schemaVersion and the findings array serialized as one
     // JSON string — exactly what the transcript observes. Pi's

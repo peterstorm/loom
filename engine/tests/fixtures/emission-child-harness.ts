@@ -4,36 +4,42 @@
  * (`engine/tests/pi/emission-*.test.ts`) so none of them imports another.
  *
  * It owns the explicit pi binary resolution (PI_BIN env, then the
- * repo-resolved `node_modules/.bin/pi`, then PATH), the frozen registry cells
- * the scenarios issue against, the launcher expectation mint (the REAL
- * `issueEmissionBinding` over `EMISSION_TOOL_SPECS`, the schema digest derived
- * from the frozen bytes, never trusted), the COUNTING PROVIDER SUBSTITUTE (a
+ * repo-resolved `node_modules/.bin/pi`, then PATH), the launcher expectation
+ * mint over the shared registry cells (`emission-registry-cells`: the cell's
+ * binding through the REAL `issueEmissionBinding` over `EMISSION_TOOL_SPECS`,
+ * the schema digest derived from the frozen bytes, never trusted — the
+ * harness declares no cell of its own), the COUNTING PROVIDER SUBSTITUTE (a
  * local HTTP server that counts and rejects completions, so a model request is
  * a counted event, never a real call), the strict JSONL RPC bus and request
  * framing, the probe-proven launcher steps (channel check, discovery, bounded
  * readiness wait, the pure gate, the fail-closed settle-aware route bind,
- * prompt delivery only on open), the shared gate-run assertions, and the
+ * prompt delivery only on open) composed ONCE in `runLauncherBarrier` inside
+ * the `withBarrierResources` lifecycle bracket, the real-RPC adapter
+ * (`rpcReadinessClient`) through which a real child drives the verifier the
+ * parent bridge ships, the shared gate-run assertions, and the
  * ambient-process-state scope the in-process suites restore.
  *
  * The gate decisions themselves are the production ones
  * (`pi/emission-readiness-gate.ts`); this harness only gathers the facts and
  * sequences the two decision stages exactly as a launcher must.
+ * `runLauncherBarrier` is not built on the shipped `verifyReadiness`: that
+ * verifier pins an issued-model route (no endpoint), returns only
+ * `{ ok } | { ok: false, reason }` (no decision ADT to assert codes, the
+ * opened readiness or the bound route on), and its port has no arm for a
+ * bounded-window timeout, a launcher cancellation, a child death mid-wait or
+ * a command-error `startup-unavailable` — the controls these suites exist to
+ * discriminate. The shipped verifier runs against a real child through
+ * `rpcReadinessClient` instead (emission-startup-production.test.ts).
  */
 
 import { expect } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  EMISSION_TOOL_SPECS,
-  issueEmissionBinding,
-  type EmissionSchemaVersion,
-  type EmissionToolName,
-} from "../../src/core/emission-tool";
+import { sha256Hex } from "../../src/core/digest";
 import {
   decideReadinessGate,
   decideStartupRoute,
@@ -55,7 +61,9 @@ import {
   parseContextDigest,
   type ContextDigest,
 } from "../../src/core/orchestration-contract/identity";
-import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
+import type { PiSubagentLaunchReply } from "../../../pi/emission-launch-bridge";
+import { canonicalTempDir } from "./canonical-temp-dir";
+import { mintedBindingFor, type RegistryCell } from "./emission-registry-cells";
 
 // ---------------------------------------------------------------------------
 // Shared unknown-value helpers (the one confined projection of untrusted data)
@@ -67,8 +75,6 @@ export const recordOf = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 
 export const stringifyUnknown = (value: unknown): string => (typeof value === "string" ? value : describeUnknown(value));
-
-export const sha256Hex = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -111,32 +117,6 @@ const resolvePiBinary = (): PiBinaryResolution => {
 
 const piBinary = resolvePiBinary();
 export const piIdentity = `pi ${piBinary.version ?? "version-unreported"} resolved from ${piBinary.source}`;
-
-// ---------------------------------------------------------------------------
-// The frozen registry cells the scenarios issue against
-// ---------------------------------------------------------------------------
-
-export type RegistryCell = Readonly<{
-  kind: PayloadProducerKindName;
-  version: EmissionSchemaVersion;
-  toolName: EmissionToolName;
-  schemaBytes: string;
-}>;
-
-const cellOf = (kind: PayloadProducerKindName, version: EmissionSchemaVersion): RegistryCell => {
-  const spec = EMISSION_TOOL_SPECS[kind];
-  // Confined boundary cast: each spec's schemaVersions record type carries
-  // only ITS versions, so a general in-vocabulary version cannot index the
-  // union of per-spec records. The undefined guard below is the real check —
-  // the cast never claims a cell exists, only that the key space is the
-  // closed version vocabulary the registry itself bounds.
-  const cell = (spec.schemaVersions as Readonly<Partial<Record<EmissionSchemaVersion, Readonly<{ schemaBytes: string }>>>>)[version];
-  if (cell === undefined) throw new Error(`registry cell ${kind}/${version} is absent`);
-  return canonicalRecord({ kind, version, toolName: spec.toolName, schemaBytes: cell.schemaBytes });
-};
-
-export const REVIEWER_V2_CELL = cellOf("reviewer-payload", "v2");
-export const JUDGE_V1_CELL = cellOf("judge-verdict", "v1");
 
 // ---------------------------------------------------------------------------
 // The imperative shell: counting provider substitute + real pi RPC child
@@ -200,30 +180,21 @@ export const contextDigestOf = (seed: string): ContextDigest => {
 };
 
 /**
- * The launcher expectation mint: the REAL issuance mint over the frozen
- * registry, with the claims the launcher holds (request id, kind, version,
- * exact tool name) and the digest derived from the frozen bytes — the mint
- * certifies the claims against the registry, so the expectation can never
- * name a schema the registry does not freeze. The harness owns the counting
- * provider's registration, so its route pins the serving endpoint too.
+ * The launcher expectation mint: the shared registry-cell binding mint (the
+ * REAL issuance mint over the frozen registry), claiming the cell's request
+ * id, kind, version, exact tool name and the digest derived from its frozen
+ * bytes — the mint certifies the claims against the registry, so the
+ * expectation can never name a schema the registry does not freeze. The
+ * harness owns the counting provider's registration, so its route pins the
+ * serving endpoint too.
  */
 export type HarnessExpectation = EmissionStartupExpectation & Readonly<{
   route: Extract<ExpectedEmissionRoute, { kind: "pinned-endpoint" }>;
 }>;
 
-export const makeExpectation = (cell: RegistryCell, requestId: string, routeBaseUrl: string): HarnessExpectation => {
-  const minted = issueEmissionBinding({
-    requestId,
-    kind: cell.kind,
-    version: cell.version,
-    toolName: cell.toolName,
-    schemaDigest: sha256Hex(cell.schemaBytes),
-  });
-  if (!minted.ok) {
-    throw new Error(`the launcher expectation mint refused the issued claims: ${minted.error.code} — ${minted.error.message}`);
-  }
-  return canonicalRecord({
-    binding: minted.value,
+export const makeExpectation = (cell: RegistryCell, requestId: string, routeBaseUrl: string): HarnessExpectation =>
+  canonicalRecord({
+    binding: mintedBindingFor(cell, requestId),
     contextDigest: contextDigestOf(`emission-startup-context:${requestId}`),
     revision: CURRENT_REVISION,
     readinessCommand: READINESS_COMMAND_NAME,
@@ -235,7 +206,6 @@ export const makeExpectation = (cell: RegistryCell, requestId: string, routeBase
       baseUrl: routeBaseUrl,
     }),
   });
-};
 
 /** One counted model request on the counting provider substitute. */
 export type CountedRequest = Readonly<{ at: number; url: string; bytes: number; body: string }>;
@@ -662,19 +632,275 @@ export const decideStartupThroughRouteBind = async (
   return decideStartupRoute(expectation.route, readiness, await bindRouteWithSettle(rpc.rpcRequest, expectation.route));
 };
 
-export const issuedPromptText = (expectation: EmissionStartupExpectation): string =>
-  `Emit the issued ${expectation.binding.kind.kind} payload via ${expectation.binding.toolName}.`;
+/** The issued request the prompt names: only its binding is read. */
+type IssuedPromptSource = Pick<EmissionStartupExpectation, "binding">;
+
+export const issuedPromptText = (issued: IssuedPromptSource): string =>
+  `Emit the issued ${issued.binding.kind.kind} payload via ${issued.binding.toolName}.`;
 
 /** 5. Prompt delivery — only ever on the open arm. */
-export const deliverIssuedPrompt = async (rpc: PiRpcChild, expectation: EmissionStartupExpectation): Promise<void> => {
+export const deliverIssuedPrompt = async (rpc: PiRpcChild, issued: IssuedPromptSource): Promise<void> => {
   await rpc.rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
-  await rpc.rpcRequest({ type: "prompt", message: issuedPromptText(expectation) }, "prompt delivery");
+  await rpc.rpcRequest({ type: "prompt", message: issuedPromptText(issued) }, "prompt delivery");
 };
 
 export const awaitFirstRequestOrDeadline = async (server: CountingServer): Promise<void> => {
   const requestDeadline = Date.now() + FIRST_REQUEST_TIMEOUT_MS;
   while (server.hits.length === 0 && Date.now() < requestDeadline) await sleep(50);
 };
+
+// ---------------------------------------------------------------------------
+// The one launcher barrier run every real-child suite drives
+// ---------------------------------------------------------------------------
+
+/** The per-run infrastructure a barrier run owns: its own counting
+ *  substitute, its own temp dir, and the children it adopted for release. */
+export type BarrierResources = Readonly<{
+  server: CountingServer;
+  tmp: string;
+  /** Register a spawned child so the bracket releases it in every outcome. */
+  adopt: (rpc: PiRpcChild) => PiRpcChild;
+}>;
+
+/**
+ * The lifecycle bracket of one real-child run: start the counting substitute
+ * and a canonical temp dir, run `body`, then — in every outcome — dispose
+ * exactly the children this run adopted (AS-020's release discipline: never a
+ * peer's), close this run's server and remove its temp dir. `server.close`
+ * never rejects (its callback resolves regardless); the temp-dir removal is
+ * best-effort so cleanup can never mask the run's own outcome.
+ *
+ * An infrastructure failure keeps its semantics — it propagates as an error,
+ * never a minted gate decision — and carries the run's own counted
+ * model-request snapshot, so the zero-request property stays provable on the
+ * rejection path too.
+ */
+export const withBarrierResources = async <T>(
+  tmpPrefix: string,
+  body: (resources: BarrierResources) => Promise<T>,
+): Promise<T> => {
+  const server = await startCountingServer();
+  const tmp = canonicalTempDir(tmpPrefix);
+  const adopted: PiRpcChild[] = [];
+  try {
+    return await body(Object.freeze({
+      server,
+      tmp,
+      adopt: (rpc: PiRpcChild): PiRpcChild => {
+        adopted.push(rpc);
+        return rpc;
+      },
+    }));
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    throw new Error(
+      `${error.message} — the counting substitute recorded ${server.hits.length} model request(s) before this failure`,
+      { cause: error },
+    );
+  } finally {
+    for (const rpc of adopted) await rpc.dispose();
+    await server.close();
+    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+  }
+};
+
+/** What the launcher does while its bounded readiness wait is open. */
+export type LauncherReadinessWait =
+  /** Waits the bounded window out. */
+  | Readonly<{ kind: "waits" }>
+  /** Cancels the barrier mid-readiness-wait (the cancellation control). */
+  | Readonly<{ kind: "cancels"; afterMs: number }>
+  /** SIGKILLs the child this many ms AFTER the verified invocation, inside the
+   *  bounded window (the infrastructure-failure boundary control). */
+  | Readonly<{ kind: "kills-child"; afterMs: number }>;
+
+/** How a launcher drives the readiness stage once discovery listed the command. */
+export type ReadinessStageDriver = Readonly<{
+  /** `2` re-invokes the command before the wait (the idempotence control). */
+  invocations: 1 | 2;
+  wait: LauncherReadinessWait;
+  /** The observation a live child's unanswered bounded wait becomes. */
+  unobserved: () => ReadinessObservation;
+}>;
+
+/** The barrier's record of one run: the protocol facts it observed, the
+ *  decision it acted on, and whether it prompted. */
+export type BarrierRun<P> = Readonly<{
+  channelAlive: boolean;
+  channelDiagnostic: string | null;
+  commands: readonly Record<string, unknown>[];
+  commandListed: boolean;
+  invocationCount: number;
+  readiness: ReadinessObservation;
+  readinessObservedAt: number | null;
+  decision: EmissionStartupDecision;
+  decidedAt: number;
+  prompted: boolean;
+  /** What the run's `afterPrompt` returned; `null` when the barrier refused. */
+  afterPrompt: P | null;
+}>;
+
+const NEVER_REACHED_READINESS: ReadinessObservation = canonicalRecord({
+  kind: "absent" as const,
+  reason: "the launcher never reached the readiness stage",
+});
+
+const CANCELLED_READINESS: ReadinessObservation = canonicalRecord({ kind: "cancelled" as const });
+
+const invokeReadinessCommand = async (rpc: PiRpcChild, command: string, label: string): Promise<void> => {
+  const invocation = await rpc.rpcRequest({ type: "prompt", message: `/${command}` }, label);
+  if (invocation["success"] !== true) {
+    throw new Error(`the ${label} was refused by the child: ${boundedEvent(invocation)}`);
+  }
+};
+
+export const waitReadinessEntryCount = async (bus: RpcBus, count: number, timeoutMs: number): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (customEntriesOf(bus, READINESS_ENTRY_TYPE).length < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`expected ${count} readiness entries, observed ${customEntriesOf(bus, READINESS_ENTRY_TYPE).length} within ${timeoutMs}ms`);
+    }
+    await sleep(50);
+  }
+};
+
+/** 3. Readiness — invoke the verified command (no model request) and wait,
+ *  bounded, for the bound payload through entry_appended, under the
+ *  launcher's wait behavior. */
+const observeReadiness = async (
+  rpc: PiRpcChild,
+  command: string,
+  driver: ReadinessStageDriver,
+): Promise<Readonly<{ readiness: ReadinessObservation; observedAt: number | null }>> => {
+  await invokeReadinessCommand(rpc, command, "readiness command invocation");
+  if (driver.invocations === 2) await invokeReadinessCommand(rpc, command, "idempotent readiness re-invocation");
+  const wait = driver.wait;
+  // The child dies AFTER a verified invocation, while the bounded wait is
+  // open: the launcher must surface infrastructure, never a minted refusal.
+  if (wait.kind === "kills-child") setTimeout(() => rpc.release(), wait.afterMs);
+  const readinessWait = settleWait(rpc.bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
+  const outcome = wait.kind === "cancels"
+    ? await Promise.race([readinessWait, sleep(wait.afterMs).then((): "cancelled" => "cancelled")])
+    : await readinessWait;
+  if (outcome === "cancelled") {
+    rpc.release();
+    return { readiness: CANCELLED_READINESS, observedAt: null };
+  }
+  const settled = settledReadiness(outcome, rpc, driver.unobserved);
+  if (outcome.kind === "observed" && driver.invocations === 2) {
+    await waitReadinessEntryCount(rpc.bus, 2, READY_TIMEOUT_MS);
+  }
+  return settled;
+};
+
+/** 5. Act on the closed verdict: prompt delivery ONLY on the open arm, then
+ *  the run's own post-prompt observation; a refusal waits the grace window
+ *  out so a cheating child's late request would still be counted. */
+export const actOnGateVerdict = async <P>(
+  rpc: PiRpcChild,
+  issued: IssuedPromptSource,
+  open: boolean,
+  afterPrompt: () => Promise<P>,
+): Promise<Readonly<{ prompted: boolean; afterPrompt: P | null }>> => {
+  if (!open) {
+    await sleep(REFUSE_GRACE_MS);
+    return { prompted: false, afterPrompt: null };
+  }
+  await deliverIssuedPrompt(rpc, issued);
+  return { prompted: true, afterPrompt: await afterPrompt() };
+};
+
+/**
+ * The launcher barrier, written once: channel check → discovery → readiness
+ * (only for a listed command) → the pure gate and the fail-closed route bind
+ * → `onDecided` → prompt only on open, then `afterPrompt`. Every step is
+ * bounded. The release stays with the caller, so a run can hold its child
+ * mid-flight across a peer's release.
+ */
+export const runLauncherBarrier = async <P>(
+  rpc: PiRpcChild,
+  expectation: EmissionStartupExpectation,
+  driver: ReadinessStageDriver,
+  hooks: Readonly<{ onDecided?: () => void; afterPrompt: () => Promise<P> }>,
+): Promise<BarrierRun<P>> => {
+  const channel = await observeChannel(rpc);
+  const commands = channel.channelAlive ? await discoverCommands(rpc) : [];
+  const commandListed = listsExtensionCommand(commands, expectation.readinessCommand);
+  const stage = commandListed
+    ? await observeReadiness(rpc, expectation.readinessCommand, driver)
+    : { readiness: NEVER_REACHED_READINESS, observedAt: null };
+  const decision = await decideStartupThroughRouteBind(rpc, expectation, {
+    ...channel,
+    commandListed,
+    readiness: stage.readiness,
+  });
+  hooks.onDecided?.();
+  const decidedAt = Date.now();
+  const acted = await actOnGateVerdict(rpc, expectation, decision.kind === "open", hooks.afterPrompt);
+  return Object.freeze({
+    channelAlive: channel.channelAlive,
+    channelDiagnostic: channel.channelDiagnostic,
+    commands,
+    commandListed,
+    invocationCount: commandListed ? driver.invocations : 0,
+    readiness: stage.readiness,
+    readinessObservedAt: stage.observedAt,
+    decision,
+    decidedAt,
+    prompted: acted.prompted,
+    afterPrompt: acted.afterPrompt,
+  });
+};
+
+// ---------------------------------------------------------------------------
+// The shipped verifier's readiness client over a REAL pi RPC child
+// ---------------------------------------------------------------------------
+
+/** The emission-rpc directive the parent bridge mints for one staged launch. */
+export type PiEmissionRpcDirective = Extract<PiSubagentLaunchReply, { kind: "emission-rpc" }>["directive"];
+/** The readiness verifier the parent bridge hands the installed launcher. */
+export type PiReadinessVerifier = PiEmissionRpcDirective["verifyReadiness"];
+/** The port that verifier drives. */
+export type PiReadinessClient = Parameters<PiReadinessVerifier>[0];
+
+/**
+ * The real-RPC adapter of the shipped verifier's readiness port — the second
+ * adapter beside the plain fake in `emission-launch-bridge.test.ts`, so the
+ * verifier `pi/emission-launch-bridge.ts` ships is exercised against a real
+ * child. Each method is the launcher's RPC exchange: `get_commands`; the
+ * readiness command invoked once, then the bounded entry wait (an unanswered
+ * wait on a live child is zero entries, which the verifier refuses as
+ * malformed readiness; a dead child throws as infrastructure); the
+ * settle-aware `set_model` bind, throwing its refusal so the verifier refuses
+ * it as an RPC failure; and `get_state`'s data record.
+ */
+export const rpcReadinessClient = (rpc: PiRpcChild): PiReadinessClient => Object.freeze({
+  getCommands: async () => (await discoverCommands(rpc)).flatMap((command) => {
+    const name = command["name"];
+    const source = command["source"];
+    if (typeof name !== "string") return [];
+    return [typeof source === "string" ? Object.freeze({ name, source }) : Object.freeze({ name })];
+  }),
+  invokeReadiness: async () => {
+    await invokeReadinessCommand(rpc, READINESS_COMMAND_NAME, "readiness command invocation");
+    const outcome = await settleWait(rpc.bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
+    if (outcome.kind === "failed") {
+      rpc.assertAliveAfterWait(outcome.error);
+      return [];
+    }
+    return [outcome.event["entry"]];
+  },
+  setModel: async (provider: string, modelId: string) => {
+    const bound = await bindRouteWithSettle(rpc.rpcRequest, { kind: "issued-model", provider, modelId });
+    if (bound.kind !== "bound") throw new Error(bound.kind === "failed" ? bound.reason : "the route bind produced no binding");
+  },
+  getState: async () => {
+    const state = await rpc.rpcRequest({ type: "get_state" }, "get_state route observation");
+    const data = recordOf(state["data"]);
+    if (state["success"] !== true || data === null) throw new Error(`get_state refused: ${boundedEvent(state)}`);
+    return { model: recordOf(data["model"]) };
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Assertion helpers (narrowing without casts)

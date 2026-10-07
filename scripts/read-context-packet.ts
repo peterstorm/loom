@@ -13,14 +13,15 @@ import { parsePredecessorArchiveArguments, projectArchivedPredecessor, type Arch
   type ResolvePublishedPacket } from "../engine/src/core/predecessor-archive";
 import type { DomainResult } from "../engine/src/core/orchestration-contract";
 import { safeIoCause } from "../engine/src/core/safe-io-cause";
-import { CONTEXT_PACKET_MAX_BYTES, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
+import { CONTEXT_PACKET_MAX_BYTES, openStoredContextPacketFile, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 
 // A retained archive expands to at most one stored Context Packet, whichever encoding retained it.
 const ARCHIVE_BOUNDS = { expandedBytes: CONTEXT_PACKET_MAX_BYTES, encodedBytes: CONTEXT_PACKET_MAX_BYTES };
 
-/** The production published-packet port: the exact file, bounded by the reference's own length. */
+/** The production published-packet port: the exact file bytes, bounded by the
+ *  reference's own length, and its run's blob lookup — never a decoded record. */
 const resolveReference: ResolvePublishedPacket = (reference) =>
-  readStoredContextPacketFile(reference.path, { file: reference.byteLength, section: CONTEXT_PACKET_MAX_BYTES });
+  openStoredContextPacketFile(reference.path, { file: reference.byteLength, section: CONTEXT_PACKET_MAX_BYTES });
 
 /** Shell boundary: a refusal becomes the thrown cause (a decoder's own error keeps its class). */
 function orThrow<T>(result: DomainResult<T, string | ArchivedPredecessorRefusal>): T {

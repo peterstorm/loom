@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { REVIEWER_OUTPUT_CONTRACT } from "../../engine/src/core/reviewer-contract";
-import { mintCellBinding, type CellBinding } from "./pilot-dispatch";
-import { corpusCases, fixtures, inputs, prereg } from "./pilot-test-fixtures";
-import { contentDigest, PILOT_CELLS, type CellKey } from "./pilot-vocabulary";
+import { mintCellBinding, pilotRequestId, type CellBinding } from "./pilot-binding";
+import { corpusCases, fixtures, inputOf, inputs, prereg } from "./pilot-test-fixtures";
+import { PILOT_CELLS, type CellKey } from "./pilot-vocabulary";
 import {
-  caseInputKey,
+  caseInputOf,
   parseCaseSource,
-  pilotRequestId,
   renderPilotPrompt,
   renderTaskBody,
   resolveCaseInput,
@@ -16,23 +15,19 @@ import {
 
 const corpus = new Map(corpusCases.map((entry) => [entry.id, entry] as const));
 const NO_PATHS = (): readonly string[] => [];
-
-const inputOf = (cell: CellKey, caseId: string): CaseInput => {
-  const input = inputs.get(caseInputKey(cell, caseId));
-  if (input === undefined) throw new Error(`${cell} ${caseId} has no resolved input`);
-  return input;
-};
+const source = (value: string) => ({ caseId: "case-under-test", source: value });
 
 describe("case-input resolution (the one resolver the window and the tests share)", () => {
-  it("resolves every preregistered case to the input its cell can render", () => {
+  it("resolves every preregistered case to the input its cell can render, carrying its case", () => {
     const changed = (revision: string): readonly string[] => [`changed-in-${revision}`];
     const resolved = resolveWindowInputs(prereg, fixtures, corpusCases, changed);
     if (!resolved.ok) throw new Error(resolved.error.join("\n"));
     const cases = prereg.cells.flatMap((cell) => cell.workload.cases.map((entry) => ({ cell: cell.cell, entry })));
-    expect([...resolved.value.keys()]).toEqual(cases.map(({ cell, entry }) => caseInputKey(cell, entry.caseId)));
+    expect(resolved.value.size).toBe(cases.length);
     for (const { cell, entry } of cases) {
-      const input = resolved.value.get(caseInputKey(cell, entry.caseId));
+      const input = caseInputOf(resolved.value, cell, entry.caseId);
       expect(input?.cell).toBe(cell);
+      expect(input?.caseId).toBe(entry.caseId);
       if (input !== undefined && "corpusCase" in input) {
         expect(input.changedPaths).toEqual([`changed-in-${input.corpusCase.revision}`]);
         // Vulnerable snapshots are the held-out known-defect cases; their known
@@ -46,20 +41,41 @@ describe("case-input resolution (the one resolver the window and the tests share
   });
 
   it("refuses a source that names a missing case or fixture, or a fixture of another cell", () => {
-    const judgeFixture = Object.entries(fixtures.fixtures).find(([, fixture]) => fixture.kind === "judge-verdict")?.[0];
+    const fixtureOf = (kind: string) => Object.entries(fixtures.fixtures).find(([, fixture]) => fixture.kind === kind)?.[0];
+    const judgeFixture = fixtureOf("judge-verdict");
+    const refutationFixture = fixtureOf("refutation-verdict");
     const corpusId = corpusCases[0]?.id;
-    expect(resolveCaseInput("reviewer-payload/v2", "corpus:no-such-case", corpus, fixtures, NO_PATHS))
+    expect(resolveCaseInput("reviewer-payload/v2", source("corpus:no-such-case"), corpus, fixtures, NO_PATHS))
       .toEqual({ ok: false, error: "corpus case no-such-case is not in the corpus" });
-    expect(resolveCaseInput("judge-verdict/v1", "fixture:no-such-fixture", corpus, fixtures, NO_PATHS))
+    expect(resolveCaseInput("judge-verdict/v1", source("fixture:no-such-fixture"), corpus, fixtures, NO_PATHS))
       .toEqual({ ok: false, error: "workload fixture no-such-fixture is not in the fixture file" });
-    expect(resolveCaseInput("refutation-verdict/v1", `fixture:${judgeFixture}`, corpus, fixtures, NO_PATHS))
+    expect(resolveCaseInput("refutation-verdict/v1", source(`fixture:${judgeFixture}`), corpus, fixtures, NO_PATHS))
       .toEqual({ ok: false, error: `workload fixture ${judgeFixture} is a judge-verdict fixture, which cannot feed cell refutation-verdict/v1` });
-    expect(resolveCaseInput("judge-verdict/v1", `corpus:${corpusId}`, corpus, fixtures, NO_PATHS))
+    expect(resolveCaseInput("judge-verdict/v1", source(`fixture:${refutationFixture}`), corpus, fixtures, NO_PATHS))
+      .toEqual({ ok: false, error: `workload fixture ${refutationFixture} is a refutation-verdict fixture, which cannot feed cell judge-verdict/v1` });
+    expect(resolveCaseInput("judge-verdict/v1", source(`corpus:${corpusId}`), corpus, fixtures, NO_PATHS))
       .toEqual({ ok: false, error: `case source corpus:${corpusId} is not a workload fixture, which cell judge-verdict/v1 needs` });
-    expect(resolveCaseInput("reviewer-payload/v3", `fixture:${judgeFixture}`, corpus, fixtures, NO_PATHS))
+    expect(resolveCaseInput("reviewer-payload/v3", source(`fixture:${judgeFixture}`), corpus, fixtures, NO_PATHS))
       .toEqual({ ok: false, error: `case source fixture:${judgeFixture} is not a corpus case, which cell reviewer-payload/v3 needs` });
-    expect(resolveCaseInput("reviewer-payload/v3", "nowhere", corpus, fixtures, NO_PATHS))
+    expect(resolveCaseInput("reviewer-payload/v3", source("nowhere"), corpus, fixtures, NO_PATHS))
       .toEqual({ ok: false, error: 'case source "nowhere" is neither corpus:<id> nor fixture:<id>' });
+  });
+
+  it("resolves a fixture source to the cell its own kind feeds, carrying the case it was resolved for", () => {
+    for (const [id, fixture] of Object.entries(fixtures.fixtures)) {
+      const cell = fixture.kind === "judge-verdict" ? "judge-verdict/v1" : "refutation-verdict/v1";
+      expect(resolveCaseInput(cell, source(`fixture:${id}`), corpus, fixtures, NO_PATHS))
+        .toEqual({ ok: true, value: { cell, caseId: "case-under-test", fixture } });
+    }
+  });
+
+  it("looks an input up only for exactly the cell and case it was resolved for", () => {
+    const [judge = "", refutation = ""] = (["judge-verdict/v1", "refutation-verdict/v1"] as const)
+      .map((cell) => prereg.cells.find((entry) => entry.cell === cell)?.workload.cases[0]?.caseId ?? "");
+    expect(caseInputOf(inputs, "judge-verdict/v1", judge)).toMatchObject({ cell: "judge-verdict/v1", caseId: judge });
+    expect(caseInputOf(inputs, "refutation-verdict/v1", judge)).toBeUndefined();
+    expect(caseInputOf(inputs, "judge-verdict/v1", refutation)).toBeUndefined();
+    expect(caseInputOf(inputs, "judge-verdict/v1", "no-such-case")).toBeUndefined();
   });
 
   it("refuses a window's inputs naming every unresolvable case", () => {
@@ -84,7 +100,7 @@ describe("case-input resolution (the one resolver the window and the tests share
     const judge = inputOf("judge-verdict/v1", prereg.cells.find((cell) => cell.cell === "judge-verdict/v1")?.workload.cases[0]?.caseId ?? "");
     if (!("fixture" in judge) || judge.fixture.kind !== "judge-verdict") throw new Error("the judge cell resolved to no judge fixture");
     // @ts-expect-error — a judge fixture is not a refutation cell's input.
-    const crossed: CaseInput = { cell: "refutation-verdict/v1", fixture: judge.fixture };
+    const crossed: CaseInput = { cell: "refutation-verdict/v1", caseId: judge.caseId, fixture: judge.fixture };
     expect(crossed.cell).toBe("refutation-verdict/v1");
   });
 
@@ -131,12 +147,5 @@ describe("matched workload prompts", () => {
     if (!("corpusCase" in input)) throw new Error("a reviewer cell resolved to a fixture");
     expect(renderTaskBody({ ...input, changedPaths: ["a.ts", "b.ts"] }, fixtures)).toContain("changed-path scope: a.ts, b.ts.");
     expect(renderTaskBody({ ...input, changedPaths: [] }, fixtures)).toContain("changed-path scope: no changed paths reported.");
-  });
-
-  it("mints canonical per-attempt request identities and a prompt-addressed context digest", () => {
-    const id = pilotRequestId("window", "judge-verdict/v1#c#r1", "extraction-only", 2);
-    expect(id).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/);
-    expect(id).not.toBe(pilotRequestId("window", "judge-verdict/v1#c#r1", "extraction-only", 1));
-    expect(binding("judge-verdict/v1", "body").contextDigest).toBe(contentDigest("body"));
   });
 });

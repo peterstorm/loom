@@ -27,6 +27,7 @@ import {
   type ImplementationAttemptSettlementReceipt,
   type TaskCompletionSuiteAuthority,
 } from "../../src/core/implementation-completion";
+import { UNKNOWN_SCHEME_BASELINE } from "../../src/core/artifact-baseline";
 import {
   CLAUDE_CONTENT_BLOCK_TYPES,
   parseCompleteClaudeJsonl,
@@ -161,7 +162,7 @@ const parsers = [
   parseIsoInstant,
   parseArtifactBaselineDigest,
   parseImplementationAuthorityDigest,
-  parseCanonicalArtifactBaseline,
+  (raw: unknown) => parseCanonicalArtifactBaseline(raw, "baseline", UNKNOWN_SCHEME_BASELINE),
   canonicalArtifactBaselineDigest,
   parseImplementationAttemptAuthority,
   parseTaskCompletionSuiteAuthority,
@@ -350,11 +351,11 @@ describe("implementation completion exact parsers", () => {
       parseCanonicalArtifactBaseline([{
         ...taskBaseline[0],
         surplus: true,
-      }]),
+      }], "baseline", UNKNOWN_SCHEME_BASELINE),
       parseCanonicalArtifactBaseline([{
         artifact: "engine/src/a.ts",
         snapshot: { kind: "missing", surplus: true },
-      }]),
+      }], "baseline", UNKNOWN_SCHEME_BASELINE),
     ];
     cases.forEach((parsed) => expect(parsed.ok).toBe(false));
   });
@@ -388,7 +389,7 @@ describe("canonical baseline and self-digest policy", () => {
       const input = reverse ? [...taskBaseline].reverse() : taskBaseline;
       expect(valueOf(canonicalArtifactBaselineDigest(input)))
         .toBe(valueOf(canonicalArtifactBaselineDigest(taskBaseline)));
-      expect(valueOf(parseCanonicalArtifactBaseline(input)).map((entry) => entry.artifact))
+      expect(valueOf(parseCanonicalArtifactBaseline(input, "baseline", UNKNOWN_SCHEME_BASELINE)).map((entry) => entry.artifact))
         .toEqual(["engine/src/a.ts", "engine/tests/a.test.ts"]);
     }));
   });
@@ -401,7 +402,7 @@ describe("canonical baseline and self-digest policy", () => {
       baseline([["engine/src/a.ts", "d".repeat(64)], ["engine/tests/a.test.ts", null]]),
     ];
     mutations.forEach((mutation) => expect(valueOf(canonicalArtifactBaselineDigest(mutation))).not.toBe(original));
-    expect(parseCanonicalArtifactBaseline([taskBaseline[0], taskBaseline[0]]).ok).toBe(false);
+    expect(parseCanonicalArtifactBaseline([taskBaseline[0], taskBaseline[0]], "baseline", UNKNOWN_SCHEME_BASELINE).ok).toBe(false);
   });
 
   it("rejects authority and receipt self-digest tampering", () => {

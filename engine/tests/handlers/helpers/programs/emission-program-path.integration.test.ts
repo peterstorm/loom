@@ -17,17 +17,18 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { git } from "../../../fixtures/git-repository";
 import { fixturePiEnvironment } from "../../../fixtures/pi-session";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
-import { fixtureValue, OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
-import { mustAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
+import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
+import { withRouteEnv } from "../../../fixtures/issue-route-env";
+import { value } from "../../../fixtures/parse-result";
+import { catalogAuthority, mustAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import {
   DESKTOP_VLLM_ROUTE,
   lowerModelProfile,
-  resolveAgentPolicy,
   resolveModelProfile,
 } from "../../../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
-import { parseRequestId, type ContextDigest, type RequestId } from "../../../../src/core/orchestration-contract/identity";
+import { parseRequestId } from "../../../../src/core/orchestration-contract/identity";
 import { buildContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../../../src/core/context-packets";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone-lineage-contract";
@@ -41,22 +42,7 @@ import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../../../src/orchestration/harnes
 import { parseTaskGraph } from "../../../../src/state-manager";
 import type { TaskGraph } from "../../../../src/types";
 
-/** Run `body` with `overrides` applied to `process.env`, restoring every key —
- *  deleting the ones that were unset — once `body` settles, even on failure. */
-async function withEnv<T>(overrides: Readonly<Record<string, string>>, body: () => T | Promise<T>): Promise<T> {
-  const previous = Object.keys(overrides).map((key) => [key, process.env[key]] as const);
-  Object.assign(process.env, overrides);
-  try {
-    return await body();
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
-const successorSource = fixtureValue(encodeByteSection(
+const successorSource = value(encodeByteSection(
   "standalone-frozen-source",
   JSON.stringify({ kind: "successor-v3-render-fixture" }),
 ));
@@ -305,7 +291,7 @@ describe("positive program-path issuance through the qualified local Pi parent (
     expect(specCheck?.authority.modelProfile).toBe("spec-check-review");
     expect(specCheck?.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     const { readPiIssuedSpawnRequest } = await import("../../../../../pi/review-run-authority");
-    await withEnv({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.local-wave") }, () => {
+    await withRouteEnv({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.local-wave") }, () => {
       for (const { authority, task } of requests.filter(({ authority }) => authority.role !== "spec-check-invoker")) {
         expect(authority.modelProfile).toBe("qualified-local-review");
         expect(authority.harnessBinding.pi).toMatchObject({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
@@ -346,7 +332,7 @@ describe("the Pi issuance read behind the spawn admission port (T6)", () => {
     if (reviewer === undefined) throw new Error("fixture did not publish a reviewer request");
     const authority = mustAuthority(reviewer.authority);
     const { readPiIssuedSpawnRequest } = await import("../../../../../pi/review-run-authority");
-    await withEnv({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.issued-port") }, () => {
+    await withRouteEnv({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.issued-port") }, () => {
       const issued = readPiIssuedSpawnRequest("019fca39-f989-7510-8e62-50dadbcad4ff", authority.requestId, authority.contextDigest, authority.role);
       expect(issued).toMatchObject({ ok: true, value: {
         role: "code-reviewer",
@@ -372,8 +358,8 @@ describe("the standalone successor v3 program path projects the issued route (T6
     const registered = await handle.registerProgram(standaloneV3RegistrationWire);
     if (!registered.ok) throw new Error(registered.error.message);
 
-    const requestId = fixtureValue(parseRequestId("request:standalone-successor-v3-wiring-1"));
-    const packet = fixtureValue(buildStandaloneReviewerContextPacketV3({
+    const requestId = value(parseRequestId("request:standalone-successor-v3-wiring-1"));
+    const packet = value(buildStandaloneReviewerContextPacketV3({
       requestId,
       role: "code-reviewer",
       requiredSkill: "none",
@@ -419,18 +405,18 @@ describe("the standalone successor v3 program path projects the issued route (T6
     const handle = created.value;
     const registered = await handle.registerProgram(standaloneV3RegistrationWire);
     if (!registered.ok) throw new Error(registered.error.message);
-    const requestId = fixtureValue(parseRequestId("request:standalone-successor-v3-qualified"));
-    const packet = fixtureValue(buildStandaloneReviewerContextPacketV3({
+    const requestId = value(parseRequestId("request:standalone-successor-v3-qualified"));
+    const packet = value(buildStandaloneReviewerContextPacketV3({
       requestId, role: "code-reviewer", requiredSkill: "none",
       fixedContext: Object.freeze([]), variableContext: Object.freeze([]),
     }));
-    const profile = fixtureValue(resolveModelProfile("qualified-local-review"));
+    const profile = value(resolveModelProfile("qualified-local-review"));
     const authority = mustAuthority({
       ...reviewerAuthority("standalone-review", requestId, packet.digest),
       modelProfile: profile.id,
       harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
     });
-    await withEnv({ PI_CODING_AGENT: "true" }, async () => {
+    await withRouteEnv({ PI_CODING_AGENT: "true" }, async () => {
       const published = await publishReviewInitialBatch(handle, [{ authority, context: {
         digest: packet.digest, slot: { kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` },
       } }], [packet], "standalone-successor-v3", standaloneV3Registration);
@@ -496,6 +482,11 @@ describe("the standalone-review v2 program path projects the issued route (T6)",
 });
 
 describe("the legacy publication route fails closed against a current registration (T6)", () => {
+  /** The guard run's own id: the run the facade starts and both legacy-route
+   *  requests (the eligible code-reviewer standalone request and the
+   *  non-eligible review-verifier refutation-panel request) are issued under. */
+  const LEGACY_GUARD_RUN = "run.legacy-guard";
+
   const runDirectoryFingerprint = (handle: RunDirHandle): readonly string[] =>
     readdirSync(handle.runDirectory, { recursive: true }).map((entry) => String(entry)).sort();
 
@@ -503,10 +494,10 @@ describe("the legacy publication route fails closed against a current registrati
    *  facade start freezes it; the eligible-refusal arm reads this registration. */
   const currentProgramRun = async (): Promise<RunDirHandle> => {
     const project = standaloneEmissionProject();
-    const started = await startFacadeProgram(project, "standalone-review", "run.legacy-guard",
+    const started = await startFacadeProgram(project, "standalone-review", LEGACY_GUARD_RUN,
       { kind: "all", files: ["src/x.ts"], dryRun: false });
     expect(started.status, started.stderr).toBe(0);
-    const opened = openRunDirectory(project.runsRoot, "run.legacy-guard");
+    const opened = openRunDirectory(project.runsRoot, LEGACY_GUARD_RUN);
     if (!opened.ok) throw new Error(opened.error.message);
     const stored = opened.value.readProgramRegistration();
     if (!stored.ok) throw new Error(stored.error.message);
@@ -517,37 +508,14 @@ describe("the legacy publication route fails closed against a current registrati
     return opened.value;
   };
 
-  const legacyRouteAuthority = (requestId: RequestId, contextDigest: ContextDigest, role: "code-reviewer" | "review-verifier-agent") => {
-    if (role === "code-reviewer") {
-      const policy = fixtureValue(resolveAgentPolicy("code-reviewer"));
-      const profile = fixtureValue(resolveModelProfile(policy.profile));
-      return mustAuthority({
-        runId: "run.legacy-guard", requestId, slotId: `slot:${requestId}`,
-        program: "standalone-review", role, attempt: 1, modelProfile: policy.profile,
-        harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
-        requiredSkill: policy.requiredSkill, contextDigest,
-        outputSlot: `transcripts/slot:${requestId}/attempt-1.raw`,
-      });
-    }
-    const policy = fixtureValue(resolveAgentPolicy("review-verifier-agent"));
-    const profile = fixtureValue(resolveModelProfile(policy.profile));
-    return mustAuthority({
-      runId: "run.legacy-guard", requestId, slotId: `slot:${requestId}`,
-      program: "refutation-panel", role, attempt: 1, modelProfile: policy.profile,
-      harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
-      requiredSkill: null, contextDigest,
-      outputSlot: `transcripts/slot:${requestId}/attempt-1.raw`,
-    });
-  };
-
   it("refuses an emission-eligible reviewer request without writing any receipt or context", async () => {
     const handle = await currentProgramRun();
-    const requestId = fixtureValue(parseRequestId("request:legacy-route-eligible-1"));
-    const packet = fixtureValue(buildStandaloneReviewerContextPacketV3({
+    const requestId = value(parseRequestId("request:legacy-route-eligible-1"));
+    const packet = value(buildStandaloneReviewerContextPacketV3({
       requestId, role: "code-reviewer", requiredSkill: "none",
       fixedContext: Object.freeze([]), variableContext: Object.freeze([]),
     }));
-    const authority = legacyRouteAuthority(requestId, packet.digest, "code-reviewer");
+    const authority = reviewerAuthority("standalone-review", requestId, packet.digest, LEGACY_GUARD_RUN);
     const before = runDirectoryFingerprint(handle);
     const refused = await publishLegacyInitialBatch(
       handle,
@@ -566,14 +534,16 @@ describe("the legacy publication route fails closed against a current registrati
 
   it("still publishes a non-eligible review-verifier-agent refutation panel request on the legacy route", async () => {
     const handle = await currentProgramRun();
-    const requestId = fixtureValue(parseRequestId("request:legacy-route-panel-1"));
-    const note = fixtureValue(encodeByteSection("fixture-note", "panel retry context"));
-    const packet = fixtureValue(buildContextPacket({
+    const requestId = value(parseRequestId("request:legacy-route-panel-1"));
+    const note = value(encodeByteSection("fixture-note", "panel retry context"));
+    const packet = value(buildContextPacket({
       requestId, role: "review-verifier-agent", requiredSkill: "none",
       outputContract: "refutation-verdict",
       fixedContext: Object.freeze([note]), variableContext: Object.freeze([]),
     }));
-    const authority = legacyRouteAuthority(requestId, packet.digest, "review-verifier-agent");
+    const authority = catalogAuthority({
+      role: "review-verifier-agent", program: "refutation-panel", requestId, contextDigest: packet.digest, runId: LEGACY_GUARD_RUN,
+    });
     const published = await publishLegacyInitialBatch(
       handle,
       Object.freeze([{ authority, context: Object.freeze({

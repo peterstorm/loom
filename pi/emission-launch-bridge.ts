@@ -23,7 +23,7 @@ import {
 } from "../engine/src/core/orchestration-contract/identity";
 import type { ContextDigest } from "../engine/src/core/orchestration-contract";
 import type { IssuedEmissionBinding, IssuedEmissionBindingOf } from "../engine/src/core/emission-tool";
-import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "./emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "./emission-readiness-protocol";
 import {
   decideReadinessGate,
   decideStartupRoute,
@@ -391,6 +391,9 @@ const readinessVerifier = (
   launch: PiEmissionLaunchExpectation,
 ): PiEmissionRpcDirective["verifyReadiness"] => async (client) => {
   const expectation = startupExpectationOf(launch);
+  // The one gate decision path; the listed/unlisted split only supplies its inputs.
+  const decide = (commandListed: boolean, readiness: ReadinessObservation): EmissionReadinessGateDecision =>
+    decideReadinessGate(expectation, parseReadinessStageObservation(observedReadinessFacts(commandListed, readiness)));
   const listed = await readinessExchange("get_commands", () => client.getCommands(), parseReadinessCommandListing);
   if (!listed.ok) return listed.error;
   // Exactly one invocation in this verifier, and none for an unlisted command.
@@ -398,17 +401,10 @@ const readinessVerifier = (
   // delivery if a verifier cheats. The gate decides inside the guarded
   // response parse: a hostile payload's throw is a bounded RPC refusal.
   const readiness = !listed.value
-    ? success<EmissionReadinessGateDecision, PiReadinessRefusal>(
-        decideReadinessGate(expectation, parseReadinessStageObservation(observedReadinessFacts(false, NOT_INVOKED))),
-      )
+    ? success<EmissionReadinessGateDecision, PiReadinessRefusal>(decide(false, NOT_INVOKED))
     : await readinessExchange("invoke_readiness", () => client.invokeReadiness(), (entries) => {
         const observation = parseReadinessEntries(entries);
-        return observation.ok
-          ? success(decideReadinessGate(
-              expectation,
-              parseReadinessStageObservation(observedReadinessFacts(true, observation.value)),
-            ))
-          : observation;
+        return observation.ok ? success(decide(true, observation.value)) : observation;
       });
   if (!readiness.ok) return readiness.error;
   if (readiness.value.kind === "refused") return readinessRefusal(readiness.value.message);

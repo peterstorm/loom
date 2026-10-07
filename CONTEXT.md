@@ -48,6 +48,10 @@ _Avoid_: Spawn gate (that is the Hook applying the decision), spawn validation
 The Pi-only parent-relayed RPC child transport for one interactive phase Agent. It preserves the same child process and Agent turn while translating child `extension_ui_request` frames into parent-TUI dialogs and returning exactly correlated `extension_ui_response` frames. It resolves the same exact effective provider/model/thinking binding as the normal subagent transport and records that binding in its result. Headless Agents remain on the normal subagent transport.
 _Avoid_: Question-file fallback, parent interview, interactive subagent (that is the tool surface, not the transport contract)
 
+**Payload Producer**:
+An Agent that emits a structured payload, classified by its producer kind: `reviewer-payload` (reviewer and review-verifier Agents, for standalone and Wave reviews), `refutation-verdict` (the review-verifier Agent, for Refutation Panel verdicts) or `judge-verdict` (the one Agent carrying the `panel-judge` profile, for architecture-panel verdicts). Producer kinds are a projection of the Agent Catalog (`producerKindsOfAgent`), never declared per request: the review-verifier is the one dual producer, and a non-judge architecture-panel designer produces none. Each producer kind selects exactly one Emission Tool.
+_Avoid_: Output agent, emitter, payload type (the kind names the producer's payload contract, not a data type)
+
 **Emission Tool**:
 The exact frozen-schema producer tool one emission-enabled child request advertises — one registered name per producer kind (`loom_emit_reviewer_payload`, `loom_emit_judge_verdict`, `loom_emit_refutation_verdict`; the issued binding selects the reviewer schema version, v2 or v3), with parameters byte-identical to the frozen payload schema for that kind/version. The child registers and executes it; the engine parser stays validity-authoritative and the model does not select the tool, kind or version.
 _Avoid_: output schema, structured output (generic), second schema (there is exactly one frozen schema)
@@ -181,11 +185,11 @@ The exact parsed immutable generation record beside one session's `.task_graph` 
 _Avoid_: Pointer owner flag, shared pointer, best-effort rollback
 
 **Trusted Review Witness Aggregate**:
-The process-local Pi authority grouped by session, Standalone Review root, and Review Run — one instance per loaded extension factory, injected into spawn admission, result capture, the review-authority bridge and session shutdown rather than reached as module state. A run becomes current when its first exact standalone spawn is bound before dispatch; retries and later captures enrich that run without reordering it. Verification considers only the current run for that root; rejection or missing capture never falls back, exact acceptance is idempotent and retires older root witnesses, and session shutdown prunes the session aggregate.
+The process-local Pi authority grouped by session, Standalone Review root, and Review Run — one instance per loaded extension factory, injected into spawn admission, result capture, the review-authority bridge and session shutdown rather than reached as module state. A run becomes current when its first exact standalone spawn is bound before dispatch; retries and later captures enrich that run without reordering it. A spawn refused after binding a new run retracts it while it is still unwitnessed, so a refusal never leaves an empty run current. Verification considers only the current run for that root; rejection or missing capture never falls back, exact acceptance is idempotent and retires older root witnesses, and session shutdown prunes the session aggregate.
 _Avoid_: Review cache, accepted result fallback, global witness map
 
 **Spawn Claims Ledger**:
-The immutable record of every capability one Pi spawn batch has taken while its admission is in progress — staged emission launches, issued write grants and whether their prompt was rewritten, reserved roster entries, the task-graph pointer lease. A refused admission releases it in one planned order (capabilities first, roster entries newest-first, the pointer lease last), attempting every release; exactly what failed to release stays on the parent session as cleanup debt. Role authority is never part of the ledger: none is committed until the whole reservation is.
+The immutable record of every capability one Pi spawn batch holds — staged emission launches, issued write grants (one per slot) and the child prompts they rewrote, the review run a standalone spawn newly bound as current, reserved roster entries, the task-graph pointer lease. Each claim is recorded no later than the step that takes its capability (a roster entry before it is marked), and the ledger is total: a duplicate grant slot or an injection with no claimed grant is refused, never dropped. A refused admission releases it in one planned order (capabilities first, then the witness run, roster entries newest-first, the pointer lease last), attempting every release; exactly what failed to release stays on the parent session as cleanup debt. Settlement derives the ledger a dispatched batch still holds from its committed grants and reservation and releases it by the same plan and remaining-debt rule, the pointer lease last. Role authority is never part of the ledger: none is committed until the whole reservation is.
 _Avoid_: Rollback list, cleanup closure, admission state
 
 **Plan**:
@@ -393,7 +397,7 @@ A plan invariant (`INV-N`, tier `checkable`) expressed as a lint rule enforced f
 _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory rules are never enforced)
 
 **Git-Visible Leaf**:
-A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it.
+A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it, under the one Git execution policy (`utils/git-execution-policy.ts`: allow-listed environment, no ambient `GIT_*`, fsmonitor disabled).
 _Avoid_: Directory listing, file walk, pathspec match
 
 **Reviewed Workspace Observation**:
@@ -430,7 +434,7 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Session TaskGraph Pointer Lease Registry** restores its previous target only after the generation's final exact lease is released
 - A **Trusted Review Witness Aggregate** verifies only the latest first-bound Standalone Review Run for one session/root; retries/captures never reorder runs, and session shutdown prunes the aggregate
-- A refused Pi spawn admission releases its **Spawn Claims Ledger**; only the releases that failed remain as the session's cleanup debt
+- A refused Pi spawn admission and a settled Pi spawn batch both release a **Spawn Claims Ledger** by one rule; only the releases that failed remain as the session's cleanup debt
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
 - A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel

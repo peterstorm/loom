@@ -288,20 +288,37 @@ export function readPiIssuedSpawnRequest(
       return failure({ message: `no unique reserved ${agent} request ${requestId} binds context ${contextDigest}` });
     }
     const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]!);
-    switch (authenticated.kind) {
-      case "authenticated":
-        return qualifyRoute(authenticated.classified, authenticated.published.authority);
-      case "registration-unreadable":
-      case "unclassified":
-      case "publication-unavailable":
-        return failure({ message: authenticated.message });
-      case "registration-invalid":
-      case "unclaimed-program":
-      case "other-program":
-        return failure({ message: `request ${requestId} has no matching registered review program` });
-    }
+    return authenticated.kind === "authenticated"
+      ? qualifyRoute(authenticated.classified, authenticated.published.authority)
+      : failure({ message: piIssuedSpawnRequestRefusal(requestId, authenticated) });
   } catch (error) {
     return failure({ message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/**
+ * The spawn-admission diagnostic for every refusing authentication step.
+ * Steps that already name their cause keep it verbatim; a request outside any
+ * review program keeps the one generic refusal; a claimed-but-INVALID
+ * registration keeps that generic refusal AND the parser's exact diagnostic,
+ * so an operator with a corrupt registration learns why without re-reading
+ * the file.
+ */
+export function piIssuedSpawnRequestRefusal(
+  requestId: RequestId,
+  refusal: Exclude<PiIssuedReviewRequestAuthentication, { kind: "authenticated" }>,
+): string {
+  const unmatched = `request ${requestId} has no matching registered review program`;
+  switch (refusal.kind) {
+    case "registration-unreadable":
+    case "unclassified":
+    case "publication-unavailable":
+      return refusal.message;
+    case "registration-invalid":
+      return `${unmatched}: the program registration is invalid: ${refusal.message}`;
+    case "unclaimed-program":
+    case "other-program":
+      return unmatched;
   }
 }
 

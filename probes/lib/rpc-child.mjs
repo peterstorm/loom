@@ -12,6 +12,12 @@
  * Waiters and `onEvent` listeners always see the full parsed event; `retain`
  * only shapes `events`, the retained history `waitFor` scans first.
  *
+ * Ordering between waits is a bus-owned cursor, never object identity: a
+ * cursor is a position in the event sequence (`events` indexes, non-JSON
+ * markers included). `next` and `exchange` resolve the cursor just past the
+ * event they matched, and a later wait given that cursor as `since` sees only
+ * what arrived after it — however `retain` reshaped the retained copy.
+ *
  * Tests: `rpc-child.test.mjs` drives the bus over a plain stream and the whole
  * lifecycle against a fake `pi` executable (the `executable` option), so no
  * real Pi or model is needed.
@@ -48,39 +54,52 @@ export function makeBus(stdout, { retain = (event) => event } = {}) {
         continue;
       }
       events.push(retain(event));
+      const cursor = events.length;
       for (const listener of listeners) listener(event);
       for (let i = waiters.length - 1; i >= 0; i--) {
         const waiter = waiters[i];
         if (waiter.predicate(event)) {
           waiters.splice(i, 1);
           clearTimeout(waiter.timer);
-          waiter.resolve(event);
+          waiter.resolve({ event, cursor });
         }
       }
     }
   });
+  /**
+   * Resolve `{ event, cursor }` for the first retained event at or after the
+   * cursor `since` — or the first future event — matching `predicate`;
+   * reject after `ms` naming `label`. `cursor` is the position just past the
+   * matched event.
+   */
+  const next = (predicate, ms, label, since = 0) => {
+    const at = events.findIndex((event, index) => index >= since && predicate(event));
+    if (at !== -1) return Promise.resolve({ event: events[at], cursor: at + 1 });
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        timer: setTimeout(() => {
+          const index = waiters.indexOf(waiter);
+          if (index !== -1) waiters.splice(index, 1);
+          reject(new Error(`${label}: no matching event within ${ms}ms`));
+        }, ms),
+      };
+      waiters.push(waiter);
+    });
+  };
   return {
     events,
+    next,
+    /** The cursor at the end of the sequence so far: a wait given it as
+     *  `since` sees only events that arrive from now on. */
+    cursor: () => events.length,
     /**
-     * Resolve with the first retained or future event matching `predicate`;
-     * reject after `ms` naming `label`. `since` skips the retained events
-     * before that index, so an earlier phase's event never satisfies a later wait.
+     * `next`, resolving only the event. `since` is a cursor, so an earlier
+     * phase's event never satisfies a later wait.
      */
     waitFor(predicate, ms, label, since = 0) {
-      const existing = events.slice(since).find(predicate);
-      if (existing) return Promise.resolve(existing);
-      return new Promise((resolve, reject) => {
-        const waiter = {
-          predicate,
-          resolve,
-          timer: setTimeout(() => {
-            const at = waiters.indexOf(waiter);
-            if (at !== -1) waiters.splice(at, 1);
-            reject(new Error(`${label}: no matching event within ${ms}ms`));
-          }, ms),
-        };
-        waiters.push(waiter);
-      });
+      return next(predicate, ms, label, since).then(({ event }) => event);
     },
     /** Call `listener` with every parsed event from now on; returns the unsubscribe. */
     onEvent(listener) {
@@ -108,15 +127,21 @@ export function spawnRpcChild(args, { cwd, env, retain, executable = "pi" }) {
   const stderrChunks = [];
   child.stderr.on("data", (data) => stderrChunks.push(data.toString()));
   const send = (command) => child.stdin.write(`${JSON.stringify(command)}\n`);
+  /** Write one command and await `{ response, cursor }`: the response
+   *  `matches` selects, within `ms`, and the cursor just past it. */
+  const exchange = (command, matches, ms, label) => {
+    send(command);
+    return bus.next(matches, ms, label).then(({ event, cursor }) => ({ response: event, cursor }));
+  };
   return {
     child,
     bus,
     /** Write one command line; no response is awaited. */
     send,
+    exchange,
     /** Write one command and await the response `matches` selects, within `ms`. */
     request(command, matches, ms, label) {
-      send(command);
-      return bus.waitFor(matches, ms, label);
+      return exchange(command, matches, ms, label).then(({ response }) => response);
     },
     /** Everything the child wrote to stderr so far, trimmed. */
     stderr: () => stderrChunks.join("").trim(),

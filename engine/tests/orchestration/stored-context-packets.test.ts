@@ -8,7 +8,7 @@ import type { AgentRequestAuthority, OrchestrationRunId } from "../../src/core/o
 import { storedContextPacket, withStoredSectionBytes } from "../../src/core/context-packets";
 import { buildContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
-import { CONTEXT_SECTION_BLOBS, readStoredContextPacketFile } from "../../src/orchestration/stored-context-packets";
+import { CONTEXT_SECTION_BLOBS, openStoredContextPacketFile, readStoredContextPacketFile } from "../../src/orchestration/stored-context-packets";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -154,6 +154,27 @@ describe("Run Directory Context Packet storage", () => {
     if (read.ok) expect(read.value.sectionBytes).toBe(packet.fixedContext.reduce((total, { byteLength }) => total + byteLength, 0));
     expect(readStoredContextPacketFile(path, { file: fileLength - 1, section: 1_000_000 }).ok).toBe(false);
     expect(readStoredContextPacketFile(path, { file: fileLength, section: 1_000 }).ok).toBe(false);
+  });
+
+  it("opens a referenced packet file as exact bytes plus its run's blob lookup, never a decoded record", async () => {
+    const { directory, handle } = freshRun();
+    const packet = reviewerPacket("code-reviewer");
+    expect((await handle.publishContext(packet)).ok).toBe(true);
+    const path = join(directory, "contexts", `${packet.digest}.json`);
+    const fileLength = statSync(path).size;
+
+    const opened = openStoredContextPacketFile(path, { file: fileLength, section: 1_000_000 });
+    if (!opened.ok) throw new Error(opened.error);
+    expect(Object.keys(opened.value).sort()).toEqual(["fileBytes", "readSectionBlob"]);
+    expect(Buffer.compare(Buffer.from(opened.value.fileBytes), readFileSync(path))).toBe(0);
+    const blob = opened.value.readSectionBlob(FROZEN_SOURCE.digest);
+    expect(blob.ok && blob.value !== null && sha256(blob.value)).toBe(FROZEN_SOURCE.digest);
+    expect(opened.value.readSectionBlob("0".repeat(64))).toEqual({ ok: true, value: null });
+
+    const tight = openStoredContextPacketFile(path, { file: fileLength, section: 1_000 });
+    if (!tight.ok) throw new Error(tight.error);
+    expect(tight.value.readSectionBlob(FROZEN_SOURCE.digest)).toMatchObject({ ok: false, error: expect.stringMatching(/^context packet .* is unreadable: /) });
+    expect(openStoredContextPacketFile(path, { file: fileLength - 1, section: 1_000_000 })).toMatchObject({ ok: false });
   });
 });
 

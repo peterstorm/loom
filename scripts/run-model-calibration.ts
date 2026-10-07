@@ -18,8 +18,8 @@
  *   `recordWindow` (`pilot-retention.ts`) runs the whole window — input
  *   resolution, the matched dispatch, retention and the decision — behind
  *   its ports, so this shell only gathers the preflight facts and wires the
- *   live adapters: the filesystem `WindowStore`, the Pi `ArmDispatch`, git's
- *   changed-path lookup and the clocks.
+ *   live adapters: the filesystem `WindowStore`, the Pi `ArmDispatch`, the
+ *   lazy workload-corpus loader, git's changed-path lookup and the clocks.
  * - `--decide <window-dir> [--assessment <file>]...` — offline re-evaluation
  *   of a retained window once blinded assessments arrive. Makes no model
  *   call, so it needs no opt-in.
@@ -33,7 +33,7 @@ import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBindi
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
 import { corpusCaseResult, type CorpusRun } from "../calibration/corpus-calibration";
-import type { Result } from "../calibration/kernel";
+import { err, ok, type Result } from "../calibration/kernel";
 import {
   decidePreflight,
   stagedRegistryFacts,
@@ -159,7 +159,7 @@ function loadPreregistration(path: string): Result<LoadedPreregistration, string
   const parsed = parsePreregistrationFile(readFileSync(path), path);
   if (!parsed.ok) return parsed;
   const { digest, prereg } = parsed.value;
-  return { ok: true, value: Object.freeze({ ref: { path: repoRelative(path), digest, id: prereg.id }, prereg }) };
+  return ok(Object.freeze({ ref: { path: repoRelative(path), digest, id: prereg.id }, prereg }));
 }
 
 function loadFixtures(path: string): Readonly<{ digest: string; fixtures: WorkloadFixtures }> {
@@ -206,12 +206,21 @@ async function gatherPreflightFacts(prereg: Preregistration, fixturesDigest: str
   });
 }
 
-/** The corpus the workload fixtures name, which the reviewer cells' sources resolve in. */
-function loadWorkloadCorpus(fixtures: WorkloadFixtures): readonly CalibrationCase[] {
-  const corpus = parseCalibrationCorpus(readFileSync(resolve(REPO_ROOT, fixtures.reviewer.corpus), "utf-8"));
-  if (!corpus.ok) throw new Error(corpus.errors.join("\n"));
-  return corpus.value.cases;
-}
+/** The corpus the workload fixtures name, which the reviewer cells' sources
+ *  resolve in. `recordWindow` invokes this port only for a window that
+ *  dispatches, so an unreadable corpus never costs a non-dispatching window
+ *  its record; an unreadable or invalid corpus is a refusal, not a throw. */
+const workloadCorpusLoader = (fixtures: WorkloadFixtures) => (): Result<readonly CalibrationCase[], string> => {
+  const path = resolve(REPO_ROOT, fixtures.reviewer.corpus);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (error) {
+    return err(`cannot read ${repoRelative(path)}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const corpus = parseCalibrationCorpus(text);
+  return corpus.ok ? ok(corpus.value.cases) : err(`invalid corpus ${repoRelative(path)}:\n  - ${corpus.errors.join("\n  - ")}`);
+};
 
 /** Prints a recorded decision; exit 0 only for `done-allowed`. */
 function reportDecision(outcome: DecisionOutcome): number {
@@ -250,7 +259,7 @@ async function runPilot(): Promise<number> {
       dispatch: planDispatch(preflight, args.includes("--preflight-only")),
     },
     preregistration: loaded,
-    workload: { fixtures, corpusCases: loadWorkloadCorpus(fixtures), changedPathsOf: calibrationRevisionPaths },
+    workload: { fixtures, loadCorpusCases: workloadCorpusLoader(fixtures), changedPathsOf: calibrationRevisionPaths },
     dispatch: piArmDispatch({
       repoRoot: REPO_ROOT,
       piCommand: "pi",

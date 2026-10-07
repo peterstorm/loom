@@ -70,6 +70,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/panel-authority.ts",
   "engine/src/core/panel-verdict-source.ts",
   "engine/src/core/persistent-panel.ts",
+  // The persistent program kernel both durable panels instantiate.
+  "engine/src/core/persistent-panel-program.ts",
   // The emission kernel (ADR-0018) and the legacy panel's pure decisions that
   // consume it: the frozen registry, the observation fold, the selection
   // decision, the legacy journal archive, and the decisions themselves. Their
@@ -116,6 +118,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/orchestration-contract/errors.ts",
   "engine/src/core/orchestration-contract/bytes.ts",
   "engine/src/core/orchestration-contract/artifacts.ts",
+  // The Orchestration Program vocabulary leaf model-profiles and the roster share.
+  "engine/src/core/orchestration-contract/programs.ts",
   "engine/src/core/orchestration-contract/roster.ts",
   "engine/src/core/orchestration-contract/publication.ts",
   "engine/src/core/orchestration-contract/completion.ts",
@@ -149,6 +153,10 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // from. The Context Packet projection imports both.
   "engine/src/core/standalone-read-coverage.ts",
   "engine/src/core/unified-diff.ts",
+  // The ONE Pi agent-directory resolution rule (Pi's own getAgentDir) the Pi
+  // extension, the routing-config loader and the model guard all share; the
+  // shells supply os.homedir().
+  "engine/src/core/pi-agent-directory.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

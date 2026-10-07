@@ -73,7 +73,6 @@ export type PreflightDecision =
   | Readonly<{ kind: "ready"; runtime: RuntimeIdentityRecord }>
   | Readonly<{ kind: "blocked"; blocks: NonEmpty<PreflightBlock>; runtime: RuntimeIdentityRecord }>;
 
-/** Staging and the loaded runtime stay distinct: `unobserved` is never a match. */
 function loadedRuntimeRecord(loaded: string | null, staged: string): RuntimeIdentityRecord["loadedRuntime"] {
   if (loaded === null) return Object.freeze({ kind: "unobserved" as const });
   if (loaded === staged) return Object.freeze({ kind: "matches-staged" as const, revision: loaded });

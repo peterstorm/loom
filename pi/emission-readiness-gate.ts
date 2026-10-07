@@ -5,12 +5,15 @@
  * emission-enabled child.
  *
  * The one contract this module shares with the child surface
- * (`pi/emission-tool.ts`) is the bound readiness report: the child builds it
- * from its honest observations, and this gate parses it with the production
- * identity parsers and compares it against the parent's registry-minted
- * expectation. Nothing else crosses: child-side registration and provisioning
- * changes cannot disturb gate precedence, and gate changes cannot reach the
- * child.
+ * (`pi/emission-tool.ts`) is the readiness protocol owned by
+ * `pi/emission-readiness-protocol.ts` — the command, the entry type and the
+ * bound report's wire shape: the child builds the report from its honest
+ * observations, and this gate parses it (its parsed type is derived from the
+ * wire shape field by field) with the production identity parsers and
+ * compares it against the parent's registry-minted expectation. Nothing else
+ * crosses — neither module imports the other: child-side registration and
+ * provisioning changes cannot disturb gate precedence, and gate changes cannot
+ * reach the child.
  *
  * The decision runs in two stages because route binding is I/O that may only
  * happen after readiness opened:
@@ -30,6 +33,7 @@
  */
 
 import type { IssuedEmissionBinding } from "../engine/src/core/emission-tool";
+import type { EmissionReadinessReport } from "./emission-readiness-protocol";
 import { isRecord } from "../engine/src/core/plain-record";
 import {
   boundDiagnosticMessage,
@@ -107,19 +111,23 @@ const refuseStartup = <C extends EmissionStartupRefusalCode>(
 // The shared readiness report contract, parsed
 // ---------------------------------------------------------------------------
 
-/** Parsed child report. Binding claims remain untrusted strings until the gate
- * compares them with the registry-minted parent expectation. */
-export type ReadinessReport = Readonly<{
+/** The identity-parsed wire fields: each refines the protocol's plain string
+ * to the production parser's branded identity. */
+type ParsedIdentityFields = Readonly<{
   requestId: RequestId;
   contextDigest: ContextDigest;
-  kind: string;
-  version: string;
-  toolName: string;
   schemaDigest: ArtifactDigest;
-  revision: string;
-  active: boolean;
-  childPid: number;
-  registeredTools: readonly string[];
+}>;
+
+/** Parsed child report, derived field by field from the protocol's wire shape
+ * (`EmissionReadinessReport`), so the parse cannot name a field the child does
+ * not send nor miss one it does. Binding claims other than the parsed
+ * identities remain untrusted strings until the gate compares them with the
+ * registry-minted parent expectation. */
+export type ReadinessReport = Readonly<{
+  [K in keyof EmissionReadinessReport]: K extends keyof ParsedIdentityFields
+    ? ParsedIdentityFields[K]
+    : EmissionReadinessReport[K];
 }>;
 
 export type ReadinessPayloadRejection = Readonly<{
@@ -193,7 +201,9 @@ export function parseReadinessReport(raw: unknown): DomainResult<ReadinessReport
       reason: `the readiness payload is ${describeUnknown(raw)}, not an object`,
     }));
   }
-  const parsed = parseAllFields({
+  // One parser per protocol field, keyed by the protocol's own wire shape: a
+  // field the protocol adds, drops or renames fails to compile here.
+  const fieldParsers: { readonly [K in keyof EmissionReadinessReport]: DomainResult<ReadinessReport[K], FieldParseError> } = {
     requestId: parseRequestId(raw["requestId"]),
     contextDigest: parseContextDigest(raw["contextDigest"]),
     schemaDigest: parseArtifactDigest(raw["schemaDigest"]),
@@ -204,7 +214,8 @@ export function parseReadinessReport(raw: unknown): DomainResult<ReadinessReport
     active: booleanValue("active", raw["active"]),
     childPid: positiveInteger("childPid", raw["childPid"]),
     registeredTools: stringArray("registeredTools", raw["registeredTools"]),
-  });
+  };
+  const parsed = parseAllFields(fieldParsers);
   if (!parsed.ok) {
     return failure(canonicalRecord({
       kind: "malformed-readiness-payload" as const,

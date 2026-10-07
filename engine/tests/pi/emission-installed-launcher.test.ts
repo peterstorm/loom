@@ -27,6 +27,7 @@ import {
   registerPiEmissionLaunchBridge,
   type PiEmissionLaunchExpectation,
   type PiSubagentLaunchEventBus,
+  type PiSubagentLaunchSlot,
 } from "../../../pi/emission-launch-bridge";
 import { LOOM_EMISSION_BINDING_ENV } from "../../../pi/emission-tool";
 import type { PiIssuedReviewRouteQualifier } from "../../../pi/review-run-authority";
@@ -40,15 +41,10 @@ import { renderReviewProgramSpawn } from "../../src/handlers/helpers/programs/sp
 import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";
 import { standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
 import { fixtureSession, withFixturePiSession } from "../fixtures/pi-session";
-import { JUDGE_V1_CELL, recordOf, repoRoot, withProcessState } from "../fixtures/emission-child-harness";
+import { recordOf, repoRoot, withProcessState } from "../fixtures/emission-child-harness";
+import { JUDGE_V1_CELL } from "../fixtures/emission-registry-cells";
 import { bridgeLaunchExpectation, NoEventBusFakePi, SynchronousEventBus } from "../fixtures/emission-launch-port";
-
-const fixtureValue = <T, E>(
-  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: E }>,
-): T => {
-  if (!result.ok) throw new Error(`fixture refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
+import { value } from "../fixtures/parse-result";
 
 type PublishedParentSpawnFixture = Readonly<{
   root: string;
@@ -82,12 +78,12 @@ const publishedParentSpawnFixture = async (label: string): Promise<PublishedPare
   if (!created.ok) throw new Error(created.error.message);
   const handle = created.value;
   const packets = ([1, 2] as const).map((attempt) => {
-    const requestId = fixtureValue(parseRequestId(standaloneRequestId(handle.runId, "code-reviewer", attempt)));
-    const section = fixtureValue(encodeByteSection(
+    const requestId = value(parseRequestId(standaloneRequestId(handle.runId, "code-reviewer", attempt)));
+    const section = value(encodeByteSection(
       "standalone-review-authority",
       JSON.stringify({ runId: handle.runId, scope: [sourcePath], role: "code-reviewer", attempt }),
     ));
-    return fixtureValue(buildReviewerContextPacket({
+    return value(buildReviewerContextPacket({
       requestId,
       role: "code-reviewer",
       requiredSkill: "none",
@@ -96,7 +92,7 @@ const publishedParentSpawnFixture = async (label: string): Promise<PublishedPare
     }));
   });
   const packet = packets[0]!;
-  const prepared = fixtureValue(prepareFreshStandaloneReview({
+  const prepared = value(prepareFreshStandaloneReview({
     runId: handle.runId,
     explicitScope: Object.freeze([sourcePath]),
     changedPaths: Object.freeze({
@@ -220,6 +216,42 @@ const shutdownParentExtension = async (
   }
 };
 
+const withPublishedRunEnvironment = <T>(
+  fixture: PublishedParentSpawnFixture,
+  operation: () => Promise<T>,
+): Promise<T> =>
+  withProcessState({ env: { [RUNS_ROOT_ENV]: fixture.runsRoot, [RUN_DIR_ENV]: fixture.runDirectory } }, operation);
+
+/**
+ * One published parent-spawn fixture for `body`: created, entered as the
+ * fixture Pi session with its run environment published, and removed in every
+ * outcome. `body` returns the parent extension it loaded, which is shut down
+ * inside the same session scope once the body completes.
+ */
+const withPublishedFixture = async (
+  label: string,
+  body: (fixture: PublishedParentSpawnFixture) => Promise<ParentGuardFakePi>,
+): Promise<void> => {
+  const fixture = await publishedParentSpawnFixture(label);
+  try {
+    await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
+      await shutdownParentExtension(await body(fixture), fixture);
+    }));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+};
+
+/** The fixture's registered run directory, its issued requests, and the first. */
+const issuedRequestsOf = (fixture: PublishedParentSpawnFixture) => {
+  const opened = openRegisteredRunDirectory(fixture.runsRoot, fixture.runDirectory);
+  if (!opened.ok) throw new Error(opened.error.message);
+  const issued = opened.value.readIssuedRequests();
+  const first = issued.ok ? issued.value[0] : undefined;
+  if (!issued.ok || first === undefined) throw new Error("fixture issued request is unavailable");
+  return Object.freeze({ run: opened.value, issued: issued.value, first });
+};
+
 type InstalledLauncherResult = Readonly<{
   agent: string;
   task: string;
@@ -278,6 +310,76 @@ const loadInstalledLauncherModules = async (): Promise<InstalledLauncherModules>
     routingPolicy: await import(/* @vite-ignore */ paths.routingPolicy),
   }) as InstalledLauncherModules;
 };
+
+/** The installed launcher's routing snapshot over an empty cloud-default policy. */
+const emptyRoutingSnapshot = (installed: InstalledLauncherModules, policyDigest: string) => {
+  const parsedPolicy = installed.routingPolicy.parseModelRoutingPolicy({
+    schemaVersion: 1,
+    defaultClass: "cloud",
+    modelClasses: {},
+    targets: {},
+    rules: [],
+  });
+  if (!parsedPolicy.ok) throw new Error(parsedPolicy.error.join("; "));
+  return Object.freeze({ policy: parsedPolicy.value, policyDigest });
+};
+
+/** The reviewer Agent definition the launcher resolves, pinned to the local route. */
+const fixtureReviewerAgent = (root: string) => Object.freeze({
+  name: "code-reviewer",
+  description: "fixture reviewer",
+  model: "desktop-vllm/glm-5.3-flash-spark-tp2-v14",
+  declaredSkills: [],
+  systemPrompt: "",
+  source: "user",
+  filePath: join(root, "code-reviewer.md"),
+} as const);
+
+const singleResultDetails = (results: readonly unknown[]) => ({
+  mode: "single" as const,
+  agentScope: "user" as const,
+  projectAgentsDir: null,
+  results,
+});
+
+/** What one installed-launcher run varies: where, what, and which launch slot. */
+type InstalledLaunch = Readonly<{
+  cwd: string;
+  task: string;
+  sessionId: string;
+  toolCallId: string;
+  slot: PiSubagentLaunchSlot;
+}>;
+
+/** One `runSingleAgent` call, its positional arguments spelled once: the
+ *  one agent, no per-call overrides, single-result details, the routing
+ *  snapshot, and the launch port correlation with a 2s readiness bound. */
+const runInstalledAgent = (
+  installed: InstalledLauncherModules,
+  bus: SynchronousEventBus,
+  agent: ReturnType<typeof fixtureReviewerAgent>,
+  routingSnapshot: ReturnType<typeof emptyRoutingSnapshot>,
+  launch: InstalledLaunch,
+): Promise<InstalledLauncherResult> =>
+  installed.launcher.runSingleAgent(
+    launch.cwd,
+    [agent],
+    agent.name,
+    launch.task,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    singleResultDetails,
+    routingSnapshot,
+    {
+      events: bus,
+      sessionId: launch.sessionId,
+      toolCallId: launch.toolCallId,
+      slot: launch.slot,
+      readinessTimeoutMs: 2_000,
+    },
+  );
 
 const FAKE_INSTALLED_PI_SOURCE = `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
@@ -356,12 +458,6 @@ describe("production parent tool_call to installed launcher readiness barrier", 
     } as const;
   };
 
-  const withPublishedRunEnvironment = <T>(
-    fixture: PublishedParentSpawnFixture,
-    operation: () => Promise<T>,
-  ): Promise<T> =>
-    withProcessState({ env: { [RUNS_ROOT_ENV]: fixture.runsRoot, [RUN_DIR_ENV]: fixture.runDirectory } }, operation);
-
   const invokeExistingParentSpawn = async (
     pi: ParentGuardFakePi,
     fixture: PublishedParentSpawnFixture,
@@ -414,12 +510,9 @@ describe("production parent tool_call to installed launcher readiness barrier", 
   };
 
   const expectUncapturedIssuedRequest = (fixture: PublishedParentSpawnFixture): void => {
-    const opened = openRegisteredRunDirectory(fixture.runsRoot, fixture.runDirectory);
-    if (!opened.ok) throw new Error(opened.error.message);
-    const issued = opened.value.readIssuedRequests();
-    if (!issued.ok || issued.value[0] === undefined) throw new Error("fixture issued request is unavailable");
-    expect(opened.value.readCapturedAttempts()).toEqual({ ok: true, value: new Set() });
-    expect(opened.value.readCaptureRejection(issued.value[0])).toEqual({ ok: true, value: null });
+    const { run, first } = issuedRequestsOf(fixture);
+    expect(run.readCapturedAttempts()).toEqual({ ok: true, value: new Set() });
+    expect(run.readCaptureRejection(first)).toEqual({ ok: true, value: null });
   };
 
   const runInstalledChild = async (
@@ -433,23 +526,6 @@ describe("production parent tool_call to installed launcher readiness barrier", 
     const log = join(fixture.root, "launch.log");
     await writeFile(fakePi, FAKE_INSTALLED_PI_SOURCE, "utf8");
     await chmod(fakePi, 0o700);
-    const parsedPolicy = installed.routingPolicy.parseModelRoutingPolicy({
-      schemaVersion: 1,
-      defaultClass: "cloud",
-      modelClasses: {},
-      targets: {},
-      rules: [],
-    });
-    if (!parsedPolicy.ok) throw new Error(parsedPolicy.error.join("; "));
-    const agent = {
-      name: "code-reviewer",
-      description: "published reviewer fixture",
-      model: "desktop-vllm/glm-5.3-flash-spark-tp2-v14",
-      declaredSkills: [],
-      systemPrompt: "",
-      source: "user",
-      filePath: join(fixture.root, "code-reviewer.md"),
-    } as const;
     return withProcessState({
       env: {
         PATH: `${fixture.root}:${process.env["PATH"] ?? ""}`,
@@ -459,23 +535,17 @@ describe("production parent tool_call to installed launcher readiness barrier", 
       },
       clearArgv1: true,
     }, async () => {
-      const result = await installed.launcher.runSingleAgent(
-        fixture.root,
-        [agent],
-        agent.name,
-        fixture.task,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        (results: readonly unknown[]) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-        { policy: parsedPolicy.value, policyDigest: `parent-handler-${variant}` },
+      const result = await runInstalledAgent(
+        installed,
+        bus,
+        fixtureReviewerAgent(fixture.root),
+        emptyRoutingSnapshot(installed, `parent-handler-${variant}`),
         {
-          events: bus,
+          cwd: fixture.root,
+          task: fixture.task,
           sessionId: fixtureSession(fixture.root).sessionId,
           toolCallId,
           slot: { kind: "single", index: 0 },
-          readinessTimeoutMs: 2_000,
         },
       );
       return Object.freeze({ result, log });
@@ -483,247 +553,206 @@ describe("production parent tool_call to installed launcher readiness barrier", 
   };
 
   it("refuses a stale disposable generated Agent before authenticating or launching the issued request", async () => {
-    const fixture = await publishedParentSpawnFixture("t5-parent-stale-agent");
-    try {
-      await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
-        const generatedAgentPath = join(fixture.piAgentDir, "agents", "code-reviewer.md");
-        await writeFile(generatedAgentPath, `${await readFile(generatedAgentPath, "utf8")}\n<!-- stale definition -->\n`, "utf8");
-        const qualified = { count: 0 };
-        const parent = await invokeIssuedParentSpawn(
-          fixture,
-          new SynchronousEventBus(),
-          "tool-call-parent-stale-agent",
-          qualified,
-        );
-        expect(parent.result).toMatchObject({
-          block: true,
-          reason: expect.stringContaining("differs from active package"),
-        });
-        expect(qualified.count).toBe(0);
-        expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
-        await shutdownParentExtension(parent.pi, fixture);
-      }));
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+    await withPublishedFixture("t5-parent-stale-agent", async (fixture) => {
+      const generatedAgentPath = join(fixture.piAgentDir, "agents", "code-reviewer.md");
+      await writeFile(generatedAgentPath, `${await readFile(generatedAgentPath, "utf8")}\n<!-- stale definition -->\n`, "utf8");
+      const qualified = { count: 0 };
+      const parent = await invokeIssuedParentSpawn(
+        fixture,
+        new SynchronousEventBus(),
+        "tool-call-parent-stale-agent",
+        qualified,
+      );
+      expect(parent.result).toMatchObject({
+        block: true,
+        reason: expect.stringContaining("differs from active package"),
+      });
+      expect(qualified.count).toBe(0);
+      expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
+      return parent.pi;
+    });
   });
 
   it("authenticates the issued request and exact disposable generated Agent before launcher-capability refusal", async () => {
-    const fixture = await publishedParentSpawnFixture("t5-parent-missing-launcher");
-    try {
-      await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
-        const qualified = { count: 0 };
-        const bus = new SynchronousEventBus();
-        const ambientPiAgentDir = process.env["PI_CODING_AGENT_DIR"];
-        const parent = await invokeIssuedParentSpawn(
-          fixture,
-          bus,
-          "tool-call-parent-missing-launcher",
-          qualified,
-        );
-        expect(process.env["PI_CODING_AGENT_DIR"]).toBe(ambientPiAgentDir);
-        expect(parent.result).toMatchObject({
-          block: true,
-          reason: expect.stringContaining("installed subagent launcher does not advertise"),
-        });
-        // The qualifier runs only after readPiIssuedSpawnRequest authenticated
-        // the exact reservation, program registration, and publication. The
-        // real admitPiSpawnBatch handler then reaches the capability guard.
-        expect(qualified.count).toBe(1);
-        expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
-        await shutdownParentExtension(parent.pi, fixture);
-      }));
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+    await withPublishedFixture("t5-parent-missing-launcher", async (fixture) => {
+      const qualified = { count: 0 };
+      const bus = new SynchronousEventBus();
+      const ambientPiAgentDir = process.env["PI_CODING_AGENT_DIR"];
+      const parent = await invokeIssuedParentSpawn(
+        fixture,
+        bus,
+        "tool-call-parent-missing-launcher",
+        qualified,
+      );
+      expect(process.env["PI_CODING_AGENT_DIR"]).toBe(ambientPiAgentDir);
+      expect(parent.result).toMatchObject({
+        block: true,
+        reason: expect.stringContaining("installed subagent launcher does not advertise"),
+      });
+      // The qualifier runs only after readPiIssuedSpawnRequest authenticated
+      // the exact reservation, program registration, and publication. The
+      // real admitPiSpawnBatch handler then reaches the capability guard.
+      expect(qualified.count).toBe(1);
+      expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
+      return parent.pi;
+    });
   });
 
   it("surfaces an incompatible launcher capability reply through the production parent guard before any Task dispatch", async () => {
-    const fixture = await publishedParentSpawnFixture("t5-parent-incompatible-launcher");
-    try {
-      await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
-        const bus = new SynchronousEventBus();
-        bus.on(LOOM_SUBAGENT_LAUNCH_CHANNEL, (event) => {
-          const probe = recordOf(event);
-          if (probe?.["kind"] === "capability" && typeof probe["respond"] === "function") {
-            probe["respond"]({ kind: "available", version: 1 });
-          }
-        });
-        const qualified = { count: 0 };
-        const parent = await invokeIssuedParentSpawn(fixture, bus, "tool-call-parent-incompatible-launcher", qualified);
-        const blocked = recordOf(parent.result);
-        expect(blocked?.["block"]).toBe(true);
-        expect(typeof blocked?.["reason"]).toBe("string");
-        if (typeof blocked?.["reason"] === "string") {
-          expect(blocked["reason"]).toContain("incompatible v2 capability response");
-          expect(blocked["reason"]).toContain("incompatible version");
-          expect(blocked["reason"]).not.toContain("does not advertise");
+    await withPublishedFixture("t5-parent-incompatible-launcher", async (fixture) => {
+      const bus = new SynchronousEventBus();
+      bus.on(LOOM_SUBAGENT_LAUNCH_CHANNEL, (event) => {
+        const probe = recordOf(event);
+        if (probe?.["kind"] === "capability" && typeof probe["respond"] === "function") {
+          probe["respond"]({ kind: "available", version: 1 });
         }
-        expect(qualified.count).toBe(1);
-        expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
-        await shutdownParentExtension(parent.pi, fixture);
-      }));
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+      });
+      const qualified = { count: 0 };
+      const parent = await invokeIssuedParentSpawn(fixture, bus, "tool-call-parent-incompatible-launcher", qualified);
+      const blocked = recordOf(parent.result);
+      expect(blocked?.["block"]).toBe(true);
+      expect(typeof blocked?.["reason"]).toBe("string");
+      if (typeof blocked?.["reason"] === "string") {
+        expect(blocked["reason"]).toContain("incompatible v2 capability response");
+        expect(blocked["reason"]).toContain("incompatible version");
+        expect(blocked["reason"]).not.toContain("does not advertise");
+      }
+      expect(qualified.count).toBe(1);
+      expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
+      return parent.pi;
+    });
   });
 
   it("surfaces a launcher probe crash through the production parent guard before any Task dispatch", async () => {
-    const fixture = await publishedParentSpawnFixture("t5-parent-crashed-launcher");
-    try {
-      await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
-        const bus = new SynchronousEventBus();
-        bus.on(LOOM_SUBAGENT_LAUNCH_CHANNEL, (event) => {
-          if (recordOf(event)?.["kind"] === "capability") throw new Error("launcher capability handler crashed before dispatch");
-        });
-        const qualified = { count: 0 };
-        const parent = await invokeIssuedParentSpawn(fixture, bus, "tool-call-parent-crashed-launcher", qualified);
-        expect(parent.result).toMatchObject({
-          block: true,
-          reason: expect.stringContaining("launcher capability handler crashed before dispatch"),
-        });
-        expect(JSON.stringify(parent.result)).not.toContain("does not advertise");
-        expect(qualified.count).toBe(1);
-        expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
-        await shutdownParentExtension(parent.pi, fixture);
-      }));
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+    await withPublishedFixture("t5-parent-crashed-launcher", async (fixture) => {
+      const bus = new SynchronousEventBus();
+      bus.on(LOOM_SUBAGENT_LAUNCH_CHANNEL, (event) => {
+        if (recordOf(event)?.["kind"] === "capability") throw new Error("launcher capability handler crashed before dispatch");
+      });
+      const qualified = { count: 0 };
+      const parent = await invokeIssuedParentSpawn(fixture, bus, "tool-call-parent-crashed-launcher", qualified);
+      expect(parent.result).toMatchObject({
+        block: true,
+        reason: expect.stringContaining("launcher capability handler crashed before dispatch"),
+      });
+      expect(JSON.stringify(parent.result)).not.toContain("does not advertise");
+      expect(qualified.count).toBe(1);
+      expect(existsSync(join(fixture.root, "launch.log"))).toBe(false);
+      return parent.pi;
+    });
   });
 
   it.skipIf(skipWithoutInstalledLauncher)("keeps the same issued request retriable after an attested pre-prompt refusal and accepts a new native correlator", async () => {
     const installed = await loadInstalledLauncherModules();
-    const fixture = await publishedParentSpawnFixture("t5-parent-same-request-retry");
-    try {
-      await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
-        const bus = new SynchronousEventBus();
-        installed.port.advertiseSubagentLaunchPort(bus);
-        const qualified = { count: 0 };
-        expect(fixture.task.match(/^LOOM_EMISSION_DESCRIPTOR:.*$/gm)).toEqual([
-          fixture.emissionDescriptor.trimEnd(),
-        ]);
-        expect(fixture.task.split(fixture.toolPrimaryInstruction)).toHaveLength(2);
+    await withPublishedFixture("t5-parent-same-request-retry", async (fixture) => {
+      const bus = new SynchronousEventBus();
+      installed.port.advertiseSubagentLaunchPort(bus);
+      const qualified = { count: 0 };
+      expect(fixture.task.match(/^LOOM_EMISSION_DESCRIPTOR:.*$/gm)).toEqual([
+        fixture.emissionDescriptor.trimEnd(),
+      ]);
+      expect(fixture.task.split(fixture.toolPrimaryInstruction)).toHaveLength(2);
 
-        const firstToolCallId = "tool-call-parent-wrong-readiness";
-        const parent = await invokeIssuedParentSpawn(fixture, bus, firstToolCallId, qualified);
-        expect(parent.result).toBeUndefined();
-        const refused = await runInstalledChild(installed, bus, fixture, firstToolCallId, "wrong-schema");
-        expect(refused.result).toMatchObject({
-          exitCode: 1,
-          messages: [],
-          launchOutcome: {
-            kind: "emission-startup-refused",
-            sessionId: fixtureSession(fixture.root).sessionId,
-            toolCallId: firstToolCallId,
-            slot: { kind: "single", index: 0 },
-            phase: "before-task-prompt",
-          },
-        });
-        expect(refused.result.stderr).toContain("registered schema digest");
-        expect(existsSync(refused.log)).toBe(false);
+      const firstToolCallId = "tool-call-parent-wrong-readiness";
+      const parent = await invokeIssuedParentSpawn(fixture, bus, firstToolCallId, qualified);
+      expect(parent.result).toBeUndefined();
+      const refused = await runInstalledChild(installed, bus, fixture, firstToolCallId, "wrong-schema");
+      expect(refused.result).toMatchObject({
+        exitCode: 1,
+        messages: [],
+        launchOutcome: {
+          kind: "emission-startup-refused",
+          sessionId: fixtureSession(fixture.root).sessionId,
+          toolCallId: firstToolCallId,
+          slot: { kind: "single", index: 0 },
+          phase: "before-task-prompt",
+        },
+      });
+      expect(refused.result.stderr).toContain("registered schema digest");
+      expect(existsSync(refused.log)).toBe(false);
 
-        const response = await deliverParentToolResult(parent.pi, fixture, firstToolCallId, [refused.result]);
-        expect(response).toMatchObject({
-          isError: true,
-          content: [{ text: expect.stringContaining("retry this same issued request") }],
-        });
-        expectUncapturedIssuedRequest(fixture);
+      const response = await deliverParentToolResult(parent.pi, fixture, firstToolCallId, [refused.result]);
+      expect(response).toMatchObject({
+        isError: true,
+        content: [{ text: expect.stringContaining("retry this same issued request") }],
+      });
+      expectUncapturedIssuedRequest(fixture);
 
-        const retryToolCallId = "tool-call-parent-readiness-retry";
-        expect(await invokeExistingParentSpawn(parent.pi, fixture, retryToolCallId)).toBeUndefined();
-        expect(qualified.count).toBe(2);
-        const retry = await runInstalledChild(installed, bus, fixture, retryToolCallId, "matching");
-        expect(retry.result.exitCode).toBe(0);
-        expect(retry.result.launchOutcome).toBeUndefined();
-        expect(await readFile(retry.log, "utf8")).toBe("emission-task\n");
-        await shutdownParentExtension(parent.pi, fixture);
-      }));
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+      const retryToolCallId = "tool-call-parent-readiness-retry";
+      expect(await invokeExistingParentSpawn(parent.pi, fixture, retryToolCallId)).toBeUndefined();
+      expect(qualified.count).toBe(2);
+      const retry = await runInstalledChild(installed, bus, fixture, retryToolCallId, "matching");
+      expect(retry.result.exitCode).toBe(0);
+      expect(retry.result.launchOutcome).toBeUndefined();
+      expect(await readFile(retry.log, "utf8")).toBe("emission-task\n");
+      return parent.pi;
+    });
   });
 
   it.skipIf(skipWithoutInstalledLauncher)("terminally rejects an absent attempt-1 result and does not infer startup refusal from untrusted markers", async () => {
     const installed = await loadInstalledLauncherModules();
 
-    const absentFixture = await publishedParentSpawnFixture("t5-parent-absent-result");
-    try {
-      await withFixturePiSession(absentFixture.root, () => withPublishedRunEnvironment(absentFixture, async () => {
-        const bus = new SynchronousEventBus();
-        installed.port.advertiseSubagentLaunchPort(bus);
-        const parent = await invokeIssuedParentSpawn(absentFixture, bus, "tool-call-absent-result", { count: 0 });
-        const response = await deliverParentToolResult(parent.pi, absentFixture, "tool-call-absent-result", []);
-        expect(response).toMatchObject({
-          isError: true,
-          content: [{ text: expect.stringContaining("no typed pre-prompt outcome exists; terminal capture rejection") }],
-        });
+    await withPublishedFixture("t5-parent-absent-result", async (absentFixture) => {
+      const bus = new SynchronousEventBus();
+      installed.port.advertiseSubagentLaunchPort(bus);
+      const parent = await invokeIssuedParentSpawn(absentFixture, bus, "tool-call-absent-result", { count: 0 });
+      const response = await deliverParentToolResult(parent.pi, absentFixture, "tool-call-absent-result", []);
+      expect(response).toMatchObject({
+        isError: true,
+        content: [{ text: expect.stringContaining("no typed pre-prompt outcome exists; terminal capture rejection") }],
+      });
 
-        const opened = openRegisteredRunDirectory(absentFixture.runsRoot, absentFixture.runDirectory);
-        if (!opened.ok) throw new Error(opened.error.message);
-        const issued = opened.value.readIssuedRequests();
-        if (!issued.ok || issued.value[0] === undefined) throw new Error("fixture issued request is unavailable");
-        expect(issued.value).toHaveLength(1);
-        expect(issued.value[0].attempt).toBe(1);
-        expect(opened.value.readCapturedAttempts()).toEqual({ ok: true, value: new Set() });
-        expect(opened.value.readCaptureRejection(issued.value[0])).toEqual({
-          ok: true,
-          value: "capture-rejection: request-bound result 1 for code-reviewer was missing or mismatched; " +
-            "no typed pre-prompt outcome exists; terminal capture rejection",
-        });
+      const { run, issued, first } = issuedRequestsOf(absentFixture);
+      expect(issued).toHaveLength(1);
+      expect(first.attempt).toBe(1);
+      expect(run.readCapturedAttempts()).toEqual({ ok: true, value: new Set() });
+      expect(run.readCaptureRejection(first)).toEqual({
+        ok: true,
+        value: "capture-rejection: request-bound result 1 for code-reviewer was missing or mismatched; " +
+          "no typed pre-prompt outcome exists; terminal capture rejection",
+      });
 
-        const sameRequestRetry = await invokeExistingParentSpawn(
-          parent.pi,
-          absentFixture,
-          "tool-call-absent-result-same-request-retry",
-        );
-        expect(sameRequestRetry).toMatchObject({
-          block: true,
-          reason: expect.stringContaining("attempt 1"),
-        });
-        expect(sameRequestRetry).toMatchObject({
-          block: true,
-          reason: expect.stringContaining("terminally rejected"),
-        });
-        expect(sameRequestRetry).toMatchObject({
-          block: true,
-          reason: expect.stringContaining("new attempt-2 issuance is required"),
-        });
-        expect(opened.value.readIssuedRequests()).toEqual(issued);
-        await shutdownParentExtension(parent.pi, absentFixture);
-      }));
-    } finally {
-      await rm(absentFixture.root, { recursive: true, force: true });
-    }
+      const sameRequestRetry = await invokeExistingParentSpawn(
+        parent.pi,
+        absentFixture,
+        "tool-call-absent-result-same-request-retry",
+      );
+      expect(sameRequestRetry).toMatchObject({
+        block: true,
+        reason: expect.stringContaining("attempt 1"),
+      });
+      expect(sameRequestRetry).toMatchObject({
+        block: true,
+        reason: expect.stringContaining("terminally rejected"),
+      });
+      expect(sameRequestRetry).toMatchObject({
+        block: true,
+        reason: expect.stringContaining("new attempt-2 issuance is required"),
+      });
+      expect(run.readIssuedRequests()).toEqual({ ok: true, value: issued });
+      return parent.pi;
+    });
 
     for (const [label, rewrite] of [
       ["malformed", (outcome: unknown) => ({ ...(recordOf(outcome) ?? {}), requestId: 42 })],
       ["after-prompt", (outcome: unknown) => ({ ...(recordOf(outcome) ?? {}), phase: "task-prompt-sent" })],
     ] as const) {
-      const fixture = await publishedParentSpawnFixture(`t5-parent-${label}-marker`);
-      try {
-        await withFixturePiSession(fixture.root, () => withPublishedRunEnvironment(fixture, async () => {
-          const bus = new SynchronousEventBus();
-          installed.port.advertiseSubagentLaunchPort(bus);
-          const toolCallId = `tool-call-${label}-marker`;
-          const parent = await invokeIssuedParentSpawn(fixture, bus, toolCallId, { count: 0 });
-          const refused = await runInstalledChild(installed, bus, fixture, toolCallId, "wrong-schema");
-          const raw = { ...refused.result, launchOutcome: rewrite(refused.result.launchOutcome) };
-          const response = await deliverParentToolResult(parent.pi, fixture, toolCallId, [raw]);
-          expect(response).toMatchObject({
-            isError: true,
-            content: [{ text: expect.stringContaining("untrusted emission launch outcome") }],
-          });
-          const opened = openRegisteredRunDirectory(fixture.runsRoot, fixture.runDirectory);
-          if (!opened.ok) throw new Error(opened.error.message);
-          const issued = opened.value.readIssuedRequests();
-          if (!issued.ok || issued.value[0] === undefined) throw new Error("fixture issued request is unavailable");
-          expect(opened.value.readCaptureRejection(issued.value[0])).toMatchObject({ ok: true, value: expect.any(String) });
-          await shutdownParentExtension(parent.pi, fixture);
-        }));
-      } finally {
-        await rm(fixture.root, { recursive: true, force: true });
-      }
+      await withPublishedFixture(`t5-parent-${label}-marker`, async (fixture) => {
+        const bus = new SynchronousEventBus();
+        installed.port.advertiseSubagentLaunchPort(bus);
+        const toolCallId = `tool-call-${label}-marker`;
+        const parent = await invokeIssuedParentSpawn(fixture, bus, toolCallId, { count: 0 });
+        const refused = await runInstalledChild(installed, bus, fixture, toolCallId, "wrong-schema");
+        const raw = { ...refused.result, launchOutcome: rewrite(refused.result.launchOutcome) };
+        const response = await deliverParentToolResult(parent.pi, fixture, toolCallId, [raw]);
+        expect(response).toMatchObject({
+          isError: true,
+          content: [{ text: expect.stringContaining("untrusted emission launch outcome") }],
+        });
+        const { run, first } = issuedRequestsOf(fixture);
+        expect(run.readCaptureRejection(first)).toMatchObject({ ok: true, value: expect.any(String) });
+        return parent.pi;
+      });
     }
   });
 });
@@ -742,54 +771,17 @@ describe("native installed subagent launcher integration", { timeout: 20_000 }, 
     const bridge = registerPiEmissionLaunchBridge(bus as PiSubagentLaunchEventBus);
     expect(bridge.probe()).toEqual({ kind: "available" });
 
-    const parsedPolicy = installed.routingPolicy.parseModelRoutingPolicy({
-      schemaVersion: 1,
-      defaultClass: "cloud",
-      modelClasses: {},
-      targets: {},
-      rules: [],
-    });
-    if (!parsedPolicy.ok) throw new Error(parsedPolicy.error.join("; "));
-    const agent = {
-      name: "code-reviewer",
-      description: "fixture reviewer",
-      model: "desktop-vllm/glm-5.3-flash-spark-tp2-v14",
-      declaredSkills: [],
-      systemPrompt: "",
-      source: "user",
-      filePath: join(tmp, "code-reviewer.md"),
-    } as const;
-    const routingSnapshot = {
-      policy: parsedPolicy.value,
-      policyDigest: "installed-launch-test",
-    } as const;
-    const makeDetails = (results: readonly unknown[]) => ({
-      mode: "single" as const,
-      agentScope: "user" as const,
-      projectAgentsDir: null,
-      results,
-    });
+    const agent = fixtureReviewerAgent(tmp);
+    const routingSnapshot = emptyRoutingSnapshot(installed, "installed-launch-test");
     const ambientBinding = process.env[LOOM_EMISSION_BINDING_ENV];
 
-    const run = async (launch: PiEmissionLaunchExpectation) => installed.launcher.runSingleAgent(
-      repoRoot,
-      [agent],
-      agent.name,
-      launch.task,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      makeDetails,
-      routingSnapshot,
-      {
-        events: bus,
-        sessionId: launch.sessionId,
-        toolCallId: launch.toolCallId,
-        slot: launch.slot,
-        readinessTimeoutMs: 2_000,
-      },
-    );
+    const run = (launch: PiEmissionLaunchExpectation) => runInstalledAgent(installed, bus, agent, routingSnapshot, {
+      cwd: repoRoot,
+      task: launch.task,
+      sessionId: launch.sessionId,
+      toolCallId: launch.toolCallId,
+      slot: launch.slot,
+    });
 
     try {
       // The fake launcher's variant and revision are set per launch below; the
@@ -838,25 +830,13 @@ describe("native installed subagent launcher integration", { timeout: 20_000 }, 
         expect(await readFile(log, "utf8")).toBe("emission-task\n");
 
         bridge.removeToolCall(retry.sessionId, retry.toolCallId);
-        const ordinaryResult = await installed.launcher.runSingleAgent(
-          repoRoot,
-          [agent],
-          agent.name,
-          "ordinary extraction-only task",
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          makeDetails,
-          routingSnapshot,
-          {
-            events: bus,
-            sessionId: "01a0e4b3-c4c1-7b63-916d-f5d41d2b5a00",
-            toolCallId: "tool-call-native-ordinary",
-            slot: { kind: "single", index: 0 },
-            readinessTimeoutMs: 2_000,
-          },
-        );
+        const ordinaryResult = await runInstalledAgent(installed, bus, agent, routingSnapshot, {
+          cwd: repoRoot,
+          task: "ordinary extraction-only task",
+          sessionId: "01a0e4b3-c4c1-7b63-916d-f5d41d2b5a00",
+          toolCallId: "tool-call-native-ordinary",
+          slot: { kind: "single", index: 0 },
+        });
         expect(ordinaryResult.exitCode).toBe(0);
         expect(ordinaryResult.messages).toHaveLength(1);
         expect(await readFile(log, "utf8")).toBe("emission-task\nordinary-task\n");

@@ -4,10 +4,10 @@ import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-cont
 import type { Preregistration, WorkloadCase } from "./pilot-preregistration";
 import { parseQualityAssessment } from "./pilot-quality";
 import { rubricAssessment, rubricEscapes } from "./pilot-rubric";
-import { accepted, corpusCases, fakeRoute, fixtures, inputs, prereg, runWindow, WINDOW_ID } from "./pilot-test-fixtures";
+import { accepted, corpusCases, fakeRoute, fixtures, inputOf, inputs, inputsWithout, prereg, runWindow, WINDOW_ID } from "./pilot-test-fixtures";
 import type { CellKey } from "./pilot-vocabulary";
 import { blind } from "./pilot-window";
-import { caseInputKey, type CaseInput, type JudgeFixture, type RefutationFixture } from "./pilot-workload";
+import type { CaseInput, JudgeFixture, RefutationFixture } from "./pilot-workload";
 
 const caseOf = (cell: CellKey, caseId: string): WorkloadCase => {
   const found = prereg.cells.find((entry) => entry.cell === cell)?.workload.cases.find((entry) => entry.caseId === caseId);
@@ -43,7 +43,7 @@ const MATCHING_CLAIM = "validate task graph --fix deletes critical finding claim
 describe("rubric assessor", () => {
   it("flags a planted fatal flaw that is unnamed or not ranked below a sound candidate", () => {
     const fixture = judgeFixture("judge-hard-readiness-barrier");
-    const input: CaseInput = { cell: "judge-verdict/v1", fixture };
+    const input: CaseInput = { cell: "judge-verdict/v1", caseId: "judge-hard-readiness-barrier", fixture };
     const workloadCase = caseOf("judge-verdict/v1", "judge-hard-readiness-barrier");
     const verdict = (flawScore: number, flaw: string | null) => ({
       criterion: fixture.criterion,
@@ -58,7 +58,7 @@ describe("rubric assessor", () => {
 
   it("refuses a payload its cell's frozen parser refuses — never read as escaping or not", () => {
     const fixture = judgeFixture("judge-hard-readiness-barrier");
-    const input: CaseInput = { cell: "judge-verdict/v1", fixture };
+    const input: CaseInput = { cell: "judge-verdict/v1", caseId: "judge-hard-readiness-barrier", fixture };
     const workloadCase = caseOf("judge-verdict/v1", "judge-hard-readiness-barrier");
     const sound = fixture.candidates.find((entry) => entry.candidate !== fixture.plantedFlaw.candidate)?.candidate;
     const unscored = {
@@ -74,7 +74,7 @@ describe("rubric assessor", () => {
     // A field rename reads as a refusal for both arms alike, never as every defect escaping.
     const renamed = { criterion: fixture.criterion, ranking: unscored.rankings };
     expect(rubricEscapes(workloadCase, input, renamed).ok).toBe(false);
-    const reviewer: CaseInput = { cell: "reviewer-payload/v2", corpusCase: vulnerable, changedPaths: [] };
+    const reviewer: CaseInput = { cell: "reviewer-payload/v2", caseId: "round12-vulnerable", corpusCase: vulnerable, changedPaths: [] };
     expect(rubricEscapes(caseOf("reviewer-payload/v2", "round12-vulnerable"), reviewer, { schemaVersion: 2, kind: "standalone-review", findings: [{ claim: MATCHING_CLAIM }] }))
       .toMatchObject({ ok: false, error: expect.stringContaining("does not parse as a reviewer-payload/v2 payload: ") });
   });
@@ -83,15 +83,15 @@ describe("rubric assessor", () => {
     const real = refutationFixture("refutation-easy-off-by-one");
     const workloadCase = caseOf("refutation-verdict/v1", "refutation-easy-off-by-one");
     const payload = (verdict: string) => ({ criterion: real.lens, verdicts: [{ finding_id: real.finding.findingId, verdict, reasoning: "r" }] });
-    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", fixture: real }, payload("refuted"))).toEqual([{ defectId: "loop-skips-last-line", severity: "major" }]);
-    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", fixture: real }, payload("upheld"))).toEqual([]);
-    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", fixture: real }, payload("uncertain"))).toEqual([]);
+    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, payload("refuted"))).toEqual([{ defectId: "loop-skips-last-line", severity: "major" }]);
+    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, payload("upheld"))).toEqual([]);
+    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, payload("uncertain"))).toEqual([]);
     const fp = refutationFixture("refutation-easy-guarded-null");
-    expect(escapesOf(caseOf("refutation-verdict/v1", "refutation-easy-guarded-null"), { cell: "refutation-verdict/v1", fixture: fp }, payload("refuted"))).toEqual([]);
+    expect(escapesOf(caseOf("refutation-verdict/v1", "refutation-easy-guarded-null"), { cell: "refutation-verdict/v1", caseId: "refutation-easy-guarded-null", fixture: fp }, payload("refuted"))).toEqual([]);
   });
 
   it("reuses the corpus match rules for reviewer v2 payloads", () => {
-    const input: CaseInput = { cell: "reviewer-payload/v2", corpusCase: vulnerable, changedPaths: [] };
+    const input: CaseInput = { cell: "reviewer-payload/v2", caseId: "round12-vulnerable", corpusCase: vulnerable, changedPaths: [] };
     const workloadCase = caseOf("reviewer-payload/v2", "round12-vulnerable");
     const payload = (claim: string) => ({ schemaVersion: 2, kind: "standalone-review", findings: [reviewerFinding(claim)] });
     expect(escapesOf(workloadCase, input, payload(MATCHING_CLAIM))).toEqual([]);
@@ -99,7 +99,7 @@ describe("rubric assessor", () => {
   });
 
   it("reads a reviewer v3 payload's findings through their drafts, so a matching v3 finding is not an escape", () => {
-    const input: CaseInput = { cell: "reviewer-payload/v3", corpusCase: vulnerable, changedPaths: [] };
+    const input: CaseInput = { cell: "reviewer-payload/v3", caseId: "round12-vulnerable", corpusCase: vulnerable, changedPaths: [] };
     const workloadCase = caseOf("reviewer-payload/v3", "round12-vulnerable");
     const payload = (claim: string) => ({
       schemaVersion: 3, kind: "standalone-successor-review",
@@ -116,7 +116,7 @@ describe("rubric assessor", () => {
     const declared = caseOf("refutation-verdict/v1", "refutation-easy-off-by-one");
     const drifted = { ...declared, knownDefects: [{ defectId: "renamed-defect", severity: "major" as const }] };
     const refuted = { criterion: real.lens, verdicts: [{ finding_id: real.finding.findingId, verdict: "refuted", reasoning: "r" }] };
-    expect(rubricEscapes(drifted, { cell: "refutation-verdict/v1", fixture: real }, refuted)).toEqual({
+    expect(rubricEscapes(drifted, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, refuted)).toEqual({
       ok: false,
       error: `case ${declared.caseId} declares no known defect "loop-skips-last-line"`,
     });
@@ -126,8 +126,8 @@ describe("rubric assessor", () => {
     const judge = judgeFixture("judge-hard-readiness-barrier");
     const real = refutationFixture("refutation-easy-off-by-one");
     const subjects = [
-      { workloadCase: caseOf("judge-verdict/v1", "judge-hard-readiness-barrier"), input: { cell: "judge-verdict/v1", fixture: judge } },
-      { workloadCase: caseOf("refutation-verdict/v1", "refutation-easy-off-by-one"), input: { cell: "refutation-verdict/v1", fixture: real } },
+      { workloadCase: caseOf("judge-verdict/v1", "judge-hard-readiness-barrier"), input: { cell: "judge-verdict/v1", caseId: "judge-hard-readiness-barrier", fixture: judge } },
+      { workloadCase: caseOf("refutation-verdict/v1", "refutation-easy-off-by-one"), input: { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real } },
     ] as const;
     const payload = fc.oneof(
       fc.anything(),
@@ -173,8 +173,7 @@ describe("rubric assessment over the blinded packet", () => {
     if (!rubric.ok) throw new Error(rubric.error.join("; "));
     expect(rubric.value).toMatchObject({ assessorId: "rubric-v1", blinded: true });
     entries.forEach((entry, index) => {
-      const input = inputs.get(caseInputKey(entry.cell, entry.caseId));
-      if (input === undefined) throw new Error(`${entry.cell} ${entry.caseId} has no resolved input`);
+      const input = inputOf(entry.cell, entry.caseId);
       expect(rubric.value.entries[index]).toEqual({ blindId: entry.blindId, escapedDefects: escapesOf(caseOf(entry.cell, entry.caseId), input, entry.payload) });
     });
   });
@@ -190,8 +189,7 @@ describe("rubric assessment over the blinded packet", () => {
     const entries = await blindedWindow();
     const [first] = entries;
     if (first === undefined) throw new Error("the window blinded no entry");
-    const missing = new Map([...inputs].filter(([key]) => key !== caseInputKey(first.cell, first.caseId)));
-    const assessed = rubricAssessment(prereg, entries, missing);
+    const assessed = rubricAssessment(prereg, entries, inputsWithout(first.cell, first.caseId));
     expect(assessed.ok).toBe(false);
     expect(assessed.ok ? [] : assessed.error).toContainEqual(expect.stringContaining(`${first.blindId} (${first.cell} case ${first.caseId}): no resolved input`));
   });

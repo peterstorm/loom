@@ -16,7 +16,6 @@
  */
 import { createHash } from "node:crypto";
 import { legacyStandaloneContext, legacyFixtureReviewerProtocols } from "./standalone-reviewer-protocol";
-import { expect } from "vitest";
 import { buildStandaloneFindingBrief, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import {
   createStandaloneResultPublicationAuthorityResolver,
@@ -34,7 +33,6 @@ import {
   type AgentRequestAuthority,
   type ArtifactSetPublished,
   type BatchPublishedReceipt,
-  type DomainResult,
   type InitialBatchPublicationIntent,
   type SpawnBatchAction,
   type SpawnRequest,
@@ -67,14 +65,9 @@ import {
 } from "../../src/core/persistent-panel";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 
-
-type AnyResult<T> = DomainResult<T, unknown>;
-
-export function valueOf<T>(result: AnyResult<T>): T {
-  expect(result.ok, `DomainResult payload: ${JSON.stringify(result)}`).toBe(true);
-  if (!result.ok) throw new Error(`expected successful domain construction: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
+/** The remediation suites' unwrap is the shared parse-result `value` — one
+ *  implementation, re-exported under the name these suites import. */
+export { value as valueOf } from "./parse-result";
 
 export const digest = (n: number): string => n.toString(16).padStart(64, "0").slice(-64);
 

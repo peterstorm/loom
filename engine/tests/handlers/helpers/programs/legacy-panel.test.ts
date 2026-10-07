@@ -1,6 +1,7 @@
 /**
  * The legacy panel program's functional core (core/legacy-panel-decisions), at
- * its interface: registration, the issuance join, record parsing,
+ * its interface: registration, the dispatch program's journal replay
+ * (`nextPanelProgramAction`, over plain event arrays), the issuance join, record parsing,
  * verdict-source selection, settlement, and the deterministic operation
  * reducer — all over plain data, no Run Directory. The shell in
  * handlers/helpers/programs/legacy-panel is pinned over a real Run Directory
@@ -16,9 +17,11 @@ import { agentRequestAuthority } from "../../../fixtures/agent-request-authority
 import { issueEmissionBinding } from "../../../../src/core/emission-tool";
 import { observeEmissionCalls } from "../../../../src/core/emission-observation";
 import {
+  AWAIT_PANEL_RESULTS,
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
   logicalPanelRequestId,
+  nextPanelProgramAction,
   parsePanelVerdictSourceRecordBytes,
   parseRegisteredPanelProgram,
   selectPanelAttemptVerdictSource,
@@ -89,6 +92,60 @@ describe("logicalPanelRequestId", () => {
       expect(logicalPanelRequestId(id, 2)).toBe(id);
       expect(logicalPanelRequestId(id, 1)).toBe(id);
       expect(logicalPanelRequestId(`${id}:attempt-2`, 1)).toBe(`${id}:attempt-2`);
+    }));
+  });
+});
+
+describe("nextPanelProgramAction: the dispatch program's journal replay over plain events", () => {
+  const succeeded = (requestId: string) => ({ type: "spawn-outcome", requestId, attempt: 1, outcome: "succeeded" });
+  const twoLenses = () => registration({ schemaVersion: 1, kind: "refutation",
+    input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction", "intent"] } });
+
+  it.each([
+    ["architecture", architecture, "architecture:candidate:1"],
+    ["refutation", refutation, "refutation:verifier:1"],
+  ] as const)("starts the %s program at its first spawn batch", (_panel, registered, requestId) => {
+    expect(nextPanelProgramAction(registered(), [])).toMatchObject({ ok: true,
+      value: { type: "spawn-batch", requests: [expect.objectContaining({ id: requestId, attempt: 1 })] } });
+  });
+
+  it("folds every journal event through the registered kind's reducer", () => {
+    expect(nextPanelProgramAction(refutation(), [succeeded(VERIFIER)])).toMatchObject({ ok: true,
+      value: { type: "engine-operation", operation: "refutation-tally" } });
+  });
+
+  it("awaits results while a batch still has unsettled requests", () => {
+    expect(nextPanelProgramAction(twoLenses(), [succeeded("refutation:verifier:1")])).toEqual({ ok: true, value: AWAIT_PANEL_RESULTS });
+  });
+
+  it("is done at once for a refutation panel with no critical findings", () => {
+    const empty: RegisteredPanelProgram = { schemaVersion: 1, kind: "refutation", input: { criticalFindingIds: [], lenses: ["reproduction"] }, context: null };
+    expect(nextPanelProgramAction(empty, [])).toMatchObject({ ok: true, value: { type: "done", panel: "refutation" } });
+  });
+
+  it.each<[string, RegisteredPanelProgram, readonly unknown[], string]>([
+    ["an event the journal translation refuses", refutation(), [{ type: "bogus" }], "events[0].type must be spawn-outcome or engine-outcome"],
+    ["an event the reducer refuses, as its JSON error", refutation(),
+      [{ type: "engine-outcome", operationId: "refutation-prepare-verifiers", outcome: "succeeded" }],
+      JSON.stringify({ kind: "duplicate-operation-outcome", operationId: "refutation-prepare-verifiers" })],
+    ["an input the program start refuses, as its joined errors",
+      { schemaVersion: 1, kind: "architecture", input: { candidateLenses: [], judgeCriteria: [] }, context: null }, [],
+      "candidate lenses must be non-empty\njudge criteria must be non-empty"],
+  ])("refuses %s", (_name, registered, events, error) => {
+    expect(nextPanelProgramAction(registered, events)).toEqual({ ok: false, error });
+  });
+
+  it("replays any prefix of settled verifiers deterministically, waiting until every lens settled", () => {
+    const lenses = ["reproduction", "intent", "blast-radius", "security", "test-coverage"];
+    fc.assert(fc.property(fc.integer({ min: 1, max: lenses.length }), fc.nat(), (size, settledSeed) => {
+      const registered = registration({ schemaVersion: 1, kind: "refutation",
+        input: { criticalFindingIds: ["T1:finding-1"], lenses: lenses.slice(0, size) } });
+      const settledCount = settledSeed % (size + 1);
+      const events = Object.freeze(Array.from({ length: settledCount }, (_, index) => Object.freeze(succeeded(`refutation:verifier:${index + 1}`))));
+      const next = nextPanelProgramAction(registered, events);
+      expect(next).toEqual(nextPanelProgramAction(registered, events));
+      const expected = settledCount === 0 ? "spawn-batch" : settledCount < size ? "await-results" : "engine-operation";
+      expect(next.ok && next.value.type).toBe(expected);
     }));
   });
 });

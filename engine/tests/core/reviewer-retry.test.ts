@@ -59,37 +59,21 @@ describe("specCheckRetryDiagnostic", () => {
 });
 
 describe("decideRefutationTranscriptRead", () => {
-  it("prefers captured bytes, then the tombstone, and never turns a read failure into evidence", () => {
-    expect(decideRefutationTranscriptRead({ ok: true, value: new TextEncoder().encode("{}") }, "rejected"))
-      .toEqual({ kind: "verdict", transcript: "{}" });
-    expect(decideRefutationTranscriptRead({ ok: false, error: { message: "gone" } }, "rejected"))
-      .toEqual({ kind: "capture-rejection", diagnostic: "rejected" });
-    expect(decideRefutationTranscriptRead({ ok: false, error: { message: "gone" } }, undefined))
-      .toEqual({ kind: "infrastructure-failure", message: "gone" });
-  });
+  const readBytes = (text: string) => ({ ok: true as const, value: new TextEncoder().encode(text) });
+  const readFailure = (message: string) => ({ ok: false as const, error: { message } });
 
-  it("keeps a captured transcript read failure as blocking infrastructure failure", () => {
-    expect(decideRefutationTranscriptRead(
-      { ok: false, error: { message: "captured transcript is unreadable" } },
-      undefined,
-    )).toEqual({ kind: "infrastructure-failure", message: "captured transcript is unreadable" });
-  });
-
-  it("turns only an explicit capture-rejection tombstone into semantic rejection", () => {
-    expect(decideRefutationTranscriptRead(
-      { ok: false, error: { message: "no transcript bytes exist" } },
-      "capture runtime terminally rejected this attempt",
-    )).toEqual({
-      kind: "capture-rejection",
-      diagnostic: "capture runtime terminally rejected this attempt",
-    });
-  });
-
-  it("parses successfully read transcript bytes for verdict submission", () => {
-    expect(decideRefutationTranscriptRead(
-      { ok: true, value: new TextEncoder().encode('{"verdict":"upheld"}') },
-      undefined,
-    )).toEqual({ kind: "verdict", transcript: '{"verdict":"upheld"}' });
+  // Captured bytes win over any tombstone; only an explicit capture-rejection
+  // tombstone turns a failed read into semantic rejection; a failed read with
+  // no tombstone stays blocking infrastructure failure, never evidence.
+  it.each([
+    ["captured bytes beside a tombstone", readBytes("{}"), "rejected", { kind: "verdict", transcript: "{}" }],
+    ["captured bytes with no tombstone", readBytes('{"verdict":"upheld"}'), undefined, { kind: "verdict", transcript: '{"verdict":"upheld"}' }],
+    ["a failed read with a tombstone", readFailure("no transcript bytes exist"), "capture runtime terminally rejected this attempt",
+      { kind: "capture-rejection", diagnostic: "capture runtime terminally rejected this attempt" }],
+    ["a failed read with no tombstone", readFailure("captured transcript is unreadable"), undefined,
+      { kind: "infrastructure-failure", message: "captured transcript is unreadable" }],
+  ] as const)("decides %s", (_label, read, tombstone, expected) => {
+    expect(decideRefutationTranscriptRead(read, tombstone)).toEqual(expected);
   });
 });
 

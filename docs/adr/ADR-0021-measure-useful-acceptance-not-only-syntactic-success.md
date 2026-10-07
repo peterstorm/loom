@@ -97,6 +97,7 @@ done.**
   - `pilot-core.ts`: `evaluatePilot` — guardrails and the release-decision
     union.
   - `pilot-workload.ts`: fixtures, case-input resolution and matched prompts;
+    `pilot-binding.ts`: per-attempt request identity and the issued binding;
     `pilot-rubric.ts`: the deterministic `rubric-v1` assessor.
   - `pilot-dispatch.ts`: transcript classification through the engine's own
     selection, plus the live Pi adapter.
@@ -199,7 +200,8 @@ done.**
 - Unobservable facts (raw duplicate keys, sampling seeds) are recorded as
   limitations rather than claimed.
 - The decision logic is pure and property-testable (`pilot.test.ts`,
-  `runner.test.ts`). The I/O sits behind the `ArmDispatch` port.
+  `pilot-quality.test.ts`, `pilot-window.test.ts`). The I/O sits behind the
+  `ArmDispatch` port.
 
 **Negative:**
 - The feature cannot currently be declared measured or done. Both retained

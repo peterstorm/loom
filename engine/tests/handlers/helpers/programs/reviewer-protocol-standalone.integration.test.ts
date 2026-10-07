@@ -31,12 +31,11 @@ import { frozenDiffReaderPages } from "../../../fixtures/read-coverage";
 import { gitResult, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
 import {
   CATALOG_ROUTE_ENV,
-  normalizeRunRoot,
   QUALIFIED_ROUTE_ENV,
-  withoutEmissionRouteDelta,
   withRouteEnv,
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
+import { normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));

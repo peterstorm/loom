@@ -680,10 +680,30 @@ const STANDALONE_SUCCESSOR_CAPTURE: CapturePersistence = Object.freeze<CapturePe
  */
 type RunCapturePlan = Readonly<{
   purpose: CapturePersistence;
-  /** The read observation's input when the Run carries a read obligation. */
-  readCoverage: Readonly<{ kind: "none" }> | Readonly<{ kind: "record"; toolOutputs: () => readonly string[] | null }>;
+  readCoverage: ReadCoveragePlan;
   reviewerProtocol: DomainResult<IssuedReviewerProtocol | null, string>;
 }>;
+
+/**
+ * Whether, and from what, a capture records its read-coverage observation:
+ * - `none` — the Run carries no read obligation;
+ * - `record-observed` — the adapter observes delivered tool outputs; the
+ *   thunk stays lazy so a Run with no obligation never projects them;
+ * - `record-unobservable` — the Run carries an obligation but the adapter
+ *   cannot observe tool outputs, which records an explicitly unobservable
+ *   attempt rather than inventing coverage.
+ */
+type ReadCoveragePlan =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "record-observed"; toolOutputs: () => readonly string[] }>
+  | Readonly<{ kind: "record-unobservable" }>;
+
+function readCoveragePlan(obligated: boolean, observeToolOutputs: (() => readonly string[]) | undefined): ReadCoveragePlan {
+  if (!obligated) return Object.freeze({ kind: "none" as const });
+  return observeToolOutputs === undefined
+    ? Object.freeze({ kind: "record-unobservable" as const })
+    : Object.freeze({ kind: "record-observed" as const, toolOutputs: observeToolOutputs });
+}
 
 function readRunCapturePlan(
   handle: RunDirHandle,
@@ -703,9 +723,7 @@ function readRunCapturePlan(
     ok: true,
     value: Object.freeze({
       purpose: successor ? STANDALONE_SUCCESSOR_CAPTURE : LEGACY_CAPTURE,
-      readCoverage: coverage.value === null
-        ? Object.freeze({ kind: "none" as const })
-        : Object.freeze({ kind: "record" as const, toolOutputs: () => observeToolOutputs === undefined ? null : observeToolOutputs() }),
+      readCoverage: readCoveragePlan(coverage.value !== null, observeToolOutputs),
       reviewerProtocol: projectRegisteredReviewerProtocol(raw),
     }),
   };
@@ -905,8 +923,12 @@ async function persistBoundCapture(
 ): Promise<CaptureOutcome> {
   const stopped = await plan.purpose.admit(handle, request);
   if (stopped !== null) return stopped;
-  if (plan.readCoverage.kind === "record" && request.program === "standalone-review") {
-    const recorded = await recordReadCoverageObservation(handle, request, plan.readCoverage.toolOutputs());
+  if (plan.readCoverage.kind !== "none" && request.program === "standalone-review") {
+    const toolOutputs = match(plan.readCoverage)
+      .with({ kind: "record-observed" }, ({ toolOutputs: observe }) => observe())
+      .with({ kind: "record-unobservable" }, () => null)
+      .exhaustive();
+    const recorded = await recordReadCoverageObservation(handle, request, toolOutputs);
     if (!recorded.ok) return retriableFailure("read-coverage", recorded.error);
   }
   if (source.kind === "selected") {

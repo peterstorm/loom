@@ -12,6 +12,7 @@ import fc from "fast-check";
 import {
   admitIssuedEmissionArguments,
   EMISSION_CONSTRAINED_SAMPLING_REQUEST,
+  EMISSION_TOOL_SPECS,
   type IssuedEmissionBinding,
 } from "../../src/core/emission-tool";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
@@ -24,8 +25,6 @@ import {
   emissionReadinessReport,
   emissionToolDefinition,
   EMISSION_HOLD_ENTRY_TYPE,
-  EMISSION_READINESS_COMMAND,
-  EMISSION_READINESS_ENTRY_TYPE,
   initialEmissionHold,
   LOOM_EMISSION_BINDING_ENV,
   parseEmissionChildProvisioning,
@@ -33,16 +32,51 @@ import {
   type EmissionHoldState,
   type EmissionToolRegistration,
 } from "../../../pi/emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../../pi/emission-readiness-protocol";
 import { whitespaceOnlyArguments } from "../fixtures/emission-arguments";
 import {
   canonicalArguments,
+  cellSchemaBytes,
+  cellSchemaDigest,
   JUDGE_V1_CELL,
   mintedBindingFor,
   REFUTATION_V1_CELL,
   REGISTRY_CELLS,
   REVIEWER_V2_CELL,
   REVIEWER_V3_CELL,
+  type RegistryCell,
 } from "../fixtures/emission-registry-cells";
+
+/** The startup-context digest convention the launcher provisions a child with. */
+const startupContextDigest = (requestId: string): string => sha256Hex(`emission-startup-context:${requestId}`);
+
+/** The full provisioning claims a launcher hands a child for `binding`. */
+const provisionedClaims = (
+  binding: IssuedEmissionBinding,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  requestId: binding.requestId,
+  contextDigest: startupContextDigest(binding.requestId),
+  kind: binding.kind.kind,
+  version: binding.version,
+  toolName: binding.toolName,
+  schemaDigest: binding.schemaDigest,
+  ...overrides,
+});
+
+describe("the registry-cell fixture union — the kind/version pairing is a compile-time guarantee", () => {
+  it("lists every frozen registry cell exactly once, and an unsupported pair does not compile", () => {
+    const frozenPairs = Object.entries(EMISSION_TOOL_SPECS)
+      .flatMap(([kind, spec]) => Object.keys(spec.schemaVersions).map((version) => `${kind}/${version}`));
+    expect(REGISTRY_CELLS.map((cell) => `${cell.kind}/${cell.version}`).sort()).toEqual(frozenPairs.sort());
+    // @ts-expect-error judge-verdict freezes no v2 schema — the pair is unrepresentable
+    const judgeV2: RegistryCell = { kind: "judge-verdict", version: "v2", spec: JUDGE_V1_CELL.spec };
+    // @ts-expect-error reviewer-payload freezes no v1 schema — the pair is unrepresentable
+    const reviewerV1: RegistryCell = { kind: "reviewer-payload", version: "v1", spec: REVIEWER_V2_CELL.spec };
+    // The forged literals exist only to carry the compile-time assertions above.
+    expect([judgeV2.kind, reviewerV1.kind]).toEqual(["judge-verdict", "reviewer-payload"]);
+  });
+});
 
 describe("the production emission tool definition — the exact registration surface (FR-001/FR-002/FR-013/FR-021/SC-006)", () => {
   it("carries the registry's exact name, the frozen bytes as parameters, and the ONE preferred sampling request, for every registry cell", () => {
@@ -52,7 +86,7 @@ describe("the production emission tool definition — the exact registration sur
       expect(definition.label).toBe(`Emission ${registryCell.kind} ${registryCell.version}`);
       // SC-006 at the definition surface: the parameters ARE the frozen
       // payload schema bytes, parsed once — one schema, no second contract.
-      expect(definition.parameters).toEqual(JSON.parse(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes));
+      expect(definition.parameters).toEqual(JSON.parse(cellSchemaBytes(registryCell)));
       // INV-1: the ONE preferred-strict request — the same object every
       // emission tool registers with, minted in the engine core.
       expect(definition.constrainedSampling).toBe(EMISSION_CONSTRAINED_SAMPLING_REQUEST);
@@ -79,7 +113,7 @@ describe("the production emission tool definition — the exact registration sur
   it("execute admits valid arguments into the minimal terminating acknowledgment with NO payload echo", async () => {
     const registryCell = JUDGE_V1_CELL;
     const definition = emissionToolDefinition(mintedBindingFor(registryCell, "req-emission-tool-t5-exec"));
-    const args = canonicalArguments(registryCell.kind, registryCell.version);
+    const args = canonicalArguments(registryCell);
     const acknowledgment = await definition.execute("call-exec-1", args);
     // FR-013: terminating, minimal, empty details — and never the payload.
     expect(acknowledgment.terminate).toBe(true);
@@ -171,12 +205,7 @@ describe("the child's readiness hold transitions — fail-closed as data (AD-4)"
     expect(initialEmissionHold(parseEmissionChildProvisioning(undefined))).toEqual(UNPROVISIONED);
     expect(initialEmissionHold(parseEmissionChildProvisioning("{not json"))).toEqual(ARMED);
     const binding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-hold");
-    const provisioned = parseEmissionChildProvisioning(JSON.stringify({
-      requestId: binding.requestId,
-      contextDigest: "c".repeat(64),
-      kind: binding.kind.kind,
-      version: binding.version,
-    }));
+    const provisioned = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(binding)));
     expect(provisioned.kind).toBe("provisioned");
     expect(initialEmissionHold(provisioned)).toEqual(ARMED);
   });
@@ -216,25 +245,12 @@ describe("the child's readiness hold transitions — fail-closed as data (AD-4)"
 });
 
 describe("the child's provisioning ADT — the issued binding certified against the frozen registry, never trusted (FR-008)", () => {
-  const provisionedClaims = (overrides: Record<string, unknown> = {}): Record<string, unknown> => {
-    const binding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
-    return {
-      requestId: binding.requestId,
-      contextDigest: sha256Hex(`emission-startup-context:${binding.requestId}`),
-      kind: binding.kind.kind,
-      version: binding.version,
-      toolName: binding.toolName,
-      schemaDigest: binding.schemaDigest,
-      ...overrides,
-    };
-  };
-
-  const parseRaw = (raw: string | undefined) => parseEmissionChildProvisioning(raw);
+  const provisionedBinding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
 
   it("only an absent env is not-provisioned; present blank provisioning refuses instead of silently becoming extraction-only", () => {
-    expect(parseRaw(undefined)).toEqual({ kind: "not-provisioned" });
+    expect(parseEmissionChildProvisioning(undefined)).toEqual({ kind: "not-provisioned" });
     for (const raw of ["", "   "]) {
-      const refused = parseRaw(raw);
+      const refused = parseEmissionChildProvisioning(raw);
       expect(refused.kind).toBe("provisioning-refused");
       if (refused.kind === "provisioning-refused") {
         expect(refused.code).toBe("invalid-json");
@@ -244,13 +260,13 @@ describe("the child's provisioning ADT — the issued binding certified against 
   });
 
   it("refuses non-JSON and non-object payloads with a bounded reason", () => {
-    const notJson = parseRaw("{not json");
+    const notJson = parseEmissionChildProvisioning("{not json");
     expect(notJson.kind).toBe("provisioning-refused");
     if (notJson.kind === "provisioning-refused") {
       expect(notJson.code).toBe("invalid-json");
       expect(notJson.reason).toContain("not valid JSON");
     }
-    const notObject = parseRaw("[]");
+    const notObject = parseEmissionChildProvisioning("[]");
     expect(notObject.kind).toBe("provisioning-refused");
     if (notObject.kind === "provisioning-refused") {
       expect(notObject.code).toBe("non-object");
@@ -259,13 +275,13 @@ describe("the child's provisioning ADT — the issued binding certified against 
   });
 
   it("refuses an out-of-contract context digest and a non-string kind before the mint is consulted", () => {
-    const badDigest = parseRaw(JSON.stringify(provisionedClaims({ contextDigest: "sha256-not-hex" })));
+    const badDigest = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(provisionedBinding, { contextDigest: "sha256-not-hex" })));
     expect(badDigest.kind).toBe("provisioning-refused");
     if (badDigest.kind === "provisioning-refused") {
       expect(badDigest.code).toBe("invalid-context-digest");
       expect(badDigest.reason).toContain("context-digest");
     }
-    const badKind = parseRaw(JSON.stringify(provisionedClaims({ kind: 42 })));
+    const badKind = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(provisionedBinding, { kind: 42 })));
     expect(badKind.kind).toBe("provisioning-refused");
     if (badKind.kind === "provisioning-refused") {
       expect(badKind.code).toBe("invalid-claim-type");
@@ -275,7 +291,7 @@ describe("the child's provisioning ADT — the issued binding certified against 
 
   it("refuses malformed present optional claims instead of silently deriving registry values", () => {
     for (const overrides of [{ toolName: 42 }, { schemaDigest: false }]) {
-      const refused = parseRaw(JSON.stringify(provisionedClaims(overrides)));
+      const refused = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(provisionedBinding, overrides)));
       expect(refused.kind).toBe("provisioning-refused");
       if (refused.kind === "provisioning-refused") {
         expect(refused.code).toBe("invalid-claim-type");
@@ -292,7 +308,7 @@ describe("the child's provisioning ADT — the issued binding certified against 
       ["wrong claimed tool name", { toolName: "loom_emit_refutation_verdict" }, "tool-name-mismatch"],
       ["empty request id", { requestId: "" }, "invalid-request-identity"],
     ] as const) {
-      const refused = parseRaw(JSON.stringify(provisionedClaims(overrides)));
+      const refused = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(provisionedBinding, overrides)));
       expect(refused.kind, label).toBe("provisioning-refused");
       if (refused.kind === "provisioning-refused") {
         expect(refused.code, label).toBe(expectedCode);
@@ -302,17 +318,17 @@ describe("the child's provisioning ADT — the issued binding certified against 
   });
 
   it("certifies valid claims into the minted binding and a canonical context digest", () => {
-    const provisioned = parseRaw(JSON.stringify(provisionedClaims()));
+    const provisioned = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(provisionedBinding)));
     if (provisioned.kind !== "provisioned") throw new Error(`expected a provisioned child, received ${provisioned.kind}`);
     const expected = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
     expect(provisioned.binding).toEqual(expected);
-    expect(provisioned.contextDigest).toBe(sha256Hex(`emission-startup-context:${expected.requestId}`));
+    expect(provisioned.contextDigest).toBe(startupContextDigest(expected.requestId));
   });
 
   it("derives absent claims from the ONE frozen source — never a second default (AD-7)", () => {
-    const claims = provisionedClaims();
+    const claims = provisionedClaims(provisionedBinding);
     const minimal = JSON.stringify({ requestId: claims.requestId, contextDigest: claims.contextDigest, kind: claims.kind, version: claims.version });
-    const provisioned = parseRaw(minimal);
+    const provisioned = parseEmissionChildProvisioning(minimal);
     if (provisioned.kind !== "provisioned") throw new Error(`expected a provisioned child, received ${provisioned.kind}`);
     const expected = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
     expect(provisioned.binding.toolName).toBe(expected.toolName);
@@ -330,14 +346,7 @@ describe("the readiness protocol contract — command, entry type, hold marker, 
 
   it("the readiness report carries exactly the ten contract fields, minted binding plus the child's honest observations", () => {
     const binding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-report");
-    const provisioned = parseEmissionChildProvisioning(JSON.stringify({
-      requestId: binding.requestId,
-      contextDigest: sha256Hex(`emission-startup-context:${binding.requestId}`),
-      kind: binding.kind.kind,
-      version: binding.version,
-      toolName: binding.toolName,
-      schemaDigest: binding.schemaDigest,
-    }));
+    const provisioned = parseEmissionChildProvisioning(JSON.stringify(provisionedClaims(binding)));
     if (provisioned.kind !== "provisioned") throw new Error(`expected a provisioned child, received ${provisioned.kind}`);
     const report = emissionReadinessReport(provisioned, {
       revision: "sha256:loom-emission-rev-t5",
@@ -350,11 +359,11 @@ describe("the readiness protocol contract — command, entry type, hold marker, 
       "requestId", "revision", "schemaDigest", "toolName", "version",
     ]);
     expect(report.requestId).toBe(binding.requestId);
-    expect(report.contextDigest).toBe(sha256Hex(`emission-startup-context:${binding.requestId}`));
+    expect(report.contextDigest).toBe(startupContextDigest(binding.requestId));
     expect(report.kind).toBe("judge-verdict");
     expect(report.version).toBe("v1");
     expect(report.toolName).toBe("loom_emit_judge_verdict");
-    expect(report.schemaDigest).toBe(sha256Hex(JUDGE_V1_CELL.spec.schemaVersions.v1!.schemaBytes));
+    expect(report.schemaDigest).toBe(cellSchemaDigest(JUDGE_V1_CELL));
     expect(report.revision).toBe("sha256:loom-emission-rev-t5");
     expect(report.active).toBe(true);
     expect(report.childPid).toBe(4242);

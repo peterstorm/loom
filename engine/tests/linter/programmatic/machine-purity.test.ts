@@ -364,7 +364,9 @@ describe("functional core — executable purity closure", () => {
     expect(audit.errors.some((error) => error.startsWith(`${ACCOUNTING}:`))).toBe(true);
   });
 
-  it.each([ACCOUNTING, SOURCE_AUTHORITY, PARSER])("%s cannot expand the exact parser-to-SAX grant", (mod) => {
+  // Six full closure scans per case: ~4s alone, past the 5s default under
+  // parallel suite load. The budget is CPU headroom, not a weaker assertion.
+  it.each([ACCOUNTING, SOURCE_AUTHORITY, PARSER])("%s cannot expand the exact parser-to-SAX grant", { timeout: 30_000 }, (mod) => {
     for (const specifier of ["saxes/other", "saxes/saxes.js", "saxes-extra", "xmlchars", "node:fs"]) {
       const audit = auditClosure([ACCOUNTING], new Map([[mod, `${readSource(mod)}\nimport * as extra from "${specifier}";`]]));
       expect(audit.errors.some(error => error.startsWith(`${mod}:`)), `${mod} -> ${specifier}`).toBe(true);
@@ -440,7 +442,7 @@ describe("emission kernel and legacy panel decisions — executable purity closu
   // Both sides are pure, so the closure alone cannot see this edge.
   it.each([EMISSION_TOOL, EMISSION_OBSERVATION, FINAL_PAYLOAD, EMISSION_SELECTION])("%s stays below the panel program layer", (mod) => {
     const specifiers = dependencies(readSource(mod)).map(({ specifier }) => specifier);
-    for (const forbidden of ["./panel-program", "./panel-verdict-source", "./persistent-panel", "./legacy-panel-decisions"]) {
+    for (const forbidden of ["./panel-program", "./panel-verdict-source", "./persistent-panel", "./persistent-panel-program", "./legacy-panel-decisions"]) {
       expect(specifiers, `${mod} -> ${forbidden}`).not.toContain(forbidden);
     }
   });

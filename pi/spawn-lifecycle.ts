@@ -7,12 +7,14 @@
  * and spec-check authorities and write grants, injects the grants into the
  * child prompts, stages emission launches, registers task execution, and
  * records the reservation the `tool_result` side settles against. Every
- * capability it takes is recorded in the batch's claims ledger
- * (`pi/spawn-claims.ts`); a refusal releases the ledger in its one planned
- * order, and whatever cannot be released stays on the parent session as
- * cleanup debt that shutdown retries. Each reserved item is built by the one
- * constructor in `pi/spawn-reservation.ts`, so a contradictory slot refuses
- * the spawn here rather than reaching settlement.
+ * capability it takes — the standalone review run it binds as current
+ * included — is recorded in the batch's claims ledger (`pi/spawn-claims.ts`)
+ * no later than the step that takes it; a refusal releases the ledger in its
+ * one planned order, and whatever cannot be released stays on the parent
+ * session as cleanup debt that shutdown retries. Role-bearing items are built
+ * only by `reservationItemOf` and debt items only by `legacyReservationItem`
+ * (`pi/spawn-reservation.ts`), so a contradictory slot refuses the spawn here
+ * rather than reaching settlement.
  *
  * Pi dispatches the live argument object it handed the `tool_call` handler,
  * so the injected prompts are written into `event.input` in place. The
@@ -74,16 +76,19 @@ import {
   cleanupFailureSuffix,
   describeCause,
   injectPiWriteGrantWithRevocation,
+  runPiCleanupActions,
 } from "./cleanup-actions";
 import {
   claimEmissionLaunches,
   claimGrantInjection,
   claimPointerLease,
   claimRosterEntry,
+  claimWitnessRun,
   claimWriteGrant,
   NO_SPAWN_CLAIMS,
   releaseSpawnClaims,
   remainingSpawnDebt,
+  spawnRollbackStepLabel,
   type SpawnClaims,
 } from "./spawn-claims";
 import {
@@ -213,10 +218,11 @@ export async function reservePiSpawnLifecycle(
   let orchestrationRunBinding: SessionRunBinding | null = null;
   let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
   const rollbackLifecycle = async (): Promise<readonly string[]> => {
-    const { errors, releases } = await releaseSpawnClaims(claims, toolCallId, {
+    const { errors, releases } = await releaseSpawnClaims(claims, (step) => spawnRollbackStepLabel(step, toolCallId), {
       removeEmissionLaunches: () => emissionLaunchBridge.removeToolCall(safeSessionId, toolCallId),
       revokeGrant: revokePiWriteGrant,
       restorePrompt: (slot, originalTask) => replacePiSpawnTask(event.input, slot, originalTask),
+      retractWitnessRun: (binding) => reviewWitnesses.retract(safeSessionId, binding),
       removeRosterEntry: (agentId) => fsSessionRegistry.removeActive(safeSessionId, agentId),
       releasePointer: rollbackSessionTaskGraphPointer,
     });
@@ -226,7 +232,7 @@ export async function reservePiSpawnLifecycle(
       graphActiveAtSpawn: orchestrationGraphActive,
       orchestrationRunBinding,
     });
-    parentSessions.retainWriteGrantDebt(safeSessionId, toolCallId, debt.grantTokens);
+    parentSessions.retainWriteGrantDebt(safeSessionId, toolCallId, debt.grants);
     parentSessions.retainSpawnCleanupDebt(safeSessionId, toolCallId, debt.reservation);
     return errors;
   };
@@ -247,14 +253,18 @@ export async function reservePiSpawnLifecycle(
   try {
     mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
     for (const state of spawnLifecycle) {
-      await fsSessionRegistry.markActive(safeSessionId, state.rosterId);
-      // The debt shape of a roster entry carries no role authority: none is
-      // committed until the whole reservation is.
+      // Claim before acquiring: the entry is owed from the moment markActive
+      // may write it, so neither markActive's own failure nor building the
+      // item can leave an active entry the rollback does not know. Removing
+      // an entry that was never written is a no-op. The debt shape of a
+      // roster entry carries no role authority: none is committed until the
+      // whole reservation is.
       claims = claimRosterEntry(claims, legacyReservationItem(
         { rosterId: state.rosterId, emissionLaunch: emissionLaunchOf(state), kind: state.dispatchTaskExecutionSpawn.kind },
         state.admission.item.agent,
         extractTaskId(state.admission.item.task),
       ));
+      await fsSessionRegistry.markActive(safeSessionId, state.rosterId);
     }
     if (needsTaskGraphLifecycle && graphExists(orchestrationGraphPath)) {
       claims = claimPointerLease(claims, await bindSessionTaskGraphPointer(
@@ -273,10 +283,13 @@ export async function reservePiSpawnLifecycle(
       event.input,
     );
     // The first exact standalone spawn makes its run current for the root;
-    // a retry of the same run never reorders it.
+    // a retry of the same run never reorders it. A run this spawn newly made
+    // current is a claim: a later refusal retracts it, so the root's current
+    // run is never one no dispatched spawn can witness.
     if (orchestrationRunBinding !== null &&
-        spawnLifecycle.some(({ admission }) => hasStandaloneReviewContext(admission.item.task))) {
-      reviewWitnesses.touch(safeSessionId, orchestrationRunBinding);
+        spawnLifecycle.some(({ admission }) => hasStandaloneReviewContext(admission.item.task)) &&
+        reviewWitnesses.touch(safeSessionId, orchestrationRunBinding) === "bound") {
+      claims = claimWitnessRun(claims, orchestrationRunBinding);
     }
     const unboundSpecChecks = orchestrationRunBinding === null
       ? spawnLifecycle.filter(({ admission }) => admission.item.agent === "spec-check-invoker")
@@ -349,18 +362,32 @@ export async function reservePiSpawnLifecycle(
       });
       // Claim the issued token for its slot before prompt injection can
       // fail. If immediate revocation also fails, the rollback retries this
-      // exact grant instead of orphaning a sibling's.
-      claims = claimWriteGrant(claims, { slot, token: grant.token, originalTask: item.task });
+      // exact grant instead of orphaning a sibling's. A slot the ledger
+      // refuses (one already holding a grant) leaves this token unowed by
+      // the rollback, so it is revoked here before the refusal propagates.
+      const claimed = claimWriteGrant(claims, { slot, token: grant.token });
+      if (!claimed.ok) {
+        const revocation = await runPiCleanupActions([{
+          label: `revoke unclaimed write grant for spawn item ${slot + 1}`,
+          run: () => revokePiWriteGrant(grant.token),
+        }]);
+        throw new Error(`${claimed.error}${cleanupFailureSuffix(revocation)}`);
+      }
+      claims = claimed.value;
       const task = await injectPiWriteGrantWithRevocation(item.task, grant, slot);
       replaceLifecycleState(Object.freeze({ ...state, grantedTask: task }));
     }
     // Mutate before task-state validation. Rollback restores prompts and
     // revokes grants, leaving no post-validation operation that can fail
-    // after executing_tasks/baselines have committed.
+    // after executing_tasks/baselines have committed. Each rewrite is claimed
+    // before the prompt changes, so a refusal or a failed write still plans
+    // its restore.
     for (const state of spawnLifecycle) {
       if (state.grantedTask === null) continue;
+      const claimed = claimGrantInjection(claims, { slot: state.slot, originalTask: state.admission.item.task });
+      if (!claimed.ok) throw new Error(claimed.error);
+      claims = claimed.value;
       replacePiSpawnTask(event.input, state.slot, state.grantedTask);
-      claims = claimGrantInjection(claims, state.slot);
     }
     spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => {
       const spawn = state.admission.taskExecutionSpawn;
@@ -497,9 +524,8 @@ export async function reservePiSpawnLifecycle(
     items.push(item.value);
   }
   const sessionRuntime = parentSessions.runtimeFor(safeSessionId);
-  const issuedGrantTokens = claims.grants.map(({ token }) => token);
-  if (issuedGrantTokens.length > 0) {
-    sessionRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(issuedGrantTokens));
+  if (claims.grants.length > 0) {
+    sessionRuntime.issuedWriteGrants.set(toolCallId, claims.grants);
   }
   sessionRuntime.spawnReservations.set(toolCallId, Object.freeze({
     sessionId: safeSessionId,

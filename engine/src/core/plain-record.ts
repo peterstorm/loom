@@ -9,6 +9,9 @@
  * - `isPlainRecord` — additionally requires a `null` or `Object.prototype`
  *   prototype, so class instances, `Map`s and foreign-realm objects refuse.
  *
+ * `hasExactKeys` is the lax guard's exact-key predicate, for parsers that
+ * word one refusal of their own.
+ *
  * On top of the strict guard sit the two exact-shape parsers the completion
  * and verification aggregates share: `parseExactRecord` (exact own key set,
  * missing then surplus diagnostics) and `collectDenseArray` (no holes,
@@ -38,6 +41,17 @@ export function isPlainRecord(value: unknown): value is UnknownRecord {
   if (!isRecord(value)) return false;
   const prototype: unknown = Object.getPrototypeOf(value);
   return prototype === null || prototype === Object.prototype;
+}
+
+/**
+ * The diagnostic-free exact-key predicate for the lax guard: the record's own
+ * enumerable string keys are exactly `keys` (any order, distinct), with no
+ * prototype check. For callers that word their own single refusal; callers
+ * that report per-field missing/surplus diagnostics use `parseExactRecord`.
+ */
+export function hasExactKeys(record: Readonly<UnknownRecord>, keys: readonly string[]): boolean {
+  const own = Object.keys(record);
+  return own.length === keys.length && keys.every((key) => own.includes(key));
 }
 
 export type ExactRecordResult =

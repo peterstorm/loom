@@ -33,7 +33,6 @@ import {
   EMISSION_TOOL_SPECS,
   issueEmissionBinding,
   type EmissionBindingRefusalCode,
-  type EmissionSchemaVersion,
   type EmissionToolSpec,
   type IssuedEmissionBinding,
 } from "./emission-tool";
@@ -179,18 +178,12 @@ export function parseEmissionDescriptor(task: string): EmissionDescriptorParse {
         `(toolName kind version requestId contextDigest schemaDigest); received ${fields.length}`,
     });
   }
-  // `issueEmissionBinding` registry-mints the tool, kind, version, request, and
-  // schema fields; the kind/version casts are only vocabulary hints that mint
-  // re-checks. `contextDigest` stays outside that mint and is independently
-  // parsed below with `parseContextDigest`.
+  // `issueEmissionBinding` parses the raw tool, kind, version, request, and
+  // schema strings into a registry-minted binding; nothing is narrowed here.
+  // `contextDigest` stays outside that mint and is independently parsed below
+  // with `parseContextDigest`.
   const [toolName, kind, version, requestId, contextDigest, schemaDigest] = fields;
-  const minted = issueEmissionBinding({
-    requestId: requestId!,
-    kind: kind as PayloadProducerKindName,
-    version: version as EmissionSchemaVersion,
-    toolName,
-    schemaDigest,
-  });
+  const minted = issueEmissionBinding({ requestId, kind, version, toolName, schemaDigest });
   if (!minted.ok) {
     return canonicalRecord({
       kind: "malformed" as const,
@@ -283,8 +276,10 @@ function parseTaskIssuedIdentity(task: string): TaskIssuedIdentity {
  * schema during qualification (ADR-0012). Qualification is deliberately
  * module-local policy, separate from the model-profile catalog: it names the
  * catalog's one local vLLM route rather than re-spelling its literal, and
- * neither callers nor ambient parent state can choose an enabled child route. */
-const QUALIFIED_EMISSION_ROUTE: Readonly<{ provider: string; model: string }> = DESKTOP_VLLM_ROUTE;
+ * neither callers nor ambient parent state can choose an enabled child route.
+ * The name is that policy seam; the value and its exact literal type are the
+ * catalog's, with no re-annotation that could widen or drift from it. */
+const QUALIFIED_EMISSION_ROUTE = DESKTOP_VLLM_ROUTE;
 
 export type SpawnEmissionExpectation =
   | Readonly<{ kind: "no-emission-tool" }>

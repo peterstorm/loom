@@ -49,7 +49,6 @@ import {
   emissionItem,
   emissionRouteFor,
   emissionTask,
-  fixtureValue,
   issuedFor,
   issuedTask,
   JUDGE_V1,
@@ -62,6 +61,7 @@ import {
   REVIEWER_V3,
   spawnItem,
 } from "../fixtures/issued-emission";
+import { value } from "../fixtures/parse-result";
 
 /** Run `body` with `overrides` applied to `process.env`, restoring every key —
  *  deleting the ones that were unset — once `body` settles, even on failure.
@@ -107,6 +107,14 @@ const issuedPiRoute = (provider: string, model: string) => Object.freeze({
  *  derived, so a requalified model changes `DESKTOP_VLLM_ROUTE` alone and only
  *  the requalification guard (pinned to the retained evidence) must move. */
 const qualifiedRoute = issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, DESKTOP_VLLM_ROUTE.model);
+
+/** The archived schema-1 reviewer claim for the v2 fixture's request, built
+ *  through the production claim constructor — one archived claim every
+ *  archived-route test shares. */
+const ARCHIVED_V1_CLAIM: IssuedProducerClaim = issuedReviewerPayloadClaim(
+  { schemaVersion: 1 },
+  { requestId: REVIEWER_V2.requestId, contextDigest: CONTEXT_DIGEST },
+);
 
 describe("EmissionToolCapability mints", () => {
   it("mints the provided capability with its branded schema digest", () => {
@@ -354,12 +362,7 @@ describe("expected spawn emission capability", () => {
       ok: true,
       value: {
         role: "code-reviewer",
-        claim: {
-          requestId: REVIEWER_V2.requestId,
-          contextDigest: CONTEXT_DIGEST,
-          producerKind: "reviewer-payload",
-          version: "v1",
-        },
+        claim: ARCHIVED_V1_CLAIM,
         route: { kind: "extraction-only", reason: "archived reviewer protocol has no emission schema" },
       },
     });
@@ -491,7 +494,7 @@ describe("expected spawn emission capability", () => {
   });
 
   it("refuses when the descriptor does not bind the independently issued request named by the task", () => {
-    const otherRequest = fixtureValue(parseRequestId("request:other-attempt"));
+    const otherRequest = value(parseRequestId("request:other-attempt"));
     const task = emissionTask("code-reviewer", REVIEWER_V2).replace(
       `LOOM_REQUEST_ID: ${REVIEWER_V2.requestId}`,
       `LOOM_REQUEST_ID: ${otherRequest}`,
@@ -661,17 +664,18 @@ describe("request emission routes", () => {
     });
   });
 
-  it("pins the qualified emission route to the catalog's qualified-local-review profile (requalification drift guard)", () => {
-    const profile = resolveModelProfile("qualified-local-review");
-    if (!profile.ok) throw new Error(`fixture profile refused: ${profile.error.message}`);
-    const pi = lowerModelProfile(profile.value, "pi");
+  it.each([
+    ["the current v2", REVIEWER_V2],
+    ["the successor v3", REVIEWER_V3],
+  ] as const)("pins the qualified emission route to the catalog's qualified-local-review profile for %s claim (requalification drift guard)", (_label, binding) => {
+    const pi = lowerModelProfile(value(resolveModelProfile("qualified-local-review")), "pi");
     // The emission capability trusts exactly the catalog profile the issue
     // route election derives from the qualified-local parent handshake. Both
     // name the catalog's single route owner, so they cannot drift apart.
     expect({ provider: pi.provider, model: pi.model }).toEqual(DESKTOP_VLLM_ROUTE);
-    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute(pi.provider, pi.model), true))
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(pi.provider, pi.model), true))
       .toMatchObject({ kind: "emission" });
-    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, "some-other-local-model"), true))
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, "some-other-local-model"), true))
       .toMatchObject({ kind: "extraction-only" });
   });
 
@@ -687,11 +691,6 @@ describe("request emission routes", () => {
     expect([...recordedModels]).toEqual([DESKTOP_VLLM_ROUTE.model]);
     expect(readFileSync(join(evidence, "README.md"), "utf8"))
       .toContain(`**Qualified route:** \`${DESKTOP_VLLM_ROUTE.provider}\` (vLLM) · model \`${DESKTOP_VLLM_ROUTE.model}\``);
-    expect(qualifyIssuedSpawnEmissionRoute(
-      claimOf(REVIEWER_V2),
-      issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, DESKTOP_VLLM_ROUTE.model),
-      true,
-    )).toMatchObject({ kind: "emission" });
   });
 
   it("carries only the exact qualified child route in enabled expectations", () => {
@@ -792,17 +791,11 @@ describe("request emission routes", () => {
   });
 
   it("routes an archived v1 contract to extraction-only regardless of the surface (no schema rewrite)", () => {
-    const v1: IssuedProducerClaim = Object.freeze({
-      requestId: REVIEWER_V2.requestId,
-      contextDigest: CONTEXT_DIGEST,
-      producerKind: "reviewer-payload",
-      version: "v1",
+    expect(decideRequestEmissionRoute(ARCHIVED_V1_CLAIM, providedEmissionCapability(REVIEWER_V2.schemaDigest))).toMatchObject({
+      kind: "extraction-only",
+      reason: expect.stringContaining("unsupported-schema-version"),
     });
-    expect(decideRequestEmissionRoute(v1, providedEmissionCapability(REVIEWER_V2.schemaDigest)).kind).toBe("extraction-only");
-    const reason = decideRequestEmissionRoute(v1, providedEmissionCapability(REVIEWER_V2.schemaDigest));
-    if (reason.kind !== "extraction-only") return;
-    expect(reason.reason).toContain("unsupported-schema-version");
-    expect(decideRequestEmissionRoute(v1, extraction).kind).toBe("extraction-only");
+    expect(decideRequestEmissionRoute(ARCHIVED_V1_CLAIM, extraction).kind).toBe("extraction-only");
   });
 
   it("routes a non-certifying issued digest to extraction-only, never to emission", () => {
@@ -857,13 +850,7 @@ describe("request emission routes", () => {
 
   it("projects an archived v1 route as extraction-only: the archived final-message contract is preserved verbatim (AS-012)", () => {
     const base = "Read the issued Context Packet FIRST. This is an issued schema-1 reviewer request.";
-    const v1: IssuedProducerClaim = Object.freeze({
-      requestId: REVIEWER_V2.requestId,
-      contextDigest: CONTEXT_DIGEST,
-      producerKind: "reviewer-payload",
-      version: "v1",
-    });
-    const route = decideRequestEmissionRoute(v1, providedEmissionCapability(REVIEWER_V2.schemaDigest));
+    const route = decideRequestEmissionRoute(ARCHIVED_V1_CLAIM, providedEmissionCapability(REVIEWER_V2.schemaDigest));
     if (route.kind !== "extraction-only") throw new Error("fixture route must be extraction-only");
     expect(projectEmissionTaskText(route, base)).toEqual({ descriptor: "", instruction: base, decision: route });
   });
@@ -1035,15 +1022,6 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
         : { ok: false, error: { message: "foreign" } },
     );
     expect(ambientQualifiedParent).toEqual({ ok: true, expectation: { kind: "no-emission-tool" } });
-  });
-
-  it("pins the qualified route to the catalog profile for the successor v3 claim too (requalification drift guard)", () => {
-    const profile = fixtureValue(resolveModelProfile("qualified-local-review"));
-    const pi = lowerModelProfile(profile, "pi");
-    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute(pi.provider, pi.model), true))
-      .toMatchObject({ kind: "emission" });
-    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, "some-other-local-model"), true))
-      .toMatchObject({ kind: "extraction-only" });
   });
 
   it("carries no strict-sampling arm in the capability vocabulary, so no route decision can demand strict support (INV-1/AS-005, property)", () => {

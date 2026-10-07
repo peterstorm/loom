@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as baselineModule from "../../src/core/artifact-baseline";
 import {
   changedDeclaredArtifacts,
+  parseTaskBaselineField,
   DECLARED_ARTIFACT_BASELINE,
   REPOSITORY_CHANGE_BASELINE,
   UNKNOWN_SCHEME_BASELINE,
@@ -55,9 +56,10 @@ describe("changedDeclaredArtifacts compares one concrete digest scheme only", ()
     changedDeclaredArtifacts(wide, repository);
     // @ts-expect-error nor a wide baseline against a wide current.
     changedDeclaredArtifacts(wide, wide);
-    const digestOnly = parseCanonicalArtifactBaseline([{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
+    const digestOnly = parseCanonicalArtifactBaseline(
+      [{ artifact: "a.ts", snapshot: { kind: "missing" } }], "baseline", UNKNOWN_SCHEME_BASELINE);
     if (!digestOnly.ok) throw new Error("expected the canonical parse to succeed");
-    // @ts-expect-error the default (digest-only) canonical parse is wide and cannot reach a comparison.
+    // @ts-expect-error the digest-only canonical parse is wide and cannot reach a comparison.
     changedDeclaredArtifacts(digestOnly.value, declared);
     expect(changedDeclaredArtifacts(declared, declared)).toEqual({ ok: true, value: [] });
     expect(changedDeclaredArtifacts(repository, repository)).toEqual({ ok: true, value: [] });
@@ -77,9 +79,63 @@ describe("changedDeclaredArtifacts compares one concrete digest scheme only", ()
   });
 });
 
+describe("a digest-scheme claim is unforgeable outside the baseline module", () => {
+  it("admits no structural stand-in for an issued scheme", () => {
+    const entries = parsed(UNKNOWN_SCHEME_BASELINE, [{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
+    // @ts-expect-error an object literal lacks the module-private brand, even with matching members.
+    const literal: ArtifactBaselineScheme<"declared-artifact"> = {
+      fromEntries: DECLARED_ARTIFACT_BASELINE.fromEntries,
+      capture: DECLARED_ARTIFACT_BASELINE.capture,
+      parse: DECLARED_ARTIFACT_BASELINE.parse,
+      scheme: "declared-artifact",
+    };
+    // @ts-expect-error a spread copies members, never the private brand.
+    const spread: ArtifactBaselineScheme<"declared-artifact"> = { ...DECLARED_ARTIFACT_BASELINE };
+    // @ts-expect-error the class is exported as a type only, so no caller constructs one.
+    expect(() => new baselineModule.ArtifactBaselineScheme("declared-artifact")).toThrow(TypeError);
+    expect(Object.hasOwn(baselineModule, "ArtifactBaselineScheme")).toBe(false);
+    expect([literal, spread]).toHaveLength(2);
+    expect(DECLARED_ARTIFACT_BASELINE.fromEntries(entries).ok).toBe(true);
+  });
+
+  it("refuses an issued scheme in place of a different one", () => {
+    // @ts-expect-error a repository-change scheme never stands in for declared-artifact.
+    const swapped: ArtifactBaselineScheme<"declared-artifact"> = REPOSITORY_CHANGE_BASELINE;
+    // @ts-expect-error nor does the wide unknown scheme.
+    const widened: ArtifactBaselineScheme<"declared-artifact"> = UNKNOWN_SCHEME_BASELINE;
+    // @ts-expect-error a canonical parse cannot claim a scheme its issued entry points do not prove.
+    parseCanonicalArtifactBaseline<"declared-artifact">([], "baseline", UNKNOWN_SCHEME_BASELINE);
+    expect([swapped, widened]).toHaveLength(2);
+    expect([DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE].map((scheme) => scheme.scheme))
+      .toEqual(["declared-artifact", "repository-change", "unknown"]);
+  });
+});
+
+describe("a Task baseline field selects its own digest scheme", () => {
+  const raw = [{ artifact: "src/a.ts", snapshot: { kind: "missing" } }];
+
+  it("parses a present field under the scheme that field owns", () => {
+    const repository = parseTaskBaselineField({ repository_baseline: raw }, "repository_baseline", "T1 repository_baseline");
+    const declared = parseTaskBaselineField({ artifact_baseline: raw }, "artifact_baseline", "T1 artifact_baseline");
+    if (repository === undefined || !repository.ok || declared === undefined || !declared.ok) {
+      throw new Error("expected both fields to parse");
+    }
+    expect(changedDeclaredArtifacts(repository.value, parsed(REPOSITORY_CHANGE_BASELINE, raw))).toEqual({ ok: true, value: [] });
+    expect(changedDeclaredArtifacts(declared.value, parsed(DECLARED_ARTIFACT_BASELINE, raw))).toEqual({ ok: true, value: [] });
+    // @ts-expect-error a repository_baseline field never compares against a declared-artifact current.
+    changedDeclaredArtifacts(repository.value, parsed(DECLARED_ARTIFACT_BASELINE, raw));
+  });
+
+  it("is undefined for an absent field and names the field path in a refusal", () => {
+    expect(parseTaskBaselineField({}, "attempt_repository_baseline", "T1 attempt_repository_baseline")).toBeUndefined();
+    expect(parseTaskBaselineField({ attempt_artifact_baseline: "bogus" }, "attempt_artifact_baseline", "T1 attempt"))
+      .toEqual({ ok: false, errors: ["T1 attempt must be an array"] });
+  });
+});
+
 describe("scheme selection lives in the named entry points", () => {
   it("exports no constructor whose digest scheme a caller chooses by type argument", () => {
-    for (const name of ["artifactBaseline", "capturedArtifactBaseline", "parseArtifactBaseline"]) {
+    for (const name of ["artifactBaseline", "provenArtifactBaseline", "capturedArtifactBaseline", "parseArtifactBaseline"]) {
       expect(Object.hasOwn(baselineModule, name), name).toBe(false);
     }
     // @ts-expect-error the generic parse is module-private.

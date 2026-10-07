@@ -1,6 +1,7 @@
 /**
- * The pilot's fixed workload — PURE: fixture parsing, case-input resolution,
- * request identity and matched prompt rendering.
+ * The pilot's fixed workload — PURE: fixture parsing, case-input resolution
+ * and matched prompt rendering (request identity and binding issuance are
+ * `pilot-binding.ts`).
  *
  * Case inputs are cell-indexed: a preregistered case's `source` resolves,
  * against the corpus and the fixture file, to the one input its cell can
@@ -8,7 +9,9 @@
  * the judge cell, a refutation fixture for the refutation cell. A source that
  * names a missing case or a fixture of another cell is refused at resolution,
  * before anything is dispatched, so a mismatched input is unrepresentable
- * past this seam.
+ * past this seam. Each input carries the case it was resolved for, and the
+ * window's inputs are keyed by a key only this module mints, so a lookup
+ * (`caseInputOf`) proves the input belongs to the scheduled cell AND case.
  *
  * Matched requests (AD-11): both arms of a pair receive byte-identical task
  * bodies (same source snapshot, same schema, same rubric, same seed-free
@@ -30,8 +33,8 @@ import { emissionToolPrimaryInstruction } from "../../engine/src/core/issued-emi
 import type { IssuedEmissionBinding } from "../../engine/src/core/emission-tool";
 import type { CalibrationCase } from "../../engine/src/core/model-calibration";
 import { err, ok, type Result } from "../kernel";
-import type { Preregistration } from "./pilot-preregistration";
-import { contentDigest, hex64, parserOf, PILOT_CELLS, text, type CellKey, type DeepReadonly, type PilotArm } from "./pilot-vocabulary";
+import type { Preregistration, WorkloadCase } from "./pilot-preregistration";
+import { hex64, parserOf, PILOT_CELLS, text, type CellKey, type DeepReadonly } from "./pilot-vocabulary";
 
 // ---------------------------------------------------------------------------
 // Fixture file (content-addressed by the preregistration)
@@ -83,14 +86,31 @@ export const parseWorkloadFixtures: (raw: unknown) => Result<WorkloadFixtures, r
 
 export type ReviewerCell = "reviewer-payload/v2" | "reviewer-payload/v3";
 
-/** A resolved case input, indexed by the one cell it can feed. */
+/** A resolved case input, indexed by the one cell it can feed and carrying
+ *  the preregistered case it was resolved for. */
 export type CaseInput =
-  | Readonly<{ cell: ReviewerCell; corpusCase: CalibrationCase; changedPaths: readonly string[] }>
-  | Readonly<{ cell: "judge-verdict/v1"; fixture: JudgeFixture }>
-  | Readonly<{ cell: "refutation-verdict/v1"; fixture: RefutationFixture }>;
+  | Readonly<{ cell: ReviewerCell; caseId: string; corpusCase: CalibrationCase; changedPaths: readonly string[] }>
+  | Readonly<{ cell: "judge-verdict/v1"; caseId: string; fixture: JudgeFixture }>
+  | Readonly<{ cell: "refutation-verdict/v1"; caseId: string; fixture: RefutationFixture }>;
 
-/** The key of one preregistered case's resolved input: `<cell>|<caseId>`. */
-export const caseInputKey = (cell: CellKey, caseId: string): string => `${cell}|${caseId}`;
+type FixtureInput = Extract<CaseInput, { fixture: unknown }>;
+
+declare const caseInputKeyBrand: unique symbol;
+
+/** The key of one preregistered case's resolved input, minted only here. */
+type CaseInputKey = string & Readonly<{ [caseInputKeyBrand]: true }>;
+
+const caseInputKey = (cell: CellKey, caseId: string): CaseInputKey => `${cell}|${caseId}` as CaseInputKey;
+
+/** Every preregistered case's resolved input, as `resolveWindowInputs` returns it. */
+export type WindowInputs = ReadonlyMap<CaseInputKey, CaseInput>;
+
+/** The resolved input of one scheduled case — only an input resolved for
+ *  exactly that cell and case; `undefined` when there is none. */
+export function caseInputOf(inputs: WindowInputs, cell: CellKey, caseId: string): CaseInput | undefined {
+  const input = inputs.get(caseInputKey(cell, caseId));
+  return input?.cell === cell && input.caseId === caseId ? input : undefined;
+}
 
 /** The revision-derived changed-path scope of a corpus snapshot (git in the shell, a constant in tests). */
 export type ChangedPathsOf = (revision: string) => readonly string[];
@@ -103,78 +123,66 @@ export function parseCaseSource(source: string): Result<Readonly<{ kind: "corpus
     : err(`case source ${JSON.stringify(source)} is neither corpus:<id> nor fixture:<id>`);
 }
 
-/** Resolve one case's `source` to the input its cell can render, or why it cannot. */
+/** A workload fixture's input: the fixture's own kind decides the one cell it can feed. */
+function fixtureInput(caseId: string, fixture: WorkloadFixtures["fixtures"][string]): FixtureInput {
+  return match(fixture)
+    .with({ kind: "judge-verdict" }, (judge): FixtureInput => Object.freeze({ cell: "judge-verdict/v1" as const, caseId, fixture: judge }))
+    .with({ kind: "refutation-verdict" }, (refutation): FixtureInput =>
+      Object.freeze({ cell: "refutation-verdict/v1" as const, caseId, fixture: refutation }))
+    .exhaustive();
+}
+
+/** Resolve one preregistered case's `source` to the input its cell can render, or why it cannot. */
 export function resolveCaseInput(
   cell: CellKey,
-  source: string,
+  entry: Pick<WorkloadCase, "caseId" | "source">,
   corpus: ReadonlyMap<string, CalibrationCase>,
   fixtures: WorkloadFixtures,
   changedPathsOf: ChangedPathsOf,
 ): Result<CaseInput, string> {
+  const { caseId, source } = entry;
   const parsed = parseCaseSource(source);
   if (!parsed.ok) return parsed;
   const { kind, id } = parsed.value;
-  const corpusCase = (reviewerCell: ReviewerCell): Result<CaseInput, string> => {
+  const corpusInput = (reviewerCell: ReviewerCell): Result<CaseInput, string> => {
     if (kind !== "corpus") return err(`case source ${source} is not a corpus case, which cell ${cell} needs`);
     const found = corpus.get(id);
     return found === undefined
       ? err(`corpus case ${id} is not in the corpus`)
-      : ok(Object.freeze({ cell: reviewerCell, corpusCase: found, changedPaths: changedPathsOf(found.revision) }));
+      : ok(Object.freeze({ cell: reviewerCell, caseId, corpusCase: found, changedPaths: changedPathsOf(found.revision) }));
   };
-  const fixture = (): Result<WorkloadFixtures["fixtures"][string], string> => {
+  const workloadFixtureInput = (): Result<CaseInput, string> => {
     if (kind !== "fixture") return err(`case source ${source} is not a workload fixture, which cell ${cell} needs`);
     const found = fixtures.fixtures[id];
-    return found === undefined ? err(`workload fixture ${id} is not in the fixture file`) : ok(found);
+    if (found === undefined) return err(`workload fixture ${id} is not in the fixture file`);
+    const input = fixtureInput(caseId, found);
+    return input.cell === cell ? ok(input) : err(`workload fixture ${id} is a ${found.kind} fixture, which cannot feed cell ${cell}`);
   };
   return match(cell)
-    .with("reviewer-payload/v2", "reviewer-payload/v3", corpusCase)
-    .with("judge-verdict/v1", (judgeCell): Result<CaseInput, string> => {
-      const found = fixture();
-      if (!found.ok) return found;
-      return found.value.kind === "judge-verdict"
-        ? ok(Object.freeze({ cell: judgeCell, fixture: found.value }))
-        : err(`workload fixture ${id} is a ${found.value.kind} fixture, which cannot feed cell ${cell}`);
-    })
-    .with("refutation-verdict/v1", (refutationCell): Result<CaseInput, string> => {
-      const found = fixture();
-      if (!found.ok) return found;
-      return found.value.kind === "refutation-verdict"
-        ? ok(Object.freeze({ cell: refutationCell, fixture: found.value }))
-        : err(`workload fixture ${id} is a ${found.value.kind} fixture, which cannot feed cell ${cell}`);
-    })
+    .with("reviewer-payload/v2", "reviewer-payload/v3", corpusInput)
+    .with("judge-verdict/v1", "refutation-verdict/v1", workloadFixtureInput)
     .exhaustive();
 }
 
-/** Every preregistered case's input, keyed by `caseInputKey`, or every case
- *  that cannot be resolved — refused before any window opens. */
+/** Every preregistered case's input, or every case that cannot be resolved —
+ *  refused before any window opens. */
 export function resolveWindowInputs(
   prereg: Preregistration,
   fixtures: WorkloadFixtures,
   corpusCases: readonly CalibrationCase[],
   changedPathsOf: ChangedPathsOf,
-): Result<ReadonlyMap<string, CaseInput>, readonly string[]> {
+): Result<WindowInputs, readonly string[]> {
   const corpus = new Map(corpusCases.map((entry) => [entry.id, entry] as const));
-  const inputs = new Map<string, CaseInput>();
+  const inputs = new Map<CaseInputKey, CaseInput>();
   const problems: string[] = [];
   for (const cell of prereg.cells) {
     for (const entry of cell.workload.cases) {
-      const resolved = resolveCaseInput(cell.cell, entry.source, corpus, fixtures, changedPathsOf);
+      const resolved = resolveCaseInput(cell.cell, entry, corpus, fixtures, changedPathsOf);
       if (resolved.ok) inputs.set(caseInputKey(cell.cell, entry.caseId), resolved.value);
       else problems.push(`${cell.cell} case ${entry.caseId}: ${resolved.error}`);
     }
   }
   return problems.length > 0 ? err(Object.freeze(problems)) : ok(inputs);
-}
-
-// ---------------------------------------------------------------------------
-// Request identity
-// ---------------------------------------------------------------------------
-
-/** Canonical, per-attempt request id (SAFE_AUTHORITY_ID-shaped): a fresh
- *  engine-issued identity per spawn, as attempt 2 is in production. */
-export function pilotRequestId(windowId: string, pairId: string, arm: PilotArm, attempt: number): string {
-  const armCode = arm === "emission-enabled" ? "em" : "ex";
-  return `cal-${contentDigest(`${windowId}\0${pairId}`).slice(0, 16)}-${armCode}-a${attempt}`;
 }
 
 // ---------------------------------------------------------------------------

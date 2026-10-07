@@ -14,10 +14,15 @@ import { configDefaults, defineConfig } from "vitest/config";
  * Calibration pilots and the operator-run qualification probes live outside
  * `engine/` (they are not Runtime Revision inputs) but are still project
  * code: `npm run verify` must run their tests.
+ *
+ * The setup file pins the ambient reviewer issue route to the catalog route
+ * before every test file, so no suite's route election depends on which
+ * fixture it happens to import first.
  */
 export default defineConfig({
   test: {
     include: [...configDefaults.include, "../calibration/**/*.test.ts", "../probes/**/*.test.{ts,mjs}"],
+    setupFiles: ["./tests/setup/catalog-issue-route.ts"],
     maxWorkers: process.platform === "darwin" ? 2 : 4,
   },
 });

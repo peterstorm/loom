@@ -7,7 +7,8 @@
 import { isIssuableProfile, lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolicy, resolveModelProfile, type ClaudeCodeBinding, type LlmProfile, type LlmProfileId, type LoomAgentName, type PiBinding } from '../model-profiles';
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
-import { AGENT_REQUIRED_SKILLS, ORCHESTRATION_PROGRAMS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot, type OrchestrationProgram } from './artifacts';
+import { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
+import { ORCHESTRATION_PROGRAMS, type OrchestrationProgram } from './programs';
 import { type SemanticPayloadDiagnostic } from './errors';
 
 export type AgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAttempt> = Readonly<{
@@ -215,7 +216,8 @@ function parseAgentRequestAuthorityInMode(
   if (!skill.ok) violations.push(skill.error);
   if (!role.ok) violations.push(violation("invalid-agent-request-field", "role", role.error.message));
   if (!profileId.ok) violations.push(violation("invalid-agent-request-field", "modelProfile", profileId.error.message));
-  if (!includes(ORCHESTRATION_PROGRAMS, fields.program)) {
+  const program: OrchestrationProgram | null = includes(ORCHESTRATION_PROGRAMS, fields.program) ? fields.program : null;
+  if (program === null) {
     violations.push(violation(
       "invalid-agent-request-field",
       "program",
@@ -239,7 +241,7 @@ function parseAgentRequestAuthorityInMode(
       ));
     } else {
       policyResolved = true;
-      if (profileId.ok && !isIssuableProfile(policy.value, fields.program, profileId.value)) {
+      if (profileId.ok && !isIssuableProfile(policy.value, program, profileId.value)) {
         violations.push(violation(
           "model-policy-mismatch",
           "modelProfile",
@@ -298,7 +300,7 @@ function parseAgentRequestAuthorityInMode(
   if (
     !runId.ok || !requestId.ok || !slotId.ok || !contextDigest.ok || !outputSlot.ok ||
     !attempt.ok || !skill.ok || !role.ok || !profileId.ok || !policyResolved || resolvedProfile === null ||
-    !includes(ORCHESTRATION_PROGRAMS, fields.program) || expectedPi === null || expectedClaude === null
+    program === null || expectedPi === null || expectedClaude === null
   ) {
     return failure(canonicalRecord({
       kind: "invalid-agent-request-authority",
@@ -312,7 +314,7 @@ function parseAgentRequestAuthorityInMode(
     runId: runId.value,
     requestId: requestId.value,
     slotId: slotId.value,
-    program: fields.program,
+    program,
     role: role.value,
     attempt: attempt.value,
     modelProfile: profileId.value,

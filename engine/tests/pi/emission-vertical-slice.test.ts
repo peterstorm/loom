@@ -17,13 +17,14 @@
  *     accepted-source record published BEFORE acceptance is declared.
  *
  * Nothing here is a test twin of production: the child runs the real
- * registration surface (with the suite's observation record wrapping the
- * PRODUCTION execute, exactly as emission-tool-runtime.test.ts does), the transcript
- * is scanned by the production adapters, and the capture crosses the same
- * runtime the Pi and Claude adapters call. The model transport is scripted
- * through the shared `fixtures/pi-scripted-loop` harness emission-tool-runtime.test.ts
- * also runs, so "real" means the real harness surfaces and real run
- * directory, never a real provider dial.
+ * registration surface (with the shared observation record,
+ * `observedEmissionTool`, wrapping the PRODUCTION execute — the same wrapper
+ * the Pi runtime loop suite registers), the transcript is scanned by the
+ * production adapters, and the capture crosses the same runtime the Pi and
+ * Claude adapters call. The model transport is scripted through the shared
+ * `fixtures/pi-scripted-loop` harness the runtime loop suite also runs, so
+ * "real" means the real harness surfaces and real run directory, never a real
+ * provider dial.
  *
  * The discriminating controls (AD-10/AS-022) run against the SAME production
  * path: a bypassed selection (candidates-only arm) fails the tool-only
@@ -370,9 +371,9 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     // usable final text: extraction is accepted, no retry is consumed, and the
     // retained single-call refusal is published beside the accepted source
     // (FR-006/AD-9). The real Pi child classifies a THROWN execute refusal as
-    // an incomplete observation (its own terminal posture, proven in
-    // emission-tool-runtime.test.ts); this case exercises the kernel's complete-call
-    // row through the same production scan and seam.
+    // an incomplete observation (its own terminal posture, proven by the Pi
+    // runtime loop suite's thrown-refusal case); this case exercises the
+    // kernel's complete-call row through the same production scan and seam.
     const refusalArgs = whitespaceOnlyArguments("reviewer-payload");
     const finalPayload = validReviewerArgumentsV2("settled after the refusal");
     const messages: readonly unknown[] = [

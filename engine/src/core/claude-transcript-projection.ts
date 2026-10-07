@@ -23,11 +23,9 @@ import { emissionToolFamily, type EmissionSchemaVersion } from "./emission-tool"
 import type { FinalPayloadCandidate } from "./harness-capture";
 import type { EmissionCallFrame } from "./emission-observation";
 import type { PayloadProducerKindName } from "./agent-catalog-projections";
+import { isRecord } from "./plain-record";
 
 type Block = Readonly<Record<string, unknown>>;
-
-const isRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
 /** One non-blank transcript line, parsed once: its JSON value, or the parse error message. */
 type ParsedLine =
@@ -78,14 +76,16 @@ type TolerantLine =
   | null;
 
 function tolerantLineOf(line: ParsedLine): TolerantLine {
+  // Deliberately not `isRecord`: a top-level JSON array is a classifiable
+  // (message-less) line, not an unclassifiable one, so it never marks the walk
+  // incomplete.
   if (line.kind === "json-error" || typeof line.value !== "object" || line.value === null) {
     return { kind: "unclassifiable", index: line.index };
   }
   const message = (line.value as Record<string, unknown>)["message"];
-  if (typeof message !== "object" || message === null) return null;
-  const record = message as Record<string, unknown>;
-  return Array.isArray(record["content"])
-    ? { kind: "message", index: line.index, role: record["role"], content: record["content"] }
+  if (!isRecord(message)) return null;
+  return Array.isArray(message["content"])
+    ? { kind: "message", index: line.index, role: message["role"], content: message["content"] }
     : null;
 }
 
@@ -124,9 +124,8 @@ function walkToolBlocks(lines: readonly ParsedLine[]): ToolWalk {
       firstUnclassifiableLineOrigin ??= origin;
       continue;
     }
-    for (const block of line.content) {
-      if (typeof block !== "object" || block === null) continue;
-      const record = block as Record<string, unknown>;
+    for (const record of line.content) {
+      if (!isRecord(record)) continue;
       if (line.role === "assistant" && record["type"] === "tool_use") {
         const id = typeof record["id"] === "string" && record["id"].trim() !== "" ? record["id"] : null;
         toolUses.push({ origin, id, name: record["name"], input: record["input"] });
@@ -321,25 +320,9 @@ export type ClaudeEmissionAttribution = Readonly<{
   version: EmissionSchemaVersion | null;
 }>;
 
-/**
- * The emission-tool-call frames observed in a Claude transcript — the same
- * closed vocabulary the Pi adapter projects, so the capture runtime's ONE
- * fold and selection serve both harnesses (FR-033's shared refusals).
- *
- * ASSISTANT TOOL CALLS ONLY (AD-8): JSON pasted into text is a
- * `FinalPayloadCandidate`, never an emission frame. FAMILY BY REGISTRY, NOT
- * BY SHAPE. Successful execution only (AS-021): a call becomes complete only
- * when its transcript also carries exactly one finalized, successful
- * `tool_result` — aborted, failed, missing, duplicate, or mismatched results
- * become incomplete frames, so a streamed-but-unexecuted call can never
- * become authoritative output. An incomplete observation is REPRESENTABLE as
- * itself and the runtime's fold refuses it — never reclassified as absence.
- *
- * The walk's own incompleteness is returned BESIDE the call frames, not as
- * one of them: it is evidence about the transcript, and a refusal under
- * extraction-only authority must name the walk instead of counting it as an
- * observed emission call.
- */
+/** The emission-call frame scan's result: the observed call frames, and BESIDE
+ *  them (never as one of them) the walk's own incompleteness, or `null` when
+ *  the walk classified every line and correlated every tool result. */
 export type ClaudeEmissionScan = Readonly<{
   frames: readonly EmissionCallFrame[];
   walkIncompleteness: string | null;
@@ -363,7 +346,7 @@ function emissionCallFrame(
   if (attributed.version === null) {
     return incomplete(id, `emission tool call ${id} carries no issued schema version to bind against (${origin})`);
   }
-  if (typeof toolUse.input !== "object" || toolUse.input === null || Array.isArray(toolUse.input)) {
+  if (!isRecord(toolUse.input)) {
     return incomplete(id, `emission tool call ${id} was observed with ${JSON.stringify(toolUse.input)} arguments, not an object (${origin})`);
   }
   const result = resultsByCallId.get(id);
@@ -379,11 +362,30 @@ function emissionCallFrame(
       toolCallId: id,
       kind: Object.freeze({ kind: producerKind }),
       version: attributed.version,
-      arguments: Object.freeze({ ...(toolUse.input as Record<string, unknown>) }),
+      arguments: Object.freeze({ ...toolUse.input }),
     }),
   });
 }
 
+/**
+ * The emission-tool-call frames observed in a Claude transcript — the same
+ * closed vocabulary the Pi adapter projects, so the capture runtime's ONE
+ * fold and selection serve both harnesses (FR-033's shared refusals).
+ *
+ * ASSISTANT TOOL CALLS ONLY (AD-8): JSON pasted into text is a
+ * `FinalPayloadCandidate`, never an emission frame. FAMILY BY REGISTRY, NOT
+ * BY SHAPE. Successful execution only (AS-021): a call becomes complete only
+ * when its transcript also carries exactly one finalized, successful
+ * `tool_result` — aborted, failed, missing, duplicate, or mismatched results
+ * become incomplete frames, so a streamed-but-unexecuted call can never
+ * become authoritative output. An incomplete observation is REPRESENTABLE as
+ * itself and the runtime's fold refuses it — never reclassified as absence.
+ *
+ * The walk's own incompleteness is returned BESIDE the call frames, not as
+ * one of them: it is evidence about the transcript, and a refusal under
+ * extraction-only authority must name the walk instead of counting it as an
+ * observed emission call.
+ */
 export function claudeEmissionScan(transcript: ClaudeTranscript, attributed: ClaudeEmissionAttribution): ClaudeEmissionScan {
   const { walk } = transcript;
   const frames = walk.toolUses.flatMap((toolUse): EmissionCallFrame[] => {

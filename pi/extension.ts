@@ -8,7 +8,8 @@
  *
  * - `spawn-preparation` — the ordered observe → expand → admit pipeline
  * - `spawn-lifecycle` — reservation of an admitted batch before dispatch
- * - `spawn-claims` — the claims ledger a refused reservation rolls back
+ * - `spawn-claims` — the claims ledger a refused reservation rolls back and a
+ *   settled batch releases
  * - `subagent-stop` — settlement of a completed batch (`tool_result`)
  * - `subagent-result-route` — the pure per-result routing decisions
  * - `child-write-grant` — a child's write capability and its rejection
@@ -22,7 +23,9 @@
  * - `review-capture` — capture of one request-bound result
  * - `spawn-reservation` — the parent session's reservations and cleanup debt
  * - `cleanup-actions` — best-effort cleanup and startup hygiene
- * - `agent-directory` — the Pi user agent directory the definition port reads
+ *
+ * The Pi user agent directory the definition port reads is resolved by the
+ * one shared rule in `engine/src/core/pi-agent-directory.ts`.
  */
 
 import { dirname, join } from "node:path";
@@ -83,7 +86,11 @@ import {
   rejectedChildWriteGrantBlock,
 } from "./child-write-grant";
 import { shutdownPiSession } from "./session-shutdown";
-import { registerPiEmissionReadiness } from "./emission-readiness";
+import {
+  registerPiEmissionReadiness,
+  type PiEmissionReadinessHost,
+  type PiEmissionReadinessRegistration,
+} from "./emission-readiness";
 import { piBashCommand, piWriteTargetPaths, replacePiSpawnTask } from "./tool-input";
 import {
   registerPiEmissionLaunchBridge,
@@ -97,7 +104,7 @@ import {
 import { createTrustedReviewWitnesses } from "./trusted-review-witness";
 import { runPiStartupSweeps, type PiStartupSweepSource } from "./cleanup-actions";
 import { createPiParentSessions } from "./spawn-reservation";
-import { piAgentDefinitionPath, resolvePiAgentDirectory } from "./agent-directory";
+import { piAgentDefinitionPath, resolvePiAgentDirectory } from "../engine/src/core/pi-agent-directory";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -170,6 +177,16 @@ function guardCrashBlock(guard: string, err: unknown): Readonly<{ block: true; r
     reason: `loom guard '${guard}' crashed (failing closed): ${message}`,
   };
 }
+
+/**
+ * The extension's emission readiness registration (AD-4/FR-008): the
+ * readiness command, the awaited `before_agent_start` hold and its
+ * `session_shutdown` fail-safe, bound to the runtime revision THIS module
+ * loaded. The factory below registers through this seam, so tests drive the
+ * named handlers it returns instead of indexing handler lists by position.
+ */
+export const registerLoomEmissionReadiness = (pi: PiEmissionReadinessHost): PiEmissionReadinessRegistration =>
+  registerPiEmissionReadiness(pi, LOADED_RUNTIME_IDENTITY.revision);
 
 const productionPiStartupSweeps: PiStartupSweepSource = () => Object.freeze([
   Object.freeze({
@@ -472,7 +489,7 @@ export default function (
   pi.on("before_agent_start", async (event, ctx) => activatePiChildWriteGrant(event, ctx, childWriteGrants));
 
   // ─── Emission Readiness (launcher barrier, AD-4/FR-008) ───────────────
-  registerPiEmissionReadiness(pi, LOADED_RUNTIME_IDENTITY.revision);
+  registerLoomEmissionReadiness(pi);
 
   pi.on("session_shutdown", async (_event, ctx) => {
     await shutdownPiSession(ctx.sessionManager.getSessionId() ?? "", {

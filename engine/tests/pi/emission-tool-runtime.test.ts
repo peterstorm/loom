@@ -65,9 +65,7 @@ import {
   acknowledgeEmissionExecution,
   admitIssuedEmissionArguments,
   EMISSION_CONSTRAINED_SAMPLING_REQUEST,
-  EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
-  type EmissionSchemaVersion,
   type EmissionToolAcknowledgment,
 } from "../../src/core/emission-tool";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
@@ -76,6 +74,7 @@ import { piReviewerCaptureObservation } from "../../../pi/review-capture";
 import { validReviewerArgumentsV2, whitespaceOnlyArguments } from "../fixtures/emission-arguments";
 import {
   canonicalArguments,
+  cellSchemaBytes,
   JUDGE_V1_CELL,
   mintedBindingFor,
   REFUTATION_V1_CELL,
@@ -96,24 +95,25 @@ import {
  *  committed qualification recordings captured (string-typed v2 fixture
  *  fields; out-of-domain judge score; the refutation verdict enum violation
  *  that decisively classified the route unconstrained). */
-const malformedArguments = (kind: RegistryCell["kind"], version: EmissionSchemaVersion): unknown => {
-  if (kind === "reviewer-payload") {
-    return {
-      schemaVersion: version === "v2" ? "2" : "3",
-      kind: version === "v2" ? "standalone-review" : "standalone-successor-review",
-      findings: JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]),
-    };
+const malformedArguments = (cell: RegistryCell): unknown => {
+  switch (cell.kind) {
+    case "reviewer-payload":
+      return {
+        schemaVersion: cell.version === "v2" ? "2" : "3",
+        kind: cell.version === "v2" ? "standalone-review" : "standalone-successor-review",
+        findings: JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]),
+      };
+    case "judge-verdict":
+      return {
+        criterion: "extensibility",
+        rankings: [{ candidate: "candidate-type-driven-fp.md", score: 12, fatal_flaw: null, strongest_idea: "out of the score domain" }],
+      };
+    case "refutation-verdict":
+      return {
+        criterion: "reproduction",
+        verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "partially_upheld", reasoning: "the qualification's decisive violation" }],
+      };
   }
-  if (kind === "judge-verdict") {
-    return {
-      criterion: "extensibility",
-      rankings: [{ candidate: "candidate-type-driven-fp.md", score: 12, fatal_flaw: null, strongest_idea: "out of the score domain" }],
-    };
-  }
-  return {
-    criterion: "reproduction",
-    verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "partially_upheld", reasoning: "the qualification's decisive violation" }],
-  };
 };
 
 
@@ -122,18 +122,13 @@ const malformedArguments = (kind: RegistryCell["kind"], version: EmissionSchemaV
  *  command registers, with the observation record around its execute). */
 const SHELL_REQUEST_ID = "req-emission-tool-t5-shell";
 
-/** The AD-10 always-accept control: a shell that SKIPS the engine's admission
- *  gate would acknowledge exactly the arguments production refuses. */
-const bypassingShellTool = (cell: RegistryCell): Record<string, unknown> => ({
-  name: cell.spec.toolName,
-  label: `Bypassing ${cell.kind}`,
-  description: "always-accept control — no engine admission",
-  parameters: frozenPayloadSchemaParameters(cell.spec.schemaVersions[cell.version]!.schemaBytes),
-  execute: async (): Promise<EmissionToolAcknowledgment> => ({
-    content: [{ type: "text", text: "payload acknowledged" }],
-    details: {},
-    terminate: true,
-  }),
+/** The AD-10 always-accept control: a shell execute that SKIPS the engine's
+ *  admission gate acknowledges whatever arguments it receives — exactly the
+ *  arguments production refuses. */
+const bypassingShellExecute = async (_args: unknown): Promise<EmissionToolAcknowledgment> => ({
+  content: [{ type: "text", text: "payload acknowledged" }],
+  details: {},
+  terminate: true,
 });
 
 const plainTool: Record<string, unknown> = {
@@ -165,9 +160,9 @@ const toolResultMessages = (messages: readonly unknown[]): { isError?: boolean; 
 describe("real pi validateToolArguments against the exact frozen registry bytes", () => {
   it("admits every canonical fixture through the REAL validator, and the validated args re-admit through the engine", () => {
     for (const registryCell of REGISTRY_CELLS) {
-      const parameters = frozenPayloadSchemaParameters(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes);
+      const parameters = frozenPayloadSchemaParameters(cellSchemaBytes(registryCell));
       const tool = { name: registryCell.spec.toolName, description: "d", parameters };
-      const args = canonicalArguments(registryCell.kind, registryCell.version);
+      const args = canonicalArguments(registryCell);
       const validated = validateToolArguments(
         tool as never,
         { id: "call-canonical", name: registryCell.spec.toolName, arguments: args } as never,
@@ -183,11 +178,11 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
    *  shape against its exact frozen parameters — or "" if the validator
    *  admitted it, which every fragment assertion below then fails on. */
   const malformedRefusalMessage = (cell: RegistryCell): string => {
-    const parameters = frozenPayloadSchemaParameters(cell.spec.schemaVersions[cell.version]!.schemaBytes);
+    const parameters = frozenPayloadSchemaParameters(cellSchemaBytes(cell));
     try {
       validateToolArguments(
         { name: cell.spec.toolName, description: "d", parameters } as never,
-        { id: "call-bad", name: cell.spec.toolName, arguments: malformedArguments(cell.kind, cell.version) } as never,
+        { id: "call-bad", name: cell.spec.toolName, arguments: malformedArguments(cell) } as never,
       );
       return "";
     } catch (error) {
@@ -226,7 +221,7 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
         // disagreement is defined for the three prose-bearing cells.
         continue;
       }
-      const parameters = frozenPayloadSchemaParameters(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes);
+      const parameters = frozenPayloadSchemaParameters(cellSchemaBytes(registryCell));
       const tool = { name: registryCell.spec.toolName, description: "d", parameters };
       const args = whitespaceOnlyArguments(registryCell.kind);
       // PI HALF: the real validator admits the whitespace-only prose.
@@ -253,14 +248,14 @@ describe("real pi agent loop — terminating execute and the in-child validation
     const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     const script = scriptTurns([
-      assistantToolCallMessage([{ type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) }]),
+      assistantToolCallMessage([{ type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell) }]),
     ]);
     const { events } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     expect(script.callCount()).toBe(1);
     // Execute observed the VALIDATED arguments, parsed-equal to the fixture.
     expect(observed).toHaveLength(1);
-    expect(observed[0]).toEqual(canonicalArguments(registryCell.kind, registryCell.version));
+    expect(observed[0]).toEqual(canonicalArguments(registryCell));
     // The tool result is a success.
     const executionEnd = events.find((event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end");
     expect(executionEnd?.isError).toBe(false);
@@ -274,8 +269,8 @@ describe("real pi agent loop — terminating execute and the in-child validation
     const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     const script = scriptTurns([
-      assistantToolCallMessage([{ type: "toolCall", id: "call-bad", name: registryCell.spec.toolName, arguments: malformedArguments(registryCell.kind, registryCell.version) }]),
-      assistantToolCallMessage([{ type: "toolCall", id: "call-good", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) }]),
+      assistantToolCallMessage([{ type: "toolCall", id: "call-bad", name: registryCell.spec.toolName, arguments: malformedArguments(registryCell) }]),
+      assistantToolCallMessage([{ type: "toolCall", id: "call-good", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell) }]),
     ]);
     const { events } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
@@ -292,7 +287,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
     expect(errorFeedback).toBeDefined();
     // The corrected emission then executed and terminated.
     expect(observed).toHaveLength(1);
-    expect(observed[0]).toEqual(canonicalArguments(registryCell.kind, registryCell.version));
+    expect(observed[0]).toEqual(canonicalArguments(registryCell));
     const successEnds = events.filter(
       (event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
         event.type === "tool_execution_end" && !event.isError,
@@ -393,7 +388,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
     // The always-accept control: a shell that skips the engine's admission
     // gate acknowledges the SAME arguments — the refusal is attributable to
     // the admission gate, not to the harness (AD-10 negative control).
-    const bypassAcknowledgment = await (bypassingShellTool(registryCell)["execute"] as (args: unknown) => Promise<EmissionToolAcknowledgment>)(whitespaceArgs);
+    const bypassAcknowledgment = await bypassingShellExecute(whitespaceArgs);
     expect(bypassAcknowledgment.terminate).toBe(true);
   });
 
@@ -491,7 +486,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
     const observed: unknown[] = [];
     const script = scriptTurns([
       assistantToolCallMessage([
-        { type: "toolCall", id: "call-emit", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) },
+        { type: "toolCall", id: "call-emit", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell) },
         { type: "toolCall", id: "call-note", name: "scratch_note", arguments: {} },
       ]),
       assistantFinalTextMessage("batch finished with a plain note; the emission alone would have terminated"),
@@ -517,7 +512,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
     // intact — the cancellation path a live launcher or user produces.
     const script = scriptTurns([
       assistantAbortedToolCallMessage([
-        { type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) },
+        { type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell) },
       ]),
     ]);
     const { events, messages } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
@@ -566,7 +561,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
     // terminating acknowledgment.
     const script = scriptTurns([
       assistantToolCallMessage([
-        { type: "toolCall", id: "call-emit", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) },
+        { type: "toolCall", id: "call-emit", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell) },
         { type: "toolCall", id: "call-note", name: "scratch_note", arguments: {} },
       ]),
     ]);
@@ -578,7 +573,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
 
     // The emission executed and observed the validated arguments.
     expect(observed).toHaveLength(1);
-    expect(observed[0]).toEqual(canonicalArguments(registryCell.kind, registryCell.version));
+    expect(observed[0]).toEqual(canonicalArguments(registryCell));
     // Two finalized results: the cancelled sibling's abort error and the
     // emission's success (emission end after the sibling's, in parallel mode).
     const ends = events.filter(
@@ -622,7 +617,7 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
       const tool = {
         name: registryCell.spec.toolName,
         description: "d",
-        parameters: frozenPayloadSchemaParameters(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes),
+        parameters: frozenPayloadSchemaParameters(cellSchemaBytes(registryCell)),
         constrainedSampling: EMISSION_CONSTRAINED_SAMPLING_REQUEST,
       };
       for (const supportsStrictMode of [true, false]) {
@@ -651,7 +646,7 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
       const tool = {
         name: registryCell.spec.toolName,
         description: "d",
-        parameters: frozenPayloadSchemaParameters(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes),
+        parameters: frozenPayloadSchemaParameters(cellSchemaBytes(registryCell)),
         constrainedSampling: EMISSION_CONSTRAINED_SAMPLING_REQUEST,
       };
       expect(resolveJsonSchemaStrictSampling(tool as never, true), `${registryCell.kind}/${registryCell.version}`).toBeUndefined();
@@ -669,7 +664,7 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
     const strictIncapableRoute = {
       name: "loom_emit_judge_verdict",
       description: "d",
-      parameters: frozenPayloadSchemaParameters(EMISSION_TOOL_SPECS["judge-verdict"].schemaVersions.v1!.schemaBytes),
+      parameters: frozenPayloadSchemaParameters(cellSchemaBytes(JUDGE_V1_CELL)),
       constrainedSampling: requiredMode,
     };
     expect(() => resolveJsonSchemaStrictSampling(strictIncapableRoute as never, false)).toThrow(
@@ -678,7 +673,7 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
     const unstrictifiableSchema = {
       name: "loom_emit_reviewer_payload",
       description: "d",
-      parameters: frozenPayloadSchemaParameters(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions.v2!.schemaBytes),
+      parameters: frozenPayloadSchemaParameters(cellSchemaBytes(REVIEWER_V2_CELL)),
       constrainedSampling: requiredMode,
     };
     expect(() => resolveJsonSchemaStrictSampling(unstrictifiableSchema as never, true)).toThrow(
@@ -696,7 +691,7 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
       // frozen bytes.
       expect(productionTool["constrainedSampling"]).toBe(EMISSION_CONSTRAINED_SAMPLING_REQUEST);
       expect(productionTool["parameters"])
-        .toEqual(JSON.parse(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes));
+        .toEqual(JSON.parse(cellSchemaBytes(registryCell)));
     }
   });
 });

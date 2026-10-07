@@ -22,6 +22,7 @@
  */
 
 import type { Phase } from "./phases";
+import type { OrchestrationProgram } from "./orchestration-contract/programs";
 
 export const LLM_PROFILE_IDS = [
   "implementation",
@@ -76,8 +77,15 @@ export type PiBinding = Readonly<{ harness: "pi" } & PiTarget>;
 
 export type HarnessBinding = ClaudeCodeBinding | PiBinding;
 
+/**
+ * Why a model-policy parse refused. `malformed-spawn-input` is a boundary
+ * shape failure of the Pi `subagent` tool input (not an object, no single
+ * unambiguous mode, an item without a non-empty agent and task), distinct
+ * from `unknown-agent`, a well-formed request naming an Agent Loom has no
+ * policy for — so a caller branching on `kind` can tell the two apart.
+ */
 export type PolicyError = Readonly<{
-  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter";
+  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter" | "malformed-spawn-input";
   message: string;
 }>;
 
@@ -329,7 +337,9 @@ export type ReviewerIssueRoute = "catalog" | "qualified-local";
 /** The orchestration programs whose reviewer rosters may elect the
  *  `qualified-local-review` profile. The refutation and architecture panels
  *  never do: their roles are not reviewers and their profiles are fixed. */
-export const QUALIFIED_LOCAL_REVIEW_PROGRAMS = Object.freeze(["wave-gate", "standalone-review"] as const);
+export const QUALIFIED_LOCAL_REVIEW_PROGRAMS = Object.freeze(
+  ["wave-gate", "standalone-review"] as const satisfies readonly OrchestrationProgram[],
+);
 export type QualifiedLocalReviewProgram = (typeof QUALIFIED_LOCAL_REVIEW_PROGRAMS)[number];
 
 /**
@@ -340,12 +350,18 @@ export type QualifiedLocalReviewProgram = (typeof QUALIFIED_LOCAL_REVIEW_PROGRAM
  * Issuance (`issuedReviewerProfile`) elects through this predicate and the
  * issue-mode request parser (`orchestration-contract/roster.ts`) validates
  * through it, so what the engine issues and what it accepts cannot drift.
- * `program` is unknown because the parser asks before the program is parsed.
+ * `program` is the parsed Orchestration Program, or `null` when the request's
+ * program did not parse: an unparsed program elects nothing, so only the
+ * catalog profile is issuable there.
  */
-export function isIssuableProfile(policy: AgentPolicy, program: unknown, profileId: LlmProfileId): boolean {
+export function isIssuableProfile(
+  policy: AgentPolicy,
+  program: OrchestrationProgram | null,
+  profileId: LlmProfileId,
+): boolean {
   return profileId === policy.profile || (
     profileId === "qualified-local-review" && policy.kind.kind === "reviewer" &&
-    typeof program === "string" && includes(QUALIFIED_LOCAL_REVIEW_PROGRAMS, program)
+    program !== null && includes(QUALIFIED_LOCAL_REVIEW_PROGRAMS, program)
   );
 }
 

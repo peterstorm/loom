@@ -59,7 +59,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("one emission call observes one complete frame, bound to the issued request, kind from the registry, arguments as observed", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const messages = [
       userLike(),
       assistantWithCalls([{ id: "call-emit-1", name: reviewerTool, arguments: args }]),
@@ -102,7 +102,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("a successfully executed tool-only reviewer result reaches the production capture observation without assistant prose", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const messages = [
       assistantWithCalls([{ id: "call-tool-only", name: reviewerTool, arguments: args }]),
       toolResultLike("call-tool-only", reviewerTool),
@@ -117,7 +117,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("a missing or failed finalized tool result makes valid-looking arguments unusable", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     for (const [label, messages] of [
       ["missing", [assistantWithCalls([{ id: "call-unexecuted", name: reviewerTool, arguments: args }])]],
       ["failed", [
@@ -136,7 +136,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("refuses duplicate finalized toolResult entries with one toolCallId instead of treating either as authoritative", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const messages = [
       assistantWithCalls([{ id: "call-duplicate-result", name: reviewerTool, arguments: args }]),
       toolResultLike("call-duplicate-result", reviewerTool),
@@ -157,7 +157,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("observes mismatched toolResult names and non-false isError for the emission call id as incomplete", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     for (const [label, toolName, isError, reason] of [
       ["wrong tool name", "bash", false, "mismatched tool result"],
       ["missing success flag", reviewerTool, undefined, "non-success isError"],
@@ -311,7 +311,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
 
   it("retains unknown argument keys in complete frames as unprojected enumerable snapshots", () => {
     const args = {
-      ...(canonicalArguments("reviewer-payload", "v2") as Record<string, unknown>),
+      ...(canonicalArguments(REVIEWER_V2_CELL) as Record<string, unknown>),
       adapterSentinel: { retained: true },
     };
     const [call] = asCompleteCalls(framesOf([
@@ -323,7 +323,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("a malformed unrelated entry does not hide a valid emission call from the independent scan", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const frames = framesOf([
       { role: "assistant", content: 42 },
       assistantWithCalls([{ id: "call-after-corruption", name: reviewerTool, arguments: args }]),
@@ -334,7 +334,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("the production reviewer capture selects a successful emission after a malformed unrelated entry with no prose", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const observation = piReviewerCaptureObservation([
       { role: "assistant", content: 42 },
       assistantWithCalls([{ id: "call-after-unrelated-malformation", name: reviewerTool, arguments: args }]),
@@ -398,7 +398,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("an exact replay of one call identity folds idempotently; a contradictory replay refuses (FR-007)", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const replayed = framesOf([
       assistantWithCalls([{ id: "call-replay", name: reviewerTool, arguments: args }]),
       assistantWithCalls([{ id: "call-replay", name: reviewerTool, arguments: args }]),
@@ -420,7 +420,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("two distinct calls and an incomplete-beside-complete pair refuse exactly as the fold classifies them", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const doubled = observeEmissionCalls(framesOf([
       assistantWithCalls([{ id: "call-a", name: reviewerTool, arguments: args }]),
       assistantWithCalls([{ id: "call-b", name: reviewerTool, arguments: args }]),
@@ -444,7 +444,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
     // carries the ambiguity's content — the observed calls in first-observed
     // order — so the terminal diagnostic names what was observed instead of a
     // bare count.
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const messages = [
       assistantWithCalls([{ id: "call-a", name: reviewerTool, arguments: args }]),
       assistantWithCalls([{ id: "call-b", name: reviewerTool, arguments: args }]),
@@ -474,7 +474,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
     // differing contract field), and the production capture translation
     // carries that retained diagnostic — never a count, never absence, never
     // a silent pick of either frame.
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const messages = [
       assistantWithCalls([{ id: "call-contradicted", name: reviewerTool, arguments: args }]),
       assistantWithCalls([{
@@ -501,7 +501,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
   });
 
   it("observes only ASSISTANT tool calls — user-carried and result-carried tool-call shapes are not emission observations (AD-8)", () => {
-    const args = canonicalArguments("reviewer-payload", "v2");
+    const args = canonicalArguments(REVIEWER_V2_CELL);
     const messages = [
       { role: "user", content: [{ type: "toolCall", id: "call-user", name: reviewerTool, arguments: args }] },
       { role: "toolResult", toolCallId: "call-user", toolName: reviewerTool, content: [{ type: "text", text: JSON.stringify(args) }] },

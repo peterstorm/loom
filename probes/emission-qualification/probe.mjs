@@ -124,7 +124,7 @@ async function runPhase(rpc, records, argsEntries, instruction, label) {
   const recordStart = records.length;
   const argsStart = argsEntries.length;
   const promptId = `p-${label}`;
-  const response = await rpc.request({ id: promptId, type: "prompt", message: instruction }, responseTo.id(promptId), STATE_TIMEOUT_MS, `prompt ${label}`);
+  const { response, cursor: afterResponse } = await rpc.exchange({ id: promptId, type: "prompt", message: instruction }, responseTo.id(promptId), STATE_TIMEOUT_MS, `prompt ${label}`);
   if (!response.success) {
     // The prompt gate rejected the instruction — no model request was made.
     // The phase still owns its window bounds, so the final re-analysis reads
@@ -134,10 +134,10 @@ async function runPhase(rpc, records, argsEntries, instruction, label) {
     return { promptRejected: response.error ?? "prompt rejected", phaseRecords: [], phaseArgs: [], recordStart, argsStart, argsEnd: argsEntries.length };
   }
   // The phase settles on the first agent_settled AFTER this prompt's response
-  // (an earlier phase's settle never counts). An unsettled phase is bounded by
-  // CALL_TIMEOUT_MS and then analyzed as observed — its missing settle is not
-  // itself an error, so the timeout is absorbed here.
-  const afterResponse = bus.events.indexOf(response) + 1;
+  // (an earlier phase's settle never counts): the bus cursor past the response
+  // bounds the wait. An unsettled phase is bounded by CALL_TIMEOUT_MS and then
+  // analyzed as observed — its missing settle is not itself an error, so the
+  // timeout is absorbed here.
   await bus.waitFor((e) => e.type === "agent_settled", CALL_TIMEOUT_MS, `settle ${label}`, afterResponse).catch(() => undefined);
   await sleep(SETTLE_GRACE_MS);
   const phaseRecords = records.slice(recordStart).filter((r) => r.request);

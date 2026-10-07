@@ -24,7 +24,14 @@ import { buildPairSchedule, parsePreregistration, type Preregistration, type Sch
 import type { WindowWorkload } from "./pilot-retention";
 import type { CellKey, PilotArm } from "./pilot-vocabulary";
 import { dispatchSchedule, type SampleRecord } from "./pilot-window";
-import { parseWorkloadFixtures, resolveWindowInputs, type CaseInput, type WorkloadFixtures } from "./pilot-workload";
+import {
+  caseInputOf,
+  parseWorkloadFixtures,
+  resolveWindowInputs,
+  type CaseInput,
+  type WindowInputs,
+  type WorkloadFixtures,
+} from "./pilot-workload";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(HERE, "../..");
@@ -54,11 +61,22 @@ export const { prereg, fixtures } = workload;
 export const corpusCases: readonly CalibrationCase[] = workload.cases;
 
 /** The window workload `recordWindow` resolves, with no git-derived changed paths. */
-export const WORKLOAD: WindowWorkload = { fixtures, corpusCases, changedPathsOf: () => [] };
+export const WORKLOAD: WindowWorkload = { fixtures, loadCorpusCases: () => ({ ok: true, value: corpusCases }), changedPathsOf: () => [] };
 
 const resolved = resolveWindowInputs(prereg, fixtures, corpusCases, WORKLOAD.changedPathsOf);
 if (!resolved.ok) throw new Error(resolved.error.join("\n"));
-export const inputs: ReadonlyMap<string, CaseInput> = resolved.value;
+export const inputs: WindowInputs = resolved.value;
+
+/** One preregistered case's resolved input, through the production lookup; a missing one throws. */
+export function inputOf(cell: CellKey, caseId: string): CaseInput {
+  const input = caseInputOf(inputs, cell, caseId);
+  if (input === undefined) throw new Error(`${cell} ${caseId} has no resolved input`);
+  return input;
+}
+
+/** The resolved inputs without one case's: a window whose lookup for it fails. */
+export const inputsWithout = (cell: CellKey, caseId: string): WindowInputs =>
+  new Map([...inputs].filter(([, input]) => !(input.cell === cell && input.caseId === caseId)));
 
 /** A test preregistration: the retained one, optionally with every cell (but
  *  `unconstrained`, which keeps the retained unconstrained qualification)

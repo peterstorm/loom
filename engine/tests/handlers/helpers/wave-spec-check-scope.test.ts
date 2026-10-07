@@ -4,9 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
-import { readWaveReviewContext } from "../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests as waveRequestsWithBoundary } from "../../../src/handlers/helpers/programs/wave-review-requests";
-import { waveSpecCheckScope } from "../../../src/core/wave-review-authority";
 import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
 import type { TaskGraph, WaveReviewEpochAuthority } from "../../../src/types";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
@@ -16,6 +14,8 @@ import { CURRENT_REVIEWER_PROTOCOL } from "../../../src/core/reviewer-contract";
 import {
   decideWaveReviewEpochReplay,
   prepareWaveReviewBatch,
+  readWaveReviewContext,
+  waveSpecCheckScope,
   type WaveRequestBatch,
 } from "../../../src/core/wave-review-authority";
 import { parseSettledFloor, type SettledFloor } from "../../../src/core/requirement-coverage";

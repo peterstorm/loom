@@ -1,54 +1,67 @@
 /**
- * The spawn-task render's emission projection seam, over in-memory run
- * directory handles: the ineligible render advertises no tool, and the
- * program-path emission authority is joined against the durable registration
- * before any delivery I/O (AD-7, FR-012). The real facade CLI program paths
- * are emission-program-path.integration.test.ts.
+ * The spawn-task render's emission projection seam, over real Run Directory
+ * handles in temporary runs roots: the ineligible render advertises no tool,
+ * and the program-path emission authority is joined against the durable
+ * registration before any delivery I/O (AD-7, FR-012). Each handle is the
+ * real adapter in a chosen durable state — no registration, an archived
+ * registration, or unreadable registration storage — so the tests pin what the
+ * render decides from that state, never which port it happens to read first.
+ * The real facade CLI program paths are emission-program-path.integration.test.ts.
  */
-import { describe, expect, it } from "vitest";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { EMISSION_DESCRIPTOR_MARKER } from "../../../../src/core/issued-emission-capability";
-import { parseAgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
 import { type RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { renderReviewProgramSpawn, renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { type RegisteredStandaloneProgram } from "../../../../src/handlers/helpers/programs/registration";
-import { type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
+import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { CONTEXT_DIGEST } from "../../../fixtures/issued-emission";
-import { mustAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
+import { value } from "../../../fixtures/parse-result";
+import { catalogAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
+
+const runsRoots: string[] = [];
+afterEach(() => { for (const root of runsRoots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+/** A fresh real run directory with no program registered. */
+const emptyRun = (): RunDirHandle => {
+  const runsRoot = canonicalTempDir("loom-spawn-task-emission-");
+  runsRoots.push(runsRoot);
+  return value(createRunDirectory(runsRoot, "run.probe"));
+};
+
+/** A real run directory whose durable registration is `registration`. */
+const registeredRun = async (registration: unknown): Promise<RunDirHandle> => {
+  const handle = emptyRun();
+  value(await handle.registerProgram(registration));
+  return handle;
+};
+
+/** A real run directory whose registration storage holds unreadable bytes:
+ *  any registration read refuses, so a render that answers anything else
+ *  provably decided before reading it. */
+const unreadableRegistrationRun = (): RunDirHandle => {
+  const handle = emptyRun();
+  writeFileSync(join(handle.runDirectory, "program.json"), "{ not json");
+  return handle;
+};
 
 describe("renderSpawnTask emission projection wiring", () => {
-  /** The confined fake: for requests outside the reviewer emission gate the
-   *  render reads only `runDirectory` — the reviewer compatibility bootstrap
-   *  and the panel view short-circuit empty before any other port. */
-  const ineligibleHandle = { runDirectory: "/run/probe" } as unknown as RunDirHandle;
-  const panelAuthority = (() => {
-    const parsed = parseAgentRequestAuthority({
-      runId: "run-probe",
-      requestId: "request:probe-1",
-      slotId: "slot-probe-1",
-      program: "refutation-panel",
-      role: "arch-judge-agent",
-      attempt: 1,
-      modelProfile: "panel-judge",
-      harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-        claude: { harness: "claude-code", model: "opus" },
-      },
-      requiredSkill: null,
-      contextDigest: CONTEXT_DIGEST,
-      outputSlot: "transcripts/slot-probe-1/attempt-1.raw",
-    });
-    if (!parsed.ok) throw new Error(`fixture authority refused: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
-    return parsed.value;
-  })();
+  const panelAuthority = catalogAuthority({
+    role: "arch-judge-agent", program: "refutation-panel",
+    requestId: "request:probe-1", runId: "run-probe", slotId: "slot-probe-1",
+  });
 
   it("renders no descriptor and the instruction verbatim outside the reviewer emission gate (FR-001/FR-020)", () => {
+    const handle = emptyRun();
     const instruction = "Complete the exact pending panel request.";
-    const task = renderSpawnTask(ineligibleHandle, panelAuthority, instruction);
+    const task = renderSpawnTask(handle, panelAuthority, instruction);
     expect(task).toBe(
       `LOOM_REQUEST_ID: ${panelAuthority.requestId}\n` +
       `LOOM_CONTEXT_DIGEST: ${CONTEXT_DIGEST}\n` +
-      `LOOM_CONTEXT_PATH: /run/probe/contexts/${CONTEXT_DIGEST}.json\n` +
+      `LOOM_CONTEXT_PATH: ${handle.runDirectory}/contexts/${CONTEXT_DIGEST}.json\n` +
       instruction,
     );
     expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
@@ -85,17 +98,6 @@ const waveV1StoredRegistration = Object.freeze({
   authorityDigest: "legacy-digest",
 });
 
-const storedRegistrationHandle = (value: unknown): RunDirHandle =>
-  ({ runDirectory: "/run/probe", readProgramRegistration: () => ({ ok: true as const, value }) }) as unknown as RunDirHandle;
-/** An eligible render with an unreadable registration storage refuses with
- *  the exact bootstrap refusal; the run directory only feeds the path markers. */
-const unavailableStorageHandle = Object.freeze({
-  runDirectory: "/run/probe",
-  readProgramRegistration: () => ({ ok: false as const, error: { message: "program registration storage is unavailable" } }),
-}) as unknown as RunDirHandle;
-/** Renders whose gate refuses before any read only need the path marker root. */
-const portlessHandle = Object.freeze({ runDirectory: "/run/probe" }) as unknown as RunDirHandle;
-
 /** The render throws are bounded (Error with a message), never silent. */
 const mustThrow = (render: () => string): string => {
   try {
@@ -113,42 +115,40 @@ describe("program-path emission authority join (T6)", () => {
   const standaloneReviewer = reviewerAuthority("standalone-review", "request:standalone-wiring-1");
 
   it("refuses a supplied authority naming another program before any registration read (AD-7)", () => {
+    // The registration storage is unreadable, so a render that read it first
+    // would refuse with the bootstrap refusal instead of the program binding.
     const standaloneMessage = mustThrow(() =>
-      renderReviewProgramSpawn(portlessHandle, standaloneReviewer, instruction, waveV2Registration).task);
+      renderReviewProgramSpawn(unreadableRegistrationRun(), standaloneReviewer, instruction, waveV2Registration).task);
     expect(standaloneMessage).toContain("not the request's standalone-review program");
     expect(standaloneMessage).toContain("a descriptor binds only its own program's issued contract");
     const waveMessage = mustThrow(() =>
-      renderReviewProgramSpawn(portlessHandle, waveReviewer, instruction, standaloneV2Registration).task);
+      renderReviewProgramSpawn(unreadableRegistrationRun(), waveReviewer, instruction, standaloneV2Registration).task);
     expect(waveMessage).toContain("not the request's wave-gate program");
   });
 
-  it("refuses a supplied authority whose issued protocol diverges from the durable registration (FR-012)", () => {
-    const message = mustThrow(() =>
-      renderReviewProgramSpawn(
-        storedRegistrationHandle(waveV1StoredRegistration), waveReviewer, instruction, waveV2Registration,
-      ).task);
+  it("refuses a supplied authority whose issued protocol diverges from the durable registration (FR-012)", async () => {
+    const handle = await registeredRun(waveV1StoredRegistration);
+    const message = mustThrow(() => renderReviewProgramSpawn(handle, waveReviewer, instruction, waveV2Registration).task);
     expect(message).toContain("schema version 2 with issued digest");
     expect(message).toContain("not the durable registration's the archived schema-1 contract");
     expect(message).toContain("a descriptor names only the joined issued contract");
   });
 
   it("keeps the durable-only fallback and its exact bootstrap refusal when no authority is supplied", () => {
-    const message = mustThrow(() => renderSpawnTask(unavailableStorageHandle, waveReviewer, instruction));
-    expect(message).toBe("reviewer bootstrap registration is unavailable: program registration storage is unavailable");
+    const handle = unreadableRegistrationRun();
+    const storage = handle.readProgramRegistration();
+    if (storage.ok) throw new Error("fixture registration storage must be unreadable");
+    const message = mustThrow(() => renderSpawnTask(handle, waveReviewer, instruction));
+    expect(message).toBe(`reviewer bootstrap registration is unavailable: ${storage.error.message}`);
   });
 
   it("ignores a supplied authority on an ineligible render: extraction-only requests advertise no tool (FR-001)", () => {
-    const panelJudge = mustAuthority({
-      runId: "run.wiring", requestId: "request:panel-wiring-1", slotId: "slot:panel-wiring-1",
-      program: "refutation-panel", role: "arch-judge-agent", attempt: 1, modelProfile: "panel-judge",
-      harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-        claude: { harness: "claude-code", model: "opus" },
-      },
-      requiredSkill: null, contextDigest: CONTEXT_DIGEST,
-      outputSlot: "transcripts/slot:panel-wiring-1/attempt-1.raw",
+    const panelJudge = catalogAuthority({
+      role: "arch-judge-agent", program: "refutation-panel",
+      requestId: "request:panel-wiring-1", slotId: "slot:panel-wiring-1",
     });
-    const { task, route } = renderReviewProgramSpawn(portlessHandle, panelJudge, instruction, waveV2Registration);
+    // Ineligible renders consult no registration: unreadable storage is never read.
+    const { task, route } = renderReviewProgramSpawn(unreadableRegistrationRun(), panelJudge, instruction, waveV2Registration);
     expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     expect(task.endsWith(instruction)).toBe(true);
     // The render hands its route over as data: an ineligible request is

@@ -19,13 +19,15 @@
  * The reader's whole archive path is `projectArchivedPredecessor`, so the
  * predecessor trust rules (retained identity is data, decode purpose is
  * explicit) live here too; the published-packet file read is its one injected
- * port, and the script only parses arguments, reads the outer packet and prints.
+ * port — bytes and a blob lookup only, so the record is derived here from the
+ * verified bytes — and the script only parses arguments, reads the outer
+ * packet and prints.
  * Pure: no filesystem access. Bounds are the caller's policy and are passed in.
  */
 import { gunzipSync } from "node:zlib";
 import { match } from "ts-pattern";
 import { projectContextPacket, type ContextProjectionInput } from "./context-packet-projection";
-import { parseStandaloneReviewerContextPacketV3 } from "./context-packets";
+import { parseStandaloneReviewerContextPacketV3, withStoredSectionBytes } from "./context-packets";
 import { sha256Bytes } from "./digest";
 import { parseArtifactDigest, type ArtifactDigest, type DomainResult } from "./orchestration-contract";
 import { isRecord, parseExactRecord } from "./plain-record";
@@ -208,13 +210,26 @@ export function parsePredecessorArchiveArguments(args: readonly string[]):
 }
 
 /**
- * The archive projection's single port: the exact predecessor packet FILE a
- * reference names, read with its section bytes restored and its file bound at
- * the reference's own `byteLength`. The production adapter is the stored
- * Context Packet reader; tests pass a plain in-memory lookup.
+ * One published predecessor packet as the port reads it: the exact packet FILE
+ * bytes and the predecessor run's section-blob lookup — BYTES only, never a
+ * decoded record. The record the predecessor projection reads is derived here
+ * from the very bytes verified against the reference, so the port cannot hand
+ * over a record that disagrees with them; a blob it serves under the wrong
+ * digest is refused by the packet parser's per-section re-hash. A lookup
+ * answers `null` for an absent blob and refuses an unreadable one.
  */
-export type ResolvePublishedPacket = (reference: PublishedPacketReference) =>
-  DomainResult<Readonly<{ fileBytes: Uint8Array; record: unknown }>, string>;
+export type PublishedPacketFile = Readonly<{
+  fileBytes: Uint8Array;
+  readSectionBlob: (digest: string) => DomainResult<Uint8Array | null, string>;
+}>;
+
+/**
+ * The archive projection's single port: the exact predecessor packet FILE a
+ * reference names, its file bound at the reference's own `byteLength`. The
+ * production adapter is `openStoredContextPacketFile`; tests pass a plain
+ * in-memory lookup.
+ */
+export type ResolvePublishedPacket = (reference: PublishedPacketReference) => DomainResult<PublishedPacketFile, string>;
 
 /**
  * Why an archive read is refused. `decoder-failed` carries a decoder's own
@@ -243,9 +258,18 @@ function decodeJsonBytes(bytes: Uint8Array, subject: string): ArchiveRead<unknow
   }
 }
 
-/** One retained encoding's expanded bytes and the predecessor packet record they carry, still unverified. */
+/**
+ * One retained encoding's expanded bytes, still unverified: a reference's
+ * exact packet file with its run's blob lookup, or an inline archive's
+ * inflated bytes. Neither carries a decoded record — that is derived only
+ * from bytes `verifyPredecessorArchiveBytes` accepted.
+ */
+type ExpandedPredecessor =
+  | Readonly<{ encoding: "published-packet-reference"; bytes: Uint8Array; readSectionBlob: PublishedPacketFile["readSectionBlob"] }>
+  | Readonly<{ encoding: "gzip-base64"; bytes: Uint8Array }>;
+
 function expandRetainedEncoding(retained: PredecessorArchiveRecord, purpose: PredecessorArchivePurpose,
-  resolveReference: ResolvePublishedPacket): ArchiveRead<Readonly<{ expanded: Uint8Array; prior: unknown }>> {
+  resolveReference: ResolvePublishedPacket): ArchiveRead<ExpandedPredecessor> {
   if (retained.encoding === "published-packet-reference") {
     // Decode purpose is explicit on both sides and must agree, never guessed.
     if (retained.purpose !== purpose) return archiveRefused("invalid explicit predecessor reference");
@@ -253,12 +277,32 @@ function expandRetainedEncoding(retained: PredecessorArchiveRecord, purpose: Pre
     // resolve from the predecessor run's own blob store.
     const predecessor = resolveReference(retained);
     if (!predecessor.ok) return archiveRefused(predecessor.error);
-    return { ok: true, value: { expanded: predecessor.value.fileBytes, prior: predecessor.value.record } };
+    return { ok: true, value: Object.freeze({ encoding: "published-packet-reference",
+      bytes: predecessor.value.fileBytes, readSectionBlob: predecessor.value.readSectionBlob }) };
   }
   const expanded = expandGzipPredecessorArchive(retained);
-  if (!expanded.ok) return fromRecordRefusal(expanded.error);
-  const prior = decodeJsonBytes(expanded.value, "expanded predecessor archive");
-  return prior.ok ? { ok: true, value: { expanded: expanded.value, prior: prior.value } } : prior;
+  return expanded.ok ? { ok: true, value: Object.freeze({ encoding: "gzip-base64", bytes: expanded.value }) } : fromRecordRefusal(expanded.error);
+}
+
+/**
+ * The predecessor packet record carried by VERIFIED bytes: decoded from those
+ * bytes alone, a reference's stored sections then restored through its run's
+ * blob lookup (each restored section is re-hashed by the packet parser). An
+ * inline archive's bytes are decoded as they are, exactly as issued.
+ */
+function predecessorRecord(expanded: ExpandedPredecessor, verified: Uint8Array): ArchiveRead<unknown> {
+  if (expanded.encoding === "gzip-base64") return decodeJsonBytes(verified, "expanded predecessor archive");
+  const decoded = decodeJsonBytes(verified, "published predecessor packet");
+  if (!decoded.ok) return decoded;
+  const unreadable: string[] = [];
+  const restored = withStoredSectionBytes(decoded.value, (digest) => {
+    const blob = expanded.readSectionBlob(digest);
+    if (blob.ok) return blob.value;
+    unreadable.push(blob.error);
+    return null;
+  });
+  if (unreadable.length > 0) return archiveRefused(unreadable[0]!);
+  return restored.ok ? { ok: true, value: restored.value } : archiveRefused(restored.error.message);
 }
 
 const ARCHIVED_IDENTITY = ["requestId", "digest", "role", "requiredSkill"] as const;
@@ -281,19 +325,27 @@ function archivedIdentity(prior: unknown): ArchiveRead<ArchivedIdentity> {
  * label must be a `predecessor-context:` section of it. The retained record is
  * parsed, expanded through its one encoding (a reference through
  * `resolveReference`, an inline gzip record under its declared length), and
- * its bytes verified against the record's own length and digest. Only then is
- * the predecessor projected, under the identity it retains: that identity is
- * DATA inside the independently selected outer section, never authority for
- * issuance or capture, and the predecessor's decode purpose is the explicit
- * selection's. Refusal order is fixed: outer identity, outer contract, label,
- * record decode, record shape, expansion, byte identity, retained identity,
+ * its bytes verified against the record's own length and digest. The
+ * predecessor record is then DERIVED from those verified bytes (a reference's
+ * stored sections restored through its blob lookup), never taken from the
+ * port. Only then is the predecessor projected, under the identity it
+ * retains: that identity is DATA inside the independently selected outer
+ * section, never authority for issuance or capture, and the predecessor's
+ * decode purpose is the explicit selection's. Refusal order is fixed: outer
+ * purpose, outer identity (naming the outer projection's own refusal), outer
+ * contract, label, record decode, record shape, expansion, byte identity,
+ * predecessor record decode and section restore, retained identity,
  * predecessor projection.
  */
 export function projectArchivedPredecessor(outer: unknown, input: ContextProjectionInput,
   selection: PredecessorArchiveRead,
   archive: Readonly<{ bounds: PredecessorArchiveBounds; resolveReference: ResolvePublishedPacket }>): ArchiveRead<unknown> {
+  const notSuccessor = "archive requires exact successor packet identity";
+  if (input.purpose !== "standalone-successor") return archiveRefused(notSuccessor);
   const outerIndex = projectContextPacket(outer, { ...input, selection: { kind: "index", offset: 0, limit: 32 } });
-  if (!outerIndex.ok || input.purpose !== "standalone-successor") return archiveRefused("archive requires exact successor packet identity");
+  // The outer projection's own refusal (integrity, digest or identity
+  // mismatch) is named, so an operator can tell which check failed.
+  if (!outerIndex.ok) return archiveRefused(`${notSuccessor}: ${outerIndex.error}`);
   const packet = parseStandaloneReviewerContextPacketV3(outer);
   if (!packet.ok) return archiveRefused(packet.error.message);
   const section = packet.value.variableContext.find((row) => row.label === selection.label && row.label.startsWith("predecessor-context:"));
@@ -304,11 +356,13 @@ export function projectArchivedPredecessor(outer: unknown, input: ContextProject
   if (!retained.ok) return fromRecordRefusal(retained.error);
   const expansion = expandRetainedEncoding(retained.value, selection.purpose, archive.resolveReference);
   if (!expansion.ok) return expansion;
-  const verified = verifyPredecessorArchiveBytes(retained.value, expansion.value.expanded);
+  const verified = verifyPredecessorArchiveBytes(retained.value, expansion.value.bytes);
   if (!verified.ok) return fromRecordRefusal(verified.error);
-  const identity = archivedIdentity(expansion.value.prior);
+  const prior = predecessorRecord(expansion.value, verified.value);
+  if (!prior.ok) return prior;
+  const identity = archivedIdentity(prior.value);
   if (!identity.ok) return identity;
-  const projected = projectContextPacket(expansion.value.prior, { ...input, ...identity.value,
+  const projected = projectContextPacket(prior.value, { ...input, ...identity.value,
     purpose: selection.purpose === "standalone-successor" ? "standalone-successor" : undefined });
   return projected.ok ? projected : archiveRefused(projected.error);
 }

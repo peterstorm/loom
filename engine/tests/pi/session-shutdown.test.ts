@@ -62,9 +62,11 @@ describe("shutdownPiSession", () => {
     if (sessionId === null) throw new Error("fixture session id must parse");
 
     const parentSessions = createPiParentSessions();
-    const issue = (taskId: string) =>
-      issuePiWriteGrant({ agent: "code-implementer-agent", taskId, cwd, taskGraphPath: graph }).token;
-    parentSessions.runtimeFor(sessionId).issuedWriteGrants.set("call-1", Object.freeze([issue("T1"), issue("T2")]));
+    const issue = (slot: number, taskId: string) => Object.freeze({
+      slot,
+      token: issuePiWriteGrant({ agent: "code-implementer-agent", taskId, cwd, taskGraphPath: graph }).token,
+    });
+    parentSessions.runtimeFor(sessionId).issuedWriteGrants.set("call-1", Object.freeze([issue(0, "T1"), issue(1, "T2")]));
     expect(grantFiles()).toHaveLength(2);
 
     const removed: string[] = [];

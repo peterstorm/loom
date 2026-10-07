@@ -3,10 +3,10 @@
 **Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md` (AS-004, AS-015, AS-016, AS-017; NFR-001; SC-001–SC-003)
 **Plan:** `.claude/plans/2026-09-16-grammar-constrained-decoding.md`, Phase 6 / AD-11
 **Runner:** `scripts/run-model-calibration.ts --pilot` / `--decide`
-**Pure core:** `pilot-core.ts` (the release decision: `evaluatePilot`, cell measurements, guardrails), over its parsed inputs `pilot-preregistration.ts` (preregistration, schedule), `pilot-observation.ts` (observations, per-sample terminals and retries), `pilot-preflight.ts` (staged registry facts, preflight decision), `pilot-quality.ts` (blinding key, assessments, escaped-defect comparison), and the shared `pilot-vocabulary.ts` (cells read from the frozen registry, arms, guardrails) and `pilot-statistics.ts`; `pilot-workload.ts` (fixtures, case-input resolution, matched prompts), `pilot-rubric.ts` (the `rubric-v1` assessor), `pilot-dispatch.ts` (transcript classification through the engine's own selection; the live Pi adapter)
+**Pure core:** `pilot-core.ts` (the release decision: `evaluatePilot`, cell measurements, guardrails), over its parsed inputs `pilot-preregistration.ts` (preregistration, schedule), `pilot-observation.ts` (observations, per-sample terminals and retries), `pilot-preflight.ts` (staged registry facts, preflight decision), `pilot-quality.ts` (blinding key, assessments, escaped-defect comparison), and the shared `pilot-vocabulary.ts` (cells read from the frozen registry, arms, guardrails) and `pilot-statistics.ts`; `pilot-workload.ts` (fixtures, case-input resolution, matched prompts), `pilot-binding.ts` (per-attempt request identity and issued binding), `pilot-rubric.ts` (the `rubric-v1` assessor), `pilot-dispatch.ts` (transcript classification through the engine's own selection; the live Pi adapter)
 **Window dispatch shell:** `pilot-window.ts` (matched-arm dispatch with the attempt-2 retry behind the `ArmDispatch` port, blinding key and packet)
-**Window retention:** `pilot-retention.ts` (`recordWindow` runs a whole window behind its ports — input resolution, matched dispatch, retention, decision — and the window's files and decision rules behind the `WindowStore` port: never-overwrite, preregistration-drift refusal, assessment retention, decision record and append-only log)
-**Shared with the historical corpus core:** `../kernel.ts` (Result, NonEmpty) and `../pi-json-stream.ts` (Pi's JSON event stream and message text)
+**Window retention:** `pilot-retention.ts` (`recordWindow` runs a whole window behind its ports — input resolution, matched dispatch, retention, decision; the workload corpus is loaded through a port only a dispatching window invokes, so a blocked or `--preflight-only` window is always retained — and the window's files and decision rules behind the `WindowStore` port: never-overwrite, preregistration-drift refusal, assessment retention, decision record and append-only log)
+**Shared with the historical corpus core:** `../kernel.ts` (Result, plus the NonEmpty helper the pilot uses) and `../pi-json-stream.ts` (Pi's JSON event stream, record guard and message text)
 
 ## Release decision: INCOMPLETE. Done cannot be claimed
 
@@ -146,16 +146,20 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 | `pilot-preflight.ts` | pure: preflight facts parsing, the staged registry facts, the preflight decision |
 | `pilot-quality.ts` | pure: blinding key and assessment parsing, the paired escaped-defect comparison (AS-016) |
 | `pilot-core.ts` | pure: `evaluatePilot` — cell measurements, guardrails and the release decision |
-| `pilot-workload.ts` | pure: fixtures, case-input resolution (cell-indexed, refused before a window opens), request identity, matched prompt rendering |
+| `pilot-workload.ts` | pure: fixtures, case-input resolution (cell-indexed, each input carrying its case, refused before a window opens), the checked `caseInputOf` lookup, matched prompt rendering |
+| `pilot-binding.ts` | pure: per-attempt request identity and the issued binding minted for it through the engine's one mint |
 | `pilot-rubric.ts` | pure: the deterministic `rubric-v1` assessor over typed payloads |
-| `pilot-dispatch.ts` | pure transcript classification + the live Pi dispatch adapter |
-| `pilot-window.ts` | shell: matched-arm window dispatch over the `ArmDispatch` port and an injected clock, the attempt-2 retry, blinding key, arm-free packet |
+| `pilot-dispatch.ts` | pure transcript classification + the live Pi dispatch adapter (it consumes the issued binding; it never mints one) |
+| `pilot-window.ts` | shell: matched-arm window dispatch over the `ArmDispatch` port and an injected clock, the attempt-2 retry, blinding key, arm-free packet; imports only the dispatch port's types, never the child-process adapter |
 | `pilot-retention.ts` | the window's retained files over the `WindowStore` port: pure derivations (preregistration and assessment parsing, drift check, observation log, assessment retention, decision record) and the `--pilot` (`recordWindow`, which runs the whole window behind its ports) / `--decide` sequences; `scripts/run-model-calibration.ts` wires the live adapters |
 | `pilot*.test.ts` | one suite per module at its interface; `pilot.test.ts` is the release decision through `evaluatePilot` |
-| `pilot-retention.test.ts` | retention rules and `recordWindow`'s wiring at the `WindowStore` and `ArmDispatch` ports, and re-decision of every retained window to its retained bytes |
+| `pilot-quality.test.ts` | the blinding-key and assessment parsers and `compareQuality` directly: held-out filtering, terminal escapes, conservative adjudication, every verdict, the not-measured and refused paths, arm symmetry (property) |
+| `pilot-window.test.ts` | `dispatchSchedule` against a fake route (matched arms, the attempt-2 budget, fail-closed aborts) and `blind` / `blindedPacket` over plain records (exactly the accepted samples blinded, an arm-free packet) |
+| `pilot-retention.test.ts` | retention rules and `recordWindow`'s wiring at the `WindowStore` and `ArmDispatch` ports (including the lazy corpus load), and re-decision of every retained window to its retained bytes |
 | `pilot-dispatch.test.ts` | transcript classification, and the live Pi adapter against a fake launcher, readiness client and `pi` executable |
-| `runner.test.ts`, `pilot-test-fixtures.ts` | CLI subprocess runs against an unreachable route, and the dispatch path against a fake route |
-| `../kernel.ts`, `../pi-json-stream.ts` | the Result/NonEmpty kernel and Pi's JSON event stream, shared with the corpus core |
+| `runner.test.ts` | CLI subprocess runs against an unreachable route (including an unreadable workload corpus, which a non-dispatching window never loads) |
+| `pilot-test-fixtures.ts` | the retained workload resolved by the production resolver, the `inputOf` lookup, sample builders and the fake route |
+| `../kernel.ts`, `../pi-json-stream.ts` | the Result kernel (plus the pilot's NonEmpty helper) and Pi's JSON event stream, shared with the corpus core |
 | `../corpus-calibration.ts` | pure core of the script's default (historical corpus) mode, tested in `../corpus-calibration.test.ts` |
 | `package.json` | private test entry point: runs these tests on the engine's pinned Vitest and config. It is not a Runtime Revision input. |
 | `windows/<window-id>/` | `window.json` (identity, preflight facts, dispatch plan), `observations.jsonl`, `accepted-payloads.jsonl`, `blinding-key.json`, `blinded-assessment-packet.json`, `assessments/`, `release-decision.json`, `decision-log.jsonl` (windows from the second one on) |

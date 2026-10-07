@@ -24,13 +24,18 @@ import {
   startPersistentRefutationPanel,
   submitArchitectureCandidateResult,
   submitRefutationVerdict,
+  type PersistentArchitecturePanelEvent,
   type PersistentArchitectureStep,
+  type PersistentRefutationPanelEvent,
   type PersistentRefutationStep,
 } from "../../src/core/persistent-panel";
 import type { PersistentPanelResult } from "../../src/core/panel-authority";
 import type { AgentRequestAuthority, ExactRoster, SpawnRequest } from "../../src/core/orchestration-contract";
-import { architecturePanelFixture, issuePanelRequests, panelPublicationResolver as resolver, refutationPanelFixture } from "../fixtures/panel-authority";
+import { createPanelPublications } from "../fixtures/panel-authority";
 import { value } from "../fixtures/parse-result";
+
+/** This property's private publication store: its resolver reads only the panels issued here. */
+const { architecturePanelFixture, issuePanelRequests, refutationPanelFixture, resolver } = createPanelPublications();
 
 /** What happens to one slot: accepted at once, accepted on its retry, or rejected twice. */
 const SLOT_PLANS = ["accept", "reject-then-accept", "reject-twice"] as const;
@@ -54,6 +59,41 @@ type AnyStep = PersistentArchitectureStep | PersistentRefutationStep;
 
 const json = (raw: unknown): string => JSON.stringify(raw, (key, entry: unknown) => (key === "byId" || key === "bySlot" ? undefined : entry));
 
+/** One planned persistence effect, as the shared sequence reads it: the append
+ *  carries its sequence, the replace its checkpoint. */
+type PlannedEffect = Readonly<{ kind: string; sequence: number; checkpoint?: unknown }>;
+
+/** One panel's persistence surface, bound to its fixture authority and the
+ *  shared resolver — the six panel functions the kernel property crosses. */
+type PanelPersistence<Step extends AnyStep, Event, History, Checkpoint> = Readonly<{
+  replay: (events: readonly Event[]) => PersistentPanelResult<Step>;
+  checkpoint: (state: Step["state"], events: readonly Event[]) => PersistentPanelResult<Checkpoint>;
+  reload: (raw: unknown) => PersistentPanelResult<Step>;
+  history: (events: readonly Event[]) => PersistentPanelResult<History>;
+  plan: (step: Step, history: History) => PersistentPanelResult<readonly [PlannedEffect, PlannedEffect]>;
+  replaceKind: string;
+}>;
+
+/** Replay, checkpoint, reload, re-parse the history and plan the recorded
+ *  prefix — the one sequence both panels share — asserting the planned append
+ *  and replace match it; returns the replayed state's JSON. */
+function persistPrefix<Step extends AnyStep, Event, History, Checkpoint>(
+  panel: PanelPersistence<Step, Event, History, Checkpoint>,
+  step: Step,
+  prefix: readonly unknown[],
+): string {
+  const events: readonly Event[] = JSON.parse(JSON.stringify(prefix));
+  const replayed = value(panel.replay(events));
+  const checkpoint = value(panel.checkpoint(replayed.state, events));
+  const reloaded = value(panel.reload(JSON.parse(JSON.stringify(checkpoint))));
+  const history = value(panel.history(events.slice(0, -1)));
+  const [append, replace] = value(panel.plan(step, history));
+  expect(append.sequence).toBe(events.length);
+  expect(replace.kind === panel.replaceKind ? json(replace.checkpoint) : null).toBe(json(checkpoint));
+  expect(json(reloaded.state)).toBe(json(replayed.state));
+  return json(replayed.state);
+}
+
 let runSequence = 0;
 
 function refutationDriver(): StageDriver<PersistentRefutationStep> {
@@ -69,18 +109,14 @@ function refutationDriver(): StageDriver<PersistentRefutationStep> {
     roster: fixture.authority.verifierRoster,
     attempt1: fixture.requests,
     submit: (step, request, outcome) => submitRefutationVerdict(step.state, resolver, panelRequestIdentity(request), outcome === "accept" ? verdict(indexOf(request)) : "not json"),
-    persist: (step, prefix) => {
-      const events = JSON.parse(JSON.stringify(prefix));
-      const replayed = value(replayPersistentRefutationPanel(fixture.authority, events, resolver));
-      const checkpoint = value(refutationPanelCheckpoint(replayed.state, events, resolver));
-      const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), resolver));
-      const history = value(parsePersistentRefutationPanelHistory(fixture.authority, events.slice(0, -1), resolver));
-      const [append, replace] = value(planRefutationPanelPersistence(step, history, resolver));
-      expect(append.sequence).toBe(events.length);
-      expect(replace.kind === "replace-refutation-panel-checkpoint" ? json(replace.checkpoint) : null).toBe(json(checkpoint));
-      expect(json(reloaded.state)).toBe(json(replayed.state));
-      return json(replayed.state);
-    },
+    persist: (step, prefix) => persistPrefix({
+      replay: (events: readonly PersistentRefutationPanelEvent[]) => replayPersistentRefutationPanel(fixture.authority, events, resolver),
+      checkpoint: (state, events) => refutationPanelCheckpoint(state, events, resolver),
+      reload: (raw) => parseRefutationPanelCheckpoint(raw, resolver),
+      history: (events) => parsePersistentRefutationPanelHistory(fixture.authority, events, resolver),
+      plan: (planned, history) => planRefutationPanelPersistence(planned, history, resolver),
+      replaceKind: "replace-refutation-panel-checkpoint",
+    }, step, prefix),
     waitingStage: "awaiting-verdicts",
     advancedStage: "ready-to-tally",
     spawnKind: "spawn-refutation-verifiers",
@@ -102,18 +138,14 @@ function architectureDriver(): StageDriver<PersistentArchitectureStep> {
         ? { lens: fixture.authority.candidateLenses[index], candidate: fixture.authority.candidateIds[index], artifact: `# candidate ${index}` }
         : { lens: fixture.authority.candidateLenses[index] });
     },
-    persist: (step, prefix) => {
-      const events = JSON.parse(JSON.stringify(prefix));
-      const replayed = value(replayPersistentArchitecturePanel(fixture.authority, events, resolver));
-      const checkpoint = value(architecturePanelCheckpoint(replayed.state, events, resolver));
-      const reloaded = value(parseArchitecturePanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), resolver));
-      const history = value(parsePersistentArchitecturePanelHistory(fixture.authority, events.slice(0, -1), resolver));
-      const [append, replace] = value(planArchitecturePanelPersistence(step, history, resolver));
-      expect(append.sequence).toBe(events.length);
-      expect(replace.kind === "replace-architecture-panel-checkpoint" ? json(replace.checkpoint) : null).toBe(json(checkpoint));
-      expect(json(reloaded.state)).toBe(json(replayed.state));
-      return json(replayed.state);
-    },
+    persist: (step, prefix) => persistPrefix({
+      replay: (events: readonly PersistentArchitecturePanelEvent[]) => replayPersistentArchitecturePanel(fixture.authority, events, resolver),
+      checkpoint: (state, events) => architecturePanelCheckpoint(state, events, resolver),
+      reload: (raw) => parseArchitecturePanelCheckpoint(raw, resolver),
+      history: (events) => parsePersistentArchitecturePanelHistory(fixture.authority, events, resolver),
+      plan: (planned, history) => planArchitecturePanelPersistence(planned, history, resolver),
+      replaceKind: "replace-architecture-panel-checkpoint",
+    }, step, prefix),
     waitingStage: "awaiting-candidates",
     advancedStage: "awaiting-judges",
     spawnKind: "spawn-architecture-candidates",

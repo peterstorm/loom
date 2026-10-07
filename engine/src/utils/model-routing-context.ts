@@ -10,6 +10,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   parseModelRef,
@@ -17,15 +18,17 @@ import {
   type ModelRef,
   type ModelRoutingConfig,
 } from "../core/model-routing";
+import { piHomeAgentDirectory, resolvePiAgentDirectory } from "../core/pi-agent-directory";
 import type { PiRoutingContext } from "./render-pi-agent";
 
+/** The default Pi agent directory under the account's home directory. */
 export function homeAgentDir(): string {
-  return join(process.env.HOME ?? "", ".pi", "agent");
+  return piHomeAgentDirectory(homedir());
 }
 
-/** The active Pi agent directory (honours PI_CODING_AGENT_DIR). */
+/** The active Pi agent directory, by the one rule in `core/pi-agent-directory`. */
 export function activeAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? homeAgentDir();
+  return resolvePiAgentDirectory(process.env, homedir());
 }
 
 export type RoutingConfigLoad =

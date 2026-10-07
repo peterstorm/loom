@@ -3,7 +3,7 @@ import {
   evaluateProofObligations,
   type TaskProof,
 } from "../../src/core/proof-obligations";
-import type { ParseResult } from "../../src/machine";
+import { labelledValue } from "./parse-result";
 import {
   parseActiveWaveGateRegistration,
   parseCompletedWaveGateRegistration,
@@ -27,14 +27,9 @@ import {
  * than leaving a test asserting against a state no engine could load.
  */
 
-const parsedFixture = <T>(what: string, result: ParseResult<T>): T => {
-  if (!result.ok) throw new Error(`${what} fixture is not loadable protected state: ${result.error}`);
-  return result.value;
-};
-
 /** A whole protected TaskGraph, proven by the State File wire parser. */
 export function protectedGraphFixture(raw: unknown): TaskGraph {
-  return parsedFixture("TaskGraph", parseTaskGraph(raw));
+  return labelledValue("protected TaskGraph", parseTaskGraph(raw));
 }
 
 /** An `active_wave_gate` anchor, proven by its State File parser: live by
@@ -47,7 +42,7 @@ export function activeWaveGateFixture(input: Readonly<{
   runsRoot?: string;
   terminalOutcome?: unknown;
 }>): ActiveWaveGateRegistration {
-  return parsedFixture("active_wave_gate", parseActiveWaveGateRegistration({
+  return labelledValue("protected active_wave_gate", parseActiveWaveGateRegistration({
     schemaVersion: 1,
     kind: "active-wave-gate",
     runId: input.runId,
@@ -68,7 +63,7 @@ export function completedWaveGateFixture(input: Readonly<{
   revision?: number;
 }>): CompletedWaveGateRegistration {
   const revision = input.revision ?? 1;
-  return parsedFixture("wave_gate_history entry", parseCompletedWaveGateRegistration({
+  return labelledValue("protected wave_gate_history entry", parseCompletedWaveGateRegistration({
     schemaVersion: 1,
     kind: "completed-wave-gate",
     runId: input.runId,

@@ -68,11 +68,11 @@ describe("retainedChildWriteGrant", () => {
 describe("rejectedChildWriteGrantDebt", () => {
   const sessionId = parseSessionId("child-session")!;
 
-  it("retains a partial roster entry as cleanup debt exactly when its removal failed", () => {
+  it("retains a partial roster entry as cleanup debt, keyed by its session, exactly when its removal failed", () => {
     fc.assert(fc.property(fc.boolean(), fc.array(fc.string(), { maxLength: 3 }), (partialMade, cleanupErrors) => {
       const debt = rejectedChildWriteGrantDebt(partialMade ? { sessionId, agentId } : null, cleanupErrors);
       expect(debt).toEqual(partialMade && cleanupErrors.length > 0
-        ? { kind: "roster-cleanup-pending", agentId, pointerBinding: null }
+        ? { sessionId, grant: { kind: "roster-cleanup-pending", agentId, pointerBinding: null } }
         : null);
     }));
   });

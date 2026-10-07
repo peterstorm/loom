@@ -24,15 +24,11 @@ import {
   type RefutationPanelAuthority,
 } from "../../src/core/panel-authority";
 import {
-  architecturePanelFixture,
-  issuePanelRequests as issue,
+  createPanelPublications,
   PANEL_FIXTURE_FINDINGS as findings,
   PANEL_HARNESS_BINDINGS as panelBindings,
-  panelPublicationResolver as publicationResolver,
   panelRosterSlot as rosterSlot,
-  refutationPanelFixture,
   semanticVerifierSlots,
-  withRewrittenPanelRegistration,
   type ArchitecturePanelFixture as ArchitectureFixture,
   type RefutationPanelFixture as RefutationFixture,
 } from "../fixtures/panel-authority";
@@ -76,6 +72,10 @@ import { parseWaveFindingId, projectFindingForPanel, type BriefFinding } from ".
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { attributeFindings } from "../../src/core/findings";
 import { createPublicationAuthorityResolver, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
+
+/** This suite's private publication store: its resolver reads only the panels issued here. */
+const { architecturePanelFixture, issuePanelRequests: issue, refutationPanelFixture, resolver: publicationResolver, withRewrittenPanelRegistration } =
+  createPanelPublications();
 
 const waveId = (raw: string) => {
   const parsed = parseWaveFindingId(raw);

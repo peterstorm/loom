@@ -53,13 +53,14 @@ import { observeEmissionCalls, type EmissionCallFrame, type EmissionToolCall } f
 import { parseRequestId, parseSlotId } from "../../src/core/orchestration-contract";
 import { canonicalStructuralEquals, parseArtifactDigest } from "../../src/core/orchestration-contract/identity";
 import {
-  architecturePanelFixture,
-  panelPublicationResolver as publicationResolver,
-  refutationPanelFixture,
+  createPanelPublications,
   type ArchitecturePanelFixture as ArchitectureFixture,
   type RefutationPanelFixture as RefutationFixture,
 } from "../fixtures/panel-authority";
 import { refusal, value } from "../fixtures/parse-result";
+
+/** This suite's private publication store: its resolver reads only the panels issued here. */
+const { architecturePanelFixture, refutationPanelFixture, resolver: publicationResolver } = createPanelPublications();
 
 // ---------------------------------------------------------------------------
 // Fixtures (the persistent panel's publication authority, minted — never asserted)

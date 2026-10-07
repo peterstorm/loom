@@ -24,7 +24,7 @@ import type { Preregistration, WorkloadCase } from "./pilot-preregistration";
 import type { EscapedDefect, QualityAssessment } from "./pilot-quality";
 import { issuesOf } from "./pilot-vocabulary";
 import type { BlindedEntry } from "./pilot-window";
-import { caseInputKey, type CaseInput } from "./pilot-workload";
+import { caseInputOf, type CaseInput, type WindowInputs } from "./pilot-workload";
 
 const encoder = new TextEncoder();
 
@@ -108,12 +108,12 @@ type AssessedEntry = QualityAssessment["entries"][number];
 
 /** One blinded entry scored by the rubric, or why it cannot be scored. */
 function assessEntry(
-  prereg: Preregistration, entry: BlindedEntry, inputs: ReadonlyMap<string, CaseInput>,
+  prereg: Preregistration, entry: BlindedEntry, inputs: WindowInputs,
 ): Result<AssessedEntry, string> {
   const where = `blinded entry ${entry.blindId} (${entry.cell} case ${entry.caseId})`;
   const workloadCase = prereg.cells.find((cell) => cell.cell === entry.cell)?.workload.cases.find((item) => item.caseId === entry.caseId);
   if (workloadCase === undefined) return err(`${where}: the case is not preregistered`);
-  const input = inputs.get(caseInputKey(entry.cell, entry.caseId));
+  const input = caseInputOf(inputs, entry.cell, entry.caseId);
   if (input === undefined) return err(`${where}: no resolved input`);
   const escapes = rubricEscapes(workloadCase, input, entry.payload);
   return escapes.ok
@@ -128,7 +128,7 @@ function assessEntry(
  * scored as zero escapes, so a drift cannot understate a window's escapes.
  */
 export function rubricAssessment(
-  prereg: Preregistration, entries: readonly BlindedEntry[], inputs: ReadonlyMap<string, CaseInput>,
+  prereg: Preregistration, entries: readonly BlindedEntry[], inputs: WindowInputs,
 ): Result<QualityAssessment, readonly string[]> {
   const scored: AssessedEntry[] = [];
   const problems: string[] = [];

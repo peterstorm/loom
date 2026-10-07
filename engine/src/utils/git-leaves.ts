@@ -7,7 +7,8 @@
  * Packet builder, the Wave lint shell and the task-local diff collector, so
  * they agree by construction on literal pathspecs, ignore rules, deleted index
  * entries, symlinks and empty directories. A path containing glob characters
- * is always that literal path, never a pattern. Commands here THROW on
+ * is always that literal path, never a pattern. Every command runs under the
+ * shared `git-execution-policy` (see `gitOutput`). Commands here THROW on
  * failure; `utils/git.ts` wraps the enumerator in the warn-and-return Result
  * adapters (`visibleLeavesAt`, `untrackedLeavesAt`) its callers expect.
  */
@@ -15,13 +16,26 @@ import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { compareStrings } from "../core/ordering";
+import { hardenedGitEnvironment } from "./git-execution-policy";
 
 const GIT_OUTPUT_LIMIT = 100 * 1024 * 1024;
 
+/**
+ * One Git command's stdout bytes, run in the real repository under the shared
+ * `git-execution-policy`: an allow-listed environment (no ambient GIT_* or
+ * config injection, no system or global config) and `core.fsmonitor`
+ * disabled. Every enumerator and revision read in this module — and every
+ * consumer of them — therefore shares one execution policy, chosen in one
+ * place. It deliberately does not use `utils/git.ts`'s shadow administration
+ * directory: that removes `info/exclude` and the repository's
+ * `core.excludesFile`, which the leaf enumerator's ignore rules require, and
+ * the listing commands run no filter or diff driver.
+ */
 export function gitOutput(root: string, args: readonly string[]): Buffer {
   return execFileSync("git", args, {
     cwd: root,
     encoding: "buffer",
+    env: hardenedGitEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: GIT_OUTPUT_LIMIT,
   });
@@ -87,7 +101,8 @@ export type WorktreeLeafSelection = "visible" | "untracked";
  * file is never ignored, exactly as Git never ignores it. An empty directory
  * contributes nothing; non-regular files (FIFOs, sockets) are not Git-visible.
  * An untracked embedded repository lists as `dir/`, exactly as Git lists it.
- * `core.fsmonitor` is disabled, so no repository-configured hook runs.
+ * It runs through `gitOutput`'s shared execution policy, so no
+ * repository-configured hook runs and no ambient GIT_* variable reaches Git.
  */
 export function worktreeVisibleLeafPaths(
   root: string,
@@ -95,7 +110,7 @@ export function worktreeVisibleLeafPaths(
   selection: WorktreeLeafSelection = "visible",
 ): readonly string[] {
   const listed = nulSeparatedGitPaths(root, [
-    "-c", "core.fsmonitor=false", "--literal-pathspecs",
+    "--literal-pathspecs",
     "ls-files", ...(selection === "visible" ? ["--cached"] : []), "--others", "--exclude-standard", "-z", "--", path,
   ]);
   return Object.freeze([...new Set(listed)].sort(compareStrings));

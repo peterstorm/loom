@@ -550,7 +550,11 @@ export type IssuedEmissionBindingOf<K extends PayloadProducerKindName> = IssuedE
   Readonly<{ kind: Readonly<{ kind: K }> }>;
 
 /**
- * The issuance claims the mint parses against the frozen registry. The
+ * The issuance claims the mint parses against the frozen registry. Every claim
+ * is a plain string — parse, don't validate: the mint, not its caller, narrows
+ * the kind and version into the registry vocabulary, so an untrusted caller
+ * (task text, a provisioning environment) passes its strings verbatim instead
+ * of casting them to a vocabulary they have not been checked against. The
  * optional claims are verified when present (a stale protocol packet must
  * refuse here, not register a tool its packet does not certify) and derived
  * from the registry when absent — derivation is from the ONE frozen source,
@@ -558,22 +562,32 @@ export type IssuedEmissionBindingOf<K extends PayloadProducerKindName> = IssuedE
  */
 export type IssuedEmissionRequest = Readonly<{
   requestId: string;
-  kind: PayloadProducerKindName;
+  kind: string;
   version: string;
   toolName?: string;
   schemaDigest?: string;
 }>;
+
+/** The kind vocabulary parse: an own registry key, so an inherited
+ *  `Object.prototype` name (`constructor`, `toString`) selects no cell. */
+const isPayloadProducerKindName = (kind: string): kind is PayloadProducerKindName =>
+  Object.hasOwn(EMISSION_TOOL_SPECS, kind);
+
+const isEmissionSchemaVersion = (version: string): version is EmissionSchemaVersion =>
+  (EMISSION_SCHEMA_VERSIONS as readonly string[]).includes(version);
 
 /**
  * The ONLY mint of an issued emission binding: parse the claims against the
  * frozen registry, refuse every claim that does not select one of its cells,
  * and return the valid-pair binding. `sha256Hex` is the digest derivation the
  * reviewer protocol's recorded `schemaDigest` uses, so a binding minted here
- * and a protocol stamped from the same bytes carry the same digest.
+ * and a protocol stamped from the same bytes carry the same digest. A typed
+ * caller's literal kind refines the result (`IssuedEmissionBindingOf<K>`); an
+ * untrusted string kind yields the unrefined binding.
  */
-export function issueEmissionBinding<K extends PayloadProducerKindName>(
+export function issueEmissionBinding<K extends string>(
   issued: IssuedEmissionRequest & Readonly<{ kind: K }>,
-): DomainResult<IssuedEmissionBindingOf<K>, EmissionBindingRefusal> {
+): DomainResult<IssuedEmissionBindingOf<K & PayloadProducerKindName>, EmissionBindingRefusal> {
   const requestId = parseRequestId(issued.requestId);
   if (!requestId.ok) {
     return failure(canonicalRecord({
@@ -585,23 +599,22 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
   // version string that names no vocabulary member refuses exactly where the
   // definedness check refused before, and the typed lookup below can never
   // select an out-of-vocabulary key.
-  if (!(EMISSION_SCHEMA_VERSIONS as readonly string[]).includes(issued.version)) {
+  const claimedVersion = issued.version;
+  if (!isEmissionSchemaVersion(claimedVersion)) {
     return failure(canonicalRecord({
       code: "unsupported-schema-version" as const,
       message: `issued emission binding carries schema version ${describeUnknown(issued.version)}, which is not in the closed schema-version vocabulary (${EMISSION_SCHEMA_VERSIONS.join(", ")})`,
     }));
   }
-  const claimedVersion = issued.version as EmissionSchemaVersion;
-  const spec: EmissionToolSpec | undefined = EMISSION_TOOL_SPECS[issued.kind];
-  if (spec === undefined) {
-    // A caller that parsed claims as plain strings and narrowed by cast can
-    // name an out-of-vocabulary kind; the mint refuses it in vocabulary
-    // instead of crashing on the undefined spec cell.
+  if (!isPayloadProducerKindName(issued.kind)) {
+    // An untrusted string kind outside the registry refuses in vocabulary,
+    // never by reading an inherited prototype member as a spec cell.
     return failure(canonicalRecord({
       code: "unknown-producer-kind" as const,
       message: `issued emission binding names producer kind ${describeUnknown(issued.kind)}, which selects no registry cell (supported: ${Object.keys(EMISSION_TOOL_SPECS).join(", ")})`,
     }));
   }
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[issued.kind];
   const schemaVersion = spec.schemaVersions[claimedVersion];
   if (schemaVersion === undefined) {
     return failure(canonicalRecord({
@@ -625,10 +638,9 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
       }));
     }
   }
-  // The vocabulary parse above proves claimedVersion is a registry-carried
-  // version, the definedness check proves the kind selects a cell, the K
-  // constraint (K extends PayloadProducerKindName) proves the kind member, and
-  // the tool name and digest are the cell's own — this is the one justified
+  // The vocabulary parses above prove the kind and version are registry
+  // members, the definedness check proves the pair selects a cell, and the
+  // tool name and digest are the cell's own — this is the one justified
   // construction cast at the ONE minting point (it also applies the nominal
   // brand), so every minted binding is a certified valid-pair record by
   // construction and no consumer ever re-narrows or re-verifies.
@@ -638,7 +650,7 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
     version: claimedVersion,
     toolName: spec.toolName,
     schemaDigest,
-  }) as IssuedEmissionBindingOf<K>);
+  }) as IssuedEmissionBindingOf<K & PayloadProducerKindName>);
 }
 
 /** One frozen registry cell: the schema bytes and the parse gate over them. */
@@ -704,8 +716,9 @@ export function admitIssuedEmissionArguments(
   binding: IssuedEmissionBinding,
   rawArgs: unknown,
 ): EmissionArgumentAdmission {
-  const cell = issuedRegistryCell(binding);
-  const canonical = canonicalizeEmissionWireArguments(frozenPayloadSchemaParameters(cell.schemaBytes), rawArgs);
+  // The registration surface's own `parameters`: admission canonicalizes
+  // against exactly the object the Pi tool registers with.
+  const canonical = canonicalizeEmissionWireArguments(issuedEmissionParameters(binding), rawArgs);
   let bytes: Uint8Array;
   try {
     bytes = encoder.encode(JSON.stringify(canonical, null, 2));
@@ -717,7 +730,7 @@ export function admitIssuedEmissionArguments(
         `${error instanceof Error ? error.message : String(error)}`,
     });
   }
-  const parsed = cell.parsePayload(bytes);
+  const parsed = issuedRegistryCell(binding).parsePayload(bytes);
   return parsed.ok
     ? Object.freeze({ kind: "valid" as const, payload: parsed.value })
     : Object.freeze({
@@ -802,9 +815,10 @@ export type EmissionExecutionOutcome =
  * The production execute shell's decision, minted once: admit the untrusted
  * arguments through the issued binding — `admitIssuedEmissionArguments`, the
  * SAME admission the engine's selection runs over the observed call — and
- * acknowledge or refuse. The real Pi tool surface (T5's registration) calls
- * exactly this, so the acceptance suite drives the same policy seam as
- * production — never a test twin.
+ * acknowledge or refuse. The real Pi tool surface (`emissionToolDefinition` in
+ * pi/emission-tool.ts, the registered tool's `execute`) calls exactly this, so
+ * the acceptance suite drives the same policy seam as production — never a
+ * test twin.
  */
 export function acknowledgeEmissionExecution(
   binding: IssuedEmissionBinding,

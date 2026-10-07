@@ -9,7 +9,7 @@ import {
   resolveModelProfile,
 } from "../../src/core/model-profiles";
 import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority } from "../../src/core/orchestration-contract";
-import { ORCHESTRATION_PROGRAMS } from "../../src/core/orchestration-contract/artifacts";
+import { ORCHESTRATION_PROGRAMS } from "../../src/core/orchestration-contract/programs";
 import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
 
@@ -67,6 +67,19 @@ describe("issuer and issue-mode parser share one eligibility rule", () => {
         expect(parsed.ok, `${policy.agent}/${program}/${route}`).toBe(true);
       }
     }
+  });
+
+  it("an unparsed program elects nothing, so the parser reports both refusals", () => {
+    const parsed = parseAgentRequestAuthority(request("code-reviewer", "unknown-program"));
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.violations.map(({ kind, field }) => `${kind}:${field}`)).toEqual(expect.arrayContaining([
+      "invalid-agent-request-field:program",
+      "model-policy-mismatch:modelProfile",
+    ]));
+    const reviewer = AGENT_POLICIES.find(({ agent }) => agent === "code-reviewer")!;
+    expect(isIssuableProfile(reviewer, null, "qualified-local-review")).toBe(false);
+    expect(isIssuableProfile(reviewer, null, reviewer.profile)).toBe(true);
   });
 });
 

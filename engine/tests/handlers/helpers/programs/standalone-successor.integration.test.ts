@@ -11,7 +11,8 @@ import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } 
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withoutEmissionRouteDelta, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
+import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";

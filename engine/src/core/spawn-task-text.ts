@@ -12,6 +12,7 @@
  * data and cannot refuse — every refusal already happened at the observation.
  */
 import { join } from "node:path";
+import { match } from "ts-pattern";
 import type { AgentRequestAuthority } from "./orchestration-contract";
 import { FROZEN_DIFF_PAGE_UNITS, type FrozenDiff } from "./standalone-read-coverage";
 
@@ -107,22 +108,25 @@ function readObligationDelivery(diff: FrozenDiff): string {
 /** The exact per-version reviewer delivery bootstrap. */
 function reviewerDeliveryBootstrap(facts: SpawnTaskFacts, delivery: ReviewerDelivery): string {
   const request = facts.authority;
+  const purpose: readonly string[] = delivery.version === 3 ? ["--purpose", "standalone-successor"] : [];
   const command = ["bun", contextPacketReaderPath(facts.packageRoot), "--packet", contextPath(facts),
     "--request", request.requestId, "--digest", request.contextDigest, "--role", request.role,
-    "--skill", request.requiredSkill ?? "none", ...(delivery.version === 3 ? ["--purpose", "standalone-successor"] : [])]
+    "--skill", request.requiredSkill ?? "none", ...purpose]
     .map(shellQuote).join(" ");
   const reader = `LOOM_CONTEXT_READ_COMMAND: ${command}\n` +
     "Run that exact command using Claude Bash or Pi bash FIRST, then append --section LABEL or --file EXACT_SOURCE_PATH and --offset N --limit 4096 to page through the indexed context. Do not dump raw packet byte arrays. A failed command means context unavailable: stop, never infer a protocol from payload. This read-only projection checks supplied identity/integrity; independent publication was proved by engine delivery, not by the helper.\n";
-  if (delivery.version === 3) return reader +
-    "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
-    "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n";
-  if (delivery.version === 2) {
-    return reader + "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +
-      (delivery.readObligation === null ? "" : readObligationDelivery(delivery.readObligation));
-  }
-  return reader + `Read the issued Context Packet FIRST. This is an issued schema-1 reviewer request.\n` +
-    `Load the archived role instructions at ${JSON.stringify(delivery.rolePath)} and shared wire contract at ${JSON.stringify(delivery.wirePath)}.\n` +
-    "Those archived instructions govern this request; current v2 wire, severity and rubric guidance is inapplicable. Missing archive reads must fail visibly, never fall back to v2.\n";
+  return reader + match(delivery)
+    .with({ version: 3 }, () =>
+      "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
+      "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n")
+    .with({ version: 2 }, ({ readObligation }) =>
+      "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +
+      (readObligation === null ? "" : readObligationDelivery(readObligation)))
+    .with({ version: 1 }, ({ rolePath, wirePath }) =>
+      `Read the issued Context Packet FIRST. This is an issued schema-1 reviewer request.\n` +
+      `Load the archived role instructions at ${JSON.stringify(rolePath)} and shared wire contract at ${JSON.stringify(wirePath)}.\n` +
+      "Those archived instructions govern this request; current v2 wire, severity and rubric guidance is inapplicable. Missing archive reads must fail visibly, never fall back to v2.\n")
+    .exhaustive();
 }
 
 /**

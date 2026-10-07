@@ -13,17 +13,23 @@ import {
   requiredSkillMarker,
   type SpawnTaskFacts,
 } from "../../src/core/spawn-task-text";
-import { FROZEN_DIFF_PAGE_UNITS, type FrozenDiff } from "../../src/core/standalone-read-coverage";
+import { FROZEN_DIFF_PAGE_UNITS, freezeDiff } from "../../src/core/standalone-read-coverage";
+import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 
 const DIGEST = "c".repeat(64);
-const authority = (overrides: Partial<AgentRequestAuthority> = {}): AgentRequestAuthority => ({
-  requestId: "req-1",
-  contextDigest: DIGEST,
-  role: "code-reviewer",
-  requiredSkill: null,
-  program: "standalone-review",
-  ...overrides,
-}) as unknown as AgentRequestAuthority;
+/** The canonical request authority fixture, as the render reads it: request
+ *  `req-1` over `DIGEST` in the standalone program. */
+const authority = (overrides: Readonly<Record<string, unknown>> = {}): AgentRequestAuthority =>
+  agentRequestAuthority("run.spawn-task-text", {
+    requestId: "req-1",
+    contextDigest: DIGEST,
+    program: "standalone-review",
+    ...overrides,
+  });
+
+/** A frozen diff minted by the production constructor, never a forged literal. */
+const frozenDiff = (files: Parameters<typeof freezeDiff>[0]["files"]) =>
+  freezeDiff({ baseRevision: "a".repeat(40), headRevision: "b".repeat(40), files });
 
 const facts = (overrides: Partial<SpawnTaskFacts> = {}): SpawnTaskFacts => ({
   authority: authority(),
@@ -89,17 +95,20 @@ describe("renderSpawnTaskText", () => {
   });
 
   it("lists exactly the text-diff files of a read obligation with their page counts", () => {
-    const diff = {
-      files: [
-        { kind: "text-diff", path: "src/a.ts", totalUnits: FROZEN_DIFF_PAGE_UNITS + 1 },
-        { kind: "binary", path: "img.png" },
-      ],
-    } as unknown as FrozenDiff;
+    // One text diff just over a page (so it spans two), one binary file.
+    const diff = frozenDiff([
+      { path: "src/a.ts", base: { kind: "absent" }, head: { kind: "text", text: "x".repeat(FROZEN_DIFF_PAGE_UNITS) } },
+      { path: "img.png", base: { kind: "binary" }, head: { kind: "binary" } },
+    ]);
+    const textDiff = diff.files[0]!;
+    if (textDiff.kind !== "text-diff") throw new Error("fixture file must carry a text diff");
+    expect(textDiff.totalUnits).toBeGreaterThan(FROZEN_DIFF_PAGE_UNITS);
+    expect(textDiff.totalUnits).toBeLessThanOrEqual(2 * FROZEN_DIFF_PAGE_UNITS);
     const text = renderSpawnTaskText(facts({ reviewer: { version: 2, readObligation: diff } }));
     expect(text).toContain("LOOM_READ_COVERAGE: every-frozen-diff-unit\n");
-    expect(text).toContain(`Frozen diff to read (1 file(s)):\n- src/a.ts: ${FROZEN_DIFF_PAGE_UNITS + 1} units, 2 page(s)\n`);
+    expect(text).toContain(`Frozen diff to read (1 file(s)):\n- src/a.ts: ${textDiff.totalUnits} units, 2 page(s)\n`);
     expect(text).not.toContain("img.png");
-    const empty = renderSpawnTaskText(facts({ reviewer: { version: 2, readObligation: { files: [] } as unknown as FrozenDiff } }));
+    const empty = renderSpawnTaskText(facts({ reviewer: { version: 2, readObligation: frozenDiff([]) } }));
     expect(empty).toContain("No scoped file has a text diff; there is nothing to read.\n");
   });
 
@@ -112,7 +121,7 @@ describe("renderSpawnTaskText", () => {
   it("property: shell-quoted command words survive any request id and Skill text", () => {
     fc.assert(fc.property(fc.string({ maxLength: 20 }), fc.string({ maxLength: 20 }), (requestId, skill) => {
       const text = renderSpawnTaskText(facts({
-        authority: authority({ requestId: requestId as AgentRequestAuthority["requestId"], requiredSkill: skill === "" ? null : skill }),
+        authority: authority({ requestId, requiredSkill: skill === "" ? null : skill }),
         reviewer: { version: 2, readObligation: null },
       }));
       const quoted = `'${requestId.replaceAll("'", "'\\''")}'`;

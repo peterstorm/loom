@@ -23,7 +23,7 @@ import type { TaskGraph } from '../../../types';
 import { waveSpecCheckDocumentsMatch } from '../../../core/wave-review-authority';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
-import { reportUncaughtWaveGateFailure, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
+import { reportUncaughtWaveGateFailure, waveBlocked, waveResumeContext, type WavePhase } from './wave-gate-outcome';
 import { driveWaveAdvisoryDecision } from './wave-advisory-decision';
 import { driveWaveRefutation } from './wave-refutation';
 import { reconcileCurrentReviewEvidence } from './wave-review-collection';
@@ -174,9 +174,8 @@ export async function resumeWaveGateFacade(
     const captured = handle.readCapturedAttempts();
     if (!issued.ok) return waveBlocked(handle, issued.error.message);
     if (!captured.ok) return waveBlocked(handle, captured.error.message);
-    const context: WaveResumeContext = Object.freeze({
-      handle, manager, registration, wave: registration.input.wave, captured: captured.value,
-    });
+    const context = waveResumeContext(handle, manager, registration, captured.value);
+    if (context === null) return waveBlocked(handle, "registered Wave Gate authority lacks an exact Wave");
     const issuance = await reconcileWaveReviewIssuance(context, graph, issued.value);
     if (issuance.kind !== "proceed") return conclude(issuance);
     const collection = await reconcileCurrentReviewEvidence(context, issuance.value);

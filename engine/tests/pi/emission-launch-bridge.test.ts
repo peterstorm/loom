@@ -4,7 +4,9 @@
  * launches keyed by session/tool-call/slot, the one-shot resolve handshake,
  * and the readiness verifier the installed launcher runs before any Task
  * prompt — driven against a plain synchronous event bus and a plain fake
- * readiness client. Every child readiness and route state the verifier
+ * readiness client (the port's second adapter, the harness's real-RPC
+ * `rpcReadinessClient`, drives the same verifier against a real production
+ * child in emission-startup-production.test.ts). Every child readiness and route state the verifier
  * observes is refused in the gate's vocabulary
  * (`pi/emission-readiness-gate.ts`); only RPC transport failures carry the
  * bridge's own wording.
@@ -15,28 +17,73 @@ import loomPiExtension from "../../../pi/extension";
 import {
   LOOM_SUBAGENT_LAUNCH_CHANNEL,
   registerPiEmissionLaunchBridge,
+  type PiEmissionLaunchExpectation,
   type PiSubagentLaunchEventBus,
 } from "../../../pi/emission-launch-bridge";
 import {
-  EMISSION_READINESS_COMMAND,
-  EMISSION_READINESS_ENTRY_TYPE,
   LOOM_EMISSION_BINDING_ENV,
 } from "../../../pi/emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../../pi/emission-readiness-protocol";
 import { EMISSION_STARTUP_REMEDIATIONS } from "../../../pi/emission-readiness-gate";
 import {
-  JUDGE_V1_CELL,
   recordOf,
-  REVIEWER_V2_CELL,
-  sha256Hex,
   withProcessState,
+  type PiReadinessClient,
 } from "../fixtures/emission-child-harness";
+import { sha256Hex } from "../../src/core/digest";
+import { JUDGE_V1_CELL, REVIEWER_V2_CELL } from "../fixtures/emission-registry-cells";
 import {
   advertiseInstalledLaunchPort,
   bridgeLaunchExpectation,
+  issuedLaunchDirective,
   launchResolveEnvelope,
   NoEventBusFakePi,
   SynchronousEventBus,
 } from "../fixtures/emission-launch-port";
+
+/** The honest readiness report a child provisioned for `launch` emits. */
+const honestReadinessFor = (launch: PiEmissionLaunchExpectation): Readonly<Record<string, unknown>> => ({
+  requestId: launch.expectation.binding.requestId,
+  contextDigest: launch.expectation.contextDigest,
+  kind: launch.expectation.binding.kind.kind,
+  version: launch.expectation.binding.version,
+  toolName: launch.expectation.binding.toolName,
+  schemaDigest: launch.expectation.binding.schemaDigest,
+  revision: launch.revision,
+  active: true,
+  childPid: 4242,
+  registeredTools: [launch.expectation.binding.toolName],
+});
+
+const readinessEntryFor = (data: unknown): Readonly<{ customType: string; data: unknown }> =>
+  ({ customType: EMISSION_READINESS_ENTRY_TYPE, data });
+
+/** The plain fake adapter of the verifier's readiness port: an honest child
+ *  that lists the readiness command, reports `launch`'s readiness and binds
+ *  its route. Every call is recorded in `calls`; a test overrides only the
+ *  exchanges it varies. */
+const fakeReadinessClient = (
+  launch: PiEmissionLaunchExpectation,
+  calls: string[],
+  overrides: Partial<PiReadinessClient> = {},
+): PiReadinessClient => ({
+  getCommands: async () => {
+    calls.push("getCommands");
+    return [{ name: EMISSION_READINESS_COMMAND, source: "extension" }];
+  },
+  invokeReadiness: async () => {
+    calls.push("invokeReadiness");
+    return [readinessEntryFor(honestReadinessFor(launch))];
+  },
+  setModel: async (provider, model) => {
+    calls.push(`setModel:${provider}/${model}`);
+  },
+  getState: async () => {
+    calls.push("getState");
+    return { model: { provider: launch.expectation.route.provider, id: launch.expectation.route.model } };
+  },
+  ...overrides,
+});
 
 describe("the parent emission adapter over the installed synchronous launch port", () => {
   it("keeps ordinary extension initialization available when the event bus is absent and reports the launcher unavailable", async () => {
@@ -210,57 +257,11 @@ describe("the parent emission adapter over the installed synchronous launch port
   });
 
   it("verifies command discovery, invokes readiness once, gates every binding field, then binds and observes the exact route", async () => {
-    const bus = new SynchronousEventBus();
-    advertiseInstalledLaunchPort(bus);
-    const bridge = registerPiEmissionLaunchBridge(bus as PiSubagentLaunchEventBus);
     const launch = bridgeLaunchExpectation(JUDGE_V1_CELL, "tool-call-verifier", { kind: "single", index: 0 });
-    expect(bridge.stage([launch])).toEqual({ ok: true });
-    const envelope = launchResolveEnvelope(launch);
-    bus.emit(LOOM_SUBAGENT_LAUNCH_CHANNEL, envelope);
-    const reply = envelope["reply"] as {
-      kind: string;
-      directive?: {
-        verifyReadiness: (client: unknown) => Promise<
-          Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>
-        >;
-      };
-    };
-    if (reply.kind !== "emission-rpc" || reply.directive === undefined) {
-      throw new Error("the exact launch did not receive its directive");
-    }
-    const directive = reply.directive;
+    const directive = issuedLaunchDirective(launch);
 
     const calls: string[] = [];
-    const readiness = {
-      requestId: launch.expectation.binding.requestId,
-      contextDigest: launch.expectation.contextDigest,
-      kind: launch.expectation.binding.kind.kind,
-      version: launch.expectation.binding.version,
-      toolName: launch.expectation.binding.toolName,
-      schemaDigest: launch.expectation.binding.schemaDigest,
-      revision: launch.revision,
-      active: true,
-      childPid: 4242,
-      registeredTools: [launch.expectation.binding.toolName],
-    };
-    const client = {
-      getCommands: async () => {
-        calls.push("getCommands");
-        return [{ name: EMISSION_READINESS_COMMAND, source: "extension" }];
-      },
-      invokeReadiness: async () => {
-        calls.push("invokeReadiness");
-        return [{ customType: EMISSION_READINESS_ENTRY_TYPE, data: readiness }];
-      },
-      setModel: async (provider: string, model: string) => {
-        calls.push(`setModel:${provider}/${model}`);
-      },
-      getState: async () => {
-        calls.push("getState");
-        return { model: { provider: launch.expectation.route.provider, id: launch.expectation.route.model } };
-      },
-    };
-    expect(await directive.verifyReadiness(client)).toEqual({ ok: true });
+    expect(await directive.verifyReadiness(fakeReadinessClient(launch, calls))).toEqual({ ok: true });
     expect(calls).toEqual([
       "getCommands",
       "invokeReadiness",
@@ -269,43 +270,22 @@ describe("the parent emission adapter over the installed synchronous launch port
     ]);
 
     const mismatchCalls: string[] = [];
-    const mismatch = await directive.verifyReadiness({
-      ...client,
-      getCommands: async () => {
-        mismatchCalls.push("getCommands");
-        return [{ name: EMISSION_READINESS_COMMAND, source: "extension" }];
-      },
+    const mismatch = await directive.verifyReadiness(fakeReadinessClient(launch, mismatchCalls, {
       invokeReadiness: async () => {
         mismatchCalls.push("invokeReadiness");
-        return [{ customType: EMISSION_READINESS_ENTRY_TYPE, data: { ...readiness, schemaDigest: sha256Hex("wrong") } }];
-      },
-      setModel: async () => {
-        mismatchCalls.push("setModel");
+        return [readinessEntryFor({ ...honestReadinessFor(launch), schemaDigest: sha256Hex("wrong") })];
       },
       getState: async () => {
         mismatchCalls.push("getState");
         return { model: null };
       },
-    });
+    }));
     expect(mismatch).toMatchObject({ ok: false, reason: expect.stringContaining("schema digest") });
     expect(mismatchCalls).toEqual(["getCommands", "invokeReadiness"]);
 
-    const failingClient = (operation: "getCommands" | "invokeReadiness" | "setModel" | "getState") => ({
-      ...client,
-      getCommands: async () => {
-        if (operation === "getCommands") throw new Error(`rpc ${operation} ${"x".repeat(10_000)}`);
-        return [{ name: EMISSION_READINESS_COMMAND, source: "extension" }];
-      },
-      invokeReadiness: async () => {
-        if (operation === "invokeReadiness") throw new Error(`rpc ${operation} ${"x".repeat(10_000)}`);
-        return [{ customType: EMISSION_READINESS_ENTRY_TYPE, data: readiness }];
-      },
-      setModel: async () => {
-        if (operation === "setModel") throw new Error(`rpc ${operation} ${"x".repeat(10_000)}`);
-      },
-      getState: async () => {
-        if (operation === "getState") throw new Error(`rpc ${operation} ${"x".repeat(10_000)}`);
-        return { model: { provider: launch.expectation.route.provider, id: launch.expectation.route.model } };
+    const failingClient = (operation: keyof PiReadinessClient): PiReadinessClient => fakeReadinessClient(launch, [], {
+      [operation]: async (): Promise<never> => {
+        throw new Error(`rpc ${operation} ${"x".repeat(10_000)}`);
       },
     });
     for (const operation of ["getCommands", "invokeReadiness", "setModel", "getState"] as const) {
@@ -323,75 +303,27 @@ describe("the parent emission adapter over the installed synchronous launch port
       ["state-not-record", { getState: async () => null as never }, "no exact provider/model record"],
       ["model-not-record", { getState: async () => ({ model: "wrong-shape" }) as never }, "no exact provider/model record"],
     ] as const) {
-      const refused = await directive.verifyReadiness({ ...client, ...malformed });
+      const refused = await directive.verifyReadiness(fakeReadinessClient(launch, [], malformed));
       expect(refused, label).toMatchObject({ ok: false, reason: expect.stringContaining(reason) });
     }
     const throwingCommand = Object.defineProperty({}, "name", {
       get: () => { throw new Error(`malformed command getter ${"y".repeat(10_000)}`); },
     });
-    const thrownResponse = await directive.verifyReadiness({
-      ...client,
+    const thrownResponse = await directive.verifyReadiness(fakeReadinessClient(launch, [], {
       getCommands: async () => [throwingCommand] as never,
-    });
+    }));
     expect(thrownResponse).toMatchObject({ ok: false, reason: expect.stringContaining("malformed command getter") });
     if (!thrownResponse.ok) expect(Buffer.byteLength(thrownResponse.reason, "utf8")).toBeLessThan(2_000);
   });
 
   it("refuses every child readiness and route state in the gate's one vocabulary, never invoking an unlisted command", async () => {
-    const bus = new SynchronousEventBus();
-    advertiseInstalledLaunchPort(bus);
-    const bridge = registerPiEmissionLaunchBridge(bus as PiSubagentLaunchEventBus);
     const launch = bridgeLaunchExpectation(JUDGE_V1_CELL, "tool-call-gate-vocabulary", { kind: "single", index: 0 });
-    expect(bridge.stage([launch])).toEqual({ ok: true });
-    const envelope = launchResolveEnvelope(launch);
-    bus.emit(LOOM_SUBAGENT_LAUNCH_CHANNEL, envelope);
-    const reply = envelope["reply"] as {
-      kind: string;
-      directive?: {
-        verifyReadiness: (client: unknown) => Promise<
-          Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>
-        >;
-      };
-    };
-    if (reply.kind !== "emission-rpc" || reply.directive === undefined) {
-      throw new Error("the exact launch did not receive its directive");
-    }
-    const directive = reply.directive;
-    const readinessEntry = {
-      customType: EMISSION_READINESS_ENTRY_TYPE,
-      data: {
-        requestId: launch.expectation.binding.requestId,
-        contextDigest: launch.expectation.contextDigest,
-        kind: launch.expectation.binding.kind.kind,
-        version: launch.expectation.binding.version,
-        toolName: launch.expectation.binding.toolName,
-        schemaDigest: launch.expectation.binding.schemaDigest,
-        revision: launch.revision,
-        active: true,
-        childPid: 4242,
-        registeredTools: [launch.expectation.binding.toolName],
-      },
-    };
+    const directive = issuedLaunchDirective(launch);
+    const readinessEntry = readinessEntryFor(honestReadinessFor(launch));
     const calls: string[] = [];
-    const client = (overrides: Readonly<Record<string, unknown>> = {}) => ({
-      getCommands: async () => {
-        calls.push("getCommands");
-        return [{ name: EMISSION_READINESS_COMMAND, source: "extension" }];
-      },
-      invokeReadiness: async () => {
-        calls.push("invokeReadiness");
-        return [readinessEntry];
-      },
-      setModel: async () => { calls.push("setModel"); },
-      getState: async () => {
-        calls.push("getState");
-        return { model: { provider: launch.expectation.route.provider, id: launch.expectation.route.model } };
-      },
-      ...overrides,
-    });
-    const refusal = async (overrides: Readonly<Record<string, unknown>>): Promise<string> => {
+    const refusal = async (overrides: Partial<PiReadinessClient>): Promise<string> => {
       calls.length = 0;
-      const verdict = await directive.verifyReadiness(client(overrides));
+      const verdict = await directive.verifyReadiness(fakeReadinessClient(launch, calls, overrides));
       if (verdict.ok) throw new Error(`expected a refusal for ${JSON.stringify(Object.keys(overrides))}`);
       return verdict.reason;
     };
@@ -420,7 +352,12 @@ describe("the parent emission adapter over the installed synchronous launch port
     expect(wrongRoute).toContain("the bound route (openai-codex/gpt-6-sol via an unreported api at an unreported base URL)");
     expect(wrongRoute).toContain(`not the expected constrained route (${launch.expectation.route.provider}/${launch.expectation.route.model})`);
     expect(wrongRoute).toContain(EMISSION_STARTUP_REMEDIATIONS["route-bind-refused"]);
-    expect(calls).toEqual(["getCommands", "invokeReadiness", "setModel", "getState"]);
+    expect(calls).toEqual([
+      "getCommands",
+      "invokeReadiness",
+      `setModel:${launch.expectation.route.provider}/${launch.expectation.route.model}`,
+      "getState",
+    ]);
 
     const noModel = await refusal({ getState: async () => { calls.push("getState"); return { model: null }; } });
     expect(noModel).toContain("the constrained route binding failed: Emission readiness RPC get_state returned no exact provider/model record");
@@ -428,24 +365,8 @@ describe("the parent emission adapter over the installed synchronous launch port
   });
 
   it("returns bounded refusals when custom-entry extraction or readiness-payload gate evaluation throws", async () => {
-    const bus = new SynchronousEventBus();
-    advertiseInstalledLaunchPort(bus);
-    const bridge = registerPiEmissionLaunchBridge(bus as PiSubagentLaunchEventBus);
     const launch = bridgeLaunchExpectation(JUDGE_V1_CELL, "tool-call-hostile-readiness", { kind: "single", index: 0 });
-    expect(bridge.stage([launch])).toEqual({ ok: true });
-    const envelope = launchResolveEnvelope(launch);
-    bus.emit(LOOM_SUBAGENT_LAUNCH_CHANNEL, envelope);
-    const reply = envelope["reply"] as {
-      kind: string;
-      directive?: {
-        verifyReadiness: (client: unknown) => Promise<
-          Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>
-        >;
-      };
-    };
-    if (reply.kind !== "emission-rpc" || reply.directive === undefined) {
-      throw new Error("the exact launch did not receive its directive");
-    }
+    const directive = issuedLaunchDirective(launch);
 
     const throwingDataEntry = Object.defineProperty(
       { customType: EMISSION_READINESS_ENTRY_TYPE },
@@ -461,12 +382,11 @@ describe("the parent emission adapter over the installed synchronous launch port
     ] as const) {
       const setModel = vi.fn();
       const getState = vi.fn();
-      const result = await reply.directive.verifyReadiness({
-        getCommands: async () => [{ name: EMISSION_READINESS_COMMAND, source: "extension" }],
+      const result = await directive.verifyReadiness(fakeReadinessClient(launch, [], {
         invokeReadiness: async () => [entry],
         setModel,
         getState,
-      });
+      }));
       expect(result.ok, label).toBe(false);
       if (result.ok) throw new Error(`${label} unexpectedly passed`);
       expect(result.reason, label).toContain("Emission readiness RPC invoke_readiness response failed");

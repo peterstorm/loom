@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { foldPiJsonStream, piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine } from "./pi-json-stream";
+import { foldPiJsonStream, isRecord, piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine } from "./pi-json-stream";
 
 const messageEnd = (message: unknown): string => JSON.stringify({ type: "message_end", message });
 
@@ -48,6 +48,13 @@ describe("Pi JSON stream fold", () => {
       });
       expect(settlePiJsonStream(streamed)).toEqual(foldPiJsonStream(lines.join("\n")));
     }), { numRuns: 200 });
+  });
+});
+
+describe("Pi records", () => {
+  it("are plain JSON objects — never null, an array or a scalar", () => {
+    expect(isRecord({ role: "assistant" })).toBe(true);
+    for (const value of [null, [], [{}], "text", 42, undefined]) expect(isRecord(value)).toBe(false);
   });
 });
 

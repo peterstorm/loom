@@ -23,7 +23,7 @@ import {
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
-import { REPOSITORY_CHANGE_BASELINE, type ArtifactBaseline } from "../core/artifact-baseline";
+import { parseTaskBaselineField, type ArtifactBaseline } from "../core/artifact-baseline";
 import { captureDeclaredArtifactBaseline } from "../utils/declared-artifact-snapshot";
 import { captureRepositoryChangeBaseline } from "../utils/repository-change-baseline";
 import { repositoryContext } from "../utils/git";
@@ -139,10 +139,8 @@ export async function registerTaskExecutionBatch(
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) continue;
     // A retained repository baseline is the stored wire record; re-prove it
-    // under its own digest scheme so the in-memory bundle keeps the brand.
-    const retained = task.repository_baseline === undefined
-      ? undefined
-      : REPOSITORY_CHANGE_BASELINE.parse(task.repository_baseline, `${taskId} repository_baseline`);
+    // under the digest scheme its field owns so the in-memory bundle keeps the brand.
+    const retained = parseTaskBaselineField(task, "repository_baseline", `${taskId} repository_baseline`);
     if (retained !== undefined && !retained.ok) {
       return { kind: "block", message: `BLOCKED: Invalid retained repository baseline: ${retained.errors.join("; ")}` };
     }

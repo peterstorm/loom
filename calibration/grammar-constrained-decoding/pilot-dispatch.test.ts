@@ -3,22 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-contract";
-import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE, LOOM_EMISSION_BINDING_ENV } from "../../pi/emission-tool";
+import { LOOM_EMISSION_BINDING_ENV } from "../../pi/emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../pi/emission-readiness-protocol";
 import { parseSampleObservation, type AttemptObservation } from "./pilot-observation";
 import { contentDigest, type CellKey, type PilotArm } from "./pilot-vocabulary";
+import { mintCellBinding, pilotRequestId, type CellBinding } from "./pilot-binding";
 import {
   classifyAttemptTranscript,
   importRpcLauncher,
-  mintCellBinding,
   piArmDispatch,
   type ArmRequest,
-  type CellBinding,
   type PiDispatchConfig,
   type ReadinessClient,
   type RpcLauncher,
   type RunRpcAgent,
 } from "./pilot-dispatch";
-import { pilotRequestId } from "./pilot-workload";
 
 /**
  * The live Pi adapter of the dispatch port (`piArmDispatch`) against plain

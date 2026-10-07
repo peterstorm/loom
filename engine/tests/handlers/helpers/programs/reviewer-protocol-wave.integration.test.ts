@@ -14,9 +14,8 @@ import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/p
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
 import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
-import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
+import { readWaveReviewContext, waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
-import { waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import { deriveWaveAttemptTwo, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-review-retries";
 import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../../src/core/wave-gate-membership";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
@@ -30,10 +29,10 @@ import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixture
 import {
   CATALOG_ROUTE_ENV,
   QUALIFIED_ROUTE_ENV,
-  withoutEmissionRouteDelta,
   withRouteEnv,
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
+import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));

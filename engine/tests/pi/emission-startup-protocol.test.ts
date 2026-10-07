@@ -20,7 +20,8 @@
  * the in-child awaited `before_agent_start` hold as the defense-in-depth
  * layer. The child here is the probe-adapted fixture extension below; the
  * PRODUCTION extension repeats the protocol in
- * `emission-startup-production.test.ts`. The shared launcher harness is
+ * `emission-startup-production.test.ts`. Both suites drive the one barrier
+ * sequence (`runLauncherBarrier`) of the shared launcher harness,
  * `engine/tests/fixtures/emission-child-harness.ts`.
  *
  * Covered: matching opens on the judge-v1 and reviewer-v2 cells; held
@@ -42,23 +43,18 @@
 
 import { describe, expect, it } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import { rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/emission-tool";
 import { canonicalRecord, type ContextDigest } from "../../src/core/orchestration-contract/identity";
 import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
-import type { EmissionStartupDecision, ReadinessObservation } from "../../../pi/emission-readiness-gate";
+import type { EmissionStartupDecision } from "../../../pi/emission-readiness-gate";
 import {
-  boundedEvent,
   CANCEL_AFTER_MS,
   contextDigestOf,
   CURRENT_REVISION,
   customEntriesOf,
-  decideStartupThroughRouteBind,
   deferred,
-  deliverIssuedPrompt,
-  discoverCommands,
   expectOpenRun,
   expectZeroRequestRefusal,
   HOLD_MS,
@@ -67,35 +63,26 @@ import {
   HOLD_RESOLVE_TIMEOUT_MS,
   holdResolvedPredicate,
   isolatedPiEnv,
-  JUDGE_V1_CELL,
-  listsExtensionCommand,
   makeExpectation,
   nextRequestId,
-  observeChannel,
   openPiRpcChild,
   orderingPair,
   piIdentity,
   READINESS_COMMAND_NAME,
   READINESS_ENTRY_TYPE,
   readinessAbsentWithinWindow,
-  readinessPredicate,
   READY_TIMEOUT_MS,
   recordOf,
-  REFUSE_GRACE_MS,
-  REVIEWER_V2_CELL,
-  settledReadiness,
-  settleWait,
-  sha256Hex,
+  runLauncherBarrier,
   sleep,
   SLOW_READINESS_MS,
   STALE_REVISION,
-  startCountingServer,
   STATE_TIMEOUT_MS,
   awaitFirstRequestOrDeadline,
-  type CountedRequest,
-  type PiRpcChild,
-  type RegistryCell,
+  withBarrierResources,
+  type LauncherReadinessWait,
 } from "../fixtures/emission-child-harness";
+import { cellSchemaBytes, cellSchemaDigest, JUDGE_V1_CELL, REVIEWER_V2_CELL, type RegistryCell } from "../fixtures/emission-registry-cells";
 
 /**
  * The child-side extension — adapted from the committed
@@ -221,15 +208,10 @@ async function reportReadiness(pi) {
 // launcher's intervention — every knob lives on the arm that reads it
 // ---------------------------------------------------------------------------
 
-/** How the launcher behaves while a SLOW child's readiness is pending. */
-type SlowReadinessLauncher =
-  /** Waits the bounded window out (the late-readiness control). */
-  | Readonly<{ kind: "waits" }>
-  /** Cancels the barrier mid-readiness-wait (the cancellation control). */
-  | Readonly<{ kind: "cancels"; afterMs: number }>
-  /** SIGKILLs the child this many ms AFTER the verified invocation, inside the
-   *  bounded window (the infrastructure-failure boundary control). */
-  | Readonly<{ kind: "kills-child"; afterMs: number }>;
+/** How the launcher behaves while a SLOW child's readiness is pending: waits
+ *  the window out (the late-readiness control), cancels (the cancellation
+ *  control), or kills the child (the infrastructure-failure boundary). */
+type SlowReadinessLauncher = LauncherReadinessWait;
 
 /** What the loaded fixture extension's readiness command does. */
 type ChildReadiness =
@@ -335,7 +317,7 @@ function childPlanOf(spec: ScenarioSpec, issuedRequestId: string): ChildPlan {
   const drift: ChildDrift = child.kind === "loaded" ? child.drift : { kind: "none" };
   const cell = drift.kind === "registers-cell" || drift.kind === "misbound" ? drift.cell : spec.issuedCell;
   const requestId = drift.kind === "bound-to-request" || drift.kind === "misbound" ? drift.requestId : issuedRequestId;
-  const toolName = drift.kind === "drifted-tool-name" ? drift.toolName : cell.toolName;
+  const toolName = drift.kind === "drifted-tool-name" ? drift.toolName : cell.spec.toolName;
   const allowlist = drift.kind === "tool-excluded" ? ["read"] : [toolName];
   return Object.freeze({
     loadsExtension: child.kind !== "absent-extension",
@@ -365,8 +347,8 @@ const childEnvFor = (countingBaseUrl: string, plan: ChildPlan): NodeJS.ProcessEn
   env["EMISSION_STARTUP_VARIANT"] = plan.variant;
   env["EMISSION_STARTUP_READINESS_COMMAND"] = READINESS_COMMAND_NAME;
   env["EMISSION_STARTUP_TOOL_NAME"] = plan.toolName;
-  env["EMISSION_STARTUP_SCHEMA"] = plan.cell.schemaBytes;
-  env["EMISSION_STARTUP_STALE_SCHEMA"] = plan.variant === "wrong-digest" ? staleSchemaBytes(plan.cell.schemaBytes) : "";
+  env["EMISSION_STARTUP_SCHEMA"] = cellSchemaBytes(plan.cell);
+  env["EMISSION_STARTUP_STALE_SCHEMA"] = plan.variant === "wrong-digest" ? staleSchemaBytes(cellSchemaBytes(plan.cell)) : "";
   env["EMISSION_STARTUP_CHILD_BINDING"] = JSON.stringify(plan.binding);
   env["EMISSION_STARTUP_COUNT_BASE_URL"] = plan.driftedBaseUrl ?? countingBaseUrl;
   env["EMISSION_STARTUP_COUNT_KEY"] = "loom-counting-key";
@@ -418,174 +400,97 @@ type StartedGate = Readonly<{
   gateDecided: Promise<void>;
 }>;
 
+/** The commands discovery reported, as `name (source)` diagnostics. */
+const commandsSeenOf = (commands: readonly Record<string, unknown>[]): readonly string[] =>
+  Object.freeze(commands.flatMap((command) =>
+    typeof command["name"] === "string" && typeof command["source"] === "string"
+      ? [`${command["name"]} (${command["source"]})`]
+      : []));
+
 /**
  * Run the launcher barrier protocol against a REAL headless pi child — the
- * probe-proven sequence, bounded at every step, cleaning up exactly this
- * child and this counting server in every outcome (AS-020's release
- * discipline: only the refusing run's own reservation is released).
+ * harness's one `runLauncherBarrier` sequence inside the lifecycle bracket,
+ * which cleans up exactly this child and this counting server in every
+ * outcome (AS-020's release discipline: only the refusing run's own
+ * reservation is released).
  */
 const startStartupGate = (spec: ScenarioSpec): StartedGate => {
-  const rpcRef: { current: PiRpcChild | null } = { current: null };
-  /** Live view of the run's own counting substitute — read by the rejection
-   *  path below so an infrastructure failure still carries its COUNTED
-   *  zero-request evidence. */
-  const countingHitsRef: { current: readonly CountedRequest[] } = { current: [] };
   const childReady = deferred<ChildProcess | null>();
   const decisionMade = deferred<void>();
-  const releaseChild = (): void => rpcRef.current?.release();
-  const result = (async (): Promise<StartupRun> => {
-    const server = await startCountingServer();
-    countingHitsRef.current = server.hits;
-    const tmp = canonicalTempDir(`loom-emission-startup-${spec.label}-`);
-    try {
-      const issuedRequestId = nextRequestId(spec.label);
-      const expectation = makeExpectation(spec.issuedCell, issuedRequestId, server.baseUrl);
-      const plan = childPlanOf(spec, issuedRequestId);
-      const extPath = join(tmp, "loom-emission-child.mjs");
-      await writeFile(extPath, CHILD_EXTENSION_SOURCE, "utf8");
-      const args: string[] = ["--mode", "rpc", "--no-session", "-ne"];
-      if (plan.loadsExtension) args.push("-e", extPath);
-      if (plan.allowlist.length > 0) args.push("--tools", plan.allowlist.join(","));
-      const rpc = openPiRpcChild({
-        role: "pi child",
-        idPrefix: `t4-${spec.label}`,
-        args,
-        cwd: tmp,
-        env: { ...childEnvFor(server.baseUrl, plan), ...await isolatedPiEnv(tmp) },
-        responseTimeoutMs: STATE_TIMEOUT_MS,
-      });
-      rpcRef.current = rpc;
-      childReady.resolve(rpc.child);
+  const result = withBarrierResources(`loom-emission-startup-${spec.label}-`, async ({ server, tmp, adopt }): Promise<StartupRun> => {
+    const issuedRequestId = nextRequestId(spec.label);
+    const expectation = makeExpectation(spec.issuedCell, issuedRequestId, server.baseUrl);
+    const plan = childPlanOf(spec, issuedRequestId);
+    const extPath = join(tmp, "loom-emission-child.mjs");
+    await writeFile(extPath, CHILD_EXTENSION_SOURCE, "utf8");
+    const args: string[] = ["--mode", "rpc", "--no-session", "-ne"];
+    if (plan.loadsExtension) args.push("-e", extPath);
+    if (plan.allowlist.length > 0) args.push("--tools", plan.allowlist.join(","));
+    const rpc = adopt(openPiRpcChild({
+      role: "pi child",
+      idPrefix: `t4-${spec.label}`,
+      args,
+      cwd: tmp,
+      env: { ...childEnvFor(server.baseUrl, plan), ...await isolatedPiEnv(tmp) },
+      responseTimeoutMs: STATE_TIMEOUT_MS,
+    }));
+    childReady.resolve(rpc.child);
 
-      const channel = await observeChannel(rpc);
-      const commandsSeen: string[] = [];
-      let commandListed = false;
-      if (channel.channelAlive) {
-        const commands = await discoverCommands(rpc);
-        for (const command of commands) {
-          if (typeof command["name"] === "string" && typeof command["source"] === "string") {
-            commandsSeen.push(`${command["name"]} (${command["source"]})`);
+    const barrier = await runLauncherBarrier(
+      rpc,
+      expectation,
+      { invocations: 1, wait: plan.launcher, unobserved: readinessAbsentWithinWindow },
+      {
+        onDecided: () => decisionMade.resolve(),
+        afterPrompt: async (): Promise<number | null> => {
+          let holdResolvedAt: number | null = null;
+          if (plan.waitForHold) {
+            await rpc.bus.waitFor(holdResolvedPredicate, HOLD_RESOLVE_TIMEOUT_MS, "hold resolution");
+            holdResolvedAt = Date.now();
           }
-        }
-        commandListed = listsExtensionCommand(commands, expectation.readinessCommand);
-      }
+          await awaitFirstRequestOrDeadline(server);
+          return holdResolvedAt;
+        },
+      },
+    );
 
-      // 3. Readiness — invoke the verified command (no model request) and
-      //    wait, bounded, for the bound payload through entry_appended.
-      let invocationCount = 0;
-      let readiness: ReadinessObservation = canonicalRecord({
-        kind: "absent" as const,
-        reason: "the launcher never reached the readiness stage",
-      });
-      let readinessObservedAt: number | null = null;
-      if (commandListed) {
-        invocationCount = 1;
-        const invocation = await rpc.rpcRequest(
-          { type: "prompt", message: `/${expectation.readinessCommand}` },
-          "readiness command invocation",
-        );
-        if (invocation["success"] !== true) {
-          throw new Error(`the readiness command invocation was refused by the child: ${boundedEvent(invocation)}`);
-        }
-        const launcher = plan.launcher;
-        if (launcher.kind === "kills-child") {
-          // The infrastructure-failure boundary control: the child dies AFTER
-          // a verified invocation, while the launcher's bounded readiness
-          // wait is open — the launcher must surface an infrastructure
-          // failure, never a minted refusal decision.
-          setTimeout(() => releaseChild(), launcher.afterMs);
-        }
-        const readinessWait = settleWait(rpc.bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
-        const outcome = launcher.kind === "cancels"
-          ? await Promise.race([readinessWait, sleep(launcher.afterMs).then((): "cancelled" => "cancelled")])
-          : await readinessWait;
-        if (outcome === "cancelled") {
-          readiness = canonicalRecord({ kind: "cancelled" as const });
-          releaseChild();
-        } else {
-          const settled = settledReadiness(outcome, rpc, readinessAbsentWithinWindow);
-          readiness = settled.readiness;
-          readinessObservedAt = settled.observedAt;
-        }
-      }
-
-      const finalDecision = await decideStartupThroughRouteBind(rpc, expectation, {
-        ...channel,
-        commandListed,
-        readiness,
-      });
-      decisionMade.resolve();
-      const decisionAt = Date.now();
-
-      // 5. Act on the closed decision — prompt delivery ONLY on the open arm.
-      let prompted = false;
-      let holdResolvedAt: number | null = null;
-      if (finalDecision.kind === "open") {
-        await deliverIssuedPrompt(rpc, expectation);
-        prompted = true;
-        if (plan.waitForHold) {
-          await rpc.bus.waitFor(holdResolvedPredicate, HOLD_RESOLVE_TIMEOUT_MS, "hold resolution");
-          holdResolvedAt = Date.now();
-        }
-        await awaitFirstRequestOrDeadline(server);
-      } else {
-        await sleep(REFUSE_GRACE_MS);
-      }
-
-      // 6. The launcher's own release: the barrier is decided, so this child's
-      //    reservation is released (the finally below is only the safety net).
-      //    A held release keeps the child mid-flight across a peer's release
-      //    (the AS-020 concurrent-isolation observation point), capped so a
-      //    lost test can never wedge the run.
-      if (spec.holdRelease !== undefined) {
-        await Promise.race([spec.holdRelease, sleep(HOLD_RELEASE_CAP_MS)]);
-      }
-      releaseChild();
-
-      const hits = server.hits;
-      return canonicalRecord({
-        label: spec.label,
-        decision: finalDecision,
-        channelAlive: channel.channelAlive,
-        channelDiagnostic: channel.channelDiagnostic,
-        commandListed,
-        commandsSeen: Object.freeze(commandsSeen),
-        invocationCount,
-        readinessPayload: readiness.kind === "observed" ? readiness.payload : null,
-        readinessObservedAt,
-        readinessEntriesAfterDecision: customEntriesOf(rpc.bus, READINESS_ENTRY_TYPE)
-          .filter((event) => event.receivedAt > decisionAt).length,
-        prompted,
-        holdResolvedAt,
-        firstRequestAt: hits.length > 0 ? hits[0]!.at : null,
-        requestCount: hits.length,
-        issuedRequestId,
-        countingBaseUrl: server.baseUrl,
-        childPid: typeof rpc.child.pid === "number" ? rpc.child.pid : null,
-        childKilled: rpc.releasedAt() !== null,
-        releasedAt: rpc.releasedAt(),
-        stderr: rpc.stderr(),
-      });
-    } finally {
-      await rpcRef.current?.dispose();
-      await server.close();
-      await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    // 6. The launcher's own release: the barrier is decided, so this child's
+    //    reservation is released (the bracket is only the safety net). A held
+    //    release keeps the child mid-flight across a peer's release (the
+    //    AS-020 concurrent-isolation observation point), capped so a lost
+    //    test can never wedge the run.
+    if (spec.holdRelease !== undefined) {
+      await Promise.race([spec.holdRelease, sleep(HOLD_RELEASE_CAP_MS)]);
     }
-  })().catch((error: unknown) => {
-    childReady.resolve(null);
-    // Infrastructure failures keep their existing semantics — they propagate
-    // as errors, never as minted gate decisions — and they carry the run's
-    // own counted model-request snapshot so the zero-request property stays
-    // provable on the rejection path too.
-    const countedRequests = countingHitsRef.current.length;
-    if (error instanceof Error) {
-      throw new Error(
-        `${error.message} — the counting substitute recorded ${countedRequests} model request(s) before this failure`,
-        { cause: error },
-      );
-    }
-    throw error;
+    rpc.release();
+
+    const hits = server.hits;
+    return canonicalRecord({
+      label: spec.label,
+      decision: barrier.decision,
+      channelAlive: barrier.channelAlive,
+      channelDiagnostic: barrier.channelDiagnostic,
+      commandListed: barrier.commandListed,
+      commandsSeen: commandsSeenOf(barrier.commands),
+      invocationCount: barrier.invocationCount,
+      readinessPayload: barrier.readiness.kind === "observed" ? barrier.readiness.payload : null,
+      readinessObservedAt: barrier.readinessObservedAt,
+      readinessEntriesAfterDecision: customEntriesOf(rpc.bus, READINESS_ENTRY_TYPE)
+        .filter((event) => event.receivedAt > barrier.decidedAt).length,
+      prompted: barrier.prompted,
+      holdResolvedAt: barrier.afterPrompt ?? null,
+      firstRequestAt: hits.length > 0 ? hits[0]!.at : null,
+      requestCount: hits.length,
+      issuedRequestId,
+      countingBaseUrl: server.baseUrl,
+      childPid: typeof rpc.child.pid === "number" ? rpc.child.pid : null,
+      childKilled: rpc.releasedAt() !== null,
+      releasedAt: rpc.releasedAt(),
+      stderr: rpc.stderr(),
+    });
   });
+  // A run that fails before (or while) spawning never resolves its child.
+  void result.catch(() => childReady.resolve(null));
   return {
     result,
     childReady: childReady.promise,
@@ -630,8 +535,8 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     expect(honest).toMatchObject({
       loadsExtension: true,
       variant: "matching",
-      toolName: REVIEWER_V2_CELL.toolName,
-      allowlist: [REVIEWER_V2_CELL.toolName],
+      toolName: REVIEWER_V2_CELL.spec.toolName,
+      allowlist: [REVIEWER_V2_CELL.spec.toolName],
       driftedBaseUrl: null,
       readinessDelayMs: 0,
       launcher: { kind: "waits" },
@@ -647,7 +552,7 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     const misbound = childPlanOf(scenario("plan-misbound", driftedChild({ kind: "misbound", requestId: "req-peer", cell: JUDGE_V1_CELL })), issued);
     expect(misbound.binding).toMatchObject({ requestId: "req-peer", kind: "judge-verdict", version: "v1" });
     expect(misbound.binding.contextDigest).toBe(contextDigestOf("emission-startup-context:req-peer"));
-    expect(misbound.toolName).toBe(JUDGE_V1_CELL.toolName);
+    expect(misbound.toolName).toBe(JUDGE_V1_CELL.spec.toolName);
     const drifted = childPlanOf(scenario("plan-drifted", driftedChild({ kind: "drifted-tool-name", toolName: "loom_emit_x" })), issued);
     expect(drifted).toMatchObject({ toolName: "loom_emit_x", allowlist: ["loom_emit_x"], cell: REVIEWER_V2_CELL });
     expect(childPlanOf(scenario("plan-absent", { kind: "absent-extension" }), issued).loadsExtension).toBe(false);
@@ -656,8 +561,11 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     expect(slow).toMatchObject({ variant: "slow", readinessDelayMs: 9, launcher: { kind: "cancels", afterMs: 3 } });
   });
 
-  it("matching readiness on the judge-verdict v1 cell opens the gate, and the first model request lands after the readiness observation (FR-008)", async () => {
-    const run = await runStartupGate(scenario("matching-judge-v1", loadedChild(), { issuedCell: JUDGE_V1_CELL }));
+  it.each([
+    { label: "matching-judge-v1", cell: JUDGE_V1_CELL, kind: "judge-verdict", version: "v1", toolName: "loom_emit_judge_verdict" },
+    { label: "matching-reviewer-v2", cell: REVIEWER_V2_CELL, kind: "reviewer-payload", version: "v2", toolName: "loom_emit_reviewer_payload" },
+  ] as const)("matching readiness on the $kind $version cell opens the gate, and the first model request lands after the readiness observation (FR-008)", async ({ label, cell, kind, version, toolName }) => {
+    const run = await runStartupGate(scenario(label, loadedChild(), { issuedCell: cell }));
     const open = expectOpenRun(run);
     expect(run.channelAlive).toBe(true);
     expect(run.commandListed).toBe(true);
@@ -667,36 +575,10 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     const { firstRequestAt, readinessObservedAt } = orderingPair(run);
     expect(firstRequestAt).toBeGreaterThanOrEqual(readinessObservedAt);
     expect(open.readiness.requestId).toBe(run.issuedRequestId);
-    expect(open.readiness.kind).toBe("judge-verdict");
-    expect(open.readiness.version).toBe("v1");
-    expect(open.readiness.toolName).toBe("loom_emit_judge_verdict");
-    expect(open.readiness.schemaDigest).toBe(sha256Hex(JUDGE_V1_CELL.schemaBytes));
-    expect(open.readiness.active).toBe(true);
-    expect(open.readiness.childPid).toBe(run.childPid);
-    expect(open.route).toEqual({
-      kind: "pinned-endpoint",
-      provider: "loom-counting",
-      modelId: "loom-counting-model",
-      api: "openai-completions",
-      baseUrl: run.countingBaseUrl,
-    });
-  });
-
-  it("matching readiness on the reviewer-payload v2 cell opens the gate, and the first model request lands after the readiness observation (FR-008)", async () => {
-    const run = await runStartupGate(scenario("matching-reviewer-v2"));
-    const open = expectOpenRun(run);
-    expect(run.channelAlive).toBe(true);
-    expect(run.commandListed).toBe(true);
-    expect(run.invocationCount).toBe(1);
-    expect(run.prompted).toBe(true);
-    expect(run.requestCount).toBe(1);
-    const { firstRequestAt, readinessObservedAt } = orderingPair(run);
-    expect(firstRequestAt).toBeGreaterThanOrEqual(readinessObservedAt);
-    expect(open.readiness.requestId).toBe(run.issuedRequestId);
-    expect(open.readiness.kind).toBe("reviewer-payload");
-    expect(open.readiness.version).toBe("v2");
-    expect(open.readiness.toolName).toBe("loom_emit_reviewer_payload");
-    expect(open.readiness.schemaDigest).toBe(sha256Hex(REVIEWER_V2_CELL.schemaBytes));
+    expect(open.readiness.kind).toBe(kind);
+    expect(open.readiness.version).toBe(version);
+    expect(open.readiness.toolName).toBe(toolName);
+    expect(open.readiness.schemaDigest).toBe(cellSchemaDigest(cell));
     expect(open.readiness.active).toBe(true);
     expect(open.readiness.childPid).toBe(run.childPid);
     expect(open.route).toEqual({
@@ -790,9 +672,9 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     const raw = recordOf(run.readinessPayload);
     expect(raw?.["toolName"]).toBe(driftedToolName);
     expect(raw?.["active"]).toBe(true);
-    expect(raw?.["schemaDigest"]).toBe(sha256Hex(REVIEWER_V2_CELL.schemaBytes));
+    expect(raw?.["schemaDigest"]).toBe(cellSchemaDigest(REVIEWER_V2_CELL));
     expect(refusedDecision.message).toContain(driftedToolName);
-    expect(refusedDecision.message).toContain(REVIEWER_V2_CELL.toolName);
+    expect(refusedDecision.message).toContain(REVIEWER_V2_CELL.spec.toolName);
   });
 
   it("a registered-but-inactive tool under a real --tools allowlist exclusion is honestly refused with ZERO model requests (AS-020)", async () => {

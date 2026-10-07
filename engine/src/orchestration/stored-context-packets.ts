@@ -4,12 +4,16 @@
  * content-addressed blob store (see `storedContextPacket` in the core). This
  * is the one read path — the Run Directory adapter, the reviewer-facing
  * reader script and cross-run predecessor walks all restore section bytes
- * through it, and the packet parsers then re-hash every section.
+ * through it, and the packet parsers then re-hash every section. The
+ * predecessor archive's port, `openStoredContextPacketFile`, shares the blob
+ * read but hands the core exact file BYTES plus the blob lookup, so the core
+ * derives the record from the very bytes it verified.
  */
 
 import { dirname, join } from "node:path";
 import { withStoredSectionBytes } from "../core/context-packets";
 import type { DomainResult } from "../core/orchestration-contract";
+import type { PublishedPacketFile } from "../core/predecessor-archive";
 import { readRunBytesNoFollow } from "./no-follow-fs";
 
 /** The Run Directory child holding section blobs, one file per section digest. */
@@ -45,6 +49,20 @@ export type StoredContextRecord = Readonly<{
  *  `runDirectory`'s blob store; each blob is read under `sectionBound`. The
  *  bound is explicit: `undefined` is the Run Directory handle's legacy
  *  unbounded `readContext`, which immutable pre-bound evidence still needs. */
+/** One section blob of `runDirectory`'s store under `sectionBound`: `null`
+ *  when absent; any other read failure throws for the caller to report. */
+function readSectionBlob(runDirectory: string, digest: string, sectionBound: number | undefined): Buffer | null {
+  try {
+    return readRunBytesNoFollow(join(runDirectory, CONTEXT_SECTION_BLOBS, digest), sectionBound);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+const unreadablePacket = (packetPath: string, error: unknown): string =>
+  `context packet ${packetPath} is unreadable: ${error instanceof Error ? error.message : String(error)}`;
+
 export function readStoredContextRecord(
   runDirectory: string,
   packetFile: Buffer,
@@ -52,14 +70,9 @@ export function readStoredContextRecord(
 ):DomainResult<StoredContextRecord, string> {
   let sectionBytes = 0;
   const resolved = withStoredSectionBytes(JSON.parse(packetFile.toString("utf8")) as unknown, (digest) => {
-    try {
-      const bytes = readRunBytesNoFollow(join(runDirectory, CONTEXT_SECTION_BLOBS, digest), sectionBound);
-      sectionBytes += bytes.length;
-      return bytes;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
+    const bytes = readSectionBlob(runDirectory, digest, sectionBound);
+    if (bytes !== null) sectionBytes += bytes.length;
+    return bytes;
   });
   return resolved.ok
     ? { ok: true, value: Object.freeze({ record: resolved.value, sectionBytes }) }
@@ -81,6 +94,37 @@ export function readStoredContextPacketFile(
     const stored = readStoredContextRecord(dirname(dirname(packetPath)), fileBytes, bounds.section);
     return stored.ok ? { ok: true, value: Object.freeze({ fileBytes, ...stored.value }) } : stored;
   } catch (error) {
-    return { ok: false, error: `context packet ${packetPath} is unreadable: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, error: unreadablePacket(packetPath, error) };
+  }
+}
+
+/**
+ * The predecessor archive's published-packet port (`ResolvePublishedPacket`):
+ * one stored packet file's exact bytes, read under `bounds.file`, and a lookup
+ * of the holding run's section blobs under `bounds.section`. It never decodes
+ * the file: `projectArchivedPredecessor` verifies these bytes against the
+ * retained reference and derives the record from them, so the bytes and the
+ * record it projects cannot disagree. A blob read failure other than absence
+ * reports the same message `readStoredContextPacketFile` does.
+ */
+export function openStoredContextPacketFile(
+  packetPath: string,
+  bounds: StoredPacketBounds,
+): DomainResult<PublishedPacketFile, string> {
+  try {
+    const fileBytes = readRunBytesNoFollow(packetPath, bounds.file);
+    const runDirectory = dirname(dirname(packetPath));
+    return { ok: true, value: Object.freeze({
+      fileBytes,
+      readSectionBlob: (digest: string): DomainResult<Uint8Array | null, string> => {
+        try {
+          return { ok: true, value: readSectionBlob(runDirectory, digest, bounds.section) };
+        } catch (error) {
+          return { ok: false, error: unreadablePacket(packetPath, error) };
+        }
+      },
+    }) };
+  } catch (error) {
+    return { ok: false, error: unreadablePacket(packetPath, error) };
   }
 }

@@ -5,16 +5,19 @@
  * run's witnesses into a Loom review-authority receipt.
  *
  * The aggregate is a port created once per extension factory and injected
- * wherever it is touched — spawn admission binds a run, result capture
- * records a witness, the review-authority bridge verifies, session shutdown
- * prunes — so every caller, and every test, holds its own isolated instance
- * rather than reaching a process-global map through an import.
+ * wherever it is touched — spawn admission binds a run (and retracts that
+ * binding when it refuses the spawn), result capture records a witness, the
+ * review-authority bridge verifies, session shutdown prunes — so every caller,
+ * and every test, holds its own isolated instance rather than reaching a
+ * process-global map through an import.
  *
  * Ordering law: a run becomes current when its first exact standalone spawn is
  * bound before dispatch; retries and later captures enrich that run without
- * reordering it. Verification considers only the current run for the root;
- * rejection or a missing capture never falls back to an older run; exact
- * acceptance is idempotent and retires the root's older witnesses.
+ * reordering it. A spawn refused after binding a new run retracts it while it
+ * is still unwitnessed, so a refusal never leaves an empty run current.
+ * Verification considers only the current run for the root; rejection or a
+ * missing capture never falls back to an older run; exact acceptance is
+ * idempotent and retires the root's older witnesses.
  */
 
 import { createHash } from "node:crypto";
@@ -42,11 +45,18 @@ import {
 } from "../engine/src/core/orchestration-contract";
 import { orchestrationMarkers } from "./review-run-authority";
 
-/** The aggregate's interface: the four moments a witness is touched. */
+/** Whether a touch made its run current (`bound`) or found it already bound. */
+export type TrustedReviewRunTouch = "bound" | "already-bound";
+
+/** The aggregate's interface: the moments a witness is touched. */
 export type TrustedReviewWitnesses = Readonly<{
   /** Bind a run as current for its root on its first exact standalone spawn;
    *  a retry of an already-bound run never reorders it. */
-  touch: (sessionId: string, binding: SessionRunBinding) => void;
+  touch: (sessionId: string, binding: SessionRunBinding) => TrustedReviewRunTouch;
+  /** Undo a `bound` touch whose spawn was refused: the run is dropped while
+   *  it holds no witnessed capture, so the root's previous run is current
+   *  again. A run that has since witnessed a capture is kept. */
+  retract: (sessionId: string, binding: SessionRunBinding) => void;
   /** Witness one exactly captured transcript under its run. Throws when the
    *  task's authority markers or the receipt digest cannot be trusted. */
   remember: (
@@ -191,7 +201,7 @@ export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
     sessionId: string,
     binding: SessionRunBinding,
     updateCaptures: (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>,
-  ): void => {
+  ): TrustedReviewRunTouch => {
     const sessionRoots = sessions.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
     sessions.set(sessionId, sessionRoots);
     const rootIdentity = resolve(binding.runsRoot);
@@ -211,11 +221,24 @@ export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
       nextTouch: previous === undefined ? root.nextTouch + 1 : root.nextTouch,
       runs,
     }));
+    return previous === undefined ? "bound" : "already-bound";
   };
 
   return Object.freeze({
-    touch: (sessionId: string, binding: SessionRunBinding): void => {
-      updateRun(sessionId, binding, (captures) => captures);
+    touch: (sessionId: string, binding: SessionRunBinding): TrustedReviewRunTouch =>
+      updateRun(sessionId, binding, (captures) => captures),
+    retract: (sessionId: string, binding: SessionRunBinding): void => {
+      const sessionRoots = sessions.get(sessionId);
+      const rootIdentity = resolve(binding.runsRoot);
+      const root = sessionRoots?.get(rootIdentity);
+      const identity = trustedRunIdentity(binding);
+      const run = root?.runs.get(identity);
+      if (sessionRoots === undefined || root === undefined || run === undefined || run.captures.size > 0) return;
+      const runs = new Map(root.runs);
+      runs.delete(identity);
+      if (runs.size > 0) sessionRoots.set(rootIdentity, Object.freeze({ nextTouch: root.nextTouch, runs }));
+      else sessionRoots.delete(rootIdentity);
+      if (sessionRoots.size === 0) sessions.delete(sessionId);
     },
     remember: (sessionId, binding, role, task, outcome): void => {
       const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);

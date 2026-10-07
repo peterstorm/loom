@@ -23,12 +23,7 @@ import { parseContextDigest, type ContextDigest } from "../../src/core/orchestra
 import type { LoomAgentName } from "../../src/core/model-profiles";
 import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import type { PiSpawnItem } from "../../src/core/pi-spawn-input";
-
-/** Fixture unwrapping: a refused parse is a fixture bug, thrown loudly. */
-export function fixtureValue<T, E>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: E }>): T {
-  if (!result.ok) throw new Error(`fixture refused: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
+import { labelledValue, value } from "./parse-result";
 
 /**
  * The ONE binding mint every fixture uses: the registry-certified issued
@@ -39,13 +34,11 @@ export function fixtureValue<T, E>(result: Readonly<{ ok: true; value: T }> | Re
 export function mintEmissionBinding<K extends PayloadProducerKindName>(
   issued: IssuedEmissionRequest & Readonly<{ kind: K }>,
 ): IssuedEmissionBindingOf<K> {
-  const minted = issueEmissionBinding(issued);
-  if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
-  return minted.value;
+  return labelledValue("emission binding", issueEmissionBinding(issued));
 }
 
-export const CONTEXT_DIGEST: ContextDigest = fixtureValue(parseContextDigest("c0ffee".padEnd(64, "0")));
-export const OTHER_CONTEXT_DIGEST: ContextDigest = fixtureValue(parseContextDigest("deadbeef".padEnd(64, "0")));
+export const CONTEXT_DIGEST: ContextDigest = value(parseContextDigest("c0ffee".padEnd(64, "0")));
+export const OTHER_CONTEXT_DIGEST: ContextDigest = value(parseContextDigest("deadbeef".padEnd(64, "0")));
 
 export const REVIEWER_V2 = mintEmissionBinding({ requestId: "request:emission-v2", kind: "reviewer-payload", version: "v2" });
 export const REVIEWER_V3 = mintEmissionBinding({ requestId: "request:emission-v3", kind: "reviewer-payload", version: "v3" });

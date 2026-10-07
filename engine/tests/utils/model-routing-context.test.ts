@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { isAbsolute, join } from "node:path";
 import {
   activeAgentDir,
   buildPiRoutingContext,
@@ -50,6 +50,23 @@ describe("model routing context shell", () => {
     // assignment instead of removing the key, which would mask the fallback.
     delete process.env.PI_CODING_AGENT_DIR;
     expect(homeAgentDir()).toBe(join(home, ".pi", "agent"));
+    expect(activeAgentDir()).toBe(join(home, ".pi", "agent"));
+  });
+
+  it("falls back to the account's home directory when HOME is unset, never a cwd-relative .pi/agent", () => {
+    // `$HOME ?? ""` once resolved this to `.pi/agent` relative to the cwd,
+    // disagreeing with Pi (os.homedir() → the passwd entry). The one shared
+    // rule now gives every reader Pi's answer.
+    delete process.env.PI_CODING_AGENT_DIR;
+    delete process.env.HOME;
+    const accountHome = userInfo().homedir;
+    expect(isAbsolute(activeAgentDir())).toBe(true);
+    expect(activeAgentDir()).toBe(join(accountHome, ".pi", "agent"));
+    expect(homeAgentDir()).toBe(join(accountHome, ".pi", "agent"));
+  });
+
+  it("treats an empty PI_CODING_AGENT_DIR as unset, as Pi does", () => {
+    process.env.PI_CODING_AGENT_DIR = "";
     expect(activeAgentDir()).toBe(join(home, ".pi", "agent"));
   });
 

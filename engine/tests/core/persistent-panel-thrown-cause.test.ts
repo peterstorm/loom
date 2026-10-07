@@ -14,8 +14,10 @@ import {
   startPersistentArchitecturePanel,
   submitArchitectureCandidateResult,
 } from "../../src/core/persistent-panel";
-import { architecturePanelFixture, panelPublicationResolver as resolver } from "../fixtures/panel-authority";
+import { createPanelPublications } from "../fixtures/panel-authority";
 import { value } from "../fixtures/parse-result";
+
+const { architecturePanelFixture, resolver } = createPanelPublications();
 
 function awaitingJudges() {
   const { authority, candidates, judges } = architecturePanelFixture("run.thrown-cause.arch");

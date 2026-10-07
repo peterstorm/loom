@@ -21,6 +21,7 @@ import {
   specCheckAuthorityOf,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
+  type ReservedSlot,
   type ReservedSlotClaims,
 } from "../../../pi/reserved-slot";
 import { slotClaims } from "../fixtures/pi-reserved-slot";
@@ -132,5 +133,32 @@ describe("parseReservedSlot", () => {
       value: { agentType: "code-implementer-agent", taskId: "T1", role: "implementation", authority: IMPLEMENTATION },
     });
     expect(parsed.ok && Object.isFrozen(parsed.value)).toBe(true);
+  });
+
+  it("refuses in precedence order: several authorities, then a role not played, then a Task mismatch", () => {
+    // Every claim below also carries an implementation authority for another
+    // Task; the earlier refusal always wins and the mismatch is never reported.
+    const several = parseReservedSlot(slotClaims({
+      agentType: "code-implementer-agent", taskId: "T2", implementationAuthority: IMPLEMENTATION, reviewAuthority: REVIEW,
+    }));
+    expect(several).toEqual({
+      ok: false,
+      error: "reserved slot for code-implementer-agent carries 2 role authorities (implementation, review); exactly one is allowed",
+    });
+    const notPlayed = parseReservedSlot(slotClaims({
+      agentType: "code-reviewer", taskId: "T2", implementationAuthority: IMPLEMENTATION,
+    }));
+    expect(notPlayed).toEqual({
+      ok: false,
+      error: "reserved slot for code-reviewer carries implementation authority, but the agent is not an implementation agent",
+    });
+  });
+
+  it("mints the only ReservedSlot values: a structurally identical literal is not one", () => {
+    const parsed = parseReservedSlot(slotClaims({ agentType: "code-reviewer", taskId: "T1", reviewAuthority: REVIEW }));
+    // @ts-expect-error — a ReservedSlot carries the producer's module-private proof.
+    const forged: ReservedSlot = { agentType: "code-reviewer", taskId: "T1", role: "review", authority: REVIEW };
+    // The proof is type-only: the minted value and the literal are equal data.
+    expect(parsed).toEqual({ ok: true, value: forged });
   });
 });

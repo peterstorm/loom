@@ -245,6 +245,31 @@ describe("recordWindow (--pilot)", () => {
     decided(await recordWindow(windowRun(memoryStore(), windowRecord(false), { preregistration: { ...LOADED, prereg: unresolvable } })));
   });
 
+  it("loads the workload corpus only for a window that dispatches: a blocked or --preflight-only window is retained whatever the corpus", async () => {
+    const loads: string[] = [];
+    const unloadable = { ...WORKLOAD, loadCorpusCases: () => { loads.push("load"); return { ok: false as const, error: "ENOENT: no such corpus" }; } };
+    const preflightOnly: WindowRecord = { ...windowRecord(true), dispatch: planDispatch(READY, true) };
+    for (const record of [windowRecord(false), preflightOnly]) {
+      const store = memoryStore();
+      const outcome = decided(await recordWindow(windowRun(store, record, { workload: unloadable })));
+      expect(outcome.decision).toBe("incomplete-missing-measurement");
+      expect(json(store, WINDOW_FILES.window)).toMatchObject({ dispatch: record.dispatch, observations: 0 });
+      expect(store.files.has(WINDOW_FILES.decision)).toBe(true);
+    }
+    expect(loads).toEqual([]);
+
+    // A window that will dispatch loads it first, and refuses before writing anything.
+    const store = memoryStore();
+    const route = fakeRoute(accepted);
+    expect(await recordWindow(windowRun(store, windowRecord(true), { workload: unloadable }, route))).toEqual({
+      ok: false,
+      error: "window test-window cannot dispatch: its workload corpus does not load: ENOENT: no such corpus",
+    });
+    expect(loads).toEqual(["load"]);
+    expect(store.writes).toEqual([]);
+    expect(route.requests).toHaveLength(0);
+  });
+
   it("names a window by its preregistration id and a path-safe start time", () => {
     expect(pilotWindowId("gcd-ad11-pilot-1", "2026-10-03T09:23:39.047Z")).toBe("gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z");
     expect(readdirSync(join(HERE, "windows")).every((id) => id.startsWith(`${prereg.id}--`) && !/[:.]/.test(id))).toBe(true);

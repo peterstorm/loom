@@ -3,49 +3,24 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { evaluatePilot } from "./pilot-core";
-import type { ArmRequest } from "./pilot-dispatch";
-import { buildPairSchedule } from "./pilot-preregistration";
-import { parseBlindingKey, parseQualityAssessment } from "./pilot-quality";
-import { rubricAssessment } from "./pilot-rubric";
-import { caseInputKey, pilotRequestId, renderTaskBody, type CaseInput } from "./pilot-workload";
-import { blind, blindedPacket, dispatchSchedule } from "./pilot-window";
-import {
-  accepted,
-  ATTEMPT_MS,
-  fakeRoute,
-  fixtures,
-  HERE,
-  inputs,
-  prereg,
-  READY,
-  REJECTED,
-  REPO_ROOT,
-  runWindow,
-  TIMEOUT,
-  WINDOW_ID,
-} from "./pilot-test-fixtures";
+import { HERE, REPO_ROOT } from "./pilot-test-fixtures";
 
 /**
- * Shell-level behaviour of `scripts/run-model-calibration.ts --pilot/--decide`:
+ * Shell-level behaviour of `scripts/run-model-calibration.ts --pilot/--decide`,
+ * the CLI itself spawned: the explicit opt-in, and — against an unreachable
+ * route — a blocked preflight recorded honestly (nothing dispatched, nothing
+ * fabricated, decision incomplete, the workload corpus never loaded), the
+ * never-overwrite refusal and the offline re-decision with its
+ * preregistration-drift refusal.
  *
- * - the CLI itself (spawned): the explicit opt-in, and — against an
- *   unreachable route — a blocked preflight recorded honestly (nothing
- *   dispatched, nothing fabricated, decision incomplete), the never-overwrite
- *   refusal and the offline re-decision with its preregistration-drift
- *   refusal. The retention rules behind them are pinned directly at the
- *   `WindowStore` port in pilot-retention.test.ts;
- * - against a fake route (pilot-test-fixtures.ts) wired into the window
- *   dispatch path `recordWindow` runs (`pilot-window.ts`): the matched-arm
- *   dispatch, the attempt-2 retry budget, the blinding key / packet and the
- *   rubric assessor wiring, and the fail-closed aborts on a missing input or
- *   an inconsistent recorded sample. `recordWindow`'s own wiring of the
- *   dispatch port, the clock and the per-sample persistence is pinned in
- *   pilot-retention.test.ts, the rubric in pilot-rubric.test.ts, and the live
- *   Pi adapter with its transcript classification in pilot-dispatch.test.ts.
- *   What stays untested is only the script's construction of the live
- *   adapters themselves (`piArmDispatch`, `performance.now`, git's
- *   changed-path lookup, the filesystem store), which needs a model route.
+ * Everything behind the script's ports is pinned at its own interface: the
+ * retention rules and `recordWindow`'s wiring at the `WindowStore` and
+ * `ArmDispatch` ports in pilot-retention.test.ts, the matched dispatch and
+ * blinding against a fake route in pilot-window.test.ts, the rubric in
+ * pilot-rubric.test.ts, and the live Pi adapter with its transcript
+ * classification in pilot-dispatch.test.ts. What stays untested is only the
+ * script's construction of the live adapters themselves (`piArmDispatch`,
+ * `performance.now`, git's changed-path lookup), which needs a model route.
  */
 
 const temps: string[] = [];
@@ -107,6 +82,22 @@ describe("run-model-calibration --pilot", () => {
     expect(decision.preregistration.path).not.toMatch(/^\//);
   });
 
+  it("retains a blocked window even when the workload corpus cannot be read (it is loaded only to dispatch)", () => {
+    const fixture = unreachablePreregistration();
+    const fixtures = JSON.parse(readFileSync(join(HERE, "workload-fixtures.json"), "utf-8")) as { reviewer: { corpus: string } };
+    fixtures.reviewer.corpus = "calibration/grammar-constrained-decoding/no-such-corpus.json";
+    const fixturesPath = join(fixture.dir, "workload-fixtures.json");
+    writeFileSync(fixturesPath, JSON.stringify(fixtures, null, 2));
+    const result = run(["--pilot", fixture.prereg, "--fixtures", fixturesPath, "--window-dir", fixture.window], { LOOM_RUN_MODEL_CALIBRATION: "1" });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain("Release decision: incomplete-missing-measurement");
+    const window = JSON.parse(readFileSync(join(fixture.window, "window.json"), "utf-8"));
+    expect(window.preflight.kind).toBe("blocked");
+    expect(window.dispatch.kind).toBe("not-attempted");
+    expect(window.observations).toBe(0);
+    expect(existsSync(join(fixture.window, "release-decision.json"))).toBe(true);
+  });
+
   it("never overwrites a retained window", () => {
     const fixture = unreachablePreregistration();
     const args = ["--pilot", fixture.prereg, "--fixtures", join(HERE, "workload-fixtures.json"), "--window-dir", fixture.window];
@@ -134,160 +125,4 @@ describe("run-model-calibration --pilot", () => {
     expect(tampered.status).not.toBe(0);
     expect(tampered.stderr).toContain("changed after window");
   });
-});
-
-// ---------------------------------------------------------------------------
-// The live dispatch path against a fake route
-// ---------------------------------------------------------------------------
-
-const schedule = buildPairSchedule(prereg);
-
-const inputOf = (cell: ArmRequest["cell"], caseId: string): CaseInput => {
-  const input = inputs.get(caseInputKey(cell, caseId));
-  if (input === undefined) throw new Error(`${cell} ${caseId} has no resolved input`);
-  return input;
-};
-
-const taskBody = (cell: ArmRequest["cell"], caseId: string): string => renderTaskBody(inputOf(cell, caseId), fixtures);
-
-describe("run-model-calibration --pilot dispatch path against a fake route", () => {
-  it("dispatches each scheduled pair once per arm, in scheduled order, over the same task body", async () => {
-    const route = fakeRoute(accepted);
-    const { records, landed, progress } = await runWindow(route);
-    expect(route.requests).toHaveLength(schedule.length * 2);
-    schedule.forEach((pair, index) => {
-      const arms = route.requests.slice(index * 2, index * 2 + 2);
-      expect(arms.map((request) => request.arm)).toEqual([...pair.armOrder]);
-      const body = taskBody(pair.cell, pair.caseId);
-      for (const request of arms) {
-        expect(request.cell).toBe(pair.cell);
-        expect(request.attempt).toBe(1);
-        expect(request.cellBinding.binding.requestId).toBe(pilotRequestId(WINDOW_ID, pair.pairId, request.arm, 1));
-        expect(request.prompt.startsWith(`${body}\n\n## Output\n\n`)).toBe(true);
-      }
-      expect(arms[0]?.cellBinding.contextDigest).toBe(arms[1]?.cellBinding.contextDigest);
-    });
-    const dispatchedCells = new Set(route.requests.map((request) => request.cell));
-    const emissionCells = prereg.cells.filter((cell) => cell.qualification.kind !== "extraction-only").map((cell) => cell.cell);
-    expect([...dispatchedCells].sort()).toEqual([...emissionCells].sort());
-    expect(landed).toEqual(records);
-    expect(records.map((record) => `${record.sample.pairId}|${record.sample.arm}`))
-      .toEqual(schedule.flatMap((pair) => pair.armOrder.map((arm) => `${pair.pairId}|${arm}`)));
-    expect(progress).toHaveLength(schedule.length);
-    expect(progress.at(-1)).toBe(`${schedule.length}/${schedule.length} ${schedule.at(-1)?.pairId}`);
-  });
-
-  it("retries a semantic rejection with one fresh attempt 2 and times the sample across both attempts (AS-015)", async () => {
-    const route = fakeRoute((request) => (request.attempt === 1 ? REJECTED : accepted(request)));
-    const { records } = await runWindow(route);
-    expect(route.requests).toHaveLength(schedule.length * 4);
-    for (const record of records) {
-      expect(record.sample.attempts.map((attempt) => [attempt.attempt, attempt.outcome.kind])).toEqual([[1, "rejected"], [2, "accepted"]]);
-      expect(record.sample.dispatchToIngestionMs).toBe(2 * ATTEMPT_MS);
-      expect(record.kind).toBe("accepted");
-    }
-    const retries = route.requests.filter((request) => request.attempt === 2);
-    expect(new Set(retries.map((request) => request.cellBinding.binding.requestId)).size).toBe(retries.length);
-    expect(retries.every((request) => request.cellBinding.binding.requestId.endsWith("-a2"))).toBe(true);
-  });
-
-  it("never spends more than the attempt-2 budget, and never retries a non-semantic failure", async () => {
-    const exhausted = fakeRoute(() => REJECTED);
-    const rejected = await runWindow(exhausted);
-    expect(Math.max(...exhausted.requests.map((request) => request.attempt))).toBe(2);
-    expect(exhausted.requests).toHaveLength(schedule.length * 4);
-    expect(rejected.records.every((record) => record.sample.attempts.length === 2 && record.kind === "terminal")).toBe(true);
-
-    const timedOut = fakeRoute(() => TIMEOUT);
-    const terminal = await runWindow(timedOut);
-    expect(timedOut.requests).toHaveLength(schedule.length * 2);
-    for (const record of terminal.records) {
-      expect(record.sample.attempts.map((attempt) => attempt.outcome.kind)).toEqual(["timeout"]);
-      expect(record.sample.dispatchToIngestionMs).toBe(ATTEMPT_MS);
-      expect(record.kind).toBe("terminal");
-    }
-  });
-
-  it("blinds every accepted sample exactly once and the packet reveals no arm or pair", async () => {
-    // The judge cell's extraction arm never lands: terminal samples are never blinded.
-    const { records } = await runWindow(fakeRoute((request) =>
-      request.cell === "judge-verdict/v1" && request.arm === "extraction-only" ? REJECTED : accepted(request)));
-    const acceptedRecords = records.flatMap((record) => (record.kind === "accepted" ? [record] : []));
-    expect(acceptedRecords.length).toBeLessThan(records.length);
-    const blinded = blind(WINDOW_ID, records);
-    const key = parseBlindingKey(blinded.key);
-    if (!key.ok) throw new Error(key.error.join("; "));
-    expect(key.value.windowId).toBe(WINDOW_ID);
-
-    const sampleIds = acceptedRecords.map((record) => `${record.sample.pairId}|${record.sample.arm}`);
-    const keyIds = key.value.entries.map((entry) => `${entry.pairId}|${entry.arm}`);
-    expect([...keyIds].sort()).toEqual([...sampleIds].sort());
-    expect(new Set(keyIds).size).toBe(keyIds.length);
-    expect(keyIds).not.toEqual(sampleIds);
-    for (const entry of blinded.entries) {
-      const owners = acceptedRecords.filter((record) => record.sample.pairId === entry.pairId && record.sample.arm === entry.arm);
-      expect(owners).toHaveLength(1);
-      expect(entry.payload).toBe(owners[0]?.acceptedPayload);
-    }
-
-    const packet = blindedPacket(WINDOW_ID, blinded.entries);
-    expect(packet.entries.map((entry) => entry.blindId)).toEqual(key.value.entries.map((entry) => entry.blindId));
-    for (const entry of packet.entries) expect(Object.keys(entry).sort()).toEqual(["blindId", "caseId", "cell", "payload"]);
-    const serialized = JSON.stringify(packet);
-    expect(serialized).not.toMatch(/emission-enabled|extraction-only|emission-tool|"arm"|"pairId"/);
-  });
-
-  it("wires the rubric assessor over the blinded packet into evidence the release decision accepts", async () => {
-    const { records } = await runWindow(fakeRoute(accepted));
-    const blinded = blind(WINDOW_ID, records);
-    const assessed = rubricAssessment(prereg, blinded.entries, inputs);
-    if (!assessed.ok) throw new Error(assessed.error.join("; "));
-    const rubric = parseQualityAssessment(assessed.value);
-    if (!rubric.ok) throw new Error(rubric.error.join("; "));
-    expect(rubric.value).toMatchObject({ assessorId: "rubric-v1", blinded: true });
-    expect(rubric.value.entries.map((entry) => entry.blindId)).toEqual(blinded.key.entries.map((entry) => entry.blindId));
-    expect(rubric.value.entries.some((entry) => entry.escapedDefects.length > 0)).toBe(true);
-
-    const evaluated = evaluatePilot({
-      preregistration: prereg, preflight: READY, observations: records.map((record) => record.sample),
-      quality: { key: blinded.key, assessments: [rubric.value] },
-    });
-    if (!evaluated.ok) throw new Error(evaluated.error.problems.join("\n"));
-    expect(evaluated.value.cells.every((cell) => cell.kind !== "not-measured")).toBe(true);
-  });
-
-  describe("aborts the window loudly instead of recording a fabricated sample", () => {
-    const first = schedule[0] as (typeof schedule)[number];
-
-    it("refuses a preregistered case with no resolved input before dispatching it", async () => {
-      const route = fakeRoute(accepted);
-      const landed: unknown[] = [];
-      const missing = new Map([...inputs].filter(([key]) => key !== caseInputKey(first.cell, first.caseId)));
-      await expect(dispatchSchedule({
-        windowId: WINDOW_ID, prereg, fixtures, inputs: missing, dispatch: route.dispatch, now: route.now,
-        onSample: (record) => { landed.push(record); }, onPair: () => {},
-      })).rejects.toThrow(`no resolved input for ${first.cell} case ${first.caseId}`);
-      expect(route.requests).toHaveLength(0);
-      expect(landed).toHaveLength(0);
-    });
-
-    it("refuses a recorded observation the sample parser rejects", async () => {
-      // An extraction-only attempt claiming the emission-tool source contradicts its arm.
-      const route = fakeRoute(() => ({ kind: "accepted", source: "emission-tool", fallbackOverRefusal: false, payloadDigest: "a".repeat(64) }));
-      const landed: unknown[] = [];
-      await expect(runWindow(route, (record) => { landed.push(record); }))
-        .rejects.toThrow(/^recorded observation for \S+\/extraction-only is malformed: /);
-      expect(landed.length).toBeLessThan(2);
-    });
-
-    it("refuses an accepted attempt that carries no accepted payload", async () => {
-      const route = fakeRoute(accepted);
-      const payloadless = { ...route, dispatch: async (request: ArmRequest) => ({ ...(await route.dispatch(request)), acceptedPayload: null }) };
-      const landed: unknown[] = [];
-      await expect(runWindow(payloadless, (record) => { landed.push(record); }))
-        .rejects.toThrow(`recorded sample for ${first.pairId}/${first.armOrder[0]} is inconsistent: its accepted outcome carries no accepted payload`);
-      expect(landed).toHaveLength(0);
-    });
-  });
-
 });

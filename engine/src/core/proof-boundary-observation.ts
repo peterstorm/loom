@@ -13,7 +13,7 @@
  * Pure: no I/O. Population mints it; the State File boundary parses it.
  */
 import { isExactGitSha } from "./git-sha";
-import { isRecord } from "./panel-kernel";
+import { hasExactKeys, isRecord } from "./plain-record";
 
 export type ProofBoundaryObservation =
   | Readonly<{ kind: "captured"; revision: string }>
@@ -28,15 +28,14 @@ const refused = (error: string): ProofBoundaryObservationParse => Object.freeze(
 /** Parse the persisted observation: exact keys, an exact Git revision, a non-empty cause. */
 export function parseProofBoundaryObservation(raw: unknown): ProofBoundaryObservationParse {
   if (!isRecord(raw)) return refused("proof_boundary_observation must be an object");
-  const keys = Object.keys(raw).sort();
   if (raw.kind === "captured") {
-    if (keys.join(",") !== "kind,revision" || !isExactGitSha(raw.revision)) {
+    if (!hasExactKeys(raw, ["kind", "revision"]) || !isExactGitSha(raw.revision)) {
       return refused("proof_boundary_observation captured shape must be exactly {kind, revision:<40/64-hex git SHA>}");
     }
     return Object.freeze({ ok: true, value: Object.freeze({ kind: "captured" as const, revision: raw.revision }) });
   }
   if (raw.kind === "absent") {
-    if (keys.join(",") !== "cause,kind" || typeof raw.cause !== "string" || raw.cause.trim() === "") {
+    if (!hasExactKeys(raw, ["kind", "cause"]) || typeof raw.cause !== "string" || raw.cause.trim() === "") {
       return refused("proof_boundary_observation absent shape must be exactly {kind, cause:<non-empty string>}");
     }
     return Object.freeze({ ok: true, value: Object.freeze({ kind: "absent" as const, cause: raw.cause }) });

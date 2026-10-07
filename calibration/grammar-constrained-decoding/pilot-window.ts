@@ -10,6 +10,9 @@
  * - Each arm runs attempt 1 and — only after a semantic rejection — the one
  *   fresh engine-issued attempt 2 (AD-9's shared request-slot budget). Wall
  *   clock runs from the initial dispatch through accepted ingestion.
+ * - Each attempt's request identity and issued binding are minted by the pure
+ *   `pilot-binding.ts`; this module imports only the port TYPES of
+ *   `pilot-dispatch.ts`, never its child-process adapter.
  * - `blind` / `blindedPacket` derive the retained blinding key and the
  *   arm-free packet an assessor sees (the rubric assessor is `pilot-rubric.ts`).
  */
@@ -20,15 +23,9 @@ import { parseSampleObservation, type SampleObservation } from "./pilot-observat
 import { buildPairSchedule, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
 import type { BlindingKey } from "./pilot-quality";
 import { SPEC_SEMANTIC_ATTEMPT_BUDGET, type CellKey, type PilotArm } from "./pilot-vocabulary";
-import { mintCellBinding, type ArmDispatch, type AttemptClassification } from "./pilot-dispatch";
-import {
-  caseInputKey,
-  pilotRequestId,
-  renderPilotPrompt,
-  renderTaskBody,
-  type CaseInput,
-  type WorkloadFixtures,
-} from "./pilot-workload";
+import { mintCellBinding, pilotRequestId } from "./pilot-binding";
+import type { ArmDispatch, AttemptClassification } from "./pilot-dispatch";
+import { caseInputOf, renderPilotPrompt, renderTaskBody, type WindowInputs, type WorkloadFixtures } from "./pilot-workload";
 
 /** One landed sample: an accepted sample carries its canonical payload; a
  *  terminal (non-accepted) sample carries none. */
@@ -50,8 +47,8 @@ export type WindowDispatch = Readonly<{
   windowId: string;
   prereg: Preregistration;
   fixtures: WorkloadFixtures;
-  /** Every preregistered case's input, keyed by `caseInputKey`. */
-  inputs: ReadonlyMap<string, CaseInput>;
+  /** Every preregistered case's resolved input (`resolveWindowInputs`). */
+  inputs: WindowInputs;
   /** The dispatch port: one attempt of one arm, launched and classified. */
   dispatch: ArmDispatch;
   /** Monotonic clock in milliseconds. */
@@ -98,8 +95,8 @@ export async function dispatchSchedule(window: WindowDispatch): Promise<readonly
   const records: SampleRecord[] = [];
   const schedule = buildPairSchedule(window.prereg);
   for (const [index, pair] of schedule.entries()) {
-    const input = window.inputs.get(caseInputKey(pair.cell, pair.caseId));
-    if (input?.cell !== pair.cell) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
+    const input = caseInputOf(window.inputs, pair.cell, pair.caseId);
+    if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
     const body = renderTaskBody(input, window.fixtures);
     for (const arm of pair.armOrder) {
       const record = await dispatchSample(window, pair, arm, body);

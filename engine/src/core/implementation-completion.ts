@@ -223,23 +223,16 @@ function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBasel
 
 /**
  * Parse an exact baseline as an unordered path-keyed set and return canonical
- * path order. Duplicate paths and all surplus fields fail closed. A caller
- * that compares the result passes the entry points of the digest scheme its
- * field was captured under; without one the result is the unknown (wide)
- * scheme, which serves digest-only callers and cannot reach
- * `changedDeclaredArtifacts`.
+ * path order. Duplicate paths and all surplus fields fail closed. Every caller
+ * names the issued scheme its field was captured under: a comparing caller its
+ * concrete scheme, a digest-only caller `UNKNOWN_SCHEME_BASELINE`, whose wide
+ * result cannot reach `changedDeclaredArtifacts`.
  */
-export function parseCanonicalArtifactBaseline(raw: unknown, path?: string): Parsed<ArtifactBaseline>;
 export function parseCanonicalArtifactBaseline<Scheme extends SnapshotScheme>(
   raw: unknown,
   path: string,
   scheme: ArtifactBaselineScheme<Scheme>,
-): Parsed<ArtifactBaseline<Scheme>>;
-export function parseCanonicalArtifactBaseline(
-  raw: unknown,
-  path = "baseline",
-  scheme: ArtifactBaselineScheme<SnapshotScheme> = UNKNOWN_SCHEME_BASELINE,
-): Parsed<ArtifactBaseline> {
+): Parsed<ArtifactBaseline<Scheme>> {
   return total(() => {
     const array = parseDenseArray(raw, path);
     if (!array.ok) return array;
@@ -273,7 +266,7 @@ function baselineDigest(value: JsonValue): ArtifactBaselineDigest {
 /** Stable SHA-256 over a canonical, permutation-invariant baseline set. */
 export function canonicalArtifactBaselineDigest(raw: unknown): Parsed<ArtifactBaselineDigest> {
   return total(() => {
-    const baseline = parseCanonicalArtifactBaseline(raw);
+    const baseline = parseCanonicalArtifactBaseline(raw, "baseline", UNKNOWN_SCHEME_BASELINE);
     return baseline.ok
       ? success(baselineDigest({ kind: "implementation-artifact-baseline", entries: baseline.value }))
       : baseline;

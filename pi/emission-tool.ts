@@ -6,8 +6,8 @@
  * wiring acts on, so the acceptance suite drives the same policy seam
  * production registers with — never a test twin. The PARENT launcher's gate
  * over the readiness report this child mints lives in
- * `pi/emission-readiness-gate.ts`; the report shape is the one contract the
- * two modules share.
+ * `pi/emission-readiness-gate.ts`; the protocol the two share (command, entry
+ * type, report shape) is owned by `pi/emission-readiness-protocol.ts`.
  *
  * Dependency direction: pi → engine, never outward, and NO pi-package import
  * (the tool definition is a plain record; the confined TypeBox claim happens
@@ -74,24 +74,13 @@ import {
   parseContextDigest,
   type ContextDigest,
 } from "../engine/src/core/orchestration-contract/identity";
-import type { PayloadProducerKindName } from "../engine/src/core/agent-catalog-projections";
+import type { EmissionReadinessReport } from "./emission-readiness-protocol";
 
 // ---------------------------------------------------------------------------
-// The launcher↔child readiness protocol contract (AD-4, probe-proven shape)
+// The child's own observable hold vocabulary (AD-4). The launcher↔child
+// readiness protocol itself — command, entry type, report shape — is owned by
+// `pi/emission-readiness-protocol.ts`, which both sides import.
 // ---------------------------------------------------------------------------
-
-/** The readiness command the launcher discovers and invokes via the RPC
- *  prompt command — extension commands execute without a model request. The
- *  name is the settled barrier protocol's (`probes/emission-readiness`, the
- *  wave-2 acceptance suite): renaming it is a launcher-visible contract
- *  change, not a refactor. */
-export const EMISSION_READINESS_COMMAND = "loom-emission-readiness";
-
-/** The custom-entry type the bound readiness payload travels under. The
- *  launcher's gate waits for `entry_appended` events of this type; the
- *  payload shape is `emissionReadinessReport`'s, and the barrier parses it
- *  with the production identity parsers. */
-export const EMISSION_READINESS_ENTRY_TYPE = "loom-emission-readiness";
 
 /** The custom-entry type bracketing the in-child `before_agent_start` hold —
  *  the defense-in-depth layer's observable gating (AD-4). Entries make the
@@ -100,8 +89,8 @@ export const EMISSION_READINESS_ENTRY_TYPE = "loom-emission-readiness";
 export const EMISSION_HOLD_ENTRY_TYPE = "loom-emission-hold";
 
 /** The closed phase vocabulary the hold's `EMISSION_HOLD_ENTRY_TYPE` entries
- *  carry onto the RPC stream — part of this module's readiness protocol
- *  contract, beside the command and entry-type names it already owns:
+ *  carry onto the RPC stream — forensic observability of the child's hold,
+ *  which the launcher gate never parses:
  *
  *  - `entered`: a prompt arrived before readiness and is wedged.
  *  - `resolved`: the readiness exchange released the hold.
@@ -223,8 +212,8 @@ function mintProvisioningClaims(claims: ProvisioningClaims): EmissionChildProvis
     return refuseProvisioning("invalid-context-digest", contextDigest.error.message);
   }
   // The mint's documented caller posture: untrusted claims arrive as strings
-  // and the mint refuses every claim that does not select one of its cells —
-  // the confined casts claim membership only where the mint re-checks it.
+  // and the mint itself parses them into the registry vocabulary, refusing
+  // every claim that does not select one of its cells — nothing is cast here.
   if (typeof claims.kind !== "string") {
     return refuseProvisioning(
       "invalid-claim-type",
@@ -246,7 +235,7 @@ function mintProvisioningClaims(claims: ProvisioningClaims): EmissionChildProvis
   }
   const minted = issueEmissionBinding({
     requestId: claims.requestId,
-    kind: claims.kind as PayloadProducerKindName,
+    kind: claims.kind,
     version: claims.version,
     ...(claims.toolName === undefined ? {} : { toolName: claims.toolName }),
     ...(claims.schemaDigest === undefined ? {} : { schemaDigest: claims.schemaDigest }),
@@ -478,26 +467,11 @@ export type EmissionReadinessObservation = Readonly<{
 }>;
 
 /**
- * The bound readiness report — exactly the ten contract fields the barrier
- * parses (request id, context digest, producer kind, schema version, exact
- * tool name, schema digest, revision, active, child pid, registered tools).
- * The binding fields are the MINTED binding's (canonical, registry
- * certified); the observation fields are the child's own honest facts. The
- * child never certifies more than it observed — the GATE decides.
+ * Mint the bound readiness report (`EmissionReadinessReport`, the protocol's
+ * one wire shape). The binding fields are the MINTED binding's (canonical,
+ * registry certified); the observation fields are the child's own honest
+ * facts. The child never certifies more than it observed — the GATE decides.
  */
-export type EmissionReadinessReport = Readonly<{
-  requestId: string;
-  contextDigest: string;
-  kind: string;
-  version: string;
-  toolName: string;
-  schemaDigest: string;
-  revision: string;
-  active: boolean;
-  childPid: number;
-  registeredTools: readonly string[];
-}>;
-
 export function emissionReadinessReport(
   provisioned: Extract<EmissionChildProvisioning, { kind: "provisioned" }>,
   observation: EmissionReadinessObservation,

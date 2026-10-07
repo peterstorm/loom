@@ -21,7 +21,6 @@ import { lowerModelProfile, resolveModelProfile } from "../src/core/model-profil
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
-import { scrubAmbientIssueRoute } from "./fixtures/issue-route-env";
 import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
@@ -36,13 +35,6 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../src/runtime-compatibility";
-
-// Route election is ambient-env sensitive: the engine elects the reviewer
-// issue route in-process from PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL. This
-// suite does not import ./fixtures/pi-session, so it pins the catalog route
-// itself, keeping an ambient Pi handshake from flipping spawn admission or
-// capture routing mid-file.
-scrubAmbientIssueRoute();
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
@@ -3637,13 +3629,19 @@ describe("Pi extension review tool_result integration", () => {
     const pointer = join(subagentDir, `${session}.task_graph`);
     const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
     let registryBytes = "";
-    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    const originalTask = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    let task = originalTask;
+    let injectionFailed = false;
     const input: Record<string, unknown> = { agent: "code-implementer-agent", agentScope: "user" };
+    // The grant injection's write lands and then fails; the rollback's
+    // restore of the claimed rewrite is an ordinary write.
     Object.defineProperty(input, "task", {
       enumerable: true,
       get: () => task,
       set: (next: string) => {
         task = next;
+        if (injectionFailed) return;
+        injectionFailed = true;
         registryBytes = readFileSync(registry, "utf8");
         writeFileSync(registry, "{malformed");
         throw new Error("injected admission prompt mutation failure");
@@ -3658,6 +3656,9 @@ describe("Pi extension review tool_result integration", () => {
         block: true,
         reason: expect.stringContaining("roll back task-graph pointer"),
       }));
+      // The rewrite was claimed before the write that half-failed, so the
+      // rollback restored the child prompt rather than leaving the grant in it.
+      expect(task).toBe(originalTask);
       expect(existsSync(pointer)).toBe(true);
       writeFileSync(registry, registryBytes);
       expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);

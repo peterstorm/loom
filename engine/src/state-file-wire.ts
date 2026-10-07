@@ -1726,6 +1726,12 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   return null;
 }
 
+/** A copy of `record` without `keys`, every other key kept in order: how a
+ *  migration retires a field in one expression. */
+function withoutKeys(record: Record<string, unknown>, ...keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !keys.includes(key)));
+}
+
 function migrateParsedTask(
   task: Record<string, unknown>,
   index: number,
@@ -1735,7 +1741,10 @@ function migrateParsedTask(
   if (!identity.ok) return parseErr(identity.error.errors.join("; "));
   const verification = parseTaskVerificationPolicy(task, `tasks[${index}]`);
   if (!verification.ok) return parseErr(verification.errors.join("; "));
-  let migrated: Record<string, unknown> = { ...task, id: identity.value };
+  // `unresolved_repository_paths` is a legacy carry, already validated by
+  // taskRepositoryCarryError: no reader consumes it, so the parsed Task never
+  // carries it again.
+  let migrated: Record<string, unknown> = withoutKeys({ ...task, id: identity.value }, "unresolved_repository_paths");
   if (task.proof === undefined && task.status === "pending") {
     migrated = {
       ...migrated,
@@ -1790,9 +1799,7 @@ function migrateParsedTask(
   } else if (executing.has(String(task.id))) {
     migrated = { ...migrated, legacy_execution_reservation: true };
   } else {
-    const { legacy_execution_reservation: staleLegacyClassification, ...withoutLegacyClassification } = migrated;
-    void staleLegacyClassification;
-    migrated = withoutLegacyClassification;
+    migrated = withoutKeys(migrated, "legacy_execution_reservation");
   }
   const repositoryCarry = task.repository_baseline ?? (
     task.active_implementation_attempt === undefined ? undefined : task.attempt_repository_baseline
@@ -1802,11 +1809,6 @@ function migrateParsedTask(
     if (!baseline.ok) return parseErr(baseline.errors.join("; "));
     migrated = { ...migrated, repository_baseline: baseline.value };
   }
-  // Legacy carry, already validated by taskRepositoryCarryError: no reader
-  // consumes it, so the parsed Task never carries it again.
-  const { unresolved_repository_paths: retiredUnresolvedCarry, ...withoutUnresolvedCarry } = migrated;
-  void retiredUnresolvedCarry;
-  migrated = withoutUnresolvedCarry;
   if (task.implementation_attempt_history !== undefined) {
     const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
     if (!history.ok) return parseErr(history.error.errors.join("; "));
@@ -1829,13 +1831,7 @@ function migrateParsedTask(
   } else {
     parsedNewTests = parseNewTestEvidence(task.new_tests_written, task.new_test_evidence);
   }
-  const {
-    new_tests_written: _legacyNewTestsWritten,
-    new_test_evidence: _legacyNewTestEvidence,
-    ...withoutLegacyNewTests
-  } = migrated;
-  void _legacyNewTestsWritten;
-  void _legacyNewTestEvidence;
+  const withoutLegacyNewTests = withoutKeys(migrated, "new_tests_written", "new_test_evidence");
   migrated = parsedNewTests === null
     ? withoutLegacyNewTests
     : { ...withoutLegacyNewTests, ...storedNewTestEvidence(parsedNewTests) };

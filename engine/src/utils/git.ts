@@ -10,6 +10,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
 import { observeGitProbe } from "./git-probe";
 import { worktreeVisibleLeafPaths, type WorktreeLeafSelection } from "./git-leaves";
+import { hardenedGitEnvironment } from "./git-execution-policy";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -193,36 +194,6 @@ export type GitDiffResult =
 const DIFF_DRIVER_SUPPRESSION = ["--no-textconv", "--no-ext-diff"] as const;
 
 /**
- * Git evidence children receive only process-launch essentials, never ambient
- * authority such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, config injection,
- * or executable diff overrides. The shadow administration directory below also
- * excludes repository-local config, hooks, info/attributes, and fsmonitor.
- */
-function diffEnvironment(): NodeJS.ProcessEnv {
-  const inherited = [
-    "PATH", "HOME", "TMPDIR", "TEMP", "TMP",
-    "SystemRoot", "WINDIR", "PATHEXT",
-  ] as const;
-  const environment: NodeJS.ProcessEnv = {};
-  for (const name of inherited) {
-    const value = process.env[name];
-    if (value !== undefined) environment[name] = value;
-  }
-  return {
-    ...environment,
-    LANG: "C",
-    LC_ALL: "C",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_COUNT: "0",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_PAGER: "cat",
-    GIT_OPTIONAL_LOCKS: "0",
-  };
-}
-
-/**
  * Complete-postimage context is unbounded by construction, so capture carries
  * an explicit budget. `execFileSync` defaulted to 1 MiB, which made an
  * ordinary large file fail as `ENOBUFS` — indistinguishable from a broken
@@ -253,10 +224,10 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  return probeGitWithEmptyRetry(["-c", "core.fsmonitor=false", ...args], {
+  return probeGitWithEmptyRetry(args, {
     cwd: root,
     encoding: "utf8",
-    env: diffEnvironment(),
+    env: hardenedGitEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
@@ -311,7 +282,7 @@ function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessE
     writeFileSync(join(shadow, "HEAD"), `${authority.headSha}\n`);
     writeFileSync(join(shadow, "config"), shadowGitConfig(authority.objectFormat));
     return operation({
-      ...diffEnvironment(),
+      ...hardenedGitEnvironment(),
       GIT_DIR: shadow,
       GIT_WORK_TREE: root,
       GIT_INDEX_FILE: authority.indexPath,
@@ -531,7 +502,10 @@ export function visibleLeavesAt(root: string, path: string): GitPathListResult {
 }
 
 /** The warn-and-return Result adapter over the one throwing leaf enumerator
- *  in `git-leaves.ts`, which owns the pathspec and ignore semantics. */
+ *  in `git-leaves.ts`, which owns the pathspec and ignore semantics. The
+ *  enumerator runs under the shared `git-execution-policy` (allow-listed
+ *  environment, fsmonitor disabled) but outside the shadow directory, whose
+ *  absent `info/exclude` would change the ignore rules it must honour. */
 function listedLeaves(
   root: string,
   path: string,

@@ -7,6 +7,7 @@ import {
   type PiSpawnReservation,
 } from "../../../pi/spawn-reservation";
 import { legacyReservedSlot, type ReservedSlot } from "../../../pi/reserved-slot";
+import { slot } from "../fixtures/pi-reserved-slot";
 import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import {
   createImplementationAttemptAuthority,
@@ -42,9 +43,9 @@ describe("createPiParentSessions", () => {
 
   it("retains grant debt and prunes the runtime in the same step once it owes nothing", () => {
     const sessions = createPiParentSessions();
-    sessions.retainWriteGrantDebt(sessionId, "call-1", ["token"]);
+    sessions.retainWriteGrantDebt(sessionId, "call-1", [{ slot: 0, token: "token" }]);
     const runtime = sessions.get(sessionId);
-    expect(runtime?.issuedWriteGrants.get("call-1")).toEqual(["token"]);
+    expect(runtime?.issuedWriteGrants.get("call-1")).toEqual([{ slot: 0, token: "token" }]);
     sessions.retainWriteGrantDebt(sessionId, "call-1", []);
     expect(sessions.get(sessionId)).toBeUndefined();
   });
@@ -70,7 +71,7 @@ describe("createPiParentSessions", () => {
         const sessions = createPiParentSessions();
         const owed = new Map<string, { grants: boolean; debt: boolean }>();
         for (const step of steps) {
-          sessions.retainWriteGrantDebt(sessionId, step.call, step.grants ? ["token"] : []);
+          sessions.retainWriteGrantDebt(sessionId, step.call, step.grants ? [{ slot: 0, token: "token" }] : []);
           sessions.retainSpawnCleanupDebt(
             sessionId,
             step.call,
@@ -98,16 +99,18 @@ describe("reservationItemOf — the per-kind slot invariant at the producer", ()
   const batchEpoch = parseArtifactDigest("b".repeat(64));
   if (!runId.ok || !batchEpoch.ok) throw new Error("fixture identity failed");
 
+  // Every slot is minted by the production producer: a ReservedSlot cannot be
+  // spelled as an object literal.
   const slots: Readonly<Record<ReservedSlot["role"], ReservedSlot>> = {
-    implementation: { agentType: "code-implementer-agent", taskId: "T1", role: "implementation", authority: implementation.value },
-    review: {
-      agentType: "code-reviewer", taskId: "T1", role: "review",
-      authority: { kind: "legacy", taskId: "T1", agentType: "code-reviewer", generation: 0 },
-    },
-    "spec-check": {
-      agentType: "spec-check-invoker", taskId: null, role: "spec-check",
-      authority: { runId: runId.value, wave: 1, batchEpoch: batchEpoch.value, slotId: "wave-slot:spec-check", attempt: 1 },
-    },
+    implementation: slot({ agentType: "code-implementer-agent", taskId: "T1", implementationAuthority: implementation.value }),
+    review: slot({
+      agentType: "code-reviewer", taskId: "T1",
+      reviewAuthority: { kind: "legacy", taskId: "T1", agentType: "code-reviewer", generation: 0 },
+    }),
+    "spec-check": slot({
+      agentType: "spec-check-invoker", taskId: null,
+      specCheckAuthority: { runId: runId.value, wave: 1, batchEpoch: batchEpoch.value, slotId: "wave-slot:spec-check", attempt: 1 },
+    }),
     legacy: legacyReservedSlot("code-reviewer", "T1"),
   };
   const admits = {

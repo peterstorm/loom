@@ -48,6 +48,37 @@ describe("makeBus", () => {
     await expect(next).resolves.toEqual({ type: "agent_settled", n: 2 });
   });
 
+  it("resolves the cursor past a matched event, from history or the future, and counts non-JSON markers", async () => {
+    const stdout = stdoutStream();
+    const bus = makeBus(stdout);
+    expect(bus.cursor()).toBe(0);
+    stdout.write("noise\n" + line({ type: "response", id: "r1" }));
+    expect(bus.cursor()).toBe(2);
+    await expect(bus.next(responseTo.id("r1"), 10, "history")).resolves.toEqual({ event: { type: "response", id: "r1" }, cursor: 2 });
+    const future = bus.next(responseTo.id("r2"), 1_000, "future");
+    stdout.write(line({ type: "agent_settled" }) + line({ type: "response", id: "r2" }));
+    await expect(future).resolves.toEqual({ event: { type: "response", id: "r2" }, cursor: 4 });
+  });
+
+  it("bounds a later wait by a response's cursor even when `retain` reshapes the retained response", async () => {
+    // Identity-based ordering (indexOf the waiter's full event in the
+    // retained history) finds nothing here and falls back to the start, so an
+    // earlier phase's settle would satisfy the wait. The cursor does not.
+    const stdout = stdoutStream();
+    const bus = makeBus(stdout, { retain: (e) => (e.type === "response" ? { type: "response", id: e.id, slimmed: true } : e) });
+    stdout.write(line({ type: "agent_settled", n: 1 }));
+    const prompted = bus.next(responseTo.id("p2"), 1_000, "prompt");
+    stdout.write(line({ type: "response", id: "p2", success: true }));
+    const { event, cursor } = await prompted;
+    expect(event).toEqual({ type: "response", id: "p2", success: true });
+    expect(bus.events.indexOf(event)).toBe(-1);
+    const settled = (e) => e.type === "agent_settled";
+    await expect(bus.waitFor(settled, 20, "stale", cursor)).rejects.toThrow("stale: no matching event within 20ms");
+    const fresh = bus.waitFor(settled, 1_000, "settle", cursor);
+    stdout.write(line({ type: "agent_settled", n: 2 }));
+    await expect(fresh).resolves.toEqual({ type: "agent_settled", n: 2 });
+  });
+
   it("retains what `retain` returns while waiters and listeners see the full event", async () => {
     const stdout = stdoutStream();
     const bus = makeBus(stdout, { retain: (e) => (e.type === "message_update" ? { type: "message_update", slimmed: true } : e) });
@@ -93,8 +124,9 @@ process.stdin.on("data", (data) => {
     const state = await rpc.request({ id: "gs1", type: "get_state" }, responseTo.command("get_state"), 10_000, "get_state");
     expect(state).toMatchObject({ id: "gs1", success: true, data: { argv: ["--no-session", "-ne"], probe: "on" } });
     rpc.send({ type: "set_auto_retry", enabled: false });
-    const prompt = await rpc.request({ id: "p1", type: "prompt", message: "hi" }, responseTo.id("p1"), 10_000, "prompt");
+    const { response: prompt, cursor } = await rpc.exchange({ id: "p1", type: "prompt", message: "hi" }, responseTo.id("p1"), 10_000, "prompt");
     expect(prompt).toMatchObject({ command: "prompt", success: true });
+    expect(cursor).toBe(3);
     expect(rpc.bus.events.map((e) => e.command)).toEqual(["get_state", "set_auto_retry", "prompt"]);
     expect(rpc.stderr()).toBe("fake pi up");
     const exited = new Promise((resolve) => rpc.child.on("exit", (_code, signal) => resolve(signal)));

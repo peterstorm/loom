@@ -7,8 +7,11 @@
  * and its publication digest live in production code only — a receipt-format
  * change reaches every panel suite through this one module.
  *
- * Every issued publication is registered in one in-memory trusted
- * registration store, which `panelPublicationResolver` reads.
+ * The roster and authority builders are pure. Issuing publications needs a
+ * trusted registration store, so that state lives behind
+ * `createPanelPublications()`: each suite (or test) creates its own store with
+ * its own resolver and effect-id sequence, so no registration leaks across
+ * suites and no identity value depends on suite execution order.
  */
 import { createHash } from "node:crypto";
 import {
@@ -53,18 +56,8 @@ export const PANEL_HARNESS_BINDINGS = {
 type PanelProgram = "architecture-panel" | "refutation-panel";
 type PanelRole = "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent";
 
-const registrations = new Map<string, readonly number[]>();
 const bytes = (raw: unknown): readonly number[] => [...new TextEncoder().encode(JSON.stringify(raw))];
 const registrationKey = ({ runId, effectId }: Readonly<{ runId: string; effectId: string }>) => `${runId}\u0000${effectId}`;
-const registrationLoader: TrustedPublicationRegistrationLoader = (lookup) => {
-  const found = registrations.get(registrationKey(lookup));
-  return found === undefined
-    ? { ok: false, error: { kind: "publication-authority-unavailable", message: "not registered" } }
-    : { ok: true, value: found };
-};
-
-/** Resolves every publication `issuePanelRequests` registered. */
-export const panelPublicationResolver: PublicationAuthorityResolver = createPublicationAuthorityResolver(registrationLoader);
 
 /** One ordinal panel request authority: `<runId>:<stage>:<slot>:<attempt>`. */
 export function panelRequestAuthority(
@@ -133,66 +126,6 @@ export function semanticVerifierSlots(
   });
 }
 
-let publicationSequence = 0;
-
-/**
- * Issue one batch through the real initial publication reconciler and register
- * its receipt with `panelPublicationResolver`. The receipt is exactly the one
- * the prepared intent expects, so nothing here restates the receipt format.
- */
-export function issuePanelRequests(requests: readonly AgentRequestAuthority[]): readonly SpawnRequest[] {
-  publicationSequence += 1;
-  const effectId = value(parseEffectId(`effect:panel-fixture:${publicationSequence}`));
-  const runId = requests[0]!.runId;
-  const rawRequests = requests.map((authority) => ({
-    authority,
-    context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
-  }));
-  const intent = value(prepareInitialBatchPublicationIntent(runId, effectId, rawRequests));
-  const receipt = {
-    schemaVersion: 1,
-    kind: "batch-published",
-    effectId: intent.identity.effectId,
-    runId: intent.identity.runId,
-    requestIds: intent.requestIds,
-    contextDigests: intent.contextDigests,
-    issuedRequests: intent.issuedRequests,
-    publicationDigest: intent.identity.publicationDigest,
-  };
-  const reconcile = createInitialBatchPublicationReconciler(
-    createInitialPublicationEffectPort(() => ({ ok: true, value: bytes(receipt) })),
-    createAtomicInitialPublicationClaimPort((request) => ({
-      ok: true,
-      value: { schemaVersion: 1, kind: "initial-publication-claimed", key: request.key, identity: request.identity },
-    })),
-  );
-  const action = value(spawnBatchAction(value(reconcile(intent)), rawRequests));
-  registrations.set(registrationKey(receipt), bytes(receipt));
-  return action.requests;
-}
-
-/**
- * Run `body` while the trusted registration behind `request` holds the bytes
- * `rewrite` derives from its registered receipt, restoring the original
- * afterwards: the publication identity still resolves, but the authority
- * behind it has moved.
- */
-export function withRewrittenPanelRegistration<T>(
-  request: SpawnRequest,
-  rewrite: (receipt: Readonly<Record<string, unknown>>) => unknown,
-  body: () => T,
-): T {
-  const key = registrationKey({ runId: request.issuance.runId, effectId: request.issuance.effectId });
-  const original = registrations.get(key);
-  if (original === undefined) throw new Error(`no registration for ${key}`);
-  registrations.set(key, bytes(rewrite(JSON.parse(new TextDecoder().decode(Uint8Array.from(original))) as Record<string, unknown>)));
-  try {
-    return body();
-  } finally {
-    registrations.set(key, original);
-  }
-}
-
 export type ArchitecturePanelFixture = Readonly<{
   authority: ArchitecturePanelAuthority;
   /** The issued attempt-1 candidate requests, in roster order. */
@@ -200,25 +133,6 @@ export type ArchitecturePanelFixture = Readonly<{
   /** The issued attempt-1 judge requests, in roster order. */
   judges: readonly SpawnRequest[];
 }>;
-
-/** A two-candidate, two-judge architecture panel with both stages issued. */
-export function architecturePanelFixture(runId: string): ArchitecturePanelFixture {
-  const run = value(parseOrchestrationRunId(runId));
-  const candidateSlots = [1, 2].map((slot) => panelRosterSlot(run, "candidate", slot, "architecture-panel", "arch-designer-agent"));
-  const judgeSlots = [1, 2].map((slot) => panelRosterSlot(run, "judge", slot, "architecture-panel", "arch-judge-agent"));
-  const authority = value(parseArchitecturePanelAuthority({
-    runId: run,
-    candidateLenses: ["simplicity-first", "type-driven-fp"],
-    judgeCriteria: ["simplicity", "pure functional core"],
-    candidateSlots,
-    judgeSlots,
-  }));
-  return {
-    authority,
-    candidates: issuePanelRequests(candidateSlots.map(({ attempts }) => attempts[0])),
-    judges: issuePanelRequests(judgeSlots.map(({ attempts }) => attempts[0])),
-  };
-}
 
 const waveId = (raw: string): WaveFindingId => {
   const parsed = parseWaveFindingId(raw);
@@ -238,20 +152,137 @@ export type RefutationPanelFixture = Readonly<{
   requests: readonly SpawnRequest[];
 }>;
 
-/** A refutation panel over `findings` with one semantic verifier per lens, issued. */
-export function refutationPanelFixture(
-  runId: string,
-  lenses: readonly ReviewLens[],
-  findings: readonly [BriefFinding, ...BriefFinding[]] = PANEL_FIXTURE_FINDINGS,
-): RefutationPanelFixture {
-  const run = value(parseOrchestrationRunId(runId));
-  const findingIds = findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
-  const slots = semanticVerifierSlots(run, lenses, findingIds);
-  const authority = value(parseRefutationPanelAuthority({
-    runId: run,
-    findings,
-    lenses,
-    verifierSlots: slots,
-  }));
-  return { authority, requests: issuePanelRequests(slots.map(({ attempts }) => attempts[0])) };
+/** One private publication store: the trusted registrations its resolver
+ *  reads, the batches it issued, and the panels issued through it. */
+export type PanelPublications = Readonly<{
+  /** Resolves every publication this store's `issuePanelRequests` registered. */
+  resolver: PublicationAuthorityResolver;
+  /**
+   * Issue one batch through the real initial publication reconciler and
+   * register its receipt in this store. The receipt is exactly the one the
+   * prepared intent expects, so nothing here restates the receipt format.
+   */
+  issuePanelRequests: (requests: readonly AgentRequestAuthority[]) => readonly SpawnRequest[];
+  /**
+   * Run `body` while the trusted registration behind `request` holds the
+   * bytes `rewrite` derives from its registered receipt, restoring the
+   * original afterwards: the publication identity still resolves, but the
+   * authority behind it has moved.
+   */
+  withRewrittenPanelRegistration: <T>(
+    request: SpawnRequest,
+    rewrite: (receipt: Readonly<Record<string, unknown>>) => unknown,
+    body: () => T,
+  ) => T;
+  /** A two-candidate, two-judge architecture panel with both stages issued. */
+  architecturePanelFixture: (runId: string) => ArchitecturePanelFixture;
+  /** A refutation panel over `findings` with one semantic verifier per lens, issued. */
+  refutationPanelFixture: (
+    runId: string,
+    lenses: readonly ReviewLens[],
+    findings?: readonly [BriefFinding, ...BriefFinding[]],
+  ) => RefutationPanelFixture;
+}>;
+
+/** A fresh publication store with its own registrations and effect-id
+ *  sequence — one per suite (or per test that needs isolation). */
+export function createPanelPublications(): PanelPublications {
+  const registrations = new Map<string, readonly number[]>();
+  let publicationSequence = 0;
+  const registrationLoader: TrustedPublicationRegistrationLoader = (lookup) => {
+    const found = registrations.get(registrationKey(lookup));
+    return found === undefined
+      ? { ok: false, error: { kind: "publication-authority-unavailable", message: "not registered" } }
+      : { ok: true, value: found };
+  };
+
+  const issuePanelRequests = (requests: readonly AgentRequestAuthority[]): readonly SpawnRequest[] => {
+    publicationSequence += 1;
+    const effectId = value(parseEffectId(`effect:panel-fixture:${publicationSequence}`));
+    const runId = requests[0]!.runId;
+    const rawRequests = requests.map((authority) => ({
+      authority,
+      context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
+    }));
+    const intent = value(prepareInitialBatchPublicationIntent(runId, effectId, rawRequests));
+    const receipt = {
+      schemaVersion: 1,
+      kind: "batch-published",
+      effectId: intent.identity.effectId,
+      runId: intent.identity.runId,
+      requestIds: intent.requestIds,
+      contextDigests: intent.contextDigests,
+      issuedRequests: intent.issuedRequests,
+      publicationDigest: intent.identity.publicationDigest,
+    };
+    const reconcile = createInitialBatchPublicationReconciler(
+      createInitialPublicationEffectPort(() => ({ ok: true, value: bytes(receipt) })),
+      createAtomicInitialPublicationClaimPort((request) => ({
+        ok: true,
+        value: { schemaVersion: 1, kind: "initial-publication-claimed", key: request.key, identity: request.identity },
+      })),
+    );
+    const action = value(spawnBatchAction(value(reconcile(intent)), rawRequests));
+    registrations.set(registrationKey(receipt), bytes(receipt));
+    return action.requests;
+  };
+
+  const withRewrittenPanelRegistration = <T>(
+    request: SpawnRequest,
+    rewrite: (receipt: Readonly<Record<string, unknown>>) => unknown,
+    body: () => T,
+  ): T => {
+    const key = registrationKey({ runId: request.issuance.runId, effectId: request.issuance.effectId });
+    const original = registrations.get(key);
+    if (original === undefined) throw new Error(`no registration for ${key}`);
+    registrations.set(key, bytes(rewrite(JSON.parse(new TextDecoder().decode(Uint8Array.from(original))) as Record<string, unknown>)));
+    try {
+      return body();
+    } finally {
+      registrations.set(key, original);
+    }
+  };
+
+  const architecturePanelFixture = (runId: string): ArchitecturePanelFixture => {
+    const run = value(parseOrchestrationRunId(runId));
+    const candidateSlots = [1, 2].map((slot) => panelRosterSlot(run, "candidate", slot, "architecture-panel", "arch-designer-agent"));
+    const judgeSlots = [1, 2].map((slot) => panelRosterSlot(run, "judge", slot, "architecture-panel", "arch-judge-agent"));
+    const authority = value(parseArchitecturePanelAuthority({
+      runId: run,
+      candidateLenses: ["simplicity-first", "type-driven-fp"],
+      judgeCriteria: ["simplicity", "pure functional core"],
+      candidateSlots,
+      judgeSlots,
+    }));
+    return {
+      authority,
+      candidates: issuePanelRequests(candidateSlots.map(({ attempts }) => attempts[0])),
+      judges: issuePanelRequests(judgeSlots.map(({ attempts }) => attempts[0])),
+    };
+  };
+
+  const refutationPanelFixture = (
+    runId: string,
+    lenses: readonly ReviewLens[],
+    findings: readonly [BriefFinding, ...BriefFinding[]] = PANEL_FIXTURE_FINDINGS,
+  ): RefutationPanelFixture => {
+    const run = value(parseOrchestrationRunId(runId));
+    const findingIds = findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
+    const slots = semanticVerifierSlots(run, lenses, findingIds);
+    const authority = value(parseRefutationPanelAuthority({
+      runId: run,
+      findings,
+      lenses,
+      verifierSlots: slots,
+    }));
+    return { authority, requests: issuePanelRequests(slots.map(({ attempts }) => attempts[0])) };
+  };
+
+  return Object.freeze({
+    resolver: createPublicationAuthorityResolver(registrationLoader),
+    issuePanelRequests,
+    withRewrittenPanelRegistration,
+    architecturePanelFixture,
+    refutationPanelFixture,
+  });
 }

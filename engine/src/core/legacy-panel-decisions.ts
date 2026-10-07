@@ -14,7 +14,8 @@
  *
  * Every export here takes already-read evidence and decides:
  * `registeredPanelProgram`, `parseRegisteredPanelProgram`,
- * `logicalPanelRequestId`, `parsePanelVerdictSourceRecordBytes`,
+ * `logicalPanelRequestId`, `nextPanelProgramAction` (the dispatch program's
+ * journal replay), `parsePanelVerdictSourceRecordBytes`,
  * `joinPanelAttemptIssuance`, `selectPanelAttemptVerdictSource`,
  * `panelSubmissionProblem`, `settlePanelAttempt`, and
  * `executeDeterministicPanelOperation`. The Run Directory reads, the
@@ -51,7 +52,16 @@ import {
 } from "./panel-verdict-source";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "./review-panel";
 import { aggregateVerdicts, architectureCriterion, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type ArchitectureCriterion, type JudgeVerdict } from "./panel-contract";
-import type { VerdictEnvelope } from "./panel-kernel";
+import type { ParseResult, VerdictEnvelope } from "./panel-kernel";
+import {
+  reduceArchitectureProgram,
+  reduceRefutationProgram,
+  startArchitectureDispatchProgram,
+  startRefutationDispatchProgram,
+  type PanelProgramAction,
+  type ProgramResult,
+  type ProgramStep,
+} from "./panel-program";
 import {
   translateLegacyPanelJournal,
   type LegacyArchitecturePanelJournal,
@@ -93,6 +103,50 @@ export function logicalPanelRequestId(requestId: string, attempt: 1 | 2): string
   return attempt === 2 && requestId.endsWith(":attempt-2")
     ? requestId.slice(0, -":attempt-2".length)
     : requestId;
+}
+
+// ---------------------------------------------------------------------------
+// The dispatch program's next action: one journal replay
+// ---------------------------------------------------------------------------
+
+/** The panel program has no next action: its issued requests await results. */
+export const AWAIT_PANEL_RESULTS = Object.freeze({ type: "await-results" as const });
+
+export type NextPanelProgramAction = PanelProgramAction | typeof AWAIT_PANEL_RESULTS;
+
+/** The ONE start-then-fold both dispatch programs replay: a start refusal is
+ *  its joined errors, a reduce refusal its JSON-serialized error. */
+function replayDispatchProgram<State, Event>(
+  started: ParseResult<ProgramStep<State>>,
+  events: readonly Event[],
+  reduce: (state: State, event: Event) => ProgramResult<ProgramStep<State>>,
+): DomainResult<NextPanelProgramAction, string> {
+  if (!started.ok) return { ok: false, error: started.errors.join("\n") };
+  let step = started.value;
+  for (const event of events) {
+    const reduced = reduce(step.state, event);
+    if (!reduced.ok) return { ok: false, error: JSON.stringify(reduced.error) };
+    step = reduced.value;
+  }
+  return { ok: true, value: step.action ?? AWAIT_PANEL_RESULTS };
+}
+
+/**
+ * The registered panel's next action, replayed from the run's journal events:
+ * the events are translated as a legacy journal of the registered kind, then
+ * folded through that kind's dispatch program from its start. A program with
+ * no next action awaits its issued requests' results.
+ */
+export function nextPanelProgramAction(
+  registration: RegisteredPanelProgram,
+  events: readonly unknown[],
+): DomainResult<NextPanelProgramAction, string> {
+  const translated = translateLegacyPanelJournal(registration.kind, { input: registration.input, events });
+  if (!translated.ok) return translated;
+  const journal = translated.value;
+  return journal.panel === "architecture"
+    ? replayDispatchProgram(startArchitectureDispatchProgram(journal.input), journal.events, reduceArchitectureProgram)
+    : replayDispatchProgram(startRefutationDispatchProgram(journal.input), journal.events, reduceRefutationProgram);
 }
 
 // ---------------------------------------------------------------------------

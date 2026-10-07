@@ -44,7 +44,7 @@
  * observation, candidates only.
  */
 
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { CLAUDE_TRANSCRIPT_MAX_BYTES, readClaudeTranscriptText } from "../../orchestration/claude-transcript-file";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import type { EmissionSchemaVersion } from "../../core/emission-tool";
@@ -89,9 +89,6 @@ import {
 
 export type { CaptureOutcome };
 
-/** The capture bound every Claude transcript read observes before decoding. */
-const CLAUDE_TRANSCRIPT_MAX_BYTES = 16_777_216;
-
 class ClaudeTranscriptReadError extends Error {}
 class ClaudeTranscriptJsonError extends Error {}
 
@@ -107,7 +104,7 @@ export type ClaudePayloadReader = (transcriptPath: string) => readonly FinalPayl
 function readClaudeTranscript(transcriptPath: string, maximumBytes: number): ClaudeTranscript {
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(readRunBytesNoFollow(transcriptPath, maximumBytes));
+    text = readClaudeTranscriptText(transcriptPath, maximumBytes);
   } catch (error) {
     throw new ClaudeTranscriptReadError(
       `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,

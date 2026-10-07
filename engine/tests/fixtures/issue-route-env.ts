@@ -1,15 +1,18 @@
 /**
- * Reviewer issue-route election fixtures. Route election is ambient-env
+ * Reviewer issue-route election environment. Route election is ambient-env
  * sensitive: observedReviewerIssueRoute() reads this process's
  * PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and fixturePiEnvironment spreads
- * process.env into every CLI child. Importing ./pi-session pins the ambient
- * route to the catalog route for the whole worker; a suite that never imports
- * it but reads the election in-process calls `scrubAmbientIssueRoute` itself,
- * and any suite opts into another route explicitly with `withRouteEnv`. So an
- * ambient Pi handshake (a wrapper session running the suite under the
- * qualified-local model) never flips the election.
+ * process.env into every CLI child. The ONE place the ambient route is pinned
+ * is the Vitest setup file (`tests/setup/catalog-issue-route.ts`, registered in
+ * `vitest.config.ts`), which scrubs it to the catalog route before every test
+ * file — so no suite depends on importing a fixture first, and an ambient Pi
+ * handshake (a wrapper session running the suite under the qualified-local
+ * model) never flips the election. A suite opts into another route explicitly
+ * with `withRouteEnv`.
+ *
+ * Dependency-free on purpose: the setup file imports it before every test
+ * file, so it must load no engine module a suite might later `vi.mock`.
  */
-import { emissionToolPrimaryInstruction, renderEmissionDescriptor } from "../../src/core/issued-emission-capability";
 
 /** A process-environment overlay: `undefined` unsets the variable for the operation. */
 export type EnvironmentOverlay = Readonly<Record<string, string | undefined>>;
@@ -31,15 +34,14 @@ function applyOverlay(overlay: EnvironmentOverlay): void {
   }
 }
 
-/** Pin the worker's ambient state to the catalog route. ./pi-session calls it
- *  on import; a suite that does not import that fixture calls it once at
- *  module top. */
+/** Pin the worker's ambient state to the catalog route — the setup file's one
+ *  call, before any suite body runs. */
 export function scrubAmbientIssueRoute(): void {
   applyOverlay(CATALOG_ROUTE_ENV);
 }
 
 /** Run `operation` under `overlay`, restoring every touched variable afterwards. */
-export async function withRouteEnv<T>(overlay: EnvironmentOverlay, operation: () => Promise<T>): Promise<T> {
+export async function withRouteEnv<T>(overlay: EnvironmentOverlay, operation: () => T | Promise<T>): Promise<T> {
   const previous: EnvironmentOverlay = Object.fromEntries(Object.keys(overlay).map((key) => [key, process.env[key]]));
   try {
     applyOverlay(overlay);
@@ -47,24 +49,4 @@ export async function withRouteEnv<T>(overlay: EnvironmentOverlay, operation: ()
   } finally {
     applyOverlay(previous);
   }
-}
-
-/** A task with its project-local run root replaced by one placeholder, comparable across fixture projects. */
-export const normalizeRunRoot = (task: string, root: string): string => task.split(root).join("<RUN_ROOT>");
-
-/**
- * The emission-route task minus exactly the route delta: the descriptor line
- * and the appended tool-primary instruction. Equal to the extraction-route
- * task when the route changes nothing else. `normalizeDescriptor` applies the
- * caller's own identity normalization to the rendered descriptor.
- */
-export function withoutEmissionRouteDelta(
-  emissionTask: string,
-  binding: Parameters<typeof renderEmissionDescriptor>[0],
-  contextDigest: Parameters<typeof renderEmissionDescriptor>[1],
-  normalizeDescriptor: (descriptor: string) => string = (descriptor) => descriptor,
-): string {
-  return emissionTask
-    .replace(normalizeDescriptor(renderEmissionDescriptor(binding, contextDigest)), "")
-    .replace(`\n${emissionToolPrimaryInstruction(binding)}`, "");
 }

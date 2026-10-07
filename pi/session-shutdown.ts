@@ -52,8 +52,8 @@ export async function shutdownPiSession(rawSessionId: string, ports: PiSessionSh
   // actions regardless of individual failures. Other sessions are untouched.
   const parentRuntime = sessionId ? parentSessions.get(sessionId) : undefined;
   let grantOrdinal = 0;
-  for (const tokens of parentRuntime?.issuedWriteGrants.values() ?? []) {
-    for (const token of tokens) {
+  for (const grants of parentRuntime?.issuedWriteGrants.values() ?? []) {
+    for (const { token } of grants) {
       grantOrdinal++;
       actions.push({
         label: `revoke outstanding write grant ${grantOrdinal}`,
@@ -115,8 +115,8 @@ export async function shutdownPiSession(rawSessionId: string, ports: PiSessionSh
   if (sessionId && parentRuntime !== undefined) {
     // Snapshot before retaining: each retain may forget an entry, and the last
     // one forgets the session runtime itself once it owes nothing.
-    for (const [toolCallId, tokens] of [...parentRuntime.issuedWriteGrants]) {
-      parentSessions.retainWriteGrantDebt(sessionId, toolCallId, tokens.filter((token) => !revokedTokens.has(token)));
+    for (const [toolCallId, grants] of [...parentRuntime.issuedWriteGrants]) {
+      parentSessions.retainWriteGrantDebt(sessionId, toolCallId, grants.filter(({ token }) => !revokedTokens.has(token)));
     }
     for (const [toolCallId, reservation] of [...parentRuntime.spawnReservations]) {
       const items = reservation.items.filter((item) => !removedRosterIds.has(item.rosterId));

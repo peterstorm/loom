@@ -8,9 +8,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { authenticatePiIssuedReviewRequest } from "../../../pi/review-run-authority";
+import { authenticatePiIssuedReviewRequest, piIssuedSpawnRequestRefusal } from "../../../pi/review-run-authority";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
-import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
+import type { AgentRequestAuthority, RequestId } from "../../src/core/orchestration-contract";
 
 const RUN_ID = "run.review-run-authority";
 const WAVE_GATE_V1 = Object.freeze({
@@ -84,5 +84,36 @@ describe("authenticatePiIssuedReviewRequest", () => {
   it("requires the request's immutable publication once it classifies", () => {
     expect(authenticatePiIssuedReviewRequest(handleWith({ ok: true, value: WAVE_GATE_V1 }), request()))
       .toEqual({ kind: "publication-unavailable", message: "reviewer request reservations are unavailable" });
+  });
+});
+
+describe("piIssuedSpawnRequestRefusal (the spawn admission's rendering)", () => {
+  const requestId = "req-review-run-authority-1" as RequestId;
+  const refusalFor = (registration: unknown, overrides: Readonly<Record<string, unknown>> = {}) => {
+    const authenticated = authenticatePiIssuedReviewRequest(handleWith({ ok: true, value: registration }), request(overrides));
+    if (authenticated.kind === "authenticated") throw new Error("fixture unexpectedly authenticated");
+    return piIssuedSpawnRequestRefusal(requestId, authenticated);
+  };
+
+  it("keeps the exact parser diagnostic of a claimed-but-invalid registration", () => {
+    expect(refusalFor({ ...WAVE_GATE_V1, input: { wave: 0 } })).toBe(
+      "request req-review-run-authority-1 has no matching registered review program: " +
+        "the program registration is invalid: wave-gate input must contain exactly wave (null or a positive integer)",
+    );
+  });
+
+  it("refuses a request outside any review program with the one generic refusal", () => {
+    const generic = "request req-review-run-authority-1 has no matching registered review program";
+    expect(refusalFor(null)).toBe(generic);
+    expect(refusalFor({ schemaVersion: 1, kind: "remediation", input: { sourceRunsRoot: "roots", sourceRun: "run.x", supportPaths: [] } }))
+      .toBe(generic);
+  });
+
+  it("names every other refusing step by its own message", () => {
+    expect(refusalFor(WAVE_GATE_V1, { runId: "run.other" }))
+      .toBe("request req-review-run-authority-1 belongs to another orchestration run");
+    expect(refusalFor(WAVE_GATE_V1)).toBe("reviewer request reservations are unavailable");
+    expect(piIssuedSpawnRequestRefusal(requestId, { kind: "registration-unreadable", message: "registration EACCES" }))
+      .toBe("registration EACCES");
   });
 });

@@ -4,6 +4,7 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { isBareGitSha } from "../fixtures/git-sha-oracle";
 import {
   parseLoomReviewAuthorityReceipt,
   parseStandaloneReviewedSource,
@@ -54,7 +55,7 @@ describe("reviewed-source codec", () => {
 
   it("property: a head revision is admitted exactly when it is a bare 40- or 64-hex SHA", () => {
     fc.assert(fc.property(fc.string({ maxLength: 70 }), (headRevision) => {
-      const admitted = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(headRevision);
+      const admitted = isBareGitSha(headRevision);
       expect(parseStandaloneReviewedSource({ ...receipt.reviewedSource, headRevision }) !== null).toBe(admitted);
     }), { numRuns: 200 });
   });

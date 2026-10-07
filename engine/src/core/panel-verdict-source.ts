@@ -16,6 +16,7 @@ import { observeEmissionCalls, type EmissionObservation, type EmissionToolCall }
 import { reviewerEmissionToolContract } from "./reviewer-contract";
 import { success as domainSuccess, failure as domainFailure } from "./orchestration-contract/identity";
 import { safeRecord } from "./exact-data";
+import type { PayloadProducerKindName } from "./agent-catalog-projections";
 import {
   canonicalRecord,
   parseArtifactByteLength,
@@ -52,11 +53,26 @@ import {
 const isEmissionSchemaVersion = (raw: unknown): raw is EmissionSchemaVersion =>
   (EMISSION_SCHEMA_VERSIONS as readonly unknown[]).includes(raw);
 
+/** Which producer kinds are panel verdict kinds, decided per kind of the
+ *  catalog's ONE vocabulary: the table is exhaustive over
+ *  `PayloadProducerKindName`, so a new producer kind fails to compile here
+ *  until it is classified, and the type and the runtime guard below are both
+ *  derived from this one table rather than re-spelling its literals. */
+const PANEL_VERDICT_KINDS = Object.freeze({
+  "reviewer-payload": false,
+  "judge-verdict": true,
+  "refutation-verdict": true,
+} as const satisfies Record<PayloadProducerKindName, boolean>);
+
 /** The verdict producer kinds a panel verdict emission or source record can name. */
-type PanelVerdictKindName = "judge-verdict" | "refutation-verdict";
+type PanelVerdictKindName = {
+  [Kind in PayloadProducerKindName]: (typeof PANEL_VERDICT_KINDS)[Kind] extends true ? Kind : never;
+}[PayloadProducerKindName];
 
 const isPanelVerdictKindName = (raw: unknown): raw is PanelVerdictKindName =>
-  raw === "judge-verdict" || raw === "refutation-verdict";
+  typeof raw === "string" && Object.hasOwn(PANEL_VERDICT_KINDS, raw) &&
+  // Parser proof site: `hasOwn` just proved `raw` is a table key.
+  PANEL_VERDICT_KINDS[raw as PayloadProducerKindName];
 
 const notPanelVerdictKind = (kindName: unknown): string =>
   `the accepted call names producer kind ${JSON.stringify(kindName ?? null)}, which is not a panel verdict kind`;

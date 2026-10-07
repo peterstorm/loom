@@ -25,7 +25,7 @@ import {
   type IssuedSpawnEmissionAuthority,
 } from "../../src/core/issued-emission-capability";
 import { planPiWriteGrants } from "../../src/core/pi-write-grant-plan";
-import { mintedBindingFor, OBSERVED_REQUEST_ID, REVIEWER_V2_CELL, REVIEWER_V3_CELL } from "../fixtures/emission-registry-cells";
+import { cellSchemaDigest, mintedBindingFor, OBSERVED_REQUEST_ID, REVIEWER_V2_CELL, REVIEWER_V3_CELL } from "../fixtures/emission-registry-cells";
 
 const issuedLookupContext = (() => {
   const parsed = parseContextDigest(sha256Hex("t5-issued-refutation-lookup"));
@@ -120,12 +120,12 @@ describe("Pi issued-request classification under a registered review facade", ()
       {
         kind: "standalone-review" as const,
         schemaVersion: 3 as const,
-        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V3_CELL.spec.schemaVersions.v3!.schemaBytes) },
+        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V3_CELL) },
       },
       {
         kind: "wave-gate" as const,
         schemaVersion: 2 as const,
-        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V2_CELL.spec.schemaVersions.v2!.schemaBytes) },
+        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V2_CELL) },
       },
     ];
     for (const program of programs) {
@@ -258,7 +258,7 @@ describe("qualified published Pi request routes bind descriptor admission indepe
       program: {
         kind: "wave-gate" as const,
         schemaVersion: 2 as const,
-        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V2_CELL.spec.schemaVersions.v2!.schemaBytes) },
+        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V2_CELL) },
       },
     },
     {
@@ -266,7 +266,7 @@ describe("qualified published Pi request routes bind descriptor admission indepe
       program: {
         kind: "standalone-review" as const,
         schemaVersion: 3 as const,
-        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V3_CELL.spec.schemaVersions.v3!.schemaBytes) },
+        reviewerProtocol: { schemaDigest: cellSchemaDigest(REVIEWER_V3_CELL) },
       },
     },
   ] as const;

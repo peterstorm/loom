@@ -35,10 +35,10 @@ import {
   contextDigestOf,
   makeExpectation,
   nextRequestId,
-  REVIEWER_V2_CELL,
-  sha256Hex,
   STALE_REVISION,
 } from "../fixtures/emission-child-harness";
+import { sha256Hex } from "../../src/core/digest";
+import { cellSchemaDigest, REVIEWER_V2_CELL } from "../fixtures/emission-registry-cells";
 
 describe("the emission-startup gate decision — a closed ADT with no semantic arm (FR-008/AD-4)", () => {
   const expectation = makeExpectation(REVIEWER_V2_CELL, nextRequestId("gate-contract"), "http://127.0.0.1:9/v1");
@@ -60,16 +60,23 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
   const observedReport = (overrides: Readonly<Record<string, unknown>> = {}): ReadinessObservation =>
     canonicalRecord({ kind: "observed" as const, payload: honestReport(overrides) });
 
-  const stageOf = (
-    facts: Parameters<typeof parseReadinessStageObservation>[0],
-  ): ReadinessStageObservation => parseReadinessStageObservation(canonicalRecord(facts));
+  type ProbeFacts = Parameters<typeof parseReadinessStageObservation>[0];
 
-  const readyStage = (): ReadinessStageObservation => stageOf({
+  /** The stage a launcher observes for `readiness` over a live channel with
+   *  the readiness command listed; a row overrides only the channel fact it
+   *  varies. */
+  const stageWith = (
+    readiness: ReadinessObservation,
+    channel: Partial<Omit<ProbeFacts, "readiness">> = {},
+  ): ReadinessStageObservation => parseReadinessStageObservation(canonicalRecord({
     channelAlive: true,
     channelDiagnostic: null,
     commandListed: true,
-    readiness: observedReport(),
-  });
+    readiness,
+    ...channel,
+  }));
+
+  const readyStage = (): ReadinessStageObservation => stageWith(observedReport());
 
   const ready = () => asReady(decideReadinessGate(expectation, readyStage()));
 
@@ -85,66 +92,23 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
     });
 
   const stageRows: readonly { readonly code: EmissionReadinessRefusalCode; readonly stage: ReadinessStageObservation }[] = [
-    {
-      code: "child-unreachable",
-      stage: stageOf({ channelAlive: false, channelDiagnostic: "connection refused", commandListed: true, readiness: observedReport() }),
-    },
-    {
-      code: "readiness-command-absent",
-      stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: false, readiness: observedReport() }),
-    },
-    {
-      code: "readiness-timeout",
-      stage: stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: canonicalRecord({ kind: "absent" as const, reason: "no readiness entry within 2500ms" }),
-      }),
-    },
-    {
-      code: "startup-unavailable",
-      stage: stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: canonicalRecord({ kind: "startup-unavailable" as const, reason: "LOOM_EMISSION_BINDING is missing" }),
-      }),
-    },
+    { code: "child-unreachable", stage: stageWith(observedReport(), { channelAlive: false, channelDiagnostic: "connection refused" }) },
+    { code: "readiness-command-absent", stage: stageWith(observedReport(), { commandListed: false }) },
+    { code: "readiness-timeout", stage: stageWith(canonicalRecord({ kind: "absent" as const, reason: "no readiness entry within 2500ms" })) },
+    { code: "startup-unavailable", stage: stageWith(canonicalRecord({ kind: "startup-unavailable" as const, reason: "LOOM_EMISSION_BINDING is missing" })) },
+    { code: "malformed-readiness", stage: stageWith(canonicalRecord({ kind: "observed" as const, payload: { emitted: "legacy-shape" } })) },
     {
       code: "malformed-readiness",
-      stage: stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: canonicalRecord({ kind: "observed" as const, payload: { emitted: "legacy-shape" } }),
-      }),
+      stage: stageWith(canonicalRecord({ kind: "malformed" as const, reason: "readiness invocation produced 2 entries; exactly one is required" })),
     },
-    {
-      code: "malformed-readiness",
-      stage: stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: canonicalRecord({ kind: "malformed" as const, reason: "readiness invocation produced 2 entries; exactly one is required" }),
-      }),
-    },
-    { code: "wrong-request", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ requestId: "req-emission-startup-t4-other-peer-1" }) }) },
-    { code: "unexpected-kind", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ kind: "judge-verdict" }) }) },
-    { code: "unexpected-version", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ version: "v9" }) }) },
-    { code: "schema-digest-mismatch", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ schemaDigest: sha256Hex("stale-bytes") }) }) },
-    { code: "tool-name-mismatch", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ toolName: "loom_emit_refutation_verdict" }) }) },
-    { code: "tool-inactive", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ active: false }) }) },
-    { code: "revision-mismatch", stage: stageOf({ channelAlive: true, channelDiagnostic: null, commandListed: true, readiness: observedReport({ revision: STALE_REVISION }) }) },
-    {
-      code: "cancelled",
-      stage: stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: canonicalRecord({ kind: "cancelled" as const }),
-      }),
-    },
+    { code: "wrong-request", stage: stageWith(observedReport({ requestId: "req-emission-startup-t4-other-peer-1" })) },
+    { code: "unexpected-kind", stage: stageWith(observedReport({ kind: "judge-verdict" })) },
+    { code: "unexpected-version", stage: stageWith(observedReport({ version: "v9" })) },
+    { code: "schema-digest-mismatch", stage: stageWith(observedReport({ schemaDigest: sha256Hex("stale-bytes") })) },
+    { code: "tool-name-mismatch", stage: stageWith(observedReport({ toolName: "loom_emit_refutation_verdict" })) },
+    { code: "tool-inactive", stage: stageWith(observedReport({ active: false })) },
+    { code: "revision-mismatch", stage: stageWith(observedReport({ revision: STALE_REVISION })) },
+    { code: "cancelled", stage: stageWith(canonicalRecord({ kind: "cancelled" as const })) },
   ];
 
   const routeRows: readonly { readonly route: RouteObservation }[] = [
@@ -197,21 +161,16 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
     // mask a misbinding and no earlier one can mask a capability lie.
     const misboundEverywhere = asRefused(decideReadinessGate(
       expectation,
-      stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: observedReport({
-          requestId: "req-emission-startup-t4-misbound-peer-1",
-          contextDigest: contextDigestOf("emission-startup-context:req-emission-startup-t4-misbound-peer-1"),
-          kind: "judge-verdict",
-          version: "v9",
-          schemaDigest: sha256Hex("misbound-bytes"),
-          toolName: "loom_emit_judge_verdict",
-          active: false,
-          revision: STALE_REVISION,
-        }),
-      }),
+      stageWith(observedReport({
+        requestId: "req-emission-startup-t4-misbound-peer-1",
+        contextDigest: contextDigestOf("emission-startup-context:req-emission-startup-t4-misbound-peer-1"),
+        kind: "judge-verdict",
+        version: "v9",
+        schemaDigest: sha256Hex("misbound-bytes"),
+        toolName: "loom_emit_judge_verdict",
+        active: false,
+        revision: STALE_REVISION,
+      })),
     ));
     expect(misboundEverywhere.code).toBe("wrong-request");
     expect(misboundEverywhere.message).toContain("req-emission-startup-t4-misbound-peer-1");
@@ -219,15 +178,10 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
 
     const misboundDigestOnly = asRefused(decideReadinessGate(
       expectation,
-      stageOf({
-        channelAlive: true,
-        channelDiagnostic: null,
-        commandListed: true,
-        readiness: observedReport({
-          contextDigest: contextDigestOf("emission-startup-context:some-other-request"),
-          kind: "judge-verdict",
-        }),
-      }),
+      stageWith(observedReport({
+        contextDigest: contextDigestOf("emission-startup-context:some-other-request"),
+        kind: "judge-verdict",
+      })),
     ));
     expect(misboundDigestOnly.code).toBe("wrong-request");
 
@@ -246,15 +200,7 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
       { code: "revision-mismatch", overrides: { revision: STALE_REVISION } },
     ];
     for (const row of chainRows) {
-      const decision = asRefused(decideReadinessGate(
-        expectation,
-        stageOf({
-          channelAlive: true,
-          channelDiagnostic: null,
-          commandListed: true,
-          readiness: observedReport(row.overrides),
-        }),
-      ));
+      const decision = asRefused(decideReadinessGate(expectation, stageWith(observedReport(row.overrides))));
       expect(decision.code, JSON.stringify(row.overrides)).toBe(row.code);
     }
   });
@@ -423,8 +369,8 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
   it("opens only on the full conjunction — matching readiness AND a verified route, with the mint digesting the frozen bytes", () => {
     const open = asOpen(decideStartupRoute(expectation.route, ready(), boundRouteOf(expectation.route)));
     expect(open.readiness.requestId).toBe(expectation.binding.requestId);
-    expect(open.readiness.toolName).toBe(REVIEWER_V2_CELL.toolName);
-    expect(open.readiness.schemaDigest).toBe(sha256Hex(REVIEWER_V2_CELL.schemaBytes));
+    expect(open.readiness.toolName).toBe(REVIEWER_V2_CELL.spec.toolName);
+    expect(open.readiness.schemaDigest).toBe(cellSchemaDigest(REVIEWER_V2_CELL));
     expect(open.route).toEqual({
       kind: "pinned-endpoint",
       provider: "loom-counting",

@@ -120,10 +120,14 @@ export function classifyImplementationWindow(
       )
     : new Set<string>();
   const active = outstanding.filter((task) => !reclaimable.has(task.id) && holdsReservation(task));
-  const activeTaskIds = new Set(active.map((task) => task.id));
+  const activeIds = Object.freeze(active.map((task) => task.id));
+  const activeTaskIds = new Set(activeIds);
   const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task) }));
-  const invalidRetry = derivations.find(({ derivation }) => derivation.kind === "invalid-retry");
-  if (invalidRetry?.derivation.kind === "invalid-retry") {
+  // `flatMap` narrows the derivation in the arm that keeps it, so the first
+  // match of each kind arrives already typed — graph order, first one wins.
+  const invalidRetry = derivations.flatMap(({ task, derivation }) =>
+    derivation.kind === "invalid-retry" ? [{ task, derivation }] : []).at(0);
+  if (invalidRetry !== undefined) {
     return contradiction(
       `${invalidRetry.task.id} has invalid implementation retry authority: ${invalidRetry.derivation.errors.join("; ")}`,
       invalidRetry.task.id,
@@ -133,8 +137,9 @@ export function classifyImplementationWindow(
     derivation.kind === "escalated"
       ? [canonicalRecord({ taskId: task.id, receiptId: derivation.receiptId, failureKinds: derivation.failureKinds })]
       : []);
-  const invalidAttestation = derivations.find(({ derivation }) => derivation.kind === "invalid-attestation");
-  if (invalidAttestation?.derivation.kind === "invalid-attestation") {
+  const invalidAttestation = derivations.flatMap(({ task, derivation }) =>
+    derivation.kind === "invalid-attestation" ? [{ task, derivation }] : []).at(0);
+  if (invalidAttestation !== undefined) {
     return contradiction(
       `${invalidAttestation.task.id} attestation mode could not derive its attestation context: ${invalidAttestation.derivation.error}`,
       invalidAttestation.task.id,
@@ -149,7 +154,7 @@ export function classifyImplementationWindow(
     recovery,
     message,
     pendingTaskIds: Object.freeze(outstanding.filter((task) => task.status !== "implemented").map((task) => task.id)),
-    activeTaskIds: Object.freeze(active.map((task) => task.id)),
+    activeTaskIds: activeIds,
     escalated: Object.freeze(escalated),
   });
   const startReadiness = outstanding.length === 0 ? deriveWaveStartReadiness(graph, waveTasks) : null;
@@ -191,7 +196,7 @@ export function classifyImplementationWindow(
       canonicalRecord({
         kind: "await-wave-implementation",
         wave,
-        activeTaskIds: Object.freeze(active.map((task) => task.id)) as NonEmpty<string>,
+        activeTaskIds: activeIds as NonEmpty<string>,
       }),
       `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`,
     );

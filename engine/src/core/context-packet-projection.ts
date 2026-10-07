@@ -19,6 +19,11 @@ export type ContextProjectionInput = Readonly<{
 }>;
 const failed = (error: string): DomainResult<never, string> => ({ ok: false, error });
 
+/** The shared value-is-a-flag rule both reader grammars below apply (and the
+ *  CLI grammar in handlers/helpers/cli-args.ts): a `--`-prefixed token is a
+ *  flag, never a value. */
+const isFlagToken = (token: string): boolean => token.startsWith("--");
+
 /** Closed CLI grammar; offsets are UTF-16 text units, index offsets are section entries. */
 export function parseContextProjectionArguments(args: readonly string[]): DomainResult<ContextProjectionInput, string> {
   const fields = new Map<string, string>();
@@ -27,11 +32,10 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     const key = args[i]!;
     const value = args[i + 1];
     if (!allowed.includes(key) || fields.has(key) || value === undefined || value.length === 0) return failed("invalid or duplicate reader argument");
-    // The shared CLI grammar (handlers/helpers/cli-args.ts): a `--`-prefixed
-    // token is a flag, never a value, so a mis-sequenced invocation is refused
-    // here with its actual cause instead of silently consuming the intended
-    // value and failing later with an unrelated refusal.
-    if (value.startsWith("--")) return failed(`reader argument ${key} requires a value; ${value} looks like another flag`);
+    // A mis-sequenced invocation is refused here with its actual cause instead
+    // of silently consuming the intended value and failing later with an
+    // unrelated refusal.
+    if (isFlagToken(value)) return failed(`reader argument ${key} requires a value; ${value} looks like another flag`);
     fields.set(key, value);
   }
   const path = fields.get("--packet"), requestId = fields.get("--request"), digest = fields.get("--digest");
@@ -65,16 +69,19 @@ export type ContextSectionReadInput = Readonly<{ path: string; digest: string; l
 
 /**
  * The whole-section reader's CLI grammar, beside the projection reader's so
- * both reader grammars have one owner. Each of `--packet`, `--digest` and
- * `--section` is read at its first occurrence and must carry a value: a
- * missing, empty or `--`-prefixed value is absent (the shared value-is-a-flag
- * rule). The packet path must be absolute.
+ * both reader grammars have one owner and share `isFlagToken`. Each of
+ * `--packet`, `--digest` and `--section` is read at its first occurrence and
+ * must carry a value: a missing, empty or flag-token value is absent. The
+ * packet path must be absolute. Duplicate handling deliberately differs from
+ * the projection reader's (first occurrence wins here; a duplicate is refused
+ * there): the two grammars share the value-is-a-flag rule, not one argument
+ * policy.
  */
 export function parseContextSectionArguments(args: readonly string[]): DomainResult<ContextSectionReadInput, string> {
   const flag = (name: string): string | undefined => {
     const index = args.indexOf(name);
     const value = index < 0 ? undefined : args[index + 1];
-    return value === undefined || value.length === 0 || value.startsWith("--") ? undefined : value;
+    return value === undefined || value.length === 0 || isFlagToken(value) ? undefined : value;
   };
   const path = flag("--packet"), digest = flag("--digest"), label = flag("--section");
   if (path === undefined) return failed("--packet requires a value");

@@ -36,7 +36,7 @@
  */
 
 import { match } from "ts-pattern";
-import { err, including, nonEmpty, ok, type NonEmpty, type Result } from "../kernel";
+import { err, nonEmpty, ok, type NonEmpty, type Result } from "../kernel";
 import {
   RETRY_CAUSES,
   sampleRetries,
@@ -594,12 +594,12 @@ function unconstrainedCellsGap(prereg: Preregistration): readonly MissingMeasure
  * measurement leaves the claim incomplete; only a complete, all-passing
  * record with every measured cell on a qualified capable route allows done.
  *
- * Missing measurements are recorded in order: the preflight block, the
- * capable-route gap, then each cell's. The capable-route check is folded into
- * the done evidence: when nothing else is missing, the cells that passed on a
- * capable route ARE the done evidence, and their absence can only mean no
- * cell is on one — so that gap is recorded exactly then, with no branch that
- * restates it.
+ * Missing measurements form one list, in order: the preflight block, the
+ * capable-route gap (no capable cell at all, or the cells left unconstrained
+ * beside a capable one), then each cell's. When that list is empty and no
+ * guardrail is violated, every emission cell is measured, all-passing and
+ * constrained, so the done evidence is non-empty; the final guard only
+ * narrows the type.
  */
 function decideRelease(evidence: PilotEvidence, cells: readonly CellOutcome[]): ReleaseDecision {
   const perCell = cells.map(cellFindings);
@@ -607,24 +607,20 @@ function decideRelease(evidence: PilotEvidence, cells: readonly CellOutcome[]): 
   const blocked: readonly MissingMeasurement[] = evidence.preflight.kind === "blocked"
     ? [Object.freeze({ kind: "preflight-blocked" as const, blocks: evidence.preflight.blocks })]
     : [];
-  const cellMissing = perCell.flatMap((findings) => findings.missing);
   const capable = prereg.cells.some((cell) => cell.qualification.kind === "constrained-emission");
-  /** Every missing measurement except the absence of any capable route. */
-  const unresolved = [...blocked, ...(capable ? unconstrainedCellsGap(prereg) : []), ...cellMissing];
-  const withNoCapableRoute = (): NonEmpty<MissingMeasurement> => including(blocked, NO_CAPABLE_ROUTE, cellMissing);
+  const routeGap = capable ? unconstrainedCellsGap(prereg) : [NO_CAPABLE_ROUTE];
+  const missing = Object.freeze([...blocked, ...routeGap, ...perCell.flatMap((findings) => findings.missing)]);
   const violated = nonEmpty(perCell.flatMap((findings) => findings.violations));
   if (violated !== null) {
     return Object.freeze({
       kind: "blocked-guardrail-violated" as const,
       violations: violated,
-      alsoMissing: capable ? Object.freeze(unresolved) : withNoCapableRoute(),
+      alsoMissing: missing,
       consequence: "design-reconsideration-required" as const,
     });
   }
-  const incomplete = nonEmpty(unresolved);
-  if (incomplete !== null) {
-    return Object.freeze({ kind: "incomplete-missing-measurement" as const, missing: capable ? incomplete : withNoCapableRoute() });
-  }
+  const incomplete = nonEmpty(missing);
+  if (incomplete !== null) return Object.freeze({ kind: "incomplete-missing-measurement" as const, missing: incomplete });
   const measuredCells = nonEmpty(perCell.flatMap((findings) => findings.passedOnCapableRoute));
   if (measuredCells === null) {
     return Object.freeze({ kind: "incomplete-missing-measurement" as const, missing: Object.freeze([NO_CAPABLE_ROUTE] as const) });

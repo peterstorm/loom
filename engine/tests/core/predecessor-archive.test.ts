@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { gzipSync } from "node:zlib";
 import type { ContextProjectionInput } from "../../src/core/context-packet-projection";
-import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../src/core/context-packets";
+import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection, storedContextPacket } from "../../src/core/context-packets";
 import { sha256Bytes } from "../../src/core/digest";
 import { parseRequestId } from "../../src/core/orchestration-contract";
 import {
   admitFrozenPredecessorArchive, expandGzipPredecessorArchive, parsePredecessorArchiveArguments, parsePredecessorArchiveRecord,
   projectArchivedPredecessor, publishedPacketReference, serializePublishedPacketReference, verifyPredecessorArchiveBytes,
   type ArchivedPredecessorRefusal, type PredecessorArchiveRecord, type PredecessorArchiveRefusal, type PublishedPacketReference,
-  type ResolvePublishedPacket,
+  type PublishedPacketFile, type ResolvePublishedPacket,
 } from "../../src/core/predecessor-archive";
 import { refusal, value } from "../fixtures/parse-result";
 
@@ -162,37 +162,39 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
   const ROLE = "code-reviewer";
   const LABEL = `predecessor-context:${ROLE}`;
   const PREDECESSOR_PATH = "/runs/prior/contexts/predecessor.json";
-  const unwrap = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
-    if (!result.ok) throw Error(JSON.stringify(result.error));
-    return result.value;
-  };
-  const requestId = (name: string) => unwrap(parseRequestId(`request:${name}`));
-  const section = (label: string, text: string) => unwrap(encodeByteSection(label, text));
+  const requestId = (name: string) => value(parseRequestId(`request:${name}`));
+  const section = (label: string, text: string) => value(encodeByteSection(label, text));
   /** A packet as the reader sees it: its stored JSON record, never the in-memory sealed object. */
   const stored = (packet: unknown): unknown => JSON.parse(JSON.stringify(packet));
 
-  const predecessor = unwrap(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
+  const predecessor = value(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
     fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }));
   const predecessorBytes = bytesOf(JSON.stringify(predecessor));
   const reference = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...referenceRecord(predecessorBytes, PREDECESSOR_PATH), ...overrides });
   const gzipArchive = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...gzipRecord(predecessorBytes), ...overrides });
 
-  /** The plain in-memory published-packet port: exact file bytes and record by path, recording each lookup. */
-  const resolverOf = (files: ReadonlyMap<string, Uint8Array>) => {
+  type BlobStore = ReadonlyMap<string, Uint8Array | "unreadable">;
+  /** The plain in-memory published-packet port: exact file bytes by path and a
+   *  section-blob store, recording each lookup. It can hand over bytes only. */
+  const resolverOf = (files: ReadonlyMap<string, Uint8Array>, blobs: BlobStore = new Map()) => {
     const lookups: PublishedPacketReference[] = [];
+    const readSectionBlob: PublishedPacketFile["readSectionBlob"] = (digest) => {
+      const blob = blobs.get(digest);
+      return blob === "unreadable" ? { ok: false, error: `blob ${digest} is unreadable` } : { ok: true, value: blob ?? null };
+    };
     const resolveReference: ResolvePublishedPacket = (ref) => {
       lookups.push(ref);
       const fileBytes = files.get(ref.path);
       return fileBytes === undefined
         ? { ok: false, error: `context packet ${ref.path} is unreadable` }
-        : { ok: true, value: { fileBytes, record: JSON.parse(Buffer.from(fileBytes).toString("utf8")) as unknown } };
+        : { ok: true, value: { fileBytes, readSectionBlob } };
     };
     return { lookups, resolveReference };
   };
 
   /** One successor v3 packet retaining `retained` (raw section text) under LABEL, plus its exact reader input. */
   function successor(retained: string) {
-    const packet = unwrap(buildStandaloneReviewerContextPacketV3({ requestId: requestId("successor"), role: ROLE,
+    const packet = value(buildStandaloneReviewerContextPacketV3({ requestId: requestId("successor"), role: ROLE,
       requiredSkill: "review", fixedContext: [], variableContext: [section(LABEL, retained)] }));
     const input: ContextProjectionInput = { path: "/runs/successor/contexts/successor.json", requestId: packet.requestId,
       digest: packet.digest, role: ROLE, requiredSkill: "review", selection: { kind: "index", offset: 0, limit: 32 },
@@ -201,23 +203,20 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
   }
 
   type ReadOptions = Readonly<{ purpose?: "v1-v2" | "standalone-successor"; label?: string;
-    files?: ReadonlyMap<string, Uint8Array>; input?: Partial<ContextProjectionInput> }>;
+    files?: ReadonlyMap<string, Uint8Array>; blobs?: BlobStore; input?: Partial<ContextProjectionInput> }>;
   const read = (retained: string, options: ReadOptions = {}) => {
     const { outer, input } = successor(retained);
-    const resolver = resolverOf(options.files ?? new Map([[PREDECESSOR_PATH, predecessorBytes]]));
+    const resolver = resolverOf(options.files ?? new Map([[PREDECESSOR_PATH, predecessorBytes]]), options.blobs);
     const result = projectArchivedPredecessor(outer, { ...input, ...options.input },
       { kind: "archive", label: options.label ?? LABEL, purpose: options.purpose ?? "v1-v2" },
       { bounds: BOUNDS, resolveReference: resolver.resolveReference });
     return { result, lookups: resolver.lookups };
   };
-  const refusedWith = (outcome: ReturnType<typeof read>): ArchivedPredecessorRefusal => {
-    if (outcome.result.ok) throw Error("expected a refusal");
-    return outcome.result.error;
-  };
+  const refusedWith = (outcome: ReturnType<typeof read>): ArchivedPredecessorRefusal => refusal(outcome.result);
 
   it.each([["a published packet reference", reference()], ["an earlier inline gzip archive", gzipArchive()]])(
     "expands %s to the predecessor packet's own projection under its retained identity", (_name, retained) => {
-      expect(unwrap(read(retained).result)).toMatchObject({ schemaVersion: 2, requestId: predecessor.requestId,
+      expect(value(read(retained).result)).toMatchObject({ schemaVersion: 2, requestId: predecessor.requestId,
         digest: predecessor.digest, role: ROLE, requiredSkill: "review", sections: expect.arrayContaining([expect.objectContaining({ label: "prior-notes" })]) });
     });
 
@@ -229,12 +228,12 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
   });
 
   it("decodes a successor-purpose predecessor as a standalone successor packet, never guessing the decoder", () => {
-    const prior = unwrap(buildStandaloneReviewerContextPacketV3({ requestId: requestId("prior-successor"), role: ROLE,
+    const prior = value(buildStandaloneReviewerContextPacketV3({ requestId: requestId("prior-successor"), role: ROLE,
       requiredSkill: "review", fixedContext: [], variableContext: [section("prior-notes", "notes")] }));
     const priorBytes = bytesOf(JSON.stringify(prior));
     const files = new Map([[PREDECESSOR_PATH, priorBytes]]);
     const asSuccessor = JSON.stringify(referenceRecord(priorBytes, PREDECESSOR_PATH, "standalone-successor"));
-    expect(unwrap(read(asSuccessor, { purpose: "standalone-successor", files }).result))
+    expect(value(read(asSuccessor, { purpose: "standalone-successor", files }).result))
       .toMatchObject({ schemaVersion: 3, requestId: prior.requestId });
     // The same v3 bytes under the v1-v2 decode purpose are refused by the v1/v2 packet parser.
     expect(refusedWith(read(JSON.stringify(referenceRecord(priorBytes, PREDECESSOR_PATH)), { files })))
@@ -243,7 +242,8 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
 
   it.each([
     ["an outer packet read without the successor purpose", reference(), { input: { purpose: undefined } }, "archive requires exact successor packet identity"],
-    ["an outer packet that differs from the expected identity", reference(), { input: { digest: "0".repeat(64) } }, "archive requires exact successor packet identity"],
+    ["an outer packet that differs from the expected identity", reference(), { input: { digest: "0".repeat(64) } },
+      "archive requires exact successor packet identity: packet differs from expected issued identity"],
     ["an absent label", reference(), { label: `${LABEL}:attempt-2` }, "archive label is absent"],
     ["a label outside the predecessor namespace", reference(), { label: "notes" }, "archive label is absent"],
     ["an unsupported encoding", reference({ encoding: "zstd" }), {}, "unsupported predecessor encoding"],
@@ -265,9 +265,9 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
     ["a gzip archive declaring fewer bytes than it expands to", gzipArchive({ byteLength: predecessorBytes.byteLength - 1 }), RangeError],
     ["a gzip archive whose expansion is not JSON", JSON.stringify(gzipRecord(bytesOf("not json"))), SyntaxError],
   ])("refuses %s with the decoder's own error as the cause", (_name, retained, decoderError) => {
-    const refusal = refusedWith(read(retained));
-    expect(refusal.kind).toBe("decoder-failed");
-    if (refusal.kind === "decoder-failed") expect(refusal.cause).toBeInstanceOf(decoderError);
+    const refused = refusedWith(read(retained));
+    expect(refused.kind).toBe("decoder-failed");
+    if (refused.kind === "decoder-failed") expect(refused.cause).toBeInstanceOf(decoderError);
   });
 
   it("refuses a verified predecessor that lacks its retained identity, naming the first missing field", () => {
@@ -280,5 +280,64 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
     const forged = bytesOf(JSON.stringify({ requestId: predecessor.requestId, digest: predecessor.digest, role: ROLE, requiredSkill: "review" }));
     expect(refusedWith(read(JSON.stringify(referenceRecord(forged, PREDECESSOR_PATH)), { files: new Map([[PREDECESSOR_PATH, forged]]) })))
       .toMatchObject({ kind: "refused", message: expect.stringMatching(/^packet integrity or supported contract check failed/) });
+  });
+
+  it("names the outer projection's own integrity refusal, distinct from a wrong purpose", () => {
+    const { outer, input } = successor(reference());
+    const tampered = { ...(outer as Record<string, unknown>), role: "silent-failure-hunter" };
+    const result = projectArchivedPredecessor(tampered, input, { kind: "archive", label: LABEL, purpose: "v1-v2" },
+      { bounds: BOUNDS, resolveReference: resolverOf(new Map()).resolveReference });
+    expect(result).toMatchObject({ ok: false, error: { kind: "refused",
+      message: expect.stringMatching(/^archive requires exact successor packet identity: packet integrity or supported contract check failed/) } });
+  });
+
+  describe("a predecessor stored with its sections in the run's blob store", () => {
+    const stored = storedContextPacket(predecessor);
+    const storedBytes = bytesOf(stored.text);
+    const files = new Map([[PREDECESSOR_PATH, storedBytes]]);
+    const blobs: BlobStore = new Map(stored.blobs.map(({ digest, bytes }) => [digest, bytes]));
+    const retained = JSON.stringify(referenceRecord(storedBytes, PREDECESSOR_PATH));
+    const sectionDigest = stored.blobs[0]!.digest;
+
+    it("derives the record from the verified file bytes and restores its sections through the blob lookup", () => {
+      expect(value(read(retained, { files, blobs }).result)).toMatchObject({ requestId: predecessor.requestId,
+        digest: predecessor.digest, sections: expect.arrayContaining([expect.objectContaining({ label: "prior-notes" })]) });
+    });
+
+    it("refuses a fake that serves different bytes under a section's digest: the record cannot disagree with the bytes", () => {
+      const lying: BlobStore = new Map([...blobs, [sectionDigest, bytesOf("bytes that are not the retained section")]]);
+      expect(refusedWith(read(retained, { files, blobs: lying })))
+        .toMatchObject({ kind: "refused", message: expect.stringMatching(/^packet integrity or supported contract check failed/) });
+    });
+
+    it.each([
+      ["an absent blob", new Map(), `context section blob ${sectionDigest} is missing from the run's blob store`],
+      ["an unreadable blob", new Map([[sectionDigest, "unreadable" as const]]), `blob ${sectionDigest} is unreadable`],
+    ] satisfies readonly (readonly [string, BlobStore, string])[])("refuses %s with its own cause", (_name, store, message) => {
+      expect(refusedWith(read(retained, { files, blobs: store }))).toEqual({ kind: "refused", message });
+    });
+
+    it("never reads a blob before the file bytes verify against the reference", () => {
+      const reads: string[] = [];
+      const resolveReference: ResolvePublishedPacket = () => ({ ok: true, value: { fileBytes: storedBytes,
+        readSectionBlob: (digest) => { reads.push(digest); return { ok: true, value: null }; } } });
+      const { outer, input } = successor(JSON.stringify({ ...referenceRecord(storedBytes, PREDECESSOR_PATH), digest: "0".repeat(64) }));
+      const result = projectArchivedPredecessor(outer, input, { kind: "archive", label: LABEL, purpose: "v1-v2" },
+        { bounds: BOUNDS, resolveReference });
+      expect(result).toEqual({ ok: false, error: { kind: "refused", message: "archive bytes differ" } });
+      expect(reads).toEqual([]);
+    });
+  });
+
+  it("admits no port value that carries a decoded record beside the bytes", () => {
+    const readSectionBlob: PublishedPacketFile["readSectionBlob"] = () => ({ ok: true, value: null });
+    // @ts-expect-error the port returns bytes and a blob lookup only; a separately supplied record is not part of it
+    const inconsistent: PublishedPacketFile = { fileBytes: predecessorBytes, readSectionBlob, record: { requestId: "request:forged" } };
+    // Even smuggled past the type, a record is never read: the projection is the verified bytes' own packet.
+    const outcome = read(reference(), {});
+    const smuggled = projectArchivedPredecessor(successor(reference()).outer, successor(reference()).input,
+      { kind: "archive", label: LABEL, purpose: "v1-v2" }, { bounds: BOUNDS, resolveReference: () => ({ ok: true, value: inconsistent }) });
+    expect(value(smuggled)).toEqual(value(outcome.result));
+    expect(value(smuggled)).toMatchObject({ requestId: predecessor.requestId });
   });
 });

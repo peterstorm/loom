@@ -35,14 +35,6 @@ export function parseFixedArtifactSlot(raw: unknown): DomainResult<FixedArtifact
     : failure(canonicalRecord({ kind: "invalid-fixed-artifact-slot", message: parsed.errors.join("; ") }));
 }
 
-export const ORCHESTRATION_PROGRAMS = Object.freeze([
-  "architecture-panel",
-  "refutation-panel",
-  "wave-gate",
-  "standalone-review",
-] as const);
-export type OrchestrationProgram = (typeof ORCHESTRATION_PROGRAMS)[number];
-
 export type ExactHarnessBinding = Readonly<{
   pi: PiBinding;
   claude: ClaudeCodeBinding;

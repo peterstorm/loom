@@ -1,19 +1,25 @@
 /**
- * The Pi user agent directory the extension's definition port reads — tested
- * at the seam callers cross, never by matching the extension's source text.
+ * The Pi user agent directory every Loom reader of it shares — tested at the
+ * seam callers cross, never by matching a shell's source text.
  *
- * The pure resolver decides the directory from the environment and home
- * directory; the factory test proves the extension resolves it when its
- * factory starts (not at module import) and validates every spawn against
- * exactly `<that directory>/agents/<agent>.md`.
+ * The pure resolver (`engine/src/core/pi-agent-directory.ts`) is Pi's own
+ * `getAgentDir` rule over the environment and home directory; the factory
+ * test proves the extension resolves it when its factory starts (not at
+ * module import) and validates every spawn against exactly
+ * `<that directory>/agents/<agent>.md`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import fc from "fast-check";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { piAgentDefinitionPath, resolvePiAgentDirectory } from "../../../pi/agent-directory";
+import {
+  piAgentDefinitionPath,
+  piHomeAgentDirectory,
+  resolvePiAgentDirectory,
+} from "../../src/core/pi-agent-directory";
 import { LOOM_REVIEW_AUTHORITY_BRIDGE } from "../../src/handlers/helpers/programs/review-authority-bridge";
 
 describe("resolvePiAgentDirectory", () => {
@@ -21,10 +27,26 @@ describe("resolvePiAgentDirectory", () => {
     expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: "/custom/pi" }, "/home/u")).toBe("/custom/pi");
     expect(resolvePiAgentDirectory({}, "/home/u")).toBe(join("/home/u", ".pi", "agent"));
     expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: undefined }, "/home/u")).toBe(join("/home/u", ".pi", "agent"));
+    expect(piHomeAgentDirectory("/home/u")).toBe(join("/home/u", ".pi", "agent"));
   });
 
-  it("never consults the home directory when the session selects its own", () => {
-    fc.assert(fc.property(fc.string({ minLength: 1 }), fc.string(), (selected, home) => {
+  it("treats an empty selection as unset, exactly as Pi does", () => {
+    expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: "" }, "/home/u")).toBe(join("/home/u", ".pi", "agent"));
+  });
+
+  it("normalises a selected directory the way Pi does: ~ against home, file:// URLs as paths", () => {
+    expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: "~" }, "/home/u")).toBe("/home/u");
+    expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: "~/pi-agent" }, "/home/u")).toBe(join("/home/u", "pi-agent"));
+    expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: pathToFileURL("/srv/pi agent").href }, "/home/u"))
+      .toBe("/srv/pi agent");
+    // Only a leading `~/` is the home shorthand; `~other/x` is a literal name.
+    expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: "~other/x" }, "/home/u")).toBe("~other/x");
+  });
+
+  it("never consults the home directory when the session selects a plain directory", () => {
+    const plain = fc.string({ minLength: 1 }).filter((selected) =>
+      selected !== "~" && !selected.startsWith("~/") && !selected.startsWith("file://"));
+    fc.assert(fc.property(plain, fc.string(), (selected, home) => {
       expect(resolvePiAgentDirectory({ PI_CODING_AGENT_DIR: selected }, home)).toBe(selected);
     }));
   });
@@ -102,7 +124,9 @@ describe("the extension factory's definition port", () => {
       agentScope: "project",
     });
     expect(refusal).toContain("Loom-owned Pi agents require agentScope='user'");
-  });
+    // The first factory test pays the extension's one-time module import and
+    // transform, which routinely sits at the default 5 s budget under load.
+  }, 30_000);
 
   it("reads the generated definition from the directory selected when each factory starts", async () => {
     const first = join(root, "pi-agent-first");
@@ -116,5 +140,5 @@ describe("the extension factory's definition port", () => {
     const secondRefusal = await spawnRefusalUnder(second);
     expect(secondRefusal).toContain(`cannot read generated agent ${piAgentDefinitionPath(second, "code-reviewer")}`);
     expect(secondRefusal).not.toContain(first);
-  });
+  }, 30_000);
 });

@@ -104,6 +104,23 @@ export type IssuedWaveReviewBatch = Readonly<{
 const CURRENT_BATCH_LABEL = "wave-gate-current";
 
 /**
+ * Pair each published request with the batch subject it was published for.
+ * Publication preserves the batch's request order, and `WaveRequestBatch`
+ * keeps `requests` index-aligned with `subjects`, so the correlation is stated
+ * once here: a count mismatch is a publication defect, refused before any
+ * request is paired, rather than checked per element.
+ */
+export function withBatchSubjects<R>(
+  published: readonly R[],
+  subjects: WaveRequestBatch["subjects"],
+): readonly (readonly [R, WaveRequestBatch["subjects"][number]])[] {
+  if (published.length !== subjects.length) {
+    throw new Error(`published ${published.length} Wave review request(s) for ${subjects.length} batch subject(s)`);
+  }
+  return published.map((request, index) => [request, subjects[index]!] as const);
+}
+
+/**
  * Resume phase: publish and install the initial batch, install a fresh batch
  * for Tasks that need one, or prove the collecting batch's exact durable
  * publication — republishing the deterministic batch when its persisted
@@ -138,16 +155,12 @@ export async function reconcileWaveReviewIssuance(
     await installWaveReviewRuns(manager, registration, batch);
     return settled({ ok: true, action: {
       ...action,
-      requests: action.requests.map((request, index) => {
-        const subject = batch.subjects[index];
-        if (subject === undefined) throw new Error(`published Wave review request ${index} has no batch subject`);
-        return {
-          ...request,
-          task: subject.taskId === null
-            ? `${request.task}\nSpec-check Wave ${wave}.`
-            : `${request.task}\nReview Task ${subject.taskId}.`,
-        };
-      }),
+      requests: withBatchSubjects(action.requests, batch.subjects).map(([request, subject]) => ({
+        ...request,
+        task: subject.taskId === null
+          ? `${request.task}\nSpec-check Wave ${wave}.`
+          : `${request.task}\nReview Task ${subject.taskId}.`,
+      })),
     } });
   }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   gitOutput,
@@ -246,6 +246,93 @@ describe("worktreeVisibleLeafPaths and its Result adapters", () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the shared Git execution policy", () => {
+  const AMBIENT_KEYS = [
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
+  ] as const;
+
+  function withAmbientGit<T>(environment: Readonly<Partial<Record<(typeof AMBIENT_KEYS)[number], string>>>, run: () => T): T {
+    const previous = new Map(AMBIENT_KEYS.map((key) => [key, process.env[key]]));
+    for (const key of AMBIENT_KEYS) {
+      const value = environment[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try {
+      return run();
+    } finally {
+      for (const key of AMBIENT_KEYS) {
+        const value = previous.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  it("never lets ambient GIT_* variables redirect, re-ignore or re-pattern the one leaf enumerator", () => {
+    write(root, "lib/tracked.txt", "tracked");
+    const head = commitAll("base");
+    write(root, "lib/untracked.txt", "untracked");
+    write(root, "lib/*.txt", "star");
+    write(root, "lib/hidden.dat", "would be ignored by injected config");
+    const expected = ["lib/*.txt", "lib/hidden.dat", "lib/tracked.txt", "lib/untracked.txt"];
+
+    // A foreign repository the ambient GIT_DIR/GIT_INDEX_FILE would substitute.
+    const foreign = canonicalTempDir("loom-git-leaves-foreign-");
+    const marker = join(foreign, "FSMONITOR_EXECUTED");
+    try {
+      initRepository(foreign);
+      write(foreign, "lib/foreign.txt", "foreign");
+      git(foreign, ["add", "-A"]);
+      git(foreign, ["commit", "--quiet", "-m", "foreign"]);
+      write(foreign, "ignore-everything", "*.dat\nlib/untracked.txt\n");
+      writeFileSync(join(foreign, "fsmonitor.sh"), `#!/bin/sh\ntouch '${marker}'\n`);
+      chmodSync(join(foreign, "fsmonitor.sh"), 0o755);
+
+      const observed = withAmbientGit({
+        GIT_DIR: join(foreign, ".git"),
+        GIT_WORK_TREE: foreign,
+        GIT_INDEX_FILE: join(foreign, ".git", "index"),
+        GIT_GLOB_PATHSPECS: "1",
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "core.excludesFile",
+        GIT_CONFIG_VALUE_0: join(foreign, "ignore-everything"),
+        GIT_CONFIG_KEY_1: "core.fsmonitor",
+        GIT_CONFIG_VALUE_1: join(foreign, "fsmonitor.sh"),
+      }, () => ({
+        visible: worktreeVisibleLeafPaths(root, "lib"),
+        untracked: worktreeVisibleLeafPaths(root, "lib", "untracked"),
+        literal: worktreeVisibleLeafPaths(root, "lib/*.txt"),
+        adapter: visibleLeavesAt(root, "lib"),
+        head: gitOutput(root, ["rev-parse", "HEAD"]).toString("utf-8").trim(),
+        atRevision: revisionTreeLeaves(root, head, "lib").map(({ path }) => path),
+      }));
+
+      expect(observed.visible).toEqual(expected);
+      expect(observed.untracked).toEqual(["lib/*.txt", "lib/hidden.dat", "lib/untracked.txt"]);
+      expect(observed.literal).toEqual(["lib/*.txt"]);
+      expect(observed.adapter).toEqual({ ok: true, paths: expected });
+      expect(observed.head).toBe(head);
+      expect(observed.atRevision).toEqual(["lib/tracked.txt"]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(foreign, { recursive: true, force: true });
+    }
+  });
+
+  it("still honours the repository's own ignore rules, which a shadow Git directory would drop", () => {
+    write(root, "lib/tracked.txt", "tracked");
+    commitAll("base");
+    write(root, "lib/info-excluded.tmp", "excluded by info/exclude");
+    write(root, "lib/config-excluded.log", "excluded by repository core.excludesFile");
+    writeFileSync(join(root, ".git", "info", "exclude"), "*.tmp\n");
+    writeFileSync(join(root, "repo-excludes"), "*.log\n");
+    git(root, ["config", "core.excludesFile", join(root, "repo-excludes")]);
+    expect(worktreeVisibleLeafPaths(root, "lib")).toEqual(["lib/tracked.txt"]);
   });
 });
 

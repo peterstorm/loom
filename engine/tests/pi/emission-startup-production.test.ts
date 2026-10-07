@@ -12,31 +12,36 @@
  * surfaces live on the launcher side (expectation revision, issued request)
  * or on the provisioning boundary (absent/garbage binding env), never on
  * production knobs. The suite also covers the hold's wedge-to-readiness
- * release arc and its shutdown release. The shared launcher harness is
- * `engine/tests/fixtures/emission-child-harness.ts`.
+ * release arc and its shutdown release (through the extension's named
+ * `registerLoomEmissionReadiness` seam), and runs the parent bridge's SHIPPED
+ * `verifyReadiness` against a real production child through the harness's
+ * real-RPC readiness adapter. The barrier sequence itself is the shared
+ * launcher harness's `runLauncherBarrier`
+ * (`engine/tests/fixtures/emission-child-harness.ts`).
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { captureLoomRuntimeIdentity } from "../../src/runtime-compatibility";
 import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { canonicalRecord } from "../../src/core/orchestration-contract/identity";
 import {
   EMISSION_HOLD_ENTRY_TYPE,
-  EMISSION_READINESS_COMMAND,
-  EMISSION_READINESS_ENTRY_TYPE,
   LOOM_EMISSION_BINDING_ENV,
 } from "../../../pi/emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../../pi/emission-readiness-protocol";
 import {
+  EMISSION_STARTUP_REMEDIATIONS,
   parseReadinessReport,
   type EmissionStartupDecision,
   type EmissionStartupExpectation,
-  type ReadinessObservation,
   type ReadinessReport,
 } from "../../../pi/emission-readiness-gate";
+import type { PiEmissionLaunchExpectation } from "../../../pi/emission-launch-bridge";
+import type { PiEmissionReadinessRegistration } from "../../../pi/emission-readiness";
 import {
+  actOnGateVerdict,
   awaitFirstCountedRequest,
   awaitFirstRequestOrDeadline,
   bindRouteWithSettle,
@@ -44,17 +49,12 @@ import {
   boundedEvent,
   contextDigestOf,
   customEntriesOf,
-  decideStartupThroughRouteBind,
-  deliverIssuedPrompt,
-  discoverCommands,
   entryDataOf,
   expectOpenRun,
   expectZeroRequestRefusal,
   HOLD_ENTRY_TYPE,
   isolatedPiEnv,
   issuedPromptText,
-  JUDGE_V1_CELL,
-  listsExtensionCommand,
   makeExpectation,
   nextRequestId,
   observeChannel,
@@ -66,27 +66,28 @@ import {
   READINESS_COMMAND_NAME,
   READINESS_ENTRY_TYPE,
   readinessAbsentWithinWindow,
-  readinessPredicate,
-  READY_TIMEOUT_MS,
   recordOf,
-  REFUSE_GRACE_MS,
   repoRoot,
-  REVIEWER_V2_CELL,
-  settledReadiness,
+  rpcReadinessClient,
+  runLauncherBarrier,
   settleWait,
-  sha256Hex,
   sleep,
   STALE_REVISION,
   startCountingServer,
   stringifyUnknown,
+  withBarrierResources,
   withProcessState,
   type CountingServer,
+  type PiReadinessVerifier,
   type PiRpcChild,
-  type RegistryCell,
-  type RpcBus,
   type SettledWait,
 } from "../fixtures/emission-child-harness";
-import { SynchronousEventBus, type FakeExtensionHandler } from "../fixtures/emission-launch-port";
+import { sha256Hex } from "../../src/core/digest";
+import { cellSchemaDigest, JUDGE_V1_CELL, REVIEWER_V2_CELL, type RegistryCell } from "../fixtures/emission-registry-cells";
+import {
+  bridgeLaunchExpectation,
+  issuedLaunchDirective,
+} from "../fixtures/emission-launch-port";
 
 const PRODUCTION_EXTENSION_PATH = join(repoRoot, "pi", "extension.ts");
 
@@ -166,7 +167,7 @@ const productionPlanOf = (spec: ProductionScenarioSpec): ProductionPlan => {
     // The launcher's expectation carries the PARENT's content-addressed
     // revision — never the T4 protocol fixture's placeholder string.
     expectationRevision: drift?.kind === "expectation-revision" ? drift.revision : PARENT_RUNTIME_REVISION,
-    allowlist: Object.freeze(drift?.kind === "tool-excluded" ? ["read"] : [provisioningCell.toolName]),
+    allowlist: Object.freeze(drift?.kind === "tool-excluded" ? ["read"] : [provisioningCell.spec.toolName]),
     invocations: spec.kind === "matching" ? spec.invocations : 1,
     waitForRequest: spec.kind === "matching",
   });
@@ -212,8 +213,8 @@ const childProvisioningEnv = (
     requestId,
     kind: provisioning.cell.kind,
     version: provisioning.cell.version,
-    toolName: provisioning.cell.toolName,
-    schemaDigest: sha256Hex(provisioning.cell.schemaBytes),
+    toolName: provisioning.cell.spec.toolName,
+    schemaDigest: cellSchemaDigest(provisioning.cell),
   });
   if (!minted.ok) {
     throw new Error(`production child provisioning mint refused: ${minted.error.code} — ${minted.error.message}`);
@@ -226,16 +227,6 @@ const childProvisioningEnv = (
     toolName: minted.value.toolName,
     schemaDigest: minted.value.schemaDigest,
   });
-};
-
-const waitReadinessEntryCount = async (bus: RpcBus, count: number, timeoutMs: number): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (customEntriesOf(bus, READINESS_ENTRY_TYPE).length < count) {
-    if (Date.now() > deadline) {
-      throw new Error(`expected ${count} readiness entries, observed ${customEntriesOf(bus, READINESS_ENTRY_TYPE).length} within ${timeoutMs}ms`);
-    }
-    await sleep(50);
-  }
 };
 
 /** The production child's spawn: the production loom extension beside the
@@ -267,16 +258,22 @@ const openProductionChild = async (
   });
 };
 
+/** Every pi command-error event the child emitted, bounded. */
+const extensionErrorsOf = (rpc: PiRpcChild): readonly Readonly<{ event: string; error: string }>[] =>
+  rpc.bus.snapshot()
+    .filter((event) => event.type === "extension_error")
+    .map((event) => canonicalRecord({ event: stringifyUnknown(event["event"]), error: stringifyUnknown(event["error"]) }));
+
 /**
- * The production barrier run: the T4 protocol sequence against a child whose
- * extension IS the production loom extension. Every step is bounded, and the
- * child is released in every outcome.
+ * The production barrier run: the harness's one `runLauncherBarrier`
+ * sequence against a child whose extension IS the production loom
+ * extension. The production readiness command registers the exact tool and
+ * appends the bound payload; its failures surface as extension_error events
+ * (pi's command-error channel), never as fabricated payloads — so an
+ * unanswered wait over a reported command error is `startup-unavailable`.
  */
-const runProductionGate = async (spec: ProductionScenarioSpec): Promise<ProductionRun> => {
-  const rpcRef: { current: PiRpcChild | null } = { current: null };
-  const server = await startCountingServer();
-  const tmp = canonicalTempDir(`loom-emission-startup-t5-${spec.label}-`);
-  try {
+const runProductionGate = (spec: ProductionScenarioSpec): Promise<ProductionRun> =>
+  withBarrierResources(`loom-emission-startup-t5-${spec.label}-`, async ({ server, tmp, adopt }) => {
     const issuedRequestId = nextRequestId(`t5-${spec.label}`);
     const plan = productionPlanOf(spec);
     const expectation = canonicalRecord({
@@ -284,86 +281,38 @@ const runProductionGate = async (spec: ProductionScenarioSpec): Promise<Producti
       revision: plan.expectationRevision,
     });
     const envBinding = childProvisioningEnv(expectation, issuedRequestId, plan.provisioning);
-    const rpc = await openProductionChild(spec.label, tmp, server, envBinding, plan.allowlist);
-    rpcRef.current = rpc;
-    const extensionErrorsOf = (): readonly Readonly<{ event: string; error: string }>[] =>
-      rpc.bus.snapshot()
-        .filter((event) => event.type === "extension_error")
-        .map((event) => canonicalRecord({ event: stringifyUnknown(event["event"]), error: stringifyUnknown(event["error"]) }));
-
-    const channel = await observeChannel(rpc);
-    const commandListed = channel.channelAlive &&
-      listsExtensionCommand(await discoverCommands(rpc), EMISSION_READINESS_COMMAND);
-
-    // 3. Readiness invocation(s) — the production command registers the exact
-    //    tool and appends the bound payload; failures surface as
-    //    extension_error events (pi's command-error channel), never as
-    //    fabricated payloads.
-    let invocationCount = 0;
-    let readiness: ReadinessObservation = canonicalRecord({
-      kind: "absent" as const,
-      reason: "the launcher never reached the readiness stage",
-    });
-    let readinessObservedAt: number | null = null;
-    if (commandListed) {
-      invocationCount = 1;
-      const first = await rpc.rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` }, "readiness command invocation");
-      if (first["success"] !== true) {
-        throw new Error(`the readiness command invocation was refused by the production child: ${boundedEvent(first)}`);
-      }
-      if (plan.invocations === 2) {
-        invocationCount = 2;
-        const second = await rpc.rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` }, "idempotent readiness re-invocation");
-        if (second["success"] !== true) {
-          throw new Error(`the idempotent readiness re-invocation was refused by the production child: ${boundedEvent(second)}`);
-        }
-      }
-      const outcome = await settleWait(rpc.bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
-      const settled = settledReadiness(outcome, rpc, () => {
-        const refusalErrors = extensionErrorsOf();
+    const rpc = adopt(await openProductionChild(spec.label, tmp, server, envBinding, plan.allowlist));
+    const barrier = await runLauncherBarrier(rpc, expectation, {
+      invocations: plan.invocations,
+      wait: { kind: "waits" },
+      unobserved: () => {
+        const refusalErrors = extensionErrorsOf(rpc);
         return refusalErrors.length > 0
           ? canonicalRecord({
               kind: "startup-unavailable" as const,
               reason: refusalErrors[refusalErrors.length - 1]!.error,
             })
           : readinessAbsentWithinWindow();
-      });
-      readiness = settled.readiness;
-      readinessObservedAt = settled.observedAt;
-      if (outcome.kind === "observed" && plan.invocations === 2) {
-        await waitReadinessEntryCount(rpc.bus, 2, READY_TIMEOUT_MS);
-      }
-    }
-
-    const finalDecision = await decideStartupThroughRouteBind(rpc, expectation, {
-      ...channel,
-      commandListed,
-      readiness,
+      },
+    }, {
+      afterPrompt: async () => {
+        if (plan.waitForRequest) await awaitFirstRequestOrDeadline(server);
+      },
     });
-
-    // 5. Prompt delivery ONLY on the open arm.
-    let prompted = false;
-    if (finalDecision.kind === "open") {
-      await deliverIssuedPrompt(rpc, expectation);
-      prompted = true;
-      if (plan.waitForRequest) await awaitFirstRequestOrDeadline(server);
-    } else {
-      await sleep(REFUSE_GRACE_MS);
-    }
     await rpc.dispose();
     const hits = server.hits;
     return canonicalRecord({
       label: spec.label,
-      decision: finalDecision,
-      channelAlive: channel.channelAlive,
-      channelDiagnostic: channel.channelDiagnostic,
-      commandListed,
-      invocationCount,
+      decision: barrier.decision,
+      channelAlive: barrier.channelAlive,
+      channelDiagnostic: barrier.channelDiagnostic,
+      commandListed: barrier.commandListed,
+      invocationCount: barrier.invocationCount,
       readinessPayloads: Object.freeze(customEntriesOf(rpc.bus, READINESS_ENTRY_TYPE).map(entryDataOf)),
-      readinessObservedAt,
-      extensionErrors: extensionErrorsOf(),
+      readinessObservedAt: barrier.readinessObservedAt,
+      extensionErrors: extensionErrorsOf(rpc),
       holdEntries: Object.freeze(customEntriesOf(rpc.bus, EMISSION_HOLD_ENTRY_TYPE).map(entryDataOf)),
-      prompted,
+      prompted: barrier.prompted,
       firstRequestAt: hits.length > 0 ? hits[0]!.at : null,
       requestCount: hits.length,
       requestBodies: Object.freeze(hits.map((hit) => hit.body)),
@@ -373,12 +322,57 @@ const runProductionGate = async (spec: ProductionScenarioSpec): Promise<Producti
       countingBaseUrl: server.baseUrl,
       stderr: rpc.stderr(),
     });
-  } finally {
-    await rpcRef.current?.dispose();
-    await server.close().catch(() => undefined);
-    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
-  }
-};
+  });
+
+/** One run of the SHIPPED verifier against a real production child. */
+type ShippedVerifierRun = Readonly<{
+  label: string;
+  verdict: Awaited<ReturnType<PiReadinessVerifier>>;
+  prompted: boolean;
+  requestCount: number;
+  readinessPayloads: readonly unknown[];
+  childKilled: boolean;
+  stderr: string;
+}>;
+
+/**
+ * The launcher's barrier as the installed launcher runs it: the parent
+ * bridge's staged directive provisions the child (its `bindingEnv` IS the
+ * child's binding), then the bridge's shipped `verifyReadiness` drives the
+ * real child through the real-RPC readiness adapter, and the prompt is
+ * delivered only on `ok: true`. The launch pins the per-run counting route;
+ * the expectation's revision is the parent runtime's unless a control drifts it.
+ */
+const runShippedVerifier = (label: string, revision: string): Promise<ShippedVerifierRun> =>
+  withBarrierResources(`loom-emission-startup-t5-shipped-${label}-`, async ({ server, tmp, adopt }) => {
+    const staged = bridgeLaunchExpectation(JUDGE_V1_CELL, `tool-call-shipped-${label}`, { kind: "single", index: 0 });
+    const launch: PiEmissionLaunchExpectation = Object.freeze({
+      ...staged,
+      revision,
+      expectation: Object.freeze({
+        ...staged.expectation,
+        route: Object.freeze({ provider: "loom-counting", model: "loom-counting-model" }),
+      }),
+    });
+    const directive = issuedLaunchDirective(launch);
+    const rpc = adopt(await openProductionChild(`shipped-${label}`, tmp, server, directive.bindingEnv, [launch.expectation.binding.toolName]));
+    // The launcher's channel check precedes the verifier: a cold child's
+    // first get_state carries the startup budget.
+    const channel = await observeChannel(rpc);
+    if (!channel.channelAlive) throw new Error(`the production child never came up: ${channel.channelDiagnostic ?? "no diagnostic"}`);
+    const verdict = await directive.verifyReadiness(rpcReadinessClient(rpc));
+    const acted = await actOnGateVerdict(rpc, launch.expectation, verdict.ok, () => awaitFirstRequestOrDeadline(server));
+    rpc.release();
+    return canonicalRecord({
+      label,
+      verdict,
+      prompted: acted.prompted,
+      requestCount: server.hits.length,
+      readinessPayloads: Object.freeze(customEntriesOf(rpc.bus, READINESS_ENTRY_TYPE).map(entryDataOf)),
+      childKilled: rpc.releasedAt() !== null,
+      stderr: rpc.stderr(),
+    });
+  });
 
 /** A stale-launcher prompt delivered before readiness must wedge. The
  *  release variant then performs the readiness exchange against that SAME
@@ -407,102 +401,93 @@ const holdPromptResponseOf = (outcome: SettledWait): HoldPromptResponse => {
   });
 };
 
-const runProductionHoldGate = async (spec: ProductionHoldGateSpec): Promise<Readonly<{
+const HOLD_PROBE_WINDOW_MS = 2_500;
+
+const runProductionHoldGate = (spec: ProductionHoldGateSpec): Promise<Readonly<{
   holdPhases: readonly string[];
   childAliveDuringProbe: boolean;
   agentStartCount: number;
   promptResponse: HoldPromptResponse;
   requestCount: number;
   stderr: string;
-}>> => {
-  const HOLD_PROBE_WINDOW_MS = 2_500;
-  const rpcRef: { current: PiRpcChild | null } = { current: null };
-  const server = await startCountingServer();
-  const tmp = canonicalTempDir(`loom-emission-startup-t5-${spec.label}-`);
-  try {
-    const issuedRequestId = nextRequestId(`t5-${spec.label}`);
-    const expectation = makeExpectation(spec.issuedCell, issuedRequestId, server.baseUrl);
-    const provisioning = spec.provisioning ?? canonicalRecord({ kind: "minted" as const, cell: spec.issuedCell });
-    const envBinding = childProvisioningEnv(expectation, issuedRequestId, provisioning);
-    if (envBinding === undefined) throw new Error("the hold control's provisioning env is absent");
-    const rpc = await openProductionChild(`hold-${spec.label}`, tmp, server, envBinding, [spec.issuedCell.toolName]);
-    rpcRef.current = rpc;
-    await rpc.rpcRequest({ type: "get_state" }, "get_state");
-    // The stale launcher binds the route and delivers the prompt WITHOUT a
-    // readiness exchange. Keep the request live so the release variant can
-    // prove this exact awaited prompt resumes after readiness.
-    await rpc.rpcRequest(
-      { type: "set_model", provider: expectation.route.provider, modelId: expectation.route.modelId },
-      "stale-launcher set_model",
-    );
-    await rpc.rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
-    let promptResponse: HoldPromptResponse = canonicalRecord({ kind: "pending" as const });
-    const promptOutcome = settleWait(rpc.rpcRequest(
-      { type: "prompt", message: issuedPromptText(expectation) },
-      "stale-launcher prompt delivery",
-    )).then((outcome) => {
-      promptResponse = holdPromptResponseOf(outcome);
-      return outcome;
-    });
-    await sleep(HOLD_PROBE_WINDOW_MS);
-    if (rpc.gone()) {
-      throw new Error("the production hold child died or failed to spawn inside the probe window");
-    }
-    const promptResponseBeforeReadiness: HoldPromptResponse = promptResponse;
-    if (spec.releaseThroughReadiness === true) {
-      const readinessResponse = await rpc.rpcRequest(
-        { type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` },
-        "hold-release readiness command",
-      );
-      if (readinessResponse["success"] !== true) {
-        throw new Error(`the hold-release readiness command failed: ${boundedEvent(readinessResponse)}`);
-      }
-      // The early binding above intentionally models a stale launcher. The
-      // provider registry can refresh while readiness registers the tool;
-      // mirror the real launcher's post-readiness bind before requiring the
-      // first model request from this already-wedged prompt. Otherwise a
-      // refreshed default model can receive it instead of the counting route.
-      const rebound = await bindRouteWithSettle(rpc.rpcRequest, expectation.route);
-      if (rebound.kind !== "bound" || rebound.model.provider !== expectation.route.provider ||
-          rebound.model.id !== expectation.route.modelId) {
-        throw new Error(`the hold-release route was not rebound after readiness: ${JSON.stringify(rebound)}`);
-      }
-      const resumed = await promptOutcome;
-      if (resumed.kind === "failed") {
-        throw new Error(`the wedged prompt did not resume: ${boundedDiagnostic(resumed.error)}; stderr: ${rpc.stderr()}`);
-      }
-      if (resumed.event["success"] !== true) {
-        throw new Error(`the resumed prompt response was refused: ${boundedEvent(resumed.event)}; stderr: ${rpc.stderr()}`);
-      }
-      await awaitFirstCountedRequest(
-        server,
-        PRODUCTION_HOLD_FIRST_REQUEST_TIMEOUT_MS,
-        () => `prompt response: ${JSON.stringify(promptResponse)}; stderr: ${rpc.stderr()}`,
-      );
-    }
-    await sleep(400);
-    if (rpc.gone()) {
-      throw new Error("the production hold child died or failed to spawn before the probe completed");
-    }
-    const holdPhases = customEntriesOf(rpc.bus, EMISSION_HOLD_ENTRY_TYPE)
-      .map((event) => recordOf(entryDataOf(event)))
-      .map((data) => (data === null ? undefined : data["phase"]))
-      .filter((phase): phase is string => typeof phase === "string");
-    await rpc.dispose();
-    return canonicalRecord({
-      holdPhases: Object.freeze(holdPhases),
-      childAliveDuringProbe: true,
-      agentStartCount: rpc.bus.snapshot().filter((event) => event.type === "agent_start").length,
-      promptResponse: spec.releaseThroughReadiness === true ? promptResponse : promptResponseBeforeReadiness,
-      requestCount: server.hits.length,
-      stderr: rpc.stderr(),
-    });
-  } finally {
-    await rpcRef.current?.dispose();
-    await server.close().catch(() => undefined);
-    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+}>> => withBarrierResources(`loom-emission-startup-t5-${spec.label}-`, async ({ server, tmp, adopt }) => {
+  const issuedRequestId = nextRequestId(`t5-${spec.label}`);
+  const expectation = makeExpectation(spec.issuedCell, issuedRequestId, server.baseUrl);
+  const provisioning = spec.provisioning ?? canonicalRecord({ kind: "minted" as const, cell: spec.issuedCell });
+  const envBinding = childProvisioningEnv(expectation, issuedRequestId, provisioning);
+  if (envBinding === undefined) throw new Error("the hold control's provisioning env is absent");
+  const rpc = adopt(await openProductionChild(`hold-${spec.label}`, tmp, server, envBinding, [spec.issuedCell.spec.toolName]));
+  await rpc.rpcRequest({ type: "get_state" }, "get_state");
+  // The stale launcher binds the route and delivers the prompt WITHOUT a
+  // readiness exchange. Keep the request live so the release variant can
+  // prove this exact awaited prompt resumes after readiness.
+  await rpc.rpcRequest(
+    { type: "set_model", provider: expectation.route.provider, modelId: expectation.route.modelId },
+    "stale-launcher set_model",
+  );
+  await rpc.rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
+  let promptResponse: HoldPromptResponse = canonicalRecord({ kind: "pending" as const });
+  const promptOutcome = settleWait(rpc.rpcRequest(
+    { type: "prompt", message: issuedPromptText(expectation) },
+    "stale-launcher prompt delivery",
+  )).then((outcome) => {
+    promptResponse = holdPromptResponseOf(outcome);
+    return outcome;
+  });
+  await sleep(HOLD_PROBE_WINDOW_MS);
+  if (rpc.gone()) {
+    throw new Error("the production hold child died or failed to spawn inside the probe window");
   }
-};
+  const promptResponseBeforeReadiness: HoldPromptResponse = promptResponse;
+  if (spec.releaseThroughReadiness === true) {
+    const readinessResponse = await rpc.rpcRequest(
+      { type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` },
+      "hold-release readiness command",
+    );
+    if (readinessResponse["success"] !== true) {
+      throw new Error(`the hold-release readiness command failed: ${boundedEvent(readinessResponse)}`);
+    }
+    // The early binding above intentionally models a stale launcher. The
+    // provider registry can refresh while readiness registers the tool;
+    // mirror the real launcher's post-readiness bind before requiring the
+    // first model request from this already-wedged prompt. Otherwise a
+    // refreshed default model can receive it instead of the counting route.
+    const rebound = await bindRouteWithSettle(rpc.rpcRequest, expectation.route);
+    if (rebound.kind !== "bound" || rebound.model.provider !== expectation.route.provider ||
+        rebound.model.id !== expectation.route.modelId) {
+      throw new Error(`the hold-release route was not rebound after readiness: ${JSON.stringify(rebound)}`);
+    }
+    const resumed = await promptOutcome;
+    if (resumed.kind === "failed") {
+      throw new Error(`the wedged prompt did not resume: ${boundedDiagnostic(resumed.error)}; stderr: ${rpc.stderr()}`);
+    }
+    if (resumed.event["success"] !== true) {
+      throw new Error(`the resumed prompt response was refused: ${boundedEvent(resumed.event)}; stderr: ${rpc.stderr()}`);
+    }
+    await awaitFirstCountedRequest(
+      server,
+      PRODUCTION_HOLD_FIRST_REQUEST_TIMEOUT_MS,
+      () => `prompt response: ${JSON.stringify(promptResponse)}; stderr: ${rpc.stderr()}`,
+    );
+  }
+  await sleep(400);
+  if (rpc.gone()) {
+    throw new Error("the production hold child died or failed to spawn before the probe completed");
+  }
+  const holdPhases = customEntriesOf(rpc.bus, EMISSION_HOLD_ENTRY_TYPE)
+    .map((event) => recordOf(entryDataOf(event)))
+    .map((data) => (data === null ? undefined : data["phase"]))
+    .filter((phase): phase is string => typeof phase === "string");
+  await rpc.dispose();
+  return canonicalRecord({
+    holdPhases: Object.freeze(holdPhases),
+    childAliveDuringProbe: true,
+    agentStartCount: rpc.bus.snapshot().filter((event) => event.type === "agent_start").length,
+    promptResponse: spec.releaseThroughReadiness === true ? promptResponse : promptResponseBeforeReadiness,
+    requestCount: server.hits.length,
+    stderr: rpc.stderr(),
+  });
+});
 
 const matchingScenario = (
   label: string,
@@ -538,18 +523,24 @@ const asProvisionedPayload = (run: ProductionRun, index = 0): ReadinessReport =>
   return parsed.value;
 };
 
+/** A registered handler as the fake records it: kept for identity checks
+ *  only — the test drives the seam's named handlers, never these. */
+type RegisteredHandler = (...args: never[]) => unknown;
+
+/** The emission readiness host (`PiEmissionReadinessHost`), faked: the
+ *  journal refuses hold entries, so every hold marker surfaces as its bounded
+ *  stderr diagnostic. */
 class EmissionHoldFakePi {
-  readonly events = new SynchronousEventBus();
-  readonly handlers = new Map<string, FakeExtensionHandler[]>();
-  readonly commands = new Map<string, Readonly<{ handler: FakeExtensionHandler }>>();
+  readonly handlers = new Map<string, RegisteredHandler[]>();
+  readonly commands = new Map<string, Readonly<{ handler: RegisteredHandler }>>();
   readonly tools = new Map<string, Readonly<{ name: string }>>();
   readonly entries: Readonly<{ customType: string; data: unknown }>[] = [];
 
-  on(event: string, handler: FakeExtensionHandler): void {
+  on(event: string, handler: RegisteredHandler): void {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
   }
 
-  registerCommand(name: string, command: Readonly<{ handler: FakeExtensionHandler }>): void {
+  registerCommand(name: string, command: Readonly<{ handler: RegisteredHandler }>): void {
     this.commands.set(name, command);
   }
 
@@ -572,6 +563,49 @@ class EmissionHoldFakePi {
     return Object.freeze([...this.tools.values()]);
   }
 }
+
+/** The one handler the fake recorded for `event`, by identity. */
+const soleHandler = (pi: EmissionHoldFakePi, event: string): RegisteredHandler | undefined => {
+  const handlers = pi.handlers.get(event) ?? [];
+  return handlers.length === 1 ? handlers[0] : undefined;
+};
+
+/**
+ * Register the production extension's emission readiness through its NAMED
+ * seam (`registerLoomEmissionReadiness`, the one the extension factory itself
+ * calls) on a fake host provisioned with one minted judge-v1 binding, and run
+ * `body` against the returned handlers with stderr captured. No other bridge
+ * registers on this host, so no handler is reached by registration position.
+ */
+const withRegisteredEmissionHold = async (
+  label: string,
+  body: (pi: EmissionHoldFakePi, registration: PiEmissionReadinessRegistration, stderr: () => string) => Promise<void>,
+): Promise<void> => {
+  const requestId = nextRequestId(`t5-${label}`);
+  const expectation = makeExpectation(JUDGE_V1_CELL, requestId, "http://127.0.0.1:9/v1");
+  const rawBinding = childProvisioningEnv(
+    expectation,
+    requestId,
+    canonicalRecord({ kind: "minted" as const, cell: JUDGE_V1_CELL }),
+  );
+  if (rawBinding === undefined) throw new Error(`the ${label} fixture failed to mint provisioning`);
+
+  const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as typeof process.stderr.write);
+  try {
+    await withProcessState({ env: { [LOOM_EMISSION_BINDING_ENV]: rawBinding } }, async () => {
+      const { registerLoomEmissionReadiness } = await import("../../../pi/extension");
+      const pi = new EmissionHoldFakePi();
+      const registration = registerLoomEmissionReadiness(pi);
+      // The seam registered exactly its named handlers on the host.
+      expect(soleHandler(pi, "before_agent_start")).toBe(registration.holdPrompt);
+      expect(soleHandler(pi, "session_shutdown")).toBe(registration.releaseHoldOnShutdown);
+      expect(pi.commands.get(EMISSION_READINESS_COMMAND)?.handler).toBe(registration.readinessCommand);
+      await body(pi, registration, () => stderr.mock.calls.map(([chunk]) => String(chunk)).join(""));
+    });
+  } finally {
+    stderr.mockRestore();
+  }
+};
 
 describe(`the PRODUCTION loom child extension through the real barrier protocol on ${piIdentity} (T5; FR-008/FR-001/AD-4)`, { timeout: 75_000 }, () => {
   it("carries the settled protocol names — the production constants and the barrier contract cannot drift apart", () => {
@@ -614,107 +648,79 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
   });
 
   it("logs a bounded append cause while the production hold remains fail-closed until readiness", async () => {
-    const requestId = nextRequestId("t5-hold-diagnostic-cause");
-    const expectation = makeExpectation(JUDGE_V1_CELL, requestId, "http://127.0.0.1:9/v1");
-    const rawBinding = childProvisioningEnv(
-      expectation,
-      requestId,
-      canonicalRecord({ kind: "minted" as const, cell: JUDGE_V1_CELL }),
-    );
-    if (rawBinding === undefined) throw new Error("the diagnostic fixture failed to mint provisioning");
-
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as typeof process.stderr.write);
-    try {
-      await withProcessState({ env: { [LOOM_EMISSION_BINDING_ENV]: rawBinding } }, async () => {
-        const productionExtension = await import("../../../pi/extension");
-        const pi = new EmissionHoldFakePi();
-        productionExtension.default(pi as never, () => Object.freeze([]));
-        const holdHandler = pi.handlers.get("before_agent_start")?.[1];
-        const readiness = pi.commands.get(EMISSION_READINESS_COMMAND);
-        if (holdHandler === undefined || readiness === undefined) {
-          throw new Error("the production extension did not register its emission hold and readiness command");
-        }
-
-        let holdSettled = false;
-        const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
-          holdSettled = true;
-        });
-        await sleep(20);
-        expect(holdSettled).toBe(false);
-
-        await readiness.handler("", {});
-        await heldPrompt;
-        expect(holdSettled).toBe(true);
-        expect(pi.entries.some((entry) => entry.customType === EMISSION_READINESS_ENTRY_TYPE)).toBe(true);
-
-        const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
-        expect(diagnostic).toContain("emission hold entered diagnostic append failed (Error: hold journal unavailable");
-        expect(diagnostic).toContain("emission hold resolved diagnostic append failed (Error: hold journal unavailable");
-        expect(diagnostic).toContain("the hold remains fail-closed");
-        expect(diagnostic).toContain("…");
-        expect(diagnostic.length).toBeLessThan(1_000);
+    await withRegisteredEmissionHold("hold-diagnostic-cause", async (pi, registration, stderr) => {
+      let holdSettled = false;
+      const heldPrompt = registration.holdPrompt().then(() => {
+        holdSettled = true;
       });
-    } finally {
-      stderr.mockRestore();
-    }
+      await sleep(20);
+      expect(holdSettled).toBe(false);
+
+      await registration.readinessCommand();
+      await heldPrompt;
+      expect(holdSettled).toBe(true);
+      expect(pi.entries.some((entry) => entry.customType === EMISSION_READINESS_ENTRY_TYPE)).toBe(true);
+
+      const diagnostic = stderr();
+      expect(diagnostic).toContain("emission hold entered diagnostic append failed (Error: hold journal unavailable");
+      expect(diagnostic).toContain("emission hold resolved diagnostic append failed (Error: hold journal unavailable");
+      expect(diagnostic).toContain("the hold remains fail-closed");
+      expect(diagnostic).toContain("…");
+      expect(diagnostic.length).toBeLessThan(1_000);
+    });
   });
 
   it("session shutdown releases an armed emission hold: the wedged prompt settles, the shutdown-released marker is attempted, and re-invocation is inert (AD-4 cleanup arm)", async () => {
-    const requestId = nextRequestId("t5-hold-shutdown-release");
-    const expectation = makeExpectation(JUDGE_V1_CELL, requestId, "http://127.0.0.1:9/v1");
-    const rawBinding = childProvisioningEnv(
-      expectation,
-      requestId,
-      canonicalRecord({ kind: "minted" as const, cell: JUDGE_V1_CELL }),
-    );
-    if (rawBinding === undefined) throw new Error("the shutdown-release fixture failed to mint provisioning");
-
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as typeof process.stderr.write);
-    try {
-      await withProcessState({ env: { [LOOM_EMISSION_BINDING_ENV]: rawBinding } }, async () => {
-        const productionExtension = await import("../../../pi/extension");
-        const pi = new EmissionHoldFakePi();
-        productionExtension.default(pi as never, () => Object.freeze([]));
-        const holdHandler = pi.handlers.get("before_agent_start")?.[1];
-        // The emission fail-safe is the SECOND session_shutdown handler: the
-        // interactive-subagent bridge registers one first, the emission
-        // fail-safe second, and the general cleanup third (whose fake-ctx
-        // behavior this unit fixture does not drive).
-        const shutdownFailSafe = pi.handlers.get("session_shutdown")?.[1];
-        if (holdHandler === undefined || shutdownFailSafe === undefined) {
-          throw new Error("the production extension did not register its emission hold and shutdown fail-safe");
-        }
-
-        let holdSettled = false;
-        const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
-          holdSettled = true;
-        });
-        await sleep(20);
-        expect(holdSettled).toBe(false);
-
-        // Shutdown with the hold armed: the wedged coroutine resolves. The
-        // fake journal refuses hold entries, so the shutdown-released marker
-        // surfaces as the bounded stderr diagnostic — the entry emission is
-        // attempted even when the journal is unavailable.
-        await shutdownFailSafe({}, {});
-        await heldPrompt;
-        expect(holdSettled).toBe(true);
-
-        // A second shutdown is inert: the hold is already released, so exactly
-        // one shutdown-released diagnostic is emitted and nothing re-releases.
-        await shutdownFailSafe({}, {});
-        const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
-        expect(diagnostic).toContain("emission hold shutdown-released diagnostic append failed (Error: hold journal unavailable");
-        expect(diagnostic.match(/shutdown-released diagnostic append failed/g)).toHaveLength(1);
-        expect(diagnostic).toContain("the hold remains fail-closed");
+    await withRegisteredEmissionHold("hold-shutdown-release", async (_pi, registration, stderr) => {
+      let holdSettled = false;
+      const heldPrompt = registration.holdPrompt().then(() => {
+        holdSettled = true;
       });
-    } finally {
-      stderr.mockRestore();
-    }
+      await sleep(20);
+      expect(holdSettled).toBe(false);
+
+      // Shutdown with the hold armed: the wedged coroutine resolves. The fake
+      // journal refuses hold entries, so the shutdown-released marker
+      // surfaces as the bounded stderr diagnostic — the entry emission is
+      // attempted even when the journal is unavailable.
+      await registration.releaseHoldOnShutdown();
+      await heldPrompt;
+      expect(holdSettled).toBe(true);
+
+      // A second shutdown is inert: the hold is already released, so exactly
+      // one shutdown-released diagnostic is emitted and nothing re-releases.
+      await registration.releaseHoldOnShutdown();
+      const diagnostic = stderr();
+      expect(diagnostic).toContain("emission hold shutdown-released diagnostic append failed (Error: hold journal unavailable");
+      expect(diagnostic.match(/shutdown-released diagnostic append failed/g)).toHaveLength(1);
+      expect(diagnostic).toContain("the hold remains fail-closed");
+    });
   });
 
-  it("matching readiness on the judge-verdict v1 cell opens the gate, exposes the exact registered tool to the constrained route, and the first model request lands after the readiness observation", async () => {
-    const run = await runProductionGate(matchingScenario("production-matching-judge-v1", { issuedCell: JUDGE_V1_CELL }));
+  it("the SHIPPED readiness verifier, driven against a real production child through the real-RPC adapter, opens the gate on the bridge's own provisioning and the first model request follows", async () => {
+    const run = await runShippedVerifier("matching", PARENT_RUNTIME_REVISION);
+    expect(run.verdict, `${run.label}; stderr: ${run.stderr}`).toEqual({ ok: true });
+    expect(run.prompted).toBe(true);
+    expect(run.requestCount).toBe(1);
+    // Exactly the one invocation the verifier is allowed.
+    expect(run.readinessPayloads).toHaveLength(1);
+  });
+
+  it("the SHIPPED readiness verifier refuses a real production child's honest load identity against a stale expected revision, in the gate's vocabulary, with ZERO model requests", async () => {
+    const run = await runShippedVerifier("stale-revision", STALE_REVISION);
+    if (run.verdict.ok) throw new Error(`[${run.label}] the shipped verifier opened a stale-revision launch; stderr: ${run.stderr}`);
+    expect(run.verdict.reason).toContain(STALE_REVISION);
+    expect(run.verdict.reason).toContain(EMISSION_STARTUP_REMEDIATIONS["revision-mismatch"]);
+    expect(run.prompted).toBe(false);
+    expect(run.requestCount).toBe(0);
+    expect(run.childKilled).toBe(true);
+  });
+
+  it.each([
+    { label: "production-matching-judge-v1", cell: JUDGE_V1_CELL, kind: "judge-verdict", version: "v1", toolName: "loom_emit_judge_verdict" },
+    { label: "production-matching-reviewer-v2", cell: REVIEWER_V2_CELL, kind: "reviewer-payload", version: "v2", toolName: "loom_emit_reviewer_payload" },
+  ] as const)("matching readiness on the $kind $version cell opens the gate, exposes the exact registered tool to the constrained route, and the first model request lands after the readiness observation", async ({ label, cell, kind, version, toolName }) => {
+    const run = await runProductionGate(matchingScenario(label, { issuedCell: cell }));
     const open = expectOpenRun(run);
     expect(run.channelAlive).toBe(true);
     expect(run.commandListed).toBe(true);
@@ -723,14 +729,14 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     expect(run.requestCount).toBe(1);
     const readiness = asProvisionedPayload(run);
     expect(readiness.requestId).toBe(run.issuedRequestId);
-    expect(readiness.kind).toBe("judge-verdict");
-    expect(readiness.version).toBe("v1");
-    expect(readiness.toolName).toBe("loom_emit_judge_verdict");
-    expect(readiness.schemaDigest).toBe(sha256Hex(JUDGE_V1_CELL.schemaBytes));
+    expect(readiness.kind).toBe(kind);
+    expect(readiness.version).toBe(version);
+    expect(readiness.toolName).toBe(toolName);
+    expect(readiness.schemaDigest).toBe(cellSchemaDigest(cell));
     expect(readiness.active).toBe(true);
     expect(readiness.childPid).toBe(run.childPid);
     expect(readiness.revision).toBe(PARENT_RUNTIME_REVISION);
-    expect(readiness.registeredTools).toContain("loom_emit_judge_verdict");
+    expect(readiness.registeredTools).toContain(toolName);
     expect(open.route).toEqual({
       kind: "pinned-endpoint",
       provider: "loom-counting",
@@ -740,24 +746,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     });
     // FR-001 on the production path: the provider request carries the exact
     // registered emission tool.
-    expect(run.requestBodies[0]).toContain("loom_emit_judge_verdict");
-    const { firstRequestAt, readinessObservedAt } = orderingPair(run);
-    expect(firstRequestAt).toBeGreaterThanOrEqual(readinessObservedAt);
-  });
-
-  it("matching readiness on the reviewer-payload v2 cell opens the gate, and the first model request lands after the readiness observation", async () => {
-    const run = await runProductionGate(matchingScenario("production-matching-reviewer-v2"));
-    expectOpenRun(run);
-    expect(run.prompted).toBe(true);
-    expect(run.requestCount).toBe(1);
-    const readiness = asProvisionedPayload(run);
-    expect(readiness.requestId).toBe(run.issuedRequestId);
-    expect(readiness.kind).toBe("reviewer-payload");
-    expect(readiness.version).toBe("v2");
-    expect(readiness.toolName).toBe("loom_emit_reviewer_payload");
-    expect(readiness.schemaDigest).toBe(sha256Hex(REVIEWER_V2_CELL.schemaBytes));
-    expect(readiness.active).toBe(true);
-    expect(run.requestBodies[0]).toContain("loom_emit_reviewer_payload");
+    expect(run.requestBodies[0]).toContain(toolName);
     const { firstRequestAt, readinessObservedAt } = orderingPair(run);
     expect(firstRequestAt).toBeGreaterThanOrEqual(readinessObservedAt);
   });
