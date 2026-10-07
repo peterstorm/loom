@@ -380,7 +380,10 @@ function architectureRosterAuthorityErrors(args: Readonly<{
   return errors;
 }
 
-export function parseArchitecturePanelAuthority(raw: ArchitecturePanelAuthorityInput): PersistentPanelResult<ArchitecturePanelAuthority> {
+/** Parse an architecture panel authority from untrusted data: an issued
+ *  `ArchitecturePanelAuthorityInput`, or a checkpoint's `authority` field
+ *  read back from disk. No shape is assumed of `raw`. */
+export function parseArchitecturePanelAuthority(raw: unknown): PersistentPanelResult<ArchitecturePanelAuthority> {
   try {
     const input = safeRecord(raw, ["runId", "candidateLenses", "judgeCriteria", "candidateSlots", "judgeSlots"]);
     if (input === null) return persistentFailure(panelError("architecture", "invalid-authority", "architecture authority must be an exact data record"));
@@ -550,7 +553,10 @@ export function boundCandidateEntry(
     : persistentSuccess(Object.freeze({ lens, candidate }));
 }
 
-export function parseRefutationPanelAuthority(raw: RefutationPanelAuthorityInput): PersistentPanelResult<RefutationPanelAuthority> {
+/** Parse a refutation panel authority from untrusted data: an issued
+ *  `RefutationPanelAuthorityInput`, or a checkpoint's `authority` field read
+ *  back from disk. No shape is assumed of `raw`. */
+export function parseRefutationPanelAuthority(raw: unknown): PersistentPanelResult<RefutationPanelAuthority> {
   try {
     const input = safeRecord(raw, ["runId", "identityRunId", "findings", "lenses", "verifierSlots"]) ??
       safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);

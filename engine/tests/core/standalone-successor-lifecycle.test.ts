@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { valueOf, standaloneFixture, publishBatch, upholdStandaloneCriticals } from "../fixtures/standalone-remediation-authority";
+import { standaloneFixture, publishBatch, upholdStandaloneCriticals } from "../fixtures/standalone-remediation-authority";
+import { value } from "../fixtures/parse-result";
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
 import {
   prepareStandaloneLineageSource,
@@ -71,23 +72,23 @@ type Reports = (prepared: PreparedStandaloneSuccessor, index: number) => Standal
 function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: string, reports: Reports = payload,
   snapshotRevision = runId,
   captureVia: (request: Readonly<{ requestId: string }>, raw: Uint8Array) => Uint8Array = (_request, raw) => raw) {
-  const source = valueOf(prepareStandaloneLineageSource(sourceResult, `/owned/${sourceResult.runId}`));
-  const disposition = dispositionPublicationFixture(valueOf(prepareStandaloneDisposition(source, bytes({
+  const source = value(prepareStandaloneLineageSource(sourceResult, `/owned/${sourceResult.runId}`));
+  const disposition = dispositionPublicationFixture(value(prepareStandaloneDisposition(source, bytes({
     schemaVersion: 1, source: source.publication, provenance: "DECLARED", revision: { kind: "initial" },
     entries: source.inventory.filter(row => ("draft" in row.finding ? row.finding.draft.severity : row.finding.severity) === "advisory")
       .map(row => ({ origin: standaloneOriginReference(row.origin), decision: "accepted", reason: "Retain explicitly." })),
   })))).published;
-  const prepared = valueOf(prepareStandaloneSuccessor(source, bytes({ runId, reviewers: source.reviewers,
+  const prepared = value(prepareStandaloneSuccessor(source, bytes({ runId, reviewers: source.reviewers,
     snapshot: source.scope.map(path => ({ kind: "present", path, mode: "100644", digest: sha256Hex(`${snapshotRevision}:${path}`) })),
   }), { kind: "selected-record", disposition }));
   const packets = prepared.reviewers.map(role => ([1, 2] as const).map(attempt => {
-    const policy = valueOf(resolveAgentPolicy(role));
-    return valueOf(buildStandaloneSuccessorReviewerContext(prepared, {
-      runId: valueOf(parseOrchestrationRunId(runId)), requestId: valueOf(parseRequestId(`request:${sha256Hex(`${runId}\u0000${role}\u0000${attempt}`)}`)),
+    const policy = value(resolveAgentPolicy(role));
+    return value(buildStandaloneSuccessorReviewerContext(prepared, {
+      runId: value(parseOrchestrationRunId(runId)), requestId: value(parseRequestId(`request:${sha256Hex(`${runId}\u0000${role}\u0000${attempt}`)}`)),
       role: policy.agent, attempt, requiredSkill: policy.requiredSkill,
     }, []));
   }));
-  const initial = valueOf(prepareFreshStandaloneReview({ runId, successor: prepared, explicitScope: source.scope,
+  const initial = value(prepareFreshStandaloneReview({ runId, successor: prepared, explicitScope: source.scope,
     changedPaths: { unstaged: source.scope, staged: [], committed: [], base_revision: null, head_revision: "1".repeat(40) },
     reviewMetadata: { requested_kinds: ["types"], docs_only: false, source_or_test_changed: false,
       types_changed: true, comments_changed: false, additions: 1, file_count: source.scope.length, new_structure: false, languages: ["TypeScript"] },
@@ -97,7 +98,7 @@ function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: strin
   const authority = parseValue(parseStandaloneReviewAuthority(JSON.parse(serializeStandaloneReviewAuthority(initial.authority)), prepared));
   const requests = authority.roster.orderedSlots.map(slot => ({ authority: slot.attempts[0],
     context: { digest: slot.attempts[0].contextDigest, slot: `contexts/${slot.attempts[0].contextDigest}.json` } }));
-  const intent = valueOf(prepareInitialBatchPublicationIntent(runId, `effect:${runId}:reviewers`, requests));
+  const intent = value(prepareInitialBatchPublicationIntent(runId, `effect:${runId}:reviewers`, requests));
   const published = publishBatch(intent, requests);
   const resolver = createPublicationAuthorityResolver(lookup => lookup.runId === runId && lookup.effectId === intent.identity.effectId
     ? { ok: true, value: published.receiptBytes } : { ok: false, error: { kind: "publication-authority-unavailable", message: "foreign publication" } });
@@ -112,45 +113,45 @@ function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: strin
   };
   const accepted = published.action.requests.map((request, index) => {
     const raw = captureVia(request.authority, bytes(reports(prepared, index)));
-    const artifact = valueOf(parseArtifactRef({ runId, slot: request.authority.outputSlot, digest: sha256Bytes(raw), byteLength: raw.length }));
-    return valueOf(acceptedAgentResult(request, valueOf(capturedReviewerResultFromBytes(artifact, raw))));
+    const artifact = value(parseArtifactRef({ runId, slot: request.authority.outputSlot, digest: sha256Bytes(raw), byteLength: raw.length }));
+    return value(acceptedAgentResult(request, value(capturedReviewerResultFromBytes(artifact, raw))));
   });
   const completion = proveStandaloneRosterCompletion(authority, resolver, accepted, protocols);
-  const awaiting = valueOf(reduceStandaloneReviewMachine(startStandaloneReviewMachine(authority), { kind: "review-batch-published", runId }));
+  const awaiting = value(reduceStandaloneReviewMachine(startStandaloneReviewMachine(authority), { kind: "review-batch-published", runId }));
   return { source, prepared, authority, packets, protocols, resolver, accepted, completion, awaiting };
 }
 
 function finalize(collected: ReturnType<typeof collect>, refute = false) {
-  const completion = valueOf(collected.completion);
+  const completion = value(collected.completion);
   const aggregate: StandaloneReviewState = parseValue(aggregateStandaloneReview({ authority: collected.authority, completion }));
-  const aggregating = valueOf(reduceStandaloneReviewMachine(collected.awaiting, { kind: "complete-roster-proved", completion }));
+  const aggregating = value(reduceStandaloneReviewMachine(collected.awaiting, { kind: "complete-roster-proved", completion }));
   let state: StandaloneReviewMachineState;
   let resolver: PublicationAuthorityResolver = collected.resolver;
-  if (aggregate.kind === "clean") state = valueOf(reduceStandaloneReviewMachine(aggregating, { kind: "aggregate-clean", aggregate: aggregate.aggregate }));
+  if (aggregate.kind === "clean") state = value(reduceStandaloneReviewMachine(aggregating, { kind: "aggregate-clean", aggregate: aggregate.aggregate }));
   else {
     const panel = upholdStandaloneCriticals(collected.authority, aggregate.aggregate, refute);
     resolver = lookup => lookup.runId === collected.authority.runId ? collected.resolver(lookup) : panel.resolver(lookup);
-    const awaiting = valueOf(reduceStandaloneReviewMachine(aggregating, { kind: "aggregate-has-criticals", aggregate: aggregate.aggregate,
+    const awaiting = value(reduceStandaloneReviewMachine(aggregating, { kind: "aggregate-has-criticals", aggregate: aggregate.aggregate,
       panelAuthority: panel.frozen, refutationAuthority: panel.authority }));
     expect(reduceStandaloneReviewMachine(awaiting, { kind: "refutation-completed", completion: {
       ...panel.completion, completedPanelState: { ...panel.completion.completedPanelState },
     } }).ok).toBe(false);
-    state = valueOf(reduceStandaloneReviewMachine(awaiting, { kind: "refutation-completed", completion: panel.completion }));
+    state = value(reduceStandaloneReviewMachine(awaiting, { kind: "refutation-completed", completion: panel.completion }));
   }
   if (state.kind !== "ready-to-finalize") throw Error("LC-2 must reach actual ready state");
   const ready: StandaloneReadyToFinalizeState = state;
   const serialization = serializeAdjudicatedStandaloneReview(ready.result);
   const receipt = { kind: "artifact-set-published" as const, effectId: ready.publicationIntent.effectId,
     runId: collected.authority.runId, artifacts: ready.publicationIntent.artifacts };
-  const done = valueOf(reduceStandaloneReviewMachine(ready, { kind: "result-published", result: JSON.parse(serialization), receipt }));
+  const done = value(reduceStandaloneReviewMachine(ready, { kind: "result-published", result: JSON.parse(serialization), receipt }));
   if (done.kind !== "done" || done.result.schemaVersion !== 3) throw Error("actual authoritative v3 done result required");
-  const replay = valueOf(parseStandaloneReviewMachineState(JSON.parse(serializeStandaloneReviewMachineState(done)), resolver,
+  const replay = value(parseStandaloneReviewMachineState(JSON.parse(serializeStandaloneReviewMachineState(done)), resolver,
     collected.protocols, collected.authority));
   expect(replay.kind).toBe("done");
   if (replay.kind !== "done") throw Error("published replay required");
   expect(serializeAdjudicatedStandaloneReview(replay.result)).toBe(serialization);
   expect(isAuthoritativeStandaloneReviewResult(replay.result)).toBe(true);
-  expect(valueOf(readStandaloneReviewPublication(replay.result, 16_777_216)).digest).toBe(sha256Hex(serialization));
+  expect(value(readStandaloneReviewPublication(replay.result, 16_777_216)).digest).toBe(sha256Hex(serialization));
   return { ...collected, aggregate, ready, done, result: done.result, serialization, receipt, resolver, replay };
 }
 
@@ -196,14 +197,14 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
     const attached = second.result.lineage.inventory[1]!.origin;
     expect(attached).toMatchObject({ kind: "published-successor", publication: { runId: first.authority.runId, resultDigest: sha256Hex(first.serialization) } });
     expect(standaloneOriginReference(attached)).toBe(standaloneOriginReference(first.result.lineage.inventory[1]!.origin));
-    const thirdSource = valueOf(prepareStandaloneLineageSource(second.replay.result, `/owned/${second.result.runId}`));
+    const thirdSource = value(prepareStandaloneLineageSource(second.replay.result, `/owned/${second.result.runId}`));
     expect(thirdSource.reviewHistory).toHaveLength(2);
     expect(thirdSource.reviewHistory[0]).toEqual(second.result.successor.reviewHistory[0]);
     expect(thirdSource.inventory[1]!.origin).toEqual(attached);
     expect(thirdSource.inventory[1]!.history).toEqual(second.result.lineage.inventory[1]!.history);
     expect(first.result.lineage.inventory[1]!.origin.kind).toBe("current");
     expect(second.result.lineage.inventory[3]!.origin.kind).toBe("current");
-    const accounting = valueOf(prepareDefectFamilyAccounting(second.result, { kind: "not-required" }));
+    const accounting = value(prepareDefectFamilyAccounting(second.result, { kind: "not-required" }));
     expect(accounting.source.sourceVersion).toBe(3);
     expect(accounting.source.sourceResultJson).toBe(second.serialization);
     expect(accounting.source.sourceResultDigest).toBe(sha256Hex(second.serialization));
@@ -245,10 +246,10 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
 
   it("conserves full canonical v3 publication through the P3 parser and refuses arbitrary lineage-byte or receipt substitutions", () => {
     const review = finalize(collect(predecessor(), "run.p3-source", repaired));
-    const authority = valueOf(freezePathAuthority({ standaloneResult: review.result, publicationReceipt: review.receipt }));
+    const authority = value(freezePathAuthority({ standaloneResult: review.result, publicationReceipt: review.receipt }));
     const resolver = createStandaloneResultPublicationAuthorityResolver(() => ({ ok: true, value: review.receipt }));
     expect(authority.sourceResultJson).toBe(review.serialization);
-    expect(valueOf(parseRemediationPathAuthority(JSON.parse(JSON.stringify(authority)), resolver))).toEqual(authority);
+    expect(value(parseRemediationPathAuthority(JSON.parse(JSON.stringify(authority)), resolver))).toEqual(authority);
     fc.assert(fc.property(fc.string({ minLength: 1, maxLength: 80 }), suffix => {
       const raw = JSON.parse(review.serialization);
       raw.lineage.inventory[0].finding.claim += suffix;
@@ -274,7 +275,7 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
     const id = inherited.result.survivingCriticals[0]!.id;
     const declaration = (findingId: string) => ({ kind: "declared-defect-family-accounting", provenance: "DECLARED",
       dispositions: [{ findingId, status: "unresolved", reason: "Explicit remaining obligation" }], groups: [] });
-    const accounting = valueOf(prepareDefectFamilyAccounting(inherited.result, declaration(id)));
+    const accounting = value(prepareDefectFamilyAccounting(inherited.result, declaration(id)));
     expect(accounting.source.sourceResultJson).toBe(inherited.serialization);
     expect(accounting.source.survivingCriticals.map(row => row.id)).toEqual([id]);
     expect(prepareDefectFamilyAccounting(inherited.result, { kind: "not-required" }).ok).toBe(false);
@@ -291,13 +292,13 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
     expect(foreign.completion.ok).toBe(false);
     expect(missing.awaiting.kind).toBe("awaiting-results");
     const request = missing.accepted[0]!.authority;
-    const retry = valueOf(reduceStandaloneReviewMachine(missing.awaiting, { kind: "result-rejected", request, message: "missing exact prior coverage" }));
+    const retry = value(reduceStandaloneReviewMachine(missing.awaiting, { kind: "result-rejected", request, message: "missing exact prior coverage" }));
     expect(retry.pending[0]?.expectedAttempt).toBe(2);
-    expect(valueOf(parseStandaloneReviewMachineState(JSON.parse(serializeStandaloneReviewMachineState(retry)), missing.resolver, missing.protocols, missing.authority)).pending).toEqual(retry.pending);
+    expect(value(parseStandaloneReviewMachineState(JSON.parse(serializeStandaloneReviewMachineState(retry)), missing.resolver, missing.protocols, missing.authority)).pending).toEqual(retry.pending);
     const secondRequest = missing.authority.roster.orderedSlots[0]!.attempts[1];
-    const terminal = valueOf(reduceStandaloneReviewMachine(retry, { kind: "result-rejected", request: secondRequest, message: "still missing" }));
+    const terminal = value(reduceStandaloneReviewMachine(retry, { kind: "result-rejected", request: secondRequest, message: "still missing" }));
     expect(terminal.kind).toBe("terminal-blocked");
-    expect(valueOf(parseStandaloneReviewMachineState(JSON.parse(serializeStandaloneReviewMachineState(terminal)), missing.resolver, missing.protocols, missing.authority)).kind).toBe("terminal-blocked");
+    expect(value(parseStandaloneReviewMachineState(JSON.parse(serializeStandaloneReviewMachineState(terminal)), missing.resolver, missing.protocols, missing.authority)).kind).toBe("terminal-blocked");
   });
 
   it("observes changed inputs for unanimous resolution, and rejects unchanged bytes despite a different Run/HEAD", () => {
@@ -344,9 +345,9 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
     fc.assert(fc.property(fc.constantFrom("run_id", "scope", "lineage", "successor"), key => {
       expect(parseAuthoritativeStandaloneReviewResult(review.ready, { ...raw, [key]: null }, review.receipt).ok).toBe(false);
     }), { seed: 5501, numRuns: 20 });
-    const published = valueOf(parseAuthoritativeStandaloneReviewResult(review.ready, raw, review.receipt));
+    const published = value(parseAuthoritativeStandaloneReviewResult(review.ready, raw, review.receipt));
     expect(isAuthoritativeStandaloneReviewResult(published)).toBe(true);
-    expect(valueOf(prepareStandaloneLineageSource(published, "/owned/published")).publication.resultDigest)
+    expect(value(prepareStandaloneLineageSource(published, "/owned/published")).publication.resultDigest)
       .toBe(sha256Hex(review.serialization));
     expect(serializeAdjudicatedStandaloneReview(published)).toBe(review.serialization);
   });

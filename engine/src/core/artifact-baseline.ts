@@ -102,32 +102,29 @@ export function restrictedArtifactBaseline<Scheme extends SnapshotScheme>(
   return Object.freeze(baseline.filter((entry) => keep(entry.artifact))) as unknown as ArtifactBaseline<Scheme>;
 }
 
-/** The runtime name of a scheme: the concrete scheme, or `"unknown"` for the
- *  wide union a digest-only parse site carries. */
-export type SnapshotSchemeName<Scheme extends SnapshotScheme> = SnapshotScheme extends Scheme ? "unknown" : Scheme;
+/**
+ * The nominal brand only this module's issued schemes carry. A class-private
+ * name cannot be written by an object literal, copied by a spread, or declared
+ * by a class outside this module, so nothing inhabits the brand without a
+ * cast. Type-only: no class exists at runtime and no instance holds a value
+ * for it — the scheme lives in the type argument, never in a runtime string.
+ */
+declare class ArtifactBaselineSchemeMint<Scheme extends SnapshotScheme> {
+  #scheme: Scheme;
+}
 
 /**
  * The construction entry points of ONE digest scheme. The scheme is fixed by
  * which issued instance a caller names, never by a type argument it supplies,
  * so the choice is visible (and reviewable) at every capture and parse site.
  *
- * Nominal, not structural: the class is exported as a type only and carries a
- * module-private `#scheme` field, so no object literal, spread, delegate or
- * subclass written outside this module inhabits it without a cast. The three
- * constants below are its only instances, so every `ArtifactBaseline<Scheme>`
- * traces back to one of them.
+ * Exported as a type only (`ArtifactBaselineScheme`, branded by
+ * `ArtifactBaselineSchemeMint`). The three constants below are its only
+ * instances, so every `ArtifactBaseline<Scheme>` traces back to one of them.
  */
-class ArtifactBaselineScheme<Scheme extends SnapshotScheme> {
-  readonly #scheme: SnapshotSchemeName<Scheme>;
-
-  constructor(scheme: SnapshotSchemeName<Scheme>) {
-    this.#scheme = scheme;
+class ArtifactBaselineEntryPoints<Scheme extends SnapshotScheme> {
+  constructor() {
     Object.freeze(this);
-  }
-
-  /** The digest scheme these entry points prove. */
-  get scheme(): SnapshotSchemeName<Scheme> {
-    return this.#scheme;
   }
 
   /** Prove already-typed entries (one entry per artifact). */
@@ -182,15 +179,22 @@ class ArtifactBaselineScheme<Scheme extends SnapshotScheme> {
   }
 }
 
-// Type-only: callers name the issued instances; none can construct or extend one.
-export type { ArtifactBaselineScheme };
+/** One issued scheme's entry points. Type-only: callers name the issued
+ *  instances; none can construct, extend or forge one. */
+export type ArtifactBaselineScheme<Scheme extends SnapshotScheme> =
+  ArtifactBaselineEntryPoints<Scheme> & ArtifactBaselineSchemeMint<Scheme>;
+
+/** The ONE mint of an issued scheme: its entry points, branded. The brand is
+ *  type-only, so this is the one justified cast that applies it. */
+const issueScheme = <Scheme extends SnapshotScheme>(): ArtifactBaselineScheme<Scheme> =>
+  new ArtifactBaselineEntryPoints<Scheme>() as ArtifactBaselineScheme<Scheme>;
 
 /** `artifact_baseline` / `attempt_artifact_baseline`: raw file bytes or a directory tree digest. */
-export const DECLARED_ARTIFACT_BASELINE = new ArtifactBaselineScheme<"declared-artifact">("declared-artifact");
+export const DECLARED_ARTIFACT_BASELINE = issueScheme<"declared-artifact">();
 /** `repository_baseline` / `attempt_repository_baseline`: `file\0<mode>\0<bytes>` or `symlink\0<target>`. */
-export const REPOSITORY_CHANGE_BASELINE = new ArtifactBaselineScheme<"repository-change">("repository-change");
+export const REPOSITORY_CHANGE_BASELINE = issueScheme<"repository-change">();
 /** A digest-only read whose scheme its site cannot know; the result can never reach a comparison. */
-export const UNKNOWN_SCHEME_BASELINE = new ArtifactBaselineScheme<SnapshotScheme>("unknown");
+export const UNKNOWN_SCHEME_BASELINE = issueScheme<SnapshotScheme>();
 
 /** The Task State File fields that persist a baseline, and the digest scheme
  *  each one is captured under. */

@@ -12,24 +12,24 @@
  * local HTTP server that counts and rejects completions, so a model request is
  * a counted event, never a real call), the strict JSONL RPC bus and request
  * framing, the probe-proven launcher steps (channel check, discovery, bounded
- * readiness wait, the pure gate, the fail-closed settle-aware route bind,
- * prompt delivery only on open) composed ONCE in `runLauncherBarrier` inside
- * the `withBarrierResources` lifecycle bracket, the real-RPC adapter
- * (`rpcReadinessClient`) through which a real child drives the verifier the
- * parent bridge ships, the shared gate-run assertions, and the
+ * readiness wait, the fail-closed settle-aware route bind, prompt delivery
+ * only on open) as the harness adapter of the PRODUCTION launcher step
+ * sequence (`pi/emission-readiness-sequence.ts`) that `runLauncherBarrier`
+ * drives inside the `withBarrierResources` lifecycle bracket, the real-RPC
+ * adapter (`rpcReadinessClient`) through which a real child drives the
+ * verifier the parent bridge ships, the shared gate-run assertions, and the
  * ambient-process-state scope the in-process suites restore.
  *
- * The gate decisions themselves are the production ones
- * (`pi/emission-readiness-gate.ts`); this harness only gathers the facts and
- * sequences the two decision stages exactly as a launcher must.
- * `runLauncherBarrier` is not built on the shipped `verifyReadiness`: that
- * verifier pins an issued-model route (no endpoint), returns only
- * `{ ok } | { ok: false, reason }` (no decision ADT to assert codes, the
- * opened readiness or the bound route on), and its port has no arm for a
- * bounded-window timeout, a launcher cancellation, a child death mid-wait or
- * a command-error `startup-unavailable` — the controls these suites exist to
- * discriminate. The shipped verifier runs against a real child through
- * `rpcReadinessClient` instead (emission-startup-production.test.ts).
+ * Neither the step ORDER nor the gate decisions live here: the sequence and
+ * the gate (`pi/emission-readiness-gate.ts`) are production code, and the
+ * shipped verifier is the step port's other adapter, so a stage the launcher
+ * adds or reorders reaches these suites too. The harness owns only what the
+ * shipped verifier's RPC client cannot express — the pinned-endpoint route,
+ * the decision ADT the suites assert codes, the opened readiness and the
+ * bound route on, and the readiness-wait controls (a bounded-window timeout,
+ * a launcher cancellation, a child death mid-wait, a command-error
+ * `startup-unavailable`). The shipped verifier itself runs against a real
+ * child through `rpcReadinessClient` (emission-startup-production.test.ts).
  */
 
 import { expect } from "vitest";
@@ -41,26 +41,29 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256Hex } from "../../src/core/digest";
 import {
-  decideReadinessGate,
-  decideStartupRoute,
   EMISSION_STARTUP_REMEDIATIONS,
-  parseReadinessStageObservation,
   type EmissionReadinessGateDecision,
   type EmissionStartupDecision,
   type EmissionStartupExpectation,
   type EmissionStartupRefusalCode,
   type ExpectedEmissionRoute,
   type ReadinessObservation,
-  type ReadinessProbeFacts,
   type RouteObservation,
 } from "../../../pi/emission-readiness-gate";
+import {
+  runEmissionStartupSequence,
+  type ChannelObservation,
+  type EmissionStartupSteps,
+} from "../../../pi/emission-readiness-sequence";
 import {
   boundDiagnosticMessage,
   canonicalRecord,
   describeUnknown,
   parseContextDigest,
+  success,
   type ContextDigest,
 } from "../../src/core/orchestration-contract/identity";
+import { withEnvOverlay, type EnvironmentOverlay } from "./issue-route-env";
 import type { PiSubagentLaunchReply } from "../../../pi/emission-launch-bridge";
 import { canonicalTempDir } from "./canonical-temp-dir";
 import { mintedBindingFor, type RegistryCell } from "./emission-registry-cells";
@@ -569,9 +572,7 @@ export const openPiRpcChild = (options: PiRpcChildOptions): PiRpcChild => {
 
 /** 1. Channel check — "child up, readiness missing" must be distinguishable
  *  from "child never came up" (infrastructure). */
-export const observeChannel = async (
-  rpc: PiRpcChild,
-): Promise<Readonly<{ channelAlive: boolean; channelDiagnostic: string | null }>> => {
+export const observeChannel = async (rpc: PiRpcChild): Promise<ChannelObservation> => {
   try {
     const state = await rpc.rpcRequest({ type: "get_state" }, "get_state");
     return state["success"] === true
@@ -617,20 +618,6 @@ export const settledReadiness = (
 
 export const readinessAbsentWithinWindow = (): ReadinessObservation =>
   canonicalRecord({ kind: "absent" as const, reason: `no readiness entry arrived within ${READY_TIMEOUT_MS}ms` });
-
-/** 4. The pure readiness decision over the observed protocol facts, then —
- *  only on a ready child — the fail-closed route binding and the route
- *  decision: the decision the launcher acts on. A refused readiness is final;
- *  no route is ever bound for it. */
-export const decideStartupThroughRouteBind = async (
-  rpc: PiRpcChild,
-  expectation: EmissionStartupExpectation,
-  facts: ReadinessProbeFacts,
-): Promise<EmissionStartupDecision> => {
-  const readiness = decideReadinessGate(expectation, parseReadinessStageObservation(facts));
-  if (readiness.kind === "refused") return readiness;
-  return decideStartupRoute(expectation.route, readiness, await bindRouteWithSettle(rpc.rpcRequest, expectation.route));
-};
 
 /** The issued request the prompt names: only its binding is read. */
 type IssuedPromptSource = Pick<EmissionStartupExpectation, "binding">;
@@ -740,11 +727,6 @@ export type BarrierRun<P> = Readonly<{
   afterPrompt: P | null;
 }>;
 
-const NEVER_REACHED_READINESS: ReadinessObservation = canonicalRecord({
-  kind: "absent" as const,
-  reason: "the launcher never reached the readiness stage",
-});
-
 const CANCELLED_READINESS: ReadinessObservation = canonicalRecord({ kind: "cancelled" as const });
 
 const invokeReadinessCommand = async (rpc: PiRpcChild, command: string, label: string): Promise<void> => {
@@ -810,12 +792,47 @@ export const actOnGateVerdict = async <P>(
   return { prompted: true, afterPrompt: await afterPrompt() };
 };
 
+/** What the harness's discovery step keeps beside the listing verdict: the
+ *  raw inventory, for the suites' discovery diagnostics. */
+type HarnessDiscovery = Readonly<{ commandListed: boolean; commands: readonly Record<string, unknown>[] }>;
+
+/** What the harness's readiness step keeps beside the observation: when it arrived. */
+type HarnessReadinessStage = Readonly<{ readiness: ReadinessObservation; observedAt: number | null }>;
+
 /**
- * The launcher barrier, written once: channel check → discovery → readiness
- * (only for a listed command) → the pure gate and the fail-closed route bind
- * → `onDecided` → prompt only on open, then `afterPrompt`. Every step is
- * bounded. The release stays with the caller, so a run can hold its child
- * mid-flight across a peer's release.
+ * The harness's adapter of the production launcher step port
+ * (`pi/emission-readiness-sequence.ts`) — the second adapter beside the
+ * verifier the parent bridge ships. Each step is the real RPC exchange with
+ * the harness's controls (the bounded-window timeout, cancellation, a child
+ * death mid-wait, a command-error `startup-unavailable`, the idempotent
+ * re-invocation) and the settle-aware pinned-endpoint route bind. Its
+ * transport failures are INFRASTRUCTURE — they throw, so the port's error arm
+ * is `never` and a hostile-payload throw from the gate propagates the same way.
+ */
+const launcherSteps = (
+  rpc: PiRpcChild,
+  readinessCommand: string,
+  driver: ReadinessStageDriver,
+): EmissionStartupSteps<never, HarnessDiscovery, HarnessReadinessStage> => Object.freeze({
+  observeChannel: async () => success(await observeChannel(rpc)),
+  discoverReadinessCommand: async () => {
+    const commands = await discoverCommands(rpc);
+    return success(Object.freeze({ commandListed: listsExtensionCommand(commands, readinessCommand), commands }));
+  },
+  observeReadiness: async () => success(Object.freeze(await observeReadiness(rpc, readinessCommand, driver))),
+  bindRoute: async (route) => success(await bindRouteWithSettle(rpc.rpcRequest, route)),
+  gateThrew: (thrown): never => {
+    throw thrown;
+  },
+});
+
+/**
+ * The launcher barrier: the production launcher step sequence over the
+ * harness's real-RPC adapter (channel check → discovery → readiness only for
+ * a listed command → the pure gate → the fail-closed route bind only on a
+ * ready child), then `onDecided` → prompt only on open, then `afterPrompt`.
+ * Every step is bounded. The release stays with the caller, so a run can hold
+ * its child mid-flight across a peer's release.
  */
 export const runLauncherBarrier = async <P>(
   rpc: PiRpcChild,
@@ -823,28 +840,21 @@ export const runLauncherBarrier = async <P>(
   driver: ReadinessStageDriver,
   hooks: Readonly<{ onDecided?: () => void; afterPrompt: () => Promise<P> }>,
 ): Promise<BarrierRun<P>> => {
-  const channel = await observeChannel(rpc);
-  const commands = channel.channelAlive ? await discoverCommands(rpc) : [];
-  const commandListed = listsExtensionCommand(commands, expectation.readinessCommand);
-  const stage = commandListed
-    ? await observeReadiness(rpc, expectation.readinessCommand, driver)
-    : { readiness: NEVER_REACHED_READINESS, observedAt: null };
-  const decision = await decideStartupThroughRouteBind(rpc, expectation, {
-    ...channel,
-    commandListed,
-    readiness: stage.readiness,
-  });
+  const sequenced = await runEmissionStartupSequence(expectation, launcherSteps(rpc, expectation.readinessCommand, driver));
+  // The adapter's error arm is `never`: its failures threw above.
+  if (!sequenced.ok) return sequenced.error;
+  const { channel, discovery, readinessStage, facts, decision } = sequenced.value;
   hooks.onDecided?.();
   const decidedAt = Date.now();
   const acted = await actOnGateVerdict(rpc, expectation, decision.kind === "open", hooks.afterPrompt);
   return Object.freeze({
     channelAlive: channel.channelAlive,
     channelDiagnostic: channel.channelDiagnostic,
-    commands,
-    commandListed,
-    invocationCount: commandListed ? driver.invocations : 0,
-    readiness: stage.readiness,
-    readinessObservedAt: stage.observedAt,
+    commands: discovery === null ? [] : discovery.commands,
+    commandListed: facts.commandListed,
+    invocationCount: facts.commandListed ? driver.invocations : 0,
+    readiness: facts.readiness,
+    readinessObservedAt: readinessStage === null ? null : readinessStage.observedAt,
     decision,
     decidedAt,
     prompted: acted.prompted,
@@ -988,28 +998,22 @@ export const orderingPair = (run: GateRun): { readonly firstRequestAt: number; r
 
 /**
  * Run `operation` against overridden ambient process state and restore every
- * touched value in `finally`, so no test leaks state into a later one. Each
- * `env` key holds its value for the operation (`undefined` deletes it); every
- * named key is snapshotted and restored, including keys the operation itself
- * reassigns. `clearArgv1` hides the runner's script path from launchers that
- * would otherwise re-exec it instead of resolving `pi` on PATH.
+ * touched value in `finally`, so no test leaks state into a later one. The
+ * `env` overlay is the shared `withEnvOverlay` scope (`undefined` deletes a
+ * key; every named key is snapshotted and restored, including keys the
+ * operation itself reassigns). `clearArgv1` hides the runner's script path
+ * from launchers that would otherwise re-exec it instead of resolving `pi` on
+ * PATH.
  */
 export const withProcessState = async <T>(
-  state: Readonly<{ env: Readonly<Record<string, string | undefined>>; clearArgv1?: boolean }>,
+  state: Readonly<{ env: EnvironmentOverlay; clearArgv1?: boolean }>,
   operation: () => T | Promise<T>,
 ): Promise<T> => {
-  const assignEnv = (key: string, value: string | undefined): void => {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  };
-  const previousEnv = Object.keys(state.env).map((key) => [key, process.env[key]] as const);
   const previousArgv1 = process.argv[1];
-  for (const [key, value] of Object.entries(state.env)) assignEnv(key, value);
   if (state.clearArgv1 === true) delete process.argv[1];
   try {
-    return await operation();
+    return await withEnvOverlay(state.env, operation);
   } finally {
-    for (const [key, value] of previousEnv) assignEnv(key, value);
     if (state.clearArgv1 === true) {
       if (previousArgv1 === undefined) delete process.argv[1];
       else process.argv[1] = previousArgv1;

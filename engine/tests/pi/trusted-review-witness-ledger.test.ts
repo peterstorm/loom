@@ -62,6 +62,22 @@ describe("createTrustedReviewWitnesses", () => {
     expect(witnesses.touch(session, run("run.refused"))).toBe("bound");
   });
 
+  it("retracting a root's only run collapses that root alone and leaves the session's other roots current", async () => {
+    const witnesses = createTrustedReviewWitnesses();
+    const otherRoot = "/nonexistent-loom-witness-other/.claude/reviews/review-and-fix-runs";
+    const elsewhere = { ...run("run.elsewhere"), runsRoot: otherRoot, runDirectory: join(otherRoot, "run.elsewhere") } as SessionRunBinding;
+    witnesses.touch(session, elsewhere);
+    witnesses.touch(session, run("run.refused"));
+    witnesses.retract(session, run("run.refused"));
+    // The session survives (it still holds the other root), but this root is
+    // gone rather than kept as an empty container with no current run.
+    await expect(witnesses.verify({ cwd, sessionId: session }))
+      .rejects.toThrow(`no request-bound Loom captures were witnessed for Pi session ${session} and root ${runsRoot}`);
+    // Re-binding the collapsed root starts a fresh run order.
+    expect(witnesses.touch(session, run("run.refused"))).toBe("bound");
+    expect(await currentRun(witnesses)).toBe("run.refused");
+  });
+
   it("keeps a run that has since witnessed a capture, and ignores a run it never bound", async () => {
     const witnesses = createTrustedReviewWitnesses();
     witnesses.touch(session, run("run.earlier"));

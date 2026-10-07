@@ -11,7 +11,7 @@ import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } 
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withEnvOverlay, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
 import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
@@ -551,7 +551,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       // The catalog arm explicitly DELETES the election variables: the outer
       // Loom session may run this suite under the qualified-local model, and
       // the catalog issue route must not inherit it.
-      const startSuccessor = (run: string, environment: EnvironmentOverlay) => withRouteEnv(environment, () => successor(root, run, p, f));
+      const startSuccessor = (run: string, environment: EnvironmentOverlay) => withEnvOverlay(environment, () => successor(root, run, p, f));
       const extraction = await startSuccessor("route-extraction", CATALOG_ROUTE_ENV);
       const emission = await startSuccessor("route-emission", QUALIFIED_ROUTE_ENV);
 
@@ -624,7 +624,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const f = await predecessor(root);
       const p = await policy(root, "source", "policy-source-record", f.publisher);
       writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
-      const s = await withRouteEnv(QUALIFIED_ROUTE_ENV, () => successor(root, "emission-source", p, f));
+      const s = await withEnvOverlay(QUALIFIED_ROUTE_ENV, () => successor(root, "emission-source", p, f));
       const { authority, task } = s.started.requests[0]!;
       const descriptor = parseEmissionDescriptor(task);
       if (descriptor.kind !== "issued") throw Error("qualified-route successor must issue an emission descriptor");

@@ -13,10 +13,12 @@
  * the whole-argv parser also retains empty tokens as unconsumed arguments.
  * `--run --json` never reads as `run = "--json"`.
  */
+import { isFlagToken } from "../../core/cli-flag-token";
 import { parseTaskId, type TaskId } from "../../core/task-id";
 
+/** A present, non-empty value that is not itself a flag (`isFlagToken`). */
 const isFlagValue = (value: string | undefined): value is string =>
-  value !== undefined && value !== "" && !value.startsWith("--");
+  value !== undefined && value !== "" && !isFlagToken(value);
 
 export function argumentValue(args: readonly string[], flag: string): string | null {
   const index = args.indexOf(flag);

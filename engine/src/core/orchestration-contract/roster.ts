@@ -729,6 +729,29 @@ export function parseExactRoster(
   return success(exactRoster);
 }
 
+/**
+ * The canonical form of an exact roster, ready to serialize: the roster's
+ * fields with its DERIVED `byId` view omitted, and nothing else changed (key
+ * order kept).
+ *
+ * `parseExactRoster` builds `byId` from `orderedSlots` and from nothing else,
+ * so the view carries no information the array does not already have — while
+ * its serialized text is an accident of how a `Map` happens to stringify:
+ * `{}` for the real `immutableMap` above, `{"size":N}` for the fake
+ * `ReadonlyMap` record it replaced, a form that still sits in durable
+ * checkpoints. Comparing canonical forms compares the slots a roster was
+ * parsed from, under any of those serializations.
+ *
+ * Takes a parsed `ExactRoster` or a raw roster read back from disk alike,
+ * because the comparisons it serves run over both. A value that is not a
+ * record passes through unchanged, so it still compares unequal.
+ */
+export function canonicalExactRosterJson(roster: unknown): unknown {
+  return typeof roster === "object" && roster !== null && !Array.isArray(roster)
+    ? Object.fromEntries(Object.entries(roster).filter(([key]) => key !== "byId"))
+    : roster;
+}
+
 export type ArtifactRef = Readonly<{
   runId: OrchestrationRunId;
   slot: FixedArtifactSlot;

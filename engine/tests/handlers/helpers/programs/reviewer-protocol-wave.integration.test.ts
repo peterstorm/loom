@@ -29,7 +29,7 @@ import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixture
 import {
   CATALOG_ROUTE_ENV,
   QUALIFIED_ROUTE_ENV,
-  withRouteEnv,
+  withEnvOverlay,
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
 import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
@@ -472,7 +472,7 @@ function executePacketCommand(task: string) {
 
 describe("the issued emission route on the Wave program path (T6)", () => {
   it("retains every issuance join across the extraction and emission routes and changes only reviewer task text (FR-012)", async () => {
-    const startRun = async (environment: EnvironmentOverlay) => withRouteEnv(environment, async () => {
+    const startRun = async (environment: EnvironmentOverlay) => withEnvOverlay(environment, async () => {
       const p = project();
       const { action, handle } = await start(p, "run.route");
       return { p, handle, requests: action.requests! };

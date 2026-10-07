@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withEnvOverlay, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
 import { standaloneOriginReference } from "../../../../src/core/standalone-finding-origin";
 import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-review";
@@ -75,7 +75,7 @@ const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"),
 /** Route-election pinning for the source run's issuing CLI child: the arms of the
  *  route-agnostic disposition control pin explicit routes, and the ambient
  *  session's qualified-local handshake must not leak into either. */
-const sourceFixture = (root: string, environment: EnvironmentOverlay = {}) => withRouteEnv(environment, () => sourceFixturePinned(root));
+const sourceFixture = (root: string, environment: EnvironmentOverlay = {}) => withEnvOverlay(environment, () => sourceFixturePinned(root));
 
 async function sourceFixturePinned(root: string) {
   const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")], JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));

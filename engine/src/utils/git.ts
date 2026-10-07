@@ -9,8 +9,14 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
 import { observeGitProbe } from "./git-probe";
-import { worktreeVisibleLeafPaths, type WorktreeLeafSelection } from "./git-leaves";
-import { hardenedGitEnvironment } from "./git-execution-policy";
+import {
+  GIT_OUTPUT_LIMIT,
+  nulSeparatedGitPaths,
+  splitNulPaths,
+  worktreeVisibleLeafPaths,
+  type WorktreeLeafSelection,
+} from "./git-leaves";
+import { hardenedGitInvocation, type GitRepositoryLocation } from "./git-execution-policy";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -224,10 +230,11 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  return probeGitWithEmptyRetry(args, {
+  const { argv, env } = hardenedGitInvocation(args);
+  return probeGitWithEmptyRetry(argv, {
     cwd: root,
     encoding: "utf8",
-    env: hardenedGitEnvironment(),
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
@@ -272,8 +279,10 @@ function shadowGitConfig(objectFormat: ShadowGitAuthority["objectFormat"]): stri
  * Execute with real object/index bytes but no repository-authored executable
  * configuration. Worktree attributes may still name a filter or diff driver;
  * the shadow config defines none, so Git treats those attributes as inert data.
+ * `operation` applies the shared execution policy at that location
+ * (`hardenedGitInvocation(args, location)`).
  */
-function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessEnv) => T): T {
+function withShadowGit<T>(root: string, operation: (location: GitRepositoryLocation) => T): T {
   const authority = observeShadowGitAuthority(root);
   const shadow = mkdtempSync(join(tmpdir(), "loom-git-shadow-"));
   let primaryError: unknown = null;
@@ -282,7 +291,6 @@ function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessE
     writeFileSync(join(shadow, "HEAD"), `${authority.headSha}\n`);
     writeFileSync(join(shadow, "config"), shadowGitConfig(authority.objectFormat));
     return operation({
-      ...hardenedGitEnvironment(),
       GIT_DIR: shadow,
       GIT_WORK_TREE: root,
       GIT_INDEX_FILE: authority.indexPath,
@@ -327,8 +335,10 @@ function diffArgsAt(
   try {
     return {
       ok: true,
-      diff: withShadowGit(root, (environment) =>
-        execFileSync("git", [...argv], diffExecOptions(root, environment))),
+      diff: withShadowGit(root, (location) => {
+        const invocation = hardenedGitInvocation(argv, location);
+        return execFileSync("git", invocation.argv, diffExecOptions(root, invocation.env));
+      }),
     };
   } catch (error) {
     const detail = error && typeof error === "object"
@@ -423,35 +433,74 @@ export function diffFilesSinceAt(root: string, revision: string, files: string[]
 }
 
 /** Which Git-dirty paths to name: worktree bytes that differ from the index,
- *  or index entries that differ from HEAD. */
-export type ChangedPathComparison = "worktree" | "index";
-
-const CHANGED_PATH_LIST_LIMIT = 100 * 1024 * 1024;
+ *  index entries that differ from HEAD, or untracked files Git does not ignore. */
+export type ChangedPathSource = "worktree" | "index" | "untracked";
 
 /**
- * The repository-relative paths Git reports as changed for one comparison,
- * named inside the shadow administration directory. `git diff --name-only`
- * re-hashes every stat-dirty tracked file, and that re-hash runs the file's
- * clean filter — repository-authored code, the same executable path
- * `diffArgsAt` closes for patches. In the shadow directory no filter is
- * defined, so filter attributes are inert data and the bytes are compared raw.
- * For a repository that does rely on a clean filter, a file whose raw bytes
- * differ from its filtered blob is named as changed: an over-report a byte
- * baseline absorbs, never a missed change. THROWS on failure, like the leaf
- * enumerator it is listed beside in `repository-change-baseline.ts`.
+ * One NUL-record Git path listing, classified by what Git must do to answer it
+ * — the class, not the caller, selects where the command runs:
+ *
+ * - `content-hashing`: Git re-hashes file content (`git diff --name-only`
+ *   re-hashes every stat-dirty tracked file), and that re-hash runs the file's
+ *   clean filter — repository-authored code, the same executable path
+ *   `diffArgsAt` closes for patches. It runs in the shadow administration
+ *   directory, where no filter is defined, so filter attributes are inert data
+ *   and the bytes are compared raw.
+ * - `filter-free`: Git only lists index and worktree names, hashing nothing,
+ *   and must honour the repository's own ignore rules (`info/exclude`,
+ *   `core.excludesFile`), which the shadow directory drops. It runs in the
+ *   repository under the shared execution policy.
  */
-export function shadowChangedPaths(root: string, comparison: ChangedPathComparison): readonly string[] {
-  const argv = [
-    "diff", ...DIFF_DRIVER_SUPPRESSION, ...(comparison === "index" ? ["--cached"] : []), "--name-only", "-z", "--",
-  ];
-  const listed = withShadowGit(root, (environment) => execFileSync("git", argv, {
-    cwd: root,
-    encoding: "buffer",
-    env: environment,
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: CHANGED_PATH_LIST_LIMIT,
+export type GitPathListing = Readonly<{
+  hashing: "content-hashing" | "filter-free";
+  argv: readonly string[];
+}>;
+
+/** The one classified listing for each dirty-path source (pure). */
+export function changedPathListing(source: ChangedPathSource): GitPathListing {
+  switch (source) {
+    case "worktree":
+      return Object.freeze({
+        hashing: "content-hashing",
+        argv: Object.freeze(["diff", ...DIFF_DRIVER_SUPPRESSION, "--name-only", "-z", "--"]),
+      });
+    case "index":
+      return Object.freeze({
+        hashing: "content-hashing",
+        argv: Object.freeze(["diff", ...DIFF_DRIVER_SUPPRESSION, "--cached", "--name-only", "-z", "--"]),
+      });
+    case "untracked":
+      return Object.freeze({
+        hashing: "filter-free",
+        argv: Object.freeze(["ls-files", "--others", "--exclude-standard", "-z", "--"]),
+      });
+  }
+}
+
+/** Run one classified listing on the route its class requires. */
+function gitPathListing(root: string, listing: GitPathListing): readonly string[] {
+  if (listing.hashing === "filter-free") return nulSeparatedGitPaths(root, listing.argv);
+  return splitNulPaths(withShadowGit(root, (location) => {
+    const { argv, env } = hardenedGitInvocation(listing.argv, location);
+    return execFileSync("git", argv, {
+      cwd: root,
+      encoding: "buffer",
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: GIT_OUTPUT_LIMIT,
+    });
   }));
-  return Object.freeze(listed.toString("utf-8").split("\0").filter((path) => path !== ""));
+}
+
+/**
+ * The repository-relative paths Git reports as dirty for one source, each
+ * listed on the route `changedPathListing` classifies it for. For a repository
+ * that does rely on a clean filter, a file whose raw bytes differ from its
+ * filtered blob is named as changed: an over-report a byte baseline absorbs,
+ * never a missed change. THROWS on failure, like the leaf enumerator.
+ */
+export function changedPaths(root: string, source: ChangedPathSource): readonly string[] {
+  return gitPathListing(root, changedPathListing(source));
 }
 
 export type GitTrackedResult =
@@ -465,11 +514,12 @@ export type GitTrackedResult =
  */
 export function isTrackedAt(root: string, file: string): GitTrackedResult {
   try {
-    const tracked = withShadowGit(root, (environment) => {
+    const tracked = withShadowGit(root, (location) => {
+      const { argv, env } = hardenedGitInvocation(["ls-files", "--error-unmatch", "--", file], location);
       try {
-        execFileSync("git", ["ls-files", "--error-unmatch", "--", file], {
+        execFileSync("git", argv, {
           cwd: root,
-          env: environment,
+          env,
           stdio: ["ignore", "ignore", "pipe"],
         });
         return true;
@@ -537,7 +587,8 @@ export function visibleLeavesAt(root: string, path: string): GitPathListResult {
  *  in `git-leaves.ts`, which owns the pathspec and ignore semantics. The
  *  enumerator runs under the shared `git-execution-policy` (allow-listed
  *  environment, fsmonitor disabled) but outside the shadow directory, whose
- *  absent `info/exclude` would change the ignore rules it must honour. */
+ *  absent `info/exclude` would change the ignore rules it must honour — a
+ *  `filter-free` listing in `GitPathListing`'s terms. */
 function listedLeaves(
   root: string,
   path: string,

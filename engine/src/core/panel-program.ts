@@ -1,7 +1,9 @@
 /**
  * The in-memory panel dispatch program (schema v1): the architecture and
  * refutation reducers that order interview, fan-out, engine operations and
- * finalization over plain spawn outcomes.
+ * finalization over plain spawn outcomes, and the one journal replay
+ * (`nextDispatchProgramAction`) that folds a journal through them, refusing in
+ * the program's own typed vocabulary (`DispatchReplayError`).
  *
  * Sibling modules own the durable (schema v2) panel: `panel-authority` parses
  * the issued roster authority, `persistent-panel` is the authority-bound
@@ -845,6 +847,64 @@ export function reduceRefutationProgram(
     case "blocked":
       return unexpected("refutation", state.stage);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Journal replay: a dispatch program's next action
+// ---------------------------------------------------------------------------
+
+/** The dispatch program has no next action: its issued requests await results. */
+export const AWAIT_PANEL_RESULTS = Object.freeze({ type: "await-results" as const });
+
+export type NextPanelProgramAction = PanelProgramAction | typeof AWAIT_PANEL_RESULTS;
+
+/** One panel's dispatch journal: the input its program starts over, and the events it folds. */
+export type DispatchJournal =
+  | Readonly<{ panel: "architecture"; input: ArchitectureProgramInput; events: readonly ArchitectureProgramEvent[] }>
+  | Readonly<{ panel: "refutation"; input: RefutationProgramInput; events: readonly RefutationProgramEvent[] }>;
+
+/** Why a dispatch journal does not replay, in the program's own vocabulary:
+ *  its start refused the input (with the start's errors), or its reducer
+ *  refused one event (with the typed program error). */
+export type DispatchReplayError =
+  | Readonly<{ kind: "start-refused"; errors: readonly string[] }>
+  | Readonly<{ kind: "event-refused"; error: PanelProgramError }>;
+
+export type DispatchReplayResult =
+  | Readonly<{ ok: true; value: NextPanelProgramAction }>
+  | Readonly<{ ok: false; error: DispatchReplayError }>;
+
+/** The ONE start-then-fold both dispatch programs replay. */
+function replayDispatchProgram<State, Event>(
+  started: ParseResult<ProgramStep<State>>,
+  events: readonly Event[],
+  reduce: (state: State, event: Event) => ProgramResult<ProgramStep<State>>,
+): DispatchReplayResult {
+  if (!started.ok) return { ok: false, error: Object.freeze({ kind: "start-refused" as const, errors: started.errors }) };
+  let step = started.value;
+  for (const event of events) {
+    const reduced = reduce(step.state, event);
+    if (!reduced.ok) return { ok: false, error: Object.freeze({ kind: "event-refused" as const, error: reduced.error }) };
+    step = reduced.value;
+  }
+  return { ok: true, value: step.action ?? AWAIT_PANEL_RESULTS };
+}
+
+/**
+ * A dispatch journal's next action: its panel's dispatch program started over
+ * the journal's input, then folded over every event in order. A program with
+ * no next action awaits its issued requests' results.
+ */
+export function nextDispatchProgramAction(journal: DispatchJournal): DispatchReplayResult {
+  return journal.panel === "architecture"
+    ? replayDispatchProgram(startArchitectureDispatchProgram(journal.input), journal.events, reduceArchitectureProgram)
+    : replayDispatchProgram(startRefutationDispatchProgram(journal.input), journal.events, reduceRefutationProgram);
+}
+
+/** The operator-facing text of a replay refusal: a start refusal is its errors,
+ *  one per line; an event refusal is its program error as JSON. */
+export function describeDispatchReplayError(error: DispatchReplayError): string {
+  return error.kind === "start-refused" ? error.errors.join("\n") : JSON.stringify(error.error);
 }
 
 // This helper is intentionally exported only as a type-shape constructor aid:

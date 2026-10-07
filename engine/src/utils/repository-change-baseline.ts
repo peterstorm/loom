@@ -13,23 +13,20 @@ import {
   type DeclaredArtifactBaseline,
 } from "../core/artifact-baseline";
 import { sha256Bytes } from "../core/digest";
-import { shadowChangedPaths } from "./git";
-import { nulSeparatedGitPaths } from "./git-leaves";
+import { changedPaths } from "./git";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "./repository-path";
 
 type RepositoryChangeBaseline = ArtifactBaseline<"repository-change">;
 
 /** Git-visible tracked and untracked paths whose worktree/index state differs
  * from HEAD. Ignored files are deliberately outside Loom's review/lint scope.
- * The two diffs re-hash file content, which can run a repository clean filter,
- * so they run in the shadow administration directory (`shadowChangedPaths`);
- * the untracked listing hashes nothing and needs the repository's own ignore
- * rules, so it stays on the shared leaf policy. */
+ * Each source runs on the route `changedPathListing` (utils/git.ts) classifies
+ * it for, so no clean filter executes while the paths are named. */
 export function repositoryChangedPaths(root: string): readonly string[] {
   return Object.freeze([...canonicalRepositoryPaths(root, [
-    ...shadowChangedPaths(root, "worktree"),
-    ...shadowChangedPaths(root, "index"),
-    ...nulSeparatedGitPaths(root, ["ls-files", "--others", "--exclude-standard", "-z", "--"]),
+    ...changedPaths(root, "worktree"),
+    ...changedPaths(root, "index"),
+    ...changedPaths(root, "untracked"),
   ], "repository change baseline")].sort());
 }
 

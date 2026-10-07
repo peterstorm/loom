@@ -20,9 +20,10 @@
  * the in-child awaited `before_agent_start` hold as the defense-in-depth
  * layer. The child here is the probe-adapted fixture extension below; the
  * PRODUCTION extension repeats the protocol in
- * `emission-startup-production.test.ts`. Both suites drive the one barrier
- * sequence (`runLauncherBarrier`) of the shared launcher harness,
- * `engine/tests/fixtures/emission-child-harness.ts`.
+ * `emission-startup-production.test.ts`. Both suites drive the shared launcher
+ * harness's `runLauncherBarrier` (`engine/tests/fixtures/emission-child-harness.ts`),
+ * which runs the PRODUCTION launcher step sequence
+ * (`pi/emission-readiness-sequence.ts`) over its real-RPC adapter.
  *
  * Covered: matching opens on the judge-v1 and reviewer-v2 cells; held
  * ordering; the zero-request negative controls (including an active,
@@ -208,11 +209,6 @@ async function reportReadiness(pi) {
 // launcher's intervention — every knob lives on the arm that reads it
 // ---------------------------------------------------------------------------
 
-/** How the launcher behaves while a SLOW child's readiness is pending: waits
- *  the window out (the late-readiness control), cancels (the cancellation
- *  control), or kills the child (the infrastructure-failure boundary). */
-type SlowReadinessLauncher = LauncherReadinessWait;
-
 /** What the loaded fixture extension's readiness command does. */
 type ChildReadiness =
   | Readonly<{ kind: "honest" }>
@@ -229,8 +225,10 @@ type ChildReadiness =
   /** Honest readiness, but the provider is registered under a drifted base
    *  URL — the live fail-closed route bind's drift surface. */
   | Readonly<{ kind: "drifted-provider"; baseUrl: string }>
-  /** Reports readiness only after `delayMs`. */
-  | Readonly<{ kind: "slow"; delayMs: number; launcher: SlowReadinessLauncher }>;
+  /** Reports readiness only after `delayMs`, while the launcher waits the
+   *  window out (the late-readiness control), cancels (the cancellation
+   *  control), or kills the child (the infrastructure-failure boundary). */
+  | Readonly<{ kind: "slow"; delayMs: number; launcher: LauncherReadinessWait }>;
 
 /** The one identity drift a loaded child carries against the issued request. */
 type ChildDrift =
@@ -290,7 +288,7 @@ type ChildPlan = Readonly<{
   /** The provider base URL; `null` registers it at the run's counting server. */
   driftedBaseUrl: string | null;
   readinessDelayMs: number;
-  launcher: SlowReadinessLauncher;
+  launcher: LauncherReadinessWait;
   waitForHold: boolean;
 }>;
 

@@ -109,6 +109,34 @@ function writeReviewPacketTaskGraph(
   }));
 }
 
+/**
+ * A `git` shim that runs `body` when the invoked subcommand is `subcommand` and
+ * otherwise defers to the real Git. The subcommand is the first non-option
+ * argument after any `-c key=value` pairs, because the shared Git execution
+ * policy prefixes every invocation with `-c core.fsmonitor=false`.
+ */
+function writeFakeGit(path: string, subcommand: string, body: readonly string[]): void {
+  const realGit = execFileSync("which", ["git"], { encoding: "utf-8" }).trim();
+  writeFileSync(path, [
+    "#!/bin/sh",
+    "sub=\"\"",
+    "skip=0",
+    "for arg in \"$@\"; do",
+    "  if [ \"$skip\" = 1 ]; then skip=0; continue; fi",
+    "  case \"$arg\" in",
+    "    -c) skip=1 ;;",
+    "    -*) ;;",
+    "    *) sub=\"$arg\"; break ;;",
+    "  esac",
+    "done",
+    `if [ "$sub" = ${JSON.stringify(subcommand)} ]; then`,
+    ...body.map((line) => `  ${line}`),
+    "fi",
+    `exec ${JSON.stringify(realGit)} "$@"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+}
+
 function hostileReviewPacketRepository(
   driver: "textconv" | "external" | "clean",
 ): Readonly<{ root: string; marker: string; packet: string }> {
@@ -734,17 +762,10 @@ describe("quality-program helper boundaries", () => {
 
     const fakeBin = join(dir, "bin");
     mkdirSync(fakeBin);
-    const fakeGit = join(fakeBin, "git");
-    const realGit = execFileSync("which", ["git"], { encoding: "utf-8" }).trim();
-    writeFileSync(fakeGit, [
-      "#!/bin/sh",
-      "if [ \"$1\" = \"ls-files\" ]; then",
-      "  echo forced-ls-files-failure >&2",
-      "  exit 2",
-      "fi",
-      `exec ${JSON.stringify(realGit)} \"$@\"`,
-      "",
-    ].join("\n"), { mode: 0o755 });
+    writeFakeGit(join(fakeBin, "git"), "ls-files", [
+      "echo forced-ls-files-failure >&2",
+      "exit 2",
+    ]);
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
       cwd: root,
@@ -784,20 +805,14 @@ describe("quality-program helper boundaries", () => {
     });
     const fakeBin = join(root, "bin");
     mkdirSync(fakeBin);
-    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-    writeFileSync(join(fakeBin, "git"), [
-      "#!/bin/sh",
-      "if [ \"$1\" = \"diff\" ]; then",
-      "  for arg in \"$@\"; do",
-      "    if [ \"$arg\" = \"--no-index\" ]; then",
-      "      echo forced-no-index-access-failure >&2",
-      "      exit 1",
-      "    fi",
-      "  done",
-      "fi",
-      `exec ${JSON.stringify(realGit)} \"$@\"`,
-      "",
-    ].join("\n"), { mode: 0o755 });
+    writeFakeGit(join(fakeBin, "git"), "diff", [
+      "for arg in \"$@\"; do",
+      "  if [ \"$arg\" = \"--no-index\" ]; then",
+      "    echo forced-no-index-access-failure >&2",
+      "    exit 1",
+      "  fi",
+      "done",
+    ]);
 
     const run = spawnSync("bun", [
       CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",

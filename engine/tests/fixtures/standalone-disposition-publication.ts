@@ -1,6 +1,6 @@
 import { canonicalStructuralEquals } from "../../src/core/orchestration-contract";
 import { readPublishedStandaloneDisposition, type PreparedStandaloneDisposition, type StandaloneDispositionPublicationReader } from "../../src/core/standalone-review";
-import { valueOf } from "./standalone-remediation-authority";
+import { value } from "./parse-result";
 
 /** In-memory publication adapter. Production uses authenticated Run registration/receipt/artifact reads. */
 export function dispositionPublicationFixture(prepared: PreparedStandaloneDisposition) {
@@ -10,5 +10,5 @@ export function dispositionPublicationFixture(prepared: PreparedStandaloneDispos
     artifacts: [{ runId: reference.runId, slot: { kind: "fixed-artifact-slot", path: "artifacts/disposition.json" }, digest: prepared.digest, byteLength: recordBytes.length }] };
   const reader: StandaloneDispositionPublicationReader = lookup => canonicalStructuralEquals(lookup, reference)
     ? { ok: true, value: { recordBytes, receipt } } : { ok: false, error: { message: "publication missing" } };
-  return { reference, recordBytes, receipt, reader, published: valueOf(readPublishedStandaloneDisposition(prepared, reference, reader)) };
+  return { reference, recordBytes, receipt, reader, published: value(readPublishedStandaloneDisposition(prepared, reference, reader)) };
 }

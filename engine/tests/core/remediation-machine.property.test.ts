@@ -55,8 +55,8 @@ import {
   standaloneInput,
   standalonePublicationResolver,
   standalonePublicationResolverForScopes,
-  valueOf,
 } from "../fixtures/standalone-remediation-authority";
+import { value } from "../fixtures/parse-result";
 
 const jsonRoundTrip = <T>(value: T): unknown => JSON.parse(JSON.stringify(value));
 
@@ -106,7 +106,7 @@ const parseRemediationState = (raw: unknown) => {
 };
 
 function repositoryWitness(offset = 0): RepositorySnapshotWitness {
-  return valueOf(parseRepositorySnapshotWitness({
+  return value(parseRepositorySnapshotWitness({
     baseTreeDigest: digest(10 + offset),
     indexDigest: digest(20 + offset),
     worktreeDigest: digest(30 + offset),
@@ -114,15 +114,15 @@ function repositoryWitness(offset = 0): RepositorySnapshotWitness {
 }
 
 function installableAssessment(): InstallableDefectFamilyAssessment {
-  const accounting = valueOf(prepareDefectFamilyAccounting(standaloneFixture().input.standaloneResult, { kind: "not-required" }));
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, null));
-  return valueOf(evaluateInstallableDefectFamilyAccounting(plan, candidateWitness(), {
+  const accounting = value(prepareDefectFamilyAccounting(standaloneFixture().input.standaloneResult, { kind: "not-required" }));
+  const plan = value(prepareDefectFamilyVerification(accounting, null));
+  return value(evaluateInstallableDefectFamilyAccounting(plan, candidateWitness(), {
     auditedInstalledPaths: remediationPaths, dirtyOrStagedPaths: remediationPaths,
   }, []));
 }
 
 function candidateWitness(repository = repositoryWitness()): CandidateRepositoryWitness {
-  return valueOf(createCandidateRepositoryWitness({
+  return value(createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",
     repositoryRoot: "/repo",
     workspaceDigest: digest(90),
@@ -148,11 +148,11 @@ function prepareVerifiedIndexInstallation(
 }
 
 function frozenAuthority(): FrozenPathAuthority {
-  return valueOf(freezePathAuthority(standaloneInput()));
+  return value(freezePathAuthority(standaloneInput()));
 }
 
 function registeredAuthority(): RegisteredPathAuthority {
-  return valueOf(registerSupportPath(frozenAuthority(), "engine/tests/regression.test.ts"));
+  return value(registerSupportPath(frozenAuthority(), "engine/tests/regression.test.ts"));
 }
 
 const observations = Object.freeze([
@@ -171,7 +171,7 @@ function audited(
   authority = registeredAuthority(),
   preexistingStagedPaths: readonly string[] = [],
 ): AuditedPathSet {
-  return valueOf(auditRemediationPaths(authority, {
+  return value(auditRemediationPaths(authority, {
     expectedDirtyPaths: remediationPaths,
     actualDirtyPaths: observations,
     preexistingStagedPaths,
@@ -180,11 +180,11 @@ function audited(
 }
 
 function staged(audit = audited()): StagedTemporaryIndex {
-  return valueOf(stageTemporaryIndex(audit, digest(40), repositoryWitness()));
+  return value(stageTemporaryIndex(audit, digest(40), repositoryWitness()));
 }
 
 function verified(stage = staged()): VerifiedTemporaryIndex {
-  return valueOf(verifyTemporaryIndex(stage, {
+  return value(verifyTemporaryIndex(stage, {
     actualTemporaryIndexStagedPaths: remediationPaths,
     actualIndexDigest: digest(40),
     currentRepositoryWitness: repositoryWitness(),
@@ -192,7 +192,7 @@ function verified(stage = staged()): VerifiedTemporaryIndex {
 }
 
 function installation(index = verified()): VerifiedIndexInstallation {
-  return valueOf(prepareVerifiedIndexInstallation(index, "effect.install-1", repositoryWitness()));
+  return value(prepareVerifiedIndexInstallation(index, "effect.install-1", repositoryWitness()));
 }
 
 function installedReceipt(prepared = installation()) {
@@ -206,20 +206,20 @@ function installedReceipt(prepared = installation()) {
 }
 
 function lifecycleStates() {
-  const start = valueOf(startRemediation(standaloneInput()));
-  const registered = valueOf(reduceRemediation(start, {
+  const start = value(startRemediation(standaloneInput()));
+  const registered = value(reduceRemediation(start, {
     kind: "support-path-registered",
     path: "engine/tests/regression.test.ts",
   }));
   if (registered.state !== "paths-registered") throw new Error("registration fixture failed");
   const audit = audited(registered.authority);
-  const auditedState = valueOf(reduceRemediation(registered, { kind: "audit-succeeded", audited: audit }));
+  const auditedState = value(reduceRemediation(registered, { kind: "audit-succeeded", audited: audit }));
   const stage = staged(audit);
-  const stagedState = valueOf(reduceRemediation(auditedState, { kind: "temporary-index-staged", staged: stage }));
+  const stagedState = value(reduceRemediation(auditedState, { kind: "temporary-index-staged", staged: stage }));
   const index = verified(stage);
-  const verifiedState = valueOf(reduceRemediation(stagedState, { kind: "staged-set-verified", verified: index }));
+  const verifiedState = value(reduceRemediation(stagedState, { kind: "staged-set-verified", verified: index }));
   const prepared = installation(index);
-  const done = valueOf(reduceRemediation(verifiedState, {
+  const done = value(reduceRemediation(verifiedState, {
     kind: "index-installed",
     installation: prepared,
     receipt: installedReceipt(prepared),
@@ -232,7 +232,7 @@ const safePath = safeName.map((name) => `src/${name}.ts`);
 
 describe("canonical remediation authority and path algebra", () => {
   it("starts only from a parser-accepted authoritative standalone result", () => {
-    const started = valueOf(startRemediation(standaloneInput()));
+    const started = value(startRemediation(standaloneInput()));
     expect(started.state).toBe("authority-frozen");
     expect(started.authority.reviewedScope.paths).toEqual(["src/deleted.ts", "src/main.ts"]);
 
@@ -262,7 +262,7 @@ describe("canonical remediation authority and path algebra", () => {
   it("accepts a critical-bearing LC-2 fixture only through its trusted result publication", () => {
     const fixture = standaloneFixture(["src/main.ts", "src/deleted.ts"], true);
     expect(fixture.input.standaloneResult.survivingCriticals).toHaveLength(1);
-    const authority = valueOf(freezePathAuthority(fixture.input));
+    const authority = value(freezePathAuthority(fixture.input));
     expect(parseRemediationPathAuthorityWithAuthority(
       jsonRoundTrip(authority),
       fixture.publicationResolver,
@@ -306,8 +306,8 @@ describe("canonical remediation authority and path algebra", () => {
       (paths, seed) => {
         const rotation = Math.abs(seed) % paths.length;
         const permuted = [...paths.slice(rotation), ...paths.slice(0, rotation)].reverse();
-        const left = valueOf(parseRemediationPathSet(paths));
-        const right = valueOf(parseRemediationPathSet(permuted));
+        const left = value(parseRemediationPathSet(paths));
+        const right = value(parseRemediationPathSet(permuted));
         expect(right.paths).toEqual(left.paths);
         expect(right.digest).toBe(left.digest);
         expect(Object.isFrozen(right.paths)).toBe(true);
@@ -324,8 +324,8 @@ describe("canonical remediation authority and path algebra", () => {
   });
 
   it("reports exact missing and unexpected sets", () => {
-    const expected = valueOf(parseRemediationPathSet(["src/a.ts", "src/b.ts"]));
-    const actual = valueOf(parseRemediationPathSet(["src/b.ts", "src/c.ts"]));
+    const expected = value(parseRemediationPathSet(["src/a.ts", "src/b.ts"]));
+    const actual = value(parseRemediationPathSet(["src/b.ts", "src/c.ts"]));
     const compared = compareExactPathSets(expected, actual);
     expect(compared.ok).toBe(false);
     if (!compared.ok) {
@@ -336,7 +336,7 @@ describe("canonical remediation authority and path algebra", () => {
 
   it("requires explicit support registration without mutating predecessor authority", () => {
     const authority = frozenAuthority();
-    const registered = valueOf(registerSupportPath(authority, "engine/tests/regression.test.ts"));
+    const registered = value(registerSupportPath(authority, "engine/tests/regression.test.ts"));
     expect(registered.registeredSupportPaths.paths).toEqual(["engine/tests/regression.test.ts"]);
     expect(registered.authorizedPaths.paths).toEqual(remediationPaths);
     expect(authority.registeredSupportPaths.paths).toEqual([]);
@@ -348,8 +348,8 @@ describe("canonical remediation authority and path algebra", () => {
       const initial = frozenAuthority();
       const left = `engine/tests/${leftName}.test.ts`;
       const right = `engine/tests/${rightName}.test.ts`;
-      const leftThenRight = valueOf(registerSupportPath(valueOf(registerSupportPath(initial, left)), right));
-      const rightThenLeft = valueOf(registerSupportPath(valueOf(registerSupportPath(initial, right)), left));
+      const leftThenRight = value(registerSupportPath(value(registerSupportPath(initial, left)), right));
+      const rightThenLeft = value(registerSupportPath(value(registerSupportPath(initial, right)), left));
       expect(leftThenRight.authorizedPaths.paths).toEqual(rightThenLeft.authorizedPaths.paths);
       expect(leftThenRight.digest).toBe(rightThenLeft.digest);
     }));
@@ -377,7 +377,7 @@ describe("canonical remediation authority and path algebra", () => {
 
   it("strictly rehydrates standalone-bound authority and rejects source or nested digest drift", () => {
     const authority = registeredAuthority();
-    const parsed = valueOf(parseRemediationPathAuthority(jsonRoundTrip(authority)));
+    const parsed = value(parseRemediationPathAuthority(jsonRoundTrip(authority)));
     expect(parsed.digest).toBe(authority.digest);
     expect(registerSupportPath(parsed, "engine/tests/second.test.ts").ok).toBe(true);
 
@@ -398,7 +398,7 @@ describe("canonical remediation authority and path algebra", () => {
 
   it("rejects self-consistent caller publication JSON unless trusted LC-2 authority resolves it", () => {
     const foreignScope = ["src/caller-fabricated-result.ts"] as const;
-    const foreign = valueOf(freezePathAuthority(standaloneInput(foreignScope)));
+    const foreign = value(freezePathAuthority(standaloneInput(foreignScope)));
     const rawForeign = jsonRoundTrip(foreign);
 
     expect(parseRemediationPathAuthorityWithAuthority(
@@ -421,10 +421,10 @@ describe("canonical remediation authority and path algebra", () => {
 
 describe("literal NUL Git path contract", () => {
   it("preserves valid pathspec-looking repository filenames only in literal NUL stdin", () => {
-    const authority = valueOf(freezePathAuthority(
+    const authority = value(freezePathAuthority(
       standaloneInput([":(glob)**", "src/*.ts", "src/[abc].ts", "--option-like"]),
     ));
-    const audit = valueOf(auditRemediationPaths(authority, {
+    const audit = value(auditRemediationPaths(authority, {
       expectedDirtyPaths: [":(glob)**", "src/*.ts", "src/[abc].ts", "--option-like"],
       actualDirtyPaths: [
         { path: ":(glob)**", change: "modified", nodeKind: "file" },
@@ -435,7 +435,7 @@ describe("literal NUL Git path contract", () => {
       preexistingStagedPaths: [],
       repositoryWitness: repositoryWitness(),
     }));
-    const contract = valueOf(prepareLiteralGitPathspec(audit));
+    const contract = value(prepareLiteralGitPathspec(audit));
     expect(contract.globalArgs).toEqual(["--literal-pathspecs"]);
     expect(contract.pathspecArgs).toEqual(["--pathspec-from-file=-", "--pathspec-file-nul"]);
     expect([...contract.globalArgs, ...contract.pathspecArgs].some((arg) => audit.paths.paths.includes(arg as never))).toBe(false);
@@ -445,7 +445,7 @@ describe("literal NUL Git path contract", () => {
   });
 
   it("strictly rehydrates the fixed contract and rejects selector or byte tampering", () => {
-    const contract = valueOf(prepareLiteralGitPathspec(audited()));
+    const contract = value(prepareLiteralGitPathspec(audited()));
     expect(parseFixedGitPathspecContract(jsonRoundTrip(contract)).ok).toBe(true);
 
     const args = jsonRoundTrip(contract) as { globalArgs: string[] };
@@ -461,7 +461,7 @@ describe("literal NUL Git path contract", () => {
 describe("exact audited, dirty, and staged evidence", () => {
   it("represents additions, modifications, both rename sides, deletion, and absence without symlinks", () => {
     if (false) {
-      const path = valueOf(parseCanonicalRepositoryRelativePath("src/impossible.ts"));
+      const path = value(parseCanonicalRepositoryRelativePath("src/impossible.ts"));
       // @ts-expect-error Present changes can only describe a regular file.
       const presentButMissing: DirtyPathObservation = { path, change: "added", nodeKind: "missing" };
       // @ts-expect-error Absent changes can only describe a missing node.
@@ -497,7 +497,7 @@ describe("exact audited, dirty, and staged evidence", () => {
     fc.assert(fc.property(fc.integer(), (seed) => {
       const rotation = Math.abs(seed) % observations.length;
       const actualDirtyPaths = [...observations.slice(rotation), ...observations.slice(0, rotation)];
-      const result = valueOf(auditRemediationPaths(registeredAuthority(), {
+      const result = value(auditRemediationPaths(registeredAuthority(), {
         expectedDirtyPaths: [...remediationPaths].reverse(),
         actualDirtyPaths,
         preexistingStagedPaths: [],
@@ -516,7 +516,7 @@ describe("exact audited, dirty, and staged evidence", () => {
     expect(audit.evidence.preexistingStagedWithinAudited.subset.paths).toEqual(["src/main.ts"]);
     expect(audit.evidence.preexistingStagedWithinAudited.superset.paths).toEqual(remediationPaths);
     const stage = staged(audit);
-    const index = valueOf(verifyTemporaryIndex(stage, {
+    const index = value(verifyTemporaryIndex(stage, {
       actualTemporaryIndexStagedPaths: remediationPaths,
       actualIndexDigest: digest(40),
       currentRepositoryWitness: repositoryWitness(),
@@ -680,7 +680,7 @@ describe("nominal proof chain, durable parsers, and TOCTOU", () => {
       ...identity,
       digest: createHash("sha256").update(JSON.stringify(identity)).digest("hex"),
     };
-    const historical = valueOf(parseVerifiedIndexInstallationWithAuthority(legacy, standalonePublicationResolver()));
+    const historical = value(parseVerifiedIndexInstallationWithAuthority(legacy, standalonePublicationResolver()));
     expect(historical.schemaVersion).toBe(1);
     expect(inspectVerifiedIndexInstallation(historical).ok).toBe(false);
     expect(reduceRemediation(states.verifiedState, {
@@ -689,7 +689,7 @@ describe("nominal proof chain, durable parsers, and TOCTOU", () => {
     const done = jsonRoundTrip(states.done) as Record<string, unknown>;
     done.installation = legacy;
     delete done.defectFamilyAssessment;
-    const parsed = valueOf(parseRemediationStateWithAuthority(done, standalonePublicationResolver()));
+    const parsed = value(parseRemediationStateWithAuthority(done, standalonePublicationResolver()));
     expect(parsed.state).toBe("done");
     expect(jsonRoundTrip(parsed)).toEqual(done);
     expect(reduceRemediation(parsed, {
@@ -728,10 +728,10 @@ describe("nominal proof chain, durable parsers, and TOCTOU", () => {
   });
 
   it("strictly rehydrates audited, staged, verified, and installation proofs", () => {
-    const audit = valueOf(parseAuditedPathSet(jsonRoundTrip(audited())));
-    const stage = valueOf(parseStagedTemporaryIndex(jsonRoundTrip(staged(audit))));
-    const index = valueOf(parseVerifiedTemporaryIndex(jsonRoundTrip(verified(stage))));
-    const prepared = valueOf(parseVerifiedIndexInstallation(jsonRoundTrip(installation(index))));
+    const audit = value(parseAuditedPathSet(jsonRoundTrip(audited())));
+    const stage = value(parseStagedTemporaryIndex(jsonRoundTrip(staged(audit))));
+    const index = value(parseVerifiedTemporaryIndex(jsonRoundTrip(verified(stage))));
+    const prepared = value(parseVerifiedIndexInstallation(jsonRoundTrip(installation(index))));
     expect(stageTemporaryIndex(audit, digest(41), repositoryWitness()).ok).toBe(true);
     expect(verifyTemporaryIndex(stage, {
       actualTemporaryIndexStagedPaths: remediationPaths,
@@ -763,7 +763,7 @@ describe("nominal proof chain, durable parsers, and TOCTOU", () => {
   it("fails TOCTOU at staging, verification, and installation for every witness component", () => {
     fc.assert(fc.property(fc.constantFrom("baseTreeDigest", "indexDigest", "worktreeDigest"), (field) => {
       const current = repositoryWitness();
-      const drifted = valueOf(parseRepositorySnapshotWitness({
+      const drifted = value(parseRepositorySnapshotWitness({
         baseTreeDigest: field === "baseTreeDigest" ? digest(101) : current.baseTreeDigest,
         indexDigest: field === "indexDigest" ? digest(102) : current.indexDigest,
         worktreeDigest: field === "worktreeDigest" ? digest(103) : current.worktreeDigest,
@@ -806,7 +806,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
       message: "must not transition",
     }).ok).toBe(false);
 
-    const parsed = valueOf(parseRemediationState(jsonRoundTrip(start)));
+    const parsed = value(parseRemediationState(jsonRoundTrip(start)));
     expect(reduceRemediation(parsed, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.parsed",
@@ -818,25 +818,25 @@ describe("durable LC-3 lifecycle and recovery", () => {
   it("continues after JSON rehydration from every LC-3 state", () => {
     const initial = lifecycleStates();
 
-    const start = valueOf(parseRemediationState(jsonRoundTrip(initial.start)));
+    const start = value(parseRemediationState(jsonRoundTrip(initial.start)));
     expect(reduceRemediation(start, { kind: "support-path-registered", path: "engine/tests/other.test.ts" }).ok).toBe(true);
 
-    const registered = valueOf(parseRemediationState(jsonRoundTrip(initial.registered)));
+    const registered = value(parseRemediationState(jsonRoundTrip(initial.registered)));
     if (registered.state !== "paths-registered") throw new Error("expected paths-registered");
     const reparsedAudit = audited(registered.authority);
     expect(reduceRemediation(registered, { kind: "audit-succeeded", audited: reparsedAudit }).ok).toBe(true);
 
-    const auditedState = valueOf(parseRemediationState(jsonRoundTrip(initial.auditedState)));
+    const auditedState = value(parseRemediationState(jsonRoundTrip(initial.auditedState)));
     if (auditedState.state !== "audited") throw new Error("expected audited");
     const reparsedStage = staged(auditedState.audited);
     expect(reduceRemediation(auditedState, { kind: "temporary-index-staged", staged: reparsedStage }).ok).toBe(true);
 
-    const stagedState = valueOf(parseRemediationState(jsonRoundTrip(initial.stagedState)));
+    const stagedState = value(parseRemediationState(jsonRoundTrip(initial.stagedState)));
     if (stagedState.state !== "staged-temporary-index") throw new Error("expected staged");
     const reparsedVerified = verified(stagedState.staged);
     expect(reduceRemediation(stagedState, { kind: "staged-set-verified", verified: reparsedVerified }).ok).toBe(true);
 
-    const verifiedState = valueOf(parseRemediationState(jsonRoundTrip(initial.verifiedState)));
+    const verifiedState = value(parseRemediationState(jsonRoundTrip(initial.verifiedState)));
     if (verifiedState.state !== "verified") throw new Error("expected verified");
     const reparsedInstall = installation(verifiedState.verified);
     expect(reduceRemediation(verifiedState, {
@@ -845,7 +845,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
       receipt: installedReceipt(reparsedInstall),
     }).ok).toBe(true);
 
-    const done = valueOf(parseRemediationState(jsonRoundTrip(initial.done)));
+    const done = value(parseRemediationState(jsonRoundTrip(initial.done)));
     expect(done.state).toBe("done");
     expect(reduceRemediation(done, {
       kind: "recoverable-effect-failed",
@@ -859,17 +859,17 @@ describe("durable LC-3 lifecycle and recovery", () => {
     const states = lifecycleStates();
     const predecessors = [states.start, states.registered, states.auditedState, states.stagedState, states.verifiedState];
     predecessors.forEach((predecessor, index) => {
-      const blocked = valueOf(reduceRemediation(predecessor, {
+      const blocked = value(reduceRemediation(predecessor, {
         kind: "recoverable-effect-failed",
         recoveryAttemptId: `attempt.${index}`,
         effectId: `effect.failure-${index}`,
         message: "transient adapter failure",
       }));
-      const resumedBlocked = valueOf(parseRemediationState(jsonRoundTrip(blocked)));
+      const resumedBlocked = value(parseRemediationState(jsonRoundTrip(blocked)));
       expect(resumedBlocked.state).toBe("recoverable-blocked");
       if (resumedBlocked.state !== "recoverable-blocked") return;
-      const receipt = valueOf(recoveryReceiptFor(resumedBlocked, `receipt.${index}`));
-      const recovered = valueOf(reduceRemediation(resumedBlocked, {
+      const receipt = value(recoveryReceiptFor(resumedBlocked, `receipt.${index}`));
+      const recovered = value(reduceRemediation(resumedBlocked, {
         kind: "recovery-receipt-accepted",
         receipt: jsonRoundTrip(receipt),
       }));
@@ -881,20 +881,20 @@ describe("durable LC-3 lifecycle and recovery", () => {
 
   it("persists consumed receipt IDs and rejects stale receipts across failures and restarts", () => {
     const { auditedState } = lifecycleStates();
-    const firstBlocked = valueOf(reduceRemediation(auditedState, {
+    const firstBlocked = value(reduceRemediation(auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.first",
       effectId: "effect.retry",
       message: "first failure",
     }));
     if (firstBlocked.state !== "recoverable-blocked") throw new Error("expected blocked");
-    const firstReceipt = valueOf(recoveryReceiptFor(firstBlocked, "receipt.first"));
-    const firstRecovered = valueOf(reduceRemediation(firstBlocked, {
+    const firstReceipt = value(recoveryReceiptFor(firstBlocked, "receipt.first"));
+    const firstRecovered = value(reduceRemediation(firstBlocked, {
       kind: "recovery-receipt-accepted",
       receipt: firstReceipt,
     }));
-    const restarted = valueOf(parseRemediationState(jsonRoundTrip(firstRecovered)));
-    const secondBlocked = valueOf(reduceRemediation(restarted, {
+    const restarted = value(parseRemediationState(jsonRoundTrip(firstRecovered)));
+    const secondBlocked = value(reduceRemediation(restarted, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.second",
       effectId: "effect.retry",
@@ -910,9 +910,9 @@ describe("durable LC-3 lifecycle and recovery", () => {
     if (!stale.ok) expect(stale.error.kind).toBe("invalid-recovery-receipt");
     expect(recoveryReceiptFor(secondBlocked, "receipt.first").ok).toBe(false);
 
-    const secondReceipt = valueOf(recoveryReceiptFor(secondBlocked, "receipt.second"));
-    const secondRecovered = valueOf(reduceRemediation(
-      valueOf(parseRemediationState(jsonRoundTrip(secondBlocked))),
+    const secondReceipt = value(recoveryReceiptFor(secondBlocked, "receipt.second"));
+    const secondRecovered = value(reduceRemediation(
+      value(parseRemediationState(jsonRoundTrip(secondBlocked))),
       { kind: "recovery-receipt-accepted", receipt: secondReceipt },
     ));
     expect(secondRecovered.consumedRecoveryReceiptIds).toEqual(["receipt.first", "receipt.second"]);
@@ -921,7 +921,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
 
   it("rejects property-generated receipt-surplus histories in active, blocked, and done states", () => {
     const states = lifecycleStates();
-    const blocked = valueOf(reduceRemediation(states.auditedState, {
+    const blocked = value(reduceRemediation(states.auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.cardinality-blocked",
       effectId: "effect.cardinality-blocked",
@@ -978,7 +978,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
       if (!parsed.ok) expect(parsed.error.field).toBe("history");
     }
 
-    const blocked = valueOf(reduceRemediation(states.auditedState, {
+    const blocked = value(reduceRemediation(states.auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.equal-history",
       effectId: "effect.equal-history",
@@ -992,25 +992,25 @@ describe("durable LC-3 lifecycle and recovery", () => {
   });
 
   it("round-trips repeated blocked recovery failures without fabricating consumed receipts", () => {
-    const firstBlocked = valueOf(reduceRemediation(lifecycleStates().auditedState, {
+    const firstBlocked = value(reduceRemediation(lifecycleStates().auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.retry-first",
       effectId: "effect.retry-first",
       message: "first recovery attempt failed",
     }));
-    const secondBlocked = valueOf(reduceRemediation(firstBlocked, {
+    const secondBlocked = value(reduceRemediation(firstBlocked, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.retry-second",
       effectId: "effect.retry-second",
       message: "second recovery attempt failed",
     }));
-    const reparsedBlocked = valueOf(parseRemediationState(jsonRoundTrip(secondBlocked)));
+    const reparsedBlocked = value(parseRemediationState(jsonRoundTrip(secondBlocked)));
     if (reparsedBlocked.state !== "recoverable-blocked") throw new Error("expected blocked");
     expect(reparsedBlocked.recoveryAttemptIds).toEqual(["attempt.retry-first", "attempt.retry-second"]);
     expect(reparsedBlocked.consumedRecoveryReceiptIds).toEqual([]);
 
-    const receipt = valueOf(recoveryReceiptFor(reparsedBlocked, "receipt.retry-second"));
-    const recovered = valueOf(reduceRemediation(reparsedBlocked, {
+    const receipt = value(recoveryReceiptFor(reparsedBlocked, "receipt.retry-second"));
+    const recovered = value(reduceRemediation(reparsedBlocked, {
       kind: "recovery-receipt-accepted",
       receipt,
     }));
@@ -1021,7 +1021,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
 
   it("requires a fresh recovery attempt identity for each failure", () => {
     const { auditedState } = lifecycleStates();
-    const blocked = valueOf(reduceRemediation(auditedState, {
+    const blocked = value(reduceRemediation(auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.same",
       effectId: "effect.one",
@@ -1037,14 +1037,14 @@ describe("durable LC-3 lifecycle and recovery", () => {
   });
 
   it("binds receipt ID, attempt, effect, predecessor, witness, run, and digest", () => {
-    const blocked = valueOf(reduceRemediation(lifecycleStates().auditedState, {
+    const blocked = value(reduceRemediation(lifecycleStates().auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.bound",
       effectId: "effect.bound",
       message: "failure",
     }));
     if (blocked.state !== "recoverable-blocked") throw new Error("expected blocked");
-    const receipt = valueOf(recoveryReceiptFor(blocked, "receipt.bound"));
+    const receipt = value(recoveryReceiptFor(blocked, "receipt.bound"));
     const mutations = [
       { ...receipt, receiptId: "receipt.foreign" },
       { ...receipt, recoveryAttemptId: "attempt.foreign" },
@@ -1068,7 +1068,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
   // chain has any reason to refuse it.
   describe("a self-consistent receipt minted for another failure is still foreign", () => {
     const blockedFor = (attempt: string, effect: string) => {
-      const blocked = valueOf(reduceRemediation(lifecycleStates().auditedState, {
+      const blocked = value(reduceRemediation(lifecycleStates().auditedState, {
         kind: "recoverable-effect-failed",
         recoveryAttemptId: attempt,
         effectId: effect,
@@ -1081,7 +1081,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
     it("refuses a valid receipt bound to a different recovery attempt", () => {
       const mine = blockedFor("attempt.mine", "effect.shared");
       const theirs = blockedFor("attempt.theirs", "effect.shared");
-      const foreign = valueOf(recoveryReceiptFor(theirs, "receipt.theirs"));
+      const foreign = value(recoveryReceiptFor(theirs, "receipt.theirs"));
 
       // The digest is genuinely valid for the receipt's own fields.
       expect(reduceRemediation(theirs, { kind: "recovery-receipt-accepted", receipt: foreign }).ok).toBe(true);
@@ -1097,7 +1097,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
     it("refuses a valid receipt bound to a different effect", () => {
       const mine = blockedFor("attempt.shared", "effect.mine");
       const theirs = blockedFor("attempt.shared", "effect.theirs");
-      const foreign = valueOf(recoveryReceiptFor(theirs, "receipt.other-effect"));
+      const foreign = value(recoveryReceiptFor(theirs, "receipt.other-effect"));
 
       const result = reduceRemediation(mine, { kind: "recovery-receipt-accepted", receipt: foreign });
 
@@ -1108,7 +1108,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
 
     it("accepts the receipt that does answer this failure, so the guard is not simply always-refusing", () => {
       const mine = blockedFor("attempt.mine", "effect.mine");
-      const own = valueOf(recoveryReceiptFor(mine, "receipt.mine"));
+      const own = value(recoveryReceiptFor(mine, "receipt.mine"));
 
       const result = reduceRemediation(mine, { kind: "recovery-receipt-accepted", receipt: own });
 
@@ -1118,7 +1118,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
 
   it("rejects every undeclared event/state pair and keeps done monotonic", () => {
     const states = lifecycleStates();
-    const blocked = valueOf(reduceRemediation(states.auditedState, {
+    const blocked = value(reduceRemediation(states.auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.blocked",
       effectId: "effect.blocked",
@@ -1132,7 +1132,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
       "staged-set-verified": { kind: "staged-set-verified", verified: states.index },
       "index-installed": { kind: "index-installed", installation: states.prepared, receipt: installedReceipt(states.prepared) },
       "recoverable-effect-failed": { kind: "recoverable-effect-failed", recoveryAttemptId: "attempt.event", effectId: "effect.event", message: "failure" },
-      "recovery-receipt-accepted": { kind: "recovery-receipt-accepted", receipt: valueOf(recoveryReceiptFor(blocked, "receipt.blocked")) },
+      "recovery-receipt-accepted": { kind: "recovery-receipt-accepted", receipt: value(recoveryReceiptFor(blocked, "receipt.blocked")) },
     };
     const allowed: Readonly<Record<RemediationState["state"], readonly RemediationEvent["kind"][]>> = {
       "authority-frozen": ["support-path-registered", "audit-succeeded", "recoverable-effect-failed"],
@@ -1175,19 +1175,19 @@ describe("durable LC-3 lifecycle and recovery", () => {
   });
 
   it("strictly binds blocked recovery-attempt history to its predecessor during JSON replay", () => {
-    const firstBlocked = valueOf(reduceRemediation(lifecycleStates().auditedState, {
+    const firstBlocked = value(reduceRemediation(lifecycleStates().auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.history-first",
       effectId: "effect.history-first",
       message: "first failure",
     }));
     if (firstBlocked.state !== "recoverable-blocked") throw new Error("expected first blocked state");
-    const firstReceipt = valueOf(recoveryReceiptFor(firstBlocked, "receipt.history-first"));
-    const recovered = valueOf(reduceRemediation(firstBlocked, {
+    const firstReceipt = value(recoveryReceiptFor(firstBlocked, "receipt.history-first"));
+    const recovered = value(reduceRemediation(firstBlocked, {
       kind: "recovery-receipt-accepted",
       receipt: firstReceipt,
     }));
-    const secondBlocked = valueOf(reduceRemediation(recovered, {
+    const secondBlocked = value(reduceRemediation(recovered, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.history-second",
       effectId: "effect.history-second",
@@ -1236,7 +1236,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
   });
 
   it("is total and cause-preserving for hostile recoverable predecessor parsing", () => {
-    const blocked = valueOf(reduceRemediation(lifecycleStates().auditedState, {
+    const blocked = value(reduceRemediation(lifecycleStates().auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.hostile-predecessor",
       effectId: "effect.hostile-predecessor",
@@ -1274,7 +1274,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
 
   it("guards hostile outer authority parsing in recoverable and done states", () => {
     const states = lifecycleStates();
-    const blocked = valueOf(reduceRemediation(states.auditedState, {
+    const blocked = value(reduceRemediation(states.auditedState, {
       kind: "recoverable-effect-failed",
       recoveryAttemptId: "attempt.hostile-authority",
       effectId: "effect.hostile-authority",
@@ -1312,7 +1312,7 @@ describe("durable LC-3 lifecycle and recovery", () => {
   it("rejects same-run outer authority replacement in a done state", () => {
     const defaultScope = ["src/main.ts", "src/deleted.ts"] as const;
     const replacementScope = ["src/same-run-foreign.ts"] as const;
-    const replacementAuthority = valueOf(freezePathAuthority(standaloneInput(replacementScope)));
+    const replacementAuthority = value(freezePathAuthority(standaloneInput(replacementScope)));
     const replaced = jsonRoundTrip(lifecycleStates().done) as { authority: unknown };
     replaced.authority = jsonRoundTrip(replacementAuthority);
 
@@ -1348,10 +1348,10 @@ describe("a proof minted under a foreign authority is refused at every transitio
 
   /** A parallel, internally consistent lifecycle under a different authority. */
   function foreignLifecycle() {
-    const frozen = valueOf(freezePathAuthority(standaloneInput([...FOREIGN_SCOPE])));
-    const registered = valueOf(registerSupportPath(frozen, "engine/tests/foreign.test.ts"));
+    const frozen = value(freezePathAuthority(standaloneInput([...FOREIGN_SCOPE])));
+    const registered = value(registerSupportPath(frozen, "engine/tests/foreign.test.ts"));
     const foreignPaths = ["engine/tests/foreign.test.ts", "src/foreign.ts"];
-    const audit = valueOf(auditRemediationPaths(registered, {
+    const audit = value(auditRemediationPaths(registered, {
       expectedDirtyPaths: foreignPaths,
       actualDirtyPaths: [
         { path: "engine/tests/foreign.test.ts", change: "added", nodeKind: "file" },
@@ -1360,13 +1360,13 @@ describe("a proof minted under a foreign authority is refused at every transitio
       preexistingStagedPaths: [],
       repositoryWitness: repositoryWitness(),
     }));
-    const stage = valueOf(stageTemporaryIndex(audit, digest(41), repositoryWitness()));
-    const index = valueOf(verifyTemporaryIndex(stage, {
+    const stage = value(stageTemporaryIndex(audit, digest(41), repositoryWitness()));
+    const index = value(verifyTemporaryIndex(stage, {
       actualTemporaryIndexStagedPaths: foreignPaths,
       actualIndexDigest: digest(41),
       currentRepositoryWitness: repositoryWitness(),
     }));
-    const prepared = valueOf(prepareVerifiedIndexInstallation(index, "effect.install-foreign", repositoryWitness()));
+    const prepared = value(prepareVerifiedIndexInstallation(index, "effect.install-foreign", repositoryWitness()));
     return { audit, stage, index, prepared };
   }
 

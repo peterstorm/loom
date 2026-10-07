@@ -40,9 +40,10 @@ import {
 } from "../../../core/orchestration-contract";
 import type { PanelVerdictSource, PanelVerdictSourceRecord } from "../../../core/panel-verdict-source";
 import { captureKey } from "../../../core/harness-capture";
-import type { PanelProgramAction, SpawnRequest as PanelSpawnRequest } from "../../../core/panel-program";
+import type { NextPanelProgramAction, PanelProgramAction, SpawnRequest as PanelSpawnRequest } from "../../../core/panel-program";
 import { lowerModelProfile, resolveModelProfile } from "../../../core/model-profiles";
 import {
+  describePanelJournalReplayError,
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
   logicalPanelRequestId,
@@ -50,7 +51,6 @@ import {
   parsePanelVerdictSourceRecordBytes,
   selectPanelAttemptVerdictSource,
   settlePanelAttempt,
-  type NextPanelProgramAction,
   type PanelAttempt,
   type PanelAttemptVerdictSource,
   type PanelOperationEvidence,
@@ -59,7 +59,7 @@ import {
 } from "../../../core/legacy-panel-decisions";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../../orchestration/context-packets";
 import type { RunDirHandle } from "../../../orchestration/run-directory-handle";
-import type { FacadeDriveResult, ProgramParse } from "./program-result";
+import { failed, type FacadeDriveResult, type ProgramParse } from "./program-result";
 import { runDirectoryEffectRunner } from "./run-directory-effects";
 import { renderSpawnTask } from "./spawn-task";
 
@@ -340,14 +340,15 @@ async function materializePanelAction(
   }) };
 }
 
-/** The journal read; the replay itself is the core's `nextPanelProgramAction`. */
+/** The journal read; the replay itself is the core's `nextPanelProgramAction`,
+ *  whose typed refusal becomes operator text here, at the shell's edge. */
 async function nextRegisteredPanelAction(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
 ): Promise<ProgramParse<NextPanelProgramAction>> {
   const records = await handle.readEvents();
   const next = nextPanelProgramAction(registration, records.map(({ event }) => event));
-  return next.ok ? next : { ok: false, message: next.error };
+  return next.ok ? next : { ok: false, message: describePanelJournalReplayError(next.error) };
 }
 
 /**
@@ -404,24 +405,29 @@ export async function driveRegisteredPanel(
 // Settlement entry points: one submitted attempt, or every captured attempt
 // ---------------------------------------------------------------------------
 
+/** A settlement step's failure, in the façade's own failure shape so an entry
+ *  point returns it unchanged. A step that succeeds has nothing to report. */
+type PanelShellFailure = ReturnType<typeof failed>;
+
 /**
  * Settle ONE attempt's raw bytes and record how it settled: the logical id is
  * derived, the attempt settled through its verdict source, then its outcome
  * appended under the reserved slot's dedup key. Both settlement entry points
  * go through here, so the logical-id/dedup-key pairing `appendSpawnOutcome`
  * owns has one caller sequence; they differ only in where `raw` comes from.
+ * Recording has no result of its own: the failure, or `null` once recorded.
  */
 async function settleAndRecordPanelAttempt(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
   request: AgentRequestAuthority,
   raw: string,
-): Promise<ProgramParse<true>> {
+): Promise<PanelShellFailure | null> {
   const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
   const settled = await settlePanelAttemptSubmission({ handle, registration, request, logicalRequestId, raw });
-  if (!settled.ok) return { ok: false, message: settled.error };
+  if (!settled.ok) return failed(settled.error);
   await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settled.value.problem);
-  return { ok: true, value: true };
+  return null;
 }
 
 /**
@@ -434,8 +440,8 @@ export async function submitRegisteredPanelAttempt(
   request: AgentRequestAuthority,
   raw: string,
 ): Promise<FacadeDriveResult> {
-  const recorded = await settleAndRecordPanelAttempt(handle, registration, request, raw);
-  if (!recorded.ok) return recorded;
+  const failure = await settleAndRecordPanelAttempt(handle, registration, request, raw);
+  if (failure !== null) return failure;
   return driveRegisteredPanel(handle, registration);
 }
 
@@ -446,12 +452,12 @@ export async function submitRegisteredPanelAttempt(
  * having judged it — the capture and the judgement are separate writes. This
  * settles each such attempt through the same verdict-source seam a submission
  * uses and records the verdict, keyed so a repeat is a no-op. It decides no
- * policy of its own.
+ * policy of its own: the first failure, or `null` once every attempt settled.
  */
 async function reconcileCapturedPanelResults(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
-): Promise<ProgramParse<true>> {
+): Promise<PanelShellFailure | null> {
   const events = await handle.readEvents();
   const settled = new Set(events.flatMap(({ event }) => {
     if (typeof event !== "object" || event === null) return [];
@@ -462,23 +468,23 @@ async function reconcileCapturedPanelResults(
       : [];
   }));
   const issued = handle.readIssuedRequests();
-  if (!issued.ok) return { ok: false, message: issued.error.message };
+  if (!issued.ok) return failed(issued.error.message);
   const captured = handle.readCapturedAttempts();
-  if (!captured.ok) return { ok: false, message: captured.error.message };
+  if (!captured.ok) return failed(captured.error.message);
 
   for (const request of issued.value) {
     if (!captured.value.has(captureKey(request.slotId, request.attempt))) continue;
     if (settled.has(`${logicalPanelRequestId(request.requestId, request.attempt)}:${request.attempt}`)) continue;
     const bytes = handle.readTranscriptBytes(request);
-    if (!bytes.ok) return { ok: false, message: bytes.error.message };
+    if (!bytes.ok) return failed(bytes.error.message);
     // The verdict-source seam resolves this attempt's emission evidence — the
     // durable record's replay when one was published, otherwise the extraction
     // baseline — and the submission decision runs over exactly that resolution
     // (the same policy every later scan of the same attempt reproduces).
-    const recorded = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
-    if (!recorded.ok) return recorded;
+    const failure = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
+    if (failure !== null) return failure;
   }
-  return { ok: true, value: true };
+  return null;
 }
 
 /**
@@ -490,7 +496,7 @@ export async function resumeRegisteredPanel(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
 ): Promise<FacadeDriveResult> {
-  const reconciled = await reconcileCapturedPanelResults(handle, registration);
-  if (!reconciled.ok) return reconciled;
+  const failure = await reconcileCapturedPanelResults(handle, registration);
+  if (failure !== null) return failure;
   return driveRegisteredPanel(handle, registration);
 }

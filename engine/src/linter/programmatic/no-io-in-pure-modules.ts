@@ -98,6 +98,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/standalone-successor-reviewer.ts",
   "engine/src/core/context-packets.ts",
   "engine/src/core/context-packet-projection.ts",
+  // The CLI value-is-a-flag rule the projection reader and the helper shell share.
+  "engine/src/core/cli-flag-token.ts",
   "engine/src/core/safe-io-cause.ts",
   "engine/src/core/wave-review-authority.ts",
   // The registered Wave Gate program's data shapes, which wave-review-authority

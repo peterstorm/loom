@@ -2,15 +2,20 @@
  * The frozen emission registry's cells as fixtures — the ONE registry-cell
  * concept every emission suite (the Pi runtime, review route, provisioning,
  * transcript-frame, readiness, startup and launch-bridge suites, and the
- * emission-child harness) shares, so a registry change is one edit here.
+ * emission-child harness) shares, so a registry change is edited here only.
  *
  * A cell is a (kind, version) pair the frozen registry actually carries, with
- * its tool spec. `RegistryCell` is a discriminated union DERIVED from
- * `EMISSION_TOOL_SPECS`: each kind pairs only with the versions its spec
- * freezes, so a fixture naming an unsupported pair (judge-verdict/v2,
- * reviewer-payload/v1) is a compile error, never a runtime mint refusal. The
- * cell's tool name, frozen schema bytes and schema digest are derived from
- * it here, never re-declared by a consumer.
+ * its tool spec and its own version-keyed schema record. `RegistryCell` is a
+ * discriminated union DERIVED from `EMISSION_TOOL_SPECS`: each kind pairs only
+ * with the versions its spec freezes, so a fixture naming an unsupported pair
+ * (judge-verdict/v2, reviewer-payload/v1) is a compile error, never a runtime
+ * mint refusal. The cell's tool name, frozen schema bytes and schema digest
+ * are derived from it here, never re-declared by a consumer.
+ *
+ * Adding a registry cell is its constant and its `REGISTRY_CELLS` entry, plus
+ * the one per-cell fixture datum — its `canonicalArguments` arm, which the
+ * exhaustive switch turns into a compile error when omitted. Everything else
+ * (schema bytes, digest, binding) is one typed lookup on the cell.
  */
 import { EMISSION_TOOL_SPECS, type EmissionSchemaVersion, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
 import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
@@ -29,8 +34,17 @@ type FrozenSpecs = typeof EMISSION_TOOL_SPECS;
  *  exactly the versions a cell of that kind may name. */
 type RegistryCellVersion<K extends PayloadProducerKindName> = keyof FrozenSpecs[K]["schemaVersions"] & EmissionSchemaVersion;
 
+/** One (kind, version) cell: the kind's tool spec beside the frozen schema
+ *  record the spec keys under that version. */
+type CellOf<K extends PayloadProducerKindName, V extends RegistryCellVersion<K>> = Readonly<{
+  kind: K;
+  version: V;
+  spec: FrozenSpecs[K];
+  schema: FrozenSpecs[K]["schemaVersions"][V];
+}>;
+
 type CellsOfKind<K extends PayloadProducerKindName> = {
-  readonly [V in RegistryCellVersion<K>]: Readonly<{ kind: K; version: V; spec: FrozenSpecs[K] }>;
+  readonly [V in RegistryCellVersion<K>]: CellOf<K, V>;
 }[RegistryCellVersion<K>];
 
 /** One frozen registry cell: a discriminated union over every legal
@@ -42,7 +56,11 @@ export type RegistryCell = {
 const registryCell = <K extends PayloadProducerKindName, V extends RegistryCellVersion<K>>(
   kind: K,
   version: V,
-): Readonly<{ kind: K; version: V; spec: FrozenSpecs[K] }> => Object.freeze({ kind, version, spec: EMISSION_TOOL_SPECS[kind] });
+): CellOf<K, V> => {
+  const spec: FrozenSpecs[K] = EMISSION_TOOL_SPECS[kind];
+  const schemaVersions: FrozenSpecs[K]["schemaVersions"] = spec.schemaVersions;
+  return Object.freeze({ kind, version, spec, schema: schemaVersions[version] });
+};
 
 export const REVIEWER_V2_CELL = registryCell("reviewer-payload", "v2");
 export const REVIEWER_V3_CELL = registryCell("reviewer-payload", "v3");
@@ -52,18 +70,9 @@ export const REFUTATION_V1_CELL = registryCell("refutation-verdict", "v1");
 /** Every frozen registry cell, once. */
 export const REGISTRY_CELLS: readonly RegistryCell[] = Object.freeze([REVIEWER_V2_CELL, REVIEWER_V3_CELL, JUDGE_V1_CELL, REFUTATION_V1_CELL]);
 
-/** The frozen schema bytes of one cell — total over the union: every arm's
- *  version indexes its own spec's schema versions, so no lookup can miss. */
-export const cellSchemaBytes = (cell: RegistryCell): string => {
-  switch (cell.kind) {
-    case "reviewer-payload":
-      return cell.version === "v2" ? cell.spec.schemaVersions.v2.schemaBytes : cell.spec.schemaVersions.v3.schemaBytes;
-    case "judge-verdict":
-      return cell.spec.schemaVersions.v1.schemaBytes;
-    case "refutation-verdict":
-      return cell.spec.schemaVersions.v1.schemaBytes;
-  }
-};
+/** The frozen schema bytes of one cell: the cell's own schema record, typed
+ *  at construction, so no lookup can miss. */
+export const cellSchemaBytes = (cell: RegistryCell): string => cell.schema.schemaBytes;
 
 /** The cell's schema digest: the SHA-256 of its frozen schema bytes. */
 export const cellSchemaDigest = (cell: RegistryCell): string => sha256Hex(cellSchemaBytes(cell));
