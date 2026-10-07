@@ -1,5 +1,10 @@
 /**
- * Shared Git fixture primitives for the remediation orchestration tests.
+ * Shared Git fixture primitives for suites that build fixture repositories.
+ *
+ * Run fixture Git through `gitResult` (stdout via `.stdout`) or `git` rather
+ * than a private spawn, so the fixture never inherits the developer's global
+ * config (`HOME` is the fixture root) or locale. Suites set any identity they
+ * rely on in repository config or `-c`, never through the ambient environment.
  *
  * `remediation-index.test.ts` and `remediation-faults.test.ts` each declared
  * their own `git`/`write`/`pathspecContract` — `pathspecContract` byte-for-byte
@@ -17,19 +22,30 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { FixedGitPathspecContract } from "../../src/core/remediation-machine";
 
-/** Real Git, fixed identity and config so the fixture is deterministic. */
-export function gitResult(root: string, args: readonly string[]): SpawnSyncReturns<string> {
+/**
+ * Fixed author and committer dates, for suites whose assertions compare commit
+ * SHAs (or packets embedding them) across separate fixture projects: identical
+ * trees then always yield identical SHAs, never split by a second boundary.
+ */
+export const PINNED_COMMIT_DATES: Readonly<Record<string, string>> = Object.freeze({
+  GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
+});
+
+/** Real Git, fixed identity and config so the fixture is deterministic. `environment`
+ *  adds variables (such as `PINNED_COMMIT_DATES`) but never overrides PATH, HOME or locale. */
+export function gitResult(root: string, args: readonly string[], environment: Readonly<Record<string, string>> = {}): SpawnSyncReturns<string> {
   const result = spawnSync("git", [...args], {
     cwd: root,
     encoding: "utf-8",
-    env: { PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
+    env: { ...environment, PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
   });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
   return result;
 }
 
-export function git(root: string, args: readonly string[]): void {
-  gitResult(root, args);
+export function git(root: string, args: readonly string[], environment: Readonly<Record<string, string>> = {}): void {
+  gitResult(root, args, environment);
 }
 
 export function write(root: string, path: string, contents: string): void {

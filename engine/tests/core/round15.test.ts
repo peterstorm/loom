@@ -41,7 +41,7 @@ import {
   type WaveFindingId,
 } from "../../src/core/review-panel";
 import { exactOrderedSetErrors, sanitizeProse, selectLenses } from "../../src/core/panel-kernel";
-import { aggregateVerdicts, candidateFilename, type JudgeVerdict } from "../../src/core/panel-contract";
+import { aggregateVerdicts, architectureCriterion, candidateFilename, CODEBASE_FIT_CRITERION, type ArchitectureCriterion, type JudgeVerdict } from "../../src/core/panel-contract";
 import { artifactError, pruneSurplusItems } from "../../src/handlers/helpers/panel-run";
 import { deriveAgentTranscriptPath } from "../../src/utils/agent-transcript-path";
 import { parseTaskGraph } from "../../src/state-manager";
@@ -673,7 +673,16 @@ describe("kernel rules that were deletable with the suite green", () => {
 // ---------------------------------------------------------------------------
 
 describe("aggregateVerdicts ranks by a total order", () => {
-  const CRITERIA = ["simplicity", "testability", "fit"];
+  // Real vocabulary members, minted through the same closed boundary the panel
+  // authority mints at — the old synthetic "testability"/"fit" strings would
+  // no longer compile into the branded criteria order.
+  const CRITERIA: readonly ArchitectureCriterion[] = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION].map(
+    (raw) => {
+      const minted = architectureCriterion(raw);
+      if (minted === null) throw new Error(`test criterion outside the validated interview vocabulary: ${raw}`);
+      return minted;
+    },
+  );
   const LENSES = ["simplicity-first", "type-driven-fp", "risk-security-first"] as const;
   const candidates = LENSES.map(candidateFilename);
 

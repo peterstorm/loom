@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { REQUIREMENT_COVERAGE_SECTION, WAVE_REVIEW_AUTHORITY_SECTION } from "../src/core/wave-review-authority";
 import { parseSpec, type ParsedSpec } from "../src/core/parse-spec";
 import { parseArtifactDigest } from "../src/core/orchestration-contract";
 import {
@@ -64,6 +65,7 @@ const indexed: SpecIndexAvailability =
 const task = (overrides: Partial<CoverageTask> = {}): CoverageTask => Object.freeze({
   id: "T1",
   inCurrentWave: true,
+  decisionRecord: false,
   completionAnchors: ["FR-001"],
   contributions: [],
   declaredFiles: ["src/a.ts"],
@@ -94,10 +96,11 @@ const unavailable = () => {
 };
 
 describe("commands/spec-check.md is bound to the projection it consumes", () => {
-  it("reads the section label the renderer is published under", () => {
-    // If the packet section were renamed, the decoder throws and loudly blocks
-    // every registered spec-check until producer and command agree again.
-    expect(command).toContain('entry.label === "requirement-coverage"');
+  it("reads exactly the section labels the Wave packet is published under", () => {
+    // A renamed packet section makes the section reader exit non-zero, which
+    // loudly blocks every registered spec-check until producer and command agree.
+    expect(command).toContain(`<LOOM_CONTEXT_SECTION_COMMAND> --section ${WAVE_REVIEW_AUTHORITY_SECTION}`);
+    expect(command).toContain(`<LOOM_CONTEXT_SECTION_COMMAND> --section ${REQUIREMENT_COVERAGE_SECTION}`);
   });
 
   it("names both column headings the renderer emits and the command depends on", () => {

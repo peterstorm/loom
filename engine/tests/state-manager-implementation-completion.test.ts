@@ -619,4 +619,17 @@ describe("Task attempt authority StateManager lockstep", () => {
       unresolved_repository_paths: ["foreign.ts"],
     }))).toContain("requires repository_baseline");
   });
+
+  it("reads a well-formed legacy unresolved-path carry and drops it from the parsed Task", () => {
+    const legacy = parseTaskGraph(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      repository_baseline: repositoryBaseline,
+      unresolved_repository_paths: ["foreign.ts"],
+    }));
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) return;
+    expect(legacy.value.tasks[0]?.repository_baseline).toEqual(repositoryBaseline);
+    expect(legacy.value.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
+  });
 });

@@ -1,11 +1,13 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { capturePiSubagentResult, piSpawnRosterId } from "../../../pi/extension";
+import { capturePiSubagentResult } from "../../../pi/review-capture";
+import { piSpawnRosterId } from "../../../pi/tool-input";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings, registerSessionRunBinding } from "../../src/orchestration/session-run-bindings";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { fixtureSession, withFixturePiSession } from "./pi-session";
+import { claudeReadLines, frozenDiffReaderPages, piReadMessages } from "./read-coverage";
 
 /** Scripted fixture transport only: no model execution or authored receipt. */
 export async function captureNativeReview(
@@ -14,6 +16,8 @@ export async function captureNativeReview(
   request: AgentRequestAuthority,
   harness: "claude" | "pi",
   texts: readonly string[],
+  /** The reader pages the scripted reviewer received; defaults to every frozen diff page (ADR-0022). */
+  toolOutputs: readonly string[] = frozenDiffReaderPages(handle, request),
 ): Promise<Readonly<{ captured: boolean; diagnostic: string }>> {
   return withFixturePiSession(repository, async () => {
     const session = fixtureSession(repository);
@@ -34,11 +38,12 @@ export async function captureNativeReview(
       const binding = bindings.value.find(({ runId, requestIds }) => runId === handle.runId && requestIds.includes(request.requestId));
       if (binding === undefined) throw new Error("production fixture session binding not published");
       const result = await capturePiSubagentResult(toolCallId, 0, request.role,
-        [{ role: "assistant", content: texts.map((text) => ({ type: "text", text })) }], binding);
+        [...piReadMessages(toolOutputs), { role: "assistant", content: texts.map((text) => ({ type: "text", text })) }], binding);
       return { captured: result.kind === "captured", diagnostic: JSON.stringify(result) };
     }
     const transcript = join(session.directory, "fixture-native-final.jsonl");
     writeFileSync(transcript, [
+      ...claudeReadLines(toolOutputs),
       JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "Scripted earlier narrative; MUST NOT enter final evidence." }] } }),
       JSON.stringify({ message: { role: "assistant", content: texts.map((text) => ({ type: "text", text })) } }),
     ].join("\n"));

@@ -1,22 +1,38 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
-import { WAVE_REVIEW_AGENTS } from "../../../../src/core/model-profiles";
+import { WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
-import { parseRegisteredFacadeProgram, publishInitialBatch, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
-import { handleWaveReviewContext, installWaveReviewRuns, waveGateAuthorityDigest, waveRequests, deriveWaveAttemptTwo, persistedWaveAttemptTwoCompatibilityProblem, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-gate";
+import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
+import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
+import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
+import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
+import { readWaveReviewContext, waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
+import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
+import { deriveWaveAttemptTwo, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-review-retries";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../../src/core/wave-gate-membership";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { Finding, TaskGraph } from "../../../../src/types";
+import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
+import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
+import {
+  CATALOG_ROUTE_ENV,
+  QUALIFIED_ROUTE_ENV,
+  withRouteEnv,
+  type EnvironmentOverlay,
+} from "../../../fixtures/issue-route-env";
+import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -26,10 +42,9 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   if (!result.ok) throw new Error(JSON.stringify(result));
   return result.value;
 }
-function git(root: string, args: readonly string[]) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr);
-}
+// Deterministic commit SHAs: frozen-source sections embed workspaceHead, and
+// sections minted by separate fixture projects are compared byte-for-byte.
+const git = (root: string, args: readonly string[]) => gitWithEnvironment(root, args, PINNED_COMMIT_DATES);
 const critical = REVIEWER_PAYLOAD_EXAMPLE_V2.findings.find((finding) => finding.severity === "critical")!;
 const criticalDraft: ReviewerDraftV2 = { ...critical, file: "src/x.ts", line: 1, claim: "  exact current claim\nwith detail  " };
 const advisory: ReviewerDraftV2 = { severity: "advisory", file: "src/x.ts", line: 1, claim: " optional cleanup ", reason: " clearer operator explanation " };
@@ -63,7 +78,7 @@ const specText = `# Feature: Wave fixture
 const specPass = "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\n";
 
 function project(priors: readonly Finding[] = []) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-wave-")));
+  const root = canonicalTempDir("loom-p4-wave-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));
@@ -125,7 +140,7 @@ function registration(handle: RunDirHandle) {
 }
 function payload(handle: RunDirHandle, request: AgentRequestAuthority, findings: readonly ReviewerDraftV2[] = [], verdict = "resolved_by_remediation") {
   const packet = value(handle.readContext(request.contextDigest));
-  const context = handleWaveReviewContext([packet], packet.digest);
+  const context = readWaveReviewContext([packet], packet.digest);
   if (context.kind !== "loaded" || context.value.task === null || context.value.taskRun === null) throw new Error("expected issued Task context");
   const priors = context.value.task.priorFindings.map(({ id }) => ({ finding_id: id, verdict, reason: "  verified against issued bytes\nexact reason  " }));
   if (packet.schemaVersion === 2) return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,
@@ -159,7 +174,7 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
       1,
       { kind: "state-layout", root: p.root },
     );
-    const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
+    const published = await publishLegacyInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
     if (!published.ok) throw new Error(published.message);
     await installWaveReviewRuns(manager, registered, batch);
     return { handle, action: published.action as Action };
@@ -192,6 +207,11 @@ describe("registered Wave reviewer protocol", () => {
       expect(packet.schemaVersion).toBe(2);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema")!.bytes).toString()).toBe(REVIEWER_PAYLOAD_SCHEMA_V2);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric")!.bytes).toString()).toBe(REVIEWER_IMPACT_RUBRIC_V1);
+      const sourceSection = packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
+      const source = value(parseWaveFrozenSource(JSON.parse(Buffer.from(sourceSection.bytes).toString("utf8"))));
+      expect(source.taskId).toBe("T1");
+      expect(source.workspaceHeadSha).toBe(run.workspace_head_sha);
+      expect(source.files).toMatchObject([{ path: "src/x.ts", kind: "text", content: "export const x = 1;\n" }]);
       expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
     }
     const reviewers = issued.slice(1);
@@ -237,6 +257,10 @@ describe("registered Wave reviewer protocol", () => {
     const firstPacket = value(handle.readContext(first.contextDigest));
     const secondPacket = value(handle.readContext(retry.authority.contextDigest));
     expect(secondPacket.fixedContext).toEqual(firstPacket.fixedContext);
+    const firstSource = firstPacket.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
+    const retrySource = secondPacket.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
+    expect(retrySource.digest).toBe(firstSource.digest);
+    expect(retrySource).toEqual(firstSource);
     expect(persistedWaveAttemptTwoCompatibilityProblem(first, retry.authority, firstPacket, secondPacket)).toBeNull();
     expect(await resume(p, handle)).toEqual(retried);
     const awaiting = await submit(p, handle, retry.authority, payload(handle, retry.authority, [advisory]));
@@ -262,7 +286,7 @@ describe("registered Wave reviewer protocol", () => {
     if (kind === "unchanged-context") {
       for (const { authority } of action.requests!.slice(1)) {
         const retry = deriveWaveAttemptTwo(handle, authority);
-        const published = await publishInitialBatch(handle, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`);
+        const published = await publishLegacyInitialBatch(handle, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`);
         if (!published.ok) throw new Error(published.message);
         legacyDelivery(published.action as Action);
       }
@@ -416,4 +440,93 @@ describe("registered Wave reviewer protocol", () => {
     expect(refused.stderr).toContain(": request does not belong to the exact current Wave Review Packet slot");
     expect(readFileSync(p.statePath)).toEqual(beforeStale);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Issued emission route controls on the real Wave program path (T6): FR-012
+// issuance joins retained regardless of emission-tool availability, and the
+// non-producer spec-check slot stays byte-identical on both routes.
+// ---------------------------------------------------------------------------
+
+/** Scope the Pi-parent observation for in-process renders without touching
+ *  the CLI children this suite spawns (their fixture environment is fixed). */
+async function withPiParent<T>(enabled: boolean, operation: () => T | Promise<T>): Promise<T> {
+  const previous = process.env.PI_CODING_AGENT;
+  try {
+    if (enabled) process.env.PI_CODING_AGENT = "true";
+    else delete process.env.PI_CODING_AGENT;
+    return await operation();
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT;
+    else process.env.PI_CODING_AGENT = previous;
+  }
+}
+
+function executePacketCommand(task: string) {
+  const command = /^LOOM_CONTEXT_READ_COMMAND: (.+)$/m.exec(task)?.[1];
+  expect(command, "delivery must supply an executable cross-harness packet reader").toBeDefined();
+  const result = spawnSync("bash", ["-c", command ?? "exit 127"], { encoding: "utf8" });
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as { schemaVersion: number; requestId: string; sections: unknown[] };
+}
+
+describe("the issued emission route on the Wave program path (T6)", () => {
+  it("retains every issuance join across the extraction and emission routes and changes only reviewer task text (FR-012)", async () => {
+    const startRun = async (environment: EnvironmentOverlay) => withRouteEnv(environment, async () => {
+      const p = project();
+      const { action, handle } = await start(p, "run.route");
+      return { p, handle, requests: action.requests! };
+    });
+    const extraction = await startRun(CATALOG_ROUTE_ENV);
+    const emission = await startRun(QUALIFIED_ROUTE_ENV);
+
+    // The route election is genuinely exercised: reviewers bind the
+    // qualified-local profile on the emission route and the catalog profile
+    // on the extraction route; the spec-check slot never does (AD-6).
+    const reviewer = (request: { authority: AgentRequestAuthority }) => request.authority.role !== "spec-check-invoker";
+    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
+      .toEqual(emission.requests.filter(reviewer).map(() => "qualified-local-review"));
+    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
+      .not.toEqual(extraction.requests.filter(reviewer).map(({ authority }) => authority.modelProfile));
+    expect(emission.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile)
+      .toBe(extraction.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile);
+
+    // FR-012 on the emission route: the issuance joins survive — the packet
+    // read command still resolves the exact issued v2 packet for every slot,
+    // and the durable-only fallback render reproduces each issued task
+    // byte-for-byte (the Wave start appends one task-scoped instruction line,
+    // so the comparison drops that final decoration), while the same render
+    // without a Pi parent yields the extraction-shaped task. The route delta
+    // on the wire is EXACTLY the descriptor line plus the appended
+    // tool-primary instruction.
+    const base = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
+    const undecorated = (task: string) => task.slice(0, task.lastIndexOf("\n"));
+    for (const { authority, task } of emission.requests) {
+      const emissionRender = await withPiParent(true, () => renderSpawnTask(emission.handle, authority, base));
+      expect(undecorated(task)).toBe(emissionRender);
+      const extractionRender = await withPiParent(false, () => renderSpawnTask(emission.handle, authority, base));
+      if (authority.role === "spec-check-invoker") {
+        expect(extractionRender).toBe(emissionRender);
+        expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        continue;
+      }
+      // The delivery join survives on the emission route: the packet read
+      // command still resolves the exact issued v2 packet for this slot.
+      expect(executePacketCommand(task)).toMatchObject({ schemaVersion: 2, requestId: authority.requestId });
+      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+      const descriptor = parseEmissionDescriptor(task);
+      expect(descriptor).toMatchObject({ kind: "issued", contextDigest: authority.contextDigest,
+        binding: { requestId: authority.requestId, version: "v2" } });
+      if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+      expect(withoutEmissionRouteDelta(emissionRender, descriptor.binding, descriptor.contextDigest)).toBe(extractionRender);
+    }
+
+    // The extraction route keeps its exact baseline: no descriptor, verbatim
+    // instruction, and a parent-state-independent durable render.
+    for (const { authority, task } of extraction.requests) {
+      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+      expect(undecorated(task)).toBe(await withPiParent(true, () => renderSpawnTask(extraction.handle, authority, base)));
+    }
+  }, 120_000);
 });

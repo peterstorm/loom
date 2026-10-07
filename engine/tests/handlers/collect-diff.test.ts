@@ -14,7 +14,8 @@ function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
     diffFilesStaged: () => diff(""),
     diffFilesSince: () => diff(""),
     diffUntracked: (f) => diff(`diff --untracked ${f}\n+new content in ${f}`),
-    inspectFilePresence: () => ({ ok: true, exists: true }),
+    inspectFilePresence: () => ({ ok: true, kind: "file" }),
+    untrackedLeaves: () => ({ ok: true, paths: [] }),
     ...overrides,
   };
 }
@@ -191,6 +192,82 @@ describe("collectDiff", () => {
         written: true,
         evidence: "1 new test methods, 1 assertions (ts: 1 it/test)",
       },
+    });
+  });
+
+  it("diffs the untracked leaves of a directory artifact, never the directory itself", () => {
+    const diffedFiles: string[] = [];
+    const result = collectDiff(["calibration/pilot"], fakeDeps({
+      isTracked: () => ({ ok: true, tracked: false }),
+      inspectFilePresence: () => ({ ok: true, kind: "directory" }),
+      untrackedLeaves: () => ({ ok: true, paths: ["calibration/pilot/core.ts", "calibration/pilot/pilot.test.ts"] }),
+      diffUntracked: (f) => {
+        diffedFiles.push(f);
+        return diff(`diff --untracked ${f}`);
+      },
+    }));
+    expect(result.ok).toBe(true);
+    expect(diffedFiles).toEqual(["calibration/pilot/core.ts", "calibration/pilot/pilot.test.ts"]);
+  });
+
+  it("keeps a tracked directory as a diff pathspec and adds its new untracked leaves", () => {
+    const worktreePathspecs: string[][] = [];
+    const diffedFiles: string[] = [];
+    collectDiff(["engine/tests"], fakeDeps({
+      isTracked: () => ({ ok: true, tracked: true }),
+      inspectFilePresence: () => ({ ok: true, kind: "directory" }),
+      untrackedLeaves: () => ({ ok: true, paths: ["engine/tests/new.test.ts"] }),
+      diffFiles: (files) => {
+        worktreePathspecs.push(files);
+        return diff("");
+      },
+      diffUntracked: (f) => {
+        diffedFiles.push(f);
+        return diff("");
+      },
+    }));
+    expect(worktreePathspecs).toEqual([["engine/tests"]]);
+    expect(diffedFiles).toEqual(["engine/tests/new.test.ts"]);
+  });
+
+  it("diffs a leaf named both directly and through its directory exactly once", () => {
+    const diffedFiles: string[] = [];
+    collectDiff(["calibration/pilot", "calibration/pilot/pilot.test.ts"], fakeDeps({
+      isTracked: () => ({ ok: true, tracked: false }),
+      inspectFilePresence: (path) => ({ ok: true, kind: path === "calibration/pilot" ? "directory" : "file" }),
+      untrackedLeaves: () => ({ ok: true, paths: ["calibration/pilot/pilot.test.ts"] }),
+      diffUntracked: (f) => {
+        diffedFiles.push(f);
+        return diff("");
+      },
+    }));
+    expect(diffedFiles).toEqual(["calibration/pilot/pilot.test.ts"]);
+  });
+
+  it("skips an absent untracked path instead of diffing it", () => {
+    const diffedFiles: string[] = [];
+    const result = collectDiff(["engine/tests/deleted.test.ts"], fakeDeps({
+      isTracked: () => ({ ok: true, tracked: false }),
+      inspectFilePresence: () => ({ ok: true, kind: "absent" }),
+      diffUntracked: (f) => {
+        diffedFiles.push(f);
+        return diff("");
+      },
+    }));
+    expect(result.ok).toBe(true);
+    expect(diffedFiles).toEqual([]);
+  });
+
+  it("returns typed failure data when a directory's untracked leaves cannot be listed", () => {
+    expect(collectDiff(
+      ["calibration/pilot"],
+      fakeDeps({
+        inspectFilePresence: () => ({ ok: true, kind: "directory" }),
+        untrackedLeaves: () => ({ ok: false, error: "git index unreadable" }),
+      }),
+    )).toEqual({
+      ok: false,
+      error: { kind: "git-observation-failed", operation: "list-untracked", message: "git index unreadable" },
     });
   });
 

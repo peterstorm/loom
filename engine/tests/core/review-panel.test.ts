@@ -33,9 +33,10 @@ import {
   type WaveFindingId,
 } from "../../src/core/review-panel";
 import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
+import { findingId } from "../fixtures/finding-id";
 
 const finding = (over: Partial<Extract<Finding, { protocolVersion?: never; review_generation?: never }>> = {}): Finding => ({
-  id: "code-reviewer-1",
+  id: findingId("code-reviewer-1"),
   agent: "code-reviewer",
   severity: "critical",
   file: "src/x.ts",
@@ -175,8 +176,8 @@ describe("reviewSignals", () => {
 describe("buildFindingBrief", () => {
   it("collects only critical findings, scoped by task", () => {
     const result = buildFindingBrief(1, [
-      task({ id: "T1", findings: [finding(), finding({ id: "code-reviewer-2", severity: "advisory", claim: "nit" })] }),
-      task({ id: "T2", findings: [finding({ id: "code-reviewer-1", claim: "another" })] }),
+      task({ id: "T1", findings: [finding(), finding({ id: findingId("code-reviewer-2"), severity: "advisory", claim: "nit" })] }),
+      task({ id: "T2", findings: [finding({ id: findingId("code-reviewer-1"), claim: "another" })] }),
       task({ id: "T3", wave: 2, findings: [finding({ claim: "next wave" })] }),
     ]);
     expect(result.taskIds).toEqual(["T1", "T2"]);
@@ -254,10 +255,10 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
     // severity. Here: one advisory, fully identified, beside two criticals. The
     // advisory brief is complete, and the check used to reject it by comparing
     // its one entry against the two criticals it does not cover.
-    const advisory = finding({ id: "code-reviewer-9", severity: "advisory", claim: "a nit" });
+    const advisory = finding({ id: findingId("code-reviewer-9"), severity: "advisory", claim: "a nit" });
     const t1 = task({
       id: "T1",
-      findings: [finding(), finding({ id: "code-reviewer-2", claim: "second" }), advisory],
+      findings: [finding(), finding({ id: findingId("code-reviewer-2"), claim: "second" }), advisory],
       critical_findings: ["unchecked cast", "second"],
       advisory_findings: ["a nit"],
     });
@@ -278,7 +279,7 @@ describe("briefCompletenessErrors — buildFindingBrief's postcondition", () => 
     // no brief, could never be refuted, and blocked the wave permanently, with
     // the only prescribed escape being a --fix that used to delete it.
     const errors = briefFor([
-      withView("T1", [finding(), finding({ id: "code-reviewer-2", claim: "second" })], ["unchecked cast", "second"]),
+      withView("T1", [finding(), finding({ id: findingId("code-reviewer-2"), claim: "second" })], ["unchecked cast", "second"]),
       withView("T2", [], ["invisible to the panel"]),
     ]);
     expect(errors).toHaveLength(1);
@@ -658,9 +659,9 @@ describe("tallyRefutations", () => {
 });
 
 describe("applyFindingOutcomes", () => {
-  const critical = finding({ id: "code-reviewer-1", claim: "unchecked cast" });
-  const survivor = finding({ id: "silent-failure-hunter-1", agent: "silent-failure-hunter", claim: "swallowed error" });
-  const advisory = finding({ id: "code-reviewer-2", severity: "advisory", claim: "nit" });
+  const critical = finding({ id: findingId("code-reviewer-1"), claim: "unchecked cast" });
+  const survivor = finding({ id: findingId("silent-failure-hunter-1"), agent: "silent-failure-hunter", claim: "swallowed error" });
+  const advisory = finding({ id: findingId("code-reviewer-2"), severity: "advisory", claim: "nit" });
 
   const blocked = task({
     review_status: "blocked",
@@ -721,7 +722,7 @@ describe("applyFindingOutcomes", () => {
 
   it("removes only ONE occurrence when two reviewers reported the same wording", () => {
     // A set-difference here would delete a finding nobody refuted.
-    const twin = finding({ id: "comment-analyzer-1", agent: "comment-analyzer", claim: "unchecked cast" });
+    const twin = finding({ id: findingId("comment-analyzer-1"), agent: "comment-analyzer", claim: "unchecked cast" });
     const duplicated = task({
       review_status: "blocked",
       findings: [critical, twin],

@@ -64,14 +64,67 @@ function revisionFiles(packageRoot: string): readonly string[] {
   return files;
 }
 
+/** A runtime source's package-root-relative path with POSIX separators: the
+ *  path form the revision digest binds. */
+const posixRelative = (packageRoot: string, absolute: string): string =>
+  relative(packageRoot, absolute).split(sep).join("/");
+
+/** The runtime revision domain's paths relative to the package root, in the
+ *  same canonical order `captureLoomRuntimeIdentity` enumerates. Consumed by
+ *  the implementation settlement's baseline restore: an attempt's authorized
+ *  writes are not bounded by its declared artifact list (dispatch call sites
+ *  ripple, and scratch a child creates inside `engine/src`/`pi` still counts
+ *  as product under this domain), so the restore must cover the whole domain,
+ *  not only declared artifacts. */
+export function runtimeDomainPaths(rawPackageRoot: string): readonly string[] {
+  const packageRoot = realpathSync(resolve(rawPackageRoot));
+  return revisionFiles(packageRoot).map((absolute) => posixRelative(packageRoot, absolute));
+}
+
+/**
+ * The write boundary's revision policy, an explicit value rather than a hidden
+ * mode of the persistence class.
+ *
+ * - `strict` hashes every runtime-domain path at its live worktree bytes —
+ *   every non-implementation caller.
+ * - `restoring` is implementation settlement's baseline restoration: each
+ *   mapped path hashes the exact attempt-start bytes supplied here, a `null`
+ *   mapping excludes the path (it did not exist at the baseline — a file the
+ *   attempt created), and every unmapped path still hashes live.
+ *
+ * WHY RESTORING EXISTS: an implementation attempt's writes may live inside the
+ * runtime revision domain (`engine/src`, `pi`). The attempt is SUPPOSED to
+ * change those bytes — that is the product. A settlement running after the
+ * children wrote must not read their authorized writes as runtime drift and
+ * refuse the very state update that records the attempt's outcome. Any drift
+ * OUTSIDE the restored paths still refuses the write. The bytes are resolved
+ * by the shell (`utils/runtime-baseline-restore`); this module reads only the
+ * checkout and never runs Git.
+ */
+export type RuntimeWriteBoundary =
+  | Readonly<{ kind: "strict" }>
+  | Readonly<{ kind: "restoring"; baseline: ReadonlyMap<string, Uint8Array | null> }>;
+
+export const STRICT_RUNTIME_WRITE_BOUNDARY: RuntimeWriteBoundary = Object.freeze({ kind: "strict" });
+
+/** Capture the checkout's runtime identity under one write-boundary policy. */
+export function captureLoomRuntimeIdentityAt(
+  rawPackageRoot: string,
+  boundary: RuntimeWriteBoundary,
+): LoomRuntimeIdentity {
+  const packageRoot = realpathSync(resolve(rawPackageRoot));
+  const entries = revisionFiles(packageRoot).flatMap((absolute): RuntimeRevisionEntry[] => {
+    const path = posixRelative(packageRoot, absolute);
+    const restored = boundary.kind === "restoring" ? boundary.baseline.get(path) : undefined;
+    if (restored === null) return [];
+    return [Object.freeze({ path, bytes: restored ?? readFileSync(absolute) })];
+  });
+  return Object.freeze({ packageRoot, revision: runtimeRevisionFromEntries(entries) });
+}
+
 /** Capture the mutable checkout bytes that one process is about to load/use. */
 export function captureLoomRuntimeIdentity(rawPackageRoot: string): LoomRuntimeIdentity {
-  const packageRoot = realpathSync(resolve(rawPackageRoot));
-  const entries = revisionFiles(packageRoot).map((absolute): RuntimeRevisionEntry => Object.freeze({
-    path: relative(packageRoot, absolute).split(sep).join("/"),
-    bytes: readFileSync(absolute),
-  }));
-  return Object.freeze({ packageRoot, revision: runtimeRevisionFromEntries(entries) });
+  return captureLoomRuntimeIdentityAt(rawPackageRoot, STRICT_RUNTIME_WRITE_BOUNDARY);
 }
 
 export type RuntimeCompatibility =

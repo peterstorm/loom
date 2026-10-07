@@ -4,10 +4,11 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolicy, resolveModelProfile, type ClaudeCodeBinding, type LlmProfile, type LlmProfileId, type LoomAgentName, type PiBinding } from '../model-profiles';
+import { isIssuableProfile, lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolicy, resolveModelProfile, type ClaudeCodeBinding, type LlmProfile, type LlmProfileId, type LoomAgentName, type PiBinding } from '../model-profiles';
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
-import { AGENT_REQUIRED_SKILLS, ORCHESTRATION_PROGRAMS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot, type OrchestrationProgram } from './artifacts';
+import { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
+import { ORCHESTRATION_PROGRAMS, type OrchestrationProgram } from './programs';
 import { type SemanticPayloadDiagnostic } from './errors';
 
 export type AgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAttempt> = Readonly<{
@@ -120,7 +121,7 @@ export function sameHarnessBinding(left: ExactHarnessBinding, right: ExactHarnes
 /**
  * Field-by-field equality for a request authority — the ONE copy.
  *
- * `standalone-review-machine`'s `sameAcceptedAuthority` and `standalone-review`'s
+ * The former `standalone-review-machine`'s `sameAcceptedAuthority` and `standalone-review`'s
  * `sameCaptureRequest` were byte-identical, and both compared `harnessBinding`
  * with `JSON.stringify` rather than the `sameHarnessBinding` comparator sitting
  * beside them here — so key order in a rehydrated binding could decide whether a
@@ -141,12 +142,7 @@ export function sameAgentRequestAuthority(
 
 export function canonicalHarnessBinding(pi: PiBinding, claude: ClaudeCodeBinding): ExactHarnessBinding {
   return canonicalRecord({
-    pi: canonicalRecord({
-      harness: "pi",
-      provider: pi.provider,
-      model: pi.model,
-      thinking: pi.thinking,
-    }),
+    pi: canonicalRecord(pi),
     claude: canonicalRecord({ harness: "claude-code", model: claude.model }),
   });
 }
@@ -168,10 +164,11 @@ export const AGENT_REQUEST_KEYS = [
 /**
  * How a request authority reached this parser.
  *
- * "issue"  — the authority is being CONSTRUCTED now, from the live catalog. It
- *            must satisfy today's AGENT_POLICIES exactly; this is the gate that
- *            keeps a newly issued request bound to the model policy actually
- *            says to use (and what keeps the Pi lowering honest).
+ * "issue"  — the authority is being CONSTRUCTED now from the live catalog.
+ *            The profile must satisfy the catalog's one eligibility rule
+ *            (`isIssuableProfile`): only reviewer roles in Wave/standalone
+ *            review may elect the qualified-local alternative; all other
+ *            roles must use their assigned default profile.
  * "stored" — the authority is being READ BACK from an immutable run artifact,
  *            event, receipt, or publication record. It is HISTORY: "issued
  *            under profile X, ran on model Y." Re-checking history against
@@ -219,7 +216,8 @@ function parseAgentRequestAuthorityInMode(
   if (!skill.ok) violations.push(skill.error);
   if (!role.ok) violations.push(violation("invalid-agent-request-field", "role", role.error.message));
   if (!profileId.ok) violations.push(violation("invalid-agent-request-field", "modelProfile", profileId.error.message));
-  if (!includes(ORCHESTRATION_PROGRAMS, fields.program)) {
+  const program: OrchestrationProgram | null = includes(ORCHESTRATION_PROGRAMS, fields.program) ? fields.program : null;
+  if (program === null) {
     violations.push(violation(
       "invalid-agent-request-field",
       "program",
@@ -243,11 +241,11 @@ function parseAgentRequestAuthorityInMode(
       ));
     } else {
       policyResolved = true;
-      if (profileId.ok && policy.value.profile !== profileId.value) {
+      if (profileId.ok && !isIssuableProfile(policy.value, program, profileId.value)) {
         violations.push(violation(
           "model-policy-mismatch",
           "modelProfile",
-          `role '${role.value}' requires profile '${policy.value.profile}', received '${profileId.value}'`,
+          `role '${role.value}' requires profile '${policy.value.profile}' (or its qualified-local reviewer alternative), received '${profileId.value}'`,
         ));
       }
       if (skill.ok) {
@@ -302,7 +300,7 @@ function parseAgentRequestAuthorityInMode(
   if (
     !runId.ok || !requestId.ok || !slotId.ok || !contextDigest.ok || !outputSlot.ok ||
     !attempt.ok || !skill.ok || !role.ok || !profileId.ok || !policyResolved || resolvedProfile === null ||
-    !includes(ORCHESTRATION_PROGRAMS, fields.program) || expectedPi === null || expectedClaude === null
+    program === null || expectedPi === null || expectedClaude === null
   ) {
     return failure(canonicalRecord({
       kind: "invalid-agent-request-authority",
@@ -316,7 +314,7 @@ function parseAgentRequestAuthorityInMode(
     runId: runId.value,
     requestId: requestId.value,
     slotId: slotId.value,
-    program: fields.program,
+    program,
     role: role.value,
     attempt: attempt.value,
     modelProfile: profileId.value,

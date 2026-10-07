@@ -27,11 +27,15 @@ import {
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { observeSpecIndex } from "../../orchestration/spec-index-observation";
 import { specIndexUnavailableMessage } from "../../core/requirement-coverage";
+import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-artifact-snapshot";
+import { observeExactHead } from "../../utils/git";
+import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
   resolvedSpecFile,
   type AuthoredTask,
+  type PopulationProofBoundary,
   type TaskGraphPopulationCommand,
   type TaskGraphPopulationResult,
 } from "../../core/task-graph-population";
@@ -171,8 +175,10 @@ function canonicalGitRoot(): CanonicalGitRootObservation {
   }
 }
 
-function resolveManifestProjectRoot(statePath: string): ResolvedProjectRoot {
-  const repositoryRoot = canonicalGitRoot();
+function resolveManifestProjectRoot(
+  statePath: string,
+  repositoryRoot: CanonicalGitRootObservation,
+): ResolvedProjectRoot {
   if (repositoryRoot.kind === "not-a-repository") return projectRootFromCanonicalStatePath(statePath);
   return repositoryRoot.kind === "repository"
     ? { ok: true, value: repositoryRoot.root }
@@ -182,8 +188,11 @@ function resolveManifestProjectRoot(statePath: string): ResolvedProjectRoot {
       };
 }
 
-function prepareVerificationManifest(statePath: string): PreparedManifest {
-  const projectRoot = resolveManifestProjectRoot(statePath);
+function prepareVerificationManifest(
+  statePath: string,
+  repositoryRoot: CanonicalGitRootObservation,
+): PreparedManifest {
+  const projectRoot = resolveManifestProjectRoot(statePath, repositoryRoot);
   if (!projectRoot.ok) return projectRoot;
   const manifestDirectory = join(projectRoot.value, dirname(VERIFICATION_MANIFEST_SOURCE_PATH));
   const manifestPath = join(projectRoot.value, VERIFICATION_MANIFEST_SOURCE_PATH);
@@ -197,6 +206,51 @@ function prepareVerificationManifest(statePath: string): PreparedManifest {
   return parsed.ok
     ? { ok: true, value: parsed.value }
     : { ok: false, error: `${manifestPath} is invalid: ${parsed.error.errors.join("; ")}` };
+}
+
+/** Absent is a distinct fact from captured: the degraded case leaves the first
+ *  dispatch stamping its own boundary instead of inventing one here, and the
+ *  graph persists its cause as `proof_boundary_observation`, which the
+ *  population result renders so the weaker boundary stays visible. */
+const proofBoundaryAbsent = (cause: string): PopulationProofBoundary => Object.freeze({ kind: "absent", cause });
+
+/** An unreadable Git object or declared artifact, which baseline capture
+ *  reports as a plain `Error` (including a failed `git` child) — as opposed to
+ *  a programming defect inside capture (a non-`Error` throw, or a `TypeError`,
+ *  `ReferenceError`, `RangeError` or `SyntaxError`). A defect must not pass as
+ *  a benign absence, so only this class degrades the boundary. */
+const isUnreadableCaptureSource = (error: unknown): error is Error =>
+  error instanceof Error && !(error instanceof TypeError || error instanceof ReferenceError ||
+    error instanceof RangeError || error instanceof SyntaxError);
+
+/** Capture each Task's declared-artifact proof boundary from GIT at the exact
+ *  repository HEAD, BEFORE any work exists, so the boundary always predates the
+ *  Task's production (INV-DF1). Degraded to absent when Git, the exact HEAD, or
+ *  a declared artifact is unreadable — the first dispatch then stamps its own
+ *  boundary rather than a partially captured one. A defect inside capture
+ *  propagates and fails population instead. */
+function captureProofBoundary(
+  repositoryRoot: CanonicalGitRootObservation,
+  tasks: readonly [AuthoredTask, ...AuthoredTask[]],
+): PopulationProofBoundary {
+  if (repositoryRoot.kind !== "repository") {
+    return proofBoundaryAbsent(`no Git repository root: ${repositoryRoot.cause}`);
+  }
+  const head = observeExactHead(repositoryRoot.root);
+  if (!head.ok) return proofBoundaryAbsent(head.error);
+  try {
+    return Object.freeze({
+      kind: "captured",
+      baselines: new Map(tasks.map((task) => [
+        task.id,
+        captureDeclaredArtifactBaselineAtRevision(repositoryRoot.root, head.headSha, task.file_list),
+      ])),
+      revision: head.headSha,
+    });
+  } catch (error) {
+    if (!isUnreadableCaptureSource(error)) throw error;
+    return proofBoundaryAbsent(error.message);
+  }
 }
 
 /** Validated CLI authority supplied to the population shell. */
@@ -357,7 +411,8 @@ const handler: HookHandler = async (stdin, args) => {
   // Operator command authority is observed once in the repository shell before
   // lock acquisition. The locked transform below carries this prepared value;
   // it never re-reads mutable source bytes and never consults decompose input.
-  const preparedManifest = prepareVerificationManifest(statePath);
+  const repositoryRoot = canonicalGitRoot();
+  const preparedManifest = prepareVerificationManifest(statePath, repositoryRoot);
   if (!preparedManifest.ok) {
     return { kind: "error", message: `Verification manifest authority unavailable: ${preparedManifest.error}` };
   }
@@ -378,6 +433,12 @@ const handler: HookHandler = async (stdin, args) => {
 
   const taskRoster = parseAuthoredTaskRoster(decompose.tasks);
   if (!taskRoster.ok) return { kind: "error", message: taskRoster.error };
+
+  // The proof boundary is captured here, beside the manifest and Spec Index,
+  // for the same reason: the locked transform stamps a prepared value and never
+  // re-reads mutable source bytes itself. The graph is created at planning
+  // BEFORE any work exists, so the boundary always predates production.
+  const proofBoundary = captureProofBoundary(repositoryRoot, taskRoster.value);
   const command: TaskGraphPopulationCommand = Object.freeze({
     planTitle: decompose.plan_title,
     validatedPlanFile,
@@ -389,6 +450,7 @@ const handler: HookHandler = async (stdin, args) => {
     force,
     ...(issue === undefined ? {} : { issue }),
     ...(repo === undefined ? {} : { repo }),
+    proofBoundary,
   });
   const preflight = populateTaskGraph(existingState, command);
   if (!preflight.ok) return { kind: "error", message: preflight.error.message };
@@ -408,12 +470,17 @@ const handler: HookHandler = async (stdin, args) => {
 
   const taskCount = decompose.tasks.length;
   process.stderr.write(`Task graph populated: ${taskCount} tasks, waves: ${applied.value.waves.join(", ")}\n`);
+  // Rendered from the persisted observation, the one record later readers see.
+  const observation = applied.value.state.proof_boundary_observation;
+  const boundaryNotice = observation === undefined ? null : renderProofBoundaryNotice(observation);
+  if (boundaryNotice !== null) process.stderr.write(`${boundaryNotice}\n`);
 
   return {
     kind: "passthrough",
     systemMessage: renderProjectVerificationCoverage(deriveProjectVerificationCoverage(preparedManifest.value)) +
       ` Install ${VERIFICATION_MANIFEST_SOURCE_PATH} before population to configure project checks; ` +
-      "later source edits do not change this TaskGraph's frozen authority.",
+      "later source edits do not change this TaskGraph's frozen authority." +
+      (boundaryNotice === null ? "" : ` ${boundaryNotice}`),
   };
 };
 

@@ -5,9 +5,10 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
+import { git, gitResult } from "../../../fixtures/git-repository";
 import { nativeSuccessorCapture } from "../../../fixtures/standalone-native-capture";
 import { representativeNativeWorkload } from "../../../fixtures/standalone-native-workload";
-import { addRepairTest, git, hash, publishedSuccessorForRemediation, repairDeclaration, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
+import { addRepairTest, hash, publishedSuccessorForRemediation, repairDeclaration, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 
@@ -76,17 +77,18 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
         const registration = readFileSync(programPath);
         const first = requests[0]!.authority;
         if (harness === "pi") {
-          const extension = await import("../../../../../pi/extension");
+          const { piSpawnRosterId } = await import("../../../../../pi/tool-input");
+          const { capturePiSubagentResult } = await import("../../../../../pi/review-capture");
           const toolCallId = "registration-unavailable";
           value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness,
-            nativeId: extension.piSpawnRosterId(toolCallId, 0, first.role), requestId: first.requestId,
+            nativeId: piSpawnRosterId(toolCallId, 0, first.role), requestId: first.requestId,
             role: first.role, attempt: first.attempt }));
           const binding = Object.freeze({ ...handle.identity,
             requestIds: Object.freeze(requests.map(({ authority }) => authority.requestId)), resultDigest: null });
           try {
             for (const corrupt of ["{", "{}"] as const) {
               writeFileSync(programPath, corrupt);
-              const refused = await extension.capturePiSubagentResult(toolCallId, 0, first.role,
+              const refused = await capturePiSubagentResult(toolCallId, 0, first.role,
                 [{ get role() { throw new Error("transcript was observed"); } }], binding);
               expect(refused).toMatchObject({ kind: "retriable-failure", reason: "program-registration",
                 message: expect.stringContaining("program registration is unavailable") });
@@ -96,7 +98,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
           } finally {
             writeFileSync(programPath, registration);
           }
-          expect(await extension.capturePiSubagentResult(toolCallId, 0, first.role,
+          expect(await capturePiSubagentResult(toolCallId, 0, first.role,
             [{ role: "assistant", content: [{ type: "text", text: JSON.stringify(payload) }] }], binding))
             .toMatchObject({ kind: "captured" });
           await native.capture(handle, requests.slice(1), requests.slice(1).map(() => [JSON.stringify(payload)]));
@@ -122,21 +124,22 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
     const native = await nativeSuccessorCapture(root, harness);
     try {
       const f = await publishedSuccessorForRemediation(root, "complete", async (handle, requests, payload) => {
-        const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+        const helpers = await import("../../../../src/handlers/helpers/programs/registration");
         const standalone = await import("../../../../src/handlers/helpers/programs/standalone");
         const first = requests[0]!.authority;
         const programPath = join(handle.runDirectory, "program.json");
         const registrationBytes = readFileSync(programPath);
         if (harness === "pi") {
-          const extension = await import("../../../../../pi/extension");
+          const { piSpawnRosterId } = await import("../../../../../pi/tool-input");
+          const { capturePiSubagentResult } = await import("../../../../../pi/review-capture");
           const toolCallId = "missing-registration";
           value(await handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "pi",
-            nativeId: extension.piSpawnRosterId(toolCallId, 0, first.role), requestId: first.requestId,
+            nativeId: piSpawnRosterId(toolCallId, 0, first.role), requestId: first.requestId,
             role: first.role, attempt: first.attempt }));
           const binding = Object.freeze({ ...handle.identity,
             requestIds: Object.freeze(requests.map(({ authority }) => authority.requestId)), resultDigest: null });
           unlinkSync(programPath);
-          const refused = await extension.capturePiSubagentResult(toolCallId, 0, first.role,
+          const refused = await capturePiSubagentResult(toolCallId, 0, first.role,
             [{ get role() { throw new Error("transcript was observed"); } }], binding);
           expect(refused).toMatchObject({ kind: "terminal-rejection", reason: "transcript-shape",
             message: expect.stringContaining("only own data") });
@@ -209,7 +212,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
     try {
       const f = await publishedSuccessorForRemediation(root, "complete", async (handle, requests, payload) => {
         const { parseEffectId } = await import("../../../../src/core/orchestration-contract");
-        const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+        const helpers = await import("../../../../src/handlers/helpers/programs/registration");
         const standalone = await import("../../../../src/handlers/helpers/programs/standalone");
         const first = requests[0]!.authority;
         const effect = value(parseEffectId(`effect:capture:${hash(Buffer.from(`${first.requestId}:${first.attempt}`))}`));
@@ -309,13 +312,13 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
     // Only this disposable repository's scope is staged/committed. Both states defeat
     // the old diff-plus-untracked recipe; neither changes this explicit source roster.
     git(root, ["add", "--", "scope"]);
-    expect(git(root, ["diff", "--name-only", "--", "scope"])).toBe("");
-    expect(git(root, ["ls-files", "--others", "--exclude-standard", "--", "scope"])).toBe("");
+    expect(gitResult(root, ["diff", "--name-only", "--", "scope"]).stdout).toBe("");
+    expect(gitResult(root, ["ls-files", "--others", "--exclude-standard", "--", "scope"]).stdout).toBe("");
     const staged = representativeNativeWorkload(join(root, "scope"));
     expect(staged.map(file => file.path)).toEqual(source.map(file => file.path));
     expect(staged.every((file, index) => file.bytes.equals(source[index]!.bytes))).toBe(true);
     git(root, ["commit", "-qm", "owned representative production workload"]);
-    expect(git(root, ["status", "--porcelain", "--", "scope"])).toBe("");
+    expect(gitResult(root, ["status", "--porcelain", "--", "scope"]).stdout).toBe("");
     const workload = representativeNativeWorkload(join(root, "scope"));
     expect(workload.map(file => file.path)).toEqual(source.map(file => file.path));
     expect(workload.every((file, index) => file.bytes.equals(source[index]!.bytes))).toBe(true);
@@ -348,7 +351,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
     try {
       const handles = await import("../../../../src/orchestration/run-directory-handle");
       const standalone = await import("../../../../src/handlers/helpers/programs/standalone");
-      const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+      const helpers = await import("../../../../src/handlers/helpers/programs/registration");
       const handle = value(handles.createRunDirectory(join(root, ".claude/reviews/review-and-fix-runs"), "v2-native"));
       const initial = version === 1 ? await (await import("../../../fixtures/standalone-native-history")).startNativeLegacyReview(handle)
         : await standalone.startStandaloneFacade(handle, { kind: "all", files: ["src/repair.mjs", "src/types.ts", "README.md"], dryRun: false });
@@ -424,7 +427,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
     try {
       const f = await publishedSuccessorForRemediation(root, "active", async (handle, requests, payload) => {
         const { REVIEWER_PAYLOAD_EXAMPLE_V2 } = await import("../../../../src/core/reviewer-contract");
-        const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+        const helpers = await import("../../../../src/handlers/helpers/programs/registration");
         const standalone = await import("../../../../src/handlers/helpers/programs/standalone");
         const retained = payload.priorAssessments[1]!;
         if (retained.verdict !== "retained") throw Error("exact old refutation required");
@@ -496,7 +499,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const handle = value(f.handles.createRunDirectory(f.runsRoot, "current-witness-installed"));
       expect(await f.remediation.startRemediationFacade(handle, prepared.registration)).toMatchObject({ ok: true, action: { kind: "done", outcome: {
         installation: { kind: "verified-index-installed" }, defectFamilyAssessment: { status: "repair-checked" } } } });
-      const staged = git(root, ["ls-files", "--stage", "-z"]);
+      const staged = gitResult(root, ["ls-files", "--stage", "-z"]).stdout;
       if (f.registration.schemaVersion !== 3) throw Error("successor required");
       const later = value(await f.standalone.prepareStandaloneSuccessorFacadeStart(f.runsRoot, "later", f.registration.input));
       // pta-4 pin of the minted-once seam: registration must publish exactly
@@ -523,8 +526,8 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const one = (started.action as { requests: Requests }).requests.slice(0, 1);
       await native.capture(laterHandle, one, [["invalid current JSON"]]);
       await expect(native.verify()).rejects.toThrow("current witnessed Standalone Review rejected: later:");
-      expect(git(root, ["ls-files", "--stage", "-z"])).toBe(staged);
-      expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
+      expect(gitResult(root, ["ls-files", "--stage", "-z"]).stdout).toBe(staged);
+      expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
       await native.emit("session_shutdown", { reason: "quit" });
       await expect(native.verify()).rejects.toThrow("no request-bound Loom captures were witnessed");
     } finally { await native.close(); }
@@ -543,7 +546,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
         const texts = requests.map((_, index) => [JSON.stringify(index === 0 ? { ...payload, priorAssessments: [] } : payload)]);
         const captured = await native.capture(handle, requests, texts);
         expect(captured.every(result => harness === "pi" ? result === undefined : (result as { kind: string }).kind === "passthrough"), JSON.stringify(captured)).toBe(true);
-        const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+        const helpers = await import("../../../../src/handlers/helpers/programs/registration");
         const standalone = await import("../../../../src/handlers/helpers/programs/standalone");
         const registration = value(helpers.parseRegistration(value(handle.readProgramRegistration())));
         const retry = await standalone.resumeStandaloneFacade(handle, registration);
@@ -573,7 +576,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const handle = value(f.handles.createRunDirectory(f.runsRoot, "native-install"));
       const done = await f.remediation.startRemediationFacade(handle, prepared.registration);
       expect(done).toMatchObject({ ok: true, action: { kind: "done", outcome: { installation: { kind: "verified-index-installed" }, defectFamilyAssessment: { status: "repair-checked" } } } });
-      expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
+      expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
       const index = readFileSync(join(root, ".git/index"));
       expect(await f.remediation.resumeRemediationFacade(handle, prepared.registration)).toEqual(done);
       expect(readFileSync(join(root, ".git/index"))).toEqual(index);
@@ -587,7 +590,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       if (harness === "pi") await expect(native.verify()).rejects.toThrow("durable capture receipt unavailable");
       writeFileSync(receiptPath, receiptBytes);
       expect(readFileSync(join(root, ".git/index"))).toEqual(index);
-      expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
+      expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
     } finally { await native.close(); }
   }));
 });

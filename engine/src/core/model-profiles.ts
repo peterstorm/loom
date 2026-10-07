@@ -12,34 +12,55 @@
  * `pi/model-routing.json`), which may explicitly inherit a local parent's
  * model for every child. That override is a policy decision at the spawn
  * boundary — this module never infers one.
+ *
+ * Scope: the profile catalog, the Agent Catalog record, catalog resolution,
+ * reviewer-profile issuance and its one eligibility rule, harness lowering,
+ * and frontmatter validation. Projections DERIVED from the catalog (agent
+ * sets, the phase map, classification predicates, producer kinds) live in
+ * `agent-catalog-projections.ts`; parsing the Pi `subagent` tool input
+ * lives in `pi-spawn-input.ts`. Each changes for its own reason.
  */
 
 import type { Phase } from "./phases";
+import type { OrchestrationProgram } from "./orchestration-contract/programs";
 
 export const LLM_PROFILE_IDS = [
   "implementation",
   "architecture-finalize",
   "general-review",
   "focused-review",
+  "qualified-local-review",
   "panel-design",
   "panel-judge",
   "refutation",
   "mechanical",
+  "spec-check-review",
 ] as const;
 
 export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
-export type PiProvider = "openai-codex";
 export type PiOpenAiModel = "gpt-5.6-sol" | "gpt-5.5" | "gpt-5.4-mini";
+export type PiCopilotModel = "gpt-5.6-terra";
 export type PiThinkingLevel = "medium" | "high";
 export type Harness = "claude-code" | "pi";
 
+/**
+ * The one local vLLM deployment the catalog targets: the single owner of its
+ * provider/served-model literal. Emission route qualification
+ * (`issued-emission-capability.ts`) is separate policy that names this route rather than
+ * re-spelling it, so a catalog rename cannot desynchronize the two.
+ */
+export const DESKTOP_VLLM_ROUTE = Object.freeze({
+  provider: "desktop-vllm",
+  model: "glm-5.3-flash-spark-tp2-v14",
+} as const);
+
 export type ClaudeCodeTarget = Readonly<{ model: ClaudeCodeModel }>;
-export type PiTarget = Readonly<{
-  provider: PiProvider;
-  model: PiOpenAiModel;
-  thinking: PiThinkingLevel;
-}>;
+export type PiTarget =
+  | Readonly<{ provider: "openai-codex"; model: PiOpenAiModel; thinking: PiThinkingLevel }>
+  | Readonly<typeof DESKTOP_VLLM_ROUTE & { thinking: "high" }>
+  | Readonly<{ provider: "github-copilot"; model: PiCopilotModel; thinking: PiThinkingLevel }>;
+export type PiProvider = PiTarget["provider"];
 
 export type LlmProfile = Readonly<{
   id: LlmProfileId;
@@ -52,17 +73,19 @@ export type ClaudeCodeBinding = Readonly<{
   model: ClaudeCodeModel;
 }>;
 
-export type PiBinding = Readonly<{
-  harness: "pi";
-  provider: PiProvider;
-  model: PiOpenAiModel;
-  thinking: PiThinkingLevel;
-}>;
+export type PiBinding = Readonly<{ harness: "pi" } & PiTarget>;
 
 export type HarnessBinding = ClaudeCodeBinding | PiBinding;
 
+/**
+ * Why a model-policy parse refused. `malformed-spawn-input` is a boundary
+ * shape failure of the Pi `subagent` tool input (not an object, no single
+ * unambiguous mode, an item without a non-empty agent and task), distinct
+ * from `unknown-agent`, a well-formed request naming an Agent Loom has no
+ * policy for — so a caller branching on `kind` can tell the two apart.
+ */
 export type PolicyError = Readonly<{
-  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter";
+  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter" | "malformed-spawn-input";
   message: string;
 }>;
 
@@ -87,27 +110,36 @@ const piTarget = (
   model: PiOpenAiModel,
   thinking: PiThinkingLevel,
 ): PiTarget => Object.freeze({ provider: "openai-codex", model, thinking });
+const copilotTarget = (
+  model: PiCopilotModel,
+  thinking: PiThinkingLevel,
+): PiTarget => Object.freeze({ provider: "github-copilot", model, thinking });
+const desktopVllmTarget: PiTarget = Object.freeze({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+/** The Pi target of the `qualified-local-review` profile: a value, so the
+ *  parent-route election below compares against it without a catalog lookup. */
+const QUALIFIED_LOCAL_REVIEW_TARGET: PiTarget = desktopVllmTarget;
 const profile = (
   id: LlmProfileId,
   claudeCode: ClaudeCodeModel,
-  piModel: PiOpenAiModel,
-  thinking: PiThinkingLevel,
+  piModel: PiTarget,
 ): LlmProfile => Object.freeze({
   id,
   claudeCode: claudeTarget(claudeCode),
-  pi: piTarget(piModel, thinking),
+  pi: piModel,
 });
 
 /** Exact, calibrated-by-policy targets. None is an alias for a parent model. */
 export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
-  profile("implementation", "opus", "gpt-5.6-sol", "high"),
-  profile("architecture-finalize", "opus", "gpt-5.6-sol", "high"),
-  profile("general-review", "sonnet", "gpt-5.6-sol", "high"),
-  profile("focused-review", "sonnet", "gpt-5.5", "high"),
-  profile("panel-design", "opus", "gpt-5.6-sol", "high"),
-  profile("panel-judge", "opus", "gpt-5.6-sol", "high"),
-  profile("refutation", "opus", "gpt-5.6-sol", "high"),
-  profile("mechanical", "haiku", "gpt-5.4-mini", "medium"),
+  profile("implementation", "opus", desktopVllmTarget),
+  profile("architecture-finalize", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("general-review", "sonnet", piTarget("gpt-5.6-sol", "high")),
+  profile("focused-review", "sonnet", piTarget("gpt-5.5", "high")),
+  profile("qualified-local-review", "sonnet", QUALIFIED_LOCAL_REVIEW_TARGET),
+  profile("panel-design", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("panel-judge", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("refutation", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("mechanical", "haiku", piTarget("gpt-5.4-mini", "medium")),
+  profile("spec-check-review", "sonnet", copilotTarget("gpt-5.6-terra", "high")),
 ]);
 
 /**
@@ -157,7 +189,8 @@ const traits = (
  * every Loom-owned Agent's identity — kind, model profile, and required Skill.
  * Keyed by name, so a duplicate or double-kinded Agent is unrepresentable.
  * Every agent set, phase map, and policy table elsewhere is a DERIVED
- * projection of this record, never a second source. Keep it exhaustive over
+ * projection of this record (`agent-catalog-projections.ts`), never a second
+ * source. Keep it exhaustive over
  * agents/*.md (excluding README.md); validateAgentPolicyCatalog is the pure
  * drift check a shell or test runs after discovering the actual filenames.
  */
@@ -185,7 +218,7 @@ export const AGENT_CATALOG = Object.freeze({
   "security-agent": traits("focused-review", plainKind("impl"), "security-expert"),
   "silent-failure-hunter": traits("focused-review", plainKind("reviewer")),
   "skill-content-reviewer": traits("focused-review", plainKind("utility")),
-  "spec-check-invoker": traits("general-review", plainKind("spec-check"), "spec-check"),
+  "spec-check-invoker": traits("spec-check-review", plainKind("spec-check"), "spec-check"),
   "specify-agent": traits("panel-design", phaseKind("specify"), "specify", "interactive-rpc"),
   "test-engineer": traits("implementation", plainKind("impl")),
   "ts-test-agent": traits("implementation", plainKind("impl"), "ts-test-engineer"),
@@ -194,6 +227,11 @@ export const AGENT_CATALOG = Object.freeze({
 
 export type LoomAgentName = keyof typeof AGENT_CATALOG;
 
+/** The Agent that writes Architecture Decision Records for work that already
+ *  shipped. Its Tasks trace to the plan's decisions rather than to a
+ *  Requirement, and they form the plan's final Wave. */
+export const DECISION_RECORD_AGENT = "adr-writer-agent" satisfies LoomAgentName;
+
 /** Row view of the catalog, in catalog order. */
 const CATALOG_ENTRIES = Object.entries(AGENT_CATALOG) as readonly [LoomAgentName, AgentTraits][];
 
@@ -201,51 +239,6 @@ export const AGENT_POLICIES: readonly AgentPolicy<LoomAgentName>[] = Object.free
   CATALOG_ENTRIES.map(([agent, { profile, kind, requiredSkill }]) =>
     Object.freeze({ agent, profile, kind, requiredSkill }),
   ),
-);
-
-/** Does this catalog Agent require same-turn user interaction in Pi? */
-export function agentRequiresInteractiveTransport(agent: LoomAgentName): boolean {
-  return AGENT_CATALOG[agent].transport === "interactive-rpc";
-}
-
-/** Names of every catalog Agent with the given kind, in catalog order. */
-export function agentsOfKind(k: AgentKind["kind"]): readonly LoomAgentName[] {
-  return Object.freeze(
-    AGENT_POLICIES.filter(({ kind }) => kind.kind === k).map(({ agent }) => agent),
-  );
-}
-
-function catalogKind(agent: string): AgentKind["kind"] | null {
-  return Object.prototype.hasOwnProperty.call(AGENT_CATALOG, agent)
-    ? AGENT_CATALOG[agent as LoomAgentName].kind.kind
-    : null;
-}
-
-/** Pure Agent Catalog projection preserving the harness's omitted-suffix alias. */
-export function isImplementationAgent(agent: string): boolean {
-  return catalogKind(agent) === "impl" || catalogKind(`${agent}-agent`) === "impl";
-}
-
-/** Pure control-plane projection for standalone review evidence producers. */
-export function isStandaloneReviewAgent(agent: string): boolean {
-  const kind = catalogKind(agent);
-  return kind === "reviewer" || kind === "review-verifier";
-}
-
-/** Ordered Wave review roster policy — a selection FROM the catalog, not a
- *  second identity source. Ordering is load-bearing: wave-gate slot authority
- *  binds reviewers by index. Lives beside the catalog (this module is a pure
- *  leaf) so both config and the wave-gate machine can import it cycle-free. */
-export const WAVE_REVIEW_AGENTS = Object.freeze([
-  "code-reviewer",
-  "silent-failure-hunter",
-  "pr-test-analyzer",
-  "type-design-analyzer",
-  "comment-analyzer",
-] as const satisfies readonly LoomAgentName[]);
-
-export const LOOM_OWNED_AGENTS: readonly LoomAgentName[] = Object.freeze(
-  AGENT_POLICIES.map(({ agent }) => agent),
 );
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -338,6 +331,69 @@ export function resolveAgentProfile(raw: unknown): PolicyResult<LlmProfile> {
   return policy.ok ? resolveModelProfile(policy.value.profile) : policy;
 }
 
+/** Explicit issuance choice. Role and Skill remain catalog-owned. */
+export type ReviewerIssueRoute = "catalog" | "qualified-local";
+
+/** The orchestration programs whose reviewer rosters may elect the
+ *  `qualified-local-review` profile. The refutation and architecture panels
+ *  never do: their roles are not reviewers and their profiles are fixed. */
+export const QUALIFIED_LOCAL_REVIEW_PROGRAMS = Object.freeze(
+  ["wave-gate", "standalone-review"] as const satisfies readonly OrchestrationProgram[],
+);
+export type QualifiedLocalReviewProgram = (typeof QUALIFIED_LOCAL_REVIEW_PROGRAMS)[number];
+
+/**
+ * The ONE profile-eligibility rule for an issued Agent request: a role may run
+ * under its catalog profile, and a reviewer-kind role in a Wave Gate or
+ * Standalone Review program may instead run under `qualified-local-review`.
+ *
+ * Issuance (`issuedReviewerProfile`) elects through this predicate and the
+ * issue-mode request parser (`orchestration-contract/roster.ts`) validates
+ * through it, so what the engine issues and what it accepts cannot drift.
+ * `program` is the parsed Orchestration Program, or `null` when the request's
+ * program did not parse: an unparsed program elects nothing, so only the
+ * catalog profile is issuable there.
+ */
+export function isIssuableProfile(
+  policy: AgentPolicy,
+  program: OrchestrationProgram | null,
+  profileId: LlmProfileId,
+): boolean {
+  return profileId === policy.profile || (
+    profileId === "qualified-local-review" && policy.kind.kind === "reviewer" &&
+    program !== null && includes(QUALIFIED_LOCAL_REVIEW_PROGRAMS, program)
+  );
+}
+
+/** The shell supplies the actual parent session observation, never a prompt or
+ * caller-authored profile. A different provider, model or thinking setting
+ * preserves the catalog/cloud route; no wildcard local inheritance is issued. */
+export function reviewerIssueRouteForParent(parent: Readonly<{
+  pi: boolean;
+  provider: string | undefined;
+  model: string | undefined;
+  thinking: string | undefined;
+}>): ReviewerIssueRoute {
+  const qualified = QUALIFIED_LOCAL_REVIEW_TARGET;
+  return parent.pi && parent.provider === qualified.provider && parent.model === qualified.model &&
+    parent.thinking === qualified.thinking ? "qualified-local" : "catalog";
+}
+
+/** The profile one roster role is issued under. The qualified-local route
+ *  elects `qualified-local-review` exactly where `isIssuableProfile` admits
+ *  it; every other role keeps its catalog profile on either route. */
+export function issuedReviewerProfile(
+  agent: unknown,
+  program: QualifiedLocalReviewProgram,
+  route: ReviewerIssueRoute,
+): PolicyResult<LlmProfile> {
+  const policy = resolveAgentPolicy(agent);
+  if (!policy.ok) return policy;
+  return resolveModelProfile(route === "qualified-local" &&
+    isIssuableProfile(policy.value, program, "qualified-local-review")
+    ? "qualified-local-review" : policy.value.profile);
+}
+
 export function parseHarness(raw: unknown): PolicyResult<Harness> {
   return raw === "claude-code" || raw === "pi"
     ? success(raw)
@@ -352,14 +408,8 @@ export function lowerModelProfile(profileValue: LlmProfile, harness: "claude-cod
 export function lowerModelProfile(profileValue: LlmProfile, harness: "pi"): PiBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding {
-  return harness === "claude-code"
-    ? Object.freeze({ harness, model: profileValue.claudeCode.model })
-    : Object.freeze({
-        harness,
-        provider: profileValue.pi.provider,
-        model: profileValue.pi.model,
-        thinking: profileValue.pi.thinking,
-      });
+  if (harness === "claude-code") return Object.freeze({ harness, model: profileValue.claudeCode.model });
+  return Object.freeze({ harness, ...profileValue.pi });
 }
 
 export function piModelPattern(target: PiTarget | PiBinding): string {
@@ -444,102 +494,6 @@ export function validateAgentPolicyCatalog(
   }
 
   return errors.length === 0 ? valid() : invalid(errors);
-}
-
-export type PiSpawnItem = Readonly<{ agent: LoomAgentName; task: string }>;
-export type ExternalPiSpawnItem = Readonly<{ agent: string; task: string }>;
-export type ClassifiedPiSpawnBatch =
-  | Readonly<{ kind: "loom-owned"; items: readonly PiSpawnItem[] }>
-  | Readonly<{ kind: "external"; items: readonly ExternalPiSpawnItem[] }>;
-
-type PiSpawnInputMode =
-  | Readonly<{ kind: "single"; entries: readonly unknown[] }>
-  | Readonly<{ kind: "parallel"; entries: readonly unknown[] }>
-  | Readonly<{ kind: "chain"; entries: readonly unknown[] }>;
-
-function parseRawPiSpawnItems(raw: unknown): PolicyResult<readonly ExternalPiSpawnItem[]> {
-  if (!isRecord(raw)) {
-    return failure({ kind: "unknown-agent", message: "Pi subagent input must be an object" });
-  }
-  const modes: PiSpawnInputMode[] = [];
-  if (typeof raw.agent === "string" || typeof raw.task === "string") {
-    modes.push(Object.freeze({ kind: "single", entries: Object.freeze([raw]) }));
-  }
-  if (Array.isArray(raw.tasks) && raw.tasks.length > 0) {
-    modes.push(Object.freeze({ kind: "parallel", entries: Object.freeze([...raw.tasks]) }));
-  }
-  if (Array.isArray(raw.chain) && raw.chain.length > 0) {
-    modes.push(Object.freeze({ kind: "chain", entries: Object.freeze([...raw.chain]) }));
-  }
-  if (modes.length !== 1) {
-    return failure({
-      kind: "unknown-agent",
-      message: "Pi subagent input must provide exactly one non-empty single, parallel, or chain mode",
-    });
-  }
-  const entries = modes[0]!.entries;
-  const items: ExternalPiSpawnItem[] = [];
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index];
-    if (
-      !isRecord(entry) || typeof entry.agent !== "string" || entry.agent.trim() === "" ||
-      typeof entry.task !== "string" || entry.task.trim() === ""
-    ) {
-      return failure({
-        kind: "unknown-agent",
-        message: `Pi subagent item ${index + 1} must contain a non-empty agent and task`,
-      });
-    }
-    items.push(Object.freeze({ agent: entry.agent, task: entry.task }));
-  }
-  return success(Object.freeze(items));
-}
-
-/**
- * Classify a structurally valid Pi batch before Loom applies its own policy.
- * Mixed ownership is rejected: passing only the external siblings through
- * would let one malformed/unknown item bypass an otherwise Loom-owned batch.
- */
-export function classifyPiSpawnItems(raw: unknown): PolicyResult<ClassifiedPiSpawnBatch> {
-  const parsed = parseRawPiSpawnItems(raw);
-  if (!parsed.ok) return parsed;
-  const resolved = parsed.value.map((item) => parseAgentName(item.agent));
-  const unknownOwned = parsed.value.find((item, index) =>
-    !resolved[index]!.ok && isLoomNamespacedAgent(item.agent)
-  );
-  if (unknownOwned !== undefined) {
-    return failure({
-      kind: "unknown-agent",
-      message: `no Loom model policy for agent '${unknownOwned.agent}'`,
-    });
-  }
-  const knownCount = resolved.filter((agent) => agent.ok).length;
-  if (knownCount === 0) return success(Object.freeze({ kind: "external", items: parsed.value }));
-  if (knownCount !== parsed.value.length) {
-    return failure({
-      kind: "unknown-agent",
-      message: "Pi subagent batches must not mix Loom-owned and external agents",
-    });
-  }
-  const items = parsed.value.map((item, index) => {
-    const agent = resolved[index]!;
-    if (!agent.ok) throw new Error("Pi spawn classification invariant: known batch contains an unknown agent");
-    return Object.freeze({ agent: agent.value, task: item.task });
-  });
-  return success(Object.freeze({ kind: "loom-owned", items: Object.freeze(items) }));
-}
-
-/** Parse an all-Loom Pi batch for callers that require Loom ownership. */
-export function parsePiSpawnItems(raw: unknown): PolicyResult<readonly PiSpawnItem[]> {
-  const classified = classifyPiSpawnItems(raw);
-  if (!classified.ok) return classified;
-  if (classified.value.kind === "external") {
-    return failure({
-      kind: "unknown-agent",
-      message: `no Loom model policy for agent '${classified.value.items[0]?.agent ?? "<empty>"}'`,
-    });
-  }
-  return success(classified.value.items);
 }
 
 /**

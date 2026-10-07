@@ -1,4 +1,6 @@
 import type { Task, TaskGraph } from "../types";
+import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import { derivePendingTaskProof } from "./proof-obligations";
 import {
@@ -42,12 +44,18 @@ export type AuthoredTaskRosterParseResult =
   | Readonly<{ ok: true; value: ValidatedAuthoredTaskRoster }>
   | Readonly<{ ok: false; error: string }>;
 
+/** The roster's ordered distinct Wave set: the one definition read by both the
+ *  contiguity check and the Wave Gate construction. */
+function taskWaves(tasks: readonly AuthoredTask[]): readonly number[] {
+  return Object.freeze([...new Set(tasks.map(({ wave }) => wave))].sort((left, right) => left - right));
+}
+
 function taskWaveRosterError(tasks: readonly AuthoredTask[]): string | null {
   const invalid = tasks.find(({ wave }) => !Number.isSafeInteger(wave) || wave < 1);
   if (invalid !== undefined) {
     return `Task ${invalid.id} Wave must be a positive safe integer, got ${JSON.stringify(invalid.wave)}`;
   }
-  const waves = [...new Set(tasks.map(({ wave }) => wave))].sort((left, right) => left - right);
+  const waves = taskWaves(tasks);
   const gap = waves.findIndex((wave, index) => wave !== index + 1);
   return gap < 0
     ? null
@@ -66,6 +74,24 @@ export function parseAuthoredTaskRoster(tasks: readonly AuthoredTask[]): Authore
   });
 }
 
+/** The population-time proof boundary: per-Task declared-artifact baselines
+ *  captured from GIT, keyed by Task id, at ONE revision — or an honest absence
+ *  with its cause, in which case each Task's first dispatch stamps its own. */
+export type PopulationProofBoundary =
+  | Readonly<{
+      kind: "captured";
+      baselines: ReadonlyMap<string, readonly DeclaredArtifactBaseline[]>;
+      revision: string;
+    }>
+  | Readonly<{ kind: "absent"; cause: string }>;
+
+/** The compact persisted observation of a boundary: its revision or its cause, never the baselines. */
+export function proofBoundaryObservationOf(boundary: PopulationProofBoundary): ProofBoundaryObservation {
+  return boundary.kind === "captured"
+    ? Object.freeze({ kind: "captured", revision: boundary.revision })
+    : Object.freeze({ kind: "absent", cause: boundary.cause });
+}
+
 export type TaskGraphPopulationCommand = Readonly<{
   planTitle: string;
   validatedPlanFile: string;
@@ -77,6 +103,12 @@ export type TaskGraphPopulationCommand = Readonly<{
   force: boolean;
   issue?: number;
   repo?: string;
+  /** The proof boundary captured from GIT at the population revision. Captured
+   *  BEFORE any work exists, so the boundary always predates the Task's
+   *  production and the stale-flow wedge is unrepresentable. The `absent` arm
+   *  records why Git could not capture it; the graph persists either arm as
+   *  its `proof_boundary_observation`. */
+  proofBoundary: PopulationProofBoundary;
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
@@ -106,8 +138,13 @@ function reject(
   return Object.freeze({ ok: false, error: Object.freeze({ kind, message }) });
 }
 
-function sanitizeTask(task: AuthoredTask, specIndex: SpecIndexAvailability): Task {
+function sanitizeTask(
+  task: AuthoredTask,
+  specIndex: SpecIndexAvailability,
+  proofBoundary: PopulationProofBoundary,
+): Task {
   const verificationPolicy = taskVerificationPolicy(task);
+  const proofBaseline = proofBoundary.kind === "captured" ? proofBoundary.baselines.get(task.id) : undefined;
   const completionAnchors = Object.freeze([...(task.spec_anchors ?? [])]);
   const anchorHashes = specIndex.kind === "indexed"
     ? recordedAnchorHashes(specIndex.index, completionAnchors)
@@ -125,6 +162,8 @@ function sanitizeTask(task: AuthoredTask, specIndex: SpecIndexAvailability): Tas
     verification_policy: serializeVerificationPolicy(verificationPolicy),
     ...(task.plan_context === undefined ? {} : { plan_context: task.plan_context }),
     file_list: Object.freeze([...task.file_list]),
+    ...(proofBaseline === undefined ? {} : { artifact_baseline: proofBaseline }),
+    ...(proofBoundary.kind === "captured" ? { start_sha: proofBoundary.revision } : {}),
     proof: derivePendingTaskProof({
       verificationPolicy,
       declaredArtifacts: task.file_list,
@@ -137,10 +176,6 @@ function sanitizeTask(task: AuthoredTask, specIndex: SpecIndexAvailability): Tas
     refuted_findings: Object.freeze([]),
     resolved_findings: Object.freeze([]),
   });
-}
-
-function taskWaves(tasks: readonly AuthoredTask[]): readonly number[] {
-  return Object.freeze([...new Set(tasks.map(({ wave }) => wave))].sort((left, right) => left - right));
 }
 
 /**
@@ -194,6 +229,7 @@ export function populateTaskGraph(
     orphaned_wave_gate_history: _staleOrphanedWaveGateHistory,
     spec_trace_wave_gate_retirements: _staleSpecTraceRetirements,
     spec_index_observation: _staleSpecIndexObservation,
+    proof_boundary_observation: _staleProofBoundaryObservation,
     ...existingWithoutWaveAuthority
   } = existing;
   const state: TaskGraph = Object.freeze({
@@ -203,7 +239,8 @@ export function populateTaskGraph(
     plan_file: command.validatedPlanFile,
     spec_file: lockedSpecFile,
     spec_index_observation: specIndexObservationOf(command.specIndex),
-    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(task, command.specIndex))),
+    proof_boundary_observation: proofBoundaryObservationOf(command.proofBoundary),
+    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(task, command.specIndex, command.proofBoundary))),
     current_wave: 1,
     executing_tasks: Object.freeze([]),
     wave_gates: waveGates,

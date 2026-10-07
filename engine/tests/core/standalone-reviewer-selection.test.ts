@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectStandaloneReviewers, type StandaloneReviewKind, type StandaloneReviewMetadata } from "../../src/core/standalone-review";
+import { selectStandaloneReviewers, type StandaloneReviewKind, type StandaloneReviewMetadata } from "../../src/core/standalone-review-scope";
 
 /**
  * Reviewer selection is the policy that decides which specialists a scope

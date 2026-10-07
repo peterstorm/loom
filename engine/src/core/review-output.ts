@@ -31,7 +31,7 @@
  * `resolveReviewFindings` + `applyReviewResolution` are the SINGLE path from a
  * review transcript to a task update. Claude Code reaches them through the
  * `store-reviewer-findings` SubagentStop handler; Pi reaches them through
- * `pi/extension.ts`'s subagent-result interception. The two harnesses used to
+ * `pi/subagent-stop.ts`'s subagent-result interception. The two harnesses used to
  * re-run the same parse → reconcile → merge sequence independently, which is how
  * the review findings on one harness could drift from the other's. There is now
  * one decision function and one state transform; the harnesses supply only the
@@ -65,12 +65,13 @@ import {
 } from "./findings";
 import { parseReviewPath } from "./review-packet";
 import { parseContextPacket, type ContextPacket, type LegacyContextPacket, type ReviewerContextPacketV2 } from "./context-packets";
-import { parseReviewerPayloadV2 } from "./reviewer-protocol";
+import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
 import { parseReviewerProtocolDescriptor, REVIEWER_PAYLOAD_LIMITS, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
-import { acceptedAgentResult, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
+import { acceptedAgentResult, boundedThrownCause, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
-import { isStandaloneReviewAgent } from "./model-profiles";
+import { isStandaloneReviewAgent } from "./agent-catalog-projections";
+import { scopeCovers } from "./path-coverage";
 
 export type ReviewerSubjectBinding =
   | Readonly<{ kind: "standalone-review"; runId: OrchestrationRunId; scope: readonly string[] }>
@@ -109,6 +110,24 @@ function protocolFailure(code: ReviewerProtocolFailure["code"], path: string, me
     safe += rendered;
   }
   return Object.freeze({ ok: false, error: Object.freeze({ kind: "reviewer-protocol-failed", code, path, message: safe }) });
+}
+
+/**
+ * The fail-closed refusal for an exception thrown while inspecting reviewer
+ * authority or evidence. The fixed admission sentence is kept, and the thrown
+ * value's error CLASS is appended so a decoder regression (`TypeError`,
+ * `RangeError`) is distinguishable from a malformed input (`SyntaxError`)
+ * without re-running anything. Only the class crosses: an exception MESSAGE can
+ * quote the reviewer payload it choked on, and this diagnostic reaches the
+ * retry preamble and the operator.
+ */
+function inspectionFailure(
+  code: "authority-unavailable" | "invalid-payload",
+  sentence: string,
+  thrown: unknown,
+  subject: string,
+): DomainResult<never, ReviewerProtocolFailure> {
+  return protocolFailure(code, "/", `${sentence} (${boundedThrownCause(thrown, subject).name})`);
 }
 
 function packetReviewerSubject(packet: ContextPacket, request: AgentRequestAuthority): ReviewerSubjectBinding | null {
@@ -192,8 +211,8 @@ export function parseIssuedReviewerProtocol(input: Readonly<{
     const authority = Object.freeze({ request, subject, ...version }) as IssuedReviewerProtocol;
     issuedReviewerProtocols.add(authority);
     return Object.freeze({ ok: true, value: authority });
-  } catch {
-    return protocolFailure("authority-unavailable", "/", "reviewer authority could not be inspected");
+  } catch (thrown) {
+    return inspectionFailure("authority-unavailable", "reviewer authority could not be inspected", thrown, "reviewer authority");
   }
 }
 
@@ -212,7 +231,7 @@ function parseCurrentReviewerEvidence(
   const payload = parsed.value;
   const subject = authority.subject;
   if (payload.kind !== subject.kind) return protocolFailure("binding-mismatch", "/kind", "payload kind must match issued subject");
-  if (payload.findings.some(({ file }) => file !== null && !subject.scope.includes(file))) {
+  if (payload.findings.some(({ file }) => file !== null && !scopeCovers(subject.scope, file))) {
     return protocolFailure("out-of-scope", "/findings", "finding location is outside the frozen scope");
   }
   const drafts = Object.freeze(payload.findings.map((draft): CurrentDraftFinding => Object.freeze({ protocolVersion: 2, ...draft })));
@@ -262,8 +281,8 @@ export function parseReviewerEvidence(authority: IssuedReviewerProtocol, rawByte
       return Object.freeze({ ok: true, value });
     }
     return parseCurrentReviewerEvidence(authority, rawBytes);
-  } catch {
-    return protocolFailure("invalid-payload", "/", "reviewer evidence could not be inspected");
+  } catch (thrown) {
+    return inspectionFailure("invalid-payload", "reviewer evidence could not be inspected", thrown, "reviewer evidence");
   }
 }
 
@@ -271,7 +290,9 @@ export function resolveIssuedTaskReviewFindings(authority: IssuedWaveReviewerPro
   const admitted = parseReviewerEvidence(authority, rawBytes);
   if (!issuedReviewerProtocols.has(authority)) return { kind: "evidence-failed", agent: "unissued-reviewer", message: "reviewer evidence requires minted authority" };
   const agent = authority.request.role;
-  if (!admitted.ok) return { kind: "evidence-failed", agent, message: admitted.error.message };
+  if (!admitted.ok) {
+    return { kind: "evidence-failed", agent, message: renderReviewerPayloadDiagnostic(admitted.error, rawBytes.byteLength) };
+  }
   if (admitted.value.kind !== "wave-review") return { kind: "evidence-failed", agent, message: "Task evidence requires issued Wave authority" };
   return admitted.value.protocolVersion === 2
     ? { kind: "bound-findings", agent, findings: admitted.value.findings, bound: admitted.value.bound, issuedSlot: {
@@ -947,23 +968,24 @@ export function resolveTaskReviewFindings(
 /**
  * Bind located wave findings to the task's Review Packet scope. A null location
  * is honest for cross-cutting claims and remains valid; a supplied path must be
- * one of the task's declared or observed files.
+ * one of the task's declared or observed files, or lie below a declared
+ * directory artifact.
  */
 export function constrainReviewResolutionToScope(
   resolution: ReviewResolution,
   scope: readonly string[],
 ): ReviewResolution {
   if (resolution.kind !== "findings" && resolution.kind !== "bound-findings") return resolution;
-  const allowed = new Set(scope.flatMap((path) => {
+  const allowed = scope.flatMap((path) => {
     const parsed = parseReviewPath(path, "review scope path");
     return parsed.ok ? [parsed.value] : [];
-  }));
+  });
   const outside = resolution.findings.drafts
     .map((finding) => finding.file)
     .filter((file): file is string => {
       if (file === null) return false;
       const parsed = parseReviewPath(file, "review finding path");
-      return !parsed.ok || !allowed.has(parsed.value);
+      return !parsed.ok || !scopeCovers(allowed, parsed.value);
     });
   if (outside.length === 0) return resolution;
   return {

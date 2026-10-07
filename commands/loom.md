@@ -450,6 +450,8 @@ Run schema validator on agent output:
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph --decompose-payload -
 ```
 
+Run the validator with cwd at the repository root (or the worktree root for a worktree orchestration): the plan's relative `**Rule file:**` paths (`.claude/linter/rules/...`) resolve against the process cwd — invoked from elsewhere, checkable INV-N rules false-fail with ENOENT.
+
 The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, every checkable INV-N rule file must exist, and near-miss declarations (typo'd headings/labels) are errors. See `references/executable-models.md`. These same checks run fail-closed inside `populate-task-graph` (4d), so they cannot be skipped.
 
 **Routing validation failures — read the error text:**
@@ -549,10 +551,11 @@ If user continues: Proceed to Phase 5 normally.
 For each wave:
 
 1. Read `helper orchestration status --json` and execute only its implementation-window recovery:
-   - `spawn-wave-implementation`: build each listed Task prompt by substituting that dispatch's exact `promptAppendix` into `{implementation_retry_context}` when non-null; do not append it a second time. `retry-implementation` is the one engine-authorized semantic attempt 2; never rewrite or summarize its appendix.
+   - `spawn-wave-implementation`: dispatch every listed Task through its engine-rendered implementation brief ([below](#implementation-briefs)). `retry-implementation` is the one engine-authorized semantic attempt 2; the brief carries its exact appendix.
    - `await-wave-implementation`: spawn nothing; wait for the listed active Tasks to settle, then re-read status.
    - `escalate-wave-implementation`: STOP and present every Task/receipt/failure kind to the user. Attempt 2 is terminal; manually re-spawning would be an unauthorized attempt 3 and the spawn gate refuses it.
-   - `start-wave-gate`: proceed to the Wave Gate.
+   - `start-wave-gate`: proceed to the Wave Gate. Status advises this only when every start prerequisite already holds (no executing Task, satisfied implementation proof, test evidence, new tests).
+   - `repair-wave-start-readiness` (diagnostic `wave-start-not-ready`): implementation stopped but a start prerequisite is unmet; `recovery.failures` lists each one. STOP and resolve them (for example re-attest a reopened Task) — do not start the Wave Gate. `start wave-gate` refuses the same prerequisites, plus an existing live gate for the Wave and, under a Verification Manifest, full-tier lint, before claiming any Run Directory, so a refused start leaves nothing to abandon.
 2. Spawn only the Tasks in `recovery.dispatches`, in parallel when more than one is listed. Status excludes non-reclaimable Tasks already in `executing_tasks` or carrying active attempt authority; a policy-expired reservation with observed-empty roster authority is deliberately reissued so registration can reclaim it atomically.
 3. Wait for all dispatched Tasks to settle. Infrastructure-blocked attempts reuse the initial/retry dispatch arm for their preserved current semantic attempt; they never consume the budget or introduce another semantic dispatch kind. Semantic attempt 1 failure produces exactly one retry dispatch.
 4. Re-read canonical status and loop through steps 1–4 for every subsequent `spawn-wave-implementation` or `await-wave-implementation` recovery. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget. Exit this loop only on `start-wave-gate`; `escalate-wave-implementation` is terminal and stops execution.
@@ -580,22 +583,19 @@ For each wave:
 
 **Re-spawn logic:** Never derive a re-spawn from raw `pending` state. Run canonical status and inspect `next.action.diagnostic.recovery`. It distinguishes dispatchable initial/current-attempt work, exact attempt-2 retry (including the required appendix), active work that must be awaited, and terminal escalation. Infrastructure recovery reuses the dispatch kind for its preserved semantic attempt. Spawn only `recovery.dispatches`; wait on `await-wave-implementation`; stop on `escalate-wave-implementation`.
 
-**Load template:** Read `{LOOM_DIR}/commands/templates/impl-agent-context.md`
+### Implementation briefs
 
-Substitute variables:
-- `{task_id}`, `{wave}`, `{agent_type}`, `{dependencies}`
-- `{verification_policy}` - Render the Task's exact `verification_policy` object, including both independent `regression` and `new_tests` arms and any waiver reasons. Legacy Tasks are rendered through the engine's compatibility semantics: absent/true means both required; false means both waived under `legacy-new-tests-required-false`.
-- `{implementation_retry_context}` - For an initial dispatch, substitute `None — semantic attempt 1.` For `retry-implementation`, substitute the exact `promptAppendix` emitted by canonical status, byte-for-byte. Never synthesize this from `failure_reason`.
-- `{required_skill}` - Read the selected source agent's `skills:` frontmatter and substitute its exact declared skill name (for agents with no declared skill, use `none`). This is both the Claude spawn-gate evidence and the Pi preloaded-skill audit label; never infer it from the agent name.
-- `{task_description}` - From task breakdown
-- `{spec_anchors_formatted}` - Formatted Requirement Completion Claims with requirement text
-- `{spec_contributions_formatted}` - Formatted partial Requirement Contributions with requirement text
-- `{plan_context}` - Relevant section from plan
-- `{file_list}` - Files to create/modify
-- `{plan_file_path}` - Path to full plan
-- `{rules_content}` - **Inline the binding rules (do NOT leave a file path).** Read `{LOOM_DIR}/rules/architecture.md` (always) plus the stack-specific file(s) — `typescript-patterns.md` for TypeScript/Next.js, `java-patterns.md` + `property-testing.md` for Java, `rust-patterns.md` for Rust — and substitute their full concatenated contents here. The `validate-template-substitution` hook blocks the spawn if `{rules_content}` is left unsubstituted. For docs/config-only tasks (e.g. ADR writing) substitute the literal text `N/A — no code in this task.`
+The engine renders every implementation prompt; never assemble one by hand. Run:
 
-**Spawn implementation agent** with the substituted template as prompt.
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief
+```
+
+It renders `commands/templates/impl-agent-context.md` for each dispatch status owes, from protected authority only: the Task row, the engine-derived retry/attestation appendix, the Spec Index text of its Requirement claims, the Agent Catalog skill, and the binding rules its `file_list` selects (`architecture.md` plus the TypeScript/Java/Rust pattern documents per extension; none for documentation-only Tasks). It refuses — naming the cause — any brief the spawn gates would refuse, so a rendered brief is admissible by construction. Each entry carries the exact invocation:
+
+- **Pi:** spawn `pi.agent` with `pi.task`, the one-line marker `LOOM_IMPLEMENTATION_BRIEF: <Task>`, and `agentScope: "user"`; batch several Tasks as `tasks`. The Loom extension expands each marker to the rendered brief before any gate reads it. Pass the marker exactly; do not paste the brief.
+- **Claude Code:** run `brief --task <Task> --prompt` and spawn `claude.subagent_type` with `claude.model`, `claude.description`, and the returned `prompt` verbatim.
+
 
 ---
 

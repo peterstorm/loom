@@ -211,7 +211,7 @@ describe("no-cross-boundary-imports", () => {
       );
       expect(granted).toBeNull();
       const grantedHash = checkBoundaryViolation(
-        "engine/src/core/standalone-review.ts",
+        "engine/src/core/digest.ts",
         "node:crypto",
         DEFAULT_BOUNDARIES
       );

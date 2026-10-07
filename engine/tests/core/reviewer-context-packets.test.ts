@@ -11,7 +11,7 @@ import {
 } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import { parseRequestId } from "../../src/core/orchestration-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 
 function section(label: string, text: string): ByteSection {
   const encoded = encodeByteSection(label, text);

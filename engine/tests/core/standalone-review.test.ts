@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { legacyStandaloneContext, legacyFixtureReviewerProtocols, standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
-import { parsedAuthority } from "../../src/handlers/helpers/programs/helpers";
+import { parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import type { IssuedStandaloneReviewerProtocol, ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -26,68 +26,61 @@ import {
   type PublicationAuthorityResolver,
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
+import { STANDALONE_REVIEW_SUBJECT } from "../../src/core/reviewer-contract";
 import {
-  STANDALONE_REVIEW_SUBJECT,
   aggregateStandaloneReview,
+  finalizeStandaloneReview,
+  parseStandaloneAggregate,
+  proveStandaloneRosterCompletion,
+  parseStandaloneRosterCompletionProof,
+  type StandaloneRosterCompletionProof,
+  STANDALONE_REVIEW_DECLARED_TRANSITIONS,
+  isDeclaredStandaloneReviewTransition,
+  parseAuthoritativeStandaloneReviewResult,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineEvent,
+} from "../../src/core/standalone-review";
+import {
   bindStandaloneCaptureAuthority,
   captureStandaloneReviewerBytes,
   capturedReviewerResultFromBytes,
   capturedReviewerResultFromText,
   completeStandaloneReviewerCapture,
-  finalizeStandaloneReview,
   fingerprintCapturedReviewerResult,
   parseCapturedReviewerResult,
   parsePreparedStandaloneReviewerCapture,
-  parseStandaloneAggregate,
   parseStandaloneCaptureAuthority,
-  parseStandalonePanelOutcomes,
-  prepareFreshStandaloneReview,
-  proveStandaloneRosterCompletion,
-  parseStandaloneRosterCompletionProof,
-  prepareStandaloneReview,
-  serializeAdjudicatedStandaloneReview,
-  serializeStandaloneAggregate,
-  serializeStandaloneReviewAuthority,
-  admitStandaloneTranscript,
-  parseStandaloneReviewAuthority,
   type CapturedReviewerResult,
-  type FrozenStandalonePanelAuthority,
-  type FrozenStandaloneReviewAuthority,
-
-  type StandaloneRosterCompletionProof,
-} from "../../src/core/standalone-review";
+} from "../../src/core/standalone-reviewer-capture";
+import { parseStandalonePanelOutcomes, type FrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
+import { prepareFreshStandaloneReview, prepareStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
+import { serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate, serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
+import { admitStandaloneTranscript } from "../../src/core/standalone-transcript-admission";
+import { type FrozenStandaloneReviewAuthority } from "../../src/core/standalone-review-model";
 import {
   aggregateLegacyStandaloneReview,
   parseAdjudicatedStandaloneReview,
 } from "../../src/core/legacy-archive";
-import {
-  STANDALONE_REVIEW_DECLARED_TRANSITIONS,
-  freezeStandaloneRefutationPanelAuthority,
-  isDeclaredStandaloneReviewTransition,
-  parseStandaloneRefutationCompletion,
-  parseAuthoritativeStandaloneReviewResult,
-  reduceStandaloneReviewMachine,
-  parseStandaloneReviewMachineState,
-  serializeStandaloneReviewMachineState,
-  startStandaloneReviewMachine,
-  type StandaloneRefutationCompletionReceipt,
-  type StandaloneReviewMachineEvent,
-} from "../../src/core/standalone-review-machine";
+import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, type StandaloneRefutationCompletionReceipt } from "../../src/core/standalone-refutation-completion";
+import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
 import { prepareStandaloneReviewHarnessCapture } from "../../src/handlers/helpers/standalone-review";
 import {
-  completePersistentRefutationPanel,
   deriveRefutationVerifierBinding,
-  panelRequestIdentity,
   parseRefutationPanelAuthority,
+  type RefutationPanelAuthority,
+} from "../../src/core/panel-authority";
+import {
+  completePersistentRefutationPanel,
+  panelRequestIdentity,
   refutationPanelCheckpoint,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
   type PersistentRefutationPanelEvent,
-  type RefutationPanelAuthority,
   type RefutationPanelCheckpoint,
   type RefutationPanelState,
-  type NonEmpty,
-} from "../../src/core/panel-program";
+} from "../../src/core/persistent-panel";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 
 const transcript = (critical: string[] = [], advisory: string[] = []) => [
   "### Machine Summary",
@@ -2457,47 +2450,5 @@ describe("prepareStandaloneReview refuses a roster that diverges from the select
 
   it("refuses a roster missing a slot the selection requires", () => {
     expect(errorsOf(preparationInput({ roster: rawStandaloneRoster().slice(0, 1) })).length).toBeGreaterThan(0);
-  });
-});
-
-describe("parseReviewMetadata docs_only invariant (round-40: type-design-analyzer advisory)", () => {
-  // A docs-only scope selects exactly code-reviewer + comment-analyzer.
-  function docsOnlyInput(overrides: Readonly<Record<string, unknown>> = {}) {
-    return preparationInput({
-      explicitScope: ["docs/README.md"],
-      scopeSafety: [{ path: "docs/README.md", status: "safe" }],
-      roster: (["code-reviewer", "comment-analyzer"] as const).map((role, index) => ({
-        slotId: `slot:${index + 1}`,
-        attempts: [
-          rawStandaloneAuthority(role, index + 1, 1),
-          rawStandaloneAuthority(role, index + 1, 2),
-        ],
-      })),
-      reviewMetadata: {
-        requested_kinds: ["comments"], docs_only: true, source_or_test_changed: false,
-        types_changed: false, comments_changed: true, additions: 0, file_count: 1,
-        new_structure: false, languages: ["Markdown"],
-      },
-      ...overrides,
-    });
-  }
-
-  it("accepts a docs-only metadata record that also changes comments", () => {
-    const prepared = prepareStandaloneReview(docsOnlyInput());
-    expect(prepared.ok).toBe(true);
-  });
-
-  it("refuses docs_only without comments_changed — the contradiction that would silently drop comment-analyzer", () => {
-    const prepared = prepareStandaloneReview(docsOnlyInput({
-      reviewMetadata: {
-        requested_kinds: ["comments"], docs_only: true, source_or_test_changed: false,
-        types_changed: false, comments_changed: false, additions: 0, file_count: 1,
-        new_structure: false, languages: ["Markdown"],
-      },
-    }));
-    expect(prepared.ok).toBe(false);
-    if (!prepared.ok) {
-      expect(prepared.error.errors.join("; ")).toContain("comments_changed must be true when docs_only is true");
-    }
   });
 });

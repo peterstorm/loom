@@ -15,6 +15,7 @@ import {
   PI_STRUCTURED_EVIDENCE_POLICY,
 } from "../../core/proof-obligations";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
+import { artifactCovers } from "../../core/path-coverage";
 import { invalidateTaskReview } from "../../core/review-output";
 import {
   parseReviewPacketRecovery,
@@ -24,7 +25,7 @@ import {
   captureDeclaredArtifactBaselineAtRevision,
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
-} from "../../utils/artifact-baseline";
+} from "../../utils/declared-artifact-snapshot";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   isWaveComplete,
@@ -162,13 +163,12 @@ function recoverPacketEvidence(
       throw new Error(`recovery packet ${inspectedPacket.relative} declaredPaths do not equal ${task.id}.file_list`);
     }
     const declaredSet = new Set(declared);
-    const artifactPaths = new Set(packet.artifacts.map((artifact) => artifact.path));
     const currentChangesFromBaseline = new Set(
       changedDeclaredArtifactsSinceRevision(root, baselineSha, declared),
     );
     const recoveredPaths: string[] = [];
     for (const path of packet.modifiedPaths.filter((candidate) => declaredSet.has(candidate))) {
-      if (!artifactPaths.has(path)) {
+      if (!packet.artifacts.some((artifact) => artifactCovers(path, artifact.path))) {
         throw new Error(`recovery packet ${inspectedPacket.relative} has no artifact for ${path}`);
       }
       // A packet proves that this Task historically wrote the path. Current

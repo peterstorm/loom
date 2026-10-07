@@ -22,6 +22,7 @@ import {
   type Finding as FindingViaTypes,
   type ReviewRun as ReviewRunViaTypes,
 } from "../../src/types";
+import { findingId } from "../fixtures/finding-id";
 
 describe("the Finding vocabulary's one home", () => {
   it("is defined once in core/findings and re-exported by types.ts unchanged", () => {
@@ -38,7 +39,7 @@ describe("the Finding vocabulary's one home", () => {
       file: null,
       line: null,
       claim: "a reviewer claim",
-      id: "code-reviewer-1",
+      id: findingId("code-reviewer-1"),
       agent: "code-reviewer",
     };
     const sameFinding: Finding = finding;

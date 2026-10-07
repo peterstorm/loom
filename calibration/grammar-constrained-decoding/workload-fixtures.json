@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "reviewer": {
+    "corpus": "calibration/corpus.json",
+    "v3Context": {
+      "lineageDigest": "29972a83118f8aeeface9cd716d3533272bef4484b1d93af46e4b58cb5488ebf",
+      "snapshotDigest": "9977e247272d434bcbacf8cea3ba0032cf8f5d6d477f273f55fa46b848e0057b"
+    }
+  },
+  "fixtures": {
+    "judge-easy-retry-budget": {
+      "kind": "judge-verdict",
+      "criterion": "correctness",
+      "brief": "Problem: a producer agent's structured payload can fail engine validation. Choose how rejected payloads are retried. The existing system has ONE bounded request-slot budget: semantic attempts 1 and 2.",
+      "candidates": [
+        { "candidate": "candidate-shared-budget.md", "design": "Emission and extraction rejections both consume the existing request-slot budget: a semantic rejection at attempt 1 permits one fresh engine-issued attempt 2; rejection at attempt 2 is terminal. Diagnostic causes are recorded separately but no second counter exists." },
+        { "candidate": "candidate-diagnostic-split.md", "design": "Reuse the shared budget (attempts 1 and 2) exactly, and additionally journal a typed cause per rejection (engine-only refusal, extraction failure, duplicate call) so operators can see why attempt 2 was spent." },
+        { "candidate": "candidate-retry-until-valid.md", "design": "Inside the same spawn, feed every validation error back to the model and re-prompt until the arguments validate; only then accept the payload. No attempt limit is needed because the model always converges eventually." }
+      ],
+      "plantedFlaw": { "candidate": "candidate-retry-until-valid.md", "defectId": "unbounded-in-spawn-retry" }
+    },
+    "judge-easy-cache-invalidation": {
+      "kind": "judge-verdict",
+      "criterion": "data-integrity",
+      "brief": "Problem: route qualification results are expensive to obtain. Choose how they are cached between runs.",
+      "candidates": [
+        { "candidate": "candidate-content-addressed.md", "design": "Key every cached qualification by (provider, served model id, Pi version, frozen schema digest). Any change to one of them is a cache miss and requires requalification." },
+        { "candidate": "candidate-forever-cache.md", "design": "Key cached qualifications by provider name only and keep them forever, so a qualified provider never has to be probed again even after model or schema upgrades." },
+        { "candidate": "candidate-ttl-plus-digest.md", "design": "Key by (provider, served model id, Pi version, schema digest) and additionally expire entries after 30 days to force periodic re-probing." }
+      ],
+      "plantedFlaw": { "candidate": "candidate-forever-cache.md", "defectId": "stale-qualification-after-schema-change" }
+    },
+    "judge-hard-readiness-barrier": {
+      "kind": "judge-verdict",
+      "criterion": "fail-closed startup",
+      "brief": "Problem: an emission-enabled Pi child must not send any model request until its emission tool is registered, active and bound to the issued request. In Pi, exceptions thrown from a before_agent_start handler are caught and the agent continues; an awaited (pending) handler does hold the agent.",
+      "candidates": [
+        { "candidate": "candidate-rpc-handshake.md", "design": "Start the child in RPC mode without a prompt, invoke a readiness extension command (no model request), compare the bound readiness payload against the issued binding, bind the exact route, and only then deliver the task prompt. An awaited before_agent_start hold is kept as defense in depth." },
+        { "candidate": "candidate-throw-guard.md", "design": "Start the child in print mode with the prompt supplied. In before_agent_start, check that the emission tool is registered and throw an Error if it is not; the throw stops the agent before any model request." },
+        { "candidate": "candidate-held-start.md", "design": "Start the child in RPC mode without a prompt; the child awaits a held before_agent_start promise that is released only after its readiness command reports the registered, active tool; the launcher compares the readiness payload before delivering the prompt." }
+      ],
+      "plantedFlaw": { "candidate": "candidate-throw-guard.md", "defectId": "caught-throw-is-not-a-barrier" }
+    },
+    "judge-hard-duplicate-identity": {
+      "kind": "judge-verdict",
+      "criterion": "replay safety",
+      "brief": "Problem: a transcript may contain the same emission tool call more than once (transport replay) and may also contain two distinct calls (the model called twice). Exact replays must be idempotent; two distinct calls are ambiguity and must be rejected.",
+      "candidates": [
+        { "candidate": "candidate-call-identity.md", "design": "Group frames by tool-call id. Frames with the same id and identical request/kind/version/arguments are one call; same id with any differing field is contradictory and refused; two or more distinct ids are a duplicate-call rejection." },
+        { "candidate": "candidate-argument-dedup.md", "design": "Deduplicate frames by their argument bytes: identical arguments are the same call regardless of tool-call id, and different arguments are distinct calls. This collapses replays without tracking identities." },
+        { "candidate": "candidate-identity-plus-digest.md", "design": "Group frames by tool-call id and compare an argument digest within a group; refuse contradictory groups; count distinct ids for the duplicate rule, journaling each call id with its digest." }
+      ],
+      "plantedFlaw": { "candidate": "candidate-argument-dedup.md", "defectId": "distinct-calls-collapsed-by-arguments" }
+    },
+    "refutation-easy-off-by-one": {
+      "kind": "refutation-verdict",
+      "lens": "correctness",
+      "finding": {
+        "findingId": "F-R1",
+        "claim": "sumLineTotals skips the last line item, so every order total is understated by its final line.",
+        "file": "src/orders/totals.ts",
+        "line": 14,
+        "excerpt": "export function sumLineTotals(lines: readonly LineItem[]): number {\n  let total = 0;\n  for (let i = 0; i < lines.length - 1; i++) {\n    total += lines[i].quantity * lines[i].unitPrice;\n  }\n  return total;\n}"
+      },
+      "groundTruth": { "kind": "real-defect", "defectId": "loop-skips-last-line" }
+    },
+    "refutation-hard-locale-digest": {
+      "kind": "refutation-verdict",
+      "lens": "determinism",
+      "finding": {
+        "findingId": "F-R2",
+        "claim": "The content-addressed revision depends on the host locale: entries are ordered with localeCompare before hashing, so two hosts can compute different revisions for identical bytes.",
+        "file": "src/runtime/revision.ts",
+        "line": 31,
+        "excerpt": "export function revisionOf(entries: readonly Entry[]): string {\n  const ordered = [...entries].sort((a, b) => a.path.localeCompare(b.path));\n  const hash = createHash(\"sha256\");\n  for (const entry of ordered) {\n    hash.update(`${entry.path}\\0`);\n    hash.update(entry.bytes);\n  }\n  return `sha256:${hash.digest(\"hex\")}`;\n}"
+      },
+      "groundTruth": { "kind": "real-defect", "defectId": "locale-dependent-digest-order" }
+    },
+    "refutation-easy-guarded-null": {
+      "kind": "refutation-verdict",
+      "lens": "correctness",
+      "finding": {
+        "findingId": "F-R3",
+        "claim": "displayName dereferences user.name without a null check and crashes when the user is missing.",
+        "file": "src/users/display.ts",
+        "line": 8,
+        "excerpt": "export function displayName(user: User | undefined): string | null {\n  if (user === undefined) return null;\n  return user.name.trim();\n}\n\n// User.name is declared `readonly name: string` (non-optional)."
+      },
+      "groundTruth": { "kind": "false-positive" }
+    },
+    "refutation-hard-atomic-rename": {
+      "kind": "refutation-verdict",
+      "lens": "concurrency",
+      "finding": {
+        "findingId": "F-R4",
+        "claim": "writeState races with concurrent readers: a reader can observe a half-written state file.",
+        "file": "src/state/write.ts",
+        "line": 22,
+        "excerpt": "export function writeState(path: string, state: State): void {\n  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;\n  writeFileSync(temp, JSON.stringify(state), { flag: \"wx\", mode: 0o600 });\n  fsyncFile(temp);\n  renameSync(temp, path); // atomic replace on the same filesystem\n}\n\n// Readers only ever open `path`; the temp file lives in the same directory."
+      },
+      "groundTruth": { "kind": "false-positive" }
+    }
+  }
+}

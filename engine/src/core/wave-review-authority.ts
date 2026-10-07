@@ -1,4 +1,4 @@
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import type {
   Finding,
   Task,
@@ -15,9 +15,11 @@ import {
   type ProofTestResult,
   type TaskProof,
 } from "./proof-obligations";
-import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "./context-packets";
-import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile, WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
+import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
+import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
+import { DECISION_RECORD_AGENT, issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, type ReviewerIssueRoute } from "./model-profiles";
+import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import {
   canonicalRecord,
   parseAgentRequestAuthority,
@@ -31,7 +33,8 @@ import {
   type InitialSpawnRequestInput,
   type OrchestrationRunId,
 } from "./orchestration-contract";
-import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
+import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
+import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
@@ -67,10 +70,23 @@ export type WaveReviewRegistrationAuthority = Readonly<{
   input: Readonly<{ wave: number }>;
   taskIds: readonly string[];
   authorityDigest: string;
-  restart?: Readonly<{ previousRunId: string; exhaustedSlots: readonly string[] }>;
-  orphanRecovery?: Readonly<{ previousRunId: string; previousAuthorityDigest: string }>;
-}> & (Readonly<{ schemaVersion: 1; reviewerProtocol?: never }> |
-  Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptor }>);
+  restart?: WaveGateRestartAudit;
+  orphanRecovery?: OrphanedWaveGateRecoveryAudit;
+}> & RegisteredReviewerProtocol;
+
+/**
+ * The exact reviewed scope of one Task: its declared and modified paths,
+ * de-duplicated and in default sort order. Batch preparation, the locked
+ * install and reviewer slot membership each compare this against a persisted
+ * protocol scope, so the rule has this one definition.
+ */
+export function taskReviewScope(task: Pick<Task, "file_list" | "files_modified">): readonly string[] {
+  return [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
+}
+
+/** The Wave review packet section labels; spec-check reads both by name. */
+export const WAVE_REVIEW_AUTHORITY_SECTION = "wave-review-authority";
+export const REQUIREMENT_COVERAGE_SECTION = "requirement-coverage";
 
 /** Exact protected snapshot identity used by publication and locked install. */
 export function waveGateAuthorityDigest(
@@ -91,11 +107,64 @@ export type WaveTaskRunAuthority = Readonly<{
   workspaceHeadSha?: ArtifactDigest;
 }>;
 
+/** One subject of a Wave review batch: the Wave's spec-check, or one reviewer
+ *  role on one registered Task. */
+export type WaveReviewSubject =
+  | Readonly<{ role: "spec-check-invoker"; taskId: null }>
+  | Readonly<{ role: (typeof WAVE_REVIEW_AGENTS)[number]; taskId: string }>;
+
+/**
+ * The canonical order of a Wave review batch, and its only definition:
+ * spec-check first, then every registered Task in roster order, each with
+ * every `WAVE_REVIEW_AGENTS` role in catalog order. Request issuance, persisted
+ * batch recovery and spawn-task labelling all read this order.
+ */
+export function waveReviewSubjects(taskIds: readonly string[]): readonly WaveReviewSubject[] {
+  return Object.freeze([
+    Object.freeze({ role: "spec-check-invoker" as const, taskId: null }),
+    ...taskIds.flatMap((taskId) => WAVE_REVIEW_AGENTS.map((role) => Object.freeze({ role, taskId }))),
+  ]);
+}
+
+/** A durably issued request recovered from a Run Directory, labelled with the
+ *  role and Task its own context names (`taskId` null when it names none). */
+export type PersistedWaveBatchCandidate<C> = Readonly<{ role: string; taskId: string | null; value: C }>;
+
+export type PersistedWaveBatchClassification<C> =
+  /** Exactly one candidate per canonical subject, in canonical order. */
+  | Readonly<{ kind: "exact"; ordered: readonly C[] }>
+  /** A missing, surplus, duplicate or foreign candidate: the persisted batch is
+   *  a partial prefix or differs from the canonical roster. */
+  | Readonly<{ kind: "incomplete" }>;
+
+/** Classify the current epoch's recovered attempt-1 requests against the
+ *  canonical batch order. A spec-check request ranks first whatever Task its
+ *  context names; a reviewer ranks by its (Task, role) subject. */
+export function classifyPersistedWaveBatch<C>(
+  taskIds: readonly string[],
+  candidates: readonly PersistedWaveBatchCandidate<C>[],
+): PersistedWaveBatchClassification<C> {
+  const subjects = waveReviewSubjects(taskIds);
+  const rank = (candidate: PersistedWaveBatchCandidate<C>): number => {
+    if (candidate.role === "spec-check-invoker") return 0;
+    const index = subjects.findIndex((subject) =>
+      subject.taskId !== null && subject.role === candidate.role && subject.taskId === candidate.taskId);
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+  };
+  const ranked = candidates.map((candidate) => ({ candidate, rank: rank(candidate) }))
+    .sort((left, right) => left.rank - right.rank);
+  return ranked.length === subjects.length && ranked.every(({ rank: position }, index) => position === index)
+    ? Object.freeze({ kind: "exact", ordered: Object.freeze(ranked.map(({ candidate }) => candidate.value)) })
+    : Object.freeze({ kind: "incomplete" });
+}
+
 export type WaveRequestBatch = Readonly<{
   batchEpoch: ArtifactDigest;
   specCheckDocuments: WaveSpecCheckDocumentsAuthority;
   /** The floor derived from the exact projection rendered into this batch's packet. */
   settledFloor: SettledFloor;
+  /** `waveReviewSubjects` of the roster; `requests` and `packets` are index-aligned with it. */
+  subjects: readonly WaveReviewSubject[];
   requests: readonly InitialSpawnRequestInput[];
   packets: readonly ContextPacket[];
   taskRuns: readonly WaveTaskRunAuthority[];
@@ -554,7 +623,7 @@ export function readWaveReviewContext(
   digest: string,
 ): WaveReviewContextRead {
   const packet = packets.find((candidate) => candidate.digest === digest);
-  const section = packet?.fixedContext.find(({ label }) => label === "wave-review-authority");
+  const section = packet?.fixedContext.find(({ label }) => label === WAVE_REVIEW_AUTHORITY_SECTION);
   if (section === undefined) return { kind: "absent" };
   try {
     const raw: unknown = JSON.parse(
@@ -645,6 +714,7 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
   return Object.freeze(graph.tasks.map((task) => Object.freeze({
     id: task.id,
     inCurrentWave: task.wave === currentWave,
+    decisionRecord: task.agent === DECISION_RECORD_AGENT,
     ...taskRowFields(task),
     anchorHashes: parsedAnchorHashes(task.spec_anchor_hashes),
   })));
@@ -679,7 +749,9 @@ export function prepareWaveReviewBatch(
   attempt: 1 | 2,
   workspace: readonly ReviewedWorkspaceObservation[],
   specCheckObservation: WaveSpecCheckObservation,
+  issueRoute: ReviewerIssueRoute = "catalog",
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
+  const reviewerRoute = registration.schemaVersion === 2 ? issueRoute : "catalog";
   if (registration.schemaVersion === 2) {
     const protocol = parseReviewerProtocolDescriptor(registration.reviewerProtocol);
     if (!protocol.ok) return failure(protocol.error.message);
@@ -696,15 +768,22 @@ export function prepareWaveReviewBatch(
       currentWaveTasks.length !== tasks.length || currentWaveTasks.some((task, index) => task.id !== tasks[index]?.id)) {
     return failure("registered Wave Task roster drifted from the exact protected current-Wave roster");
   }
-  const workspaceByTask = new Map<string, ReviewedWorkspaceObservation>();
+  const observationsByTask = new Map<string, ReviewedWorkspaceObservation>();
   for (const observation of workspace) {
-    if (workspaceByTask.has(observation.taskId)) {
+    if (observationsByTask.has(observation.taskId)) {
       return failure(`Task ${observation.taskId} has duplicate workspace observations`);
     }
-    workspaceByTask.set(observation.taskId, observation);
+    observationsByTask.set(observation.taskId, observation);
   }
-  if (workspaceByTask.size !== tasks.length || tasks.some(({ id }) => !workspaceByTask.has(id))) {
+  if (observationsByTask.size !== tasks.length || tasks.some(({ id }) => !observationsByTask.has(id))) {
     return failure("current Wave workspace observations differ from the exact registered Task roster");
+  }
+  const workspaceByTask = new Map<string, ReviewedWorkspaceObservation>();
+  for (const task of tasks) {
+    const observation = observationsByTask.get(task.id)!;
+    const snapshot = admitReviewedWorkspace(task.id, taskReviewScope(task), observation);
+    if (!snapshot.ok) return failure(snapshot.error);
+    workspaceByTask.set(task.id, snapshot.value);
   }
   if (specCheckDocuments.spec.path !== (graph.spec_file ?? null) ||
       specCheckDocuments.plan.path !== (graph.plan_file ?? null)) {
@@ -731,6 +810,7 @@ export function prepareWaveReviewBatch(
   );
   const batchEpoch = parseArtifactDigest(sha256Hex(JSON.stringify({
     runId,
+    ...(reviewerRoute === "qualified-local" ? { reviewerRoute } : {}),
     wave: registration.input.wave,
     authorityDigest: registration.authorityDigest,
     tasks: tasks.map((task) => ({
@@ -766,10 +846,17 @@ export function prepareWaveReviewBatch(
     }));
   }
 
-  const subjects = [
-    { role: "spec-check-invoker" as const, taskId: null as string | null },
-    ...tasks.flatMap((task) => WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: task.id as string | null }))),
-  ];
+  const frozenSourceByTask = new Map<string, ByteSection>();
+  if (registration.schemaVersion === 2) {
+    for (const task of tasks) {
+      const snapshot = workspaceByTask.get(task.id)!;
+      const source = encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(snapshot)));
+      if (!source.ok) return failure(source.error.message);
+      frozenSourceByTask.set(task.id, source.value);
+    }
+  }
+
+  const subjects = waveReviewSubjects(registration.taskIds);
   const requests: InitialSpawnRequestInput[] = [];
   const packets: ContextPacket[] = [];
   for (const subject of subjects) {
@@ -803,10 +890,10 @@ export function prepareWaveReviewBatch(
     if (!requestId.ok) return failure(requestId.error.message);
     const policy = resolveAgentPolicy(subject.role);
     if (!policy.ok) return failure(policy.error.message);
-    const profile = resolveModelProfile(policy.value.profile);
+    const profile = issuedReviewerProfile(subject.role, "wave-gate", reviewerRoute);
     if (!profile.ok) return failure(profile.error.message);
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
-    const section = encodeByteSection("wave-review-authority", JSON.stringify({
+    const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
       runId,
       wave: registration.input.wave,
       authorityDigest: registration.authorityDigest,
@@ -840,9 +927,15 @@ export function prepareWaveReviewBatch(
     // it — so widening the authority schema would buy a parser nobody calls.
     // Only the spec-check subject receives it; no reviewer has a use for it.
     const coverageSection = subject.taskId === null
-      ? encodeByteSection("requirement-coverage", renderRequirementCoverage(requirementCoverage))
+      ? encodeByteSection(REQUIREMENT_COVERAGE_SECTION, renderRequirementCoverage(requirementCoverage))
       : null;
     if (coverageSection !== null && !coverageSection.ok) return failure(coverageSection.error.message);
+    const sourceSection = subject.taskId === null ? null : frozenSourceByTask.get(subject.taskId) ?? null;
+    const fixedContext = [
+      section.value,
+      ...(sourceSection === null ? [] : [sourceSection]),
+      ...(coverageSection === null ? [] : [coverageSection.value]),
+    ];
     const packetInput = {
       requestId: requestId.value,
       role: subject.role,
@@ -850,9 +943,7 @@ export function prepareWaveReviewBatch(
       outputContract: subject.role === "spec-check-invoker"
         ? `Run the Wave ${registration.input.wave} spec alignment check and emit its exact Machine Summary.`
         : `Review Task ${subject.taskId} from the immutable packet and emit the exact Machine Summary and findings contract.`,
-      fixedContext: Object.freeze(
-        coverageSection === null ? [section.value] : [section.value, coverageSection.value],
-      ),
+      fixedContext: Object.freeze(fixedContext),
       variableContext: Object.freeze([]),
     };
     const packet = subject.taskId !== null && registration.schemaVersion === 2
@@ -897,6 +988,7 @@ export function prepareWaveReviewBatch(
       // section above renders—so the Finding identities/count recorded on the
       // epoch and those the Agent reads are one expression, not two agreeing ones.
       settledFloor: settledFloorOf(requirementCoverage),
+      subjects,
       requests: Object.freeze(requests),
       packets: Object.freeze(packets),
       taskRuns: Object.freeze(taskRuns),

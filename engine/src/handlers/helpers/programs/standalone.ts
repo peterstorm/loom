@@ -9,22 +9,45 @@ import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineag
 import { prepareStandaloneSuccessorSource, readStandaloneSuccessorAuthority } from './standalone-source';
 import { boundedStandaloneReadHandle, observeStableStandaloneSuccessorSource } from './standalone-successor-source';
 import type { StandaloneSuccessorStartInput, RegisteredStandaloneSuccessorProgram } from './standalone-successor-registration';
-import { admitCapturedStandaloneTranscript, readStandaloneCaptureWitnesses, replayStandaloneCliCaptures, standaloneRefutationPreparation, type StandaloneCaptureWitness, type StandaloneEvidenceReplayResult } from './standalone-evidence';
+import { admitStandaloneReviewerResult, readStandaloneCaptureWitnesses, replayStandaloneCliCaptures, standaloneRefutationPreparation, type StandaloneCaptureWitness, type StandaloneEvidenceReplayResult } from './standalone-evidence';
 // Retain existing caller entry points, not the union of the evidence volume's internal exports.
 export { replayStandaloneCliCaptures, replayStandaloneResultFromEvidence, readStandaloneReviewedSource, standaloneRefutationPreparation } from './standalone-evidence';
-export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult, StandaloneReviewedSource, StandaloneReviewedSourceFile } from './standalone-evidence';
+export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult } from './standalone-evidence';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import { publishStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
 import { batchPublicationIdentity, type AgentRequestAuthority, type SpawnRequest, type PublicationAuthorityResolver, type SemanticAttempt } from '../../../core/orchestration-contract';
 import { decideAttemptOneSlots } from '../../../core/standalone-attempt-admission';
-import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, canonicalStandaloneResultArtifact, completeStandaloneReviewerCapture, parseStandaloneReviewScope, prepareFreshStandaloneReview, proveStandaloneRosterCompletion, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, type FrozenStandaloneReviewAuthority, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
-import { parseStandaloneReviewMachineState, reduceStandaloneReviewMachine, parseStandaloneRefutationCompletion, serializeStandaloneReviewMachineState, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
-import { completePersistentRefutationPanel, panelRequestIdentity, refutationPanelCheckpoint, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentRefutationPanelEvent } from '../../../core/panel-program';
+import {
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
+  type StandaloneReviewerProtocolResolver,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineState,
+} from '../../../core/standalone-review';
+import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
+import { canonicalStandaloneResultArtifact, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
+import { parseStandaloneReviewScope } from '../../../core/standalone-review-scope';
+import { prepareFreshStandaloneReview } from '../../../core/standalone-review-preparation';
+import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
+import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from '../../../core/standalone-review-checkpoint';
+import { parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
+import { completePersistentRefutationPanel, panelRequestIdentity, refutationPanelCheckpoint, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentRefutationPanelEvent } from '../../../core/persistent-panel';
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../orchestration/no-follow-fs';
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, readRegisteredStandaloneAuthority, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
+import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
+import { readPublishedStandaloneResult, durableRequests, recoverOrPublishStandaloneRetry, safeScope, standalonePackets, standalonePublicationEffectId } from './standalone-requests';
+import { deriveChangedPaths, gitText, metadata, reviewBaseline } from './changed-paths';
+import { STANDALONE_READ_COVERAGE_V1, readCoverageBudgetProblem } from '../../../core/standalone-read-coverage';
+import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standaloneRetryTask } from '../../../core/reviewer-retry';
+import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
+import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
+import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
+import { observedReviewerIssueRoute, renderReviewProgramSpawn } from './spawn-task';
+import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
+import { type RegisteredStandaloneProgram } from './registration';
 
 const preparedSuccessorStarts = new WeakSet<object>();
 
@@ -89,7 +112,7 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
     const prepared = prepareFreshStandaloneReview({ runId: destination.value.runId, explicitScope: input.files,
       changedPaths: changed.authority, successor: lineage.value.prepared, reviewerContexts: lineage.value.contexts,
       scopeSafety: lineage.value.prepared.snapshot.map(row => ({ path: row.path, status: row.kind === "absent" ? "absent" : "safe" })),
-      reviewMetadata: preparationMetadata(reviewMetadata) });
+      reviewMetadata: preparationMetadata(reviewMetadata), reviewerIssueRoute: observedReviewerIssueRoute() });
     if (!prepared.ok) return { ok: false as const, message: prepared.error.errors.join("; ") };
     const registration: RegisteredStandaloneSuccessorProgram = Object.freeze({ schemaVersion: 3, kind: "standalone-review",
       reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, input, currentSource: source.value.source,
@@ -123,7 +146,7 @@ export async function startPreparedStandaloneSuccessor(handle: RunDirHandle,
     if (!published.ok) return failed(published.error.message);
   }
   const requests = initialStandaloneRequests(prepared.authority);
-  const batch = await publishInitialBatch(handle, requests, prepared.packets.filter((_, index) => index % 2 === 0), "standalone-review");
+  const batch = await publishReviewInitialBatch(handle, requests, prepared.packets.filter((_, index) => index % 2 === 0), "standalone-review", prepared.registration);
   if (!batch.ok) return failed(batch.message);
   const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId });
   if (!awaiting.ok) return failed(awaiting.error.message);
@@ -147,7 +170,14 @@ export async function startStandaloneFacade(
     if (!parsedScope.ok) return failed(parsedScope.errors.join("; "));
     const scope = parsedScope.value;
     const reviewMetadata = metadata(input.kind, scope, changed);
-    const packetSet = standalonePackets(handle.runId, reviewMetadata, scope, changed.authority.head_revision);
+    // Every fresh standalone review carries the read obligation (ADR-0022):
+    // each reviewer must be engine-observed reading the scope's whole frozen
+    // diff. A scope too large for one reviewer to read is refused here, before
+    // anything is registered or issued.
+    const packetSet = standalonePackets(handle.runId, reviewMetadata, scope, changed.authority.head_revision,
+      { baselineRevision: reviewBaseline(changed) });
+    const budget = packetSet.frozenDiff === null ? "read-coverage frozen diff was not built" : readCoverageBudgetProblem(packetSet.frozenDiff);
+    if (budget !== null) return failed(budget);
     const prepared = prepareFreshStandaloneReview({
       runId: handle.runId,
       ...(input.files === null ? {} : { explicitScope: scope }),
@@ -155,11 +185,13 @@ export async function startStandaloneFacade(
       reviewMetadata: preparationMetadata(reviewMetadata),
       scopeSafety: safeScope(scope),
       reviewerContexts: packetSet.contexts,
+      reviewerIssueRoute: observedReviewerIssueRoute(),
     });
     if (!prepared.ok) return failed(prepared.error.errors.join("; "));
     const registration: RegisteredStandaloneProgram = Object.freeze({
       schemaVersion: 2,
       reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+      readCoverage: STANDALONE_READ_COVERAGE_V1,
       kind: "standalone-review",
       input,
       authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.value.authority)),
@@ -177,7 +209,7 @@ export async function startStandaloneFacade(
       const published = await handle.publishContext(packet);
       if (!published.ok) return failed(published.error.message);
     }
-    const batch = await publishInitialBatch(handle, initialRequests, packetSet.packets.filter((_, index) => index % 2 === 0), "standalone-review");
+    const batch = await publishReviewInitialBatch(handle, initialRequests, packetSet.packets.filter((_, index) => index % 2 === 0), "standalone-review", registration);
     if (!batch.ok) return failed(batch.message);
     const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.value.authority), {
       kind: "review-batch-published", runId: handle.runId,
@@ -358,11 +390,12 @@ export async function resumeStandaloneFacade(
         if (registration.schemaVersion !== 3 || authenticated === undefined) {
           return failed("standalone review checkpoint is missing and no durable batch publication exists");
         }
-        const published = await publishInitialBatch(
+        const published = await publishReviewInitialBatch(
           handle,
           initialStandaloneRequests(authorityResult.value),
           authenticated.packets.filter((_, index) => index % 2 === 0),
           "standalone-review",
+          registration,
         );
         if (!published.ok) return failed(published.message);
       }
@@ -403,7 +436,7 @@ export async function resumeStandaloneFacade(
       case "awaiting-refutation":
         return resumeAwaitingRefutation(handle, state.value, resolver);
       case "awaiting-results":
-        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols);
+        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols, registration);
       case "preparing":
       case "aggregating":
         return failed(`unsupported standalone resume state ${state.value.kind}`);
@@ -429,7 +462,10 @@ async function resumeAwaitingRefutation(
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver);
   if (recovered.kind === "corrupt") return failed(recovered.message);
   if (recovered.kind === "absent") {
-    const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
+    // Panel verdicts are the explicit extraction-only publication route: the
+    // refutation batch carries no reviewer emission authority, so the shared
+    // core renders every task with the caller's instruction verbatim.
+    const published = await publishLegacyInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
     return published.ok ? { ok: true, action: published.action } : failed(published.message);
   }
   const panelRequests = recovered.requests;
@@ -472,18 +508,19 @@ async function resumeAwaitingRefutation(
   // exact terminal state.
   const panelEvents: PersistentRefutationPanelEvent[] = [];
   for (const request of panelRequests) {
-    const bytes = handle.readTranscriptBytes(request.authority);
+    const transcript = decideRefutationTranscriptRead(
+      handle.readTranscriptBytes(request.authority),
+      tombstones.get(request.authority.slotId),
+    );
+    if (transcript.kind === "infrastructure-failure") return failed(transcript.message);
     // A tombstoned attempt-1 slot has no evidence: the capture runtime
     // terminally rejected the attempt, so there is no verdict to parse.
-    // The slot advances to its attempt-2 retry through the panel's
-    // rejection path — with the capture diagnostic as the rejection
-    // message, which the attempt-2 task repeats to the verifier. Kept
-    // as a fail-closed guard: a runtime whose missing-filter and this
-    // loop disagree must fail loudly, not pass an undefined tombstone
-    // downstream as if the slot had a verdict.
-    let submitted = bytes.ok
-      ? submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), Buffer.from(bytes.value).toString("utf8"))
-      : rejectRefutationVerdict(panelState, resolver, panelRequestIdentity(request), tombstones.get(request.authority.slotId) ?? bytes.error.message);
+    // Only that explicit tombstone advances the slot through the panel's
+    // semantic rejection path; an unreadable captured transcript returned
+    // above as infrastructure failure and cannot consume a retry.
+    let submitted = transcript.kind === "verdict"
+      ? submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), transcript.transcript)
+      : rejectRefutationVerdict(panelState, resolver, panelRequestIdentity(request), transcript.diagnostic);
     if (!submitted.ok) return failed(submitted.error.message);
     panelState = submitted.value.state;
     if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
@@ -577,6 +614,7 @@ async function resumeAwaitingResults(
   state: Extract<StandaloneReviewMachineState, { kind: "awaiting-results" }>,
   resolver: PublicationAuthorityResolver,
   reviewerProtocols: StandaloneReviewerProtocolResolver,
+  registration: RegisteredStandaloneProgram,
 ): Promise<FacadeDriveResult> {
   const activeAuthority = state.authority;
   const recovered = durableRequests(handle, activeAuthority, resolver);
@@ -621,7 +659,7 @@ async function resumeAwaitingResults(
     if (decision?.kind !== "captured") continue;
     const bytes = handle.readTranscriptBytes(authority);
     if (!bytes.ok) return failed(bytes.error.message);
-    const admission = admitCapturedStandaloneTranscript(reviewerProtocols, authority, bytes.value);
+    const admission = admitStandaloneReviewerResult(handle, reviewerProtocols, authority, bytes.value);
     if (!admission.ok) rejected.push({ slot: authority, problems: [...admission.problems] });
   }
   let machine: StandaloneReviewMachineState = state;
@@ -671,7 +709,7 @@ async function resumeAwaitingResults(
       issued.push(attemptOne);
       continue;
     }
-    const retry = await recoverOrPublishStandaloneRetry(handle, activeAuthority, slot, resolver);
+    const retry = await recoverOrPublishStandaloneRetry(handle, activeAuthority, slot, resolver, registration);
     if (!retry.ok) return failed(retry.message);
     issued.push(retry.request);
   }
@@ -695,7 +733,8 @@ async function resumeAwaitingResults(
     const bytes = handle.readTranscriptBytes(request.authority);
     if (!bytes.ok) return failed(bytes.error.message);
     if (request.authority.attempt === 2) {
-      const admission = admitCapturedStandaloneTranscript(
+      const admission = admitStandaloneReviewerResult(
+        handle,
         reviewerProtocols,
         request.authority,
         bytes.value,
@@ -735,17 +774,18 @@ async function resumeAwaitingResults(
       idempotencyKey: { runId: handle.runId, effectId: effectId.value },
       receipt: publication.receipt,
       requests: missing.map((request) => {
-        const task = renderSpawnTask(
+        const spawn = renderReviewProgramSpawn(
           handle,
           request.authority,
           "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.",
+          registration,
           { standalone: true },
         );
         return {
           ...request,
           task: request.authority.attempt === 2
-            ? standaloneRetryTask(task, rejectedDiagnostics.get(request.authority.slotId) ?? null, activeAuthority)
-            : task,
+            ? standaloneRetryTask(spawn.task, spawn.route, rejectedDiagnostics.get(request.authority.slotId) ?? null, activeAuthority)
+            : spawn.task,
         };
       }),
     } };
@@ -767,7 +807,10 @@ async function resumeAwaitingResults(
     });
     if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") return failed(reduced.ok ? "critical route did not reach refutation" : reduced.error.message);
     await handle.writeCheckpoint(serializeStandaloneReviewMachineState(reduced.value));
-    const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
+    // Panel verdicts are the explicit extraction-only publication route: the
+    // refutation batch carries no reviewer emission authority, so the shared
+    // core renders every task with the caller's instruction verbatim.
+    const published = await publishLegacyInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
     return published.ok ? { ok: true, action: published.action } : failed(published.message);
   }
   reduced = reduceStandaloneReviewMachine(reduced.value, { kind: "aggregate-clean", aggregate: aggregate.value.aggregate });

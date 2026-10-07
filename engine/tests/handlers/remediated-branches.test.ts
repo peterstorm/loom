@@ -377,7 +377,7 @@ describe("remediation façade refusals", () => {
 
     expect(driven.ok).toBe(true);
     if (!driven.ok) return;
-    expect((driven.action as { kind: string }).kind).toBe("blocked");
+    expect(driven.action.kind).toBe("blocked");
   });
 
   it("refuses when the source review is registered but NOT done", async () => {
@@ -419,6 +419,6 @@ describe("remediation façade refusals", () => {
 
     expect(driven.ok).toBe(true);
     if (!driven.ok) return;
-    expect((driven.action as { kind: string }).kind).toBe("blocked");
+    expect(driven.action.kind).toBe("blocked");
   });
 });

@@ -433,6 +433,17 @@ describe("transcript authority invariants", () => {
     expect(forged.kind).toBe("manual-override");
   });
 
+  it("derives a current floor's count from its findings, so a disagreeing count is unrepresentable", () => {
+    // @ts-expect-error the current-floor witness is minted only from criticalFindings
+    const forged: SettledFloor = { kind: "settled", count: 3, criticalFindings: [] };
+    expect(forged.kind).toBe("settled");
+    expect(parseSettledFloor({ kind: "settled", count: 1, criticalFindings: ["one", "two"] })).toBeNull();
+    const parsed = parseSettledFloor({ kind: "settled", count: 2, criticalFindings: ["one", "two"] });
+    expect(parsed).toEqual({ kind: "settled", count: 2, criticalFindings: ["one", "two"] });
+    // The persisted wire shape is unchanged: count stays an enumerable field.
+    expect(JSON.parse(JSON.stringify(parsed))).toEqual({ kind: "settled", count: 2, criticalFindings: ["one", "two"] });
+  });
+
   it.each([1e100, Number.MAX_SAFE_INTEGER + 1])("refuses unsafe persisted floor count %s", (count) => {
     expect(parseSettledFloor({ kind: "settled", count })).toBeNull();
   });

@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { commitWaveGateCompletion, deriveWaveReadiness } from "../../src/core/wave-gate-machine";
+import { checkWaveCompletionSuite, evaluateWaveGate, type GateDeps } from "../../src/core/wave-gate-checks";
+import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import {
-  checkWaveCompletionSuite,
-  commitWaveGateCompletion,
   deriveLoomStatus,
   deriveLoomStatusFromParsedGraph,
   renderLoomStatusHuman,
   renderLoomStatusJson,
-  deriveWaveCompletionSuiteReadiness,
-  deriveWaveReadiness,
-  evaluateWaveGate,
-  type GateDeps,
-} from "../../src/core/wave-gate-machine";
+} from "../../src/core/loom-status";
 import {
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
@@ -26,7 +23,8 @@ import {
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
-import { canonicalJson, sha256Hex, type JsonValue } from "../../src/core/review-packet";
+import { canonicalJson, type JsonValue } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import {
   parseNewTestEvidence,
   type ActiveWaveGateRegistration,

@@ -17,12 +17,12 @@ import completeWaveGateHandler, {
   type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
 // The gate checks, the decision functions, and the status renderers live in
-// `core/wave-gate-machine` and are imported from it directly. They used to
-// arrive through a `complete-wave-gate` facade that re-exported them
-// unchanged; production never routed through that facade (`orchestration`
-// already imported the core originals), so the second path was pinned by
-// these tests alone. Deleting it removes the divergence its own parity case
-// was written to detect.
+// `core/wave-gate-checks` and `core/loom-status` and are imported from them
+// directly. They used to arrive through a `complete-wave-gate` facade that
+// re-exported them unchanged; production never routed through that facade
+// (`orchestration` already imported the core originals), so the second path
+// was pinned by these tests alone. Deleting it removes the divergence its own
+// parity case was written to detect, so that case went with it.
 import {
   applyGateDecision,
   checkCriticalFindings,
@@ -32,11 +32,18 @@ import {
   checkSpecAlignment,
   checkTestEvidence,
   computeNextWave,
+  deriveWaveStartReadiness,
   evaluateWaveGate,
   gateCheckMessage,
+  type GateDeps as CoreGateDeps,
+} from "../../src/core/wave-gate-checks";
+import {
+  deriveLoomStatus,
+  deriveLoomStatusFromParsedGraph,
+  deriveNextAction,
   renderLoomStatusHuman,
   renderLoomStatusJson,
-} from "../../src/core/wave-gate-machine";
+} from "../../src/core/loom-status";
 import {
   parseNewTestEvidence,
   type CapturedSpecCheck,
@@ -44,45 +51,40 @@ import {
   type TaskGraph,
 } from "../../src/types";
 import {
-  TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,
   evaluateTaskProof,
 } from "../../src/core/proof-obligations";
 import {
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
-  settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
+import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { waveGateAuthorityDigest } from "../../src/core/wave-review-authority";
 import {
   commitWaveGateCompletion,
   createWaveGateState,
-  WAVE_REVIEW_AGENTS,
-  deriveLoomStatus,
-  deriveLoomStatusFromParsedGraph,
-  deriveNextAction,
-  deriveWaveAdvisoryDecisionRequest,
-  deriveWaveAdvisoryNextAction,
-  deriveWaveGateDriveStep,
   deriveWaveReadiness,
-  deriveWaveRefutationPlan,
-  evaluateWaveGate as evaluateCoreWaveGate,
-  prepareWaveRefutationPanel,
+  isCanonicalWaveReadiness,
   projectWaveGateLifecycle,
   proveWaveGateNextAction,
   reduceWaveGate,
-  waveAdvisoryDecisionActionRequest,
-  renderLoomStatusHuman as renderCoreLoomStatusHuman,
-  renderLoomStatusJson as renderCoreLoomStatusJson,
-  type GateDeps as CoreGateDeps,
+  snapshotActionProofIsExact,
   type WaveGateEvent,
   type WaveGateState,
 } from "../../src/core/wave-gate-machine";
+import {
+  deriveWaveAdvisoryDecisionRequest,
+  deriveWaveAdvisoryNextAction,
+  deriveWaveGateDriveStep,
+  deriveWaveRefutationPlan,
+  prepareWaveRefutationPanel,
+  waveAdvisoryDecisionActionRequest,
+} from "../../src/core/wave-gate-preparation";
+import { WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
+import { lowerModelProfile, resolveAgentPolicy, resolveAgentProfile } from "../../src/core/model-profiles";
 import {
   blockedAction,
   doneAction,
@@ -103,6 +105,7 @@ import {
   parseTaskGraph,
   StateManager,
 } from "../../src/state-manager";
+import { findingId } from "../fixtures/finding-id";
 
 const satisfiedProof = evaluateTaskProof(
   { newTestsRequired: true, declaredArtifacts: [] },
@@ -681,7 +684,7 @@ describe("generateWaveGateSummary (pure)", () => {
       critical_findings: [],
       refuted_findings: [{
         finding: {
-          id: "code-reviewer-1",
+          id: findingId("code-reviewer-1"),
           agent: "code-reviewer",
           severity: "critical",
           file: "src/x.ts",
@@ -1180,6 +1183,15 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
     }
   });
 
+  it("recognises only the readiness snapshot deriveWaveReadiness minted, through read-only predicates", () => {
+    const minted = authorityValue(deriveWaveReadiness(registeredGraph(), statusDeps));
+    expect(isCanonicalWaveReadiness(minted)).toBe(true);
+    expect(isCanonicalWaveReadiness({ ...minted })).toBe(false);
+    // An unproven snapshot carries neither half of the lifecycle proof pair.
+    expect(snapshotActionProofIsExact(minted)).toBe(true);
+    expect(snapshotActionProofIsExact({ ...minted, lifecycleCheckpointDigest: minted.readinessDigest })).toBe(false);
+  });
+
   it("rejects forged readiness, wrong-run/revision/digest receipts, and ineligible completion", () => {
     const preparing = lifecycleInitialState();
     const awaiting = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
@@ -1295,7 +1307,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     const readiness = deriveWaveReadiness(graph, statusDeps);
     expect(readiness.ok).toBe(true);
     if (!readiness.ok) return;
-    expect(readiness.value.gateDecision).toEqual(evaluateCoreWaveGate(graph, 1, statusDeps));
+    expect(readiness.value.gateDecision).toEqual(evaluateWaveGate(graph, 1, statusDeps));
     const resumeDecision = deriveNextAction(readiness.value);
     expect(resumeDecision.action).toMatchObject({
       kind: "blocked",
@@ -1330,11 +1342,11 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       { ...taskState({ id: "T1", wave: 1, status: "completed" }),
         critical_findings: ["critical"], advisory_findings: ["advisory"],
         refuted_findings: [{
-          finding: { id: "old-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
+          finding: { id: findingId("old-1"), agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
           refutations: [{ lens: "intent", reason: "false positive" }],
         }],
         resolved_findings: [{
-          finding: { id: "old-2", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "fixed" },
+          finding: { id: findingId("old-2"), agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "fixed" },
           resolution: {
             kind: "resolved_by_remediation", generation: 1, packet_id: "packet", head_sha: "head",
             expected_agents: ["code-reviewer"],
@@ -1378,7 +1390,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("uses wave-scoped canonical Finding identities when two Tasks emit the same Finding id", () => {
     const shared = {
-      id: "code-reviewer-1",
+      id: findingId("code-reviewer-1"),
       agent: "code-reviewer",
       severity: "critical" as const,
       file: null,
@@ -1680,53 +1692,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       });
     });
 
-    function semanticReceipt(
-      attemptNumber: 1 | 2,
-      history: readonly ImplementationAttemptSettlementReceipt[],
-    ): ImplementationAttemptSettlementReceipt {
-      const authority = authorityValue(createImplementationAttemptAuthority({
-        taskId: "T1",
-        wave: 1,
-        semanticAttempt: attemptNumber,
-        reservationId: `status-attempt-${attemptNumber}`,
-        headSha: "a".repeat(40),
-        reservedAt: `2026-09-01T00:00:0${attemptNumber}.000Z`,
-        taskScopeBaseline: [],
-        dirtySetBaseline: [],
-      }));
-      const suiteAuthority = authorityValue(createTaskCompletionSuiteAuthority(authority));
-      const result = settleImplementationAttempt({
-        id: "T1",
-        status: "pending",
-        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
-        active_implementation_attempt: authority,
-        implementation_attempt_history: history,
-      }, authority, authority, {
-        schemaVersion: 1,
-        kind: "implementation-observed",
-        observedAt: `2026-09-01T00:01:0${attemptNumber}.000Z`,
-        evidence: {
-          taskCompleted: false,
-          testResult: { verdict: "trusted-pass" },
-          filesModified: [],
-          newTestsWritten: false,
-          newTestEvidence: "waived",
-        },
-        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-      }, {
-        schemaVersion: 1,
-        kind: "task-completion-suite-result",
-        implementationAuthorityDigest: suiteAuthority.implementationAuthorityDigest,
-        suiteDigest: suiteAuthority.suiteDigest,
-        checks: [{
-          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-          scope: "task",
-          outcome: { kind: "accepted", changedPaths: [] },
-        }],
-      });
-      if (!result.ok || result.value.kind === "ignored") throw new Error("status settlement fixture failed");
-      return result.value.receipt;
-    }
+    const semanticReceipt = (attemptNumber: 1 | 2, history: readonly ImplementationAttemptSettlementReceipt[]) =>
+      semanticAttemptReceipt("T1", attemptNumber, history);
 
     it("publishes the exact attempt-2 prompt appendix after semantic attempt 1", () => {
       const retry = semanticReceipt(1, []);
@@ -1757,6 +1724,72 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           },
         },
       });
+    });
+
+    it("dispatches the exact attempt-2 context after a Wave Gate run was abandoned for changed bytes", () => {
+      const retry = semanticReceipt(1, []);
+      const registered = registeredGraph();
+      const graph = registeredGraph({
+        active_wave_gate: {
+          ...registered.active_wave_gate!,
+          terminalOutcome: { kind: "terminal-abandoned", reason: "reviewed bytes changed", supersededBy: null },
+        },
+        tasks: [taskState({ id: "T2", status: "implemented" }), {
+          ...taskState({ id: "T1", status: "pending" }),
+          implementation_attempt_history: [retry],
+          implementation_retry_protocol: 2,
+          implementation_retry_history_start: 0,
+          failure_reason: `retry-required: ${retry.failureKinds.join(", ")}`,
+          retry_count: 1,
+        }],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.facts.location).toEqual({ kind: "known", value: { activePhase: "execute", activeWave: 1 } });
+      expect(status.next.action).toMatchObject({
+        diagnostic: { recovery: {
+          kind: "spawn-wave-implementation", wave: 1,
+          dispatches: [{ kind: "retry-implementation", taskId: "T1", semanticAttempt: 2,
+            promptAppendix: expect.stringContaining(retry.receiptId) }],
+        } },
+      });
+      expect(graph.active_wave_gate?.terminalOutcome).toEqual({
+        kind: "terminal-abandoned", reason: "reviewed bytes changed", supersededBy: null,
+      });
+      expect(deriveWaveReadiness(graph, statusDeps)).toMatchObject({
+        ok: false, error: { reasons: [{ kind: "authority-contradiction" }] },
+      });
+    });
+
+    it("offers a fresh Wave Gate once implementation is complete after abandonment", () => {
+      const registered = registeredGraph();
+      const graph = registeredGraph({ active_wave_gate: {
+        ...registered.active_wave_gate!,
+        terminalOutcome: { kind: "terminal-abandoned", reason: "reviewed bytes changed", supersededBy: null },
+      } });
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps).next.action)
+        .toMatchObject({ diagnostic: { recovery: { kind: "start-wave-gate", wave: 1 } } });
+    });
+
+    it("refuses a foreign-wave tombstone or one already naming a successor", () => {
+      const registered = registeredGraph();
+      for (const terminal of [
+        { ...registered.active_wave_gate!, wave: 2, terminalOutcome: {
+          kind: "terminal-abandoned" as const, reason: "foreign", supersededBy: null,
+        } },
+        { ...registered.active_wave_gate!, terminalOutcome: {
+          kind: "terminal-abandoned" as const, reason: "successor selected",
+          supersededBy: authorityValue(parseOrchestrationRunId("next-run")),
+        } },
+      ]) {
+        const graph = registeredGraph({ active_wave_gate: terminal });
+        const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+        expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+        expect(status.next.action).toMatchObject({
+          kind: "blocked", diagnostic: { category: "invalid-authority", recovery: { kind: "inspect-run-and-stop" } },
+        });
+      }
     });
 
     it("reports terminal non-retryable escalation after semantic attempt 2", () => {
@@ -1815,6 +1848,44 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       expect(status.next.reasons.at(-1)).toMatchObject({ kind: "wave-gate-not-started" });
     });
 
+    it("reports unmet start prerequisites instead of advising a start the Wave Gate would refuse", () => {
+      const graph = unstarted({
+        tasks: [
+          taskState({ id: "T1", wave: 1, status: "implemented", new_test_observation: undefined }),
+          { ...taskState({ id: "T2", wave: 1, status: "completed" }), test_result: undefined },
+        ],
+      });
+      const readiness = deriveWaveStartReadiness(graph, graph.tasks.filter((entry) => entry.wave === 1));
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(readiness.kind).toBe("not-ready");
+      if (readiness.kind !== "not-ready") return;
+      expect(readiness.failures).toEqual([
+        expect.stringContaining("Not all tasks have test evidence.\n  Missing: T2"),
+        expect.stringContaining("Not all tasks satisfied new-test requirement.\n  Missing: T1"),
+      ]);
+      // Status projects exactly the prerequisites the start refuses on.
+      expect(status.next.action).toMatchObject({
+        kind: "blocked",
+        diagnostic: {
+          kind: "wave-start-not-ready",
+          category: "wave-start-prerequisites-unmet",
+          message: `Wave 1 implementation stopped but the Wave Gate cannot start: ${readiness.failures.join("; ")}`,
+          retry: { kind: "advance-wave-lifecycle", eligible: false, consumesSemanticAttempt: false },
+          recovery: { kind: "repair-wave-start-readiness", wave: 1, failures: readiness.failures },
+        },
+      });
+      expect(status.next.reasons.at(-1)).toMatchObject({ kind: "wave-start-not-ready" });
+    });
+
+    it("advises a start exactly when the shared start readiness is ready", () => {
+      const ready = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "implemented" })] });
+      expect(deriveWaveStartReadiness(ready, ready.tasks)).toEqual({ kind: "ready" });
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: ready }, statusDeps).next.action)
+        .toMatchObject({ diagnostic: { kind: "wave-gate-not-started", recovery: { kind: "start-wave-gate", wave: 1 } } });
+    });
+
     it("scopes the owed implementation to the current Wave, ignoring later Waves", () => {
       const graph = unstarted({
         tasks: [
@@ -1833,7 +1904,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("renders as a status rather than an authority failure", () => {
       const graph = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] });
 
-      const human = renderCoreLoomStatusHuman(
+      const human = renderLoomStatusHuman(
         deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps),
       );
 
@@ -1862,7 +1933,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       review_status: "blocked",
       findings: [
         {
-          id: "code-reviewer-1",
+          id: findingId("code-reviewer-1"),
           agent: "code-reviewer",
           severity: "critical",
           file: null,
@@ -1870,7 +1941,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           claim: "retained later-Wave critical",
         },
         {
-          id: "code-reviewer-2",
+          id: findingId("code-reviewer-2"),
           agent: "code-reviewer",
           severity: "advisory",
           file: null,
@@ -2007,10 +2078,10 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   it("renders versioned human and machine status from the same complete value", () => {
     const status = deriveLoomStatusFromParsedGraph({ ok: true, value: registeredGraph() }, statusDeps);
     const json = renderLoomStatusJson(status);
-    expect(renderCoreLoomStatusJson(status)).toBe(json);
+    expect(renderLoomStatusJson(status)).toBe(json);
     expect(JSON.parse(json)).toEqual(status);
     const human = renderLoomStatusHuman(status);
-    expect(renderCoreLoomStatusHuman(status)).toBe(human);
+    expect(renderLoomStatusHuman(status)).toBe(human);
     for (const category of Object.keys(status.facts)) expect(human).toContain(category);
     expect(human).toContain(`nextAction: ${status.next.action.kind}`);
     for (const entry of status.next.reasons) expect(human).toContain(entry.message);
@@ -2118,7 +2189,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
 
   it("refuses stale criticals on a pending generation that has no current Review Packet", () => {
     const finding = {
-      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "stale until current review completes",
     };
     const pending = authorityValue(deriveWaveReadiness(registeredGraph({
@@ -2141,7 +2212,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
 
   it("binds Wave refutation identity to the exact readiness epoch", () => {
     const finding = {
-      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "completion can advance without authority",
     };
     const first = authorityValue(deriveWaveReadiness(registeredGraph({
@@ -2161,7 +2232,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     expect(deriveWaveRefutationPlan(clean)).toMatchObject({ ok: false });
 
     const finding = {
-      id: "code-reviewer-1",
+      id: findingId("code-reviewer-1"),
       agent: "code-reviewer",
       severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts",
@@ -2179,6 +2250,25 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     expect(panel.authority.findings).toEqual(plan.findings);
     expect(panel.authority.lenses).toEqual(plan.lenses);
     expect(panel.authority.verifierRoster.orderedSlots).toHaveLength(plan.lenses.length);
+    // Verifier routing comes from the catalog: the verifier role's own profile
+    // and its exact lowering, never a binding spelled in the Wave Gate core.
+    const verifierPolicy = authorityValue(resolveAgentPolicy("review-verifier-agent"));
+    const verifierProfile = authorityValue(resolveAgentProfile("review-verifier-agent"));
+    for (const request of panel.authority.verifierRoster.orderedSlots.flatMap(({ attempts }) => attempts)) {
+      expect(request.role).toBe("review-verifier-agent");
+      expect(request.modelProfile).toBe(verifierPolicy.profile);
+      expect(request.harnessBinding).toEqual({
+        pi: lowerModelProfile(verifierProfile, "pi"),
+        claude: lowerModelProfile(verifierProfile, "claude-code"),
+      });
+      // Golden bytes: the serialized authority is unchanged by resolving the
+      // binding through the catalog instead of a literal.
+      expect(JSON.stringify(request.harnessBinding)).toBe(
+        '{"pi":{"harness":"pi","provider":"openai-codex","model":"gpt-5.6-sol","thinking":"high"},' +
+        '"claude":{"harness":"claude-code","model":"opus"}}',
+      );
+      expect(request.modelProfile).toBe("refutation");
+    }
     const claimedReplay = authorityValue(prepareWaveRefutationPanel(snapshot, {
       verifierSlots: panel.authority.verifierRoster.orderedSlots,
     }));
@@ -2196,7 +2286,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
 
   it("derives advisory await-user internally and exposes it as the sole status action", () => {
     const advisory = {
-      id: "comment-analyzer-1",
+      id: findingId("comment-analyzer-1"),
       agent: "comment-analyzer",
       severity: "advisory" as const,
       file: null,
@@ -2227,7 +2317,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
    */
   const advisoryGraph = (): TaskGraph => {
     const advisory = {
-      id: "comment-analyzer-1",
+      id: findingId("comment-analyzer-1"),
       agent: "comment-analyzer",
       severity: "advisory" as const,
       file: null,
@@ -2834,12 +2924,5 @@ describe("final-Wave compatibility completion replay", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe("complete-wave-gate compatibility delegation", () => {
-  it("returns the core decision byte-for-byte without weakening any check", () => {
-    const state = registeredGraph();
-    expect(evaluateWaveGate(state, null, statusDeps)).toEqual(evaluateCoreWaveGate(state, null, statusDeps));
   });
 });

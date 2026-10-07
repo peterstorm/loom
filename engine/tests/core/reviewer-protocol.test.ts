@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { z } from "zod/v4";
-import { parseReviewerPayloadV2, renderReviewerWireContract } from "../../src/core/reviewer-protocol";
+import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic, renderReviewerWireContract } from "../../src/core/reviewer-protocol";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
   REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, reviewerPayloadV2Schema,
-  type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2,
+  type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "../../src/core/reviewer-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const decode = (value: unknown) => parseReviewerPayloadV2(bytes(JSON.stringify(value)));
@@ -127,7 +127,7 @@ describe("current reviewer codec", () => {
     ), { seed: 4010, numRuns: 100 });
   });
 
-  it.each([null, [], 2, "x", {}, { schemaVersion: 2, kind: "standalone-review" }, { schemaVersion: 1, kind: "standalone-review", findings: [] }, { ...standalone(), kind: "unknown" }, { ...standalone(), criticalCount: 0 }, { ...standalone(), packetId: "a".repeat(64) }, { ...standalone(), protocolVersion: 2 }, { ...wave(), extra: 1 }])
+  it.each<[unknown]>([[null], [[]], [2], ["x"], [{}], [{ schemaVersion: 2, kind: "standalone-review" }], [{ schemaVersion: 1, kind: "standalone-review", findings: [] }], [{ ...standalone(), kind: "unknown" }], [{ ...standalone(), criticalCount: 0 }], [{ ...standalone(), packetId: "a".repeat(64) }], [{ ...standalone(), protocolVersion: 2 }], [{ ...wave(), extra: 1 }]])
     ("refuses wrong root, version, missing fields or authored extras: %j", (value) => refuseValue(value));
 
   it.each(["severity", "file", "line", "claim", "basis"])("requires critical %s", (key) => {
@@ -211,6 +211,15 @@ describe("current reviewer codec", () => {
     refused(bytes("[".repeat(32) + "0" + "]".repeat(32)), "invalid-payload");
     refused(bytes("[".repeat(33) + "0" + "]".repeat(33)), "depth-exceeded");
     expect(decode(standalone([{ ...advisory, claim: '\\"' + "[{}]".repeat(500) }])).ok).toBe(true);
+  });
+  it("applies one string rule to the depth precheck and prose extraction alike", () => {
+    // Escaped quotes and unbalanced delimiters deeper than the depth limit, all
+    // inside one string value: the precheck must not count them and the
+    // extractor must not split a candidate on them.
+    const claim = '\\" ' + "{[".repeat(REVIEWER_PAYLOAD_LIMITS.depth + 1) + ' \\\\" }';
+    const payload = standalone([{ ...advisory, claim }]);
+    const wrapped = `Summary before the payload.\n\n${JSON.stringify(payload)}\n\nTrailing prose.`;
+    expect(parseReviewerPayloadV2(bytes(wrapped))).toEqual({ ok: true, value: payload });
   });
 
   it.each([
@@ -323,6 +332,50 @@ describe("authoritative generated wire contract", () => {
     }
     inspect(schema);
     for (const phrase of ["UTF-8 bytes", "null file requires a null line", "issued frozen scope", "packet order", '"maxItems": 32', '"maxItems": 128', '"maxItems": 4096']) expect(REVIEWER_PAYLOAD_SCHEMA_V2).toContain(phrase);
+  });
+});
+
+describe("reviewer payload rejection diagnostics", () => {
+  const failure = (
+    partial: Pick<ReviewerProtocolFailure, "message"> & Partial<ReviewerProtocolFailure>,
+  ): ReviewerProtocolFailure => ({
+    kind: "reviewer-protocol-failed",
+    code: "invalid-json",
+    path: "",
+    ...partial,
+  });
+
+  it("names the strict grammar error and carries its position as a UTF-8 byte offset", () => {
+    const refused = parseReviewerPayloadV2(bytes('{"x":1,}'));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("expected whole-response refusal");
+    expect(refused.error.code).toBe("invalid-json");
+    expect(refused.error.message).toBe(
+      "Reviewer payload must be exactly one strict JSON object. Parse error: PropertyNameExpected at position 7 (line 1, column 8)",
+    );
+    expect(refused.error.byteOffset).toBe(7);
+  });
+
+  it("converts the reported position to a byte offset, not a code-unit index", () => {
+    // The scanner reports code-unit position 11; the UTF-8 payload byte offset
+    // is 14 (each é is 2 bytes).
+    const refused = parseReviewerPayloadV2(bytes('{"a":"ééé",}'));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error("expected whole-response refusal");
+    expect(refused.error.message).toContain("at position 11");
+    expect(refused.error.byteOffset).toBe(14);
+  });
+
+  it("renders message, path, byte offset and size-scoped guidance for retries", () => {
+    expect(renderReviewerPayloadDiagnostic(failure({ message: "bad", path: "#/findings/0", byteOffset: 42 }), 512)).toBe(
+      "bad at #/findings/0 (byte 42) (payload 512 bytes; validate the emitted JSON with JSON.parse before finalizing)",
+    );
+    expect(renderReviewerPayloadDiagnostic(failure({ message: "bad", byteOffset: 9_846 }), 9_846)).toBe(
+      "bad (byte 9846) (payload 9846 bytes; keep the final JSON under 8500 bytes — compress re-verification reasons to one sentence per prior finding and escape every quote inside prose)",
+    );
+    expect(renderReviewerPayloadDiagnostic(failure({ message: "plain" }), 32)).toBe(
+      "plain (payload 32 bytes; validate the emitted JSON with JSON.parse before finalizing)",
+    );
   });
 });
 

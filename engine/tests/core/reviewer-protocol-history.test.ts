@@ -14,25 +14,20 @@ import {
   parseEffectReceipt,
   type PublicationAuthorityResolver,
 } from "../../src/core/orchestration-contract";
-import {
-  admitStandaloneTranscript,
-  canonicalStandaloneResultArtifact,
-  capturedReviewerResultFromBytes,
-  serializeAdjudicatedStandaloneReview,
-  serializeStandaloneReviewAuthority,
-  type FrozenStandaloneReviewAuthority,
-} from "../../src/core/standalone-review";
+import { admitStandaloneTranscript } from "../../src/core/standalone-transcript-admission";
+import { canonicalStandaloneResultArtifact, serializeAdjudicatedStandaloneReview, serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
+import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
+import { type FrozenStandaloneReviewAuthority } from "../../src/core/standalone-review-model";
 import {
   isAuthoritativeStandaloneReviewResult,
   parseAuthoritativeStandaloneReviewResult,
-  parseStandaloneReviewMachineState,
   reduceStandaloneReviewMachine,
-  serializeStandaloneReviewMachineState,
   startStandaloneReviewMachine,
-} from "../../src/core/standalone-review-machine";
+} from "../../src/core/standalone-review";
+import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
 import { aggregateLegacyStandaloneReview } from "../../src/core/legacy-archive";
 import { parseIssuedReviewerProtocol, resolveReviewFindings, type IssuedStandaloneReviewerProtocol, type ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
-import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/helpers";
+import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import { loadReviewerV1Golden, type ReviewerV1Golden } from "../fixtures/reviewer-protocol-v1";
 import inventory from "../fixtures/reviewer-protocol-v1/inventory.json";
 import storage from "../fixtures/reviewer-protocol-v1/storage.json";

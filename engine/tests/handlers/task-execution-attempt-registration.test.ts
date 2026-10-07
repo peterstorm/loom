@@ -171,7 +171,7 @@ describe("modern implementation attempt registration", () => {
     }
   });
 
-  it("binds a fresh attempt to the first unresolved repository baseline instead of laundering persistent foreign bytes", async () => {
+  it("binds a fresh attempt to a retained repository baseline and retires a legacy unresolved-path carry", async () => {
     const repo = repository();
     writeFileSync(join(repo.root, "foreign.ts"), "foreign write from failed attempt\n");
     const task = taskFixture({
@@ -183,9 +183,14 @@ describe("modern implementation attempt registration", () => {
       depends_on: [],
       file_list: ["src/a.ts"],
       repository_baseline: [],
-      unresolved_repository_paths: ["foreign.ts"],
     });
-    writeGraph(repo.statePath, graph([task]));
+    // State File bytes written before the carry was retired still read: the
+    // parser validates the legacy field and drops it, so the next write omits it.
+    const legacy = graph([task]);
+    writeFileSync(repo.statePath, JSON.stringify({
+      ...legacy,
+      tasks: legacy.tasks.map((entry) => ({ ...entry, unresolved_repository_paths: ["foreign.ts"] })),
+    }, null, 2));
 
     const result = await registerTaskExecutionBatch([spawn("T1")]);
 
@@ -194,10 +199,10 @@ describe("modern implementation attempt registration", () => {
     const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
     expect(stored.tasks[0]?.repository_baseline).toEqual([]);
     expect(stored.tasks[0]?.attempt_repository_baseline).toEqual([]);
-    expect(stored.tasks[0]?.unresolved_repository_paths).toEqual(["foreign.ts"]);
+    expect(stored.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
-  it("keeps an unreported unowned delta non-positive while a parallel sibling-owned dirty path stays inert", async () => {
+  it("re-arms a retry on a fresh repository boundary so foreign and sibling movement between attempts cannot block or attribute it", async () => {
     const repo = repository();
     const task = taskFixture({
       id: "T1",
@@ -240,19 +245,23 @@ describe("modern implementation attempt registration", () => {
 
     const first = await registerTaskExecutionBatch([spawn("T1")]);
     if (first.kind !== "registered") throw new Error(first.message);
-    const retainedBaseline = manager.load().tasks[0]?.repository_baseline;
     mkdirSync(join(repo.root, "src"), { recursive: true });
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1;\n");
     writeFileSync(join(repo.root, "foreign.ts"), "foreign\n");
     writeFileSync(join(repo.root, "sibling.ts"), "parallel T2 bytes\n");
     await settle(first.authorities[0]!, ["src/a.ts"], "2026-08-25T00:01:00.000Z", false);
+    // The foreign delta observed DURING attempt 1 invalidates its review and
+    // retires the attempt boundary with the retry-required transition: the
+    // re-armed attempt freezes a FRESH boundary at its own registration, so
+    // the surviving foreign bytes (never repaired) cannot refuse or sully it.
     expect(manager.load().tasks[0]).toMatchObject({
       status: "pending",
-      repository_baseline: retainedBaseline,
-      unresolved_repository_paths: ["foreign.ts"],
+      review_status: "pending",
     });
+    expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
+    expect(manager.load().tasks[0]).not.toHaveProperty("unresolved_repository_paths");
 
-    rmSync(join(repo.root, "foreign.ts"));
+    // No foreign repair before the retry: the fresh boundary absorbs it.
     const second = await registerTaskExecutionBatch([
       nextSpawn(manager.load(), "T1"),
       spawn("T2"),
@@ -298,8 +307,11 @@ describe("modern implementation attempt registration", () => {
     expect(manager.load().tasks[0]).toMatchObject({ status: "implemented" });
     expect(manager.load().tasks[0]?.retry_count).toBeUndefined();
     expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
+    expect(manager.load().tasks[0]?.files_modified).not.toContain("foreign.ts");
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
     expect(readFileSync(join(repo.root, "sibling.ts"), "utf8")).toBe("parallel T2 bytes\n");
+    // The foreign write survived every attempt unattributed and unblocked.
+    expect(readFileSync(join(repo.root, "foreign.ts"), "utf8")).toBe("foreign\n");
   });
 
   it("rejects a preflight authority plan when locked settlement history advances the semantic attempt", () => {

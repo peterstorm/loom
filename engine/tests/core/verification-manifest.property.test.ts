@@ -15,7 +15,7 @@ import {
   parseVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
-import { sha256Bytes } from "../../src/core/review-packet";
+import { sha256Bytes } from "../../src/core/digest";
 
 const digest = (character: string): string => character.repeat(64);
 const activeAuthority = Object.freeze({

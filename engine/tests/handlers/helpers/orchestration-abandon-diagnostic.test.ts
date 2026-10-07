@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ afterEach(() => {
 
 describe("abandon stamp diagnostic", () => {
   it("reports a published marker without claiming it retired a different active Wave Gate", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-abandon-mismatch-")));
+    const root = canonicalTempDir("loom-abandon-mismatch-");
     roots.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(join(runsRoot, "run.not-owner"), { recursive: true });

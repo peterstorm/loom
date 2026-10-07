@@ -59,7 +59,10 @@ structure.
 `--files` is a comma-separated explicit scope. Without it, the engine freezes
 the canonical sorted union of branch-committed, staged, unstaged tracked, and
 untracked non-ignored paths, excluding Loom run/state evidence. Empty scope is a
-hard stop. `--dry-run` is recorded in review authority; it does not weaken
+hard stop. Each reviewer packet's frozen source must fit the 16 MiB Context Packet
+bound; a larger scope is refused at start, before any reviewer runs. Split a large
+change into several `--files` reviews, which also keeps each reviewer's slice
+small enough to read in full. `--dry-run` is recorded in review authority; it does not weaken
 review/adjudication.
 
 Do not use this command to feed one Wave Task. `/wave-gate` owns packet-bound
@@ -112,6 +115,14 @@ For explicit files, `files` is a non-empty JSON string array. Never hand-build
 scope metadata, reviewer rosters, model lookups, transcript slots, findings,
 verdict manifests, or panel events.
 
+Every fresh review carries an engine-enforced read obligation
+([ADR-0022](../docs/adr/ADR-0022-engine-observed-standalone-read-coverage.md)):
+each reviewer must be observed paging the scope's whole frozen diff, or its
+result is refused and retried with the unread ranges. `start` refuses a scope
+whose frozen diff exceeds one reviewer's 240,000-unit budget. When it does, partition
+the scope into explicit `files` slices of at most about 230 KB of `git diff` and
+start one Run per slice.
+
 ## 4. Execute returned actions
 
 Execute only the single typed action returned by `start` or `resume`:
@@ -142,7 +153,8 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration resume \
 ```
 
 Resume until `done` or `blocked`. Resume is idempotent. Pi and Claude adapters
-bind native result identities and write exact final bytes directly into
+bind native result identities, record the engine's read-coverage observation from
+the reviewer's own transcript, and write exact final bytes directly into
 engine-reserved slots. Never copy Agent output into files yourself.
 
 ## 5. Report only canonical results

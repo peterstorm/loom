@@ -1,0 +1,636 @@
+/**
+ * Panel verdict source selection and durable provenance (AD-8, FR-006/009/011/012).
+ *
+ * Pure module: no I/O, no clock, no randomness.
+ */
+import type { ParseResult } from "./panel-kernel";
+import { selectVerdictSource, type VerdictSourceSelection } from "./emission-ingestion";
+import {
+  EMISSION_SCHEMA_VERSIONS,
+  issueEmissionBinding,
+  type EmissionSchemaVersion,
+  type IssuedEmissionBinding,
+  type IssuedEmissionBindingOf,
+} from "./emission-tool";
+import { observeEmissionCalls, type EmissionObservation, type EmissionToolCall } from "./emission-observation";
+import { reviewerEmissionToolContract } from "./reviewer-contract";
+import { success as domainSuccess, failure as domainFailure } from "./orchestration-contract/identity";
+import { safeRecord } from "./exact-data";
+import type { PayloadProducerKindName } from "./agent-catalog-projections";
+import {
+  canonicalRecord,
+  parseArtifactByteLength,
+  parseArtifactDigest,
+  parseRequestId,
+  parseSlotId,
+  type ArtifactDigest,
+  type DomainResult,
+  type RequestId,
+  type SemanticAttempt,
+  type SlotId,
+} from "./orchestration-contract";
+
+//
+// Judge v1 and refutation v1 enter their panels through the SAME deterministic
+// selection seam the reviewer capture path uses: the emission observation is
+// folded and bound ONCE (the kernel's `selectVerdictSource`), the selection
+// runs BEFORE the authoritative parse (AD-8), and the accepted source is
+// returned by the same decision — never reconstructed by a caller from the
+// input records. The panel parsers keep their criterion/lens bindings and
+// complete candidate/finding coverage (FR-012): a selection can choose WHICH
+// bytes are parsed, never what they must bind to — a source cannot override
+// issuance.
+//
+// Layering (ADR-0018): the emission kernel (`emission-ingestion`,
+// `emission-tool`, `emission-observation`, `harness-capture`) is a declared pure module set below the
+// panel layer, audited in the same purity closure, so this core composes it
+// directly: the live fold, and the AD-9 exact replay that re-certifies a
+// record's emission claims through the registry mint and re-folds its single
+// accepted call. The kernel never imports this module back. This core keeps
+// every decision arm: which bytes won, the retained refusal, the durable
+// provenance, the record protocol, and the replay's certification cross-check.
+
+const isEmissionSchemaVersion = (raw: unknown): raw is EmissionSchemaVersion =>
+  (EMISSION_SCHEMA_VERSIONS as readonly unknown[]).includes(raw);
+
+/** Which producer kinds are panel verdict kinds, decided per kind of the
+ *  catalog's ONE vocabulary: the table is exhaustive over
+ *  `PayloadProducerKindName`, so a new producer kind fails to compile here
+ *  until it is classified, and the type and the runtime guard below are both
+ *  derived from this one table rather than re-spelling its literals. */
+const PANEL_VERDICT_KINDS = Object.freeze({
+  "reviewer-payload": false,
+  "judge-verdict": true,
+  "refutation-verdict": true,
+} as const satisfies Record<PayloadProducerKindName, boolean>);
+
+/** The verdict producer kinds a panel verdict emission or source record can name. */
+type PanelVerdictKindName = {
+  [Kind in PayloadProducerKindName]: (typeof PANEL_VERDICT_KINDS)[Kind] extends true ? Kind : never;
+}[PayloadProducerKindName];
+
+const isPanelVerdictKindName = (raw: unknown): raw is PanelVerdictKindName =>
+  typeof raw === "string" && Object.hasOwn(PANEL_VERDICT_KINDS, raw) &&
+  // Parser proof site: `hasOwn` just proved `raw` is a table key.
+  PANEL_VERDICT_KINDS[raw as PayloadProducerKindName];
+
+const notPanelVerdictKind = (kindName: unknown): string =>
+  `the accepted call names producer kind ${JSON.stringify(kindName ?? null)}, which is not a panel verdict kind`;
+
+// Route-aware panel-verdict wire-instruction rendering (AD-7; FR-020/AS-012).
+
+/**
+ * The closed wire-instruction route of ONE panel verdict spawn attempt — the
+ * same route discriminant the request programs project (AD-7). The emission
+ * arm carries the registry-minted binding; the extraction-only arm its
+ * admission reason. A refused route is not representable — the shell throws
+ * it fail-closed before any render.
+ */
+export type PanelVerdictInstructionRoute =
+  | Readonly<{ kind: "emission"; binding: IssuedEmissionBinding }>
+  | Readonly<{ kind: "extraction-only"; reason: string }>;
+
+/**
+ * Route-aware rendered panel-verdict wire instructions (AD-7, FR-020/AS-012):
+ * an emission route renders the ONE frozen tool-primary wording over the
+ * binding's exact issued tool; an extraction-only verdict attempt — today's
+ * whole panel-verdict spawn surface, and any unqualified route — renders the
+ * panel's own final-message contract (`finalMessageContract`) VERBATIM. A
+ * pure projection; it never rewrites issued packet or verdict-schema bytes.
+ */
+export function renderPanelVerdictInstructions(
+  route: PanelVerdictInstructionRoute,
+  finalMessageContract: string,
+): string {
+  return route.kind === "emission"
+    ? reviewerEmissionToolContract(route.binding.toolName)
+    : finalMessageContract;
+}
+
+/** A retained emission refusal in its durable provenance form: the parse's
+ *  closed code widened to the validated non-empty string the source records
+ *  carry (the code is never re-ingested by any parse). */
+export type PanelVerdictEmissionRefusal = Readonly<{ code: string; message: string }>;
+
+/**
+ * The verdict-source selection as the panel core holds it: the kernel's
+ * `VerdictSourceSelection`, except that an extraction-over-refused-call arm
+ * replayed from a durable record carries its retained refusal in the durable
+ * provenance form. Which bytes won, from what source, with the retained
+ * refusal (FR-006) and the observed calls of an ambiguity (FR-007).
+ */
+export type PanelVerdictSourceSelection =
+  | Exclude<VerdictSourceSelection, Readonly<{ kind: "extraction-over-refused-call" }>>
+  | Readonly<{ kind: "extraction-over-refused-call"; rawJson: string; source: "extraction"; emissionRefusal: PanelVerdictEmissionRefusal }>;
+
+/** One issued verdict-kind emission submission input, as the caller hands it
+ *  to the panel seam: the issued binding (authenticated issuance, AD-6 —
+ *  never output shape) and the emission observation. */
+export type PanelVerdictEmissionSelectionOf<K extends PanelVerdictKindName> = Readonly<{
+  binding: IssuedEmissionBindingOf<K>;
+  observation: EmissionObservation;
+}>;
+
+export type PanelVerdictEmissionSelection = PanelVerdictEmissionSelectionOf<PanelVerdictKindName>;
+
+/**
+ * The ONE fold of a live verdict emission input over a caller's raw bytes:
+ * the kernel's verdict-source selection. Both panel paths — the persistent
+ * submissions and the legacy attempt resolution — fold through here.
+ */
+export function foldPanelVerdictEmission(emission: PanelVerdictEmissionSelection, rawJson: string): PanelVerdictSourceSelection {
+  return selectVerdictSource(emission.binding, emission.observation, rawJson);
+}
+
+/**
+ * The emission arm of an accepted panel verdict source: the accepted call's
+ * identity and the issued schema identity, every field required. The producer
+ * kind stays the durable provenance string here (an accepted event's arm is
+ * parsed as recorded); a source record narrows it to a verdict kind.
+ */
+export type EmissionToolVerdictSource = Readonly<{
+  source: "emission-tool";
+  toolCallId: string;
+  producerKind: string;
+  emissionSchemaVersion: EmissionSchemaVersion;
+  schemaDigest: ArtifactDigest;
+}>;
+
+/** The extraction arm: the retained single-call refusal that led to the
+ *  fallback (FR-006) when there was one — and nothing when there was not. */
+export type ExtractionVerdictSource = Readonly<{
+  source: "extraction";
+  emissionRefusal?: PanelVerdictEmissionRefusal;
+}>;
+
+/**
+ * The durable accepted-source record of one panel verdict (FR-009/FR-011) —
+ * the same provenance vocabulary the reviewer capture seam's source records
+ * use, so one ingestion-time shape serves every producer path. A closed union:
+ * an extraction arm with call or schema identity, or an emission arm missing
+ * any of it, is not representable. The serialized form is the same flat
+ * record either arm always had.
+ */
+export type PanelVerdictSource = EmissionToolVerdictSource | ExtractionVerdictSource;
+
+
+/** The zero-emission-baseline accepted source: extraction with no refusal. */
+const EXTRACTION_VERDICT_SOURCE: PanelVerdictSource = canonicalRecord({ source: "extraction" as const });
+
+type RejectedVerdictSelection = Extract<PanelVerdictSourceSelection, { kind: "duplicate-emission-call" | "observation-refused" }>;
+type AcceptedVerdictSelection = Extract<PanelVerdictSourceSelection, { kind: "emission-tool-arguments" | "final-message-extraction" | "extraction-over-refused-call" }>;
+
+const isRejectedVerdictSelection = (selection: PanelVerdictSourceSelection): selection is RejectedVerdictSelection =>
+  selection.kind === "duplicate-emission-call" || selection.kind === "observation-refused";
+
+/** The provenance the selection decision itself returns for an accepted arm —
+ *  derived ONCE here, so the persistent accepted events and the legacy source
+ *  records cannot disagree about what was accepted or why. */
+export function panelVerdictSourceProvenance(
+  expected: IssuedEmissionBinding,
+  accepted: AcceptedVerdictSelection,
+): PanelVerdictSource {
+  switch (accepted.kind) {
+    case "emission-tool-arguments":
+      return canonicalRecord({
+        source: "emission-tool" as const,
+        toolCallId: accepted.call.toolCallId,
+        producerKind: accepted.call.kind.kind,
+        emissionSchemaVersion: expected.version,
+        schemaDigest: expected.schemaDigest,
+      });
+    case "final-message-extraction":
+      return EXTRACTION_VERDICT_SOURCE;
+    case "extraction-over-refused-call":
+      return canonicalRecord({
+        source: "extraction" as const,
+        emissionRefusal: canonicalRecord({ code: accepted.emissionRefusal.code, message: accepted.emissionRefusal.message }),
+      });
+  }
+}
+
+/**
+ * The durable source arm of an accepted panel verdict event, PARSED not
+ * assumed. `undefined` is the historical projection: genuinely pre-feature
+ * accepted events were extraction (the plan's parser-compatible historical
+ * rule). A PRESENT arm must be exact — malformed present-day source fields are
+ * NOT historical absence and refuse here, so a corrupted arm can never be
+ * replayed as a silently-downgraded extraction acceptance.
+ */
+export function projectPanelVerdictSourceArm(raw: unknown): DomainResult<PanelVerdictSource, string> {
+  if (raw === undefined) return domainSuccess(EXTRACTION_VERDICT_SOURCE);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return domainFailure("panel verdict source must be an exact data record when present");
+  }
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record).sort().join(",");
+  if (record["source"] === "emission-tool") {
+    if (keys !== "emissionSchemaVersion,producerKind,schemaDigest,source,toolCallId") {
+      return domainFailure("an emission-tool panel verdict source must carry exactly its call identity and issued schema identity");
+    }
+    const toolCallId = record["toolCallId"];
+    const producerKind = record["producerKind"];
+    const emissionSchemaVersion = record["emissionSchemaVersion"];
+    const schemaDigest = parseArtifactDigest(record["schemaDigest"]);
+    if (typeof toolCallId !== "string" || toolCallId.length === 0 ||
+        typeof producerKind !== "string" || producerKind.length === 0 ||
+        !isEmissionSchemaVersion(emissionSchemaVersion) ||
+        !schemaDigest.ok) {
+      return domainFailure("an emission-tool panel verdict source carries a malformed call or schema identity");
+    }
+    return domainSuccess(canonicalRecord({
+      source: "emission-tool" as const,
+      toolCallId,
+      producerKind,
+      emissionSchemaVersion,
+      schemaDigest: schemaDigest.value,
+    }));
+  }
+  if (record["source"] === "extraction") {
+    if (keys === "source") return domainSuccess(EXTRACTION_VERDICT_SOURCE);
+    if (keys === "emissionRefusal,source") {
+      const refusal = record["emissionRefusal"];
+      if (typeof refusal !== "object" || refusal === null || Array.isArray(refusal)) {
+        return domainFailure("a retained emission refusal must be an exact data record");
+      }
+      const refusalRecord = refusal as Record<string, unknown>;
+      if (Object.keys(refusalRecord).sort().join(",") !== "code,message" ||
+          typeof refusalRecord["code"] !== "string" || refusalRecord["code"].length === 0 ||
+          typeof refusalRecord["message"] !== "string" || refusalRecord["message"].length === 0) {
+        return domainFailure("a retained emission refusal must carry exactly a non-empty code and message");
+      }
+      return domainSuccess(canonicalRecord({
+        source: "extraction" as const,
+        emissionRefusal: canonicalRecord({ code: refusalRecord["code"], message: refusalRecord["message"] }),
+      }));
+    }
+    return domainFailure("an extraction panel verdict source carries only its optional retained emission refusal");
+  }
+  return domainFailure(`panel verdict source must be "emission-tool" or "extraction"`);
+}
+
+/** The typed rejection a refused selection arm produces — the SAME vocabulary
+ *  the reviewer capture runtime uses for the identical arms, so a duplicate or
+ *  misbound observation consumes one attempt and names what was observed. The
+ *  `kind` is the PersistentPanelError kind; the rejection event derives its
+ *  category from it (`rejectionEvent`), the legacy path reads the message. */
+export function panelVerdictSelectionRejection(
+  selection: RejectedVerdictSelection,
+): Readonly<{ kind: "request-binding-mismatch" | "malformed-result"; message: string }> {
+  if (selection.kind === "duplicate-emission-call") {
+    return canonicalRecord({
+      kind: "malformed-result" as const,
+      message: `result carried ${selection.calls.length} distinct emission tool calls (${selection.calls.map(({ toolCallId }) => toolCallId).join(", ")}); exactly one successfully executed call is allowed`,
+    });
+  }
+  return canonicalRecord({
+    kind: selection.refusal.code === "unusable-observation" ? "malformed-result" as const : "request-binding-mismatch" as const,
+    message: `${selection.refusal.code}: ${selection.refusal.message}`,
+  });
+}
+
+/** The retained single-call refusal beside a parse that also refused: BOTH
+ *  causes in one diagnostic (AD-9 — one rejection, not two). */
+export function describePanelRefusalPair(
+  emissionRefusal: Readonly<{ code: string; message: string }>,
+  parseDetail: string,
+): string {
+  return `emission arguments were refused [${emissionRefusal.code}]: ${emissionRefusal.message}; authoritative verdict parse was refused: ${parseDetail}`;
+}
+
+/** The emission-provenance prefix of an emission-arm parse failure: the
+ *  accepted call stays named even when its payload refused the joins. */
+export function describePanelVerdictEmissionParseFailure(
+  toolCallId: string,
+  label: string,
+  detail: string,
+): string {
+  return `emission tool call ${toolCallId} produced a ${label} that refuses its authoritative parse: ${detail}`;
+}
+
+
+interface VerdictSubmissionFoldInput<Verdict> {
+  readonly label: "judge verdict" | "refutation verdict";
+  readonly expectedRequestId: RequestId;
+  readonly emission: PanelVerdictEmissionSelection | undefined;
+  readonly rawJson: unknown;
+  /** The seam's own authoritative parse — the criterion/lens binding and the
+   *  complete candidate/finding coverage live HERE and nowhere else; the
+   *  selection can choose which bytes reach it, never what they bind to. */
+  readonly parse: (rawJson: unknown) => ParseResult<Verdict>;
+  readonly classifyRaw: (raw: unknown) => "request-binding-mismatch" | "malformed-result";
+  readonly foreignAuthorityMessage: string;
+}
+
+type RejectedVerdictSubmission = Readonly<{ kind: "rejected"; errorKind: "request-binding-mismatch" | "malformed-result"; message: string }>;
+
+type VerdictSubmissionFold<Verdict> =
+  | Readonly<{ kind: "accepted"; value: Verdict; source: PanelVerdictSource }>
+  | RejectedVerdictSubmission;
+
+/** The selection stage of one submission: the baseline (no emission input),
+ *  a refused selection, or an accepted selection held WITH the issued binding
+ *  it was folded against — a live selection without its binding is not
+ *  representable. */
+type VerdictSubmissionSelection =
+  | Readonly<{ kind: "baseline" }>
+  | RejectedVerdictSubmission
+  | Readonly<{ kind: "live"; selection: AcceptedVerdictSelection; binding: IssuedEmissionBinding }>;
+
+function selectVerdictSubmission(
+  emission: PanelVerdictEmissionSelection | undefined,
+  rawJson: unknown,
+): VerdictSubmissionSelection {
+  if (emission === undefined) return canonicalRecord({ kind: "baseline" as const });
+  // The fold receives the caller's raw input ONLY to fill the extraction
+  // arms' byte-verbatim echo (`final-message-extraction` /
+  // `extraction-over-refused-call`); the fold itself never parses it, and
+  // the parse target for those arms is resolved back to the caller's raw
+  // input — never to this echo. A non-string caller input is carried as ""
+  // so the echo stays a string without ever becoming the parse target: the
+  // caller's own input keeps refusing with its baseline diagnostic.
+  const selection = foldPanelVerdictEmission(emission, typeof rawJson === "string" ? rawJson : "");
+  if (isRejectedVerdictSelection(selection)) {
+    const rejection = panelVerdictSelectionRejection(selection);
+    return canonicalRecord({ kind: "rejected" as const, errorKind: rejection.kind, message: rejection.message });
+  }
+  return canonicalRecord({ kind: "live" as const, selection, binding: emission.binding });
+}
+
+/**
+ * The ONE verdict-submission fold both panel verdict submissions share:
+ * selection before the authoritative parse (AD-8), the accepted source
+ * returned by the same decision, and the extraction arms parsed byte-verbatim
+ * on the caller's raw input. Without an emission input the fold is today's
+ * baseline exactly — the accepted source is extraction and every diagnostic is
+ * byte-identical to the pre-selection seam.
+ */
+export function foldVerdictSubmission<Verdict>(input: VerdictSubmissionFoldInput<Verdict>): VerdictSubmissionFold<Verdict> {
+  const selected = selectVerdictSubmission(input.emission, input.rawJson);
+  if (selected.kind === "rejected") return selected;
+  const accepted = selected.kind === "live" ? selected.selection : null;
+  const parseTarget = accepted?.kind === "emission-tool-arguments" ? accepted.rawJson : input.rawJson;
+  const parsed = input.parse(parseTarget);
+  if (!parsed.ok) {
+    const errorKind = input.classifyRaw(parseTarget);
+    const base = errorKind === "request-binding-mismatch" ? input.foreignAuthorityMessage : parsed.errors.join("; ");
+    const message = accepted?.kind === "emission-tool-arguments"
+      ? describePanelVerdictEmissionParseFailure(accepted.call.toolCallId, input.label, base)
+      : accepted?.kind === "extraction-over-refused-call"
+        ? describePanelRefusalPair(accepted.emissionRefusal, base)
+        : base;
+    return canonicalRecord({ kind: "rejected" as const, errorKind, message });
+  }
+  const source = selected.kind === "live"
+    ? panelVerdictSourceProvenance(selected.binding, selected.selection)
+    : EXTRACTION_VERDICT_SOURCE;
+  return canonicalRecord({ kind: "accepted" as const, value: parsed.value, source });
+}
+
+/** The identity and payload fields every panel verdict source record carries. */
+type PanelVerdictSourceRecordFields = Readonly<{
+  schemaVersion: 1;
+  kind: "panel-verdict-source";
+  requestId: RequestId;
+  slotId: SlotId;
+  attempt: SemanticAttempt;
+  /** The digest identity of the bytes the seam authoritatively parsed: the
+   *  selected rawJson for the emission arm, the attempt's own raw bytes for
+   *  the extraction arms. */
+  payloadDigest: ArtifactDigest;
+  payloadByteLength: number;
+}>;
+
+/** A record's emission source: the producer kind narrowed to a verdict kind,
+ *  which the accepted call's kind proves. */
+type RecordedEmissionVerdictSource = EmissionToolVerdictSource & Readonly<{ producerKind: PanelVerdictKindName }>;
+
+/**
+ * The accepted-call arm of a record, as a closed union: the emission source
+ * with its required accepted call, or the extraction source with none. An
+ * emission record without its call, or an extraction record carrying one, is
+ * not representable.
+ */
+type AcceptedCallArm =
+  | Readonly<{ source: RecordedEmissionVerdictSource; acceptedCall: EmissionToolCall }>
+  | Readonly<{ source: ExtractionVerdictSource }>;
+
+/**
+ * The durable per-attempt record of ONE panel attempt's accepted verdict
+ * source (the legacy panel path's channel for FR-009/FR-011 provenance). The
+ * emission arm carries the ACCEPTED CALL — the exact replay authority AD-9's
+ * replay row names — so every later per-attempt scan (reconciliation,
+ * deterministic tally/aggregate) re-runs the SAME selection seam over it and
+ * reproduces the same selected bytes instead of re-parsing pre-selection
+ * transcript bytes as if they had never been selected. The serialized key
+ * order is `schemaVersion, kind, requestId, slotId, attempt, source,
+ * [acceptedCall,] payloadDigest, payloadByteLength` on both arms.
+ */
+export type PanelVerdictSourceRecord = Readonly<PanelVerdictSourceRecordFields & AcceptedCallArm>;
+
+type EmissionPanelVerdictSourceRecord = Extract<PanelVerdictSourceRecord, Readonly<{ acceptedCall: EmissionToolCall }>>;
+
+const isEmissionSourceRecord = (record: PanelVerdictSourceRecord): record is EmissionPanelVerdictSourceRecord =>
+  record.source.source === "emission-tool";
+
+/**
+ * The record invariant of the accepted-call arm, owned HERE for both the
+ * constructor and the parser: the accepted call is present exactly when the
+ * source is emission-tool, a present call agrees with the record's request
+ * and source arm on request id, tool-call id, producer kind and schema
+ * version, and that producer kind is a verdict kind. `shape` admits the call
+ * value itself (the parser's exact-record parse; the identity for the
+ * constructor's already-typed call), so a disagreeing record refuses at the
+ * point it is built, not first on re-read.
+ */
+function certifyAcceptedCallArm<Raw>(
+  record: Readonly<{ requestId: RequestId; source: PanelVerdictSource; acceptedCall: Raw | undefined }>,
+  shape: (raw: Raw) => DomainResult<EmissionToolCall, string>,
+): DomainResult<AcceptedCallArm, string> {
+  const { source } = record;
+  if (source.source === "extraction") {
+    return record.acceptedCall === undefined
+      ? domainSuccess(canonicalRecord({ source }))
+      : domainFailure("an extraction panel verdict source record must not carry an accepted call");
+  }
+  if (record.acceptedCall === undefined) {
+    return domainFailure("an emission-tool panel verdict source record requires the accepted call");
+  }
+  const call = shape(record.acceptedCall);
+  if (!call.ok) return call;
+  if (call.value.requestId !== record.requestId) return domainFailure("the accepted call was observed under a different request than the record's request");
+  if (source.toolCallId !== call.value.toolCallId) return domainFailure("the accepted call's identity disagrees with the record's source arm");
+  if (source.producerKind !== call.value.kind.kind) return domainFailure("the accepted call's producer kind disagrees with the record's source arm");
+  if (source.emissionSchemaVersion !== call.value.version) return domainFailure("the accepted call's schema version disagrees with the record's source arm");
+  // The parser's call shape already refuses a non-verdict kind; the
+  // constructor's identity shape does not, so the kind is proved here once
+  // for both — a non-verdict record refuses where it is built.
+  if (!isRecordedEmissionVerdictSource(source)) return domainFailure(notPanelVerdictKind(source.producerKind));
+  return domainSuccess(canonicalRecord({ source, acceptedCall: call.value }));
+}
+
+function isRecordedEmissionVerdictSource(source: EmissionToolVerdictSource): source is RecordedEmissionVerdictSource {
+  return isPanelVerdictKindName(source.producerKind);
+}
+
+/** The ONE constructor of a durable panel verdict source record. */
+export function panelVerdictSourceRecord(args: {
+  requestId: RequestId;
+  slotId: SlotId;
+  attempt: SemanticAttempt;
+  source: PanelVerdictSource;
+  acceptedCall?: EmissionToolCall;
+  payloadDigest: ArtifactDigest;
+  payloadByteLength: number;
+}): DomainResult<PanelVerdictSourceRecord, string> {
+  const arm = certifyAcceptedCallArm(
+    { requestId: args.requestId, source: args.source, acceptedCall: args.acceptedCall },
+    (call: EmissionToolCall) => domainSuccess(call),
+  );
+  if (!arm.ok) return arm;
+  if (!Number.isSafeInteger(args.payloadByteLength) || args.payloadByteLength <= 0) {
+    return domainFailure("a panel verdict source record payload byte length must be a positive safe integer");
+  }
+  return domainSuccess(recordOf(args.requestId, args.slotId, args.attempt, arm.value, args.payloadDigest, args.payloadByteLength));
+}
+
+/** The record in its fixed serialized key order, for either arm. */
+function recordOf(
+  requestId: RequestId,
+  slotId: SlotId,
+  attempt: SemanticAttempt,
+  arm: AcceptedCallArm,
+  payloadDigest: ArtifactDigest,
+  payloadByteLength: number,
+): PanelVerdictSourceRecord {
+  const fields = { schemaVersion: 1 as const, kind: "panel-verdict-source" as const, requestId, slotId, attempt };
+  return "acceptedCall" in arm
+    ? canonicalRecord({ ...fields, source: arm.source, acceptedCall: arm.acceptedCall, payloadDigest, payloadByteLength })
+    : canonicalRecord({ ...fields, source: arm.source, payloadDigest, payloadByteLength });
+}
+
+/** Parse the exact contract shape of an accepted emission tool call: branded
+ *  request id, tool-call identity, a panel verdict producer kind, a closed
+ *  schema version and present arguments. The agreement with the record is
+ *  `certifyAcceptedCallArm`'s. Every diagnostic keeps the exact message the
+ *  fixtures pin. */
+function parsePanelVerdictAcceptedCall(acceptedCallRaw: unknown): DomainResult<EmissionToolCall, string> {
+  const callRecord = safeRecord(acceptedCallRaw, ["requestId", "toolCallId", "kind", "version", "arguments"]);
+  if (callRecord === null) return domainFailure("the accepted call must be an exact emission tool call record");
+  const callRequestId = parseRequestId(callRecord["requestId"]);
+  const toolCallId = callRecord["toolCallId"];
+  const kind = callRecord["kind"];
+  const kindName = typeof kind === "object" && kind !== null && !Array.isArray(kind)
+    ? (kind as Record<string, unknown>)["kind"]
+    : undefined;
+  const version = callRecord["version"];
+  if (!callRequestId.ok) return domainFailure(`the accepted call request id is invalid: ${callRequestId.error.message}`);
+  if (typeof toolCallId !== "string" || toolCallId.length === 0) return domainFailure("the accepted call carries no tool-call identity");
+  if (!isPanelVerdictKindName(kindName)) {
+    // The verdict panels only ever accept verdict-kind calls: the submission
+    // bindings are verdict-kind refinements and the kernel selection refuses
+    // an unexpected kind, so a record claiming anything else is not a panel
+    // verdict record and refuses at the parse boundary.
+    return domainFailure(notPanelVerdictKind(kindName));
+  }
+  if (!isEmissionSchemaVersion(version)) {
+    return domainFailure(`the accepted call carries schema version ${JSON.stringify(version ?? null)}, which is not in the closed schema-version vocabulary`);
+  }
+  if (callRecord["arguments"] === undefined) return domainFailure("the accepted call carries no arguments");
+  return domainSuccess(canonicalRecord({
+    requestId: callRequestId.value,
+    toolCallId,
+    kind: canonicalRecord({ kind: kindName }),
+    version,
+    arguments: callRecord["arguments"],
+  }));
+}
+
+/** Parse a durable record back: exact shape, branded identities, the accepted
+ *  call's contract fields, and every cross-check that makes a tampered record
+ *  refuse instead of replaying. Absent source is NOT the historical projection
+ *  here — a record always carries its accepted source. */
+export function parsePanelVerdictSourceRecord(raw: unknown): DomainResult<PanelVerdictSourceRecord, string> {
+  const record = safeRecord(raw, ["schemaVersion", "kind", "requestId", "slotId", "attempt", "source", "acceptedCall", "payloadDigest", "payloadByteLength"]);
+  if (record === null || record["schemaVersion"] !== 1 || record["kind"] !== "panel-verdict-source") {
+    return domainFailure("panel verdict source record must be an exact schemaVersion 1 panel-verdict-source data record");
+  }
+  const requestId = parseRequestId(record["requestId"]);
+  const slotId = parseSlotId(record["slotId"]);
+  const attempt = record["attempt"] === 1 || record["attempt"] === 2 ? record["attempt"] : null;
+  const payloadDigest = parseArtifactDigest(record["payloadDigest"]);
+  const payloadByteLength = parseArtifactByteLength(record["payloadByteLength"]);
+  if (record["source"] === undefined) return domainFailure("panel verdict source record must carry its accepted source");
+  const source = projectPanelVerdictSourceArm(record["source"]);
+  if (!requestId.ok) return domainFailure(`panel verdict source record request id is invalid: ${requestId.error.message}`);
+  if (!slotId.ok) return domainFailure(`panel verdict source record slot id is invalid: ${slotId.error.message}`);
+  if (attempt === null) return domainFailure("panel verdict source record attempt must be 1 or 2");
+  if (!payloadDigest.ok) return domainFailure(`panel verdict source record payload digest is invalid: ${payloadDigest.error.message}`);
+  if (!payloadByteLength.ok) return domainFailure(`panel verdict source record payload byte length is invalid: ${payloadByteLength.error.message}`);
+  if (!source.ok) return domainFailure(`panel verdict source record source is invalid: ${source.error}`);
+
+  const arm = certifyAcceptedCallArm(
+    { requestId: requestId.value, source: source.value, acceptedCall: record["acceptedCall"] },
+    parsePanelVerdictAcceptedCall,
+  );
+  if (!arm.ok) return arm;
+  return domainSuccess(recordOf(requestId.value, slotId.value, attempt, arm.value, payloadDigest.value, payloadByteLength.value));
+}
+
+/**
+ * The EXACT REPLAY of one durable record's accepted selection (AD-9's replay
+ * row): the emission arm re-certifies its claims against the frozen registry
+ * through the mint, re-folds the single accepted call, and re-runs the SAME
+ * selection — so a re-scan reproduces the accepted bytes and call identity
+ * instead of re-parsing the pre-selection transcript bytes. A record whose
+ * schema digest does not certify the minted registry digest refuses. The
+ * caller verifies the returned selection's bytes against the record's payload
+ * digest (it owns the bytes); extraction arms replay verbatim with the
+ * retained refusal in place.
+ */
+export function replayPanelVerdictSourceSelection(
+  record: PanelVerdictSourceRecord,
+  rawJson: string,
+): DomainResult<PanelVerdictSourceSelection, string> {
+  if (!isEmissionSourceRecord(record)) {
+    // The durable refusal re-enters the selection vocabulary verbatim: the
+    // provenance form widened the parse's code to a validated non-empty
+    // string (the shared provenance vocabulary) and this arm carries it
+    // unchanged — the code is never re-ingested by any parse.
+    const { emissionRefusal } = record.source;
+    return emissionRefusal === undefined
+      ? domainSuccess(canonicalRecord({ kind: "final-message-extraction" as const, rawJson, source: "extraction" as const }))
+      : domainSuccess(canonicalRecord({
+          kind: "extraction-over-refused-call" as const,
+          rawJson,
+          source: "extraction" as const,
+          emissionRefusal,
+        }));
+  }
+  // The record's emission claims select a VERDICT registry cell: the record
+  // arm carries a verdict producer kind, its schema version and its accepted
+  // call by construction, so the claims need no narrowing here.
+  const minted = issueEmissionBinding({
+    requestId: record.requestId,
+    kind: record.source.producerKind,
+    version: record.source.emissionSchemaVersion,
+  });
+  if (!minted.ok) {
+    return domainFailure(`the record's emission claims select no frozen registry cell: ${minted.error.message}`);
+  }
+  if (minted.value.schemaDigest !== record.source.schemaDigest) {
+    return domainFailure(`the record's schema digest does not certify the frozen registry digest ${minted.value.schemaDigest}`);
+  }
+  const selection = selectVerdictSource(
+    minted.value,
+    observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: record.acceptedCall })]),
+    rawJson,
+  );
+  if (selection.kind !== "emission-tool-arguments") {
+    return domainFailure(`replaying the record's accepted call did not reproduce the accepted emission selection (${selection.kind})`);
+  }
+  if (selection.call.toolCallId !== record.source.toolCallId) {
+    return domainFailure(`the replayed call identity ${selection.call.toolCallId} does not match the recorded ${record.source.toolCallId}`);
+  }
+  return domainSuccess(selection);
+}

@@ -8,8 +8,6 @@ import {
   parseReviewPacket,
   parseReviewPacketRecovery,
   serializeReviewPacket,
-  sha256Bytes,
-  sha256Hex,
   parseBaseSha,
   parseHeadSha,
   type BaseSha,
@@ -19,6 +17,7 @@ import {
   type ReviewPacketInput,
   type ReviewPath,
 } from "../../src/core/review-packet";
+import { sha256Bytes, sha256Hex } from "../../src/core/digest";
 
 const base = (hex: string): BaseSha => {
   const parsed = parseBaseSha(hex);
@@ -192,6 +191,30 @@ describe("Review Packet", () => {
       declaredPaths: ["a.ts"],
       artifacts: [{ path: "outside.ts", diff: "x", postimage: bytes("x") }],
     })), /outside the.*scope/);
+  });
+
+  it("reviews a scoped directory through the leaf artifacts below it", () => {
+    const directory = createReviewPacket(input({
+      declaredPaths: ["src/feature"],
+      modifiedPaths: ["src/feature"],
+      artifacts: [
+        { path: "src/feature/a.ts", diff: "+a\n", postimage: bytes("a\n") },
+        { path: "src/feature/nested/b.ts", diff: "-b\n", postimage: null },
+      ],
+    }));
+    expect(directory.ok).toBe(true);
+    if (directory.ok) expect(parseReviewPacket(serializeReviewPacket(directory.value))).toEqual(directory);
+    expectError(createReviewPacket(input({
+      declaredPaths: ["src/feature"],
+      modifiedPaths: [],
+      artifacts: [],
+    })), /scoped path 'src\/feature' has no artifact/);
+    // A sibling sharing the directory's name prefix is not below it.
+    expectError(createReviewPacket(input({
+      declaredPaths: ["src/feature"],
+      modifiedPaths: [],
+      artifacts: [{ path: "src/feature-other/a.ts", diff: "x", postimage: bytes("x") }],
+    })), /artifact 'src\/feature-other\/a\.ts' is outside/);
   });
 
   it("parses and verifies unknown JSON and has fixed-point serialization", () => {

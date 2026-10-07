@@ -27,8 +27,13 @@ import {
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
-import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
-import { waveGateAuthorityDigest } from "./core/wave-review-authority";
+import {
+  assertPiCliMutationCompatible,
+  captureLoomRuntimeIdentityAt,
+  STRICT_RUNTIME_WRITE_BOUNDARY,
+  type RuntimeWriteBoundary,
+} from "./runtime-compatibility";
+import { installWaveGateRegistration } from "./core/wave-gate-registration";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -308,13 +313,20 @@ export function findRegisteredWaveGateCompletionReplay(
 export class StateManager {
   private readonly path: string;
   private readonly authority: TaskGraphFileAuthority;
+  /** The write boundary's revision policy: strict for every caller except
+   *  implementation settlement, which restores the in-flight attempts'
+   *  provably-clean runtime paths to their attempt-start bytes. See
+   *  RuntimeWriteBoundary. */
+  private readonly writeBoundary: RuntimeWriteBoundary;
 
   constructor(
     path: string,
     authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
+    writeBoundary: RuntimeWriteBoundary = STRICT_RUNTIME_WRITE_BOUNDARY,
   ) {
     this.path = authority.path;
     this.authority = authority;
+    this.writeBoundary = writeBoundary;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
@@ -323,9 +335,12 @@ export class StateManager {
   }
 
   /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
-  static fromLocalSession(sessionId: string): StateManager | null {
+  static fromLocalSession(
+    sessionId: string,
+    writeBoundary: RuntimeWriteBoundary = STRICT_RUNTIME_WRITE_BOUNDARY,
+  ): StateManager | null {
     const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
-    return authority === null ? null : new StateManager(authority.path, authority);
+    return authority === null ? null : new StateManager(authority.path, authority, writeBoundary);
   }
 
   /**
@@ -409,64 +424,12 @@ export class StateManager {
   ): Promise<ActiveWaveGateRegistration> {
     const parsed = parseActiveWaveGateRegistration(rawRegistration);
     if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
-    const registration = parsed.value;
     return this.updateAndReturn((state) => {
-      if (state.current_phase !== "execute") {
-        throw new Error(`Cannot register Wave Gate run outside execute Phase (current: ${state.current_phase})`);
-      }
-      if (state.current_wave !== registration.wave) {
-        throw new Error(`Cannot register Wave Gate wave ${registration.wave}; protected current_wave is ${state.current_wave ?? "missing"}`);
-      }
-      if (registration.revision !== 0 || registration.terminalOutcome !== null) {
-        throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
-      }
-      const completed = state.wave_gate_history ?? [];
-      if (completed.some((entry) => entry.runId === registration.runId)) {
-        throw new Error(`Wave Gate run ${registration.runId} is already terminal`);
-      }
-      if (completed.some((entry) => entry.wave >= registration.wave)) {
-        throw new Error(`Wave ${registration.wave} is already completed or older than terminal Wave history`);
-      }
-      const existing = state.active_wave_gate;
-      if (existing !== undefined) {
-        const exactReplay = existing.runId === registration.runId &&
-          existing.wave === registration.wave &&
-          existing.authorityDigest === registration.authorityDigest && existing.runsRoot === registration.runsRoot &&
-          existing.revision === registration.revision && existing.terminalOutcome === null;
-        if (exactReplay) return { state, value: existing };
-        if (existing.terminalOutcome === null) {
-          throw new Error(`Active Wave Gate run ${existing.runId} already owns wave ${existing.wave}`);
-        }
-        if (existing.terminalOutcome.kind !== "terminal-abandoned") {
-          throw new Error(
-            `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
-          );
-        }
-        if (existing.terminalOutcome.supersededBy !== null &&
-            existing.terminalOutcome.supersededBy !== registration.runId) {
-          throw new Error(
-            `Abandoned Wave Gate run ${existing.runId} authorizes successor ${existing.terminalOutcome.supersededBy}, ` +
-            `not ${registration.runId}`,
-          );
-        }
-        // An operator-abandoned tombstone is not authority for the Wave: the
-        // fresh registration supersedes it below. Roster and digest are still
-        // re-proven against the locked state, and the tombstone is NOT
-        // archived into wave_gate_history — that history poisons later starts
-        // for the same Wave, and an abandoned run was never completed.
-      }
-      const lockedTaskIds = state.tasks
-        .filter((task) => task.wave === registration.wave)
-        .map(({ id }) => id);
-      const rosterMatches = lockedTaskIds.length === publishedTaskIds.length &&
-        lockedTaskIds.every((taskId, index) => taskId === publishedTaskIds[index]);
-      const lockedDigest = waveGateAuthorityDigest(registration.wave, lockedTaskIds, state);
-      if (!rosterMatches || lockedDigest !== registration.authorityDigest) {
-        throw new Error(
-          "Protected Wave authority changed after Run Directory publication; active Wave Gate was not installed",
-        );
-      }
-      return { state: { ...state, active_wave_gate: registration }, value: registration };
+      const decision = installWaveGateRegistration(state, parsed.value, publishedTaskIds);
+      if (decision.kind === "refused") throw new Error(decision.message);
+      return decision.kind === "replayed"
+        ? { state, value: decision.registration }
+        : { state: decision.state, value: decision.registration };
     });
   }
 
@@ -623,7 +586,12 @@ export class StateManager {
     // This is the final shared write boundary, including replacement/repair
     // paths. Check before lock creation so a skewed fresh CLI leaves the
     // protected graph byte-for-byte and metadata-for-metadata untouched.
-    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
+    // Implementation settlement's restoring boundary hashes the in-flight
+    // attempts' provably-clean runtime paths at their attempt-start bytes: the
+    // attempt writing those files is the product, not runtime drift. Every
+    // other path still hashes live, so any other drift refuses exactly as
+    // before; the strict boundary is the full-domain live capture.
+    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
       withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {

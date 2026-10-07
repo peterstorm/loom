@@ -18,12 +18,8 @@
 
 import { z } from "zod";
 import { DAG_INPUT, createTransformNode, defineDag, ok, type DagDef } from "@fuguejs/framework";
-import {
-  aggregateArchitecturePanel,
-  tallyRefutationPanel,
-  type ArchitecturePanelAuthority,
-  type RefutationPanelAuthority,
-} from "../../core/panel-program";
+import type { ArchitecturePanelAuthority, RefutationPanelAuthority } from "../../core/panel-authority";
+import { aggregateArchitecturePanel, tallyRefutationPanel } from "../../core/persistent-panel";
 import type { JudgeVerdict } from "../../core/panel-contract";
 import type { RefutationVerdict } from "../../core/review-panel";
 import type { VerdictEnvelope } from "../../core/panel-kernel";

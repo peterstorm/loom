@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluateTaskProof } from "../engine/src/core/proof-obligations";
-import { parseContextPacket } from "../engine/src/core/context-packets";
+import { parseContextPacket, type ContextPacket } from "../engine/src/core/context-packets";
+import { CONTEXT_PACKET_BOUNDS, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 import { readWaveReviewContext } from "../engine/src/core/wave-review-authority";
 import type { ReviewerDraftV2 } from "../engine/src/core/reviewer-contract";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
@@ -174,11 +175,39 @@ function assertBatchReplay(cwd: string, runsRoot: string, runDir: string, expect
   check(JSON.stringify(requestIds(replay)) === JSON.stringify(requestIds(expected)), `${label} resume changed pending request authority`);
 }
 
+/**
+ * What a reviewer's own Bash does with a read-coverage task (ADR-0022): run the
+ * issued read command with --diff for every listed file until nextOffset is
+ * null. Each stdout is a real reader page, handed to `submit --tool-outputs`
+ * exactly as a non-capturing harness would; tasks without the obligation read nothing.
+ */
+function frozenDiffReads(cwd: string, request: SpawnRequest): readonly string[] {
+  if (!request.task.includes("LOOM_READ_COVERAGE: every-frozen-diff-unit")) return [];
+  const command = /^LOOM_CONTEXT_READ_COMMAND: (.*)$/m.exec(request.task)?.[1];
+  check(command !== undefined, "read-coverage task is missing its read command");
+  const outputs: string[] = [];
+  for (const [, path] of request.task.matchAll(/^- (.+): \d+ units, \d+ page\(s\)$/gm)) {
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const read = spawnSync("bash", ["-c", `${command} --diff '${path}' --offset ${offset}`], { cwd, encoding: "utf8" });
+      check(read.status === 0, `frozen diff read failed for ${path}: ${read.stderr}`);
+      outputs.push(read.stdout);
+      offset = (JSON.parse(read.stdout) as { nextOffset: number | null }).nextOffset;
+    }
+  }
+  check(outputs.length > 0, "read-coverage task listed no frozen diff to read");
+  return outputs;
+}
+
 function submit(cwd: string, runsRoot: string, runDir: string, request: SpawnRequest, output: string): unknown {
   const { authority } = request;
+  const reads = frozenDiffReads(cwd, request);
+  const toolOutputs = join(runsRoot, `tool-outputs-${authority.requestId.slice(-16)}.json`);
+  if (reads.length > 0) writeFileSync(toolOutputs, JSON.stringify(reads));
   return run(cwd, [
     "submit", "--runs-root", runsRoot, "--run", runDir,
     "--request", authority.requestId, "--slot", authority.slotId, "--attempt", String(authority.attempt),
+    ...(reads.length > 0 ? ["--tool-outputs", toolOutputs] : []),
   ], output);
 }
 
@@ -211,16 +240,22 @@ function scriptedFindings(severity: "clean" | "critical" | "advisory", path: str
   }];
 }
 
+/** The issued request's Context Packet, read the way the engine stores it. */
+function issuedPacket(runDir: string, request: SpawnRequest): ContextPacket {
+  const stored = readStoredContextPacketFile(join(runDir, "contexts", `${request.authority.contextDigest}.json`), CONTEXT_PACKET_BOUNDS);
+  check(stored.ok, "issued Context Packet is unreadable");
+  const parsed = parseContextPacket(stored.value.record);
+  check(parsed.ok, "issued Context Packet failed parsing");
+  return parsed.value;
+}
+
 function reviewerOutput(
   runDir: string,
   request: SpawnRequest,
   severity: "clean" | "critical" | "advisory",
   path: string,
 ): string {
-  const parsed = parseContextPacket(JSON.parse(readFileSync(
-    join(runDir, "contexts", `${request.authority.contextDigest}.json`), "utf8")));
-  check(parsed.ok, "reviewer Context Packet failed parsing");
-  const packet = parsed.value;
+  const packet = issuedPacket(runDir, request);
   check(packet.schemaVersion === 2 && packet.digest === request.authority.contextDigest &&
     packet.requestId === request.authority.requestId && packet.role === request.authority.role,
   "fresh reviewer issuance must carry its matching current wire");
@@ -248,14 +283,10 @@ function refutationOutput(
   request: SpawnRequest,
   verdict: "refuted" | "upheld" = "refuted",
 ): string {
-  const contextPath = join(runDir, "contexts", `${request.authority.contextDigest}.json`);
-  const packet = record(JSON.parse(readFileSync(contextPath, "utf8")) as unknown, "refutation context packet");
-  check(Array.isArray(packet.fixedContext), "refutation context has no fixedContext");
-  const section = packet.fixedContext
-    .map((candidate, index) => record(candidate, `fixedContext[${index}]`))
-    .find((candidate) => candidate.label === "refutation-authority" || candidate.label === "wave-refutation-authority");
-  check(section !== undefined && Array.isArray(section.bytes), "refutation authority section is missing");
-  const authority = record(JSON.parse(Buffer.from(section.bytes as number[]).toString("utf8")) as unknown, "refutation authority");
+  const section = issuedPacket(runDir, request).fixedContext
+    .find(({ label }) => label === "refutation-authority" || label === "wave-refutation-authority");
+  check(section !== undefined, "refutation authority section is missing");
+  const authority = record(JSON.parse(Buffer.from(Uint8Array.from(section.bytes)).toString("utf8")) as unknown, "refutation authority");
   check(typeof authority.lens === "string", "refutation lens is missing");
   check(Array.isArray(authority.findings) && authority.findings.length > 0, "refutation findings are missing");
   const verdicts = authority.findings.map((candidate, index) => {

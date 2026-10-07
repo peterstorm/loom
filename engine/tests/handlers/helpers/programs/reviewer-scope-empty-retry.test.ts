@@ -1,12 +1,12 @@
 /**
  * Consumer-level pin for the reviewer-scope Git observations in
- * handlers/helpers/programs/helpers (the standalone-review scope authority).
+ * handlers/helpers/programs/changed-paths (the standalone-review scope authority).
  *
  * The canonical empty-stdout transient rationale lives at `observeGitProbe`
  * (utils/git-probe); the policy was already enforced at the four other
  * Git-observing families (config root probe, utils/git root/HEAD/diff probes,
  * git-remediation, workspace-digest). This file closes the last gap: a revert
- * of the retry inside helpers.ts alone would otherwise freeze a silently
+ * of the retry inside changed-paths.ts alone would otherwise freeze a silently
  * reduced review scope (an empty path family or an empty HEAD revision) with
  * no diagnostic, because `parseStandaloneReviewScope` refuses only the
  * all-empty union, never a partially emptied one.
@@ -45,7 +45,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-import { deriveChangedPaths, metadata } from "../../../../src/handlers/helpers/programs/helpers";
+import { deriveChangedPaths, metadata } from "../../../../src/handlers/helpers/programs/changed-paths";
 
 const SHA = "b".repeat(40);
 

@@ -6,6 +6,7 @@ import {
   parseReservationId,
 } from "../../src/core/implementation-completion";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { slot } from "../fixtures/pi-reserved-slot";
 import type { TaskGraph } from "../../src/types";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import {
@@ -93,11 +94,11 @@ describe("Pi exact implementation authority correlation", () => {
         stopReason: "error",
         messages: [],
       },
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-implementer-agent",
         taskId: "T1",
         implementationAuthority: attempt,
-      },
+      }),
       now: "2026-08-24T00:01:00.000Z",
       projectBoundary: { kind: "state-layout", root: process.cwd() },
     });
@@ -152,11 +153,11 @@ describe("Pi exact implementation authority correlation", () => {
         stopReason: "error",
         messages: [],
       },
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-implementer-agent",
         taskId: "T1",
         implementationAuthority: oldAttempt,
-      },
+      }),
       now: "2026-08-24T00:01:00.000Z",
       projectBoundary: { kind: "state-layout", root: process.cwd() },
     });

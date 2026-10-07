@@ -5,13 +5,20 @@ import { parseRequestId, parseOrchestrationRunId, parseAgentRequestAuthority, pa
   type AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
-import { sha256Hex } from "../../src/core/review-packet";
-import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, standaloneOriginReference } from "../../src/core/standalone-lineage";
+import { sha256Hex } from "../../src/core/digest";
+import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-review";
+import { standaloneOriginReference } from "../../src/core/standalone-finding-origin";
 import { parseStandaloneReviewerPayloadV3, parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_SCHEMA_V3, STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3 } from "../../src/core/standalone-lineage-contract";
 import { buildStandaloneSuccessorReviewerContext, standaloneSuccessorReviewerRegistration, parseIssuedStandaloneSuccessorReviewer,
-  admitStandaloneSuccessorReviewer, aggregateIssuedStandaloneSuccessorEvidence, type IssuedStandaloneSuccessorReviewer } from "../../src/core/standalone-successor-reviewer";
+  admitStandaloneSuccessorReviewer, aggregateIssuedStandaloneSuccessorEvidence,
+  type IssuedStandaloneSuccessorReviewer } from "../../src/core/standalone-successor-reviewer";
+import { EMISSION_TOOL_SPECS, issueEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
+import { issuedReviewerEmissionRoute, projectRegisteredReviewerProtocol } from "../../src/core/reviewer-emission-route";
+import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
+import { observeEmissionCalls } from "../../src/core/emission-observation";
+import { emissionCallFrame } from "../fixtures/emission-call-frame";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
 const prior = valueOf(prepareStandaloneLineageSource(standaloneFixture(undefined, true).input.standaloneResult, "/owned/predecessor"));
@@ -39,6 +46,19 @@ function fixture(role = "code-reviewer", attempt: 1 | 2 = 1) {
   const registration = standaloneSuccessorReviewerRegistration(prepared);
   const issued = valueOf(parseIssuedStandaloneSuccessorReviewer({ request, packet, registration, prepared }));
   return { request, packet, registration, prepared, issued };
+}
+
+/** The successor's issued v3 binding, derived exactly as production derives
+ *  it: the durable v3 registration's protocol projection through the core
+ *  reviewer-route derivation, on the qualified Pi route with a Pi parent. */
+function successorBinding(authority: AgentRequestAuthority): IssuedEmissionBindingOf<"reviewer-payload"> {
+  const protocol = valueOf(projectRegisteredReviewerProtocol({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 }));
+  if (protocol === null) throw new Error("fixture registration must project a reviewer protocol");
+  const qualified = { ...authority, harnessBinding: { ...authority.harnessBinding,
+    pi: lowerModelProfile(valueOf(resolveModelProfile("qualified-local-review")), "pi") } } as AgentRequestAuthority;
+  const route = issuedReviewerEmissionRoute(protocol, qualified, true);
+  if (route.kind !== "emission") throw new Error(`fixture successor route must be emission, got ${route.kind}`);
+  return route.binding;
 }
 
 describe("explicit standalone v3 wire and descriptor conservation", () => {
@@ -143,5 +163,119 @@ describe("publication-bound successor admission at actual core seams", () => {
       transcriptDigest: sha256Hex(new TextDecoder().decode(raw)), ordinal: 2 }, finding: { id: "code-reviewer-2", protocolVersion: 2 } });
     expect(accepted.newFindings[0]?.origin).not.toHaveProperty("publication");
     expect(accepted.payload.findings[0]?.relation.kind).toBe("distinct-related");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The successor's issued emission authority (T9): the successor surface's own
+// v3-locked half of the emission seam's issuance join (AD-6/AD-7/AD-8,
+// FR-001/FR-012). The v3 schema bytes are UNCHANGED (FR-021): the registry
+// cell, the frozen descriptor and the packet's reviewer-payload-schema
+// section are one schema, one contract.
+// ---------------------------------------------------------------------------
+
+describe("the successor's issued emission authority (T9)", () => {
+  const registryV3Cell = EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v3"]!;
+
+  it("keeps one schema, one contract: the registry's v3 cell bytes, the frozen descriptor digest and the packet's schema section are the same bytes (FR-021/FR-031)", () => {
+    expect(registryV3Cell.schemaBytes).toBe(STANDALONE_REVIEWER_SCHEMA_V3);
+    expect(sha256Hex(registryV3Cell.schemaBytes)).toBe(STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest);
+    const f = fixture("code-reviewer", 1);
+    const schemaSection = f.packet.fixedContext.find(section => section.label === "reviewer-payload-schema")!;
+    expect(new TextDecoder().decode(schemaSection.bytes.valueOf())).toBe(registryV3Cell.schemaBytes);
+    expect(registryV3Cell.parsePayload).toBe(parseStandaloneReviewerPayloadV3);
+  });
+
+  it("derives the successor's v3 binding from its durable registration through the ONE production route — the registry mint's own cell", () => {
+    const f = fixture("code-reviewer", 1);
+    const binding = successorBinding(f.request.authority);
+    expect(binding).toMatchObject({
+      requestId: "request:code-reviewer:1",
+      kind: { kind: "reviewer-payload" },
+      version: "v3",
+      toolName: EMISSION_TOOL_SPECS["reviewer-payload"].toolName,
+      schemaDigest: STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest,
+    });
+    expect(binding).toEqual(valueOf(issueEmissionBinding({
+      requestId: "request:code-reviewer:1", kind: "reviewer-payload", version: "v3", schemaDigest: STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest,
+    })));
+  });
+
+  it("refuses a drifted or foreign successor protocol descriptor before any binding exists — checked, never trusted (AD-8)", () => {
+    const registration = (reviewerProtocol: unknown) => ({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol });
+    const drifted = projectRegisteredReviewerProtocol(registration({ ...STANDALONE_REVIEWER_PROTOCOL_V3, schemaDigest: "f".repeat(64) }));
+    expect(drifted.ok).toBe(false);
+    // The current v2 descriptor certifies no successor (v3) contract.
+    expect(projectRegisteredReviewerProtocol(registration(CURRENT_REVIEWER_PROTOCOL)).ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Emission-sourced successor payloads cross the UNCHANGED issuance joins
+// (FR-012, T9): the kernel's canonical selection decides WHICH bytes are
+// captured; the successor's own joins (issued protocol, lineage digests,
+// prior-origin/coverage, attribution) stay source-blind — an emission source
+// can never override issuance, and a join refusal is identical regardless of
+// which source produced the bytes.
+// ---------------------------------------------------------------------------
+
+describe("emission-sourced successor payloads cross the unchanged issuance joins (FR-012, T9)", () => {
+  it("selects a valid v3 emission call through the successor's own binding and admits the selected bytes through the identical joins", () => {
+    const f = fixture("code-reviewer", 1);
+    const binding = successorBinding(f.request.authority);
+    const selection = selectCanonicalPayload(
+      binding,
+      observeEmissionCalls([emissionCallFrame(binding, "call-successor-1", payload())]),
+      [],
+    );
+    expect(selection.kind).toBe("emission-tool-arguments");
+    if (selection.kind !== "emission-tool-arguments") throw new Error("fixture must select the emission arm");
+    const admitted = valueOf(admitStandaloneSuccessorReviewer(f.issued, Uint8Array.from(selection.payload.bytes)));
+    // The joins are source-blind: identical lineage, coverage and attribution
+    // to the extraction-sourced admission of the same payload.
+    const extractionAdmitted = valueOf(admitStandaloneSuccessorReviewer(f.issued, bytes(payload())));
+    expect(admitted.request.attempt).toBe(extractionAdmitted.request.attempt);
+    expect(admitted.lineageDigest).toBe(extractionAdmitted.lineageDigest);
+    expect(admitted.payload.snapshotDigest).toBe(extractionAdmitted.payload.snapshotDigest);
+    expect(admitted.newFindings).toEqual(extractionAdmitted.newFindings);
+    expect(admitted.payload).toEqual(extractionAdmitted.payload);
+  });
+
+  it("refuses an emission-sourced payload that violates the coverage join exactly as the extraction path does — a source cannot override issuance", () => {
+    const f = fixture("code-reviewer", 1);
+    const binding = successorBinding(f.request.authority);
+    const coverageViolating = { ...payload(), priorAssessments: [] };
+    const selection = selectCanonicalPayload(
+      binding,
+      observeEmissionCalls([emissionCallFrame(binding, "call-successor-2", coverageViolating)]),
+      [],
+    );
+    expect(selection.kind).toBe("emission-tool-arguments");
+    if (selection.kind !== "emission-tool-arguments") throw new Error("fixture must select the emission arm");
+    const emissionJoinRefusal = admitStandaloneSuccessorReviewer(f.issued, Uint8Array.from(selection.payload.bytes));
+    const extractionJoinRefusal = admitStandaloneSuccessorReviewer(f.issued, bytes(coverageViolating));
+    expect(emissionJoinRefusal.ok).toBe(false);
+    expect(extractionJoinRefusal.ok).toBe(false);
+    if (!emissionJoinRefusal.ok && !extractionJoinRefusal.ok) {
+      expect(emissionJoinRefusal.error.message).toBe(extractionJoinRefusal.error.message);
+    }
+  });
+
+  it("retains the engine-refined refusal on the selection and never reaches the joins with the refused arguments (FR-006)", () => {
+    const f = fixture("code-reviewer", 1);
+    const binding = successorBinding(f.request.authority);
+    const refined = { ...payload(), findings: [{ draft: { severity: "advisory" as const, file: null, line: null, claim: "Exact text ", reason: "   " }, relation: { kind: "independent" as const } }] };
+    const selection = selectCanonicalPayload(
+      binding,
+      observeEmissionCalls([emissionCallFrame(binding, "call-successor-3", refined)]),
+      [{ origin: "content[0].text", text: JSON.stringify(payload()) }],
+    );
+    expect(selection.kind).toBe("extraction-over-refused-call");
+    if (selection.kind !== "extraction-over-refused-call") throw new Error("fixture must retain the refusal");
+    expect(selection.emissionRefusal.code).toBe("invalid-payload");
+    expect(selection.source).toBe("extraction");
+    // The extraction fallback's admitted payload crosses the SAME joins.
+    if (!selection.fallback.ok) throw new Error("fixture fallback must admit");
+    expect(admitStandaloneSuccessorReviewer(f.issued, Uint8Array.from(selection.fallback.value.bytes)).ok).toBe(true);
   });
 });

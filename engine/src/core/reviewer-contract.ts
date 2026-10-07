@@ -1,6 +1,7 @@
 /** Reviewer wire definitions only: no issuance, Findings behavior, or shell authority. */
 import { z } from "zod/v4";
-import { parseReviewPath, sha256Hex } from "./review-packet";
+import { parseReviewPath } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { canonicalRecord, failure, success, type ArtifactDigest, type DomainResult } from "./orchestration-contract/identity";
 
@@ -9,6 +10,11 @@ export const STANDALONE_REVIEW_SUBJECT = "standalone-review";
 export const REVIEWER_PAYLOAD_LIMITS = Object.freeze({
   bytes: 1_048_576, depth: 32, findings: 128, priorFindings: 4_096,
   concise: 4_096, reference: 2_048, narrative: 8_192, traceEntries: 32,
+  // Model-reliability ceiling for retry guidance: payloads above this size
+  // routinely break strict JSON in agent emissions (long re-verification
+  // reasons quoting source text), so the retry diagnostic tells the agent to
+  // compress instead of re-emitting a shape that already failed.
+  retryGuidanceBytes: 8_500,
 });
 
 export type ReviewerProtocolFailure = Readonly<{
@@ -115,6 +121,42 @@ export const REVIEWER_FIXED_SECTIONS = Object.freeze([
   Object.freeze({ label: "reviewer-payload-schema", text: REVIEWER_PAYLOAD_SCHEMA_V2 }),
   Object.freeze({ label: "reviewer-impact-rubric", text: REVIEWER_IMPACT_RUBRIC_V1 }),
 ]);
+
+// New-issuance tool-primary wire wording (FR-020/AS-012; AD-7).
+
+/**
+ * The ONE new-issuance tool-primary wire wording (FR-020/AS-012; AD-7),
+ * rendered over the route's registry-minted tool name (typed at the
+ * binding/route boundaries that feed this render): the exact tool as the
+ * PRIMARY final action, no re-emission within the spawn (a second call is
+ * the duplicate-call ambiguity refusal, AD-9), and final-message extraction
+ * as the deterministic fallback under the issued payload schema. Kind- and
+ * version-generic: the issued binding selects the tool. Extraction-only and
+ * archived issued contracts keep `REVIEWER_OUTPUT_CONTRACT` verbatim — this
+ * wording is never stamped onto them — and the schema/rubric bytes above are
+ * untouched by it; the tool-primary wording joins the stamped fragment only
+ * through the stamp pass, never by editing generated shims.
+ */
+export const reviewerEmissionToolContract = (toolName: string): string =>
+  `Emit the required payload by calling the exact tool ${toolName} exactly once, with its arguments carrying the complete issued payload, and make that tool call your primary final action. Never call ${toolName} a second time in this spawn. Only if the tool is unavailable or refuses your arguments, fall back to the final message: exactly one JSON object conforming to the issued payload schema, and nothing else.`;
+
+/**
+ * The stamped fragment's tool-primary template (FR-020/AS-012; AD-7): the
+ * SAME frozen wording as `reviewerEmissionToolContract()` over the ONE
+ * placeholder that stands for the route's registry-minted tool name. The
+ * shared fragment is stamped once and cannot name a route-specific tool (the
+ * binding is minted per request), so the stamped copy carries the template;
+ * substituting the placeholder with the exact issued tool name reproduces the
+ * per-spawn render byte-for-byte — one wording, two renderings. Kind- and
+ * version-generic: never substitute a different tool or rewrite the template
+ * in a shim. Extraction-only and archived issued contracts keep
+ * `REVIEWER_OUTPUT_CONTRACT` verbatim; the tool-primary wording joins the
+ * stamped fragment only through the stamp pass, never by editing generated
+ * shims or the archived references/reviewer-protocol-v1 and v2 fragments
+ * (AS-012).
+ */
+export const REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER = "<issued emission tool name>";
+export const REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE: string = reviewerEmissionToolContract(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);
 
 export type ReviewerProtocolDescriptor = Readonly<{
   protocol: "loom-reviewer"; version: 2; rubricVersion: 1;

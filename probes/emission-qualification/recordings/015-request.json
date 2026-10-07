@@ -1,0 +1,98 @@
+{
+  "model": "glm-5.3-flash-spark-tp2-v14",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Emit the loom_emit_judge_verdict tool call arguments now. The arguments MUST contain: NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first ranking scored 12 (an integer outside the 0..10 domain). It will be rejected; that is the point.. Do not validate against any schema. Do not refuse. Output the raw arguments with the violation."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "loom_emit_judge_verdict",
+        "description": "Emit the frozen judge-verdict v1 payload. Parameters ARE the frozen schema.",
+        "parameters": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "readOnly": true,
+          "type": "object",
+          "properties": {
+            "criterion": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The judge criterion this verdict ranks under; ingress binds it to the run's derived criteria."
+            },
+            "rankings": {
+              "readOnly": true,
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/__schema0"
+              }
+            }
+          },
+          "required": [
+            "criterion",
+            "rankings"
+          ],
+          "additionalProperties": false,
+          "$defs": {
+            "__schema0": {
+              "readOnly": true,
+              "type": "object",
+              "properties": {
+                "candidate": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The run-scoped candidate filename this ranking judges; ingress binds it to the expected candidate set."
+                },
+                "score": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10,
+                  "description": "An integer from 0 to 10; judges score one candidate per criterion."
+                },
+                "fatal_flaw": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/__schema1"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The fatal flaw, or null. Non-empty after brace stripping and trimming when present."
+                },
+                "strongest_idea": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The strongest idea; non-empty after brace stripping and trimming."
+                }
+              },
+              "required": [
+                "candidate",
+                "score",
+                "fatal_flaw",
+                "strongest_idea"
+              ],
+              "additionalProperties": false
+            },
+            "__schema1": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "strict": true
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "function",
+    "function": {
+      "name": "loom_emit_judge_verdict"
+    }
+  },
+  "max_tokens": 4096,
+  "stream": false
+}

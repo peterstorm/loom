@@ -26,6 +26,7 @@ import type {
 import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./core/verification-manifest";
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
+import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 import type {
@@ -407,14 +408,11 @@ interface TaskCommonMetadataBase {
   readonly active_implementation_context?: ImplementationAttemptContext;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
-  /** First repository boundary retained until an exact attempt is accepted.
-   * Fresh attempts bind to this boundary instead of snapshotting unresolved
-   * foreign bytes as their new starting state. */
+  /** The repository boundary frozen at the current attempt's registration.
+   * Every settlement retires it, so a re-armed attempt freezes a fresh one.
+   * (The former `unresolved_repository_paths` carry had no writer after that
+   * retirement; the State File parser validates and drops legacy copies.) */
   readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Repository-observed unowned paths still different from the retained
-   * repository boundary, including paths omitted from transcript evidence.
-   * Sibling-owned dirty paths never enter this set. */
-  readonly unresolved_repository_paths?: readonly string[];
   readonly reserved_at?: string;
   readonly legacy_execution_reservation?: true;
   /** Engine-issued packet authority retained after a review run closes. A
@@ -714,6 +712,7 @@ export type StatusReasonKind =
   | "wave-implementation-pending"
   | "implementation-escalation-required"
   | "wave-gate-not-started"
+  | "wave-start-not-ready"
   | "run-complete"
   | "completion-prerequisite-failed"
   | "completion-eligible"
@@ -946,7 +945,14 @@ export type WaveImplementationRecovery =
         failureKinds: OrchestrationNonEmpty<string>;
       }>>;
     }>
-  | Readonly<{ kind: "start-wave-gate"; wave: number }>;
+  | Readonly<{ kind: "start-wave-gate"; wave: number }>
+  | Readonly<{
+      kind: "repair-wave-start-readiness";
+      wave: number;
+      /** Every failed start prerequisite, in gate order — exactly the reasons
+       * `start wave-gate` refuses with before claiming a Run Directory. */
+      failures: OrchestrationNonEmpty<string>;
+    }>;
 
 /** An execute Wave holds no Wave Gate registration between entering the Wave
  * and starting its gate. Healthy implementation work is retryable; exhausted
@@ -962,7 +968,19 @@ export type WaveImplementationDiagnostic =
         eligible: true;
         consumesSemanticAttempt: false;
       }>;
-      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" }>;
+      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" | "repair-wave-start-readiness" }>;
+    }>
+  | Readonly<{
+      kind: "wave-start-not-ready";
+      category: "wave-start-prerequisites-unmet";
+      runId: OrchestrationRunId;
+      message: string;
+      retry: Readonly<{
+        kind: "advance-wave-lifecycle";
+        eligible: false;
+        consumesSemanticAttempt: false;
+      }>;
+      recovery: Extract<WaveImplementationRecovery, { kind: "repair-wave-start-readiness" }>;
     }>
   | Readonly<{
       kind: "implementation-escalation-required";
@@ -1048,6 +1066,9 @@ export interface TaskGraph {
    * Tasks and Requirement Content Hashes were populated. Absent on legacy
    * graphs; never contains the derived ParsedSpec itself. */
   readonly spec_index_observation?: SpecIndexObservation;
+  /** Whether population captured every Task's proof boundary from Git, or the
+   * cause it could not. Absent on legacy graphs, which means unknown. */
+  readonly proof_boundary_observation?: ProofBoundaryObservation;
   readonly plan_file: string | null;
   readonly plan_title?: string;
   /** `readonly` for the same reason `Task.findings` is: every producer already
@@ -1090,7 +1111,7 @@ export interface TaskGraph {
 // These are pure data shapes describing what a plan DECLARED, not how it is
 // parsed. They live here rather than in `parsers/parse-plan-models.ts` because
 // both the producer (that parser) and a consumer in the functional core
-// (`core/wave-gate-machine.ts`, which binds lifecycle artifacts to a wave) need
+// (`core/wave-gate-checks.ts`, which binds lifecycle artifacts to a wave) need
 // them. Keeping them in the parser forced core to import across a denied
 // boundary for a type-only dependency; keeping them here lets the arrow point
 // at shared data instead. `parse-plan-models.ts` re-exports them, so its

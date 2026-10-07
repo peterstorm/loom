@@ -1,5 +1,5 @@
 import { canonicalStructuralEquals } from "../../src/core/orchestration-contract";
-import { readPublishedStandaloneDisposition, type PreparedStandaloneDisposition, type StandaloneDispositionPublicationReader } from "../../src/core/standalone-lineage";
+import { readPublishedStandaloneDisposition, type PreparedStandaloneDisposition, type StandaloneDispositionPublicationReader } from "../../src/core/standalone-review";
 import { valueOf } from "./standalone-remediation-authority";
 
 /** In-memory publication adapter. Production uses authenticated Run registration/receipt/artifact reads. */

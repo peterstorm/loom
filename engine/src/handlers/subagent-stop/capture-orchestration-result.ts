@@ -26,21 +26,41 @@
  * review beside an active wave therefore cannot capture into the wave's graph or
  * vice versa.
  *
- * Claude's payload reader and native correlator live here. Capture writes and
- * payload admission are shared with Pi through `harness-capture-runtime`.
+ * Claude's transcript READ (bounded, typed read/corruption failures) and native
+ * correlator live here; what the transcript says — final-payload candidates,
+ * emission call frames, tool outputs, the spawn prompt — is the pure
+ * core/claude-transcript-projection over ONE parse of the lines. Capture writes
+ * and payload admission are shared with Pi through `harness-capture-runtime`.
  * This adapter also preserves the historical Claude observation-fault policy
  * from the bound packet/registration; current infrastructure unavailability
  * must not consume a reviewer semantic attempt.
+ *
+ * The default observation (T7) reads BOTH closed vocabularies from that one
+ * parse: the final-payload candidates (handback-aware) plus the assistant
+ * emission-tool-call frames — so the shared runtime's ONE canonical selection
+ * serves Claude too, and a call to an emission tool this request never
+ * advertised is REFUSED (extraction-only authority cannot be upgraded), never
+ * absorbed as absence. A caller-supplied payload reader owns its whole
+ * observation, candidates only.
  */
 
-import { readFileSync } from "node:fs";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { CLAUDE_TRANSCRIPT_MAX_BYTES, readClaudeTranscriptText } from "../../orchestration/claude-transcript-file";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import type { AgentRequestAuthority } from "../../core/orchestration-contract";
-import { isReviewAgent } from "../../config";
+import type { EmissionSchemaVersion } from "../../core/emission-tool";
+import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { parseRegisteredFacadeProgram } from "../helpers/programs";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
+import {
+  claudeEmissionScan,
+  claudeToolOutputs,
+  claudeTranscriptCandidates,
+  claudeTranscriptSpawnPrompt,
+  parseClaudeTranscript,
+  type ClaudeEmissionAttribution,
+  type ClaudeTranscript,
+} from "../../core/claude-transcript-projection";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
 import type { BindingResult } from "../../orchestration/session-run-bindings";
@@ -55,6 +75,7 @@ import {
 import {
   captureAuditLine,
   captureCandidates,
+  captureEmissionObservation,
   captureUnavailable,
   captureHarnessResult,
   describeCaptureFailure,
@@ -68,159 +89,48 @@ import {
 
 export type { CaptureOutcome };
 
-/**
- * Inspect the FINAL TURN of a Claude transcript and hand over the final
- * payload it carries.
- *
- * Claude's transcript is JSONL with one entry per line. Only the final turn is
- * examined — no earlier turn is ever searched as a fallback. Lines that are not
- * conversation entries (`attachment`, `system`, …) carry no payload and are
- * skipped wherever they fall, so a harness bookkeeping line written after the
- * subagent stopped cannot hide its result.
- *
- * The final turn takes one of two shapes:
- *  - legacy: it ends with an assistant line; that line's text blocks are the
- *    candidates.
- *  - SubagentHandback: current Claude Code subagents deliver their report by
- *    calling the `SubagentHandback` tool. The turn then ends with the user
- *    tool_result lines answering the calls of ONE assistant message — which
- *    Claude writes as several assistant lines sharing a message id when the
- *    model made parallel calls. Each `SubagentHandback` call in that message
- *    whose tool_result is present and not an error contributes its string
- *    `input.message`. A failed or unanswered handback delivers nothing; the
- *    message's other blocks (prose, other tool calls) are never a result.
- *
- * A syntactically malformed line is reported as transcript corruption with its
- * line number. Any other final turn yields no candidate, so the payload rules
- * still reject instead of accepting salvage.
- *
- * Several candidates are reported as the ambiguity they are rather than being
- * collapsed here: choosing or joining them is the shared payload rule's
- * decision, and pre-selecting one would turn `ambiguous-final-payload` into an
- * unreachable refusal on this path.
- */
 class ClaudeTranscriptReadError extends Error {}
 class ClaudeTranscriptJsonError extends Error {}
 
 export type ClaudePayloadReader = (transcriptPath: string) => readonly FinalPayloadCandidate[];
 
-type Block = Readonly<Record<string, unknown>>;
-
-/** One conversation line of the transcript, by role. */
-type ConversationLine = Readonly<{ index: number; role: "assistant" | "user"; messageId: string | null; content: readonly Block[] }>;
-
-function readTranscriptLines(transcriptPath: string, maximumBytes?: number): readonly string[] {
-  // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
-  // which would turn an unreadable transcript into a silent "no candidates"
-  // before readFileSync could surface the cause. Once the locator selected this
-  // path, EVERY read failure — including ENOENT when the file disappeared — is
-  // filesystem evidence the operator must see, never a missing-payload claim.
+/** The one bounded transcript read behind every Claude transcript projection,
+ *  parsed once. No pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
+ *  which would turn an unreadable transcript into a silent "no candidates"
+ *  before the read could surface the cause. Once the locator selected this
+ *  path, EVERY read failure — including ENOENT when the file disappeared and an
+ *  oversize file — is filesystem evidence the operator must see, never a
+ *  missing-payload claim. */
+function readClaudeTranscript(transcriptPath: string, maximumBytes: number): ClaudeTranscript {
+  let text: string;
   try {
-    return (maximumBytes === undefined ? readFileSync(transcriptPath, "utf-8")
-      : new TextDecoder("utf-8", { fatal: true }).decode(readRunBytesNoFollow(transcriptPath, maximumBytes))).split("\n");
+    text = readClaudeTranscriptText(transcriptPath, maximumBytes);
   } catch (error) {
     throw new ClaudeTranscriptReadError(
       `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  return parseClaudeTranscript(text.split("\n"));
 }
 
-const isRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw);
-
-/** The `message` object of one transcript line; malformed JSON is corruption with its 1-based line number. */
-function transcriptMessageOf(line: string, zeroBasedLine: number, position: string): Readonly<Record<string, unknown>> | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(line) as unknown;
-  } catch (error) {
-    throw new ClaudeTranscriptJsonError(
-      `invalid ${position} Claude transcript JSON at line ${zeroBasedLine + 1}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (!isRecord(parsed)) return null;
-  const message = parsed["message"];
-  return isRecord(message) ? message : null;
+/** The final-turn candidates of a transcript; a corrupt final turn is thrown as its typed refusal. */
+function candidatesOf(transcript: ClaudeTranscript): readonly FinalPayloadCandidate[] {
+  const candidates = claudeTranscriptCandidates(transcript);
+  if (!candidates.ok) throw new ClaudeTranscriptJsonError(candidates.error);
+  return candidates.value;
 }
 
-/** A line as a conversation entry, or `null` for anything else (attachments, system lines, …). */
-function conversationLineOf(line: string, index: number): ConversationLine | null {
-  const message = transcriptMessageOf(line, index, "final");
-  if (message === null || !Array.isArray(message["content"])) return null;
-  const role = message["role"];
-  if (role !== "assistant" && role !== "user") return null;
-  return Object.freeze({
-    index,
-    role,
-    messageId: typeof message["id"] === "string" ? message["id"] : null,
-    content: (message["content"] as readonly unknown[]).filter(isRecord),
-  });
-}
-
-const isToolResultLine = (line: ConversationLine): boolean =>
-  line.role === "user" && line.content.length > 0 && line.content.every((block) => block["type"] === "tool_result");
-
-const textsOf = (line: ConversationLine): readonly string[] =>
-  line.content
-    .filter((block) => block["type"] === "text")
-    .map((block) => block["text"])
-    .filter((text): text is string => typeof text === "string");
-
-/** Delivered handback payloads of one assistant message, given the results that answered it. */
-function deliveredHandbacks(
-  message: readonly ConversationLine[],
-  results: ReadonlyMap<string, boolean>,
+/**
+ * The FINAL TURN payload candidates of a Claude transcript (see
+ * `claudeTranscriptCandidates` for the rule): the default `ClaudePayloadReader`.
+ * An unreadable transcript throws its read error; a malformed line the final
+ * turn reaches throws transcript corruption with its line number.
+ */
+export function claudeFinalPayloadCandidates(
+  transcriptPath: string,
+  maximumBytes = CLAUDE_TRANSCRIPT_MAX_BYTES,
 ): readonly FinalPayloadCandidate[] {
-  return message.flatMap((line) => line.content.flatMap((block): FinalPayloadCandidate[] => {
-    if (block["type"] !== "tool_use" || block["name"] !== "SubagentHandback" || typeof block["id"] !== "string") return [];
-    // Unanswered, or answered with an error: the handback delivered nothing.
-    if (results.get(block["id"]) !== false) return [];
-    const payload = isRecord(block["input"]) ? block["input"]["message"] : undefined;
-    return typeof payload === "string" ? [Object.freeze({ origin: `transcript.line[${line.index}].handback`, text: payload })] : [];
-  }));
-}
-
-export function claudeFinalPayloadCandidates(transcriptPath: string, maximumBytes?: number): readonly FinalPayloadCandidate[] {
-  const lines = readTranscriptLines(transcriptPath, maximumBytes);
-  // Walk backwards, parsing only as far as the final turn reaches: a torn or
-  // malformed line in an EARLIER turn is not this capture's evidence.
-  let cursor = lines.length;
-  const previousConversationLine = (): ConversationLine | null => {
-    while (--cursor >= 0) {
-      if (lines[cursor]!.trim().length === 0) continue;
-      const line = conversationLineOf(lines[cursor]!, cursor);
-      if (line !== null) return line;
-    }
-    return null;
-  };
-
-  const results = new Map<string, boolean>();
-  let caller = previousConversationLine();
-  while (caller !== null && isToolResultLine(caller)) {
-    for (const block of caller.content) {
-      if (typeof block["tool_use_id"] === "string") results.set(block["tool_use_id"], block["is_error"] === true);
-    }
-    caller = previousConversationLine();
-  }
-  if (caller === null || caller.role !== "assistant") return Object.freeze([]);
-  if (results.size === 0) {
-    const last = caller;
-    return Object.freeze(textsOf(last).map((text, blockIndex) => Object.freeze({
-      origin: `transcript.line[${last.index}].block[${blockIndex}]`,
-      text,
-    })));
-  }
-
-  // The assistant message the results answer: Claude writes one line per block
-  // of a multi-call message, all sharing its message id.
-  const message: ConversationLine[] = [caller];
-  if (caller.messageId !== null) {
-    for (let line = previousConversationLine(); line?.role === "assistant" && line.messageId === caller.messageId;
-      line = previousConversationLine()) {
-      message.unshift(line);
-    }
-  }
-  return Object.freeze(deliveredHandbacks(message, results));
+  return candidatesOf(readClaudeTranscript(transcriptPath, maximumBytes));
 }
 
 /**
@@ -228,21 +138,10 @@ export function claudeFinalPayloadCandidates(transcriptPath: string, maximumByte
  * message, written by the harness from the Agent call's prompt. `null` when the
  * opening line is not such a message (it then carries no request marker).
  */
-export function claudeSpawnPrompt(transcriptPath: string, maximumBytes = 16_777_216): BindingResult<string | null> {
+export function claudeSpawnPrompt(transcriptPath: string, maximumBytes = CLAUDE_TRANSCRIPT_MAX_BYTES): BindingResult<string | null> {
   try {
-    const lines = readTranscriptLines(transcriptPath, maximumBytes);
-    const openingIndex = lines.findIndex((line) => line.trim().length > 0);
-    if (openingIndex < 0) return { ok: true, value: null };
-    const message = transcriptMessageOf(lines[openingIndex]!, openingIndex, "opening");
-    if (message === null || message["role"] !== "user") return { ok: true, value: null };
-    const content = message["content"];
-    if (typeof content === "string") return { ok: true, value: content };
-    if (!Array.isArray(content)) return { ok: true, value: null };
-    const texts = (content as readonly unknown[])
-      .filter((block): block is Readonly<Record<string, unknown>> => isRecord(block) && block["type"] === "text")
-      .map((block) => block["text"])
-      .filter((text): text is string => typeof text === "string");
-    return { ok: true, value: texts.join("\n") };
+    const prompt = claudeTranscriptSpawnPrompt(readClaudeTranscript(transcriptPath, maximumBytes));
+    return prompt.ok ? { ok: true, value: prompt.value } : { ok: false, message: prompt.error };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -282,6 +181,18 @@ export async function establishClaudeStopRun(
   if (role.length === 0) return { ok: false, message: `Claude agent ${nativeId} has no agent role to correlate` };
   const recorded = await recordClaudeSpawnCorrelator(authority.run, { requestId: authority.requestId, role, nativeId });
   return recorded.ok ? { ok: true, value: Object.freeze({ kind: "bound", run: authority.run }) } : recorded;
+}
+
+
+/** The registration's issued emission schema version, as the transcript scan
+ *  attributes it — from the DURABLE registration, never from the transcript
+ *  or the model (AD-7). Archived v1 and non-review programs bind no version. */
+function issuedEmissionVersionOf(
+  parsed: ReturnType<typeof parseRegisteredFacadeProgram> | null,
+): EmissionSchemaVersion | null {
+  if (parsed === null || parsed.kind !== "registered") return null;
+  if (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate") return null;
+  return parsed.program.schemaVersion === 2 ? "v2" : parsed.program.schemaVersion === 3 ? "v3" : null;
 }
 
 /**
@@ -374,6 +285,9 @@ export async function captureClaudeResult(
   // immutable reservation first. An unrelated stop remains `no-reservation`.
   // Actual final-payload refusals can be terminalised against that request;
   // current locator/read unavailability instead preserves its exact attempt.
+  // The transcript the observation parsed, kept for the lazy read-coverage
+  // tool-output projection (ADR-0022) so the file is read and parsed once.
+  let observedTranscript: ClaudeTranscript | null = null;
   const observe = (): CaptureObservation => {
     const transcriptPath = resolveAgentTranscriptPath(input);
     if (transcriptPath === null) {
@@ -399,8 +313,24 @@ export async function captureClaudeResult(
       // Every current capture is bounded before decoding. The old unbounded
       // readFileSync branch admitted the impossible foreign escape, because the
       // correlated request carries no schema version to compare against.
-      return captureCandidates(readPayload === claudeFinalPayloadCandidates
-        ? claudeFinalPayloadCandidates(transcriptPath, 16_777_216) : readPayload(transcriptPath));
+      //
+      // The default observation reads BOTH closed vocabularies from one
+      // bounded parse (T7): the handback-aware final-payload candidates AND the
+      // emission-family tool-call frames — so the capture runtime's ONE
+      // canonical selection serves Claude too, and a call to an emission tool
+      // this request never advertised is refused, never absorbed as absence.
+      // A caller-supplied reader owns its WHOLE observation (candidates only);
+      // the frame scan is part of the default projection.
+      if (readPayload !== claudeFinalPayloadCandidates) return captureCandidates(readPayload(transcriptPath));
+      const attributed: ClaudeEmissionAttribution | null = correlated.ok
+        ? { requestId: correlated.value.request.requestId, version: issuedEmissionVersionOf(parsedRegistration) }
+        : null;
+      const transcript = readClaudeTranscript(transcriptPath, CLAUDE_TRANSCRIPT_MAX_BYTES);
+      observedTranscript = transcript;
+      const candidates = candidatesOf(transcript);
+      if (attributed === null) return captureCandidates(candidates);
+      const scan = claudeEmissionScan(transcript, attributed);
+      return captureEmissionObservation(scan.frames, candidates, scan.walkIncompleteness);
     } catch (error) {
       if (error instanceof ClaudeTranscriptReadError) {
         return claudeObservationUnavailable(input, runsRoot, runDirectory, "transcript-read", error.message);
@@ -417,6 +347,11 @@ export async function captureClaudeResult(
     // carries; the spawn side recorded it beside the reservation.
     nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
     observe,
+    // Only the default projection reads the transcript lines; a caller-supplied
+    // payload reader owns its whole observation and supplies no tool outputs.
+    ...(readPayload === claudeFinalPayloadCandidates
+      ? { observeToolOutputs: () => observedTranscript === null ? Object.freeze([]) : claudeToolOutputs(observedTranscript) }
+      : {}),
   });
 }
 

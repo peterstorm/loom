@@ -51,7 +51,7 @@ Organized as a ladder from "close existing gaps" to "formal methods," in rough o
 
 ### Tier 1 — mechanize reviewer dimensions
 
-A large fraction of what the frozen reviewer roster (`engine/src/config.ts`, `WAVE_REVIEW_AGENTS`) finds is mechanizable with production-ready 2026 tooling.
+A large fraction of what the frozen reviewer roster (`engine/src/core/agent-catalog-projections.ts`, `WAVE_REVIEW_AGENTS`) finds is mechanizable with production-ready 2026 tooling.
 
 **T1.1 — Replace the regex lint tier with AST-level rules.** The shipped regex rules (`lint-rules/*.json`: `no-any-type`, `no-console-log`, `no-raw-exception-catch`, `no-field-injection`, …) false-positive on strings and comments and cannot express structure. **ast-grep** (Rust/tree-sitter, repo-scale scans in seconds, YAML rules with relational constraints `inside`/`has`/`not`, autofix, embeddable as a library) can slot directly into the `lint-file` PostToolUse hook so violations block at edit time. First-class TypeScript; workable Java. For taint/dataflow rules, **Opengrep** (the LGPL consortium fork of Semgrep CE, which narrowed its OSS scope in Dec 2024) is the choice.
 

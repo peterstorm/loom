@@ -4,8 +4,7 @@ import { applyReviewResolution, resolveReviewFindings, reviewResolutionLog } fro
 import { claimsOfSeverity, removeOnce } from "../../src/core/findings";
 import { parseMachineSummary, parseLegacyFindings, makeParsedFindings, buildEvidenceFailureMessage, reconcileFindings } from "../../src/core/review-output";
 import { mergeFindings } from "../../src/core/findings";
-import { isReviewAgent } from "../../src/config";
-import { REVIEW_SUB_AGENTS } from "../../src/config";
+import { isReviewAgent, REVIEW_SUB_AGENTS } from "../../src/core/agent-catalog-projections";
 import type { Task } from "../../src/types";
 
 describe("parseMachineSummary (pure)", () => {

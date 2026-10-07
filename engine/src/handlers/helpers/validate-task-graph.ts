@@ -6,7 +6,8 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
-import { PHASE_ORDER, KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
+import { PHASE_ORDER } from "../../config";
+import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../core/agent-catalog-projections";
 import {
   attributeFindings,
   claimsOfSeverity,
@@ -49,6 +50,7 @@ import {
   requiresRegression,
 } from "../../core/verification-policy";
 import { isProtectedVerificationPath } from "../../core/completion-suite";
+import { DECISION_RECORD_AGENT } from "../../core/model-profiles";
 export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -284,10 +286,10 @@ export function validateFull(
   }
 
   // ADR tasks must be in the highest wave so they document what already shipped.
-  const adrTasks = validTaskRecords.filter((task) => task.agent === "adr-writer-agent");
+  const adrTasks = validTaskRecords.filter((task) => task.agent === DECISION_RECORD_AGENT);
   if (adrTasks.length > 0 && waves.length > 0) {
     const maxWave = waves[waves.length - 1];
-    const nonImplTasks = validTaskRecords.filter((task) => task.agent !== "adr-writer-agent");
+    const nonImplTasks = validTaskRecords.filter((task) => task.agent !== DECISION_RECORD_AGENT);
     const implWaves = [...new Set(nonImplTasks.map((task) => task.wave as number))]
       .filter((w): w is number => typeof w === "number" && Number.isSafeInteger(w));
     const maxImplWave = implWaves.length > 0 ? Math.max(...implWaves) : 0;

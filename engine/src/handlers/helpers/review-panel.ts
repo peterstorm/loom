@@ -59,11 +59,9 @@ import {
   type FindingOutcome,
   type WaveFindingId,
 } from "../../core/review-panel";
-import {
-  finalizeStandaloneReview,
-  parseStandalonePanelOutcomes,
-  serializeAdjudicatedStandaloneReview,
-} from "../../core/standalone-review";
+import { finalizeStandaloneReview } from "../../core/standalone-review";
+import { parseStandalonePanelOutcomes } from "../../core/standalone-refutation-panel";
+import { serializeAdjudicatedStandaloneReview } from "../../core/standalone-review-records";
 import { loadEvidenceBoundAggregate } from "./standalone-review";
 
 export function standaloneTallyPublishErrors(

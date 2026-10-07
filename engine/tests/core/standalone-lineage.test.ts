@@ -1,15 +1,33 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
-import { readStandaloneReviewPublication } from "../../src/core/standalone-review-machine";
+import {
+  readStandaloneReviewPublication,
+  prepareStandaloneLineageSource,
+  prepareStandaloneDisposition,
+  prepareStandaloneSuccessor,
+  aggregateStandaloneAssessments,
+  attributeStandaloneSuccessorFindings,
+  assessStandaloneSuccessor,
+  projectStandaloneLineageSource,
+  type StandaloneLineageSource,
+  type PreparedStandaloneDisposition,
+  isPreparedStandaloneSuccessor,
+} from "../../src/core/standalone-review";
 import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
-import { STANDALONE_LINEAGE_LIMITS, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
-import { prepareStandaloneLineageSource, prepareStandaloneDisposition, prepareStandaloneSuccessor, parseFindingOrigin,
-  parseStandaloneLineageInventory, standaloneOriginReference, standaloneDecisionReference, aggregateStandaloneAssessments,
-  attributeStandaloneSuccessorFindings, assessStandaloneSuccessor, findingOf, projectStandaloneLineageSource,
-  type PreparedStandaloneSuccessor, type StandaloneLineageSource, type PreparedStandaloneDisposition } from "../../src/core/standalone-lineage";
+import { STANDALONE_LINEAGE_LIMITS, standaloneLineageInventorySchema, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
+import { attributeFindings } from "../../src/core/findings";
+import {
+  parseFindingOrigin,
+  parseStandaloneLineageInventory,
+  standaloneOriginReference,
+  standaloneDecisionReference,
+  findingOf,
+} from "../../src/core/standalone-finding-origin";
+import { type PreparedStandaloneSuccessor } from "../../src/core/standalone-review-model";
+import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const historical = { kind: "historical-decision-unavailable" } as const;
@@ -46,6 +64,19 @@ describe("Standalone Finding Origin and source membership", () => {
     expect(reads).toBe(0);
     expect(prepareStandaloneSuccessor({ ...source() }, bytes({}), historical).ok).toBe(false);
     expectTypeOf<readonly unknown[]>().not.toMatchTypeOf<StandaloneLineageSource>();
+  });
+  it("lets successor custody leave the core only as a read-only predicate that a structural copy cannot satisfy", () => {
+    const minted = successor();
+    expect(isPreparedStandaloneSuccessor(minted)).toBe(true);
+    const copy = { ...minted };
+    expect(isPreparedStandaloneSuccessor(copy)).toBe(false);
+    // Preparation sits above the custody core and admits a successor only through that predicate.
+    const fresh = prepareFreshStandaloneReview({
+      runId: minted.runId, changedPaths: {}, scopeSafety: [], reviewerContexts: [], successor: copy,
+      reviewMetadata: { requested_kinds: ["all"], docs_only: false, source_or_test_changed: true, types_changed: false,
+        comments_changed: false, additions: 1, file_count: 1, new_structure: false, languages: ["TypeScript"] },
+    });
+    expect(fresh).toMatchObject({ ok: false, error: { errors: ["successor membership is required"] } });
   });
   it("joins the original LC-2 publication bytes, not mutable legacy children or a newly computed hash", () => {
     const result = standaloneFixture(scope, false, { firstTranscript: "CRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: isolated integrity probe" }).input.standaloneResult;
@@ -88,6 +119,54 @@ describe("Standalone Finding Origin and source membership", () => {
     for (const inventory of [[row, row], [{ ...row, finding: { ...row.finding, id: "foreign-1" } }],
       [{ ...row, history: [{ ...row.history[0], threshold: 1 }] }], [{ ...row, history: [{ ...row.history[0], survives: true }] }],
       [{ ...row, history: [{ ...row.history[0], refutations: [] }] }]]) expect(parseStandaloneLineageInventory(bytes(inventory)).ok).toBe(false);
+  });
+  it.each(["code-reviewer:1", "code reviewer-1", `code-reviewer-${Number.MAX_SAFE_INTEGER}0`])(
+    "rejects a stored Finding id outside the task-local FindingId grammar: %s", id => {
+      const row = source(true, true).inventory[0]!;
+      expect(parseStandaloneLineageInventory(bytes([{ ...row, finding: { ...row.finding, id } }])))
+        .toMatchObject({ ok: false, error: { code: "invalid-data" } });
+    });
+  describe("the lineage row schema rehydrates exactly the minted FindingId grammar", () => {
+    const FINDING_ID_REFUSAL = "Finding id must be a task-local Finding ID";
+    const rowWithId = (id: string): unknown => {
+      const row = source(true, true).inventory[0]!;
+      return JSON.parse(JSON.stringify([{ ...row, finding: { ...row.finding, id } }]));
+    };
+    const legacyDraft = { severity: "advisory" as const, file: null, line: null, claim: "A minted identity probe." };
+    // Agent names stay inside the row schema's 2048-byte reference bound once
+    // sanitized and suffixed; a longer agent is not a reviewer role name.
+    const agent = fc.string({ minLength: 0, maxLength: 256 });
+    const ordinal = fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER });
+    const mintedId = fc.tuple(agent, ordinal).map(([name, start]) => attributeFindings([legacyDraft], name, start)[0]!.id);
+
+    it("accepts every id attributeFindings mints for any agent name and positive safe ordinal", () => {
+      fc.assert(fc.property(mintedId, id => {
+        const parsed = standaloneLineageInventorySchema.safeParse(rowWithId(id));
+        expect(parsed.success).toBe(true);
+        if (parsed.success) expect(parsed.data[0]?.finding.id).toBe(id);
+      }), { seed: 5141, numRuns: 200 });
+    });
+
+    const refusedFor = (id: string): boolean => {
+      const parsed = standaloneLineageInventorySchema.safeParse(rowWithId(id));
+      return !parsed.success && JSON.stringify(parsed.error.issues).includes(FINDING_ID_REFUSAL);
+    };
+
+    it("refuses a minted id once a ':' or whitespace is spliced in", () => {
+      const separator = fc.constantFrom(":", " ", "\t", "\n", "\r", "\u00a0", "\u2003", "\u3000");
+      fc.assert(fc.property(mintedId, separator, fc.nat(), (id, char, at) => {
+        const index = at % (id.length + 1);
+        expect(refusedFor(`${id.slice(0, index)}${char}${id.slice(index)}`)).toBe(true);
+      }), { seed: 5142, numRuns: 200 });
+    });
+
+    it("refuses a numeric suffix beyond the safe-integer range", () => {
+      const beyondSafe = fc.bigInt({ min: BigInt(Number.MAX_SAFE_INTEGER) + 1n, max: 10n ** 30n });
+      fc.assert(fc.property(agent, beyondSafe, (name, suffix) => {
+        const prefix = attributeFindings([legacyDraft], name, 1)[0]!.id.replace(/-1$/u, "");
+        expect(refusedFor(`${prefix}-${suffix}`)).toBe(true);
+      }), { seed: 5143, numRuns: 200 });
+    });
   });
   it("bounds retained ingress before decoding, history count and origin ordinal", () => {
     expect(parseStandaloneLineageInventory(new Uint8Array(STANDALONE_LINEAGE_LIMITS.retainedBytes + 1))).toMatchObject({ ok: false, error: { code: "limit-exceeded" } });

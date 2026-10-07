@@ -17,28 +17,26 @@ import { fileURLToPath } from "node:url";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../../../src/runtime-compatibility";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import {
-  applyCurrentSpecCheckCaptureRejection,
-  applyWaveFacadeSubmission,
-  handleWaveReviewContext,
-  installWaveReviewRuns,
-  publishWaveAdvisoryDecisionRequest,
-  reportUncaughtWaveGateFailure,
-  specCheckSlotBelongsToWaveEpoch,
-  waveAdvisoryDecisionRequestId,
-  waveGateAuthorityDigest,
-  waveGateDecisionMismatch,
-  waveRefutationCommitProblem,
-  waveRequests,
-} from "../../../../src/handlers/helpers/programs/wave-gate";
+import { applyCurrentSpecCheckCaptureRejection, specCheckSlotBelongsToWaveEpoch, waveGateDecisionMismatch, waveRefutationCommitProblem } from "../../../../src/core/wave-gate-membership";
+import { applyWaveFacadeSubmission } from "../../../../src/handlers/helpers/programs/wave-gate-submission";
+import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
+import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
+import { publishWaveAdvisoryDecisionRequest, waveAdvisoryDecisionRequestId } from "../../../../src/handlers/helpers/programs/wave-advisory-decision";
+import { reportUncaughtWaveGateFailure } from "../../../../src/handlers/helpers/programs/wave-gate-outcome";
+import { waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import {
   deriveLoomStatusFromParsedGraph,
+} from "../../../../src/core/loom-status";
+import {
   deriveWaveAdvisoryDecisionRequest,
   deriveWaveGateDriveStep,
+} from "../../../../src/core/wave-gate-preparation";
+import {
   deriveWaveReadiness,
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
-import { derivePendingTaskProof } from "../../../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof } from "../../../../src/core/proof-obligations";
+import { taskVerificationPolicy } from "../../../../src/core/verification-policy";
 import { buildFindingBrief } from "../../../../src/core/review-panel";
 import {
   parseRequestId,
@@ -49,10 +47,11 @@ import {
 import type { WaveReviewRegistrationAuthority } from "../../../../src/core/wave-review-authority";
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
-import type { RegisteredWaveGateProgram } from "../../../../src/handlers/helpers/programs/helpers";
+import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
+import { findingId } from "../../../fixtures/finding-id";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
@@ -126,7 +125,16 @@ describe("Wave Gate start effect ordering", () => {
     const statePath = join(stateDirectory, "active_task_graph.json");
     mkdirSync(runDirectory, { recursive: true });
     mkdirSync(stateDirectory, { recursive: true });
-    const initial = graph({ active_wave_gate: undefined });
+    // Start-ready Tasks, so the start passes its preflight and reaches the
+    // Run Directory program publication this case refuses.
+    const verification_policy = { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "documentation-only" } } as const;
+    const proof = evaluateTaskProof({ verificationPolicy: taskVerificationPolicy({ verification_policy }), declaredArtifacts: [] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: false });
+    if (proof.state !== "satisfied") throw new Error("fixture proof must satisfy");
+    const initial = graph({
+      active_wave_gate: undefined,
+      tasks: TASKS.map((entry) => ({ ...entry, proof, test_result: { verdict: "trusted-pass" }, verification_policy })) as unknown as TaskGraph["tasks"],
+    });
     writeFileSync(statePath, JSON.stringify(initial));
     try {
       const opened = openRunDirectory(runsRoot, runDirectory);
@@ -305,7 +313,7 @@ describe("wave review context authority", () => {
       planFile: null,
       specCheckDocuments: DOCUMENTS,
     });
-    const context = handleWaveReviewContext([packet], packet.digest);
+    const context = readWaveReviewContext([packet], packet.digest);
     expect(context).toMatchObject({
       kind: "loaded",
       value: { runId: RUN_ID, wave: 1, subject: { taskId: null }, taskRun: null },
@@ -343,7 +351,7 @@ describe("wave review context authority", () => {
       planFile: null,
       specCheckDocuments: DOCUMENTS,
     });
-    const context = handleWaveReviewContext([packet], packet.digest);
+    const context = readWaveReviewContext([packet], packet.digest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded") return;
     const closedReviewGraph = graph({
@@ -466,7 +474,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "loaded",
       value: {
         subject: { role: "code-reviewer", taskId: "T1" },
@@ -493,7 +501,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "corrupt",
       message: expect.stringContaining("taskRun fields are invalid"),
     });
@@ -517,7 +525,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "loaded",
       value: { task: { proof, testResult } },
     });
@@ -545,7 +553,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "corrupt",
       message: expect.stringContaining(message),
     });
@@ -553,7 +561,7 @@ describe("wave review context authority", () => {
 
   it("classifies valid JSON with the wrong schema as corrupt", () => {
     const packet = packetFor({ wave: 1, batchEpoch: "b".repeat(64) });
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "corrupt",
       message: expect.stringContaining("invalid top-level schema"),
     });
@@ -581,7 +589,7 @@ describe("wave review context authority", () => {
       specFile: null,
       planFile: null,
     });
-    expect(handleWaveReviewContext([packet], packet.digest).kind).toBe("corrupt");
+    expect(readWaveReviewContext([packet], packet.digest).kind).toBe("corrupt");
   });
 });
 
@@ -700,7 +708,7 @@ describe("locked Refutation Panel authority", () => {
           ...entry,
           review_status: "blocked" as const,
           findings: [{
-            id: "code-reviewer-1",
+            id: findingId("code-reviewer-1"),
             agent: "code-reviewer",
             severity: "critical" as const,
             file: "engine/src/example.ts",

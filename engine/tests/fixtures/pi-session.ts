@@ -5,6 +5,14 @@ import { fileURLToPath } from "node:url";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
 
+// This fixture propagates ambient state: `fixturePiEnvironment` spreads
+// process.env into every CLI child, and `withFixturePiSession` runs native APIs
+// that read the issue-route election from process.env. Importing it has no
+// side effect: the ambient issue route is pinned to the catalog route by the
+// Vitest setup file (tests/setup/catalog-issue-route.ts) before every test
+// file, and a suite opts into another route explicitly with `withRouteEnv`
+// from ./issue-route-env.
+
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 type FixtureSession = Readonly<{ directory: string; sessionId: string; sessionFile: string; transport: string }>;
 const sessions = new Map<string, FixtureSession>();

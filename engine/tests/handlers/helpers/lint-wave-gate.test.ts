@@ -1,18 +1,21 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   parseWaveArg,
   collectModifiedFiles,
-  filterExistingFiles,
   resolveLintTargets,
   aggregateResults,
   lintFiles,
+  runFullTierWaveLint,
   type FileLintResult,
 } from "../../../src/handlers/helpers/lint-wave-gate";
 import type { Task, TaskCommonMetadata } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { git } from "../../fixtures/git-repository";
 import type { LintResult } from "../../../src/linter/types";
 import { formatOutput } from "../../../src/linter/formatter";
 
@@ -113,35 +116,11 @@ describe("collectModifiedFiles", () => {
   });
 });
 
-// --- filterExistingFiles ---
-
-describe("filterExistingFiles", () => {
-  it("returns empty array for empty input", () => {
-    expect(filterExistingFiles([], () => true)).toEqual([]);
-  });
-
-  it("filters out non-existing files", () => {
-    const files = ["exists.ts", "deleted.ts", "also-exists.ts"];
-    const existsFn = (p: string) => p !== "deleted.ts";
-    expect(filterExistingFiles(files, existsFn)).toEqual(["exists.ts", "also-exists.ts"]);
-  });
-
-  it("returns all files when all exist", () => {
-    const files = ["a.ts", "b.ts"];
-    expect(filterExistingFiles(files, () => true)).toEqual(["a.ts", "b.ts"]);
-  });
-
-  it("returns empty when none exist", () => {
-    const files = ["a.ts", "b.ts"];
-    expect(filterExistingFiles(files, () => false)).toEqual([]);
-  });
-});
-
 // --- repository-confined lint targets ---
 
 describe("resolveLintTargets", () => {
   it("canonicalizes absolute in-repo paths and skips deleted files", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-targets-")));
+    const root = canonicalTempDir("loom-lint-targets-");
     try {
       mkdirSync(join(root, "src"));
       writeFileSync(join(root, "src", "a.ts"), "export {};\n");
@@ -153,8 +132,8 @@ describe("resolveLintTargets", () => {
   });
 
   it("rejects external and symlink-traversing transcript paths before lint reads", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-root-")));
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-outside-")));
+    const root = canonicalTempDir("loom-lint-root-");
+    const outside = canonicalTempDir("loom-lint-outside-");
     try {
       writeFileSync(join(outside, "secret.ts"), "secret\n");
       symlinkSync(outside, join(root, "linked"));
@@ -165,6 +144,42 @@ describe("resolveLintTargets", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("lints a directory artifact as its Git-visible regular files", () => {
+    // Production regression: a Wave whose Task declared a directory artifact
+    // blocked the completion suite with "lint target must be a regular file".
+    const root = canonicalTempDir("loom-lint-directory-");
+    try {
+      git(root, ["init", "--quiet"]);
+      mkdirSync(join(root, "calibration", "pilot", "cache"), { recursive: true });
+      writeFileSync(join(root, ".gitignore"), "calibration/pilot/cache/\n");
+      writeFileSync(join(root, "calibration", "pilot", "tracked.ts"), "export {};\n");
+      git(root, ["add", "."]);
+      git(root, ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "seed"]);
+      writeFileSync(join(root, "calibration", "pilot", "untracked.ts"), "export {};\n");
+      writeFileSync(join(root, "calibration", "pilot", "cache", "ignored.ts"), "export {};\n");
+      symlinkSync("tracked.ts", join(root, "calibration", "pilot", "alias.ts"));
+
+      expect(resolveLintTargets(root, ["calibration/pilot", "calibration/pilot/tracked.ts"])).toEqual([
+        join(root, "calibration", "pilot", "tracked.ts"),
+        join(root, "calibration", "pilot", "untracked.ts"),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a directory artifact's files cannot be listed", () => {
+    const root = canonicalTempDir("loom-lint-listing-");
+    try {
+      mkdirSync(join(root, "calibration"));
+      expect(() => resolveLintTargets(root, ["calibration"], () => {
+        throw new Error("git index unreadable");
+      })).toThrow("git index unreadable");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -293,7 +308,7 @@ describe("aggregateResults", () => {
         kind: "violations",
         violations: [
           { rule: "no-console", file: "src/index.ts", line: 10, text: "console.log('debug')", fixHint: "Use logger instead" },
-          { rule: "no-any", file: "src/index.ts", line: 20, text: "const x: any = {}", fixHint: "Use explicit type" },
+          { rule: "no-any", file: "src/index.ts", line: 20, text: "const x = untypedValue", fixHint: "Use explicit type" },
         ],
       }),
     ];
@@ -309,23 +324,85 @@ describe("aggregateResults", () => {
   });
 });
 
-// --- Integration: collectModifiedFiles + filterExistingFiles pipeline ---
+// --- batch lint path (production: rules loaded once) ---
 
-describe("file collection pipeline", () => {
-  it("handles full pipeline: collect → filter → empty = no files to lint", () => {
-    const tasks = [makeTask({ files_modified: ["deleted.ts"] })];
-    const files = collectModifiedFiles(tasks);
-    const existing = filterExistingFiles(files, () => false);
-    expect(existing).toEqual([]);
+describe("lintFiles batch path", () => {
+  it("assembles each FileLintResult from the batch result, in input order", () => {
+    const root = canonicalTempDir("loom-lint-batch-");
+    try {
+      const rules = join(root, "rules");
+      mkdirSync(rules);
+      writeFileSync(join(root, "b.ts"), "export {};\n");
+      writeFileSync(join(root, "a.ts"), "export {};\n");
+      const files = [join(root, "b.ts"), join(root, "a.ts")];
+      const results = lintFiles(files, rules, null);
+      expect(results.map(({ file }) => file)).toEqual(files);
+      for (const { file, result, output } of results) {
+        expect(output).toEqual(formatOutput(result, file));
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- engine-error block (fail closed) ---
+
+describe("runFullTierWaveLint", () => {
+  it("allows a Wave that modified nothing", () => {
+    expect(runFullTierWaveLint([makeTask()])).toEqual({ kind: "allow" });
   });
 
-  it("handles full pipeline: multiple tasks → deduplicate → filter", () => {
-    const tasks = [
-      makeTask({ id: "T1", files_modified: ["a.ts", "shared.ts"] }),
-      makeTask({ id: "T2", files_modified: ["shared.ts", "b.ts", "deleted.ts"] }),
-    ];
-    const files = collectModifiedFiles(tasks);
-    const existing = filterExistingFiles(files, (p) => p !== "deleted.ts");
-    expect(existing).toEqual(["a.ts", "b.ts", "shared.ts"]);
+  it("converts a target-resolution failure into the WAVE-GATE LINT ENGINE ERROR block", () => {
+    const outside = canonicalTempDir("loom-lint-engine-error-");
+    try {
+      writeFileSync(join(outside, "secret.ts"), "export {};\n");
+      const result = runFullTierWaveLint([makeTask({ files_modified: [join(outside, "secret.ts")] })]);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") {
+        expect(result.message).toMatch(/^🚫 WAVE-GATE LINT ENGINE ERROR: .*must identify a file inside the repository/);
+      }
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+// Resolved from this file, not the runner's cwd, so the suite passes from any launch directory.
+const ENGINE_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const CLI_PATH = join(ENGINE_ROOT, "src", "cli.ts");
+
+describe("lint-wave-gate handler", () => {
+  const cli = (statePath: string) =>
+    spawnSync("bun", [CLI_PATH, "helper", "lint-wave-gate"], {
+      cwd: ENGINE_ROOT,
+      encoding: "utf-8",
+      env: { ...process.env, LOOM_STATE_PATH: statePath, PI_CODING_AGENT: "" },
+    });
+
+  it("fails closed with the engine-error block when the task graph cannot be loaded", () => {
+    const dir = canonicalTempDir("loom-lint-handler-");
+    try {
+      const statePath = join(dir, "active_task_graph.json");
+      writeFileSync(statePath, '{"current_phase":');
+      const run = cli(statePath);
+      expect(run.status).toBe(2);
+      expect(run.stdout + run.stderr)
+        .toContain(`🚫 WAVE-GATE LINT ENGINE ERROR: Corrupt state file (invalid JSON): ${statePath}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an absent task graph without the engine-error prefix", () => {
+    const dir = canonicalTempDir("loom-lint-handler-");
+    try {
+      const statePath = join(dir, "absent.json");
+      const run = cli(statePath);
+      expect(run.status).toBe(2);
+      expect(run.stdout + run.stderr).toContain(`🚫 WAVE-GATE LINT: Cannot read task graph at ${statePath}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

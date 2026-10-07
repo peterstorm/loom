@@ -22,7 +22,8 @@ import {
   type AcceptedWaveCompletionReceipt,
   type CompletionCheckResult,
 } from "../../src/core/completion-suite";
-import { canonicalJson, sha256Hex } from "../../src/core/review-packet";
+import { canonicalJson } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 
 const digest = (character: string): string => character.repeat(64);
 

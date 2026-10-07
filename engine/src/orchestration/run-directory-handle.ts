@@ -16,7 +16,9 @@
  *   events/<sequence>-<dedup>.json     immutable domain events
  *   requests/<request-id>.json         immutable request authority
  *   requests/correlators/<digest>.json immutable native-id/request binding
- *   contexts/<digest>.json             complete immutable context packets
+ *   contexts/<digest>.json             immutable context packets (section identity only;
+ *                                      packets written before blob storage carry inline bytes)
+ *   blobs/<section-digest>             immutable section bytes, stored once per digest
  *   transcripts/<slot>/attempt-<n>.raw exact harness bytes
  *   transcripts/<slot>/attempt-<n>.rejected immutable terminal capture refusal
  *   receipts/<effect-id>.json          typed effect/publication receipts
@@ -57,7 +59,8 @@ import { captureKey, type CaptureKey } from "../core/harness-capture";
 import { parseSemanticAttempt } from "../core/implementation-completion";
 import { canonicalJson, parseJsonValue } from "../core/review-packet";
 import type { ContextPacket } from "./context-packets";
-import { parseStandaloneReviewerContextPacketV3, serializeStandaloneReviewerContextPacketV3, type StandaloneReviewerContextPacketV3 } from "../core/context-packets";
+import { parseStandaloneReviewerContextPacketV3, storedContextPacket, type StandaloneReviewerContextPacketV3, type StoredContextPacket } from "../core/context-packets";
+import { CONTEXT_PACKET_MAX_BYTES, CONTEXT_SECTION_BLOBS, readStoredContextRecord } from "./stored-context-packets";
 import { parseContextPacket } from "./context-packets";
 import {
   ensureRelativeDirectoryNoFollow,
@@ -104,6 +107,7 @@ const FIXED_SUBDIRECTORIES: readonly string[] = [
   REQUESTS,
   join(REQUESTS, CORRELATORS),
   CONTEXTS,
+  CONTEXT_SECTION_BLOBS,
   TRANSCRIPTS,
   RECEIPTS,
   ARTIFACTS,
@@ -1098,9 +1102,57 @@ function contextPublished(
   return success(canonicalRecord({ kind: "context-published" as const, runId, digest, slotPath: path }));
 }
 
+/** The first part of a stored packet no bounded reader could read back, or
+ *  null when the packet file and every section (one blob each) fit the bound. */
+function oversizeStoredPacket(
+  packet: ContextPacket | StandaloneReviewerContextPacketV3,
+  stored: StoredContextPacket,
+): string | null {
+  const narrow = "narrow the review scope (for example with --files)";
+  const fileBytes = Buffer.byteLength(stored.text, "utf8");
+  if (fileBytes > CONTEXT_PACKET_MAX_BYTES) {
+    return `context packet ${packet.digest} is ${fileBytes} bytes, over the ${CONTEXT_PACKET_MAX_BYTES}-byte Context Packet bound; ${narrow}`;
+  }
+  // A section's blob holds exactly its bytes, so its byteLength is the blob size.
+  const section = [...packet.fixedContext, ...packet.variableContext].find(({ byteLength }) => byteLength > CONTEXT_PACKET_MAX_BYTES);
+  return section === undefined
+    ? null
+    : `context packet ${packet.digest} section ${section.label} is ${section.byteLength} bytes, ` +
+      `over the ${CONTEXT_PACKET_MAX_BYTES}-byte Context Packet bound; ${narrow}`;
+}
+
+/** Write each section blob once; an existing blob must hold the exact bytes. */
+function publishSectionBlobs(directory: string, stored: StoredContextPacket): DomainResult<void, RunDirectoryError> {
+  for (const { digest, bytes } of stored.blobs) {
+    // A blob is named by its section digest; bytes that do not hash to it
+    // would leave a packet no reader can verify.
+    if (createHash("sha256").update(bytes).digest("hex") !== digest) {
+      return failure("context", `context section bytes do not match their digest ${digest}`);
+    }
+    const path = join(directory, CONTEXT_SECTION_BLOBS, digest);
+    try {
+      writeRunBytesExclusiveNoFollow(path, bytes);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        return failure("context", `cannot publish context section blob ${digest}: ${(error as Error).message}`);
+      }
+      try {
+        if (!readRunBytesNoFollow(path).equals(bytes)) {
+          return failure("context", `a different section blob already occupies digest ${digest}`);
+        }
+      } catch (readError) {
+        return failure("context", `cannot verify context section blob ${digest}: ${(readError as Error).message}`);
+      }
+    }
+  }
+  return success(undefined);
+}
+
 function readContextPacket(directory: string, digest: ContextPacket["digest"], maximumBytes?: number): DomainResult<ContextPacket, RunDirectoryError> {
   try {
-    const parsed = parseContextPacket(readJsonNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes));
+    const record = readStoredContextRecord(directory, readRunBytesNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes), maximumBytes);
+    if (!record.ok) return failure("context", record.error);
+    const parsed = parseContextPacket(record.value.record);
     if (!parsed.ok) return failure("context", parsed.error.message);
     return parsed.value.digest === digest
       ? success(parsed.value)
@@ -1136,20 +1188,28 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
   return {
     async publishContext(packet: ContextPacket | StandaloneReviewerContextPacketV3): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
       const path = join(directory, CONTEXTS, `${packet.digest}.json`);
-      const encoded = packet.schemaVersion === 3 ? serializeStandaloneReviewerContextPacketV3(packet) : success(JSON.stringify(packet));
-      if (!encoded.ok) return failure("context", encoded.error.message);
-      const claimed = claimIdempotentWrite(path, encoded.value, "context",
+      const stored = storedContextPacket(packet);
+      // Refuse before any write: a part over the bound would publish evidence
+      // that lineage authentication and remediation could never read back.
+      const oversize = oversizeStoredPacket(packet, stored);
+      if (oversize !== null) return failure("context", oversize);
+      // Blobs first: a packet file is never visible before the bytes it names.
+      const blobs = publishSectionBlobs(directory, stored);
+      if (!blobs.ok) return blobs;
+      const claimed = claimIdempotentWrite(path, stored.text, "context",
         (cause) => `cannot publish context packet: ${cause}`,
         "a different context packet already occupies this digest");
       return claimed.ok ? contextPublished(runId, packet.digest, path) : claimed;
     },
 
-    readStandaloneSuccessorContext(digest: ContextPacket["digest"], maximumBytes = 16_777_216): DomainResult<StandaloneReviewerContextPacketV3, RunDirectoryError> {
+    readStandaloneSuccessorContext(digest: ContextPacket["digest"], maximumBytes = CONTEXT_PACKET_MAX_BYTES): DomainResult<StandaloneReviewerContextPacketV3, RunDirectoryError> {
       try {
         const bytes = readRunBytesNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes);
         const prior = successorPackets.get(digest);
         if (prior !== undefined && prior.bytes.equals(bytes)) return success(prior.packet);
-        const parsed = parseStandaloneReviewerContextPacketV3(JSON.parse(bytes.toString("utf8")));
+        const record = readStoredContextRecord(directory, bytes, maximumBytes);
+        if (!record.ok) return failure("context", record.error);
+        const parsed = parseStandaloneReviewerContextPacketV3(record.value.record);
         if (!parsed.ok) return failure("context", parsed.error.message);
         if (parsed.value.digest !== digest) return failure("context", "successor packet differs from its immutable slot");
         successorPackets.set(digest, Object.freeze({ bytes, packet: parsed.value }));

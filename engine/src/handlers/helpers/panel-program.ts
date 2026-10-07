@@ -1,16 +1,18 @@
 import type { HookHandler } from "../../types";
 import {
-  planArchitecturePanelPersistence,
-  planRefutationPanelPersistence,
   reduceArchitectureProgram,
   reduceRefutationProgram,
   startArchitectureDispatchProgram,
   startRefutationDispatchProgram,
+} from "../../core/panel-program";
+import {
+  planArchitecturePanelPersistence,
+  planRefutationPanelPersistence,
   type PersistentArchitecturePanelHistory,
   type PersistentArchitectureStep,
   type PersistentRefutationPanelHistory,
   type PersistentRefutationStep,
-} from "../../core/panel-program";
+} from "../../core/persistent-panel";
 import type { PublicationAuthorityResolver } from "../../core/orchestration-contract";
 import {
   translateLegacyPanelJournal,

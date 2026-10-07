@@ -11,15 +11,12 @@ import {
   type BriefFinding,
 } from "../../src/core/review-panel";
 import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
-import {
-  canonicalStandalonePanelFindingAuthority, canonicalDigest, freezeStandalonePanelAuthority, parseFrozenStandalonePanelAuthority,
-  type StandaloneReviewAggregate,
-} from "../../src/core/standalone-review";
+import { canonicalStandalonePanelFindingAuthority, freezeStandalonePanelAuthority, parseFrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
+import { canonicalDigest } from "../../src/core/digest";
+import { type StandaloneReviewAggregate } from "../../src/core/standalone-review-model";
+import { findingId } from "../fixtures/finding-id";
+import { value } from "../fixtures/parse-result";
 
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 const example = REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!;
 if (example.severity !== "critical") throw new Error("critical fixture required");
 const basis = example.basis;
@@ -36,7 +33,7 @@ function current(claim = hostile, confidence = 50, trace = true): Finding {
   }))));
   return attributeFindings(payload.findings.map((draft): CurrentDraftFinding => ({ protocolVersion: 2, ...draft })), "code-reviewer")[0]!;
 }
-const legacy: Finding = { id: "old-reviewer-1", agent: " old{reviewer} ", severity: "critical", file: null, line: null, claim: " {old}  claim " };
+const legacy: Finding = { id: findingId("old-reviewer-1"), agent: " old{reviewer} ", severity: "critical", file: null, line: null, claim: " {old}  claim " };
 const taskOf = (findings: readonly Finding[]) => ({ id: "T1", wave: 1, findings, critical_findings: findings.filter(({ severity }) => severity === "critical").map(({ claim }) => claim) });
 
 describe("versioned panel Finding conservation", () => {
@@ -48,7 +45,7 @@ describe("versioned panel Finding conservation", () => {
   it("round-trips exact current strings, both evidence arms, duplicates and counts beside historical entries", () => {
     fc.assert(fc.property(fc.string({ maxLength: 100 }), fc.integer({ min: 0, max: 100 }), fc.boolean(), (suffix, confidence, trace) => {
       const first = current(hostile + suffix, confidence, trace);
-      const findings = [{ ...legacy, agent: "old-reviewer" }, first, { ...first, id: "code-reviewer-2" }];
+      const findings = [{ ...legacy, agent: "old-reviewer" }, first, { ...first, id: findingId("code-reviewer-2") }];
       const task = taskOf(findings);
       const before = JSON.stringify(findings);
       const brief = buildFindingBrief(1, [task]);

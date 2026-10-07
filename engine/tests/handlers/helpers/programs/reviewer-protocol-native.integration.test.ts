@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,12 +9,12 @@ import { captureNativeReview } from "../../../fixtures/native-review-capture";
 import { captureClaudeResult, claudeFinalPayloadCandidates } from "../../../../src/handlers/subagent-stop/capture-orchestration-result";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { captureKey } from "../../../../src/core/harness-capture";
-import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review";
+import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../../../src/state-manager";
-import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-gate";
-import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/helpers";
+import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
+import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/registration";
 import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFromEvidence } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
@@ -29,7 +29,7 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   return result.value;
 }
 function fixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-native-")));
+  const root = canonicalTempDir("loom-p4-native-");
   roots.push(root);
   mkdirSync(join(root, "src")); mkdirSync(join(root, "runs"));
   writeFileSync(join(root, "src/a.ts"), "export const fixture = 1;\n");
@@ -241,8 +241,10 @@ async function waveFixture() {
     // config owns an import-time State File path: reload inside this disposable
     // fixture rather than calling a driver bound to the test runner's cwd.
     vi.resetModules();
-    const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
-    return driver.startWaveGateFacade(handle, { wave: 1 });
+    const driver = await import("../../../../src/handlers/helpers/programs/wave-gate-start");
+    const prepared = driver.prepareWaveGateFacadeStart({ wave: 1 }, join(root, "runs"), "run.native-wave");
+    if (!prepared.ok) throw new Error(prepared.message);
+    return driver.startWaveGateFacade(handle, prepared.value);
   });
   if (!started.ok) throw new Error(started.message);
   return { root, statePath, handle, initial: started.action as Action };
@@ -260,7 +262,7 @@ async function resumeWave(root: string, handle: RunDirHandle): Promise<Action> {
 }
 function wavePayload(handle: RunDirHandle, request: AgentRequestAuthority): string {
   const packet = value(handle.readContext(request.contextDigest));
-  const context = handleWaveReviewContext([packet], packet.digest);
+  const context = readWaveReviewContext([packet], packet.digest);
   if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("missing issued Wave subject");
   return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,
     generation: context.value.taskRun.generation, prior_findings: [], findings: [] });
@@ -299,7 +301,7 @@ describe("current Wave native capture settles only through the registered facade
     }
     const first = initial.requests![1]!.authority;
     const admitted = await inDirectory(root, async () => {
-      const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
+      const driver = await import("../../../../src/handlers/helpers/programs/wave-gate-submission");
       return driver.applyWaveFacadeSubmission(handle, first, wavePayload(handle, first));
     });
     expect(admitted.ok, JSON.stringify(admitted)).toBe(true);
@@ -309,7 +311,7 @@ describe("current Wave native capture settles only through the registered facade
     for (const { authority } of initial.requests!.slice(1)) {
       const raw = wavePayload(handle, authority);
       const manual = await inDirectory(root, async () => {
-        const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
+        const driver = await import("../../../../src/handlers/helpers/programs/wave-gate-submission");
         return driver.applyWaveFacadeSubmission(handle, authority, raw);
       });
       expect(manual).toMatchObject({ ok: false, message: expect.stringContaining("exact current Review Packet slot") });

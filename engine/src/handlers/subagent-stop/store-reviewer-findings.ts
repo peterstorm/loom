@@ -4,7 +4,7 @@
  * Review-output parsing, reconciliation, and state transformation lives in
  * `core/review-output.ts`. This imperative shell parses SubagentStop identity
  * and the trusted first prompt, then reads the transcript, finds the Task,
- * writes, and logs. `pi/extension.ts` is the same shell over the shared review
+ * writes, and logs. `pi/subagent-stop.ts` is the same shell over the shared review
  * core, which is what keeps the two harnesses from drifting.
  *
  * Every early return that DISCARDS a reviewer's output fails with a contextual
@@ -26,7 +26,7 @@ import {
   reviewResolutionLog,
   type ReviewResolution,
 } from "../../core/review-output";
-import { isReviewAgent } from "../../config";
+import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";

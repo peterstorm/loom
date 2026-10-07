@@ -1,7 +1,7 @@
 /**
  * Tests for applyUntrustedStopResolution — the verdict-resolution decision
  * the pi extension's Stop handler runs INSIDE its locked mgr.update
- * (pi/extension.ts). The pre-lock skip guards are only a fast path: a
+ * (pi/subagent-result.ts). The pre-lock skip guards are only a fast path: a
  * concurrent writer can outdate the snapshot before the write lands
  * (TOCTOU), so this pure re-check is the authoritative one. Pinned
  * directly (round-15): an untrusted pass must never overwrite a concurrent

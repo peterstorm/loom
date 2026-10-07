@@ -3,11 +3,11 @@ import { match } from "ts-pattern";
 import { readDenseDataArray, readExactDataRecord } from "./orchestration-contract/bytes";
 import { canonicalRecord, canonicalStructuralEquals, failure, success, parseOrchestrationRunId, type DomainResult } from "./orchestration-contract/identity";
 import { parseEffectReceipt, type ArtifactSetPublished } from "./orchestration-contract/effects";
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { parseBoundedReviewerJson } from "./reviewer-protocol";
 import { STANDALONE_LINEAGE_LIMITS, standaloneDispositionSchema, standalonePublicationReferenceSchema,
   type StandaloneDispositionRecord, type StandalonePublicationReference } from "./standalone-lineage-contract";
-import type { StandaloneDispositionPublicationReference } from "./standalone-lineage";
+import type { StandaloneDispositionPublicationReference } from "./standalone-review-model";
 
 type Error = Readonly<{ message: string }>;
 const reject = (message: string): DomainResult<never, Error> => failure(canonicalRecord({ message }));

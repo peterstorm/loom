@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -39,7 +39,7 @@ describe("panel-contract helper CLI", () => {
   let manifestPath: string;
 
   beforeEach(() => {
-    tmp = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-contract-")));
+    tmp = canonicalTempDir("loom-panel-contract-");
     runsRoot = join(tmp, "panel-runs");
     runDir = join(runsRoot, "run.1234567890");
     mkdirSync(join(runDir, "candidates"), { recursive: true });

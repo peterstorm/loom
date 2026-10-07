@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "windowId": "gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z",
+  "preregistration": {
+    "path": "calibration/grammar-constrained-decoding/preregistration.json",
+    "digest": "4f00b74ff732f779da9e4421a034ce1f8fc4045aee51dd8c249293447458f7b9",
+    "id": "gcd-ad11-pilot-1"
+  },
+  "workloadFixtures": {
+    "path": "calibration/grammar-constrained-decoding/workload-fixtures.json",
+    "digest": "b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201"
+  },
+  "startedAt": "2026-10-03T09:23:39.047Z",
+  "preflightFacts": {
+    "registry": {
+      "reviewer-payload/v2": {
+        "toolName": "loom_emit_reviewer_payload",
+        "schemaDigest": "3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37"
+      },
+      "reviewer-payload/v3": {
+        "toolName": "loom_emit_reviewer_payload",
+        "schemaDigest": "515ed14d0435d47da4f8299ed4f7ba9908f33c9f567051db93de84ec0017b4a2"
+      },
+      "judge-verdict/v1": {
+        "toolName": "loom_emit_judge_verdict",
+        "schemaDigest": "3f590e9f4a9e4ef586220f4d0fa07bb061fb4ebaa32c9a24eeed07fbb044c569"
+      },
+      "refutation-verdict/v1": {
+        "toolName": "loom_emit_refutation_verdict",
+        "schemaDigest": "766a0dee252ca3fb135253d51b6ddea5bac1ce941e367eebf2da10f81ce8b2fd"
+      }
+    },
+    "workloadFixturesDigest": "b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201",
+    "piVersion": "0.83.0",
+    "stagedRuntimeRevision": "sha256:d92429639cbce93e37791539080f6f2eb80f3035fc0aa4c57e3510884ed212ab",
+    "loadedRuntimeRevision": null,
+    "route": {
+      "kind": "unreachable",
+      "reason": "GET http://192.168.0.80:8000/v1/models failed: Unable to connect. Is the computer able to access the url?"
+    }
+  },
+  "preflight": {
+    "kind": "blocked",
+    "blocks": [
+      {
+        "kind": "route-unreachable",
+        "reason": "GET http://192.168.0.80:8000/v1/models failed: Unable to connect. Is the computer able to access the url?"
+      }
+    ],
+    "runtime": {
+      "stagedRuntimeRevision": "sha256:d92429639cbce93e37791539080f6f2eb80f3035fc0aa4c57e3510884ed212ab",
+      "loadedRuntime": {
+        "kind": "unobserved"
+      },
+      "piVersion": "0.83.0"
+    }
+  },
+  "dispatch": {
+    "kind": "not-attempted",
+    "reason": "preflight blocked — no sample is dispatched or fabricated"
+  },
+  "endedAt": "2026-10-03T09:23:42.749Z",
+  "observations": 0
+}

@@ -17,6 +17,7 @@ import { REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerDraftV2Schema } from "../../src/co
 import { attributeFindings, parseStoredFindings, parseStoredRefutations, parseStoredResolutions, currentFindingAuthorityError, salvageMalformedFindings, recoverViewOnlyClaims, claimsOfSeverity, applyFindingOutcomes } from "../../src/core/findings";
 import { fixFull } from "../../src/handlers/helpers/validate-task-graph";
 import { updateTaskFindings } from "../../src/handlers/helpers/store-review-findings";
+import { findingId } from "../fixtures/finding-id";
 
 function currentDraft(claim = "  preserved\n  claim "): CurrentDraftFinding {
   return { protocolVersion: 2, ...reviewerDraftV2Schema.parse({ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0], file: "src/x.ts", claim }) };
@@ -93,7 +94,7 @@ const PACKET = "a".repeat(64) as PacketId;
 const HEAD = "b".repeat(40) as HeadSha;
 
 const finding = (id: string, agent: string, claim: string): Finding => ({
-  id,
+  id: findingId(id),
   agent,
   severity: "critical",
   file: "src/x.ts",

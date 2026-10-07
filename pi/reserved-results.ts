@@ -12,15 +12,12 @@
  * owns result I/O and delegates only positional reconciliation to this module.
  */
 
-import { agentsOfKind } from "../engine/src/core/model-profiles";
+import { REVIEW_SUB_AGENTS } from "../engine/src/core/agent-catalog-projections";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
-import { parsePiSubagentResults, type PiSubagentResultEntry } from "./subagent-result";
-
-const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
-const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
+import { parsePiSubagentResults, type PiSubagentResultEntry } from "./subagent-result-batch";
 
 /**
  * The reservation fields the classification actually reads.
@@ -110,14 +107,14 @@ function returnedResultMatchesReservation(
 ): boolean {
   const entry = entries[index];
   if (entry?.ok !== true || stripNamespace(entry.result.agent) !== item.agentType) return false;
-  return !isReviewAgent(item.agentType) || item.taskId === null || extractTaskId(entry.result.task) === item.taskId;
+  return !REVIEW_SUB_AGENTS.has(item.agentType) || item.taskId === null || extractTaskId(entry.result.task) === item.taskId;
 }
 
 /**
  * What a reserved review/spec-check slot that never returned MEANS when no
  * TaskGraph was active at spawn.
  *
- * The persistence arm in `extension.ts` cannot run without a State File, and
+ * The persistence arm in `subagent-stop.ts` cannot run without a State File, and
  * that used to silence the entire reporting path: a reviewer that died without
  * returning produced no diagnostic at all, for exactly the unorchestrated
  * batches that have no other reporting route. Nothing can be recorded, so the
@@ -157,7 +154,7 @@ export function classifyMissingReservedResults<T extends ReservedResultItem>(
   }
   return Object.freeze({
     reviews: missing((item) =>
-      item.kind !== "standalone" && item.taskId !== null && isReviewAgent(item.agentType)),
+      item.kind !== "standalone" && item.taskId !== null && REVIEW_SUB_AGENTS.has(item.agentType)),
     specChecks: missing((item) =>
       item.kind !== "standalone" && item.agentType === "spec-check-invoker"),
     runResults: Object.freeze([]),

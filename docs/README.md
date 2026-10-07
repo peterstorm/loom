@@ -65,6 +65,18 @@ Architecture Decision Records preserve why the system has its current shape:
 - [ADR-0008: Versioned Defect-Family installation authority](adr/ADR-0008-versioned-defect-family-installation-authority.md)
 - [ADR-0009: Versioned reviewer protocol](adr/ADR-0009-versioned-reviewer-protocol.md)
 - [ADR-0010: Standalone Finding and disposition lineage](adr/ADR-0010-standalone-finding-lineage.md)
+- [ADR-0011: Retain the selected type-driven FP approach and panel provenance](adr/ADR-0011-type-driven-fp-approach-and-panel-provenance.md)
+- [ADR-0012: Preferred strict sampling, with exact-route qualification](adr/ADR-0012-preferred-strict-sampling-with-exact-route-qualification.md)
+- [ADR-0013: Model-initiated emission, terminating success](adr/ADR-0013-model-initiated-emission-terminating-success.md)
+- [ADR-0014: Child readiness is a launcher barrier, not a notification](adr/ADR-0014-child-readiness-is-a-launcher-barrier-not-a-notification.md)
+- [ADR-0015: One frozen schema; explicit limits on its guarantees](adr/ADR-0015-one-frozen-schema-explicit-limits-on-its-guarantees.md)
+- [ADR-0016: All three producer kinds remain in scope](adr/ADR-0016-all-three-producer-kinds-remain-in-scope.md)
+- [ADR-0017: Issuance-aware instructions and honest degraded routes](adr/ADR-0017-issuance-aware-instructions-and-honest-degraded-routes.md)
+- [ADR-0018: One observation/selection decision with per-path payload construction](adr/ADR-0018-one-observation-selection-decision-with-per-path-payload-construction.md)
+- [ADR-0019: One existing request-slot budget; no same-spawn correction protocol](adr/ADR-0019-one-existing-request-slot-budget-no-same-spawn-correction-protocol.md)
+- [ADR-0020: Acceptance and a real vertical slice before breadth](adr/ADR-0020-acceptance-and-a-real-vertical-slice-before-breadth.md)
+- [ADR-0021: Measure useful acceptance, not only syntactic success](adr/ADR-0021-measure-useful-acceptance-not-only-syntactic-success.md)
+- [ADR-0022: Admit a standalone reviewer only after the engine observed it read the whole frozen diff](adr/ADR-0022-engine-observed-standalone-read-coverage.md)
 
 ## Harness and migration notes
 

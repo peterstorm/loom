@@ -72,26 +72,34 @@
 import { match } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { recordReadCoverageObservation, runReadCoverage } from "../../orchestration/standalone-read-coverage-evidence";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { dirname, join, resolve } from "node:path";
-import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
+import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
+import { isReviewAgent } from "../../core/agent-catalog-projections";
+import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
+import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
   HookHandler,
   HookResult,
+  LoomStatus,
   WaveCompletionResultObservation,
 } from "../../types";
+import { deriveWaveReadiness } from "../../core/wave-gate-machine";
+import type { GateDeps } from "../../core/wave-gate-checks";
+import type { ImplementationReservationStatusObservation } from "../../core/implementation-window";
 import {
   deriveLoomStatusFromParsedGraph,
-  deriveWaveReadiness,
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
   type AdvisoryApprovalObservation,
-  type GateDeps,
-  type ImplementationReservationStatusObservation,
-} from "../../core/wave-gate-machine";
+  type StatusDeps,
+} from "../../core/loom-status";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
 import {
   observeCurrentWaveCompletionResult,
@@ -115,36 +123,21 @@ import {
   registerSessionRunBinding,
 } from "../../orchestration/session-run-bindings";
 import {
-  AGENT_REQUIRED_SKILLS,
-  parseAgentRequestAuthority,
   parseStoredAgentRequestAuthority,
   parseEffectId,
-  parseFixedArtifactSlot,
-  parseRequestId,
-  parseSlotId,
   type AgentRequestAuthority,
   type EffectIntent,
 } from "../../core/orchestration-contract";
-import {
-  reduceArchitectureProgram,
-  reduceRefutationProgram,
-  startArchitectureDispatchProgram,
-  startRefutationDispatchProgram,
-  type PanelProgramAction,
-  type SpawnRequest as PanelSpawnRequest,
-} from "../../core/panel-program";
-import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
-import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
-import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
-import { aggregateVerdicts, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type JudgeVerdict } from "../../core/panel-contract";
-import type { VerdictEnvelope } from "../../core/panel-kernel";
-import { createEffectRunner } from "../../orchestration/effect-runner";
+import { expectedSpawnModel } from "../../core/model-profiles";
 import { captureKey } from "../../core/harness-capture";
+import { translateLegacyPanelJournal } from "./panel-program";
 import {
-  translateLegacyPanelJournal,
-  type LegacyArchitecturePanelJournal,
-  type LegacyRefutationPanelJournal,
-} from "./panel-program";
+  parseRegisteredPanelProgram,
+  registeredPanelProgram,
+  type RegisteredPanelProgram,
+} from "../../core/legacy-panel-decisions";
+import { driveRegisteredPanel, resumeRegisteredPanel, submitRegisteredPanelAttempt } from "./programs/legacy-panel";
+import { runDirectoryEffectRunner } from "./programs/run-directory-effects";
 import {
   applyWaveFacadeSubmission,
   inspectRemediationFacade,
@@ -154,7 +147,6 @@ import {
   prepareRemediationFacadeStart,
   parseStandaloneStartInput,
   parseWaveGateStartInput,
-  renderSpawnTask,
   resumeRemediationFacade,
   resumeStandaloneFacade,
   resumeWaveGateFacade,
@@ -165,35 +157,34 @@ import {
   prepareStandaloneSuccessorFacadeStart,
   startPreparedStandaloneSuccessor,
   replayStandaloneCapturedEvidence,
+  prepareWaveGateFacadeStart,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
-  waveGateDecisionMismatch,
+  type FacadeAction,
   type FacadeDriveResult,
   type ProgramParse,
   type RemediationStartInputV2,
   type RegisteredStandaloneProgram,
-  type RegisteredWaveGateProgram,
 } from "./programs";
+import type { RegisteredWaveGateProgram } from "../../core/wave-gate-program";
+import { advisoryDecisionApproved, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
+import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
-import { renderStandaloneReviewSummary } from "../../core/standalone-review";
-import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-machine";
-import { argumentValue, hasFlag } from "./cli-args";
+import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
+import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
+import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import { REMEDIATION_EVENT_RESOURCE_POLICY } from "./programs/remediation-events";
 import { parseStandaloneDispositionStartBytes } from "../../core/standalone-disposition-machine";
 import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from "../../core/standalone-lineage-contract";
-import { projectStandaloneLineageSource, type StandaloneDispositionSelection } from "../../core/standalone-lineage";
+import { projectStandaloneLineageSource } from "../../core/standalone-review";
+import { type StandaloneDispositionSelection } from "../../core/standalone-review-model";
 import { readAuthenticatedStandaloneLineageSource } from "./programs/standalone-source";
 import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFacade,
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
-const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate", "attest"] as const;
-type Operation = (typeof OPERATIONS)[number];
-
-const isOperation = (value: string | undefined): value is Operation =>
-  value !== undefined && (OPERATIONS as readonly string[]).includes(value);
 
 function usage(): HookResult {
   return {
@@ -206,6 +197,9 @@ function usage(): HookResult {
       "",
       "  status  [--json] [--wave N] [--runs-root <wave-gate-runs-root>]",
       "          --runs-root <root> --run <run-directory> selects read-only Run inspection",
+      "  brief   [--task <task-id>] [--prompt]",
+      "          (pure read: engine-rendered implementation brief + spawn invocation for each owed dispatch;",
+      "          Pi spawns pass the LOOM_IMPLEMENTATION_BRIEF marker, --prompt adds the full brief for Claude Code)",
       "  inspect --runs-root <root> --run <run-directory> [--json]",
       "          (pure read: program, state, per-slot capture and rejection diagnostics, event tail)",
       "          --lineage returns authenticated source identity, complete Finding Origins, counts and advisory inventory",
@@ -266,7 +260,7 @@ function parseStatusGraph(rawGraph: unknown): ReturnType<typeof parseTaskGraph> 
 
 function renderParsedStatus(
   parsedGraph: ReturnType<typeof parseStatusGraph>,
-  deps: GateDeps,
+  deps: StatusDeps,
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation,
 ): string {
@@ -276,7 +270,7 @@ function renderParsedStatus(
 
 export function renderStatus(
   rawGraph: unknown,
-  deps: GateDeps,
+  deps: StatusDeps,
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation = Object.freeze({ kind: "unverified" }),
 ): string {
@@ -460,15 +454,7 @@ async function observedAdvisoryApprovalFromParsed(
   }
   const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
   try {
-    const events = await opened.value.readEvents();
-    const approved = events.some(({ event }) => {
-      if (typeof event !== "object" || event === null) return false;
-      const record = event as Record<string, unknown>;
-      const decision = record.decision;
-      return record.kind === "user-decision-recorded" && record.decisionId === decisionId &&
-        typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
-        Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
-    });
+    const approved = advisoryDecisionApproved(await opened.value.readEvents(), decisionId);
     return Object.freeze({ kind: approved ? "approved" : "not-approved" });
   } catch (error) {
     return unavailable(
@@ -524,12 +510,22 @@ export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<string> {
+  const status = await deriveCurrentOrchestrationStatus(args, statePath);
+  return hasFlag(args, "--json") ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+}
+
+/** The canonical status of the protected graph, with every shell observation
+ *  status depends on. Renderers and the dispatch helpers project this value. */
+async function deriveCurrentOrchestrationStatus(
+  args: readonly string[],
+  statePath: string,
+): Promise<LoomStatus> {
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
   const workspace = statusWorkspaceObservation(parsedGraph, statePath);
   const completionResult = statusCompletionResult(parsedGraph, binding, workspace);
-  const statusDeps: GateDeps = Object.freeze({
+  const statusDeps: StatusDeps = Object.freeze({
     ...productionGateDeps,
     currentWaveWorkspace: workspace,
     currentWaveCompletionResult: completionResult,
@@ -542,11 +538,91 @@ export async function currentOrchestrationStatus(
         advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, workspace, binding.handle),
       })
     : base;
-  return renderParsedStatus(parsedGraph, statusDeps, hasFlag(args, "--json"), observation);
+  return deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation);
 }
 
 async function statusOperation(args: readonly string[]): Promise<HookResult> {
   process.stdout.write(`${await currentOrchestrationStatus(args)}\n`);
+  return { kind: "allow" };
+}
+
+/** `brief`'s whole argument grammar: `--task <id>` and the `--prompt` switch.
+ *  Brief answers only while canonical status owes implementation dispatches
+ *  for the protected current Wave, so a status selector (`--wave`,
+ *  `--runs-root`, `--run`) would have nothing to select; it and any other
+ *  argument are refused rather than silently ignored. */
+const BRIEF_VALUE_FLAGS: ReadonlySet<string> = new Set(["--task"]);
+const BRIEF_SWITCHES: ReadonlySet<string> = new Set(["--prompt"]);
+
+/** One owed dispatch's brief and its exact spawn invocation per harness. */
+export type BriefInvocation = Readonly<{
+  taskId: string;
+  agent: string;
+  dispatch: ImplementationBrief["dispatch"];
+  pi: Readonly<{ agent: string; task: string }>;
+  claude: Readonly<{ subagent_type: string; model: string; description: string }>;
+  prompt?: string;
+}>;
+
+/**
+ * Pure harness projection of one rendered brief. Pi passes the brief MARKER
+ * as the task; the Loom extension expands it to the rendered brief before any
+ * gate reads the prompt. Claude Code has no expansion seam, so `withPrompt`
+ * carries the rendered brief to pass verbatim.
+ */
+export function briefInvocation(brief: ImplementationBrief, claudeModel: string, withPrompt: boolean): BriefInvocation {
+  return Object.freeze({
+    taskId: brief.taskId,
+    agent: brief.agent,
+    dispatch: brief.dispatch,
+    pi: Object.freeze({ agent: brief.agent, task: `${IMPLEMENTATION_BRIEF_MARKER}: ${brief.taskId}` }),
+    claude: Object.freeze({ subagent_type: brief.agent, model: claudeModel, description: `Implement ${brief.taskId}` }),
+    ...(withPrompt ? { prompt: brief.prompt } : {}),
+  });
+}
+
+/**
+ * `brief [--task Tn] [--prompt]` — the engine-rendered implementation brief
+ * for every dispatch canonical status owes (or the one named Task), with the
+ * exact spawn invocation per harness (`briefInvocation`). A pure read: the
+ * spawn gate still registers and authorizes the attempt. Any argument outside
+ * that grammar, a status selector included, is refused.
+ */
+async function briefOperation(args: readonly string[]): Promise<HookResult> {
+  const unconsumed = unconsumedValueArguments(args, BRIEF_VALUE_FLAGS).filter((token) => !BRIEF_SWITCHES.has(token));
+  if (unconsumed.length > 0) {
+    return {
+      kind: "error",
+      message: `brief takes only --task <id> and --prompt; unknown or unconsumed argument(s): ${unconsumed.join(" ")}`,
+    };
+  }
+  const status = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
+  const action = status.next.action;
+  const recovery = action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started"
+    ? action.diagnostic.recovery
+    : null;
+  if (recovery?.kind !== "spawn-wave-implementation") {
+    const owed = recovery?.kind ?? (action.kind === "blocked" ? action.diagnostic.kind : action.kind);
+    return { kind: "error", message: `canonical status owes no implementation dispatch (next: ${owed}); run status` };
+  }
+  const requested = argumentValue(args, "--task");
+  const dispatches = recovery.dispatches.filter(({ taskId }) => requested === null || taskId === requested);
+  if (dispatches.length === 0) {
+    return {
+      kind: "error",
+      message: `Task ${requested} is not in the owed dispatches (${recovery.dispatches.map(({ taskId }) => taskId).join(", ")})`,
+    };
+  }
+  const withPrompt = hasFlag(args, "--prompt");
+  const briefs: BriefInvocation[] = [];
+  for (const dispatch of dispatches) {
+    const rendered = renderTaskImplementationBrief(TASK_GRAPH_PATH, LOOM_PACKAGE_ROOT, dispatch.taskId);
+    if (!rendered.ok) return { kind: "error", message: rendered.error };
+    const claudeModel = expectedSpawnModel(rendered.value.agent, "claude-code");
+    if (!claudeModel.ok) return { kind: "error", message: claudeModel.error.message };
+    briefs.push(briefInvocation(rendered.value, claudeModel.value, withPrompt));
+  }
+  process.stdout.write(`${JSON.stringify({ wave: recovery.wave, briefs }, null, 2)}\n`);
   return { kind: "allow" };
 }
 
@@ -869,303 +945,6 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
     : { kind: "allow" };
 }
 
-type RegisteredPanelProgram = Readonly<{
-  schemaVersion: 1;
-  kind: "architecture" | "refutation";
-  input: LegacyArchitecturePanelJournal["input"] | LegacyRefutationPanelJournal["input"];
-  /** Exact immutable caller context from which role-specific packets derive. */
-  context: unknown;
-}>;
-
-function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  const record = raw as Record<string, unknown>;
-  if (record["schemaVersion"] !== 1 ||
-      (record["kind"] !== "architecture" && record["kind"] !== "refutation") ||
-      typeof record["input"] !== "object" || record["input"] === null) return null;
-  const translated = translateLegacyPanelJournal(record["kind"], { input: record["input"], events: [] });
-  return translated.ok
-    ? Object.freeze({
-        schemaVersion: 1,
-        kind: record["kind"],
-        input: translated.value.input,
-        context: Object.hasOwn(record, "context") ? record["context"] : record["input"],
-      })
-    : null;
-}
-
-/**
- * Record how one semantic attempt settled, keyed so a replay is a no-op.
- *
- * The dedup key is derived from the RESERVED request id and attempt (the pair
- * that names the slot on disk), while the event carries the LOGICAL request id
- * the panel program reasons about — the two differ for a retried panel attempt,
- * and both call sites had to get that pairing right independently. One function
- * now owns it, because a dedup key that drifted from the slot identity would
- * make a replayed submission mint a second outcome for the same attempt.
- */
-async function appendSpawnOutcome(
-  handle: RunDirHandle,
-  reservedRequestId: string,
-  attempt: 1 | 2,
-  logicalRequestId: string,
-  problem: string | null,
-): Promise<void> {
-  await handle.appendEvent({
-    schemaVersion: 1,
-    sequence: 0,
-    dedupKey: `result:${createHash("sha256").update(`${reservedRequestId}:${attempt}`).digest("hex")}`,
-    recordedAtMs: Date.now(),
-    event: {
-      type: "spawn-outcome",
-      requestId: logicalRequestId,
-      attempt,
-      outcome: problem === null ? "succeeded" : "failed",
-      ...(problem === null ? {} : { error: problem }),
-    },
-  });
-}
-
-/**
- * The runner for effects a run directory serves ENTIRELY on its own.
- *
- * All three outside ports are unreachable by construction: an operation routed
- * here that reaches for git or protected wave state is a routing bug, and it
- * should fail loudly rather than be served. `submitOperation`'s transcript
- * capture built this same three-stub runner inline instead of calling it, so a
- * change to what "unreachable" means here would have silently missed one of the
- * two run-directory-only paths.
- */
-const facadeEffectRunner = (handle: RunDirHandle) => {
-  const unreachablePort = async (): Promise<never> => {
-    throw new Error("effect port is unreachable for this run-directory operation");
-  };
-  return createEffectRunner({
-    handle,
-    ports: {
-      commitProtectedWaveState: unreachablePort,
-      inspectGitRemediation: unreachablePort,
-      installVerifiedIndex: unreachablePort,
-    },
-    resolveArtifacts: () => [],
-  });
-};
-
-type MaterializedPanelRequest = Readonly<{
-  request: PanelSpawnRequest;
-  authority: AgentRequestAuthority;
-  packet: ContextPacket;
-}>;
-
-function materializePanelRequest(
-  handle: RunDirHandle,
-  registration: RegisteredPanelProgram,
-  request: PanelSpawnRequest,
-): Readonly<{ ok: true; value: MaterializedPanelRequest }> | Readonly<{ ok: false; message: string }> {
-  const requestId = parseRequestId(
-    request.attempt === 1 ? request.id : `${request.id}:attempt-${request.attempt}`,
-  );
-  const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
-  const profile = resolveModelProfile(request.modelProfile);
-  const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
-  if (!requestId.ok) return { ok: false, message: requestId.error.message };
-  if (!slotId.ok) return { ok: false, message: slotId.error.message };
-  if (!profile.ok) return { ok: false, message: profile.error.message };
-  if (!Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
-    return { ok: false, message: `unknown panel agent ${request.agent}` };
-  }
-  const requiredSkill = AGENT_REQUIRED_SKILLS[role];
-  const authoritySection = encodeByteSection("panel-authority", JSON.stringify({
-    panel: registration.kind,
-    input: registration.input,
-    context: registration.context,
-  }));
-  if (!authoritySection.ok) return { ok: false, message: authoritySection.error.message };
-  const requestSection = encodeByteSection("panel-request", JSON.stringify({
-    panel: registration.kind,
-    logicalRequestId: request.id,
-    requestId: requestId.value,
-    attempt: request.attempt,
-    role: request.agent,
-    outputContract: request.outputContract,
-  }));
-  if (!requestSection.ok) return { ok: false, message: requestSection.error.message };
-  const packet = buildContextPacket({
-    requestId: requestId.value,
-    role: request.agent,
-    requiredSkill: requiredSkill ?? "none",
-    outputContract: request.outputContract,
-    fixedContext: Object.freeze([authoritySection.value]),
-    variableContext: Object.freeze([requestSection.value]),
-  });
-  if (!packet.ok) return { ok: false, message: packet.error.message };
-  const outputSlot = parseFixedArtifactSlot(
-    `transcripts/${slotId.value}/attempt-${request.attempt}.raw`,
-  );
-  if (!outputSlot.ok) return { ok: false, message: outputSlot.error.message };
-  const authority = parseAgentRequestAuthority({
-    runId: handle.runId,
-    requestId: requestId.value,
-    slotId: slotId.value,
-    program: registration.kind === "architecture" ? "architecture-panel" : "refutation-panel",
-    role,
-    attempt: request.attempt,
-    modelProfile: profile.value.id,
-    harnessBinding: {
-      pi: lowerModelProfile(profile.value, "pi"),
-      claude: lowerModelProfile(profile.value, "claude-code"),
-    },
-    requiredSkill,
-    contextDigest: packet.value.digest,
-    outputSlot: outputSlot.value,
-  });
-  return authority.ok
-    ? { ok: true, value: Object.freeze({ request, authority: authority.value, packet: packet.value }) }
-    : { ok: false, message: authority.error.violations.map(({ message }) => message).join("; ") };
-}
-
-async function materializePanelAction(
-  handle: RunDirHandle,
-  registration: RegisteredPanelProgram,
-  action: PanelProgramAction | Readonly<{ type: "await-results"; runId: string }>,
-): Promise<Readonly<{ ok: true; action: unknown }> | Readonly<{ ok: false; message: string }>> {
-  let panelRequests: readonly PanelSpawnRequest[] = [];
-  if (action.type === "spawn-batch") {
-    panelRequests = action.requests;
-  } else if (action.type === "await-user") {
-    panelRequests = [action.request];
-  }
-  if (panelRequests.length === 0) {
-    if (action.type === "done") return { ok: true, action: Object.freeze({ kind: "done", ...action, type: undefined }) };
-    if (action.type === "blocked") return { ok: true, action: Object.freeze({ kind: "blocked", runId: handle.runId, diagnostic: action }) };
-    return { ok: true, action };
-  }
-
-  const materialized: MaterializedPanelRequest[] = [];
-  for (const request of panelRequests) {
-    const parsed = materializePanelRequest(handle, registration, request);
-    if (!parsed.ok) return parsed;
-    materialized.push(parsed.value);
-  }
-  for (const entry of materialized) {
-    const published = await handle.publishContext(entry.packet);
-    if (!published.ok) return { ok: false, message: published.error.message };
-  }
-  const effectId = parseEffectId(`effect:reserve:${createHash("sha256").update(JSON.stringify(
-    materialized.map(({ authority }) => authority.requestId),
-  )).digest("hex")}`);
-  if (!effectId.ok) return { ok: false, message: effectId.error.message };
-  const runEffect = facadeEffectRunner(handle);
-  const reserved = await runEffect({
-    kind: "reserve-agent-requests",
-    effectId: effectId.value,
-    runId: handle.runId,
-    requests: materialized.map(({ authority }) => authority) as [AgentRequestAuthority, ...AgentRequestAuthority[]],
-  });
-  if (!reserved.ok) return { ok: false, message: reserved.error.message };
-
-  const enriched = materialized.map(({ request, authority, packet }) => Object.freeze({
-    ...request,
-    authority,
-    // Harness adapters execute this exact task text. The marker binds a Pi
-    // batch item to one issued request without reconstructing authority from
-    // role or lexical request ordering.
-    task: renderSpawnTask(handle, authority, `Read the immutable context packet at LOOM_CONTEXT_PATH, then ${request.outputContract}`),
-    context: Object.freeze({
-      digest: packet.digest,
-      slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` }),
-    }),
-  }));
-  return { ok: true, action: Object.freeze({
-    kind: "spawn-batch",
-    runId: handle.runId,
-    requests: Object.freeze(enriched),
-  }) };
-}
-
-async function nextRegisteredPanelAction(
-  handle: RunDirHandle,
-  registration: RegisteredPanelProgram,
-): Promise<Readonly<{ ok: true; action: PanelProgramAction | Readonly<{ type: "await-results"; runId: string }> }> |
-  Readonly<{ ok: false; message: string }>> {
-  const records = await handle.readEvents();
-  const translated = translateLegacyPanelJournal(registration.kind, {
-    input: registration.input,
-    events: records.map(({ event }) => event),
-  });
-  if (!translated.ok) return { ok: false, message: translated.error };
-
-  if (translated.value.panel === "architecture") {
-    let step = startArchitectureDispatchProgram(translated.value.input);
-    if (!step.ok) return { ok: false, message: step.errors.join("\n") };
-    for (const event of translated.value.events) {
-      const reduced = reduceArchitectureProgram(step.value.state, event);
-      if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
-      step = { ok: true, value: reduced.value };
-    }
-    return { ok: true, action: step.value.action ?? { type: "await-results", runId: handle.runId } };
-  }
-
-  let step = startRefutationDispatchProgram(translated.value.input);
-  if (!step.ok) return { ok: false, message: step.errors.join("\n") };
-  for (const event of translated.value.events) {
-    const reduced = reduceRefutationProgram(step.value.state, event);
-    if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
-    step = { ok: true, value: reduced.value };
-  }
-  return { ok: true, action: step.value.action ?? { type: "await-results", runId: handle.runId } };
-}
-
-/**
- * Drive deterministic operations internally until the program reaches a true
- * external boundary. Publication precedes the immutable success event; resume
- * safely republishes byte-identical artifacts after a publication→event crash.
- */
-async function driveRegisteredPanel(
-  handle: RunDirHandle,
-  registration: RegisteredPanelProgram,
-): Promise<Readonly<{ ok: true; action: unknown }> | Readonly<{ ok: false; message: string }>> {
-  for (let operationCount = 0; operationCount <= 4; operationCount += 1) {
-    const next = await nextRegisteredPanelAction(handle, registration);
-    if (!next.ok) return next;
-    if (next.action.type === "await-results") {
-      const issued = handle.readIssuedRequests();
-      const captured = handle.readCapturedAttempts();
-      if (!issued.ok) return { ok: false, message: issued.error.message };
-      if (!captured.ok) return { ok: false, message: captured.error.message };
-      const pending = issued.value.filter((request) => !captured.value.has(captureKey(request.slotId, request.attempt)));
-      return { ok: true, action: Object.freeze({
-        kind: "spawn-batch",
-        runId: handle.runId,
-        requests: Object.freeze(pending.map((authority) => Object.freeze({
-          authority,
-          context: Object.freeze({
-            digest: authority.contextDigest,
-            slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` }),
-          }),
-          task: renderSpawnTask(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending panel request."),
-        }))),
-      }) };
-    }
-    if (next.action.type !== "engine-operation") {
-      return materializePanelAction(handle, registration, next.action);
-    }
-    const operationId = next.action.operation;
-    const executed = executeDeterministicPanelOperation(handle, registration, operationId);
-    if (!executed.ok) return executed;
-    const published = await handle.publishArtifactSet(executed.artifacts);
-    if (!published.ok) return { ok: false, message: published.error.message };
-    await handle.appendEvent({
-      schemaVersion: 1,
-      sequence: 0,
-      dedupKey: `engine:${createHash("sha256").update(`${operationId}:succeeded`).digest("hex")}`,
-      recordedAtMs: Date.now(),
-      event: { type: "engine-outcome", operationId, outcome: "succeeded" },
-    });
-  }
-  return { ok: false, message: "panel emitted more deterministic operations than its closed operation vocabulary allows" };
-}
-
 /**
  * The harness session a façade invocation publishes capture authority into.
  *
@@ -1194,23 +973,22 @@ function bindingSessionOf(env: NodeJS.ProcessEnv): BindingSession | null {
 async function publishSpawnBinding(
   session: BindingSession,
   handle: RunDirHandle,
-  action: Record<string, unknown>,
+  action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>,
 ): Promise<HookResult | null> {
   const { sessionId } = session;
   const label = HARNESS_LABEL[session.harness];
   if (sessionId === undefined) {
     return { kind: "error", message: `${label} orchestration spawn publication requires ${session.sessionVariable}` };
   }
-  const requests = action["requests"];
-  if (!Array.isArray(requests) || requests.length === 0) {
+  const requests = action.requests;
+  if (requests.length === 0) {
     return { kind: "error", message: `${label} orchestration spawn action has no request authority` };
   }
   const requestIds = [];
   for (const [index, request] of requests.entries()) {
-    if (typeof request !== "object" || request === null) {
-      return { kind: "error", message: `${label} orchestration spawn request ${index} is malformed` };
-    }
-    const parsed = parseStoredAgentRequestAuthority((request as Record<string, unknown>)["authority"]);
+    // Re-parsed at the capture-authority boundary: the binding records only
+    // authority the stored-request parser admits, never the in-memory value.
+    const parsed = parseStoredAgentRequestAuthority(request.authority);
     if (!parsed.ok) {
       return { kind: "error", message: `${label} orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}` };
     }
@@ -1234,17 +1012,16 @@ async function publishSpawnBinding(
 async function publishCompletionBinding(
   session: BindingSession,
   handle: RunDirHandle,
-  action: Record<string, unknown>,
+  action: Extract<FacadeAction, Readonly<{ kind: "done" }>>,
 ): Promise<HookResult | null> {
   const { sessionId } = session;
   const label = HARNESS_LABEL[session.harness];
-  const outcome = action["outcome"];
-  const record = typeof outcome === "object" && outcome !== null ? outcome as Record<string, unknown> : null;
-  const slot = record?.["slot"];
-  const slotRecord = typeof slot === "object" && slot !== null ? slot as Record<string, unknown> : null;
-  const resultDigest = record?.["digest"];
-  if (slotRecord?.["kind"] !== "fixed-artifact-slot" || slotRecord["path"] !== "result.json" ||
-      typeof resultDigest !== "string" || !/^[0-9a-f]{64}$/.test(resultDigest)) return null;
+  // Only a done action whose outcome is the run's published `result.json`
+  // artifact completes a session binding; every other outcome binds nothing.
+  const outcome = action.outcome;
+  if (typeof outcome !== "object" || !("slot" in outcome) || outcome.slot.kind !== "fixed-artifact-slot" ||
+      outcome.slot.path !== "result.json" || !/^[0-9a-f]{64}$/.test(outcome.digest)) return null;
+  const resultDigest = outcome.digest;
   if (sessionId === undefined) {
     return { kind: "error", message: `${label} orchestration completion publication requires ${session.sessionVariable}` };
   }
@@ -1264,14 +1041,11 @@ async function publishCompletionBinding(
     : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
 }
 
-async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<HookResult> {
-  const actionRecord = typeof action === "object" && action !== null
-    ? action as Record<string, unknown>
-    : null;
+async function emitRunAction(handle: RunDirHandle, action: FacadeAction): Promise<HookResult> {
   const session = bindingSessionOf(process.env);
-  if (session !== null && actionRecord !== null) {
-    const failure = actionRecord["kind"] === "spawn-batch" ? await publishSpawnBinding(session, handle, actionRecord)
-      : actionRecord["kind"] === "done" ? await publishCompletionBinding(session, handle, actionRecord)
+  if (session !== null) {
+    const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(session, handle, action)
+      : action.kind === "done" ? await publishCompletionBinding(session, handle, action)
       : null;
     if (failure !== null) return failure;
   }
@@ -1331,21 +1105,15 @@ function parseStartRequest(program: Exclude<StartProgram, "standalone-dispositio
   if (translated.value.events.length !== 0) {
     return { ok: false, message: "a fresh orchestration start cannot import pre-existing events" };
   }
-  const registration: RegisteredPanelProgram = Object.freeze({
-    schemaVersion: 1,
-    kind: program,
-    input: translated.value.input,
-    context: raw,
-  });
+  const registration = registeredPanelProgram(translated.value, raw);
   return { ok: true, value: Object.freeze({ kind: "panel", registration }) };
 }
 
-type NonRemediationStartRequest = Exclude<StartRequest, { kind: "remediation" }>;
+type DirectStartRequest = Exclude<StartRequest, { kind: "remediation" | "wave-gate" }>;
 
-const driveStart = (handle: RunDirHandle, request: NonRemediationStartRequest): Promise<FacadeDriveResult> =>
+const driveStart = (handle: RunDirHandle, request: DirectStartRequest): Promise<FacadeDriveResult> =>
   match(request)
     .with({ kind: "standalone-review" }, ({ input }) => startStandaloneFacade(handle, input))
-    .with({ kind: "wave-gate" }, ({ input }) => startWaveGateFacade(handle, input))
     .with({ kind: "panel" }, async ({ registration }) => {
       const registered = await handle.registerProgram(registration);
       return registered.ok
@@ -1354,64 +1122,80 @@ const driveStart = (handle: RunDirHandle, request: NonRemediationStartRequest): 
     })
     .exhaustive();
 
+/** The Run Directory a start names: both `--runs-root` and `--run`, or the
+ *  program's exact usage refusal. */
+function startRunLocation(
+  args: readonly string[],
+  usage: string,
+): Readonly<{ ok: true; runsRoot: string; run: string }> | Readonly<{ ok: false; result: HookResult }> {
+  const runsRoot = argumentValue(args, "--runs-root");
+  const run = argumentValue(args, "--run");
+  return runsRoot === null || run === null
+    ? { ok: false, result: { kind: "error", message: usage } }
+    : { ok: true, runsRoot, run };
+}
+
+/** The one start tail: create and bind the live Run Directory, drive the
+ *  program the start prepared, and emit its action. Each start arm differs only
+ *  in its usage and prepare step and hands its driver here. */
+async function driveCreatedRun(
+  args: readonly string[],
+  drive: (handle: RunDirHandle) => Promise<FacadeDriveResult>,
+): Promise<HookResult> {
+  const bound = bindLiveRun(args, createRunDirectory);
+  if (!isBound(bound)) return bound;
+  const driven = await drive(bound.value.handle);
+  return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+}
+
 async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   const program = args[0];
   if (!isStartProgram(program)) {
     return { kind: "error", message: `start requires ${START_PROGRAMS.join(", ")}` };
   }
-  if (program === "standalone-disposition") return startDispositionOperation(stdin, args.slice(1));
+  const runArgs = args.slice(1);
+  if (program === "standalone-disposition") return startDispositionOperation(stdin, runArgs);
   const request = parseStartRequest(program, stdin);
   if (!request.ok) return { kind: "error", message: request.message };
-  if (request.value.kind === "standalone-review" && "schemaVersion" in request.value.input) {
-    const root = argumentValue(args.slice(1), "--runs-root");
-    const run = argumentValue(args.slice(1), "--run");
-    if (root === null || run === null) return { kind: "error", message: "successor start requires --runs-root and --run" };
-    const prepared = await prepareStandaloneSuccessorFacadeStart(root, run, request.value.input);
+  const startRequest = request.value;
+  if (startRequest.kind === "standalone-review" && "schemaVersion" in startRequest.input) {
+    const location = startRunLocation(runArgs, "successor start requires --runs-root and --run");
+    if (!location.ok) return location.result;
+    const prepared = await prepareStandaloneSuccessorFacadeStart(location.runsRoot, location.run, startRequest.input);
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    const bound = bindLiveRun(args.slice(1), createRunDirectory);
-    if (!isBound(bound)) return bound;
-    const driven = await startPreparedStandaloneSuccessor(bound.value.handle, prepared.value);
-    return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+    return driveCreatedRun(runArgs, (handle) => startPreparedStandaloneSuccessor(handle, prepared.value));
   }
-  if (request.value.kind === "remediation") {
-    const runRoot = argumentValue(args.slice(1), "--runs-root");
-    const run = argumentValue(args.slice(1), "--run");
-    if (runRoot === null || run === null) {
-      return { kind: "error", message: "remediation start requires --runs-root and --run" };
-    }
+  if (startRequest.kind === "remediation") {
+    const location = startRunLocation(runArgs, "remediation start requires --runs-root and --run");
+    if (!location.ok) return location.result;
     const prepared = await prepareRemediationFacadeStart({
-      input: request.value.input,
+      input: startRequest.input,
       repositoryStartPath: process.cwd(),
-      remediationRunsRoot: runRoot,
-      remediationRun: run,
+      remediationRunsRoot: location.runsRoot,
+      remediationRun: location.run,
     });
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    const bound = bindLiveRun(args.slice(1), createRunDirectory);
-    if (!isBound(bound)) return bound;
-    const driven = await startRemediationFacade(bound.value.handle, prepared.value.registration);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return driveCreatedRun(runArgs, (handle) => startRemediationFacade(handle, prepared.value.registration));
   }
-  const bound = bindLiveRun(args.slice(1), createRunDirectory);
-  if (!isBound(bound)) return bound;
-  const driven = await driveStart(bound.value.handle, request.value);
-  if (!driven.ok) return { kind: "error", message: driven.message };
-  return emitRunAction(bound.value.handle, driven.action);
+  if (startRequest.kind === "wave-gate") {
+    const location = startRunLocation(runArgs, "wave-gate start requires --runs-root and --run");
+    if (!location.ok) return location.result;
+    const prepared = prepareWaveGateFacadeStart(startRequest.input, location.runsRoot, location.run);
+    if (!prepared.ok) return { kind: "error", message: prepared.message };
+    return driveCreatedRun(runArgs, (handle) => startWaveGateFacade(handle, prepared.value));
+  }
+  return driveCreatedRun(runArgs, (handle) => driveStart(handle, startRequest));
 }
 
 async function startDispositionOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   if (Buffer.byteLength(stdin) > STANDALONE_LINEAGE_LIMITS.retainedBytes) return { kind: "error", message: "disposition input exceeds byte budget" };
   const input = parseStandaloneDispositionStartBytes(Buffer.from(stdin));
   if (!input.ok) return { kind: "error", message: input.error.message };
-  const root = argumentValue(args, "--runs-root");
-  const run = argumentValue(args, "--run");
-  if (root === null || run === null) return { kind: "error", message: "disposition start requires --runs-root and --run" };
-  const prepared = await prepareStandaloneDispositionFacadeStart(input.value, root, run);
+  const location = startRunLocation(args, "disposition start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = await prepareStandaloneDispositionFacadeStart(input.value, location.runsRoot, location.run);
   if (!prepared.ok) return { kind: "error", message: prepared.message };
-  const bound = bindLiveRun(args, createRunDirectory);
-  if (!isBound(bound)) return bound;
-  const driven = await startStandaloneDispositionFacade(bound.value.handle, prepared.value);
-  return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+  return driveCreatedRun(args, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
 }
 
 async function recoverOrphanOperation(args: readonly string[]): Promise<HookResult> {
@@ -1466,48 +1250,6 @@ async function restartOperation(args: readonly string[]): Promise<HookResult> {
 }
 
 /**
- * Fold every captured-but-unsettled panel attempt into a `spawn-outcome` event.
- *
- * A transcript can be captured into its reserved slot without the program yet
- * having judged it — the capture and the judgement are separate writes. This
- * replays each such attempt through `panelSubmissionProblem` and records the
- * verdict, keyed so a repeat is a no-op. It decides no policy of its own.
- */
-async function reconcileCapturedPanelResults(
-  handle: RunDirHandle,
-  registration: RegisteredPanelProgram,
-): Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; message: string }>> {
-  const events = await handle.readEvents();
-  const settled = new Set(events.flatMap(({ event }) => {
-    if (typeof event !== "object" || event === null) return [];
-    const record = event as Record<string, unknown>;
-    return record["type"] === "spawn-outcome" && typeof record["requestId"] === "string" &&
-      (record["attempt"] === 1 || record["attempt"] === 2)
-      ? [`${record["requestId"]}:${record["attempt"]}`]
-      : [];
-  }));
-  const issued = handle.readIssuedRequests();
-  if (!issued.ok) return { ok: false, message: issued.error.message };
-  const captured = handle.readCapturedAttempts();
-  if (!captured.ok) return { ok: false, message: captured.error.message };
-
-  for (const request of issued.value) {
-    if (!captured.value.has(captureKey(request.slotId, request.attempt))) continue;
-    const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
-    if (settled.has(`${logicalRequestId}:${request.attempt}`)) continue;
-    const bytes = handle.readTranscriptBytes(request);
-    if (!bytes.ok) return { ok: false, message: bytes.error.message };
-    const problem = panelSubmissionProblem(
-      registration,
-      logicalRequestId,
-      Buffer.from(bytes.value).toString("utf-8"),
-    );
-    await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, problem);
-  }
-  return { ok: true };
-}
-
-/**
  * Resume is idempotent and never silently spawns or decides policy: it reports
  * what the run's durable evidence already says. A run whose authority cannot
  * be read is reported as such rather than restarted, because restarting would
@@ -1555,9 +1297,7 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
     }
     const registration = parseRegisteredPanelProgram(stored.value);
     if (registration === null) return { kind: "error", message: "registered orchestration program is malformed" };
-    const reconciled = await reconcileCapturedPanelResults(bound.value.handle, registration);
-    if (!reconciled.ok) return { kind: "error", message: reconciled.message };
-    const driven = await driveRegisteredPanel(bound.value.handle, registration);
+    const driven = await resumeRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
     return emitRunAction(bound.value.handle, driven.action);
   }
@@ -1575,53 +1315,6 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
     runDirectory: authority.value.runDirectory,
   }, null, 2)}\n`);
   return { kind: "allow" };
-}
-
-function logicalPanelRequestId(requestId: string, attempt: 1 | 2): string {
-  return attempt === 2 && requestId.endsWith(":attempt-2")
-    ? requestId.slice(0, -":attempt-2".length)
-    : requestId;
-}
-
-function panelSubmissionProblem(
-  registration: RegisteredPanelProgram,
-  logicalRequestId: string,
-  raw: string,
-): string | null {
-  if (registration.kind === "refutation") {
-    const match = /^refutation:verifier:(\d+)$/.exec(logicalRequestId);
-    const input = registration.input as LegacyRefutationPanelJournal["input"];
-    const index = match === null ? -1 : Number(match[1]) - 1;
-    const lens = input.lenses[index];
-    if (lens === undefined) return `request ${logicalRequestId} is not a canonical verifier slot`;
-    const parsed = parseRefutationVerdict(raw, lens, input.criticalFindingIds);
-    return parsed.ok ? null : parsed.errors.join("; ");
-  }
-
-  const input = registration.input as LegacyArchitecturePanelJournal["input"];
-  const candidateMatch = /^architecture:candidate:(\d+)$/.exec(logicalRequestId);
-  if (candidateMatch !== null) {
-    const index = Number(candidateMatch[1]) - 1;
-    const lens = input.candidateLenses[index];
-    if (lens === undefined) return `request ${logicalRequestId} is not a canonical candidate slot`;
-    const parsed = parseArchitectureCandidate(raw, lens);
-    return parsed.ok ? null : parsed.errors.join("; ");
-  }
-
-  const judgeMatch = /^architecture:judge:(\d+)$/.exec(logicalRequestId);
-  if (judgeMatch !== null) {
-    const criterion = input.judgeCriteria[Number(judgeMatch[1]) - 1];
-    if (criterion === undefined) return `request ${logicalRequestId} is not a canonical judge slot`;
-    const verdict = parseJudgeVerdict(raw, criterion, input.candidateLenses.map(candidateFilename));
-    return verdict.ok ? null : verdict.errors.join("; ");
-  }
-
-  if (logicalRequestId === "architecture:finalize") {
-    const parsed = parseArchitectureFinalization(raw, input.candidateLenses.map(candidateFilename));
-    return parsed.ok ? null : parsed.errors.join("; ");
-  }
-
-  return `request ${logicalRequestId} is not a canonical architecture result slot`;
 }
 
 /**
@@ -1717,7 +1410,7 @@ async function captureSubmission(
     kind: "capture-raw-transcript", effectId: effectId.value, runId: binding.reserved.runId,
     request: binding.reserved, bytes: [...Buffer.from(stdin, "utf-8")],
   };
-  const captured = await facadeEffectRunner(binding.handle)(captureIntent);
+  const captured = await runDirectoryEffectRunner(binding.handle)(captureIntent);
   if (!captured.ok) return { ok: false, result: { kind: "error", message: captured.error.message } };
   return captured.value.kind === "raw-transcript-captured"
     ? { ok: true, value: { semanticRaw: stdin, artifact: captured.value, alreadyCaptured } }
@@ -1725,7 +1418,7 @@ async function captureSubmission(
 }
 
 async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedSubmission): Promise<HookResult> {
-  const { facadeRegistration, handle, panelRegistration, requestId, reserved, attempt } = binding;
+  const { facadeRegistration, handle, panelRegistration, requestId, reserved } = binding;
   if (facadeRegistration?.kind === "standalone-review") {
     const driven = await resumeStandaloneFacade(handle, facadeRegistration);
     return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
@@ -1739,10 +1432,8 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
     return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
   }
   if (panelRegistration !== null) {
-    const logicalRequestId = logicalPanelRequestId(requestId, attempt);
-    const problem = panelSubmissionProblem(panelRegistration, logicalRequestId, capture.semanticRaw);
-    await appendSpawnOutcome(handle, requestId, attempt, logicalRequestId, problem);
-    const driven = await driveRegisteredPanel(handle, panelRegistration);
+    // bindSubmission proved `reserved` is exactly this request id and attempt.
+    const driven = await submitRegisteredPanelAttempt(handle, panelRegistration, reserved, capture.semanticRaw);
     return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
   }
   process.stdout.write(`${JSON.stringify(capture.alreadyCaptured
@@ -1751,9 +1442,49 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
   return { kind: "allow" };
 }
 
+/**
+ * The tool outputs a non-capturing harness delivered to the reviewer, read
+ * from `--tool-outputs PATH` (a JSON array of strings, in delivery order), or
+ * null when none were supplied. They pass through the SAME page verification
+ * native capture uses (ADR-0022): a string counts only where it is an exact
+ * reader page of the frozen diff, so this input grants no credit native
+ * capture would not.
+ */
+function submittedToolOutputs(args: readonly string[]): Readonly<{ ok: true; value: readonly string[] | null }> | Readonly<{ ok: false; message: string }> {
+  const path = argumentValue(args, "--tool-outputs");
+  if (path === null) return { ok: true, value: null };
+  let raw: unknown;
+  try {
+    const bytes = readRunBytesNoFollow(path, 64 * 1024 * 1024);
+    raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (cause) {
+    return { ok: false, message: `--tool-outputs ${path} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}` };
+  }
+  return Array.isArray(raw) && raw.every((entry) => typeof entry === "string")
+    ? { ok: true, value: Object.freeze([...raw as string[]]) }
+    : { ok: false, message: "--tool-outputs must be a JSON array of strings" };
+}
+
+/** Record the submitted attempt's read-coverage observation before its transcript, when the Run requires one. */
+async function recordSubmittedReadCoverage(binding: SubmissionBinding, toolOutputs: readonly string[] | null): Promise<string | null> {
+  if (binding.facadeRegistration?.kind !== "standalone-review" || binding.reserved.program !== "standalone-review") return null;
+  const attempts = binding.handle.readCapturedAttempts();
+  if (!attempts.ok) return attempts.error.message;
+  if (attempts.value.has(captureKey(binding.reserved.slotId, binding.reserved.attempt))) return null;
+  const policy = runReadCoverage(binding.handle);
+  if (!policy.ok) return policy.error;
+  if (policy.value === null) return toolOutputs === null ? null : "--tool-outputs applies only to a read-coverage standalone review";
+  const recorded = await recordReadCoverageObservation(binding.handle, binding.reserved, toolOutputs);
+  return recorded.ok ? null : recorded.error;
+}
+
 async function submitOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   const binding = bindSubmission(args);
   if (!binding.ok) return binding.result;
+  const toolOutputs = submittedToolOutputs(args);
+  if (!toolOutputs.ok) return { kind: "error", message: toolOutputs.message };
+  const coverage = await recordSubmittedReadCoverage(binding.value, toolOutputs.value);
+  if (coverage !== null) return { kind: "error", message: coverage };
   const captured = await captureSubmission(binding.value, stdin);
   return captured.ok ? dispatchSubmission(binding.value, captured.value) : captured.result;
 }
@@ -1792,149 +1523,6 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
     attempt: request.attempt,
   }, null, 2)}\n`);
   return { kind: "allow" };
-}
-
-type DeterministicOperationArtifact = Readonly<{ relativePath: string; bytes: readonly number[] }>;
-
-function operationArtifact(relativePath: string, value: unknown): DeterministicOperationArtifact {
-  return Object.freeze({
-    relativePath,
-    bytes: Object.freeze([...Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf-8")]),
-  });
-}
-
-function capturedPanelRaw(
-  handle: RunDirHandle,
-  logicalRequestId: string,
-): Readonly<{ ok: true; raw: string }> | Readonly<{ ok: false; message: string }> {
-  const issued = handle.readIssuedRequests();
-  if (!issued.ok) return { ok: false, message: issued.error.message };
-  const captured = handle.readCapturedAttempts();
-  if (!captured.ok) return { ok: false, message: captured.error.message };
-  const candidates = issued.value
-    .filter((request) => logicalPanelRequestId(request.requestId, request.attempt) === logicalRequestId &&
-      captured.value.has(captureKey(request.slotId, request.attempt)))
-    .sort((left, right) => right.attempt - left.attempt);
-  const request = candidates[0];
-  if (request === undefined) return { ok: false, message: `operation is missing captured result for ${logicalRequestId}` };
-  const bytes = handle.readTranscriptBytes(request);
-  return bytes.ok
-    ? { ok: true, raw: Buffer.from(bytes.value).toString("utf-8") }
-    : { ok: false, message: bytes.error.message };
-}
-
-function executeDeterministicPanelOperation(
-  handle: RunDirHandle,
-  registration: RegisteredPanelProgram,
-  operationId: string,
-): Readonly<{ ok: true; artifacts: readonly DeterministicOperationArtifact[] }> |
-  Readonly<{ ok: false; message: string }> {
-  if (registration.kind === "refutation") {
-    const input = registration.input as LegacyRefutationPanelJournal["input"];
-    if (operationId === "refutation-prepare-verifiers") {
-      return {
-        ok: true,
-        artifacts: Object.freeze([operationArtifact("operations/refutation-prepare-verifiers.json", {
-          schemaVersion: 1, runId: handle.runId, findingIds: input.criticalFindingIds, lenses: input.lenses,
-        })]),
-      };
-    }
-    if (operationId !== "refutation-tally") {
-      return { ok: false, message: `unsupported refutation operation ${operationId}` };
-    }
-    const verdicts: VerdictEnvelope<RefutationVerdict>[] = [];
-    for (let index = 0; index < input.lenses.length; index += 1) {
-      const logicalRequestId = `refutation:verifier:${index + 1}`;
-      const captured = capturedPanelRaw(handle, logicalRequestId);
-      if (!captured.ok) return captured;
-      const parsed = parseRefutationVerdict(captured.raw, input.lenses[index]!, input.criticalFindingIds);
-      if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
-      verdicts.push(parsed.value);
-    }
-    // The threshold formula and the k-of-n rule are DOMAIN rules and live in
-    // the core (`defaultRefutationThreshold` / `countRefutationVotes`), which
-    // the persistent panel path already delegates to. This branch used to
-    // reimplement both inline, so the same votes could be adjudicated two ways
-    // by two code paths with nothing to keep them in step.
-    const threshold = defaultRefutationThreshold(input.lenses.length);
-    const outcomes = input.criticalFindingIds.map((findingId) => {
-      const judgements = verdicts.map((verdict, index) => Object.freeze({
-        lens: input.lenses[index]!,
-        entry: verdict.entries.find((entry) => entry.findingId === findingId)!,
-      }));
-      const tallied = countRefutationVotes(judgements, threshold);
-      return Object.freeze({
-        finding_id: findingId,
-        survives: tallied.survives,
-        refuted_by: Object.freeze(tallied.refutations.map(({ lens }) => lens)),
-        votes: Object.freeze(judgements.map(({ lens, entry }) => Object.freeze({ lens, vote: entry }))),
-      });
-    });
-    const result = Object.freeze({
-      schemaVersion: 1,
-      kind: "refutation-panel-result",
-      runId: handle.runId,
-      lenses: input.lenses,
-      threshold,
-      outcomes: Object.freeze(outcomes),
-    });
-    return {
-      ok: true,
-      artifacts: Object.freeze([
-        operationArtifact("operations/refutation-tally.json", result),
-        operationArtifact("result.json", result),
-      ]),
-    };
-  }
-
-  const input = registration.input as LegacyArchitecturePanelJournal["input"];
-  const candidates = input.candidateLenses.map(candidateFilename);
-  if (operationId === "architecture-prepare-candidates") {
-    return {
-      ok: true,
-      artifacts: Object.freeze([operationArtifact("operations/architecture-prepare-candidates.json", {
-        schemaVersion: 1, runId: handle.runId, lenses: input.candidateLenses, candidates,
-      })]),
-    };
-  }
-  if (operationId === "architecture-prepare-judges") {
-    const accepted = [];
-    for (let index = 0; index < input.candidateLenses.length; index += 1) {
-      const captured = capturedPanelRaw(handle, `architecture:candidate:${index + 1}`);
-      if (!captured.ok) return captured;
-      const problem = panelSubmissionProblem(registration, `architecture:candidate:${index + 1}`, captured.raw);
-      if (problem !== null) return { ok: false, message: problem };
-      accepted.push(JSON.parse(captured.raw) as unknown);
-    }
-    return {
-      ok: true,
-      artifacts: Object.freeze([operationArtifact("operations/architecture-prepare-judges.json", {
-        schemaVersion: 1, candidates: accepted, criteria: input.judgeCriteria,
-      })]),
-    };
-  }
-  if (operationId === "architecture-aggregate") {
-    const verdicts: JudgeVerdict[] = [];
-    for (let index = 0; index < input.judgeCriteria.length; index += 1) {
-      const captured = capturedPanelRaw(handle, `architecture:judge:${index + 1}`);
-      if (!captured.ok) return captured;
-      const parsed = parseJudgeVerdict(captured.raw, input.judgeCriteria[index]!, candidates);
-      if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
-      verdicts.push(parsed.value);
-    }
-    const ranking = aggregateVerdicts(verdicts, input.judgeCriteria, candidates);
-    if (!ranking.ok) return { ok: false, message: ranking.errors.join("; ") };
-    return {
-      ok: true,
-      artifacts: Object.freeze([
-        operationArtifact("operations/architecture-aggregate.json", {
-          schemaVersion: 1, kind: "architecture-ranking", runId: handle.runId, ranking: ranking.value,
-        }),
-        operationArtifact("ranking.json", ranking.value),
-      ]),
-    };
-  }
-  return { ok: false, message: `unsupported architecture operation ${operationId}` };
 }
 
 async function completeOperation(args: readonly string[]): Promise<HookResult> {
@@ -2061,8 +1649,8 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
 // ---------------------------------------------------------------------------
 
 const handler: HookHandler = async (stdin, args) => {
-  const operation = args[0];
-  if (!isOperation(operation)) return usage();
+  const operation = parseOrchestrationOperation(args[0]);
+  if (operation === null) return usage();
   const rest = args.slice(1);
 
   switch (operation) {
@@ -2070,6 +1658,8 @@ const handler: HookHandler = async (stdin, args) => {
       return argumentValue(rest, "--run") === null ? statusOperation(rest) : inspectOperation(rest);
     case "inspect":
       return inspectOperation(rest);
+    case "brief":
+      return briefOperation(rest);
     case "abandon":
       return abandonOperation(rest);
     case "start":

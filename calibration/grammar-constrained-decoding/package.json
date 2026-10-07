@@ -1,0 +1,9 @@
+{
+  "name": "@peterstorm/loom-calibration-grammar-constrained-decoding",
+  "private": true,
+  "type": "module",
+  "description": "AD-11 calibration pilot tests. Runs on the engine's pinned Vitest and config; not part of the Runtime Revision digest.",
+  "scripts": {
+    "test": "env -u PI_CODING_AGENT ../../engine/node_modules/.bin/vitest run --root ../../engine --dir ."
+  }
+}

@@ -1,3 +1,4 @@
+import { captureReviewedTranscript } from "../../../fixtures/read-coverage";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync, truncateSync, chmodSync } from "node:fs";
@@ -8,7 +9,12 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureStandaloneCliEvidence } from "../../../fixtures/standalone-cli-capture";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
-import { standaloneOriginReference, standaloneDecisionReference, type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-lineage";
+import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
+import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
+import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
 import type { StandaloneReviewerPayloadV3 } from "../../../../src/core/standalone-lineage-contract";
 
@@ -28,6 +34,10 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
 const json = (raw: unknown) => JSON.stringify(raw);
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];
 type Action = { kind: string; requests: { authority: AgentRequestAuthority; task: string }[]; digest: string; json: string };
+const spawnBatch = (action: FacadeAction) => {
+  if (action.kind !== "spawn-batch") throw Error(`expected spawn-batch, got ${action.kind}`);
+  return action;
+};
 function project() {
   const root = canonicalTempDir("loom-p5-successor-"); roots.push(root);
   mkdirSync(join(root, "runs")); writeFileSync(join(root, "a.ts"), "export const value = 0;\n");
@@ -62,27 +72,27 @@ async function predecessor(root: string, criticalHistory = false) {
   // Runtime/session/cwd/transport ownership precedes every shell import and operation.
   const handles = await import("../../../../src/orchestration/run-directory-handle");
   const shell = await import("../../../../src/handlers/helpers/programs/standalone");
-  const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+  const helpers = await import("../../../../src/handlers/helpers/programs/registration");
   const handle = value(handles.createRunDirectory(join(root, "runs"), "source"));
   const started = await shell.startStandaloneFacade(handle, { kind: "types", files: ["a.ts"], dryRun: false });
   if (!started.ok) throw Error(started.message);
-  const action = started.action as Action;
-  for (const [index, { authority }] of action.requests.entries()) value(await handle.captureTranscript(authority, [...Buffer.from(json({ schemaVersion: 2, kind: "standalone-review",
+  const action = spawnBatch(started.action);
+  for (const [index, { authority }] of action.requests.entries()) value(await captureReviewedTranscript(handle, authority, [...Buffer.from(json({ schemaVersion: 2, kind: "standalone-review",
     findings: index === 0 ? criticalHistory ? [critical, { ...critical, claim: "Unchanged upheld blocker" }]
       : [{ severity: "advisory", file: "a.ts", line: 1, claim: "Original assertion", reason: "Clarity" }] : [] }))]));
   const registration = value(helpers.parseRegistration(value(handle.readProgramRegistration())));
   let completed = await shell.resumeStandaloneFacade(handle, registration); if (!completed.ok) throw Error(completed.message);
   if (criticalHistory) {
-    for (const { authority } of (completed.action as Action).requests) {
+    for (const { authority } of spawnBatch(completed.action).requests) {
       const packet = value(handle.readContext(authority.contextDigest));
       const context = JSON.parse(Buffer.from(packet.fixedContext[0]!.bytes).toString());
-      value(await handle.captureTranscript(authority, [...Buffer.from(json({ criterion: context.lens,
+      value(await captureReviewedTranscript(handle, authority, [...Buffer.from(json({ criterion: context.lens,
         verdicts: context.findings.map((finding: { id: string }, index: number) => ({ finding_id: finding.id,
           verdict: index === 0 ? "refuted" : "upheld", reasoning: `Original ${context.lens} exact reasoning` })) }))]));
     }
     completed = await shell.resumeStandaloneFacade(handle, registration); if (!completed.ok) throw Error(completed.message);
   }
-  expect((completed.action as Action).kind).toBe("done");
+  expect(completed.action.kind).toBe("done");
   const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
   return { handles, shell, helpers, publisher };
 }
@@ -290,11 +300,13 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
     const root = project(); await ownedSession(root, async () => {
       const handles = await import("../../../../src/orchestration/run-directory-handle");
       const shell = await import("../../../../src/handlers/helpers/programs/standalone");
-      const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+      const publication = await import("../../../../src/handlers/helpers/programs/request-publication");
+      const helpers = await import("../../../../src/handlers/helpers/programs/registration");
       const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");
-      const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review");
-      const machine = await import("../../../../src/core/standalone-review-machine");
+      const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review-preparation");
+      const machine = await import("../../../../src/core/standalone-review");
+      const checkpoint = await import("../../../../src/core/standalone-review-checkpoint");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const handle = value(handles.createRunDirectory(join(root, "runs"), "source"));
       const agent = value(resolveAgentPolicy("code-reviewer")); const profile = value(resolveModelProfile(agent.profile));
@@ -312,17 +324,17 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
           comments_changed: false, additions: 1, file_count: 1, new_structure: false, languages: ["TypeScript"] },
         scopeSafety: [{ path: "a.ts", status: "safe" }], roster: [{ slotId: "slot:legacy", attempts: attempts.map(row => row.authority) }] }));
       const registration = standaloneFixtureRegistration(prepared.authority); value(await handle.registerProgram(registration));
-      const batch = await helpers.publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+      const batch = await publication.publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
         context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), attempts.map(row => row.packet), "standalone-review");
       expect(batch.ok).toBe(true);
       const awaiting = value(machine.reduceStandaloneReviewMachine(machine.startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
-      await handle.writeCheckpoint(machine.serializeStandaloneReviewMachineState(awaiting));
-      value(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("Missing historical required markers")]));
+      await handle.writeCheckpoint(checkpoint.serializeStandaloneReviewMachineState(awaiting));
+      value(await captureReviewedTranscript(handle, prepared.initialRequests[0], [...Buffer.from("Missing historical required markers")]));
       const retried = await shell.resumeStandaloneFacade(handle, registration);
       if (!retried.ok) throw Error(retried.message);
-      const retry = (retried.action as Action).requests[0]!.authority;
+      const retry = spawnBatch(retried.action).requests[0]!.authority;
       expect(retry.attempt).toBe(2);
-      value(await handle.captureTranscript(retry, [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact original v1 assertion")]));
+      value(await captureReviewedTranscript(handle, retry, [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact original v1 assertion")]));
       expect((await shell.resumeStandaloneFacade(handle, registration)).ok).toBe(true);
       const before = readFileSync(join(handle.runDirectory, "result.json"));
       const p = await policy(root, "source", "policy-zero", publisher);
@@ -527,6 +539,114 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
         expect(Buffer.from(replay.json)).toEqual(bytes); expect(replay.digest).toBe(hash(bytes));
         expect(existsSync(join(s.handle.runDirectory, "checkpoint.json"))).toBe(false);
       }
+    });
+  });
+
+  it("projects the issued v3 route on the successor path and changes only reviewer task text across routes (FR-012)", async () => {
+    const root = project();
+    await ownedSession(root, async () => {
+      const f = await predecessor(root);
+      const p = await policy(root, "source", "policy-route", f.publisher);
+      writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
+      // The catalog arm explicitly DELETES the election variables: the outer
+      // Loom session may run this suite under the qualified-local model, and
+      // the catalog issue route must not inherit it.
+      const startSuccessor = (run: string, environment: EnvironmentOverlay) => withRouteEnv(environment, () => successor(root, run, p, f));
+      const extraction = await startSuccessor("route-extraction", CATALOG_ROUTE_ENV);
+      const emission = await startSuccessor("route-emission", QUALIFIED_ROUTE_ENV);
+
+      // The route election is genuinely exercised and both runs freeze the
+      // same successor v3 program shape (schemaVersion 3, same lineage).
+      for (const run of [extraction, emission]) {
+        expect(run.registration.schemaVersion).toBe(3);
+        expect(run.started.requests.map(({ authority }) => authority.role)).toEqual(["code-reviewer", "type-design-analyzer"]);
+      }
+      expect(emission.started.requests.map(({ authority }) => authority.modelProfile))
+        .toEqual(emission.started.requests.map(() => "qualified-local-review"));
+      expect(emission.started.requests.map(({ authority }) => authority.modelProfile))
+        .not.toEqual(extraction.started.requests.map(({ authority }) => authority.modelProfile));
+
+      // The successor's frozen packet content is route-independent: the v3
+      // packet digests embed each run's request identity, but the lineage and
+      // predecessor-archive section bytes are identical.
+      for (const [extractionRequest, emissionRequest] of extraction.started.requests.map((request, index) => [request, emission.started.requests[index]!] as const)) {
+        const extractionPacket = value(extraction.handle.readStandaloneSuccessorContext(extractionRequest.authority.contextDigest));
+        const emissionPacket = value(emission.handle.readStandaloneSuccessorContext(emissionRequest.authority.contextDigest));
+        expect(emissionPacket.schemaVersion).toBe(3);
+        expect(emissionPacket.variableContext.map((section) => section.label))
+          .toEqual(extractionPacket.variableContext.map((section) => section.label));
+        expect(emissionPacket.variableContext.map((section) => section.digest))
+          .toEqual(extractionPacket.variableContext.map((section) => section.digest));
+        // The fixed sections embed each run's identity (run id, run locator,
+        // lineage digest), so the route-independence comparison normalizes
+        // those identity values; any route-dependent byte would survive that
+        // normalization.
+        expect(emissionPacket.fixedContext.map((section) => section.label))
+          .toEqual(extractionPacket.fixedContext.map((section) => section.label));
+        const normalizeIdentity = (text: string) =>
+          text.split("route-emission").join("route-extraction")
+            .split(emission.prepared.lineageDigest).join(extraction.prepared.lineageDigest);
+        for (const [emissionSection, extractionSection] of emissionPacket.fixedContext.map((section, index) => [section, extractionPacket.fixedContext[index]!] as const)) {
+          expect(normalizeIdentity(Buffer.from(emissionSection.bytes).toString("utf8")))
+            .toBe(Buffer.from(extractionSection.bytes).toString("utf8"));
+        }
+      }
+
+      // The route delta on the wire is EXACTLY the descriptor line plus the
+      // appended tool-primary instruction; request digests and run identity
+      // are normalized to placeholders because each run mints its own.
+      const normalize = (task: string, run: typeof extraction, name: string) => {
+        let out = task.split(name).join("<RUN>");
+        for (const [index, { authority }] of run.started.requests.entries()) {
+          out = out.split(authority.requestId).join(`<REQUEST:${index}>`);
+          out = out.split(authority.contextDigest).join(`<CONTEXT:${index}>`);
+        }
+        return out;
+      };
+      for (const [extractionRequest, emissionRequest] of extraction.started.requests.map((request, index) => [request, emission.started.requests[index]!] as const)) {
+        const extractionTask = normalize(extractionRequest.task, extraction, "route-extraction");
+        const emissionTask = normalize(emissionRequest.task, emission, "route-emission");
+        expect(extractionTask).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        const descriptor = parseEmissionDescriptor(emissionRequest.task);
+        expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
+          binding: { requestId: emissionRequest.authority.requestId, version: "v3" } });
+        if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+        expect(withoutEmissionRouteDelta(emissionTask, descriptor.binding, descriptor.contextDigest,
+          (rendered) => normalize(rendered, emission, "route-emission"))).toBe(extractionTask);
+        expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+      }
+    });
+  });
+
+  it("publishes the accepted-source record when a native successor capture is won by the emission tool (FR-009)", async () => {
+    const root = project();
+    await ownedSession(root, async () => {
+      const f = await predecessor(root);
+      const p = await policy(root, "source", "policy-source-record", f.publisher);
+      writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
+      const s = await withRouteEnv(QUALIFIED_ROUTE_ENV, () => successor(root, "emission-source", p, f));
+      const { authority, task } = s.started.requests[0]!;
+      const descriptor = parseEmissionDescriptor(task);
+      if (descriptor.kind !== "issued") throw Error("qualified-route successor must issue an emission descriptor");
+      value(await s.handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "pi", nativeId: "native-emission-source",
+        requestId: authority.requestId, role: authority.role, attempt: authority.attempt }));
+      const args = payload(s);
+      const runtime = await import("../../../../src/orchestration/harness-capture-runtime");
+      const outcome = await runtime.captureHarnessResult({
+        harness: "pi", runsRoot: join(root, "runs"), runDirectory: s.handle.runDirectory, nativeId: "native-emission-source",
+        observe: () => runtime.captureEmissionObservation([{ kind: "complete", call: { requestId: authority.requestId,
+          toolCallId: "call-successor-source", kind: { kind: "reviewer-payload" }, version: "v3", arguments: args } }], []),
+      });
+      expect(outcome.kind, JSON.stringify(outcome)).toBe("captured");
+      if (outcome.kind !== "captured") return;
+      const record = value(s.handle.readArtifactBytes(`capture-sources/${authority.requestId}.json`, 16_384));
+      expect(record, "the successor capture won by the emission tool left no accepted-source record").not.toBeNull();
+      expect(JSON.parse(Buffer.from(record!).toString("utf8"))).toEqual({
+        schemaVersion: 1, kind: "capture-source", requestId: authority.requestId, slotId: authority.slotId, attempt: authority.attempt,
+        harness: "pi", source: "emission-tool", toolCallId: "call-successor-source", producerKind: "reviewer-payload",
+        emissionSchemaVersion: "v3", schemaDigest: descriptor.binding.schemaDigest,
+        payloadDigest: outcome.receipt.digest, payloadByteLength: outcome.receipt.byteLength,
+      });
     });
   });
 });

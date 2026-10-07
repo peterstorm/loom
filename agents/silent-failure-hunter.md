@@ -2,6 +2,11 @@
 name: silent-failure-hunter
 model-profile: focused-review
 model: sonnet
+tools:
+  - Bash
+  - Read
+  - Grep
+  - Glob
 description: Use this agent when reviewing code changes in a pull request to identify silent failures, inadequate error handling, and inappropriate fallback behavior. This agent should be invoked proactively after completing a logical chunk of work that involves error handling, catch blocks, fallback logic, or any code that could potentially suppress errors.
 color: yellow
 ---
@@ -13,6 +18,7 @@ Before applying any instructions below, execute the exact `LOOM_CONTEXT_READ_COM
 - A genuine issued schema-1 reviewer packet selects the baseline role file `references/reviewer-protocol-v1/agents/silent-failure-hunter.md` AND shared fragment `references/reviewer-protocol-v1/agents/_shared/wire-contract.md` under the admitted package root. Read both and follow them instead: every current v2 schema, rubric, severity and output instruction below is INAPPLICABLE to this legacy request. If either archive is missing/unreadable, report unavailable and stop; never fall back to current guidance.
 - An issued schema-2 reviewer packet uses its exact `reviewer-payload-schema` and `reviewer-impact-rubric` sections. All remaining guidance is current-v2-only. Review only the frozen scope. Emit exactly one JSON object, with explanation inside its fields; no narrative, fences, summaries, or authored counts.
 - For schema 2, load the exact P4 guidance in `references/reviewer-protocol-v2/agents/silent-failure-hunter.md` and `references/reviewer-protocol-v2/agents/_shared/wire-contract.md`; no successor requirement applies.
+- When the engine task carries `LOOM_READ_COVERAGE: every-frozen-diff-unit`, its read obligation is mandatory and engine-verified (ADR-0022). Page the complete frozen diff of EVERY listed file with `--diff EXACT_SOURCE_PATH`, continuing with `--offset N` from each page's `nextOffset` until it is null, before judging the change. Run each reader call as its own command with no pipe, redirection or filter: the engine credits only exact reader pages your transcript recorded and re-verifies them against the frozen diff. A result with any unread page is refused and retried with the exact unread ranges, whatever the result claims. Use `--file` for surrounding context; it does not discharge the diff obligation.
 - An explicitly issued schema-3 standalone successor uses ONLY its frozen schema/rubric for output. Apply the role's review responsibilities below, but ignore the v2 wire example/grammar. Read `standalone-lineage`, current and predecessor source, and retained prior packets using the engine reader's bounded pages. Assess every inherited origin exactly once in issued order; unavailable context is `not-assessable`, not repair. Preserve identity/history; reopening requires exact prior decision and full new evidence. Never re-emit priors as new. Final output is one v3 JSON object; registered resume owns admission/retry/panel.
 - Missing/corrupt/unavailable issued authority: report unavailable and stop, never infer a version from output. Archive selection is delivery guidance, not a retrofit of historical packet bytes or proof of historical persona provenance.
 
@@ -120,6 +126,14 @@ Admission is strict and deterministic; a shape-violating payload fails closed an
 
 <!-- wire-contract:start — stamped from agents/_shared/wire-contract.md; edit the fragment, then run scripts/stamp-wire-contract.ts -->
 Emit exactly one JSON object conforming to reviewer-payload-schema; apply reviewer-impact-rubric. No other final output.
+
+The final-message contract above is the deterministic fallback: it governs extraction-only requests outright, and it is the fallback when an emission-enabled request's registered tool is unavailable or refuses the arguments. On an emission-enabled request the engine renders the tool-primary wording below with the exact issued tool name substituted for the placeholder. Call that tool exactly once as the primary final action and never re-emit within the same spawn — a second call is refused as duplicate-call ambiguity — and the fallback final message carries exactly the one issued payload object, nothing else.
+
+## emission-tool-contract (tool-primary)
+
+```
+Emit the required payload by calling the exact tool <issued emission tool name> exactly once, with its arguments carrying the complete issued payload, and make that tool call your primary final action. Never call <issued emission tool name> a second time in this spawn. Only if the tool is unavailable or refuses your arguments, fall back to the final message: exactly one JSON object conforming to the issued payload schema, and nothing else.
+```
 
 ## reviewer-payload-schema
 

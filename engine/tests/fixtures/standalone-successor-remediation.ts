@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "./canonical-temp-dir";
+import { git } from "./git-repository";
 import { captureStandaloneCliEvidence as capture } from "./standalone-cli-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
@@ -14,11 +14,6 @@ export const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).di
 export function value<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
   if (!result.ok) throw Error(JSON.stringify(result));
   return result.value;
-}
-export function git(root: string, args: readonly string[]): string {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw Error(result.stderr);
-  return result.stdout;
 }
 
 /** Same enrolled fixed command as the existing P3 fixture; never edits the project manifest. */
@@ -62,7 +57,7 @@ export type SuccessorFixtureCapture = (handle: RunDirHandle, requests: Action["r
 async function publishOriginalReview(runsRoot: string) {
   const handles = await import("../../src/orchestration/run-directory-handle");
   const standalone = await import("../../src/handlers/helpers/programs/standalone");
-  const helpers = await import("../../src/handlers/helpers/programs/helpers");
+  const helpers = await import("../../src/handlers/helpers/programs/registration");
   const publisher = await import("../../src/handlers/helpers/programs/standalone-disposition");
   const { REVIEWER_PAYLOAD_EXAMPLE_V2 } = await import("../../src/core/reviewer-contract");
   const source = value(handles.createRunDirectory(runsRoot, "source"));
@@ -101,7 +96,7 @@ export async function publishedSuccessorForRemediation(root: string, mode: "comp
   const sourceReader = await import("../../src/handlers/helpers/programs/standalone-source");
   const remediation = await import("../../src/handlers/helpers/programs/remediation");
   const accounting = await import("../../src/core/defect-family-accounting");
-  const lineage = await import("../../src/core/standalone-lineage");
+  const lineage = await import("../../src/core/standalone-finding-origin");
   const { parseStandaloneDispositionStartBytes } = await import("../../src/core/standalone-disposition-machine");
   const dispositionInput = value(parseStandaloneDispositionStartBytes(Buffer.from(JSON.stringify({ source: reference, previous: null,
     record: { schemaVersion: 1, source: reference, provenance: "DECLARED", revision: { kind: "initial" },

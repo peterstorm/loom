@@ -11,6 +11,12 @@
  * inside its role's artifact roots (`artifactWriteRoots`). Everything else is
  * blocked.
  *
+ * This is the ONE artifact-writer admission. Pi supplies no request: it cannot
+ * name the calling agent here, and its phase/panel writers instead hold scoped
+ * write grants (admitted as grant holders above; the extension then confines
+ * each write to the grant's `deriveArtifactWriteScope` dirs). Both paths
+ * classify writers through the same `artifact-write-scope` role policy.
+ *
  * On Claude Code an implementation role is not by itself a write grant: the
  * Agent's exact Implementation Attempt is bound lazily (`core/implementation-
  * binding`), and only a `bound` Agent admits. The harness supplies that state
@@ -21,7 +27,7 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 import { match } from "ts-pattern";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, defaultTaskGraphExists } from "../config";
+import { IMPL_AGENTS } from "./agent-catalog-projections";
 import { artifactWriteRoots } from "./artifact-write-scope";
 import { PENDING_BINDING_ESCALATION, type ImplementationBinding } from "./implementation-binding";
 import {
@@ -75,11 +81,6 @@ export type ActiveRosterProbe = (sessionId: SessionId) => readonly ActiveRosterE
 function isWriteAuthorizedAgent(agentId: string): boolean {
   return IMPL_AGENTS.has(agentId) || parseGrantedAgentId(agentId) !== null;
 }
-
-// Default task-graph existence probe: the shared fail-closed probe in config
-// (`defaultTaskGraphExists` — ENOENT is the only absent answer), injected
-// here as `shouldBlockDirectEdit`'s default port. Pi passes its own override
-// built on the same `probePathFailClosed` core.
 
 /**
  * No roster reader supplied — answer `null`, i.e. "cannot prove a subagent is
@@ -165,10 +166,19 @@ function artifactWriteVerdict(
     : { kind: "outside-roots", agentType, allowedRoots, targetPath };
 }
 
+/**
+ * REQUIRED arming port: the task-graph existence probe, named at every call
+ * site — no import-frozen default stands in for it. The lazy-arming doctrine
+ * (commit 6f4a1452): a default frozen at module load made the gate's arming
+ * depend on the checkout and silently disarmed on a fresh one; production
+ * callers inject `pathExistsFailClosed(taskGraphPath())`, tests inject their
+ * own. Fail-closed semantics stay the caller's (`pathExistsFailClosed` — ENOENT
+ * is the only absent answer).
+ */
 export function shouldBlockDirectEdit(
   toolName: string,
   sessionId: string,
-  taskGraphExists: () => boolean = defaultTaskGraphExists,
+  taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
   artifactWrite?: ArtifactWriteRequest,
   implementationBinding?: ImplementationBindingProbe,

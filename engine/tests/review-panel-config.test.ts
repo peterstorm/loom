@@ -2,17 +2,8 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  ARCH_PANEL_AGENTS,
-  IMPL_AGENTS,
-  PHASE_AGENT_MAP,
-  REVIEW_AGENTS,
-  REVIEW_SUB_AGENTS,
-  REVIEW_PANEL_AGENTS,
-  UTILITY_AGENTS,
-  assertReviewPanelDisjoint,
-  reviewPanelOverlap,
-} from "../src/config";
+import { UTILITY_AGENTS, assertReviewPanelDisjoint, reviewPanelOverlap } from "../src/config";
+import { ARCH_PANEL_AGENTS, IMPL_AGENTS, PHASE_AGENT_MAP, REVIEW_AGENTS, REVIEW_SUB_AGENTS, REVIEW_PANEL_AGENTS } from "../src/core/agent-catalog-projections";
 import { categorize } from "../src/handlers/subagent-stop/dispatch";
 import { VALIDATED_AGENTS } from "../src/handlers/pre-tool-use/validate-agent-skill";
 import { KNOWN_HANDLERS } from "../src/handler-routes";

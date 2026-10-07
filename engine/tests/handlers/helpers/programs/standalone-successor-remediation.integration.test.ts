@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { gitResult } from "../../../fixtures/git-repository";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
-import { addRepairTest, CHECK_ID, git, hash, publishedSuccessorForRemediation, repairDeclaration,
+import { addRepairTest, CHECK_ID, hash, publishedSuccessorForRemediation, repairDeclaration,
   REPORT_PATH, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
 
 const roots: string[] = [];
@@ -44,10 +45,10 @@ async function expectInstalled(f: Fixture, run: string, declaration: unknown, su
   if (!done.ok) throw Error(done.message);
   const outcome = (done.action as { outcome: { installation: { indexDigest: string }; defectFamilyAssessment: unknown } }).outcome;
   const index = readFileSync(join(f.root, ".git/index"));
-  expect(outcome.installation.indexDigest).toBe(hash(Buffer.from(git(f.root, ["ls-files", "--stage", "-z"]))));
-  expect(git(f.root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["src/repair.mjs", ...supportPaths]);
-  expect(Buffer.from(git(f.root, ["show", ":src/repair.mjs"]))).toEqual(candidate);
-  for (const path of supportPaths) expect(Buffer.from(git(f.root, ["show", `:${path}`]))).toEqual(readFileSync(join(f.root, path)));
+  expect(outcome.installation.indexDigest).toBe(hash(Buffer.from(gitResult(f.root, ["ls-files", "--stage", "-z"]).stdout)));
+  expect(gitResult(f.root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["src/repair.mjs", ...supportPaths]);
+  expect(Buffer.from(gitResult(f.root, ["show", ":src/repair.mjs"]).stdout)).toEqual(candidate);
+  for (const path of supportPaths) expect(Buffer.from(gitResult(f.root, ["show", `:${path}`]).stdout)).toEqual(readFileSync(join(f.root, path)));
   expect(readFileSync(join(f.root, "src/repair.mjs"))).toEqual(candidate);
   expect(readFileSync(join(f.root, ".loom/verification-manifest.json"))).toEqual(manifest);
   const checkpointBytes = readFileSync(join(handle.runDirectory, "checkpoint.json"));
@@ -142,8 +143,8 @@ describe.sequential("owned v3 source → actual guarded P3 installation", { time
     expect(done).toMatchObject({ ok: true, action: { kind: "done", outcome: { defectFamilyAssessment: { status: "repair-checked" } } } });
     const checkpoint = JSON.parse(readFileSync(join(handle.runDirectory, "checkpoint.json"), "utf8"));
     expect(checkpoint.state.authority.sourceResultJson).toBe(f.originalBytes.toString());
-    expect(checkpoint.state.receipt.indexDigest).toBe(hash(Buffer.from(git(root, ["ls-files", "--stage", "-z"]))));
-    expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["src/repair.mjs", "tests/repair.test.mjs"]);
+    expect(checkpoint.state.receipt.indexDigest).toBe(hash(Buffer.from(gitResult(root, ["ls-files", "--stage", "-z"]).stdout)));
+    expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["src/repair.mjs", "tests/repair.test.mjs"]);
     expect(await f.remediation.resumeRemediationFacade(handle, prepared.registration)).toEqual(done);
     expect(await handle.readEvents()).toHaveLength(1);
     expectPreserved(f);

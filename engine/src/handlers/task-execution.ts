@@ -23,12 +23,13 @@ import {
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
-import {
-  captureDeclaredArtifactBaseline,
-  captureRepositoryChangeBaseline,
-} from "../utils/artifact-baseline";
+import { parseTaskBaselineField, type ArtifactBaseline } from "../core/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../utils/declared-artifact-snapshot";
+import { captureRepositoryChangeBaseline } from "../utils/repository-change-baseline";
 import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
+
+type RepositoryChangeBaseline = ArtifactBaseline<"repository-change">;
 
 export type TaskExecutionRegistrationOutcome =
   | Readonly<{
@@ -122,10 +123,10 @@ export async function registerTaskExecutionBatch(
   const baselines = new Map<string, Readonly<{
     proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
     attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
-    repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
-    repositoryObservation: ReturnType<typeof captureRepositoryChangeBaseline>;
+    repositoryAttempt: RepositoryChangeBaseline;
+    repositoryObservation: RepositoryChangeBaseline;
   }>>();
-  let repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
+  let repositoryAttempt: RepositoryChangeBaseline;
   try {
     repositoryAttempt = captureRepositoryChangeBaseline(repository.root);
   } catch (error) {
@@ -137,13 +138,19 @@ export async function registerTaskExecutionBatch(
   for (const taskId of taskIds) {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
     if (!task) continue;
+    // A retained repository baseline is the stored wire record; re-prove it
+    // under the digest scheme its field owns so the in-memory bundle keeps the brand.
+    const retained = parseTaskBaselineField(task, "repository_baseline", `${taskId} repository_baseline`);
+    if (retained !== undefined && !retained.ok) {
+      return { kind: "block", message: `BLOCKED: Invalid retained repository baseline: ${retained.errors.join("; ")}` };
+    }
     try {
       const declared = task.file_list ?? [];
       const attemptScope = [...new Set([...declared, ...(task.files_modified ?? [])])];
       baselines.set(taskId, {
         proof: captureDeclaredArtifactBaseline(repository.root, declared),
         attempt: captureDeclaredArtifactBaseline(repository.root, attemptScope),
-        repositoryAttempt: task.repository_baseline ?? repositoryAttempt,
+        repositoryAttempt: retained?.value ?? repositoryAttempt,
         repositoryObservation: repositoryAttempt,
       });
     } catch (error) {

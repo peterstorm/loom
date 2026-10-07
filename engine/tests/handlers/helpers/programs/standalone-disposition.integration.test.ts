@@ -1,3 +1,4 @@
+import { captureReviewedTranscript, readCoverageSubmitArgs } from "../../../fixtures/read-coverage";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
@@ -5,13 +6,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
-import { standaloneOriginReference, prepareStandaloneSuccessor, type StandaloneDispositionPublicationReference } from "../../../../src/core/standalone-lineage";
+import { standaloneOriginReference } from "../../../../src/core/standalone-finding-origin";
+import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-review";
+import { type StandaloneDispositionPublicationReference } from "../../../../src/core/standalone-review-model";
 import { parseStandaloneDispositionStartBytes, standaloneDispositionReceipt } from "../../../../src/core/standalone-disposition-machine";
-function valueOf<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw Error(JSON.stringify(result));
-  return result.value;
-}
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
+import { value } from "../../../fixtures/parse-result";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { StandaloneDispositionRecord } from "../../../../src/core/standalone-lineage-contract";
 type Action = Readonly<{ kind: string; requests: readonly { authority: AgentRequestAuthority }[];
@@ -70,11 +72,17 @@ async function command(root: string, args: readonly string[], raw = "") {
   return JSON.parse(result.stdout) as Action;
 }
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];
-async function sourceFixture(root: string) {
+/** Route-election pinning for the source run's issuing CLI child: the arms of the
+ *  route-agnostic disposition control pin explicit routes, and the ambient
+ *  session's qualified-local handshake must not leak into either. */
+const sourceFixture = (root: string, environment: EnvironmentOverlay = {}) => withRouteEnv(environment, () => sourceFixturePinned(root));
+
+async function sourceFixturePinned(root: string) {
   const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")], JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
-  const requests: readonly { authority: AgentRequestAuthority }[] = initial.requests;
+  const requests: readonly { authority: AgentRequestAuthority; task?: string }[] = initial.requests;
   for (const [index, { authority }] of requests.entries()) {
-    await command(root, ["submit", ...flags(root, "source"), "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "1"],
+    await command(root, ["submit", ...flags(root, "source"), "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "1",
+      ...readCoverageSubmitArgs(join(root, "runs"), "source", authority)],
       JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: index === 0 ? [
         { severity: "advisory", file: "README.md", line: 1, claim: "First advisory", reason: "Nonblocking clarity" },
         { severity: "advisory", file: "README.md", line: 1, claim: "Second advisory", reason: "Nonblocking organization" },
@@ -83,11 +91,11 @@ async function sourceFixture(root: string) {
   const locator = join(root, "runs", "source");
   const source = { locator, runId: "source", resultDigest: hash(readFileSync(join(locator, "result.json"))) };
   const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
-  const lineage = valueOf(await publisher.readStandaloneDispositionSource(source));
-  const input = valueOf(parseStandaloneDispositionStartBytes(bytes({ source, previous: null, record: { schemaVersion: 1,
+  const lineage = value(await publisher.readStandaloneDispositionSource(source));
+  const input = value(parseStandaloneDispositionStartBytes(bytes({ source, previous: null, record: { schemaVersion: 1,
     source, provenance: "DECLARED", revision: { kind: "initial" }, entries: lineage.inventory.map((row, index) => ({
       origin: standaloneOriginReference(row.origin), decision: index === 0 ? "accepted" : "deferred", reason: "  Exact declared policy\n  " })) } })));
-  return { source, lineage, input, publisher };
+  return { source, lineage, input, publisher, initial };
 }
 
 describe.sequential("admitted standalone advisory publication, correction and recovery", { timeout: 60_000 }, () => {
@@ -111,7 +119,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
       expect(await command(root, ["status", ...flags(root, "policy"), "--json"])).toEqual(inspected);
       const reader = await import("../../../../src/handlers/helpers/programs/standalone-disposition-source");
       expect(f.publisher.readSelectedStandaloneDisposition).toBe(reader.readSelectedStandaloneDisposition);
-      const selected = valueOf(reader.readSelectedStandaloneDisposition(f.lineage, done.outcome.publication));
+      const selected = value(reader.readSelectedStandaloneDisposition(f.lineage, done.outcome.publication));
       expect(prepareStandaloneSuccessor(f.lineage, bytes({ runId: "successor", snapshot: [{ kind: "absent", path: "README.md" }], reviewers: f.lineage.reviewers }), { kind: "selected-record", disposition: selected }).ok).toBe(true);
       expect(readFileSync(join(root, ".git/index"))).toEqual(index);
     });
@@ -126,10 +134,10 @@ describe.sequential("admitted standalone advisory publication, correction and re
         JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
       for (const { authority } of other.requests) {
         await command(root, ["submit", ...flags(root, "other-source"), "--request", authority.requestId,
-          "--slot", authority.slotId, "--attempt", "1"], JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] }));
+          "--slot", authority.slotId, "--attempt", "1", ...readCoverageSubmitArgs(join(root, "runs"), "other-source", authority)], JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] }));
       }
       const locator = join(root, "runs/other-source");
-      const foreign = valueOf(await f.publisher.readStandaloneDispositionSource({ locator, runId: "other-source",
+      const foreign = value(await f.publisher.readStandaloneDispositionSource({ locator, runId: "other-source",
         resultDigest: hash(readFileSync(join(locator, "result.json"))) }));
       const reader = await import("../../../../src/handlers/helpers/programs/standalone-disposition-source");
       const path = join(root, "runs/policy/artifacts/disposition.json");
@@ -183,9 +191,9 @@ describe.sequential("admitted standalone advisory publication, correction and re
     const root = project();
     await withFixturePiSession(root, async () => {
       const f = await sourceFixture(root);
-      const registration = valueOf(await f.publisher.prepareStandaloneDispositionFacadeStart(f.input, join(root, "runs"), "crash"));
+      const registration = value(await f.publisher.prepareStandaloneDispositionFacadeStart(f.input, join(root, "runs"), "crash"));
       const { createRunDirectory } = await import("../../../../src/orchestration/run-directory-handle");
-      const handle = valueOf(createRunDirectory(join(root, "runs"), "crash"));
+      const handle = value(createRunDirectory(join(root, "runs"), "crash"));
       let fired = false;
       const interrupted = { ...handle,
         registerProgram: async (input: unknown) => {
@@ -298,16 +306,17 @@ describe.sequential("admitted standalone advisory publication, correction and re
     const root = project();
     await withFixturePiSession(root, async () => {
       const { createRunDirectory } = await import("../../../../src/orchestration/run-directory-handle");
-      const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review");
-      const { startStandaloneReviewMachine, reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState } = await import("../../../../src/core/standalone-review-machine");
+      const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review-preparation");
+      const { startStandaloneReviewMachine, reduceStandaloneReviewMachine } = await import("../../../../src/core/standalone-review");
+      const { serializeStandaloneReviewMachineState } = await import("../../../../src/core/standalone-review-checkpoint");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");
-      const { publishInitialBatch } = await import("../../../../src/handlers/helpers/programs/helpers");
+      const { publishLegacyInitialBatch } = await import("../../../../src/handlers/helpers/programs/request-publication");
       const { resumeStandaloneFacade } = await import("../../../../src/handlers/helpers/programs/standalone");
       const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
-      const handle = valueOf(createRunDirectory(join(root, "runs"), "legacy"));
-      const policy = valueOf(resolveAgentPolicy("code-reviewer"));
-      const profile = valueOf(resolveModelProfile(policy.profile));
+      const handle = value(createRunDirectory(join(root, "runs"), "legacy"));
+      const policy = value(resolveAgentPolicy("code-reviewer"));
+      const profile = value(resolveModelProfile(policy.profile));
       const scope = ["README.md"];
       const attempts = ([1, 2] as const).map(attempt => {
         const identity = { runId: handle.runId, requestId: `request:legacy:${attempt}`, role: policy.agent, attempt, requiredSkill: policy.requiredSkill };
@@ -316,25 +325,25 @@ describe.sequential("admitted standalone advisory publication, correction and re
           harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
           contextDigest: packet.digest, outputSlot: `transcripts/slot:legacy/attempt-${attempt}.raw` } };
       });
-      const prepared = valueOf(prepareStandaloneReview({ runId: handle.runId, explicitScope: scope,
+      const prepared = value(prepareStandaloneReview({ runId: handle.runId, explicitScope: scope,
         changedPaths: { unstaged: scope, staged: [], committed: [], base_revision: null, head_revision: spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim() },
         reviewMetadata: { requested_kinds: ["types"], docs_only: false, source_or_test_changed: false, types_changed: false,
           comments_changed: false, additions: 1, file_count: 1, new_structure: false, languages: ["Markdown"] },
         scopeSafety: [{ path: "README.md", status: "safe" }], roster: [{ slotId: "slot:legacy", attempts: attempts.map(row => row.authority) }] }));
       const registration = standaloneFixtureRegistration(prepared.authority);
-      valueOf(await handle.registerProgram(registration));
-      const published = await publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+      value(await handle.registerProgram(registration));
+      const published = await publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
         context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), attempts.map(row => row.packet), "standalone-review");
       expect(published.ok).toBe(true);
-      const awaiting = valueOf(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
+      const awaiting = value(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
       await handle.writeCheckpoint(serializeStandaloneReviewMachineState(awaiting));
-      valueOf(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact historical advisory")]));
+      value(await captureReviewedTranscript(handle, prepared.initialRequests[0], [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact historical advisory")]));
       const completed = await resumeStandaloneFacade(handle, registration);
-      expect(completed.ok && (completed.action as { kind: string }).kind).toBe("done");
+      expect(completed.ok && completed.action.kind).toBe("done");
       const result = readFileSync(join(handle.runDirectory, "result.json"));
       const receipts = readdirSync(join(handle.runDirectory, "receipts")).map(name => [name, readFileSync(join(handle.runDirectory, "receipts", name))] as const);
       const reference = { locator: handle.runDirectory, runId: handle.runId, resultDigest: hash(result) };
-      const source = valueOf(await publisher.readStandaloneDispositionSource(reference));
+      const source = value(await publisher.readStandaloneDispositionSource(reference));
       expect(source.inventory[0]?.finding).not.toHaveProperty("protocolVersion");
       const record = { schemaVersion: 1, source: reference, provenance: "DECLARED", revision: { kind: "historical-import", proseReference: "note:now", prose: "Exact original prose" },
         entries: source.inventory.map(row => ({ origin: standaloneOriginReference(row.origin), decision: "deferred", reason: "Present-day attestation" })) };
@@ -377,7 +386,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
       ]);
       expect(model.disposition.disposition.history[0].record).toEqual(firstInput.record);
       writeFileSync(join(root, "README.md"), "# Mutable live source must not replace reviewed bytes\n");
-      expect(valueOf(await f.publisher.readStandaloneDispositionSource(f.source)).snapshot).toEqual(projection.snapshot);
+      expect(value(await f.publisher.readStandaloneDispositionSource(f.source)).snapshot).toEqual(projection.snapshot);
       const wrong = await invoke(root, ["inspect", ...flags(root, "source"), "--lineage", "--disposition", second.outcome.publication.locator]);
       expect(wrong.code).not.toBe(0);
       const missing = await invoke(root, ["inspect", ...flags(root, "never-created"), "--lineage"]);
@@ -426,5 +435,51 @@ describe.sequential("admitted standalone advisory publication, correction and re
       expect(done.outcome.record.revision).toEqual(input.record.revision);
       expect(done.outcome.provenance).toBe("DECLARED");
     });
+  });
+
+  it("keeps the disposition publication route-agnostic: finding inventory and policy entries are identical regardless of the source run's emission route (FR-012)", async () => {
+    // The outer Loom session may run under the qualified-local model, so both
+    // arms pin their route explicitly: the catalog arm DELETES the election
+    // variables, the emission arm pins the qualified local route.
+    const catalogRoot = project();
+    const qualifiedRoot = project();
+    const catalog = await sourceFixture(catalogRoot, CATALOG_ROUTE_ENV);
+    const qualified = await sourceFixture(qualifiedRoot, QUALIFIED_ROUTE_ENV);
+
+    // The control is genuinely exercised: the qualified source run issues
+    // descriptors and tool-primary instructions, the catalog run does not.
+    const tasksOf = (fixture: Awaited<ReturnType<typeof sourceFixture>>) =>
+      (fixture.initial.requests as readonly { authority: AgentRequestAuthority; task: string }[]).map(({ task }) => task);
+    for (const task of tasksOf(qualified)) {
+      expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
+      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+    }
+    for (const task of tasksOf(catalog)) {
+      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      expect(parseEmissionDescriptor(task).kind).toBe("absent");
+    }
+
+    // FR-012 downstream of issuance: the disposition's finding inventory and
+    // the published policy decisions are identical across routes once each
+    // project's own source identity is normalized. Finding rows normalize by
+    // locator/result digest; policy entries carry origin REFERENCE DIGESTS
+    // (hashes of project-local source identity), so their decisions and
+    // reasons are compared and their origins are covered by the inventory
+    // equality above.
+    const normalizeSource = (value: unknown, fixture: Awaited<ReturnType<typeof sourceFixture>>) =>
+      JSON.stringify(value).split(fixture.source.locator).join("<SOURCE>").split(fixture.source.resultDigest).join("<RESULT>");
+    const policyDecisions = (record: { entries: readonly { origin: unknown; decision: unknown; reason: unknown }[] }) =>
+      JSON.stringify(record.entries.map(({ origin: _origin, ...decision }) => decision));
+    expect(normalizeSource(qualified.lineage.inventory, qualified)).toBe(normalizeSource(catalog.lineage.inventory, catalog));
+    expect(policyDecisions(qualified.input.record)).toBe(policyDecisions(catalog.input.record));
+    expect(qualified.input.record.revision).toEqual(catalog.input.record.revision);
+    expect(qualified.input.record.provenance).toBe(catalog.input.record.provenance);
+    const catalogDone = await command(catalogRoot, ["start", "standalone-disposition", ...flags(catalogRoot, "policy")], JSON.stringify(catalog.input));
+    const qualifiedDone = await command(qualifiedRoot, ["start", "standalone-disposition", ...flags(qualifiedRoot, "policy")], JSON.stringify(qualified.input));
+    for (const done of [catalogDone, qualifiedDone]) {
+      expect(done).toMatchObject({ kind: "done", outcome: { kind: "standalone-disposition-published", provenance: "DECLARED" } });
+    }
+    expect(policyDecisions(qualifiedDone.outcome.record)).toBe(policyDecisions(catalogDone.outcome.record));
+    expect(qualifiedDone.outcome.record.revision).toEqual(catalogDone.outcome.record.revision);
   });
 });

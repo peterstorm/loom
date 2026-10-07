@@ -1,3 +1,4 @@
+import { z } from "zod/v4";
 import {
   coverageErrors,
   fail,
@@ -6,7 +7,6 @@ import {
   parseCriteriaSet,
   parseRunManifest,
   parseVerdictEnvelope,
-  requireEntry,
   sanitizeProse,
   selectLenses,
   type ParseResult,
@@ -14,6 +14,8 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import { sha256Hex } from "./digest";
+import { type ArtifactDigest } from "./orchestration-contract/identity";
 
 // The architecture panel is consumer 1 of the kernel. Everything below is what
 // is genuinely architecture-specific: the interview digest, lens selection, the
@@ -336,10 +338,14 @@ declare const CANDIDATE_FILENAME: unique symbol;
  */
 export type CandidateFilename = string & { readonly [CANDIDATE_FILENAME]: true };
 
+/**
+ * One manifest candidate. Its filename is NOT a field: it is a pure function of
+ * the lens (`candidateFilename`), and storing both let a record pair lens X
+ * with lens Y's filename. Derive it at the use site instead.
+ */
 export type PanelCandidate = Readonly<{
   lens: PanelLens;
   path: string;
-  filename: CandidateFilename;
 }>;
 
 export type PanelManifest = Readonly<{
@@ -384,16 +390,11 @@ export function parsePanelManifest(
 
   // `entry.id` is a proven `PanelLens`, not a cast one: `parseRunManifest`
   // resolves each raw id against `expectedLenses` and returns that element.
-  //
-  // The filename is re-MINTED through `candidateFilename` rather than branded by
-  // assertion. `parseRunManifest` has just proved `entry.filename` equals
-  // `spec.filenameOf(entry.id)`, so the two are the same string — and going
-  // through the constructor means the brand is never claimed for a value the
-  // constructor did not produce.
+  // `parseRunManifest` has also proved the wire `filename` equals
+  // `candidateFilename(entry.id)`, so dropping it loses nothing.
   const candidates: PanelCandidate[] = parsed.value.entries.map((entry) => ({
     lens: entry.id,
     path: entry.path,
-    filename: candidateFilename(entry.id),
   }));
 
   return ok({
@@ -477,10 +478,15 @@ function requireNonIncreasingScores(rankings: readonly JudgeRanking[]): readonly
   return [];
 }
 
-/** Parse untrusted judge output and return canonical, substitution-safe data. */
+/** Parse untrusted judge output and return canonical, substitution-safe data.
+ *  The expected criterion rides the closed `ArchitectureCriterion` brand — the
+ *  same discipline the refutation sibling applies to `ReviewLens` — so a
+ *  hand-typed criterion string cannot compile at the seam that binds a verdict
+ *  to its criterion. Untrusted checkpoint strings mint through
+ *  `architectureCriterion` (nullable) before the call. */
 export function parseJudgeVerdict(
   rawJson: string,
-  expectedCriterion: string,
+  expectedCriterion: ArchitectureCriterion,
   expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<JudgeVerdict> {
   return parseVerdictEnvelope<JudgeRanking, CandidateFilename>(
@@ -582,6 +588,63 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
 }
 
 // ---------------------------------------------------------------------------
+// Judge-verdict emission schema — the frozen parameter bytes for the
+// judge-verdict emission tool (one schema, no second contract)
+// ---------------------------------------------------------------------------
+
+/**
+ * The schema-conformance grammar for one judge verdict's arguments, derived
+ * from the current external snake_case contract of `serializeJudgeVerdict` —
+ * the SAME serialization chain the panel writes with, so the judge-verdict
+ * emission tool's parameter schema is the exact frozen bytes of this one schema
+ * (FR-021/SC-006). Shape, score domain, and prose sanitization are expressed
+ * here; the issuance-join constraints (criterion binding to the run's derived
+ * criteria, candidate coverage of the expected set, non-increasing scores) are
+ * NOT expressible in a standalone schema and stay in `parseJudgeVerdict` at the
+ * submission seam — the schema's criterion and candidate fields are therefore
+ * shape-level strings, bound by the seam's authority.
+ *
+ * Consumed by `EMISSION_TOOL_SPECS["judge-verdict"]` — the emission-tool
+ * kernel's one place kind→schema knowledge lives — whose
+ * `frozenPayloadSchemaParameters` is the ONE constructor of the tool's
+ * `parameters` object from these bytes (AD-5, byte-identity by construction).
+ */
+export const judgeVerdictV1Schema = z.strictObject({
+  criterion: z.string().min(1)
+    .describe("The judge criterion this verdict ranks under; ingress binds it to the run's derived criteria."),
+  rankings: z.array(z.strictObject({
+    candidate: z.string().min(1)
+      .describe("The run-scoped candidate filename this ranking judges; ingress binds it to the expected candidate set."),
+    score: z.number().int().min(0).max(10)
+      .describe("An integer from 0 to 10; judges score one candidate per criterion."),
+    fatal_flaw: z.string().min(1).refine((value) => sanitizeProse(value).length > 0).nullable()
+      .describe("The fatal flaw, or null. Non-empty after brace stripping and trimming when present."),
+    strongest_idea: z.string().min(1).refine((value) => sanitizeProse(value).length > 0)
+      .describe("The strongest idea; non-empty after brace stripping and trimming."),
+  }).readonly()).min(1).readonly(),
+}).readonly();
+export type JudgeVerdictArgsV1 = z.infer<typeof judgeVerdictV1Schema>;
+
+/** The frozen zod-derived parameter bytes; the byte-match guard is proven
+ *  through a different serialization chain than this stamper writes with.
+ *  Consumed verbatim by the emission-tool kernel's judge-verdict spec.
+ *
+ *  JSON Schema cannot represent refinements, and `z.toJSONSchema` silently
+ *  drops them: the frozen bytes grammar-constrain SHAPE only (minLength, the
+ *  integer score domain, nullability — the judge schema carries no enum; the
+ *  refutation schema's verdict enum lives in its own comment). The
+ *  prose-sanitization refinement rides the emission edge's parse —
+ *  `verdictArgsParser` re-runs `safeParse` on every generated argument — so
+ *  sanitization is enforced at the emission edge, never by the provider
+ *  grammar. A reader who believed the rendered bytes enforced it would be
+ *  wrong about the one sanitization the schema expresses. */
+export const JUDGE_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(judgeVerdictV1Schema, {
+  target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
+}), null, 2);
+
+export const JUDGE_VERDICT_SCHEMA_V1_DIGEST: ArtifactDigest = sha256Hex(JUDGE_VERDICT_SCHEMA_V1) as ArtifactDigest;
+
+// ---------------------------------------------------------------------------
 // Aggregation — the deterministic cross-verdict ranking
 // ---------------------------------------------------------------------------
 
@@ -650,11 +713,14 @@ function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
  *     verdicts sharing a criterion would silently produce a wrong tie-break.
  *
  * Verdicts are matched to criteria BY NAME here, so their argument order is
- * irrelevant and a duplicated or missing criterion is a hard error.
+ * irrelevant and a duplicated or missing criterion is a hard error. The
+ * criteria order rides the closed `ArchitectureCriterion` brand — the order
+ * IS the tie-break order, so a hand-typed free-text list cannot compile at
+ * the seam that decides which architecture ships.
  */
 export function aggregateVerdicts(
   verdicts: readonly JudgeVerdict[],
-  criteriaInOrder: readonly string[],
+  criteriaInOrder: readonly ArchitectureCriterion[],
   expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<readonly CandidateRanking[]> {
   const errors: string[] = [];
@@ -710,20 +776,26 @@ export function aggregateVerdicts(
 
   if (errors.length > 0) return fail(errors);
 
-  const ranked = expectedCandidates.map((candidate): CandidateRanking => {
-    // No `?? 0`: coverage above proves every (criterion, candidate) pair has a
-    // ranking, and a defaulted zero would silently change which architecture
-    // wins if that proof ever stopped holding.
-    const scores = criteriaInOrder.map((criterion): CriterionScore => ({
-      criterion,
-      score: requireEntry(envelopes, criterion, candidate, (r) => r.candidate).score,
-    }));
-    return {
-      candidate,
-      totalScore: scores.reduce((sum, entry) => sum + entry.score, 0),
-      scores,
-    };
-  });
+  // No `?? 0` and no throw: coverage above proves every (criterion, candidate)
+  // pair has a ranking. A defaulted zero would silently change which
+  // architecture wins if that proof ever stopped holding, and a throw would
+  // make this exported aggregator partial — so a broken proof is a returned
+  // error, which keeps every caller (the panel-contract helper included) free
+  // of a try/catch around it.
+  const ranked: CandidateRanking[] = [];
+  for (const candidate of expectedCandidates) {
+    const scores: CriterionScore[] = [];
+    for (const criterion of criteriaInOrder) {
+      const entry = envelopes.get(criterion)?.entries.find((ranking) => ranking.candidate === candidate);
+      if (entry === undefined) {
+        errors.push(`panel kernel invariant: verdict for '${criterion}' has no entry for '${candidate}' after coverage check`);
+      } else {
+        scores.push({ criterion, score: entry.score });
+      }
+    }
+    ranked.push({ candidate, totalScore: scores.reduce((sum, entry) => sum + entry.score, 0), scores });
+  }
+  if (errors.length > 0) return fail(errors);
 
   return ok([...ranked].sort(compareRankings));
 }
@@ -751,4 +823,111 @@ export function serializeRankings(
       scores: entry.scores.map((score) => ({ criterion: score.criterion, score: score.score })),
     })),
   }, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Run admission — the cross-artifact validation one run-scoped panel-contract
+// operation performs, as pure functions over already-read artifacts
+// ---------------------------------------------------------------------------
+
+/** One failed panel-contract step: the contract it belongs to (the helper's
+ *  diagnostic heading) and its errors. */
+export type PanelContractFailure = Readonly<{ contract: string; errors: readonly string[] }>;
+
+export type PanelContractResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; failure: PanelContractFailure }>;
+
+const admitted = <T>(value: T): PanelContractResult<T> => ({ ok: true, value });
+const refused = <T>(contract: string, errors: readonly string[]): PanelContractResult<T> =>
+  ({ ok: false, failure: { contract, errors } });
+
+/** The raw run artifacts, read by the shell and handed in untrusted. */
+export type PanelRunArtifacts = Readonly<{
+  manifestJson: unknown;
+  interviewJson: unknown;
+  interviewMarkdown: string;
+}>;
+
+/**
+ * A run whose interview Markdown, canonical interview JSON, lens selection and
+ * candidate manifest are proven to agree. The criteria and candidate ids are
+ * DERIVED here — never supplied by the caller — so the orchestrator and the
+ * finalizer cannot disagree about what they are or what order they are in.
+ */
+export type AdmittedPanelRun = Readonly<{
+  interview: InterviewDigest;
+  manifest: PanelManifest;
+  criteria: readonly ArchitectureCriterion[];
+  candidates: readonly CandidateFilename[];
+}>;
+
+/**
+ * Admit one panel run from its raw artifacts: both interview directions must
+ * parse and describe the same validated constraints, the lens set is derived
+ * from that digest and the designer count, and the manifest must bind exactly
+ * that lens set to `runDir`. Filesystem facts (existence, symlinks, surplus
+ * files) stay in the shell; everything decidable from the bytes is here.
+ */
+export function admitPanelRun(
+  artifacts: PanelRunArtifacts,
+  runDir: string,
+  layout: RunLayout<"architecture">,
+  designerCount: number,
+): PanelContractResult<AdmittedPanelRun> {
+  const interview = parseInterviewDigestJson(artifacts.interviewJson);
+  if (!interview.ok) return refused("canonical interview digest", interview.errors);
+  const markdownInterview = parseInterviewDigest(artifacts.interviewMarkdown);
+  if (!markdownInterview.ok) return refused("interview Markdown digest", markdownInterview.errors);
+  if (JSON.stringify(markdownInterview.value) !== JSON.stringify(interview.value)) {
+    return refused("interview authority", [
+      "interview.md and interview.json describe different validated constraints",
+    ]);
+  }
+  const lenses = selectPanelLenses(interview.value, designerCount);
+  if (!lenses.ok) return refused("panel lens selection", lenses.errors);
+  const manifest = parsePanelManifest(artifacts.manifestJson, runDir, layout, lenses.value);
+  if (!manifest.ok) return refused("panel manifest", manifest.errors);
+  return admitted({
+    interview: interview.value,
+    manifest: manifest.value,
+    criteria: deriveJudgeCriteria(interview.value),
+    candidates: manifest.value.candidates.map((candidate) => candidateFilename(candidate.lens)),
+  });
+}
+
+/** The canonical criteria output of an admitted run. */
+export function serializeCriteria(run: AdmittedPanelRun): string {
+  return JSON.stringify(run.criteria, null, 2);
+}
+
+/**
+ * Admit one judge's raw output for a CLI-supplied criterion. The criterion is
+ * minted through the closed vocabulary — never asserted into the brand — and
+ * must be one this run's digest derives, so a typo'd or stale criterion cannot
+ * produce a verdict that aggregation later rejects as "unexpected". Returns the
+ * canonical serialized verdict.
+ */
+export function admitJudgeVerdict(
+  run: AdmittedPanelRun,
+  criterion: string,
+  rawJson: string,
+): PanelContractResult<string> {
+  const expectedCriterion = architectureCriterion(criterion);
+  if (expectedCriterion === null || !run.criteria.includes(expectedCriterion)) {
+    return refused("judge verdict", [
+      `criterion must be one of the derived criteria: ${run.criteria.join(", ")}; received: ${criterion}`,
+    ]);
+  }
+  const verdict = parseJudgeVerdict(rawJson, expectedCriterion, run.candidates);
+  return verdict.ok ? admitted(serializeJudgeVerdict(verdict.value)) : refused("judge verdict", verdict.errors);
+}
+
+/** Rank an admitted run's re-validated verdicts; returns the canonical ranking. */
+export function rankPanelVerdicts(
+  run: AdmittedPanelRun,
+  verdicts: readonly JudgeVerdict[],
+): PanelContractResult<string> {
+  const ranked = aggregateVerdicts(verdicts, run.criteria, run.candidates);
+  return ranked.ok ? admitted(serializeRankings(ranked.value, run.criteria)) : refused("panel aggregate", ranked.errors);
 }

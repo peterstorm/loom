@@ -132,6 +132,8 @@ function selectedGeneratedReports(
 type ParsedPathPolicy = Readonly<{
   generatedReports: readonly ReviewPath[];
   candidateSources: readonly ReviewPath[];
+  /** The source review's frozen scope, which may name paths the reviewed change deleted. */
+  reviewedPaths: ReadonlySet<ReviewPath>;
 }>;
 
 function parsePathPolicy(
@@ -139,8 +141,9 @@ function parsePathPolicy(
 ): DomainResult<ParsedPathPolicy, RemediationCandidateCaptureError> {
   const reports = selectedGeneratedReports(input.verification);
   if (!reports.ok) return reports;
+  const reviewed = parsePathList(input.pathSources.reviewedPaths, "pathSources.reviewedPaths");
+  if (!reviewed.ok) return reviewed;
   const sourceLists: readonly (readonly [readonly string[], string])[] = [
-    [input.pathSources.reviewedPaths, "pathSources.reviewedPaths"],
     [input.pathSources.supportPaths, "pathSources.supportPaths"],
     [input.pathSources.siblingPaths, "pathSources.siblingPaths"],
     [input.pathSources.inputSourcePaths, "pathSources.inputSourcePaths"],
@@ -148,7 +151,7 @@ function parsePathPolicy(
       ? [[[VERIFICATION_MANIFEST_SOURCE_PATH], "verification.manifestPath"]] as const
       : []),
   ];
-  const sources: ReviewPath[] = [];
+  const sources: ReviewPath[] = [...reviewed.value];
   for (const [raw, field] of sourceLists) {
     const parsed = parsePathList(raw, field);
     if (!parsed.ok) return parsed;
@@ -162,6 +165,7 @@ function parsePathPolicy(
   return success(Object.freeze({
     generatedReports: reports.value,
     candidateSources: Object.freeze([...sourceSet].sort(compareStrings)),
+    reviewedPaths: new Set(reviewed.value),
   }));
 }
 
@@ -333,17 +337,62 @@ function sameReportAudits(
   });
 }
 
+function absentFromWorktree(root: CanonicalRepositoryRoot, path: ReviewPath): boolean {
+  try {
+    lstatSync(join(root, ...path.split("/")));
+    return false;
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/**
+ * Committed paths whose deletion is already STAGED: present in HEAD's tree,
+ * absent from the index (so outside the observed roster) and absent from the
+ * worktree. That is the same candidate change as an unstaged deletion — which
+ * the observed roster already admits — so it must be authorizable too;
+ * otherwise a remediation that installed (staged) a deletion leaves the next
+ * remediation over the same tree unable to name the path it must authorize.
+ */
+function stagedCommittedDeletions(
+  root: CanonicalRepositoryRoot,
+  paths: readonly ReviewPath[],
+): DomainResult<ReadonlySet<ReviewPath>, RemediationCandidateCaptureError> {
+  if (paths.length === 0) return success(new Set());
+  const head = gitQuery(root, "HEAD tree lookup", ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"]);
+  if (!head.ok) return head;
+  if (head.value.status !== 0) return success(new Set());
+  const committed = gitQuery(root, "committed deletion lookup", ["ls-tree", "-z", "--name-only", "HEAD", "--", ...paths]);
+  if (!committed.ok) return committed;
+  if (committed.value.status !== 0) return failure("pathSources", "cannot list committed candidate input paths");
+  const names = new Set(committed.value.stdout.toString("utf-8").split("\0").filter((name) => name.length > 0));
+  return success(new Set(paths.filter((path) => names.has(path) && absentFromWorktree(root, path))));
+}
+
+/**
+ * A reviewed path may be absent everywhere — not in HEAD, the index, or the
+ * worktree — because the reviewed change itself deleted it (a branch diff
+ * against its base names deletions). Such a path carries no candidate bytes to
+ * authorize, and re-creating it would make it observed and so digest-visible.
+ * Support, sibling and input-source paths get no such allowance: a name the
+ * caller supplies that does not exist is refused, never silently accepted.
+ */
 function requireObservedCandidateSources(
-  sources: readonly ReviewPath[],
+  root: CanonicalRepositoryRoot,
+  policy: ParsedPathPolicy,
   observed: readonly ReviewPath[],
 ): DomainResult<null, RemediationCandidateCaptureError> {
   const roster = new Set(observed);
-  const missing = sources.filter((path) => !roster.has(path));
+  const unobserved = policy.candidateSources.filter((path) => !roster.has(path));
+  const deletions = stagedCommittedDeletions(root, unobserved);
+  if (!deletions.ok) return deletions;
+  const missing = unobserved.filter((path) =>
+    !deletions.value.has(path) && !(policy.reviewedPaths.has(path) && absentFromWorktree(root, path)));
   return missing.length === 0
     ? success(null)
     : failure(
       "pathSources",
-      `candidate input paths are not Git-visible tracked or non-ignored untracked paths: ${missing.join(", ")}`,
+      `candidate input paths are not Git-visible tracked or non-ignored untracked paths, committed paths with a staged deletion, nor reviewed paths absent from the worktree: ${missing.join(", ")}`,
     );
 }
 
@@ -378,7 +427,7 @@ export function captureRemediationCandidateWorkspace(
   }
   const runAfter = auditRunDirectory(root.value, input.runDirectory);
   if (!runAfter.ok) return runAfter;
-  const observedSources = requireObservedCandidateSources(policy.value.candidateSources, workspace.value.observedPaths);
+  const observedSources = requireObservedCandidateSources(root.value, policy.value, workspace.value.observedPaths);
   if (!observedSources.ok) return observedSources;
   const candidate = createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",

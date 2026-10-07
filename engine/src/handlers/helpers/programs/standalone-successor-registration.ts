@@ -1,10 +1,10 @@
 /** Explicit successor ingress and frozen source data. These records are not nominal predecessor authority. */
 import { boundedThrownCause, canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
-import { parseStandaloneReviewScope, STANDALONE_REVIEWER_ROLES, type StandaloneReviewKind } from "../../../core/standalone-review";
+import { parseStandaloneReviewScope, STANDALONE_REVIEWER_ROLES, type StandaloneReviewKind } from "../../../core/standalone-review-scope";
 import { STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3,
   standalonePublicationReferenceSchema, type StandalonePublicationReference } from "../../../core/standalone-lineage-contract";
-import type { StandaloneDispositionPublicationReference } from "../../../core/standalone-lineage";
+import type { StandaloneDispositionPublicationReference } from "../../../core/standalone-review-model";
 import { encodeByteSection, boundedByteIterable, type ByteSection } from "../../../core/context-packets";
 import type { ProgramParse } from "./program-result";
 

@@ -7,7 +7,7 @@ import { parseTaskId } from "../../core/task-id";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { handleWaveReviewContext, type WaveReviewContextAuthority } from "./programs";
+import { readWaveReviewContext, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
 import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../types";
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";
@@ -63,12 +63,16 @@ function exactIds(left: readonly string[], right: readonly string[]): boolean {
 
 /** Pure, conservative evidence check. A later pending Task is safe only when
  * it is wholly untouched: any reservation, implementation, test/proof, review,
- * packet, finding, recovery, retry, or execution evidence blocks reopening. */
+ * packet, finding, recovery, retry, or execution evidence blocks reopening.
+ * Population-time proof-boundary stamps (start_sha and artifact_baseline) are
+ * planning provenance, not Task progress: sanitizeTask stamps them on every
+ * roster Task before any work exists, so they must not refuse a documented
+ * completed-Wave reopen. */
 export function hasLaterWaveTaskProgress(task: Task, executingTaskIds: readonly string[]): boolean {
   return executingTaskIds.includes(task.id) ||
     task.status !== "pending" ||
     task.reserved_at !== undefined || task.active_implementation_attempt !== undefined ||
-    (task.implementation_attempt_history?.length ?? 0) > 0 || task.start_sha !== undefined ||
+    (task.implementation_attempt_history?.length ?? 0) > 0 ||
     task.files_modified !== undefined || task.test_result !== undefined ||
     task.test_evidence !== undefined || task.new_test_observation !== undefined ||
     (task.proof !== undefined && task.proof.state !== "pending") ||
@@ -79,7 +83,7 @@ export function hasLaterWaveTaskProgress(task: Task, executingTaskIds: readonly 
     (task.findings?.length ?? 0) > 0 || (task.critical_findings?.length ?? 0) > 0 ||
     (task.advisory_findings?.length ?? 0) > 0 || (task.refuted_findings?.length ?? 0) > 0 ||
     (task.resolved_findings?.length ?? 0) > 0 ||
-    task.artifact_baseline !== undefined || task.attempt_artifact_baseline !== undefined ||
+    task.attempt_artifact_baseline !== undefined ||
     task.attempt_repository_baseline !== undefined || task.issued_review_packets !== undefined ||
     task.artifact_baseline_recovered_from !== undefined || task.recovered_artifact_writes !== undefined ||
     task.failure_reason !== undefined || (task.retry_count ?? 0) > 0;
@@ -168,7 +172,7 @@ function packetReopeningProof(graph: TaskGraph, request: ReopenRequest, runsRoot
     if (authority.program !== "wave-gate" || authority.role === "spec-check-invoker") continue;
     const read = opened.value.readContext(authority.contextDigest);
     if (!read.ok) throw new Error(`cannot read immutable Review Packet context: ${read.error.message}`);
-    const parsed = handleWaveReviewContext([read.value], authority.contextDigest);
+    const parsed = readWaveReviewContext([read.value], authority.contextDigest);
     if (parsed.kind === "corrupt") throw new Error(`immutable Review Packet context is corrupt: ${parsed.message}`);
     if (parsed.kind === "loaded") contexts.push(parsed.value);
   }

@@ -18,7 +18,8 @@ import {
   parseImplementationRetryContext,
   renderImplementationRetryContext,
 } from "../../src/core/implementation-retry";
-import { canonicalJson, sha256Hex, type JsonValue } from "../../src/core/review-packet";
+import { canonicalJson, type JsonValue } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import {
   TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,

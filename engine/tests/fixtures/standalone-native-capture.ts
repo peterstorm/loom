@@ -3,13 +3,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import { LOOM_REVIEW_AUTHORITY_BRIDGE, readLoomReviewAuthorityBridge } from "../../src/handlers/helpers/programs/review-authority-bridge";
 import { fixtureSession } from "./pi-session";
 import { value } from "./standalone-successor-remediation";
+import { runReadCoverage } from "../../src/orchestration/standalone-read-coverage-evidence";
+import { claudeReadLines, frozenDiffReaderPages, piReadMessages } from "./read-coverage";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 type Emit = (event: string, payload: Record<string, unknown>) => Promise<unknown[]>;
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const bridgeKey = Symbol.for("@peterstorm/loom/review-authority/v1");
 
 async function nativeBatchCapturer(root: string, harness: "claude" | "pi", session: ReturnType<typeof fixtureSession>, emit: Emit) {
   const bindings = await import("../../src/orchestration/session-run-bindings");
@@ -18,6 +20,12 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
   let redeliver: ((texts?: readonly (readonly string[])[]) => Promise<unknown[]>) | undefined;
   const capture = async (handle: RunDirHandle, requests: readonly { authority: AgentRequestAuthority; task: string }[], texts: readonly (readonly string[])[]) => {
     const toolCallId = `owned-native-${++ordinal}`;
+    // Each scripted reviewer read its whole frozen diff (ADR-0022); empty for runs without a read
+    // obligation. A Run whose registration a test deliberately made unreadable gives the reviewer
+    // nothing to read — the engine must refuse that capture before observing anything. Only that
+    // case is absorbed: any other fault while building the pages throws out of the fixture.
+    const registrationReadable = runReadCoverage(handle).ok;
+    const reads = requests.map(({ authority }) => registrationReadable ? frozenDiffReaderPages(handle, authority) : []);
     if (harness === "pi") {
       value(await bindings.registerSessionRunBinding(session.transport, session.sessionId, {
         runId: handle.runId, runsRoot: handle.identity.runsRoot, runDirectory: handle.runDirectory,
@@ -28,7 +36,7 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
       if (calls.some(result => result !== undefined)) throw Error(`native spawn refused: ${JSON.stringify(calls)}`);
       redeliver = (observed = texts) => emit("tool_result", { toolName: "subagent", toolCallId, input, isError: false, content: [],
         details: { results: input.tasks.map((item, index) => ({ agent: item.agent, task: item.task, exitCode: 0,
-          messages: [{ role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
+          messages: [...piReadMessages(reads[index]!), { role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
       return redeliver();
     }
     const deliveries: ((observed: readonly string[]) => Promise<unknown>)[] = [];
@@ -38,7 +46,10 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
         role: authority.role, attempt: authority.attempt }));
       const transcript = join(session.directory, `${nativeId}.jsonl`);
       deliveries.push(async observed => {
-        writeFileSync(transcript, JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }) + "\n");
+        writeFileSync(transcript, [
+          ...claudeReadLines(reads[index]!),
+          JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }),
+        ].join("\n") + "\n");
         process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
         process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
         return dispatch.runDispatch(JSON.stringify({ session_id: session.sessionId, agent_id: nativeId,
@@ -65,10 +76,10 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"];
   const previous = keys.map(key => [key, process.env[key]] as const);
   const globals = globalThis as unknown as Record<PropertyKey, unknown>;
-  const oldBridge = globals[bridgeKey];
+  const oldBridge = globals[LOOM_REVIEW_AUTHORITY_BRIDGE];
   const restore = () => {
     for (const [key, prior] of previous) { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; }
-    if (oldBridge === undefined) delete globals[bridgeKey]; else globals[bridgeKey] = oldBridge;
+    if (oldBridge === undefined) delete globals[LOOM_REVIEW_AUTHORITY_BRIDGE]; else globals[LOOM_REVIEW_AUTHORITY_BRIDGE] = oldBridge;
   };
   try {
     // Shadow only this test worker's inherited transport locators; durable parent bindings and PI admission stay untouched.
@@ -80,7 +91,7 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     if (harness === "pi") {
       const extension = await import("../../../pi/extension");
       const render = await import("../../src/utils/render-pi-agent");
-      const { STANDALONE_REVIEWER_ROLES } = await import("../../src/core/standalone-review");
+      const { STANDALONE_REVIEWER_ROLES } = await import("../../src/core/standalone-review-scope");
       for (const role of [...STANDALONE_REVIEWER_ROLES, "review-verifier-agent"]) {
         writeFileSync(join(process.env.PI_CODING_AGENT_DIR, "agents", `${role}.md`), render.expectedPiAgentDefinition(role, packageRoot));
       }
@@ -97,8 +108,7 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     const capturer = await nativeBatchCapturer(root, harness, session, emit);
     return { ...capturer, emit, session, verify: () => {
       if (harness !== "pi") throw Error("Claude has durable capture provenance, not a Pi process witness");
-      return (globals[bridgeKey] as { verify: (input: { cwd: string; sessionId: string }) => Promise<unknown> })
-        .verify({ cwd: root, sessionId: session.sessionId });
+      return readLoomReviewAuthorityBridge(globalThis).verify({ cwd: root, sessionId: session.sessionId });
       },
       close: async () => {
         try { await emit("session_shutdown", { reason: "quit" }); }

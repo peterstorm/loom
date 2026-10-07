@@ -29,6 +29,7 @@
 // module that declares itself pure. Loom's run directories are posix paths in
 // every runbook, template and smoke test.
 import { posix } from "node:path";
+import { isRecord } from "./plain-record";
 
 const { basename, join, normalize } = posix;
 
@@ -39,9 +40,9 @@ export type ParseResult<T> =
 export const ok = <T>(value: T): ParseResult<T> => ({ ok: true, value });
 export const fail = <T>(errors: readonly string[]): ParseResult<T> => ({ ok: false, errors });
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+// The lax shape guard lives in the shared exact-parse kernel; re-exported for
+// the panel parsers that import it from here.
+export { isRecord };
 
 // ---------------------------------------------------------------------------
 // Run layout — what one panel calls the files inside its run directory

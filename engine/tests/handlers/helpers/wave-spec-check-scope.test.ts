@@ -4,21 +4,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
-import {
-  handleWaveReviewContext,
-  installWaveReviewRuns,
-  waveRequests as waveRequestsWithBoundary,
-  waveSpecCheckScope,
-} from "../../../src/handlers/helpers/programs/wave-gate";
-import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
+import { installWaveReviewRuns, waveRequests as waveRequestsWithBoundary } from "../../../src/handlers/helpers/programs/wave-review-requests";
+import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
 import type { TaskGraph, WaveReviewEpochAuthority } from "../../../src/types";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import { taskFixture } from "../../fixtures/task-lifecycle";
-import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
+import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../src/core/reviewer-contract";
 import {
   decideWaveReviewEpochReplay,
   prepareWaveReviewBatch,
+  readWaveReviewContext,
+  waveSpecCheckScope,
   type WaveRequestBatch,
 } from "../../../src/core/wave-review-authority";
 import { parseSettledFloor, type SettledFloor } from "../../../src/core/requirement-coverage";
@@ -34,6 +31,8 @@ import {
 } from "../../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../../src/core/context-packets";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
+import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../src/core/wave-frozen-source";
+import { observedWorkspace } from "../../fixtures/reviewed-workspace";
 
 const DIGEST = (fill: string): ArtifactDigest => {
   const parsed = parseArtifactDigest(fill.repeat(64));
@@ -141,7 +140,7 @@ describe("registered Wave spec-check scope", () => {
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     expect(specRequest).toBeDefined();
     const authority = specRequest!.authority as AgentRequestAuthority;
-    const context = handleWaveReviewContext(batch.packets, authority.contextDigest);
+    const context = readWaveReviewContext(batch.packets, authority.contextDigest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded" || context.value.subject.role !== "spec-check-invoker") return;
     const scope = context.value.specCheckScope;
@@ -232,7 +231,7 @@ describe("registered Wave spec-check scope", () => {
       ...WAVE_REVIEW_AGENTS,
     ]);
     expect(authorities.map(({ modelProfile }) => modelProfile)).toEqual([
-      "general-review",
+      "spec-check-review",
       "general-review",
       "focused-review",
       "focused-review",
@@ -240,7 +239,7 @@ describe("registered Wave spec-check scope", () => {
       "focused-review",
     ]);
     for (const authority of authorities) {
-      const context = handleWaveReviewContext(batch.packets, authority.contextDigest);
+      const context = readWaveReviewContext(batch.packets, authority.contextDigest);
       expect(context.kind).toBe("loaded");
       if (context.kind !== "loaded") continue;
       expect(context.value.runId).toBe(created.value.runId);
@@ -594,7 +593,9 @@ describe("Wave reviewer slot identity projection", () => {
       const graph = { ...preparedGraph, tasks: preparedGraph.tasks.map((task) => ({ ...task, review_generation: generation })) };
       const legacy = { ...plain, schemaVersion: 1 as const, input: { wave: 1 } };
       const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
-      const workspace = [{ taskId: "T1", scope: ["engine/src/core/wave-review-authority.ts"], headSha: "b".repeat(64) }];
+      const workspace = [observedWorkspace("T1", ["engine/src/core/wave-review-authority.ts"], [
+        { path: "engine/src/core/wave-review-authority.ts", bytes: Buffer.from("reviewed source") },
+      ])];
       const observation = observeDocuments(null, null);
       const first = prepareWaveReviewBatch(runId.value, legacy, graph, 1, workspace, observation);
       const second = prepareWaveReviewBatch(runId.value, current, graph, 1, workspace, observation);
@@ -604,6 +605,16 @@ describe("Wave reviewer slot identity projection", () => {
       expect(second.value.packets[0]).toEqual(first.value.packets[0]);
       expect(second.value.settledFloor).toEqual(first.value.settledFloor);
       expect(second.value.packets.slice(1).every(({ schemaVersion }) => schemaVersion === 2)).toBe(true);
+      expect(first.value.packets.every((packet) => packet.fixedContext.every(({ label }) => label !== WAVE_FROZEN_SOURCE_SECTION))).toBe(true);
+      expect(second.value.packets[0]!.fixedContext.every(({ label }) => label !== WAVE_FROZEN_SOURCE_SECTION)).toBe(true);
+      const sources = second.value.packets.slice(1).map((packet) =>
+        packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!);
+      expect(new Set(sources.map(({ digest }) => digest)).size).toBe(1);
+      const parsedSource = parseWaveFrozenSource(JSON.parse(Buffer.from(sources[0]!.bytes).toString("utf8")));
+      expect(parsedSource).toMatchObject({ ok: true, value: {
+        taskId: "T1", workspaceHeadSha: workspace[0]!.headSha,
+        files: [{ path: "engine/src/core/wave-review-authority.ts", kind: "text", content: "reviewed source" }],
+      } });
       expect(second.value.requests.slice(1)).not.toEqual(first.value.requests.slice(1));
     }), { numRuns: 20, seed: 4301 });
   });
@@ -613,6 +624,85 @@ describe("Wave reviewer slot identity projection", () => {
 
     expect(identitiesFor({ ...plain, authorityDigest: "b".repeat(64) }, 1)).not.toEqual(baseline);
     expect(identitiesFor(plain, 2)).not.toEqual(baseline);
+  });
+});
+
+describe("Wave frozen source authority", () => {
+  const parsedRunId = parseOrchestrationRunId("run.frozen-source");
+  if (!parsedRunId.ok) throw new Error(parsedRunId.error.message);
+  const parsedGraph = parseTaskGraph({
+    spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+    spec_file: null, plan_file: null, wave_gates: {},
+    tasks: [
+      taskFixture({ id: "T1", description: "first", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"] }),
+      taskFixture({ id: "T2", description: "second", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [],
+        file_list: ["src/b.ts"], files_modified: ["src/b.ts"] }),
+    ],
+  });
+  if (!parsedGraph.ok) throw new Error(String(parsedGraph.error));
+  const registration: RegisteredWaveGateProgram = {
+    schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: { wave: 1 },
+    taskIds: ["T1", "T2"], authorityDigest: "a".repeat(64),
+  };
+  const first = observedWorkspace("T1", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("first task") }]);
+  const second = observedWorkspace("T2", ["src/b.ts"], [{ path: "src/b.ts", bytes: Buffer.from("second task") }]);
+  const prepare = (workspace: readonly typeof first[]) => prepareWaveReviewBatch(
+    parsedRunId.value, { ...registration, input: { wave: 1 } }, parsedGraph.value, 1, workspace, observeDocuments(null, null),
+  );
+
+  it("publishes one task-local snapshot to every reviewer and none to spec-check", () => {
+    const batch = prepare([first, second]);
+    if (!batch.ok) throw new Error(batch.error.message);
+    for (const [index, packet] of batch.value.packets.entries()) {
+      const source = packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION);
+      if (index === 0) {
+        expect(source).toBeUndefined();
+        continue;
+      }
+      expect(source).toBeDefined();
+      const context = readWaveReviewContext([packet], packet.digest);
+      if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("reviewer context must load");
+      const decoded = parseWaveFrozenSource(JSON.parse(Buffer.from(source!.bytes).toString("utf8")));
+      if (!decoded.ok) throw new Error(decoded.error);
+      expect(decoded.value.taskId).toBe(context.value.taskRun.taskId);
+      expect(decoded.value.workspaceHeadSha).toBe(context.value.taskRun.workspaceHeadSha);
+      expect(decoded.value.files.map(({ path }) => path)).toEqual(
+        context.value.taskRun.taskId === "T1" ? ["src/a.ts"] : ["src/b.ts"],
+      );
+    }
+  });
+
+  // Hostile observations built around the smart constructor, as a fake port
+  // could. Each keeps the brand's type through the spread but not the mint's
+  // proof, so the batch refuses it before reading a byte; the mint's own
+  // refusals of these shapes are pinned in tests/core/reviewed-workspace.test.ts.
+  it.each([
+    ["missing artifact", { ...first, artifacts: [] }],
+    ["mismatched digest", { ...first, headSha: "f".repeat(64) }],
+    ["duplicate artifact", { ...first, artifacts: [...first.artifacts, ...first.artifacts] }],
+    ["out-of-scope artifact", { ...first, artifacts: [{ path: "src/foreign.ts" as (typeof first.artifacts)[number]["path"], contentBase64: "" }] }],
+  ] as const)("refuses a %s observation", (_name, malformed) => {
+    const batch = prepare([malformed, second]);
+    expect(batch.ok).toBe(false);
+    if (!batch.ok) expect(batch.error.message).toBe("Task T1 workspace observation was not minted by the reviewed-workspace core");
+  });
+
+  it("refuses an honestly minted observation of another scope", () => {
+    const otherScope = observedWorkspace("T1", ["src/b.ts"], [{ path: "src/b.ts", bytes: Buffer.from("first task") }]);
+    const batch = prepare([otherScope, second]);
+    expect(batch.ok).toBe(false);
+    if (!batch.ok) expect(batch.error.message).toBe("Task T1 workspace observation differs from its exact review scope");
+  });
+
+  it("refuses missing, duplicate, and foreign Task observations", () => {
+    for (const workspace of [[first], [first, first], [first, { ...second, taskId: "foreign" }]]) {
+      const batch = prepare(workspace);
+      expect(batch.ok).toBe(false);
+      if (!batch.ok) expect(batch.error.message).toMatch(/workspace observations|duplicate workspace observations/);
+    }
   });
 });
 
@@ -855,7 +945,9 @@ describe("Wave spec-check authority guards", () => {
     return parsed.value;
   };
 
-  const workspace = [{ taskId: "T1", headSha: "b".repeat(64), scope: ["src/a.ts"] }];
+  const workspace = [observedWorkspace("T1", ["src/a.ts"], [
+    { path: "src/a.ts", bytes: Buffer.from("reviewed source") },
+  ])];
 
   it("refuses an observation whose Spec Index names another document", () => {
     // The guard exists so a projection can never be published under a document
@@ -948,7 +1040,7 @@ describe("wave-review-authority spec-check scope decoding", () => {
     const packet = packetFor([{
       id: "T1", description: "legacy", completionAnchors: ["FR-1"], contributions: [], declaredFiles: ["a.ts"],
     }]);
-    const context = handleWaveReviewContext([packet], packet.digest);
+    const context = readWaveReviewContext([packet], packet.digest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded" || context.value.specCheckScope === null) return;
     expect(context.value.specCheckScope[0]?.modifiedFiles).toEqual([]);
@@ -959,13 +1051,13 @@ describe("wave-review-authority spec-check scope decoding", () => {
       id: "T1", description: "current", completionAnchors: ["FR-1"], contributions: [],
       declaredFiles: ["a.ts"], modifiedFiles: ["a.ts"],
     }]);
-    expect(handleWaveReviewContext([current], current.digest).kind).toBe("loaded");
+    expect(readWaveReviewContext([current], current.digest).kind).toBe("loaded");
 
     const blank = packetFor([{
       id: "T1", description: "blank", completionAnchors: ["FR-1"], contributions: [],
       declaredFiles: ["a.ts"], modifiedFiles: ["  "],
     }]);
-    expect(handleWaveReviewContext([blank], blank.digest).kind).toBe("corrupt");
+    expect(readWaveReviewContext([blank], blank.digest).kind).toBe("corrupt");
   });
 
   it("accepts repeated modified paths, which the state schema also accepts", () => {
@@ -975,7 +1067,7 @@ describe("wave-review-authority spec-check scope decoding", () => {
       id: "T1", description: "repeated", completionAnchors: ["FR-1"], contributions: [],
       declaredFiles: ["a.ts"], modifiedFiles: ["a.ts", "a.ts"],
     }]);
-    expect(handleWaveReviewContext([repeated], repeated.digest).kind).toBe("loaded");
+    expect(readWaveReviewContext([repeated], repeated.digest).kind).toBe("loaded");
   });
 });
 
@@ -998,6 +1090,7 @@ describe("an installed epoch is replayed only when it is the same epoch", () => 
     batchEpoch: DIGEST("b"),
     specCheckDocuments: documents,
     settledFloor,
+    subjects: Object.freeze([]),
     requests: Object.freeze([]),
     packets: Object.freeze([]),
     taskRuns: Object.freeze([]),

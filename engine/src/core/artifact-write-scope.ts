@@ -18,15 +18,18 @@
  * may write at all — a judge whose prompt names candidate paths is READING
  * them and receives nothing. Path mentions only REFINE a writer's scope.
  *
- * The decision functions perform no I/O, clock, or randomness. Importing this
- * module is not currently side-effect-free: `PHASE_AGENT_MAP` comes from
- * `config.ts`, whose initialization resolves the Task Graph through filesystem
- * and Git probes. Splitting runtime discovery from Agent policy is tracked as
- * a separate configuration-seam deepening.
+ * The decision functions perform no I/O, clock, or randomness, and importing
+ * this module is side-effect-free: `PHASE_AGENT_MAP` comes from the pure
+ * agent-catalog-projections leaf, not from `config.ts`
+ * — whose initialization resolves the Task Graph through filesystem and Git
+ * probes. Runtime discovery still lives in config, exactly where this module
+ * never reaches.
  */
 
-import { PHASE_AGENT_MAP } from "../config";
+import { PHASE_AGENT_MAP } from "./agent-catalog-projections";
 import { stripNamespace } from "../utils/strip-namespace";
+import type { LoomAgentName } from "./model-profiles";
+import type { Phase } from "../types";
 
 /**
  * `.claude/specs/…` / `.claude/plans/…` path tokens in a phase prompt
@@ -39,60 +42,62 @@ import { stripNamespace } from "../utils/strip-namespace";
  */
 const ARTIFACT_PATH_TOKEN = /(?:^|[^A-Za-z0-9_./{}-])((?:\.\.\/)*\.claude\/(?:specs|plans)(?:\/[A-Za-z0-9._/{}:-]*)?)/g;
 
-/** Phase agents whose run contract includes writing an artifact. Everything
- *  else PHASE_AGENT_MAP knows (decompose) is read-only and receives no grant
- *  even when its prompt names artifact paths. */
-const ARTIFACT_WRITING_PHASES: ReadonlySet<string> = new Set([
-  "brainstorm",
-  "specify",
-  "clarify",
-  "plan-alignment",
-  "architecture",
-]);
+/** Repo-relative artifact roots. Every spec-phase and panel-run artifact
+ *  lives under the spec tree (`.claude/specs/<slug>/`, including the
+ *  panel-runs subtree the interview digest and designer candidates occupy);
+ *  architecture's plan lives under the plan tree. */
+const SPEC_ARTIFACT_ROOT = ".claude/specs";
+const PLAN_ARTIFACT_ROOT = ".claude/plans";
 
-/** Panel agents whose run contract includes writing an artifact. They are
- *  not in PHASE_AGENT_MAP, so the phase branch cannot admit them — this set
- *  is the only door for `role: "panel"` agents. Judges are deliberately
- *  absent: their prompts name candidate paths to READ, and a scoped write
- *  grant would let a compromised judge rewrite candidate files the finalizer
- *  reads verbatim. */
+/** A writing phase's role roots: every dir its template promises it writes
+ *  (commands/templates/phase-*.md). ONE representation of the phase-writer
+ *  policy: the KEYS are exactly the artifact-writing phases, so the writer set
+ *  and its roots can never diverge, and a phase absent from the map is a
+ *  non-writer (decompose is read-only and receives no grant even when its
+ *  prompt names artifact paths). Architecture writes the plan, may write under
+ *  the spec tree (`{slug}/`, and panel-run dirs in finalize), and writes
+ *  checkable-invariant lint rules into the harness's rules dir
+ *  (`.claude/linter/rules/`, or `.pi/linter/rules/` under Pi). Every other
+ *  writing phase writes only into the spec tree — plan-alignment's report goes
+ *  to `{spec_dir}`. */
+const PHASE_ARTIFACT_ROOTS: Readonly<Partial<Record<Phase, readonly string[]>>> = Object.freeze({
+  brainstorm: Object.freeze([SPEC_ARTIFACT_ROOT]),
+  specify: Object.freeze([SPEC_ARTIFACT_ROOT]),
+  clarify: Object.freeze([SPEC_ARTIFACT_ROOT]),
+  "plan-alignment": Object.freeze([SPEC_ARTIFACT_ROOT]),
+  architecture: Object.freeze([PLAN_ARTIFACT_ROOT, SPEC_ARTIFACT_ROOT, ".claude/linter/rules", ".pi/linter/rules"]),
+});
+
+/** The panel agents whose run contract includes writing an artifact — the
+ *  WAVE_REVIEW_AGENTS pattern: a literal roster typed against the catalog, so a
+ *  renamed or typo'd agent name fails compilation instead of silently emptying
+ *  both harnesses' panel admission. Judges are deliberately absent: their
+ *  prompts name candidate paths to READ, and write capability would let a
+ *  compromised judge rewrite candidate files the finalizer reads verbatim.
+ *  Tested against UNTRUSTED agent names, hence the string-keyed set. */
 const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set([
   "arch-interviewer-agent",
   "arch-designer-agent",
-]);
+] as const satisfies readonly LoomAgentName[]);
 
 /** Panel writers' role-wide root: every panel run lives under the spec tree. */
-const PANEL_ARTIFACT_ROOTS: readonly string[] = [".claude/specs"];
+const PANEL_ARTIFACT_ROOTS: readonly string[] = Object.freeze([SPEC_ARTIFACT_ROOT]);
 
-/** Why an agent may write artifacts at all. Not a writer → `null`. */
+/** Why an agent may write artifacts at all, carrying its role roots. Not a
+ *  writer → `null`. */
 type ArtifactWriterRole =
-  | Readonly<{ kind: "phase"; phase: string }>
-  | Readonly<{ kind: "panel" }>;
+  | Readonly<{ kind: "phase"; roots: readonly string[] }>
+  | Readonly<{ kind: "panel"; roots: readonly string[] }>;
 
 /** The one role classifier both harnesses' policies go through. A phase
  *  writer wins over a panel writer (no agent is both today). */
 function artifactWriterRole(agent: string): ArtifactWriterRole | null {
   const name = stripNamespace(agent);
   const phase = PHASE_AGENT_MAP[name];
-  if (phase !== undefined && ARTIFACT_WRITING_PHASES.has(phase)) return { kind: "phase", phase };
-  return PANEL_ARTIFACT_WRITERS.has(name) ? { kind: "panel" } : null;
+  const phaseRoots = phase === undefined ? undefined : PHASE_ARTIFACT_ROOTS[phase];
+  if (phaseRoots !== undefined) return { kind: "phase", roots: phaseRoots };
+  return PANEL_ARTIFACT_WRITERS.has(name) ? { kind: "panel", roots: PANEL_ARTIFACT_ROOTS } : null;
 }
-
-/** A writing phase's role roots: every dir its template promises it writes
- *  (commands/templates/phase-*.md). Architecture writes the plan
- *  (`.claude/plans/`), may write under the spec tree (`.claude/specs/{slug}/`,
- *  and panel-run dirs in finalize), and writes checkable-invariant lint rules
- *  into the harness's rules dir (`.claude/linter/rules/`, or
- *  `.pi/linter/rules/` under Pi). Every other writing phase writes only into
- *  the spec tree — plan-alignment's report goes to `{spec_dir}`. */
-function phaseArtifactRoots(phase: string): readonly string[] {
-  return phase === "architecture"
-    ? [".claude/plans", ".claude/specs", ".claude/linter/rules", ".pi/linter/rules"]
-    : [".claude/specs"];
-}
-
-const roleRoots = (role: ArtifactWriterRole): readonly string[] =>
-  role.kind === "phase" ? phaseArtifactRoots(role.phase) : PANEL_ARTIFACT_ROOTS;
 
 const isWithin = (root: string, dir: string): boolean => dir === root || dir.startsWith(`${root}/`);
 
@@ -129,7 +134,7 @@ function scopeFromPathTokens(task: string): readonly string[] {
  * time; a scoped grant admits Edit/Write only inside them.
  *
  * Role first: only agents whose contract includes writing an artifact
- * (ARTIFACT_WRITING_PHASES phase agents, PANEL_ARTIFACT_WRITERS panel
+ * (PHASE_ARTIFACT_ROOTS phase agents, PANEL_ARTIFACT_WRITERS panel
  * agents) may receive a grant — a read-only agent (judge, verifier,
  * reviewer, decompose, spec-check) gets null even when its prompt names
  * artifact paths. For writers, prompt path tokens refine the scope WITHIN the
@@ -147,7 +152,7 @@ export function deriveArtifactWriteScope(
 ): readonly string[] | null {
   const role = artifactWriterRole(agent);
   if (role === null) return null;
-  const roots = roleRoots(role);
+  const { roots } = role;
 
   const derived = scopeFromPathTokens(task).filter((dir) => roots.some((root) => isWithin(root, dir)));
   if (derived.length > 0) {
@@ -165,10 +170,9 @@ export function deriveArtifactWriteScope(
  * into, or null when the role is not an artifact writer. No prompt refinement:
  * this is the Claude Code policy, where the caller is known only by its
  * recorded agent type. Phase writers get their phase's roots
- * (`phaseArtifactRoots` — also Pi's no-token fallback); panel writers get
+ * (`PHASE_ARTIFACT_ROOTS` — also Pi's no-token fallback); panel writers get
  * `.claude/specs`.
  */
 export function artifactWriteRoots(agent: string): readonly string[] | null {
-  const role = artifactWriterRole(agent);
-  return role === null ? null : roleRoots(role);
+  return artifactWriterRole(agent)?.roots ?? null;
 }

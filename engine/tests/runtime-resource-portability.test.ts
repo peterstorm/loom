@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -45,7 +45,7 @@ describe("Pi harness detection", () => {
     ["legacy", ".claude/state/active_task_graph.json", ".claude/state/active_task_graph.json"],
     ["native", ".pi/state/active_task_graph.json", ".pi/state/active_task_graph.json"],
   ] as const)("uses the Pi process marker with %s state and no agent-directory override", (_label, presentGraph, expectedPath) => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-pi-marker-")));
+    const root = canonicalTempDir("loom-pi-marker-");
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
       if (presentGraph !== null) {
@@ -73,7 +73,7 @@ describe("Pi harness detection", () => {
   });
 
   it("resumes legacy Claude state when Pi-native state is absent", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-pi-state-fallback-")));
+    const root = canonicalTempDir("loom-pi-state-fallback-");
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
       const legacy = ".claude/state/active_task_graph.json";
@@ -132,7 +132,7 @@ describe("TaskGraph repository-root discovery", () => {
   }
 
   it("fails closed when Git cannot prove the root from a nested repository cwd", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-git-root-failure-")));
+    const root = canonicalTempDir("loom-git-root-failure-");
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
       mkdirSync(join(root, ".claude", "state"), { recursive: true });
@@ -156,7 +156,7 @@ describe("TaskGraph repository-root discovery", () => {
   });
 
   it.skipIf(process.getuid?.() === 0)("rejects Git's non-repository diagnostic when ancestor metadata exists but is unreadable", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-unreadable-git-root-")));
+    const root = canonicalTempDir("loom-unreadable-git-root-");
     const gitDirectory = join(root, ".git");
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
@@ -179,7 +179,7 @@ describe("TaskGraph repository-root discovery", () => {
   });
 
   it("rejects a non-repository diagnostic when readable ancestor metadata exists", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-readable-git-root-")));
+    const root = canonicalTempDir("loom-readable-git-root-");
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
       const nested = join(root, "nested", "cwd");
@@ -200,7 +200,7 @@ describe("TaskGraph repository-root discovery", () => {
   });
 
   it("fails closed when the Git executable cannot start", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-missing-git-")));
+    const root = canonicalTempDir("loom-missing-git-");
     try {
       const emptyPath = join(root, "empty-bin");
       mkdirSync(emptyPath);
@@ -219,7 +219,7 @@ describe("TaskGraph repository-root discovery", () => {
   });
 
   it("fails closed when Git reports success without a repository root", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-empty-git-root-")));
+    const root = canonicalTempDir("loom-empty-git-root-");
     try {
       const bin = fakeGit(root, "", 0);
       const run = spawnSync(BUN, ["-e", configScript], {
@@ -236,7 +236,7 @@ describe("TaskGraph repository-root discovery", () => {
   });
 
   it("uses cwd-relative creation authority only for a proven non-repository", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-no-git-root-")));
+    const root = canonicalTempDir("loom-no-git-root-");
     try {
       const bin = fakeGit(root, "fatal: not a git repository (or any of the parent directories): .git", 128);
       const run = spawnSync(BUN, ["-e", configScript], {

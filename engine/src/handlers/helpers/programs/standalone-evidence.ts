@@ -3,21 +3,51 @@
  * this volume never loads a predecessor or drives program publication.
  */
 import { createHash } from 'node:crypto';
-import type { PreparedStandaloneSuccessor } from '../../../core/standalone-lineage';
+import { isExactGitSha } from '../../../core/git-sha';
+import {
+  parseStandaloneReviewedSource,
+  type StandaloneReviewedSource,
+  type StandaloneReviewedSourceFile,
+} from '../../../core/review-authority-receipt';
+import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } from '../../../core/standalone-review-model';
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
-import { standaloneCurrentPanelCriticals, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
+import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
 import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
-import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture, proveStandaloneRosterCompletion, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority, type StandaloneTranscriptAdmission } from '../../../core/standalone-review';
-import { reduceStandaloneReviewMachine, freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
+import {
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
+  type StandaloneReviewerProtocolResolver,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineState,
+} from '../../../core/standalone-review';
+import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
+import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
+import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
+import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
-import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, refutationPanelCheckpoint, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentPanelResult, type PersistentRefutationPanelEvent, type PersistentRefutationStep } from '../../../core/panel-program';
+import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';
+import {
+  completePersistentRefutationPanel,
+  panelRequestIdentity,
+  refutationPanelCheckpoint,
+  rejectRefutationVerdict,
+  startPersistentRefutationPanel,
+  submitRefutationVerdict,
+  type PersistentRefutationPanelEvent,
+  type PersistentRefutationStep,
+} from '../../../core/persistent-panel';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { admitRecordedReadCoverage } from '../../../orchestration/standalone-read-coverage-evidence';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { boundedStandaloneReadHandle, successorSourceSnapshot } from './standalone-successor-source';
-import { parseRegistration, standaloneReviewerProtocolResolver, durablePublicationDigest, durableRefutationRequests, durableRequests, exactObject, readRegisteredStandaloneAuthority, publicationResolver, standaloneRetryEffectId, type RegisteredStandaloneProgram } from './helpers';
+import { parseRegistration, exactObject, type RegisteredStandaloneProgram } from './registration';
+import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
+import { durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
+import { durableRequests, standaloneRetryEffectId } from './standalone-requests';
 import type { ProgramParse } from './program-result';
 
 function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandaloneReviewAuthority) {
@@ -36,7 +66,7 @@ function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandalon
 export function standaloneRefutationPreparation(
   handle: RunDirHandle,
   authority: FrozenStandaloneReviewAuthority,
-  aggregate: import("../../../core/standalone-review").StandaloneReviewAggregate,
+  aggregate: import("../../../core/standalone-review-model").StandaloneReviewAggregate,
 ) {
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });
   const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
@@ -122,16 +152,6 @@ type StandaloneScopePacketAuthority = Readonly<{
   attempt: 1 | 2;
 }>;
 
-export type StandaloneReviewedSourceFile =
-  | Readonly<{ path: string; kind: "file"; digest: string; byteLength: number }>
-  | Readonly<{ path: string; kind: "absent"; digest: null; byteLength: 0 }>;
-
-export type StandaloneReviewedSource = Readonly<{
-  schemaVersion: 1;
-  headRevision: string;
-  files: readonly StandaloneReviewedSourceFile[];
-}>;
-
 function parseScopePacketAuthority(bytes: Iterable<number>):
   | Readonly<{ ok: true; value: StandaloneScopePacketAuthority }>
   | Readonly<{ ok: false; message: string }> {
@@ -175,8 +195,7 @@ function parseReviewedSource(bytes: Iterable<number>, scope: readonly string[], 
     }
     const record = raw as Record<string, unknown>;
     if (!exactObject(record, ["files", "headRevision", "schemaVersion"]) ||
-        record.schemaVersion !== sourceVersion || typeof record.headRevision !== "string" ||
-        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(record.headRevision) ||
+        record.schemaVersion !== sourceVersion || !isExactGitSha(record.headRevision) ||
         !Array.isArray(record.files) || record.files.length !== scope.length) {
       return malformed("standalone-frozen-source context section is malformed");
     }
@@ -220,14 +239,12 @@ function parseReviewedSource(bytes: Iterable<number>, scope: readonly string[], 
         byteLength: file.byteLength as number,
       }));
     }
-    return Object.freeze({
-      ok: true as const,
-      value: Object.freeze({
-        schemaVersion: 1 as const,
-        headRevision: record.headRevision,
-        files: Object.freeze(files),
-      }),
-    });
+    // The attestation is minted through the receipt codec the bridge consumer
+    // parses with, so the producer can only build what the consumer accepts.
+    const attested = parseStandaloneReviewedSource({ schemaVersion: 1, headRevision: record.headRevision, files });
+    return attested === null
+      ? malformed("standalone-frozen-source context section does not form a reviewed-source attestation")
+      : Object.freeze({ ok: true as const, value: attested });
   } catch (error) {
     return malformed(`standalone-frozen-source context section is invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -405,7 +422,8 @@ export function replayStandaloneResultFromEvidence(
       if (captured.value.has(attemptOneKey)) {
         const bytes = witnessedBytes(attemptOne.authority);
         if (!bytes.ok) return failed(bytes.message);
-        const admission = admitCapturedStandaloneTranscript(
+        const admission = admitStandaloneReviewerResult(
+          handle,
           reviewerProtocols,
           attemptOne.authority,
           bytes.value,
@@ -430,7 +448,8 @@ export function replayStandaloneResultFromEvidence(
       }
       const retryBytes = witnessedBytes(retry.value.authority);
       if (!retryBytes.ok) return failed(retryBytes.message);
-      const retryAdmission = admitCapturedStandaloneTranscript(
+      const retryAdmission = admitStandaloneReviewerResult(
+        handle,
         reviewerProtocols,
         retry.value.authority,
         retryBytes.value,
@@ -677,6 +696,25 @@ export function replayStandaloneCliCaptures(handle: RunDirHandle, registration: 
   successor?: PreparedStandaloneSuccessor, processWitnesses?: ReadonlyMap<string, StandaloneCaptureWitness>): StandaloneEvidenceReplayResult {
   const witnesses = readStandaloneCaptureWitnesses(handle, processWitnesses);
   return witnesses.ok ? replayStandaloneResultFromEvidence(handle, registration, witnesses.value, successor) : witnesses;
+}
+
+/**
+ * The one standalone result admission every resume and replay path crosses:
+ * the issued payload contract first, then — for a Run carrying the read
+ * obligation (ADR-0022) — the engine-observed read coverage of the attempt.
+ * A refusal of either is a semantic rejection that consumes the bounded retry;
+ * unreadable coverage evidence throws as infrastructure.
+ */
+export function admitStandaloneReviewerResult(
+  handle: RunDirHandle,
+  reviewerProtocols: StandaloneReviewerProtocolResolver,
+  request: AgentRequestAuthority,
+  bytes: Uint8Array,
+): Pick<Extract<StandaloneTranscriptAdmission, { ok: true }>, "ok"> | Extract<StandaloneTranscriptAdmission, { ok: false }> {
+  const payload = admitCapturedStandaloneTranscript(reviewerProtocols, request, bytes);
+  if (!payload.ok) return payload;
+  const coverage = admitRecordedReadCoverage(handle, request);
+  return coverage.kind === "refused" ? { ok: false, problems: [coverage.problem] } : { ok: true };
 }
 
 export function admitCapturedStandaloneTranscript(

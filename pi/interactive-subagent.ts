@@ -13,6 +13,7 @@ import { Type } from "typebox";
 import { resolveEffectivePiBindingFromParent, type EffectivePiBinding, type RoutedPiThinkingLevel } from "../engine/src/core/model-routing";
 import { lowerModelProfile, resolveAgentProfile } from "../engine/src/core/model-profiles";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
+import { piAgentDefinitionPath } from "../engine/src/core/pi-agent-directory";
 import { validatePiAgentDefinitionFile, type PiRoutingContext } from "../engine/src/utils/render-pi-agent";
 import {
   cancelledUiResponse,
@@ -259,7 +260,7 @@ export async function runInteractiveSubagent(
   }>,
   dependencies: InteractiveSubagentDependencies = {},
 ): Promise<InteractiveAgentResult> {
-  const agentPath = join(input.piAgentDir, "agents", `${input.agent}.md`);
+  const agentPath = piAgentDefinitionPath(input.piAgentDir, input.agent);
   const validation = validatePiAgentDefinitionFile(
     agentPath,
     input.agent,

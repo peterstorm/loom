@@ -1,7 +1,14 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
-import { prepareStandaloneLineageSource, prepareStandaloneDisposition, prepareStandaloneSuccessor, readPublishedStandaloneDisposition,
-  standaloneOriginReference, findingOf, type PublishedStandaloneDisposition, type PreparedStandaloneDisposition } from "../../src/core/standalone-lineage";
+import {
+  prepareStandaloneLineageSource,
+  prepareStandaloneDisposition,
+  prepareStandaloneSuccessor,
+  readPublishedStandaloneDisposition,
+  type PreparedStandaloneDisposition,
+} from "../../src/core/standalone-review";
+import { standaloneOriginReference, findingOf } from "../../src/core/standalone-finding-origin";
+import { type PublishedStandaloneDisposition } from "../../src/core/standalone-review-model";
 import { parseStandaloneDispositionStartBytes, parseStandaloneDispositionStartInput, parseRegisteredStandaloneDispositionProgram, registerStandaloneDisposition,
   startStandaloneDisposition, reduceStandaloneDisposition, standaloneDispositionReceipt, checkStandaloneDispositionCheckpoint } from "../../src/core/standalone-disposition-machine";
 import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";

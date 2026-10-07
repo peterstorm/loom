@@ -21,14 +21,23 @@ import {
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
-import { canonicalJson, sha256Bytes, sha256Hex, type JsonValue } from "./review-packet";
+import { canonicalJson, type JsonValue } from "./review-packet";
+import { sha256Bytes, sha256Hex } from "./digest";
+import {
+  collectDenseArray,
+  exactRecordErrors,
+  isPlainRecord,
+  parseExactRecord,
+  toElementResult,
+  type ElementResult,
+  type UnknownRecord,
+} from "./plain-record";
 
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;
 export const VERIFICATION_MANIFEST_KIND = "loom-verification-manifest" as const;
 
 type ProjectWaveCompletionCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
-type UnknownRecord = Record<string, unknown>;
 
 export type VerificationManifestSource =
   | Readonly<{ kind: "engine-default" }>
@@ -142,22 +151,9 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
   }
 }
 
-function isRecord(raw: unknown): raw is UnknownRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
-  const prototype: unknown = Object.getPrototypeOf(raw);
-  return prototype === null || prototype === Object.prototype;
-}
-
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
-  if (!isRecord(raw)) return failure([`${path} must be an object`]);
-  const expected = new Set(fields);
-  const missing = fields
-    .filter((field) => !Object.prototype.hasOwnProperty.call(raw, field))
-    .map((field) => `${path}.${field} is required`);
-  const surplus = Reflect.ownKeys(raw).flatMap((key) =>
-    typeof key === "string" && expected.has(key) ? [] : [`${path}.${String(key)} is not allowed`]);
-  const errors = [...missing, ...surplus];
-  return errors.length === 0 ? success(raw) : failure(errors);
+  const record = parseExactRecord(raw, fields, path);
+  return record.ok ? success(record.value) : failure(exactRecordErrors(record, path, "an object"));
 }
 
 function projectCheck(check: VerificationManifestCheck): ProjectWaveCompletionCheck {
@@ -212,18 +208,10 @@ function parseCheck(raw: unknown, path: string): Parsed<VerificationManifestChec
 }
 
 function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationManifestCheck[]> {
-  if (!Array.isArray(raw)) return failure([`${path} must be an array`]);
-  const checks: VerificationManifestCheck[] = [];
-  const errors: string[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(raw, index)) {
-      errors.push(`${path}[${index}] must be present`);
-      continue;
-    }
-    const parsed = parseCheck(raw[index], `${path}[${index}]`);
-    if (parsed.ok) checks.push(parsed.value);
-    else errors.push(...parsed.error.errors);
-  }
+  const collected = collectDenseArray(raw, path, (value, elementPath) => toElementResult(parseCheck(value, elementPath)));
+  if (collected.kind === "not-array") return failure([`${path} must be an array`]);
+  const checks = collected.values;
+  const errors = [...collected.errors];
   const counts = new Map<string, number>();
   for (const check of checks) counts.set(check.id, (counts.get(check.id) ?? 0) + 1);
   const duplicates = [...counts.entries()]
@@ -344,7 +332,7 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<FrozenVeri
 }
 
 function parseSource(raw: unknown): Parsed<VerificationManifestSource> {
-  if (!isRecord(raw)) return failure(["frozenVerificationManifest.source must be an object"]);
+  if (!isPlainRecord(raw)) return failure(["frozenVerificationManifest.source must be an object"]);
   if (raw.kind === "engine-default") {
     const record = exactRecord(raw, ["kind"], "frozenVerificationManifest.source");
     return record.ok ? success(ENGINE_DEFAULT_SOURCE) : record;
@@ -365,26 +353,25 @@ function parseSource(raw: unknown): Parsed<VerificationManifestSource> {
     : failure(errors);
 }
 
-function parseProjectChecks(raw: unknown): Parsed<readonly ProjectWaveCompletionCheck[]> {
-  if (!Array.isArray(raw)) return failure(["frozenVerificationManifest.projectChecks must be an array"]);
-  const checks: ProjectWaveCompletionCheck[] = [];
-  const errors: string[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(raw, index)) {
-      errors.push(`frozenVerificationManifest.projectChecks[${index}] must be present`);
-      continue;
-    }
-    const parsed = parseAuthorizedWaveCompletionCheck(raw[index], `frozenVerificationManifest.projectChecks[${index}]`);
-    if (!parsed.ok) errors.push(...parsed.error.errors);
-    else if (parsed.value.kind !== "project-command") {
-      errors.push(`frozenVerificationManifest.projectChecks[${index}] must be a project command`);
-    } else if (parsed.value.reportPolicy.kind === "required-file" &&
-        !parsed.value.reportPolicy.path.startsWith(`${COMPLETION_REPORT_ROOT}/`)) {
-      errors.push(
-        `frozenVerificationManifest.projectChecks[${index}].reportPolicy.path must be a file beneath protected ${COMPLETION_REPORT_ROOT}/`,
-      );
-    } else checks.push(parsed.value);
+function parseProjectCheck(raw: unknown, path: string): ElementResult<ProjectWaveCompletionCheck> {
+  const parsed = parseAuthorizedWaveCompletionCheck(raw, path);
+  if (!parsed.ok) return freeze({ ok: false, errors: parsed.error.errors });
+  if (parsed.value.kind !== "project-command") return freeze({ ok: false, errors: [`${path} must be a project command`] });
+  if (parsed.value.reportPolicy.kind === "required-file" &&
+      !parsed.value.reportPolicy.path.startsWith(`${COMPLETION_REPORT_ROOT}/`)) {
+    return freeze({
+      ok: false,
+      errors: [`${path}.reportPolicy.path must be a file beneath protected ${COMPLETION_REPORT_ROOT}/`],
+    });
   }
+  return freeze({ ok: true, value: parsed.value });
+}
+
+function parseProjectChecks(raw: unknown): Parsed<readonly ProjectWaveCompletionCheck[]> {
+  const collected = collectDenseArray(raw, "frozenVerificationManifest.projectChecks", parseProjectCheck);
+  if (collected.kind === "not-array") return failure(["frozenVerificationManifest.projectChecks must be an array"]);
+  const checks = collected.values;
+  const errors = [...collected.errors];
   const counts = new Map<string, number>();
   for (const check of checks) counts.set(check.checkId, (counts.get(check.checkId) ?? 0) + 1);
   const duplicates = [...counts.entries()].filter(([, count]) => count > 1).map(([id]) => id).sort(compareStrings);

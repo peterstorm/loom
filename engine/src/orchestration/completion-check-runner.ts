@@ -22,7 +22,7 @@ import {
   parseStructuredTestReportBytes,
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
-import { sha256Bytes } from "../core/review-packet";
+import { sha256Bytes } from "../core/digest";
 import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {

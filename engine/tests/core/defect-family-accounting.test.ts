@@ -46,28 +46,24 @@ import {
 } from "../../src/core/orchestration-contract";
 import {
   aggregateStandaloneReview,
-  capturedReviewerResultFromText,
-  prepareStandaloneReview,
   proveStandaloneRosterCompletion,
-  serializeAdjudicatedStandaloneReview,
-} from "../../src/core/standalone-review";
-import {
-  freezeStandaloneRefutationPanelAuthority,
   parseAuthoritativeStandaloneReviewResult,
-  parseStandaloneRefutationCompletion,
   reduceStandaloneReviewMachine,
   startStandaloneReviewMachine,
   type AuthoritativeStandaloneReviewResult,
-} from "../../src/core/standalone-review-machine";
+} from "../../src/core/standalone-review";
+import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
+import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
+import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
+import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from "../../src/core/standalone-refutation-completion";
+import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import {
   completePersistentRefutationPanel,
-  deriveRefutationVerifierBinding,
   panelRequestIdentity,
-  parseRefutationPanelAuthority,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
-  type NonEmpty,
-} from "../../src/core/panel-program";
+} from "../../src/core/persistent-panel";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 
 const digest = (character: string): string => character.repeat(64);
 

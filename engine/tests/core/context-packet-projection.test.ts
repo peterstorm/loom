@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import fc from "fast-check";
 import { match } from "ts-pattern";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, symlinkSync, mkdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync, symlinkSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sha256Bytes } from "../../src/core/review-packet";
+import { sha256Bytes } from "../../src/core/digest";
 import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
-import { parseContextProjectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
+import { parseContextProjectionArguments, parseContextSectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
+import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/wave-frozen-source";
+import { observedWorkspace } from "../fixtures/reviewed-workspace";
 
 const script = fileURLToPath(new URL("../../../scripts/read-context-packet.ts", import.meta.url));
 const roots: string[] = [];
@@ -19,7 +21,7 @@ const value = <T>(result: { ok: true; value: T } | { ok: false }): T => {
   return result.value;
 };
 function fixture(version: 1 | 2 | 3 = 2) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-reader-")));
+  const root = canonicalTempDir("loom-reader-");
   roots.push(root);
   const text = "export const literal = 'do not execute $(touch /tmp/not-authority)';\n".repeat(1500);
   const section = value(encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, headRevision: "fixture", files: [
@@ -67,6 +69,68 @@ describe("read-only packet command", () => {
     expect(JSON.parse(page.stdout)).toEqual({ offset: 4096, nextOffset: 6144, totalUnits: f.text.length, text: f.text.slice(4096, 6144) });
     expect(readFileSync(f.path, "utf8")).toBe(f.bytes);
     expect(Buffer.byteLength(page.stdout)).toBeLessThan(48 * 1024);
+  });
+
+  it("reads exact Wave text while section browsing exposes only binary/absent metadata", () => {
+    const root = canonicalTempDir("loom-wave-reader-");
+    roots.push(root);
+    const text = "export const dirty = 'exact workspace bytes';\n";
+    const snapshot = observedWorkspace("T1", ["absent.ts", "binary.bin", "src/a.ts"], [
+      { path: "src/a.ts", bytes: Buffer.from(text) },
+      { path: "binary.bin", bytes: Uint8Array.from([0xff, 0x00, 0x61]) },
+      { path: "absent.ts", bytes: null },
+    ]);
+    const source = value(encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(snapshot))));
+    const packet = value(buildReviewerContextPacket({
+      requestId: value(parseRequestId("request:wave-reader")), role: "code-reviewer", requiredSkill: "none",
+      fixedContext: [source], variableContext: [],
+    }));
+    const path = join(root, "packet.json");
+    writeFileSync(path, JSON.stringify(packet));
+    const args = ["--packet", path, "--request", packet.requestId, "--digest", packet.digest,
+      "--role", packet.role, "--skill", packet.requiredSkill];
+
+    const section = run([...args, "--section", WAVE_FROZEN_SOURCE_SECTION]);
+    expect(section.status, section.stderr).toBe(0);
+    const metadata = JSON.parse(section.stdout).text as string;
+    expect(metadata).toContain("binary.bin");
+    expect(metadata).toContain("absent.ts");
+    expect(metadata).toContain("[omitted; select text with --file]");
+    expect(metadata).not.toContain("exact workspace bytes");
+    expect(metadata).not.toContain(Buffer.from([0xff, 0x00, 0x61]).toString("base64"));
+
+    const selected = run([...args, "--file", "src/a.ts"]);
+    expect(selected.status, selected.stderr).toBe(0);
+    expect(JSON.parse(selected.stdout).text).toBe(text);
+    for (const path of ["binary.bin", "absent.ts", "foreign.ts"]) {
+      const refused = run([...args, "--file", path]);
+      expect(refused.status).toBe(1);
+      expect(refused.stdout).toBe("");
+    }
+  });
+
+  it("refuses ambiguous Wave paths and a Wave source whose bytes disagree with workspaceHeadSha", () => {
+    const requestId = value(parseRequestId("request:wave-reader-ambiguity"));
+    const source = observedWorkspace("T1", ["src/a.ts"], [
+      { path: "src/a.ts", bytes: Buffer.from("exact") },
+    ]);
+    const wire = waveFrozenSource(source);
+    const mutations = [
+      { ...wire, files: [...wire.files, wire.files[0]!] },
+      { ...wire, files: [{ ...wire.files[0]!, content: "drifted" }] },
+    ];
+    for (const [index, mutation] of mutations.entries()) {
+      const section = value(encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(mutation)));
+      const packet = value(buildReviewerContextPacket({ requestId, role: "code-reviewer", requiredSkill: "none",
+        fixedContext: [section], variableContext: [] }));
+      const input = value(parseContextProjectionArguments([
+        "--packet", "/fixture/packet.json", "--request", packet.requestId, "--digest", packet.digest,
+        "--role", packet.role, "--skill", packet.requiredSkill, "--file", "src/a.ts",
+      ]));
+      const projected = projectContextPacket(packet, input);
+      expect(projected.ok, `mutation ${index} must refuse`).toBe(false);
+      if (!projected.ok) expect(projected.error).toMatch(/duplicate path|differs from its digest or length/);
+    }
   });
 
   it("renders current frozen schema and rubric as decoded text", () => {
@@ -204,6 +268,23 @@ describe("read-only packet command", () => {
       expect(sectionRefusal.error).toContain("selected section hostile-utf8 cannot be decoded safely as text data (");
       expect(sectionRefusal.error).toContain("The encoded data was not valid");
     }
+
+    // The same hostile bytes as the frozen-source INDEX: the UTF-8 decode of
+    // the index names itself, beneath the selected file's subject.
+    const hostileIndex = {
+      ...identity,
+      fixedContext: [{ label: "standalone-frozen-source", bytes: hostileBytes, digest: hostileDigest, byteLength: 2 }],
+    } as const;
+    const hostileIndexPacket = { ...hostileIndex, digest: contextPacketDigest(hostileIndex as unknown as Parameters<typeof contextPacketDigest>[0]) };
+    const utf8IndexRefusal = projectContextPacket(hostileIndexPacket, value(parseContextProjectionArguments([
+      "--packet", "/fixture/packet.json", "--request", identity.requestId, "--digest", hostileIndexPacket.digest,
+      "--role", identity.role, "--skill", identity.requiredSkill, "--file", "src/a.ts",
+    ])));
+    expect(utf8IndexRefusal).toMatchObject({ ok: false });
+    if (!utf8IndexRefusal.ok) {
+      expect(utf8IndexRefusal.error).toContain("source file src/a.ts cannot be decoded safely as text data (");
+      expect(utf8IndexRefusal.error).toContain("frozen source index could not be decoded as UTF-8");
+    }
   });
 
   it("carries the parser's field-level diagnostic in the packet-integrity refusal", () => {
@@ -261,5 +342,23 @@ describe("read-only packet command", () => {
       expect(projected).toMatchObject({ text: f.text.slice(offset, offset + limit), offset });
       expect(JSON.stringify(f.packet)).toBe(f.bytes);
     }), { seed: 4101, numRuns: 15 });
+  });
+});
+
+describe("whole-section reader arguments", () => {
+  const args = ["--packet", "/run/contexts/p.json", "--digest", "a".repeat(64), "--section", "wave-review-authority"];
+
+  it("reads each flag's value in any order, at its first occurrence", () => {
+    const expected = { ok: true, value: { path: "/run/contexts/p.json", digest: "a".repeat(64), label: "wave-review-authority" } };
+    expect(parseContextSectionArguments(args)).toEqual(expected);
+    expect(parseContextSectionArguments([...args.slice(4), ...args.slice(0, 4)])).toEqual(expected);
+    expect(parseContextSectionArguments([...args, "--section", "other"])).toEqual(expected);
+  });
+
+  it("refuses an absent, empty or flag-shaped value, and a relative packet path", () => {
+    expect(parseContextSectionArguments(args.slice(2))).toEqual({ ok: false, error: "--packet requires a value" });
+    expect(parseContextSectionArguments(["--packet", "/p.json", "--digest", "", "--section", "s"])).toEqual({ ok: false, error: "--digest requires a value" });
+    expect(parseContextSectionArguments(["--packet", "/p.json", "--digest", "d", "--section", "--packet"])).toEqual({ ok: false, error: "--section requires a value" });
+    expect(parseContextSectionArguments(["--packet", "contexts/p.json", "--digest", "d", "--section", "s"])).toEqual({ ok: false, error: "--packet must be an absolute path" });
   });
 });

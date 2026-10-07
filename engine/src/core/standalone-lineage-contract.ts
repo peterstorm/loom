@@ -3,7 +3,9 @@ import { z } from "zod/v4";
 import { boundedText, evidenceSchema, reviewerDraftV2Schema, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { canonicalRecord, success, failure, type DomainResult, SAFE_AUTHORITY_ID, SHA256_HEX } from "./orchestration-contract/identity";
-import { parseReviewPath, sha256Hex } from "./review-packet";
+import { parseReviewPath } from "./review-packet";
+import { parseFindingId } from "./findings";
+import { sha256Hex } from "./digest";
 
 export const STANDALONE_LINEAGE_LIMITS = Object.freeze({
   retainedBytes: 16_777_216, inventory: 4_096, historyPerOrigin: 64,
@@ -50,7 +52,15 @@ const decision = z.discriminatedUnion("kind", [
     runId: identity, snapshotDigest: digest, assessments: z.array(currentAssessment).min(1).max(7).readonly(),
   }).readonly(),
 ]);
-const findingIdentity = { id: reference, agent: role };
+/** Rehydrates the shared `FindingId` brand through its sole constructor, so a
+ *  parsed row's Finding already carries proven task-local identity. */
+const findingId = reference.transform((value, context) => {
+  const id = parseFindingId(value);
+  if (id !== null) return id;
+  context.addIssue({ code: "custom", input: value, message: "Finding id must be a task-local Finding ID" });
+  return z.NEVER;
+});
+const findingIdentity = { id: findingId, agent: role };
 const legacyFinding = z.strictObject({ ...findingIdentity, severity: z.enum(["critical", "advisory"]), file: path.nullable(),
   line: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).nullable(), claim: boundedText(4_096),
 }).readonly();

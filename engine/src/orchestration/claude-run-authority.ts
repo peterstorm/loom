@@ -8,7 +8,7 @@
  * `claude-code`) keyed by the main agent's `CLAUDE_CODE_SESSION_ID`, and every
  * Claude hook — whose payload `session_id` is that same parent session, for the
  * main agent and its subagents alike — reads it back here. It is the SAME
- * mechanism Pi uses (`pi/extension` resolves its runs from the same registry),
+ * mechanism Pi uses (`pi/review-run-authority` resolves its runs from the same registry),
  * not a parallel copy.
  *
  * The explicit `LOOM_ORCHESTRATION_*` variables keep their precedence and their

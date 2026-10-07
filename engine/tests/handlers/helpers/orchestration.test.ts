@@ -1,7 +1,8 @@
+import { captureReviewedTranscript } from "../../fixtures/read-coverage";
 import { spawn, spawnSync } from "node:child_process";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,11 +11,26 @@ import {
   observedAdvisoryApproval,
   renderStatus,
 } from "../../../src/handlers/helpers/orchestration";
+import {
+  panelSubmissionProblem,
+  parseRegisteredPanelProgram,
+} from "../../../src/core/legacy-panel-decisions";
+import {
+  resolvePanelAttemptVerdictSource,
+  settlePanelAttemptSubmission,
+} from "../../../src/handlers/helpers/programs/legacy-panel";
+import { candidateFilename, type PanelLens } from "../../../src/core/panel-contract";
+import { panelVerdictSourceProvenance, panelVerdictSourceRecord } from "../../../src/core/panel-verdict-source";
+import { selectVerdictSource } from "../../../src/core/emission-ingestion";
+import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../../src/core/emission-tool";
+import { captureKey } from "../../../src/core/harness-capture";
+import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
-import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
+import { type GateDeps } from "../../../src/core/wave-gate-checks";
+import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
-import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
@@ -25,9 +41,14 @@ import {
   type StandaloneCaptureWitness,
 } from "../../../src/handlers/helpers/programs/standalone";
 import { StateManager } from "../../../src/state-manager";
-import { parseRegistration, publishInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
-import { deriveWaveAttemptTwo, waveGateAuthorityDigest, waveRequests, installWaveReviewRuns, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
-import { captureKey } from "../../../src/core/harness-capture";
+import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
+import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/issued-emission-capability";
+import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
+import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
+import { waveRequests, installWaveReviewRuns } from "../../../src/handlers/helpers/programs/wave-review-requests";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../src/core/wave-gate-membership";
+import { prepareOrphanedWaveGateRecovery } from "../../../src/core/wave-gate-replacement";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { createRunDirectory, openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
@@ -327,7 +348,7 @@ describe("orchestration status", () => {
   });
 
   it("reports unavailable reservation liveness instead of inventing an active Agent", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-status-roster-unavailable-")));
+    const root = canonicalTempDir("loom-status-roster-unavailable-");
     cleanup.push(root);
     const statePath = join(root, "active_task_graph.json");
     const rosterDir = join(root, "subagents");
@@ -440,7 +461,7 @@ describe("observedAdvisoryApproval", () => {
 
 describe("inspectRunDirectoryEntry", () => {
   it("classifies a symlink at the run path as occupied, never as a usable directory", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-inspect-")));
+    const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot, { recursive: true });
@@ -457,7 +478,7 @@ describe("inspectRunDirectoryEntry", () => {
   });
 
   it("classifies a non-directory entry (file) as occupied, never as a usable directory", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-inspect-")));
+    const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot, { recursive: true });
@@ -474,7 +495,7 @@ describe("inspectRunDirectoryEntry", () => {
   });
 
   it("classifies a missing entry as absent and a real directory as a directory", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-inspect-")));
+    const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(join(runsRoot, "run.real"), { recursive: true });
@@ -653,7 +674,7 @@ describe("prepareOrphanedWaveGateRecovery", () => {
 
 describe("orchestration CLI", () => {
   function project(): string {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-orchestration-")));
+    const root = canonicalTempDir("loom-orchestration-");
     cleanup.push(root);
     mkdirSync(join(root, ".claude", "state"), { recursive: true });
     return root;
@@ -727,7 +748,7 @@ describe("orchestration CLI", () => {
         1,
         { kind: "state-layout", root },
       );
-      const published = await publishInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
+      const published = await publishLegacyInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
       if (!published.ok) throw new Error(published.message);
       await installWaveReviewRuns(manager, registration, batch);
     });
@@ -756,7 +777,7 @@ describe("orchestration CLI", () => {
         : currentWavePayload(run, [], run.prior_finding_ids.map((finding_id) => ({
           finding_id, verdict: "still_present", reason: "Scripted fixture prior remains present",
         })));
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
     return resumeWaveFixture(root, runsRoot, runDir);
   }
@@ -978,6 +999,423 @@ describe("orchestration CLI", () => {
     expect(result.outcomes).toEqual([{ finding_id: "T1:finding-1", survives: true, refuted_by: [], votes: expect.any(Array) }]);
   }, 15_000);
 
+  // ---------------------------------------------------------------------------
+  // The legacy panel verdict fold (T8, AD-8/AD-9): the SAME selection policy the
+  // persistent submissions run, wired through the legacy panel path's
+  // submission boundary and its per-attempt scans, with the durable
+  // panel-verdict-source record as the replay authority.
+  // ---------------------------------------------------------------------------
+
+  describe("the legacy panel verdict fold", () => {
+    const artifactDigestOf = (hex: string) => {
+      const parsedDigest = parseArtifactDigest(hex);
+      if (!parsedDigest.ok) throw new Error(parsedDigest.error.message);
+      return parsedDigest.value;
+    };
+    type RefutationVerdict = "upheld" | "refuted";
+    const refutationProgram = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
+
+    /** A started LEGACY refutation run, opened, with its first verifier attempt's authority. */
+    async function startedRefutationRun(runName: string) {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, runName);
+      mkdirSync(runDir, { recursive: true });
+      const started = await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], refutationProgram, root);
+      expect(started.status, started.stderr).toBe(0);
+      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      return { root, runsRoot, runDir, opened: opened.value, request };
+    }
+
+    /** A refutation verdict for every critical finding under the run's first lens, read from the
+     *  `panel-authority` section materializePanelRequest publishes into a LEGACY panel context. */
+    function refutationVerdictArguments(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: RefutationVerdict) {
+      const context = handle.readContext(authority.contextDigest);
+      if (!context.ok) throw new Error(context.error.message);
+      const section = context.value.fixedContext.find(({ label }) => label === "panel-authority");
+      if (section === undefined) throw new Error("refutation context lacks semantic authority");
+      const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
+        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
+      };
+      return {
+        criterion: semantic.input.lenses[0],
+        verdicts: semantic.input.criticalFindingIds.map((id) => ({
+          finding_id: id,
+          verdict,
+          reasoning: verdict === "upheld" ? "the current packet still exhibits the finding" : "the current packet does not exhibit the finding",
+        })),
+      };
+    }
+
+    /** The complete refutation-verdict emission call of one attempt. */
+    function refutationEmissionCall(handle: RunDirHandle, request: AgentRequestAuthority, toolCallId: string, verdict: RefutationVerdict) {
+      return Object.freeze({
+        requestId: request.requestId,
+        toolCallId,
+        kind: Object.freeze({ kind: "refutation-verdict" as const }),
+        version: "v1" as const,
+        arguments: refutationVerdictArguments(handle, request, verdict),
+      });
+    }
+    const judgeRegistration = () => {
+      const input = { candidateLenses: ["type-driven-fp"], judgeCriteria: ["simplicity", "pure functional core"] };
+      const registration = parseRegisteredPanelProgram({ schemaVersion: 1, kind: "architecture", input });
+      if (registration === null) throw new Error("fixture judge registration refused");
+      return registration;
+    };
+    const refutationRegistration = () => {
+      const input = { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] };
+      const registration = parseRegisteredPanelProgram({ schemaVersion: 1, kind: "refutation", input });
+      if (registration === null) throw new Error("fixture refutation registration refused");
+      return registration;
+    };
+
+    function mintJudgeSelection(requestId: string, args: unknown, toolCallId = "legacy-call-1") {
+      const minted = issueEmissionBinding({ requestId, kind: "judge-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.message}`);
+      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({ requestId, toolCallId, kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args }),
+      })]), "the raw final text");
+      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
+      return { binding: minted.value, selection };
+    }
+
+    it("selects an emission judge verdict before the authoritative parse and keeps the criterion join", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const args = {
+        criterion: input.judgeCriteria[0],
+        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
+      };
+      const { selection } = mintJudgeSelection("architecture:judge:1", args);
+      // Emission wins over the (parseable) final text; the emitted bytes
+      // satisfy the SAME criterion/candidate joins the extraction parse uses.
+      expect(panelSubmissionProblem(registration, "architecture:judge:1",
+        JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 3 + index, fatal_flaw: null, strongest_idea: `x ${index}` })) }),
+        { kind: "selected", selection, record: null })).toBeNull();
+
+      // A schema-valid payload with a FOREIGN criterion refuses at the
+      // authoritative parse, and the diagnostic names the accepted call.
+      const foreign = mintJudgeSelection("architecture:judge:1", {
+        criterion: "my own taste",
+        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
+      }, "legacy-call-foreign");
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
+        { kind: "selected", selection: foreign.selection, record: null }))
+        .toContain("emission tool call legacy-call-foreign produced a judge verdict that refuses its authoritative parse");
+    });
+
+    it("rejects duplicate and misbound legacy emission observations and never falls back", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const args = { criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) };
+      const binding = issueEmissionBinding({ requestId: "architecture:judge:1", kind: "judge-verdict", version: "v1" });
+      if (!binding.ok) throw new Error(binding.error.message);
+      const call = Object.freeze({ requestId: "architecture:judge:1", toolCallId: "call-a", kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args });
+      const duplicated = selectVerdictSource(binding.value, observeEmissionCalls([
+        Object.freeze({ kind: "complete" as const, call }),
+        Object.freeze({ kind: "complete" as const, call: { ...call, toolCallId: "call-b" } }),
+      ]), "the raw final text");
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
+        { kind: "selected", selection: duplicated, record: null }))
+        .toContain("2 distinct emission tool calls (call-a, call-b)");
+
+      const misbound = selectVerdictSource(binding.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({ requestId: "some-other-request", toolCallId: "call-c", kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args }),
+      })]), "the raw final text");
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
+        { kind: "selected", selection: misbound, record: null }))
+        .toContain("wrong-request");
+    });
+
+    it("accepts extraction over a refused legacy call with the refusal retained in the problem", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const binding = issueEmissionBinding({ requestId: "architecture:judge:1", kind: "judge-verdict", version: "v1" });
+      if (!binding.ok) throw new Error(binding.error.message);
+      const refused = selectVerdictSource(binding.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({
+          requestId: "architecture:judge:1",
+          toolCallId: "call-refused",
+          kind: Object.freeze({ kind: "judge-verdict" as const }),
+          version: "v1" as const,
+          arguments: { criterion: input.judgeCriteria[0], rankings: [{ candidate: candidates[0], score: 9.5, fatal_flaw: null, strongest_idea: "x" }] },
+        }),
+      })]), JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) }));
+      expect(refused.kind).toBe("extraction-over-refused-call");
+      // The extraction parse of the caller's raw bytes is usable: accepted, and
+      // the retained refusal rides the settle seam's source (asserted by the
+      // record round-trip test below), not silently dropped.
+      expect(panelSubmissionProblem(registration, "architecture:judge:1",
+        JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) }),
+        { kind: "selected", selection: refused, record: null })).toBeNull();
+
+      // Refused call + unusable extraction: ONE problem carrying BOTH causes.
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "not json at all",
+        { kind: "selected", selection: refused, record: null }))
+        .toMatch(/emission arguments were refused \[invalid-schema\].*authoritative verdict parse was refused: judge verdict is not valid JSON/s);
+    });
+
+    it("refuses an observed emission call under a candidate or finalize slot", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const { selection } = mintJudgeSelection("architecture:judge:1", {
+        criterion: input.judgeCriteria[0],
+        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
+      });
+      expect(panelSubmissionProblem(registration, "architecture:candidate:1", "raw",
+        { kind: "selected", selection, record: null }))
+        .toContain("extraction-only panel slot that advertises no emission tool");
+      expect(panelSubmissionProblem(registration, "architecture:finalize", "raw",
+        { kind: "selected", selection, record: null }))
+        .toContain("extraction-only panel slot that advertises no emission tool");
+    });
+
+    it("refuses a misbound emission binding before it reads the attempt's durable record", async () => {
+      const { opened, request } = await startedRefutationRun("run.legacy-fold-join-order");
+      // An unparseable durable record for this attempt: a shell that read the
+      // record before the issuance join would refuse with the record's parse
+      // failure instead of the join's caller-defect refusal.
+      const published = await opened.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from("not json", "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      const resolve = (binding: IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict">) => resolvePanelAttemptVerdictSource({
+        handle: opened,
+        request,
+        raw: "raw",
+        emission: { binding, observation: { kind: "absent" } },
+      });
+      const minted = <K extends "judge-verdict" | "refutation-verdict">(requestId: string, kind: K): IssuedEmissionBindingOf<K> => {
+        const binding = issueEmissionBinding({ requestId, kind, version: "v1" });
+        if (!binding.ok) throw new Error(binding.error.message);
+        return binding.value;
+      };
+
+      const foreignRequest = resolve(minted("refutation:verifier:other", "refutation-verdict"));
+      expect(foreignRequest.ok).toBe(false);
+      if (foreignRequest.ok) throw new Error("unreachable");
+      expect(foreignRequest.error).toContain(`issued emission binding certifies request refutation:verifier:other, not the submitted request ${request.requestId}`);
+
+      const wrongKind = resolve(minted(request.requestId, "judge-verdict"));
+      expect(wrongKind.ok).toBe(false);
+      if (wrongKind.ok) throw new Error("unreachable");
+      expect(wrongKind.error).toContain(`issued emission binding certifies producer kind judge-verdict, not the refutation-verdict kind the refutation-panel attempt ${request.requestId} belongs to`);
+
+      // Control: with no live emission input the join holds, the record IS
+      // read, and its malformed bytes refuse closed.
+      const read = resolvePanelAttemptVerdictSource({ handle: opened, request, raw: "raw" });
+      expect(read.ok).toBe(false);
+      if (read.ok) throw new Error("unreachable");
+      expect(read.error).toContain(`the durable panel verdict source for request ${request.requestId} is not valid JSON`);
+    }, 30_000);
+
+    /** Mint the issued refutation-verdict binding for the attempt, select a
+     *  refuting emission verdict, and publish the durable source record through
+     *  the settle seam's own constructor/serializer — the same seam
+     *  production's capture-side caller runs. */
+    async function publishRefutationRecord(handle: RunDirHandle, request: AgentRequestAuthority, toolCallId: string, payloadDigestOverride?: string) {
+      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(minted.error.message);
+      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: refutationEmissionCall(handle, request, toolCallId, "refuted"),
+      })]), "prose, not a verdict");
+      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
+      const acceptedBytes = new TextEncoder().encode(selection.rawJson);
+      const record = panelVerdictSourceRecord({
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        source: panelVerdictSourceProvenance(minted.value, selection),
+        acceptedCall: selection.call,
+        payloadDigest: artifactDigestOf(payloadDigestOverride ?? createHash("sha256").update(acceptedBytes).digest("hex")),
+        payloadByteLength: acceptedBytes.length,
+      });
+      if (!record.ok) throw new Error(record.error);
+      const published = await handle.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from(`${JSON.stringify(record.value, null, 2)}\n`, "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      return { binding: minted.value, record: record.value };
+    }
+
+    /** A started refutation run whose verifier attempt already has a durable
+     *  source record — the shared fixture of the precedence and fail-closed unit tests below. */
+    async function publishedRefutationRecord(runName: string, payloadDigestOverride?: string) {
+      const { opened, request } = await startedRefutationRun(runName);
+      return { opened, request, ...await publishRefutationRecord(opened, request, "precedence-call", payloadDigestOverride) };
+    }
+
+    it("replays the durable record over a contradicting live emission input, and refuses a record whose payload digest does not certify the attempt bytes", async () => {
+      const good = await publishedRefutationRecord("run.record-precedence");
+      const resolved = resolvePanelAttemptVerdictSource({
+        handle: good.opened,
+        request: good.request,
+        raw: "prose, not a verdict",
+        // A LIVE emission input whose observation CONTRADICTS the record (an
+        // absent observation would otherwise select the extraction baseline):
+        // the durable record is authoritative when present (FR-009) — the
+        // returned selection is the record's accepted call, never the live
+        // input's arm, and the record rides beside it.
+        emission: { binding: good.binding, observation: { kind: "absent" } },
+      });
+      expect(resolved.ok, resolved.ok ? "" : resolved.error).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.value.kind).toBe("selected");
+      if (resolved.value.kind !== "selected") throw new Error("unreachable");
+      expect(resolved.value.record).not.toBeNull();
+      expect(resolved.value.selection).toMatchObject({
+        kind: "emission-tool-arguments",
+        source: "emission-tool",
+        call: { toolCallId: "precedence-call" },
+      });
+
+      // A record whose payload digest does not certify THESE attempt bytes is
+      // stale/unavailable evidence and refuses closed — never a silent
+      // extraction baseline over a record that says otherwise.
+      const stale = await publishedRefutationRecord("run.record-stale-bytes", createHash("sha256").update("different bytes entirely").digest("hex"));
+      const refused = resolvePanelAttemptVerdictSource({
+        handle: stale.opened,
+        request: stale.request,
+        raw: "prose, not a verdict",
+        emission: { binding: stale.binding, observation: { kind: "absent" } },
+      });
+      expect(refused.ok).toBe(false);
+      if (refused.ok) throw new Error("unreachable");
+      expect(refused.error).toContain(`the durable panel verdict source for request ${stale.request.requestId} does not describe the accepted attempt bytes`);
+    }, 30_000);
+
+    it("replays a durable panel verdict source record through the legacy refutation panel", async () => {
+      const { root, runsRoot, runDir, opened, request } = await startedRefutationRun("run.refutation-emission-record");
+
+      // The raw attempt bytes are PROSE — without the record, the legacy scan
+      // would refuse them ("not valid JSON") and the run would consume its
+      // attempt on a parse failure.
+      const raw = "the verifier answered in prose, never emitting a verdict";
+      expect((await captureReviewedTranscript(opened, request, [...Buffer.from(raw)])).ok).toBe(true);
+
+      // Mint the ISSUED refutation-verdict binding for THIS attempt's request,
+      // select the emission verdict, and publish the durable source record.
+      await publishRefutationRecord(opened, request, "legacy-record-call");
+
+      // Resume: the reconciliation replays the record through the ONE selection
+      // seam, accepts the emission verdict, and drives the panel to done — the
+      // deterministic tally consumes the SELECTED bytes, not the prose.
+      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+      expect(resumed.status, resumed.stderr).toBe(0);
+      const action = JSON.parse(resumed.stdout) as { kind: string };
+      expect(action.kind).toBe("done");
+      const result = JSON.parse(readFileSync(join(runDir, "artifacts", "result.json"), "utf-8")) as {
+        outcomes: readonly { finding_id: string; survives: boolean }[];
+      };
+      expect(result.outcomes).toEqual([{ finding_id: "T1:finding-1", survives: false, refuted_by: ["reproduction"], votes: expect.any(Array) }]);
+      // The accepted source is durably bound: the record the settle seam
+      // replayed is the only provenance for this attempt, and a resubmission
+      // of the same attempt reproduces the same decision idempotently.
+      const idempotent = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+      expect(idempotent.status, idempotent.stderr).toBe(0);
+      expect(JSON.parse(idempotent.stdout).kind).toBe("done");
+    }, 30_000);
+
+    it("fails closed when a durable record cannot be replayed, and keeps the no-record baseline byte-identical", async () => {
+      const { root, runsRoot, runDir, opened, request } = await startedRefutationRun("run.refutation-record-failclosed");
+      expect((await captureReviewedTranscript(opened, request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
+
+      // A record whose schema digest does NOT certify the frozen schema is
+      // unavailable evidence, never a silent extraction baseline: the scan
+      // fails closed and the run does not advance.
+      const corrupted = {
+        schemaVersion: 1,
+        kind: "panel-verdict-source",
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        source: {
+          source: "emission-tool",
+          toolCallId: "corrupt-call",
+          producerKind: "refutation-verdict",
+          emissionSchemaVersion: "v1",
+          schemaDigest: createHash("sha256").update("not the frozen schema bytes").digest("hex"),
+        },
+        acceptedCall: {
+          requestId: request.requestId,
+          toolCallId: "corrupt-call",
+          kind: { kind: "refutation-verdict" },
+          version: "v1",
+          arguments: { criterion: "reproduction", verdicts: [] },
+        },
+        payloadDigest: createHash("sha256").update(Buffer.from("prose, not a verdict")).digest("hex"),
+        payloadByteLength: Buffer.byteLength("prose, not a verdict"),
+      };
+      const published = await opened.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from(`${JSON.stringify(corrupted, null, 2)}\n`, "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+      expect(resumed.status).not.toBe(0);
+      expect(resumed.stderr).toContain("could not be replayed");
+      const events = await opened.readEvents();
+      expect(events.filter(({ event }) => (event as { type?: string }).type === "spawn-outcome")).toHaveLength(0);
+
+      // The no-record baseline is unchanged: a VALID verdict under the same
+      // slot without any record is accepted exactly as today, and no source
+      // record is written for it.
+      const baseline = await startedRefutationRun("run.refutation-record-baseline");
+      const verdict = JSON.stringify(refutationVerdictArguments(baseline.opened, baseline.request, "upheld"));
+      expect((await captureReviewedTranscript(baseline.opened, baseline.request, [...Buffer.from(verdict)])).ok).toBe(true);
+      const baselineResumed = (await runCli(["resume", "--runs-root", baseline.runsRoot, "--run", baseline.runDir], "", baseline.root));
+      expect(baselineResumed.status, baselineResumed.stderr).toBe(0);
+      expect(JSON.parse(baselineResumed.stdout).kind).toBe("done");
+      expect(existsSync(join(baseline.runDir, "artifacts", "panel-verdict-sources"))).toBe(false);
+    }, 30_000);
+
+    it("settles a live emission selection with the write-ahead record through the production seam", async () => {
+      const { opened, request } = await startedRefutationRun("run.refutation-live-settle");
+      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(minted.error.message);
+      const emissionCall = refutationEmissionCall(opened, request, "live-settle-call", "upheld");
+      const settled = await settlePanelAttemptSubmission({
+        handle: opened,
+        registration: refutationRegistration(),
+        request,
+        logicalRequestId: request.requestId,
+        raw: "prose, not a verdict",
+        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]) },
+      });
+      expect(settled.ok, settled.ok ? "" : settled.error).toBe(true);
+      if (!settled.ok) throw new Error("unreachable");
+      expect(settled.value.problem).toBeNull();
+      expect(settled.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
+      // The record is durable BEFORE any outcome is declared, and it replays.
+      const stored = await opened.readArtifactBytes(`panel-verdict-sources/${request.requestId}.json`, 65_536);
+      expect(stored.ok && stored.value !== null).toBe(true);
+      const republished = await settlePanelAttemptSubmission({
+        handle: opened,
+        registration: refutationRegistration(),
+        request,
+        logicalRequestId: request.requestId,
+        raw: "prose, not a verdict",
+        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]) },
+      });
+      expect(republished.ok, republished.ok ? "" : republished.error).toBe(true);
+      if (!republished.ok) throw new Error("unreachable");
+      expect(republished.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
+    }, 30_000);
+  });
+
   it("resumes an anchored run idempotently without spawning anything", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
@@ -1047,14 +1485,61 @@ describe("orchestration CLI", () => {
     expect(stored.value?.requestId).toBe(request.requestId);
   });
 
-  it("exposes the wave-gate façade and returns a typed blocked action when authority is unavailable", async () => {
+  it("refuses unavailable wave-gate authority before claiming a Run Directory", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
     const runDir = join(runsRoot, "run.wave-gate");
-    mkdirSync(runDir, { recursive: true });
+    mkdirSync(runsRoot, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("blocked");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("active_task_graph.json");
+    expect(existsSync(runDir)).toBe(false);
+  });
+
+  it("renders the owed implementation dispatches as briefs with per-harness invocations", async () => {
+    const root = project();
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph()));
+
+    const listed = await runCli(["brief"], "", root);
+    expect(listed.status, listed.stderr).toBe(0);
+    const output = JSON.parse(listed.stdout) as { wave: number; briefs: readonly Record<string, unknown>[] };
+    expect(output).toEqual({
+      wave: 1,
+      briefs: [{
+        taskId: "T2",
+        agent: "code-implementer-agent",
+        dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+        pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
+        claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2" },
+      }],
+    });
+
+    const withPrompt = await runCli(["brief", "--task", "T2", "--prompt"], "", root);
+    expect(withPrompt.status, withPrompt.stderr).toBe(0);
+    const prompt = (JSON.parse(withPrompt.stdout) as { briefs: readonly { prompt: string }[] }).briefs[0]!.prompt;
+    expect(prompt).toContain("**Task ID:** T2\n**Wave:** 1\n**Agent:** code-implementer-agent");
+    expect(prompt).toContain("Available at: plan.md");
+
+    const notOwed = await runCli(["brief", "--task", "T1"], "", root);
+    expect(notOwed.status).not.toBe(0);
+    expect(notOwed.stderr).toContain("Task T1 is not in the owed dispatches (T2)");
+  });
+
+  it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.second");
+    mkdirSync(runsRoot, { recursive: true });
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.first", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, runsRoot, terminalOutcome: null,
+      },
+    })));
+    const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Active Wave Gate run run.first already owns wave 1");
+    expect(existsSync(runDir)).toBe(false);
   });
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {
@@ -1232,7 +1717,7 @@ describe("orchestration CLI", () => {
     const root = repository();
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "secret.ts"), "export const secret = true;\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-noncanonical-scope-runs-")));
+    const runsRoot = canonicalTempDir("loom-noncanonical-scope-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.noncanonical-scope");
     mkdirSync(runDir);
@@ -1249,13 +1734,13 @@ describe("orchestration CLI", () => {
 
   it("refuses to freeze scope bytes through a symlinked ancestor", async () => {
     const root = repository();
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-frozen-scope-outside-")));
+    const outside = canonicalTempDir("loom-frozen-scope-outside-");
     cleanup.push(outside);
     writeFileSync(join(outside, "secret.ts"), "export const secret = true;\n");
     mkdirSync(join(root, "linked"));
     rmSync(join(root, "linked"), { recursive: true });
     symlinkSync(outside, join(root, "linked"));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-frozen-scope-runs-")));
+    const runsRoot = canonicalTempDir("loom-frozen-scope-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.symlinked-frozen-scope");
     mkdirSync(runDir);
@@ -1270,7 +1755,7 @@ describe("orchestration CLI", () => {
 
   it("freezes untracked files into default scope and accepts findings against them", async () => {
     const root = repository();
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-orchestration-runs-")));
+    const runsRoot = canonicalTempDir("loom-orchestration-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.untracked-scope");
     mkdirSync(join(root, "src"));
@@ -1325,7 +1810,7 @@ describe("orchestration CLI", () => {
     const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of action.requests.entries()) {
       const transcript = index === 0 ? criticalTranscript : cleanTranscript;
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
 
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -1335,6 +1820,62 @@ describe("orchestration CLI", () => {
     expect(panel.requests).toHaveLength(3);
     expect(panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
   }, 15_000);
+
+  it("keeps the refutation panel spawn tool-free under a qualified emission-capable parent (FR-001/AD-6)", async () => {
+    // runCli's envOverrides override (and undefined-delete) the fixture env,
+    // so each arm pins its own issue-route election explicitly.
+    const CATALOG_ROUTE_ENV = { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined } as const;
+    const QUALIFIED_ROUTE_ENV = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" } as const;
+    const runThroughPanel = async (routeEnv: Readonly<Record<string, string | undefined>>) => {
+      const root = repository();
+      writeFileSync(join(root, "README.md"), "fixture\npanel defect\n");
+      const runsRoot = join(root, ".claude", "reviews", "review-and-fix-runs");
+      const runDir = join(runsRoot, "run.panel-route");
+      mkdirSync(runDir, { recursive: true });
+      const startedResponse = await runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", runDir],
+        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, routeEnv);
+      expect(startedResponse.status, startedResponse.stderr).toBe(0);
+      const started = JSON.parse(startedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const criticalTranscript = currentStandaloneCritical("README.md", "Panel route defect");
+      const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
+      for (const [index, { authority }] of started.requests.entries()) {
+        expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
+      }
+      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, routeEnv);
+      expect(resumedResponse.status, resumedResponse.stderr).toBe(0);
+      const panel = JSON.parse(resumedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
+      return { root, started, panel };
+    };
+    const catalog = await runThroughPanel(CATALOG_ROUTE_ENV);
+    const qualified = await runThroughPanel(QUALIFIED_ROUTE_ENV);
+
+    // The parent route is genuinely emission-capable: the reviewer slots of
+    // the qualified run issue descriptors, the catalog run's do not.
+    for (const { task } of qualified.started.requests) {
+      expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
+      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+    }
+    for (const { task } of catalog.started.requests) {
+      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+    }
+
+    // AD-6: the panel verdict slots are not this feature's emission route —
+    // every panel task advertises no tool and is byte-identical across the
+    // two parent routes (modulo the project-local run-directory path).
+    const normalize = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
+    expect(qualified.panel.requests.map(({ authority }) => authority.role))
+      .toEqual(catalog.panel.requests.map(({ authority }) => authority.role));
+    for (const [catalogRequest, qualifiedRequest] of catalog.panel.requests.map((request, index) => [request, qualified.panel.requests[index]!] as const)) {
+      for (const task of [catalogRequest.task, qualifiedRequest.task]) {
+        expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+        expect(parseEmissionDescriptor(task).kind).toBe("absent");
+      }
+      expect(normalize(qualifiedRequest.task, qualified.root)).toBe(normalize(catalogRequest.task, catalog.root));
+    }
+  }, 60_000);
 
   it("counts committed, staged, unstaged, and untracked additions once for reviewer selection", async () => {
     const root = repository();
@@ -1351,7 +1892,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "layered.ts"), lines(75, "final"));
     writeFileSync(join(root, "working.ts"), lines(100, "working"));
     writeFileSync(join(root, "untracked.ts"), lines(150, "untracked"));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-orchestration-runs-")));
+    const runsRoot = canonicalTempDir("loom-orchestration-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.complete-additions");
     mkdirSync(runDir, { recursive: true });
@@ -1449,7 +1990,7 @@ describe("orchestration CLI", () => {
     });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-missing-task-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-missing-task-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-missing-task");
     mkdirSync(runDir);
@@ -1483,7 +2024,7 @@ describe("orchestration CLI", () => {
       plan_file: null,
       tasks: [reviewReadyTask(proof)],
     })));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-stale-request-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-stale-request-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-stale-request");
     mkdirSync(runDir);
@@ -1528,7 +2069,7 @@ describe("orchestration CLI", () => {
         review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-fresh-generation-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-fresh-generation-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-fresh-generation");
     mkdirSync(runDir);
@@ -1586,7 +2127,7 @@ describe("orchestration CLI", () => {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-sibling-stability-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-sibling-stability-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-sibling-stability");
     mkdirSync(runDir);
@@ -1603,7 +2144,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const [index, request] of initial.requests.slice(1, 1 + WAVE_REVIEW_AGENTS.length).entries()) {
-      expect((await opened.value.captureTranscript(request.authority,
+      expect((await captureReviewedTranscript(opened.value, request.authority,
         [...Buffer.from(transcript(index === 0 ? "new finding from completed sibling packet" : null))])).ok).toBe(true);
     }
 
@@ -1645,7 +2186,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-review-recovery-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-review-recovery-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-review-recovery");
     mkdirSync(runDir);
@@ -1658,7 +2199,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of initial.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
 
     const resumed = await resumeWaveFixture(root, runsRoot, runDir);
@@ -1734,7 +2275,7 @@ describe("orchestration CLI", () => {
     // Simulate a crash after durable attempt-2 capture but before semantic
     // application. Resume must reconcile that exact transcript, not exhaust it.
     const crashWindow = recovery.requests[0]!.authority;
-    expect((await opened.value.captureTranscript(crashWindow, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, crashWindow, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
     const reconciled = await resumeWaveFixture(root, runsRoot, runDir);
     const afterCrash = reconciled as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(afterCrash.kind, JSON.stringify(reconciled)).toBe("spawn-batch");
@@ -1745,7 +2286,7 @@ describe("orchestration CLI", () => {
     expect(afterCrashGraph.tasks[0]?.review_run?.evidence.map(({ agent }) => agent)).toEqual([crashWindow.role]);
 
     for (const { authority } of recovery.requests.slice(1)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
     }
     const afterReview = await resumeWaveFixture(root, runsRoot, runDir);
     const specRecovery = afterReview as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
@@ -1767,7 +2308,7 @@ describe("orchestration CLI", () => {
       const raw = index === 0
         ? "not valid refutation JSON"
         : refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
     const retriedPanel = await resumeWaveFixture(root, runsRoot, runDir);
     const retryAction = retriedPanel as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
@@ -1823,7 +2364,7 @@ describe("orchestration CLI", () => {
         findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-spec-retry-epoch-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-spec-retry-epoch-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-spec-retry-epoch");
     mkdirSync(runDir);
@@ -1832,6 +2373,17 @@ describe("orchestration CLI", () => {
     const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(initial.kind, started.stdout).toBe("spawn-batch");
     expect(initial.requests.some(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)).toBe(true);
+    // Spec-check reads its sections only through the delivered engine reader;
+    // running that exact command decodes its digest-verified authority.
+    const tasks = initial.requests as readonly { authority: AgentRequestAuthority; task: string }[];
+    const specTask = tasks.find(({ authority }) => authority.role === "spec-check-invoker")!.task;
+    const sectionCommand = /^LOOM_CONTEXT_SECTION_COMMAND: (.+)$/m.exec(specTask)?.[1];
+    expect(sectionCommand, specTask).toBeDefined();
+    const authoritySection = spawnSync("bash", ["-c", `${sectionCommand} --section wave-review-authority`], { encoding: "utf8" });
+    expect(authoritySection.status, authoritySection.stderr).toBe(0);
+    expect(JSON.parse(authoritySection.stdout)).toMatchObject({ subject: { role: "spec-check-invoker" } });
+    expect(tasks.filter(({ authority }) => authority.role !== "spec-check-invoker")
+      .every(({ task }) => !task.includes("LOOM_CONTEXT_SECTION_COMMAND"))).toBe(true);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
 
@@ -1867,9 +2419,9 @@ describe("orchestration CLI", () => {
     // spec-check retry from epoch 1's own attempt-1 (the only one in the
     // journal at this point) — the single-epoch happy path.
     for (const { authority } of reviewersOf(initial.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
-    expect((await opened.value.captureTranscript(specCheckOf(initial.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, specCheckOf(initial.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
     const epochOneRetryBatch = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(epochOneRetryBatch.kind, JSON.stringify(epochOneRetryBatch)).toBe("spawn-batch");
     expect(epochOneRetryBatch.requests.length).toBeGreaterThan(0);
@@ -1880,7 +2432,7 @@ describe("orchestration CLI", () => {
     }).tasks[0]?.review_run;
     expect(epochOneRun).toBeDefined();
     for (const { authority } of reviewersOf(epochOneRetryBatch.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(acceptedReviewerTranscript(epochOneRun!))])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(acceptedReviewerTranscript(epochOneRun!))])).ok).toBe(true);
     }
     const epochOneSpecSpawn = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(epochOneSpecSpawn.kind, JSON.stringify(epochOneSpecSpawn)).toBe("spawn-batch");
@@ -1918,15 +2470,15 @@ describe("orchestration CLI", () => {
     // Epoch-1 review closed before the invalidation, so the prior finding was
     // already retired; the fresh packet has no remaining prior findings.
     for (const { authority } of reviewersOf(epochTwoBatch.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
-    expect((await opened.value.captureTranscript(specCheckOf(epochTwoBatch.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, specCheckOf(epochTwoBatch.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
     const epochTwoRetryBatch = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(epochTwoRetryBatch.kind, JSON.stringify(epochTwoRetryBatch)).toBe("spawn-batch");
     expect(epochTwoRetryBatch.requests.length).toBeGreaterThan(0);
     expect(epochTwoRetryBatch.requests.every(({ authority }) => authority.attempt === 2 && authority.role !== "spec-check-invoker")).toBe(true);
     for (const { authority } of reviewersOf(epochTwoRetryBatch.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(acceptedReviewerTranscript(epochTwoRun!))])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(acceptedReviewerTranscript(epochTwoRun!))])).ok).toBe(true);
     }
 
     // --- the regression: applying those captured epoch-2 reviewer retries
@@ -1980,7 +2532,7 @@ describe("orchestration CLI", () => {
         findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-spec-retry-lost-context-")));
+    const runsRoot = canonicalTempDir("loom-wave-spec-retry-lost-context-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-spec-retry-lost-context");
     mkdirSync(runDir);
@@ -1993,9 +2545,9 @@ describe("orchestration CLI", () => {
     const specCheck = initial.requests.find(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)!.authority;
     const reviewers = initial.requests.filter(({ authority }) => authority !== specCheck);
     for (const { authority } of reviewers) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
-    expect((await opened.value.captureTranscript(specCheck, [...Buffer.from(
+    expect((await captureReviewedTranscript(opened.value, specCheck, [...Buffer.from(
       "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: BLOCKED")])).ok).toBe(true);
     // The reviewer attempt-2 derivation reads every attempt-1 context before
     // the spec retry derivation does — remove them ALL so whichever scan hits
@@ -2060,7 +2612,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-facade-floor-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-facade-floor-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-facade-floor");
     mkdirSync(runDir);
@@ -2090,7 +2642,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const specCheck = initial.requests
       .find(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)!.authority;
-    expect((await opened.value.captureTranscript(specCheck, [...Buffer.from(
+    expect((await captureReviewedTranscript(opened.value, specCheck, [...Buffer.from(
       PASSING_SPEC_CHECK_FOOTER)])).ok).toBe(true);
 
     const firstResume = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -2126,7 +2678,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-attempt-one-rejection-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-attempt-one-rejection-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-attempt-one-rejection");
     mkdirSync(runDir);
@@ -2157,7 +2709,7 @@ describe("orchestration CLI", () => {
             const run = graph.tasks[0]!.review_run!;
             return currentWavePayload(run);
           })();
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(task)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(task)])).ok).toBe(true);
     }
 
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -2176,7 +2728,7 @@ describe("orchestration CLI", () => {
     });
     expect(retry.requests[0]?.task).toContain("model exited without a final payload");
     expect(retry.requests[0]?.task).toContain("unchanged reviewer-payload-schema");
-    const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
+    const lateAttemptOne = await captureReviewedTranscript(opened.value, rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
   }, 30_000);
@@ -2196,7 +2748,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-mixed-retry-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-mixed-retry-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-mixed-retry");
     mkdirSync(runDir);
@@ -2208,7 +2760,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of initial.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
     }
     const retryResult = await resumeWaveFixture(root, runsRoot, runDir);
     const retries = retryResult as {
@@ -2219,7 +2771,7 @@ describe("orchestration CLI", () => {
     expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
 
     const [exhausted, ...pending] = retries.requests;
-    expect((await opened.value.captureTranscript(
+    expect((await captureReviewedTranscript(opened.value, 
       exhausted!.authority,
       [...Buffer.from("malformed attempt two")],
     )).ok).toBe(true);
@@ -2233,7 +2785,7 @@ describe("orchestration CLI", () => {
       pending.map(({ authority }) => authority.requestId),
     );
     for (const { authority } of drainBatch.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
     }
     const blocked = await resumeWaveFixture(root, runsRoot, runDir);
     expect(blocked).toMatchObject({
@@ -2292,7 +2844,7 @@ describe("orchestration CLI", () => {
         }],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-orphan-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-orphan-runs-");
     cleanup.push(runsRoot);
     const oldRun = join(runsRoot, "run.wave-orphaned");
     mkdirSync(oldRun);
@@ -2337,7 +2889,7 @@ describe("orchestration CLI", () => {
       "--new-run", replacementRun,
     ] as const;
 
-    const foreignRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-foreign-root-")));
+    const foreignRoot = canonicalTempDir("loom-wave-foreign-root-");
     cleanup.push(foreignRoot);
     const foreignReplacement = join(foreignRoot, "run.wave-orphan-replacement");
     mkdirSync(foreignReplacement);
@@ -2488,7 +3040,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-restart-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-restart-runs-");
     cleanup.push(runsRoot);
     const previousRun = join(runsRoot, "run.wave-exhausted");
     mkdirSync(previousRun);
@@ -2498,10 +3050,10 @@ describe("orchestration CLI", () => {
     const previous = openRunDirectory(runsRoot, previousRun);
     if (!previous.ok) throw new Error(previous.error.message);
     for (const { authority } of initial.requests) {
-      expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(previous.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
       if (authority.role !== "spec-check-invoker") {
         const retry = deriveWaveAttemptTwo(previous.value, authority);
-        const published = await withFixturePiSession(root, () => publishInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
+        const published = await withFixturePiSession(root, () => publishLegacyInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
         if (!published.ok) throw new Error(published.message);
       }
     }
@@ -2618,7 +3170,7 @@ describe("orchestration CLI", () => {
     expect(premature.stderr).toContain("restart refused before final-attempt rejection");
 
     for (const { authority } of retries.requests) {
-      expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(previous.value, authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
     }
     const blocked = (await runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root));
     expect(blocked.status, blocked.stderr).toBe(0);
@@ -2743,7 +3295,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-partial-restart-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-partial-restart-runs-");
     cleanup.push(runsRoot);
     const previousRun = join(runsRoot, "run.wave-partial-exhausted");
     mkdirSync(previousRun);
@@ -2759,9 +3311,9 @@ describe("orchestration CLI", () => {
     const first = reviewerRequests[0]!.authority;
     const opened = openRunDirectory(runsRoot, previousRun);
     if (!opened.ok) throw new Error(opened.error.message);
-    expect((await opened.value.captureTranscript(first, [...Buffer.from(accepted)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, first, [...Buffer.from(accepted)])).ok).toBe(true);
     for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== first.requestId)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
     }
     const resumed = await resumeWaveFixture(root, runsRoot, previousRun);
     const retries = resumed as { requests: readonly { authority: AgentRequestAuthority }[] };
@@ -2790,7 +3342,7 @@ describe("orchestration CLI", () => {
       "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
     ], "", root));
     expect(restarted.status, restarted.stderr).toBe(0);
-    const lateCapture = await opened.value.captureTranscript(retries.requests[0]!.authority, [...Buffer.from(accepted)]);
+    const lateCapture = await captureReviewedTranscript(opened.value, retries.requests[0]!.authority, [...Buffer.from(accepted)]);
     expect(lateCapture.ok).toBe(false);
     if (!lateCapture.ok) expect(lateCapture.error.message).toContain("terminally rejected");
     const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
@@ -2815,7 +3367,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-valid-retry-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-valid-retry-runs-");
     cleanup.push(runsRoot);
     const previousRun = join(runsRoot, "run.wave-valid-retry");
     mkdirSync(previousRun);
@@ -2824,7 +3376,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, previousRun);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of initial.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
     }
     const resumed = await resumeWaveFixture(root, runsRoot, previousRun);
     const retries = resumed as { requests: readonly { authority: AgentRequestAuthority }[] };
@@ -2833,13 +3385,13 @@ describe("orchestration CLI", () => {
     }).tasks[0]!.review_run!;
     const valid = currentWavePayload(active);
     for (const { authority } of retries.requests.slice(0, -1)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(valid)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(valid)])).ok).toBe(true);
     }
     await resumeWaveFixture(root, runsRoot, previousRun);
     const finalValid = retries.requests.at(-1)!.authority;
     // Crash window: final valid bytes landed, but semantic application has not.
     // Applying this slot would close the roster and remove review_run entirely.
-    expect((await opened.value.captureTranscript(finalValid, [...Buffer.from(valid)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, finalValid, [...Buffer.from(valid)])).ok).toBe(true);
     const replacementRun = join(runsRoot, "run.wave-valid-retry-replacement");
     mkdirSync(replacementRun);
     const restarted = (await runCli([
@@ -2864,7 +3416,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-crash-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-crash-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-crash-window");
     mkdirSync(runDir);
@@ -2964,7 +3516,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-upheld-tally-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-upheld-tally-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-upheld-tally");
     mkdirSync(runDir);
@@ -2980,7 +3532,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of action.requests) {
       const raw = refutationVerdicts(opened.value, authority, "upheld");
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // The reducer used to recurse after the tally no matter what: an all-upheld
@@ -3046,7 +3598,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-refuted-tally-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-refuted-tally-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-refuted-tally");
     mkdirSync(runDir);
@@ -3060,7 +3612,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of action.requests) {
       const raw = refutationVerdicts(opened.value, authority, "refuted");
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // A refuting tally retires the critical and promotes the blocked task:
@@ -3109,7 +3661,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-lint-block-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-lint-block-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-lint-block");
     mkdirSync(runDir);
@@ -3129,7 +3681,7 @@ describe("orchestration CLI", () => {
   it("publishes standalone refutation attempt 2 after a malformed attempt-1 verdict", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-refutation-retry-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-refutation-retry-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-refutation-retry");
     mkdirSync(runDir);
@@ -3143,7 +3695,7 @@ describe("orchestration CLI", () => {
     const critical = currentStandaloneCritical("a.txt", "retry finding");
     const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of initial.requests.entries()) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
     const panelResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(panelResult.status, panelResult.stderr).toBe(0);
@@ -3155,7 +3707,7 @@ describe("orchestration CLI", () => {
       const raw = index === 0
         ? "malformed"
         : refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -3187,7 +3739,7 @@ describe("orchestration CLI", () => {
     // accepted-only completed-state projection.
     const retryRequest = retry.requests[0]!;
     const valid = refutationVerdicts(opened.value, retryRequest.authority, "upheld");
-    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const doneResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(doneResult.status, doneResult.stderr).toBe(0);
     expect(JSON.parse(doneResult.stdout).kind, JSON.stringify(JSON.parse(doneResult.stdout))).toBe("done");
@@ -3203,7 +3755,7 @@ describe("orchestration CLI", () => {
   it("advances a capture-rejected refutation attempt 1 to its attempt-2 retry and completes the run", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-refutation-tombstone-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-refutation-tombstone-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-refutation-tombstone");
     mkdirSync(runDir);
@@ -3217,7 +3769,7 @@ describe("orchestration CLI", () => {
     const critical = currentStandaloneCritical("a.txt", "tombstone finding");
     const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of initial.requests.entries()) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
     const panelResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(panelResult.status, panelResult.stderr).toBe(0);
@@ -3249,7 +3801,7 @@ describe("orchestration CLI", () => {
         continue;
       }
       const raw = refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // Resume: the tombstoned attempt-1 slot must NOT be re-issued — the
@@ -3290,7 +3842,7 @@ describe("orchestration CLI", () => {
     // replay too, not only in the resume path.
     const retryRequest = retry.requests[0]!;
     const valid = refutationVerdicts(opened.value, retryRequest.authority, "upheld");
-    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
     expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
@@ -3303,7 +3855,7 @@ describe("orchestration CLI", () => {
   it("terminalizes the refutation panel when the attempt-2 capture is terminally rejected", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-refutation-attempt2-tombstone-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-refutation-attempt2-tombstone-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-refutation-attempt2-tombstone");
     mkdirSync(runDir);
@@ -3317,7 +3869,7 @@ describe("orchestration CLI", () => {
     const critical = currentStandaloneCritical("a.txt", "doomed finding");
     const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of initial.requests.entries()) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
     const panelResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(panelResult.status, panelResult.stderr).toBe(0);
@@ -3351,7 +3903,7 @@ describe("orchestration CLI", () => {
         continue;
       }
       const raw = refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // First resume: the tombstoned attempt-1 advances to its attempt-2 retry
@@ -3414,7 +3966,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const request of action.requests) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv));
     expect(resumed.status, resumed.stderr).toBe(0);
@@ -3443,7 +3995,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const { authority } of action.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     mkdirSync(join(runDir, "result.json"));
 
@@ -3456,7 +4008,7 @@ describe("orchestration CLI", () => {
   it("advances a capture-rejected standalone reviewer attempt 1 to diagnostic-rich attempt 2", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-capture-rejection-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-capture-rejection-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-capture-rejection");
     mkdirSync(runDir);
@@ -3487,7 +4039,7 @@ describe("orchestration CLI", () => {
     });
     const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== rejected.requestId)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
     }
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(resumed.status, resumed.stderr).toBe(0);
@@ -3522,13 +4074,13 @@ describe("orchestration CLI", () => {
 
     // The terminal rejection still binds: late bytes for attempt 1 cannot
     // overwrite it, and only the exact attempt-2 authority closes the slot.
-    const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
+    const lateAttemptOne = await captureReviewedTranscript(opened.value, rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
 
     // The retry lands, the roster completes, and the run reaches idempotent done.
     const retryRequest = retry.requests[0]!;
-    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
     expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
@@ -3540,7 +4092,7 @@ describe("orchestration CLI", () => {
   it("heals a standalone crash after batch publication but before the checkpoint write", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-crash-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-crash-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-crash-window");
     mkdirSync(runDir);
@@ -3550,7 +4102,7 @@ describe("orchestration CLI", () => {
     expect(started.status, started.stderr).toBe(0);
     const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
 
-    // Simulate the crash window: publishInitialBatch durably wrote contexts,
+    // Simulate the crash window: publishLegacyInitialBatch durably wrote contexts,
     // requests, and the publication receipt, but the awaiting-results
     // checkpoint write never happened.
     rmSync(join(runDir, "checkpoint.json"));
@@ -3566,7 +4118,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const { authority } of resumedAction.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
@@ -3584,7 +4136,7 @@ describe("orchestration CLI", () => {
    */
   async function cleanStandaloneReviewFixture(slug: string) {
     const repository = project();
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), slug)));
+    const runsRoot = canonicalTempDir(slug);
     cleanup.push(runsRoot);
     const git = (args: readonly string[]) => spawnSync("git", args, { cwd: repository, encoding: "utf8" });
     expect(git(["init", "-q"]).status).toBe(0);
@@ -3601,17 +4153,18 @@ describe("orchestration CLI", () => {
     await withFixturePiSession(repository, async () => {
       const started = await startStandaloneFacade(opened.value, { kind: "comments", files: ["a.txt"], dryRun: false });
       if (!started.ok) throw new Error(started.message);
-      const action = started.action as { requests: { authority: AgentRequestAuthority }[] };
+      const action = started.action;
+      if (action.kind !== "spawn-batch") throw new Error(`expected spawn-batch, got ${action.kind}`);
       const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
       for (const request of action.requests) {
-        expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+        expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
       }
       const raw = opened.value.readProgramRegistration();
       if (!raw.ok) throw new Error(raw.error.message);
       const registered = parseRegistration(raw.value);
       if (!registered.ok) throw new Error(registered.message);
       const done = await resumeStandaloneFacade(opened.value, registered.value);
-      expect(done.ok && (done.action as { kind: string }).kind === "done").toBe(true);
+      expect(done.ok && done.action.kind === "done").toBe(true);
     });
     return { repository, runsRoot, sourceRun, remediationRun, git };
   }
@@ -3805,7 +4358,8 @@ describe("orchestration CLI", () => {
       ], JSON.stringify({ kind: "not-a-review-kind", files: null, dryRun: false }), root));
 
       expect(invalidJson.status).not.toBe(0);
-      expect(invalidJson.stderr.trim()).toBe("Reviewer payload must be exactly one strict JSON object.");
+      expect(invalidJson.stderr.trim()).toContain("Reviewer payload must be exactly one strict JSON object.");
+      expect(invalidJson.stderr.trim()).toContain("Parse error:");
       expect(invalidJson.stdout).toBe("");
       expect(existsSync(join(runsRoot, "run.invalid-json"))).toBe(false);
       expect(invalidShape.status).not.toBe(0);
@@ -3978,7 +4532,7 @@ describe("orchestration CLI", () => {
           findings: [], critical_findings: [], advisory_findings: [],
         }],
       }));
-      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), `loom-${label}-runs-`)));
+      const runsRoot = canonicalTempDir(`loom-${label}-runs-`);
       cleanup.push(runsRoot);
       const runDir = join(runsRoot, `run.${label}`);
       mkdirSync(runDir);
@@ -4000,7 +4554,7 @@ describe("orchestration CLI", () => {
             severity: "advisory", file: "src/x.ts", line: 1, claim: "prefer the façade-owned lifecycle request",
             reason: "Scripted nonblocking fixture improvement",
           }] : []);
-        expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+        expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
       }
 
       const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -4042,7 +4596,9 @@ describe("orchestration CLI", () => {
       const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
       expect(replay.status, replay.stderr).toBe(0);
       expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
-    }, 15_000);
+      // Five cold CLI processes plus two concurrent status reads can exceed
+      // the default deadline under the full parallel project suite.
+    }, 30_000);
 
     it("refuses a decision id that is not the exact pending advisory request", async () => {
       const { root, runsRoot, runDir } = (await startedWaveRun("decide-wrong-id"));
@@ -4123,7 +4679,7 @@ describe("orchestration CLI", () => {
 
     it("refuses a decision against a program that does not accept user decisions", async () => {
       const root = repository();
-      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-decide-wrong-program-runs-")));
+      const runsRoot = canonicalTempDir("loom-decide-wrong-program-runs-");
       cleanup.push(runsRoot);
       const runDir = join(runsRoot, "run.decide-wrong-program");
       mkdirSync(runDir);
@@ -4242,7 +4798,7 @@ describe("orchestration CLI", () => {
       const [captured, rejected] = action.requests;
       if (captured === undefined || rejected === undefined) throw new Error("expected at least two reviewer slots");
       const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
-      expect((await opened.value.captureTranscript(captured.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, captured.authority, [...Buffer.from(transcript)])).ok).toBe(true);
       expect((await opened.value.rejectCapture(
         rejected.authority,
         'agent-failed: exited without a successful result (exitCode=0, stopReason=error, errorMessage="Connection error.")',
@@ -4432,7 +4988,7 @@ describe("orchestration CLI", () => {
           findings: [], critical_findings: [], advisory_findings: [],
         }],
       }));
-      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-abandon-stamp-runs-")));
+      const runsRoot = canonicalTempDir("loom-wave-abandon-stamp-runs-");
       cleanup.push(runsRoot);
       const runDir = join(runsRoot, "run.wave-abandon-stamp");
       mkdirSync(runDir);

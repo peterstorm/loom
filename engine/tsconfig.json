@@ -14,7 +14,13 @@
     "skipLibCheck": true,
     "types": ["node"],
     "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": false
+    "verbatimModuleSyntax": false,
+    // ../calibration and ../probes have no node_modules of their own: their tests run on the
+    // engine's pinned Vitest and fast-check, so they typecheck against them.
+    "paths": {
+      "vitest": ["./node_modules/vitest"],
+      "fast-check": ["./node_modules/fast-check"]
+    }
   },
-  "include": ["src", "tests", "../pi", "scripts/typecheck.ts", "vitest.config.ts"]
+  "include": ["src", "tests", "../pi", "../calibration", "../scripts/run-model-calibration.ts", "../scripts/read-context-packet.ts", "../scripts/read-context-section.ts", "../probes/emission-qualification/*.mts", "../probes/emission-qualification/*.test.ts", "scripts/typecheck.ts", "vitest.config.ts"]
 }

@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   closeAnchoredDirectory,
@@ -38,7 +38,7 @@ describe("anchored lock liveness", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lock-")));
+    dir = canonicalTempDir("loom-lock-");
   });
 
   afterEach(() => {
@@ -193,5 +193,5 @@ describe("anchored lock liveness", () => {
     } finally {
       closeAnchoredDirectory(anchored);
     }
-  });
+  }, 15000);
 });

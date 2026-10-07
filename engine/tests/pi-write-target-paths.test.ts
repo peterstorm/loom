@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { piWriteTargetPaths } from "../../pi/extension";
+import { piWriteTargetPaths } from "../../pi/tool-input";
 
 const paths = (input: unknown): readonly string[] => {
   const parsed = piWriteTargetPaths(input);

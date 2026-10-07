@@ -8,11 +8,12 @@ import {
 } from "../types";
 export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
-  artifactCovers,
+  DECLARED_ARTIFACT_BASELINE,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
   type DeclaredArtifactBaseline,
 } from "./artifact-baseline";
+import { artifactCovers } from "./path-coverage";
 import {
   createTaskCompletionSuiteResult,
   parseCanonicalArtifactBaseline,
@@ -47,9 +48,11 @@ export type TaskLocalByteObservation = Readonly<{
    *  verify-only child must leave these empty, and an unreported write is
    *  drift, never an attested pass. */
   attemptScopeChangedPaths: readonly ReviewPath[];
-  /** Parser-proven cumulative paths retained for audit/lint scope. */
+  /** Cumulative Task paths retained for audit/lint scope: prior attributions,
+   *  this attempt's parser-proven changes, and every declared artifact whose
+   *  bytes differ from the first Task baseline. */
   cumulativeModifiedPaths: readonly ReviewPath[];
-  /** Declared paths changed from the first Task baseline and parser-attributed. */
+  /** Declared paths whose bytes differ from the first Task baseline. */
   cumulativeProofArtifactChanges: readonly ReviewPath[];
   /** Task-scope bytes changed, or exact observation was unavailable. */
   taskBytesChangedOrUnobservable: boolean;
@@ -95,8 +98,10 @@ function compareExactBaselines(
   baseline: readonly DeclaredArtifactBaseline[];
   changed: readonly ReviewPath[];
 }> | Readonly<{ ok: false; errors: readonly string[] }> {
-  const parsedBaseline = parseCanonicalArtifactBaseline(baseline, `${path}.baseline`);
-  const parsedCurrent = parseCanonicalArtifactBaseline(current, `${path}.current`);
+  // Both Task-local scopes (attempt and proof) are captured as declared-artifact
+  // snapshots, so both sides parse under that one digest scheme.
+  const parsedBaseline = parseCanonicalArtifactBaseline(baseline, `${path}.baseline`, DECLARED_ARTIFACT_BASELINE);
+  const parsedCurrent = parseCanonicalArtifactBaseline(current, `${path}.current`, DECLARED_ARTIFACT_BASELINE);
   if (!parsedBaseline.ok || !parsedCurrent.ok) {
     return freeze({
       ok: false,
@@ -179,8 +184,14 @@ export function buildTaskLocalByteObservation(
   // attributes the directory, never the raw leaf path.
   const attributedAttempt = attributedChangedArtifacts(attempt.changed, parserPaths.value);
   const priorAllowedPaths = priorPaths.value.filter((path) => covered(allowed, path));
-  const cumulative = frozenArray([...new Set([...priorAllowedPaths, ...attributedAttempt])].sort(compareStrings));
-  const proofChanges = attributedChangedArtifacts(proof.changed, cumulative);
+  // A declared artifact that differs from the first Task baseline is this
+  // Task's own production: declared artifacts are Wave-exclusive and that
+  // baseline predates every attempt. Crediting it keeps an earlier attempt's
+  // bytes when their attribution was lost to an infrastructure-blocked
+  // settlement, so a verify-only retry is not failed for work already done.
+  const cumulative = frozenArray(
+    [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proof.changed])].sort(compareStrings),
+  );
   const suite = createTaskCompletionSuiteResult(
     input.authority,
     outside.length > 0
@@ -193,7 +204,7 @@ export function buildTaskLocalByteObservation(
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
-    cumulativeProofArtifactChanges: frozenArray(proofChanges),
+    cumulativeProofArtifactChanges: proof.changed,
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
     unresolvedRepositoryPaths,
     invalidationBytesChanged: attempt.changed.length > 0 || unresolvedRepositoryPaths.length > 0,
@@ -484,6 +495,21 @@ function evidenceFields(evidence: NormalizedImplementationEvidence) {
   };
 }
 
+/**
+ * Each attempt owns the repository boundary frozen at its own spawn, so every
+ * settlement retires it with its unresolved-foreign diagnostics. A retry or an
+ * infrastructure-blocked settlement then re-arms an attempt that freezes a
+ * FRESH boundary instead of inheriting a stale snapshot that turns every
+ * unrelated repository movement between attempts into out-of-scope evidence
+ * for THIS task (the wave-3 cross-task retry jam). Foreign or sibling paths
+ * observed DURING an attempt still invalidate its review — only the
+ * inter-attempt carry is gone, which is why Task no longer has an
+ * unresolved-path field at all.
+ */
+const RETIRED_ATTEMPT_BOUNDARY = Object.freeze({
+  repository_baseline: undefined,
+});
+
 function transitionedTask(
   task: Task,
   transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>,
@@ -492,6 +518,7 @@ function transitionedTask(
   const history = [...(task.implementation_attempt_history ?? []), transition.receipt];
   const common = {
     ...clearAttempt(task),
+    ...RETIRED_ATTEMPT_BOUNDARY,
     implementation_attempt_history: history,
   };
   if (transition.kind === "implemented") {
@@ -499,8 +526,6 @@ function transitionedTask(
     return {
       ...common,
       status: "implemented",
-      repository_baseline: undefined,
-      unresolved_repository_paths: undefined,
       proof: transition.proof,
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
@@ -511,14 +536,9 @@ function transitionedTask(
   }
   if (transition.kind === "retry-required" || transition.kind === "escalation-required") {
     if (facts.normalizedEvidence === undefined) throw new Error(`${transition.kind} transition requires normalized evidence`);
-    const repositoryBaseline = task.repository_baseline ?? task.attempt_repository_baseline;
     const pending = {
       ...common,
       status: "pending" as const,
-      ...(repositoryBaseline === undefined ? {} : { repository_baseline: repositoryBaseline }),
-      unresolved_repository_paths: facts.bytes.unresolvedRepositoryPaths.length === 0
-        ? undefined
-        : facts.bytes.unresolvedRepositoryPaths,
       legacy_missing_proof: undefined,
       failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
       retry_count: transition.kind === "retry-required" ? 1 : 2,
@@ -529,18 +549,10 @@ function transitionedTask(
       : { ...pending, proof: transition.proof, revalidation_required: undefined };
   }
   if (task.proof === undefined) throw new Error("infrastructure settlement requires historical Proof audit data");
-  const byteOutcome = facts.bytes.suite.checks[0]?.outcome;
-  const unresolvedRepositoryPaths = byteOutcome?.kind === "observation-unavailable"
-    ? task.unresolved_repository_paths
-    : facts.bytes.unresolvedRepositoryPaths;
   return {
     ...common,
     status: "pending",
     proof: task.proof,
-    repository_baseline: task.repository_baseline ?? task.attempt_repository_baseline,
-    unresolved_repository_paths: unresolvedRepositoryPaths === undefined || unresolvedRepositoryPaths.length === 0
-      ? undefined
-      : unresolvedRepositoryPaths,
     revalidation_required: true,
     legacy_missing_proof: undefined,
     failure_reason: `infrastructure-blocked: ${transitionFailureKinds(transition).join(", ")}`,

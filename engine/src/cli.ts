@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import type { HookResult, HookHandler } from "./types";
 import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
-import { KNOWN_HANDLERS, failureExitCode, piRuntimeHandshakeRequired } from "./handler-routes";
+import { KNOWN_HANDLERS, failureExitCode, piRuntimeHandshakeRequired, routeConsumesStdin } from "./handler-routes";
 import { captureLoomRuntimeIdentity, piCliMutationCompatibility } from "./runtime-compatibility";
 import { assertAnchoredFilesystemPlatformSupported } from "./orchestration/no-follow-fs";
 
@@ -38,8 +38,10 @@ const standaloneStart = process.argv.slice(2, 6).join("/") === "helper/orchestra
 const orchestrationSubmit = process.argv.slice(2, 5).join("/") === "helper/orchestration/submit";
 const orchestrationInput = dispositionStart || standaloneStart || orchestrationSubmit;
 const maximumStdinBytes = orchestrationInput ? ORCHESTRATION_STDIN_BYTES : HOOK_STDIN_BYTES;
-// Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports)
-const stdinPromise: Promise<string> = process.stdin.isTTY
+// Eagerly buffer stdin before any async work (bun drains piped data during dynamic imports).
+// A flags-only route never reads stdin, so it never waits on an inherited open stream.
+const stdinPromise: Promise<string> = process.stdin.isTTY ||
+    !routeConsumesStdin(process.argv[2], process.argv[3], process.argv.slice(4))
   ? Promise.resolve("")
   : new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];

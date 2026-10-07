@@ -121,23 +121,24 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/reviewer-contract.ts": ["zod/v4"],
       "engine/src/core/standalone-lineage-contract.ts": ["zod/v4"],
       "engine/src/core/reviewer-protocol.ts": ["jsonc-parser"],
+      // Grammar-constrained verdict grammars: the panel contract and the panel
+      // tally define their judge/refutation verdict schemas with zod, and the
+      // emission tool's verdict-args parser types its admission seam with the
+      // same package. Exact-specifier grants — never a prefix — so a new zod
+      // subpath fails the gate until it is re-audited by machine-purity.
+      "engine/src/core/panel-contract.ts": ["zod/v4"],
+      "engine/src/core/review-panel.ts": ["zod/v4"],
+      "engine/src/core/emission-tool.ts": ["zod/v4"],
     },
     perFileAllow: {
-      // Cross-branch pre-provisioning, INERT in this checkout: the feature-
-      // branch `block-direct-edits` normalizes panel/spec-artifact targets
-      // with pure path math (posix.normalize) before the prefix test, but the
-      // module checked in at this HEAD makes no node:path import (the
-      // normalization landed only on feat/defect-stale-flow and
-      // feat/grammar-constrained-decoding). By the map-header doctrine above:
-      // stale permission, not a lint failure.
+      // The direct-edit guard normalizes panel/spec-artifact targets with pure
+      // path math (posix.normalize) before the prefix test — no filesystem I/O.
       "engine/src/core/block-direct-edits.ts": ["node:path"],
-      // Cross-branch pre-provisioning, INERT in this checkout: the feature-
-      // branch `emission-ingestion` folds a digest over captured payload
-      // bytes (digest-only hashing, mirroring review-packet/panel-program),
-      // but that module does not exist on this branch — the only occurrence
-      // of its name in this tree is this grant line. By the map-header
-      // doctrine above: stale permission, not a lint failure.
+      // The emission ingestion folds a digest over captured payload bytes —
+      // digest-only hashing, mirroring review-packet.
       "engine/src/core/emission-ingestion.ts": ["node:crypto"],
+      // The shared deterministic SHA-256 leaf (sha256Bytes/sha256Hex).
+      "engine/src/core/digest.ts": ["node:crypto"],
       // The shared rules gate classifies target files by extension: pure
       // path math (extname/join) over strings, no filesystem.
       "engine/src/core/bash-code-mutation.ts": ["node:path"],
@@ -157,16 +158,27 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/parse-spec.ts": ["node:crypto"],
       "engine/src/core/panel-kernel.ts": ["node:path"],
       "engine/src/core/phase-artifact-paths.ts": ["node:path"],
-      "engine/src/core/panel-program.ts": ["node:crypto"],
+      // The one Pi agent-directory rule: `~` expansion and the agents/<name>.md
+      // join are pure path math, and a `file://` selection is read as its path
+      // with fileURLToPath — string conversion, no filesystem.
+      "engine/src/core/pi-agent-directory.ts": ["node:path", "node:url"],
+      // The retained predecessor-archive codec inflates an inline gzip archive
+      // in memory under an explicit output bound — pure decompression, no I/O.
+      "engine/src/core/predecessor-archive.ts": ["node:zlib"],
       "engine/src/core/remediation-machine.ts": ["node:crypto"],
       "engine/src/core/repository-path.ts": ["node:path"],
       "engine/src/core/review-packet.ts": ["node:crypto"],
       "engine/src/core/review-panel.ts": ["node:path"],
       "engine/src/core/rules-gate.ts": ["node:path"],
-      "engine/src/core/standalone-review.ts": ["node:crypto", "node:util"],
+      // Standalone scope classification reads each scope path's extension:
+      // pure path math (posix.extname) over strings, no filesystem.
+      "engine/src/core/scope-classification.ts": ["node:path"],
+      // Spawn task text joins the run directory, packet and reader paths:
+      // pure path math (join) over shell-gathered strings, no filesystem.
+      "engine/src/core/spawn-task-text.ts": ["node:path"],
+      "engine/src/core/standalone-review.ts": ["node:util"],
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],
-      "engine/src/core/wave-gate-machine.ts": ["node:crypto"],
       // Cross-branch pre-provisioning, deliberate. TODAY this per-file grant
       // is INERT with zero granted capability: `find-file` sits in utils/,
       // which NO boundary rule governs, so the per-file lookup only runs for

@@ -5,10 +5,11 @@
  * git identities, and artifact bytes. It performs no filesystem or git I/O.
  */
 
-import { createHash } from "node:crypto";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import { sha256Bytes, sha256Hex } from "./digest";
 import { isExactGitSha } from "./git-sha";
+import { artifactCovers } from "./path-coverage";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
@@ -336,16 +337,6 @@ export function canonicalJson(value: JsonValue): string {
     .join(",")}}`;
 }
 
-/** Deterministic SHA-256 over bytes, without an intervening text decode. */
-export function sha256Bytes(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-/** Deterministic SHA-256 over UTF-8 text. */
-export function sha256Hex(text: string): string {
-  return sha256Bytes(Buffer.from(text, "utf-8"));
-}
-
 /**
  * The three hash brands' only constructors.
  *
@@ -439,19 +430,27 @@ function parseArtifactInputs(raw: unknown): ParsedArtifacts {
   return { artifacts, paths, errors };
 }
 
+/** Artifacts are files. A scoped file is its own artifact; a scoped directory
+ * is reviewed through the leaf files below it, so it must cover at least one
+ * artifact, and every artifact must sit at or below some scoped path. */
 function scopeErrors(
   declared: readonly ReviewPath[],
   modified: readonly ReviewPath[],
   artifactPaths: ReadonlySet<ReviewPath>,
 ): string[] {
   const errors: string[] = [];
-  const scope = new Set([...declared, ...modified]);
-  if (scope.size === 0) errors.push("review packet scope must be non-empty");
-  for (const path of artifactPaths) {
-    if (!scope.has(path)) errors.push(`artifact '${path}' is outside the declared/modified scope`);
+  const scope = [...new Set([...declared, ...modified])];
+  const artifacts = [...artifactPaths];
+  if (scope.length === 0) errors.push("review packet scope must be non-empty");
+  for (const path of artifacts) {
+    if (!scope.some((scoped) => artifactCovers(scoped, path))) {
+      errors.push(`artifact '${path}' is outside the declared/modified scope`);
+    }
   }
-  for (const path of scope) {
-    if (!artifactPaths.has(path)) errors.push(`scoped path '${path}' has no artifact`);
+  for (const scoped of scope) {
+    if (!artifacts.some((path) => artifactCovers(scoped, path))) {
+      errors.push(`scoped path '${scoped}' has no artifact`);
+    }
   }
   return errors;
 }

@@ -114,7 +114,7 @@ export interface WaveBlockCauseSpecCheck {
  * finding, each left `blocked: true` standing over an empty cause set, and the
  * wave dead-ended behind a "BLOCKED due to:" list with nothing in it.
  *
- * A BLANK finding string is not a cause. `wave-gate-machine`'s
+ * A BLANK finding string is not a cause. `wave-gate-checks`'s
  * `checkCriticalFindings` — the check that actually withholds the gate — counts
  * only `finding.trim() !== ""` entries, and `findingsViewError` admits
  * whitespace-only view entries, so counting raw array length here made the

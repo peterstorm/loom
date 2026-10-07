@@ -51,34 +51,75 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/completion-suite.ts",
   "engine/src/core/verification-manifest.ts",
   "engine/src/core/standalone-review.ts",
-  "engine/src/core/standalone-review-machine.ts",
+  "engine/src/core/standalone-review-scope.ts",
+  "engine/src/core/standalone-review-model.ts",
+  "engine/src/core/standalone-review-preparation.ts",
+  "engine/src/core/standalone-review-records.ts",
+  "engine/src/core/standalone-review-checkpoint.ts",
+  "engine/src/core/standalone-reviewer-capture.ts",
+  "engine/src/core/standalone-transcript-admission.ts",
+  "engine/src/core/standalone-finding-origin.ts",
+  "engine/src/core/standalone-refutation-panel.ts",
+  "engine/src/core/standalone-refutation-completion.ts",
   "engine/src/core/findings.ts",
   "engine/src/core/findings-shape.ts",
   "engine/src/core/review-packet.ts",
   "engine/src/core/git-sha.ts",
   "engine/src/core/panel-kernel.ts",
   "engine/src/core/panel-program.ts",
+  "engine/src/core/panel-authority.ts",
+  "engine/src/core/panel-verdict-source.ts",
+  "engine/src/core/persistent-panel.ts",
+  // The persistent program kernel both durable panels instantiate.
+  "engine/src/core/persistent-panel-program.ts",
+  // The emission kernel (ADR-0018) and the legacy panel's pure decisions that
+  // consume it: the frozen registry, the observation fold, the selection
+  // decision, the legacy journal archive, and the decisions themselves. Their
+  // purity is the closure's transitive property, not a per-file text rule.
+  "engine/src/core/emission-tool.ts",
+  "engine/src/core/emission-observation.ts",
+  "engine/src/core/harness-capture.ts",
+  // The one parse and walk of a Claude transcript into final-payload
+  // candidates, emission frames and tool outputs.
+  "engine/src/core/claude-transcript-projection.ts",
+  "engine/src/core/emission-ingestion.ts",
+  "engine/src/core/legacy-archive.ts",
+  "engine/src/core/legacy-panel-decisions.ts",
+  "engine/src/core/exact-data.ts",
+  // The ONE deterministic SHA-256 leaf every hashing core module shares.
+  "engine/src/core/digest.ts",
   "engine/src/core/panel-contract.ts",
   "engine/src/core/review-panel.ts",
   "engine/src/core/review-output.ts",
   "engine/src/core/reviewer-contract.ts",
   "engine/src/core/reviewer-protocol.ts",
   "engine/src/core/standalone-lineage-contract.ts",
-  "engine/src/core/standalone-lineage.ts",
   "engine/src/core/standalone-disposition-machine.ts",
   "engine/src/core/standalone-successor-reviewer.ts",
   "engine/src/core/context-packets.ts",
   "engine/src/core/context-packet-projection.ts",
   "engine/src/core/safe-io-cause.ts",
   "engine/src/core/wave-review-authority.ts",
+  // The registered Wave Gate program's data shapes, which wave-review-authority
+  // shares instead of restating the reviewer-protocol arms.
+  "engine/src/core/wave-gate-program.ts",
   "engine/src/core/reviewed-workspace.ts",
+  "engine/src/core/wave-frozen-source.ts",
+  // The orchestration helper's operation table, read by handler-routes.
+  "engine/src/handlers/helpers/orchestration-operations.ts",
   "engine/src/core/model-profiles.ts",
+  // The Agent Catalog's derived projections and the Pi spawn-input parser,
+  // split out of model-profiles; both are pure leaves over the catalog.
+  "engine/src/core/agent-catalog-projections.ts",
+  "engine/src/core/pi-spawn-input.ts",
   "engine/src/core/phases.ts",
   "engine/src/core/repository-path.ts",
   "engine/src/core/orchestration-contract/index.ts",
   "engine/src/core/orchestration-contract/errors.ts",
   "engine/src/core/orchestration-contract/bytes.ts",
   "engine/src/core/orchestration-contract/artifacts.ts",
+  // The Orchestration Program vocabulary leaf model-profiles and the roster share.
+  "engine/src/core/orchestration-contract/programs.ts",
   "engine/src/core/orchestration-contract/roster.ts",
   "engine/src/core/orchestration-contract/publication.ts",
   "engine/src/core/orchestration-contract/completion.ts",
@@ -93,12 +134,29 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/requirement-coverage.ts",
   "engine/src/core/parse-spec.ts",
   "engine/src/core/artifact-baseline.ts",
+  "engine/src/core/runtime-baseline-restore.ts",
+  "engine/src/core/path-coverage.ts",
   "engine/src/core/implementation-retry.ts",
   "engine/src/core/implementation-completion.ts",
   "engine/src/core/task-id.ts",
+  // The persisted population proof-boundary observation (types.ts imports it).
+  "engine/src/core/proof-boundary-observation.ts",
+  // Engine-issued spawn task text over shell-gathered facts.
+  "engine/src/core/spawn-task-text.ts",
+  // The Pi review-authority receipt contract and its reviewed-source codec.
+  "engine/src/core/review-authority-receipt.ts",
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",
+  // Standalone read coverage (ADR-0022): the obligation, page verification and
+  // admission decision, plus the deterministic diff the obligation is frozen
+  // from. The Context Packet projection imports both.
+  "engine/src/core/standalone-read-coverage.ts",
+  "engine/src/core/unified-diff.ts",
+  // The ONE Pi agent-directory resolution rule (Pi's own getAgentDir) the Pi
+  // extension, the routing-config loader and the model guard all share; the
+  // shells supply os.homedir().
+  "engine/src/core/pi-agent-directory.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

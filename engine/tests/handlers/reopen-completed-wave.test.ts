@@ -1,13 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-machine";
+import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-checks";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import { reviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
+import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import reopenCompletedWaveHandler, {
   commitCompletedWaveReopening,
   deriveWaveReopeningProof,
@@ -25,8 +24,10 @@ import {
   createReclaimedImplementationAttemptReceipt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
-import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
+import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { findingId } from "../fixtures/finding-id";
 
 const proof = (() => {
   const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
@@ -103,21 +104,21 @@ const modernProof = (taskIds: readonly string[]): WaveReopeningProof => ({ mode:
 
 describe("reviewed workspace integrity", () => {
   it("fails closed after accepted evidence when current dirty/untracked declared bytes drift", () => {
-    const changed = reviewedWorkspaceObservation("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("dirty and untracked") }]);
+    const changed = observedWorkspace("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("dirty and untracked") }]);
     const result = checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [changed] });
     expect(result.passed).toBe(false);
     if (!result.passed) expect(result.reason).toContain("refresh review evidence");
   });
 
   it("accepts an unchanged declared scope", () => {
-    const unchanged = { taskId: "T22", scope: ["src/a.ts"], headSha: head };
+    const unchanged = { ...observedWorkspace("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: [] }]), headSha: head };
     expect(checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [unchanged] }).passed).toBe(true);
   });
 
   it("property: a byte mutation changes the snapshot authority", () => {
     fc.assert(fc.property(fc.uint8Array(), fc.integer({ min: 0, max: 255 }), (bytes, extra) => {
-      const original = reviewedWorkspaceObservation("T", ["a.ts"], [{ path: "a.ts", bytes }]);
-      const changed = reviewedWorkspaceObservation("T", ["a.ts"], [{ path: "a.ts", bytes: Uint8Array.from([...bytes, extra]) }]);
+      const original = observedWorkspace("T", ["a.ts"], [{ path: "a.ts", bytes }]);
+      const changed = observedWorkspace("T", ["a.ts"], [{ path: "a.ts", bytes: Uint8Array.from([...bytes, extra]) }]);
       expect(changed.headSha).not.toBe(original.headSha);
     }));
   });
@@ -194,7 +195,6 @@ describe("later-Wave progress refusal", () => {
         "2026-08-24T00:01:00.000Z",
       ))],
     }), "Implementation Attempt history"],
-    [(entry) => ({ ...entry, start_sha: "a".repeat(40) }), "start SHA"],
     [(entry) => ({ ...entry, files_modified: [] }), "files"],
     [(entry) => taskFixture({ ...entry, status: "pending", proof, revalidation_required: true }), "proof"],
     [(entry) => ({ ...entry, test_result: { verdict: "trusted-pass" } }), "test result"],
@@ -206,12 +206,11 @@ describe("later-Wave progress refusal", () => {
     [(entry) => ({ ...entry, accepted_review_authority: {} as never }), "accepted authority"],
     [(entry) => ({ ...entry, review_error: "rejected" }), "review error"],
     [(entry) => ({ ...entry, review_evidence_failures: [] }), "review evidence failure"],
-    [(entry) => ({ ...entry, findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "advisory", file: null, line: null, claim: "reviewed" }] }), "findings"],
+    [(entry) => ({ ...entry, findings: [{ id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "advisory", file: null, line: null, claim: "reviewed" }] }), "findings"],
     [(entry) => ({ ...entry, critical_findings: ["reviewed"] }), "critical findings"],
     [(entry) => ({ ...entry, advisory_findings: ["reviewed"] }), "advisory findings"],
     [(entry) => ({ ...entry, refuted_findings: [{}] as never }), "refuted findings"],
     [(entry) => ({ ...entry, resolved_findings: [{}] as never }), "resolved findings"],
-    [(entry) => ({ ...entry, artifact_baseline: [] }), "artifact baseline"],
     [(entry) => ({ ...entry, attempt_artifact_baseline: [] }), "attempt baseline"],
     [(entry) => ({ ...entry, attempt_repository_baseline: [] }), "repository baseline"],
     [(entry) => ({ ...entry, issued_review_packets: [] }), "issued packet"],
@@ -235,6 +234,23 @@ describe("later-Wave progress refusal", () => {
   it("keeps a wholly untouched pending later Task eligible", () => {
     expect(hasLaterWaveTaskProgress(pendingTask("T23", 4), [])).toBe(false);
     expect(hasLaterWaveProgress(graph(), 3)).toBe(false);
+  });
+
+  it("ignores population-time proof-boundary stamps as progress evidence", () => {
+    // Production-shaped later-Wave Task: populated (stamped) but never started.
+    const stamped = {
+      ...pendingTask("T23", 4),
+      start_sha: "a".repeat(40),
+      artifact_baseline: [{ artifact: "src/b.ts", snapshot: { kind: "sha256" as const, digest } }],
+    };
+    expect(hasLaterWaveTaskProgress(stamped, [])).toBe(false);
+    const stampedGraph = graph([task("T19", 3), task("T22", 3), stamped]);
+    expect(hasLaterWaveProgress(stampedGraph, 3)).toBe(false);
+    const reopened = reopenCompletedWave(stampedGraph, request, legacyProof);
+    expect(reopened.wave_reopening_history?.[0]).toMatchObject({
+      proofMode: "legacy-workspace-authority-unverifiable",
+      reopenedTaskIds: ["T19", "T22"],
+    });
   });
 });
 
@@ -330,9 +346,9 @@ describe("reopen completed Wave", () => {
     expect(() => reopenCompletedWave(reopened, request, legacyProof)).toThrow("current_wave exactly");
   });
 
-  it("blocks immediate Wave Gate preparation and forbids legacy task-stop positive bypass", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-reopened-wave-"));
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-reopened-wave-runs-"));
+  it("refuses immediate Wave Gate start before claiming a run and forbids legacy task-stop positive bypass", () => {
+    const root = canonicalTempDir("loom-reopened-wave-");
+    const runsRoot = canonicalTempDir("loom-reopened-wave-runs-");
     try {
       mkdirSync(join(root, "src"), { recursive: true });
       writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n");
@@ -354,13 +370,14 @@ describe("reopen completed Wave", () => {
       writeFileSync(statePath, JSON.stringify(awaitingRevalidation));
       const { PI_CODING_AGENT: _pi, ...env } = process.env;
       const blockedRun = join(runsRoot, "run.revalidation-required");
-      mkdirSync(blockedRun);
       const blocked = spawnSync("bun", [CLI, "helper", "orchestration", "start", "wave-gate", "--runs-root", runsRoot, "--run", blockedRun], {
         cwd: root, encoding: "utf8", input: JSON.stringify({ wave: 3 }),
         env: { ...env, LOOM_STATE_PATH: statePath },
       });
-      expect(blocked.status, blocked.stderr).toBe(0);
-      expect((JSON.parse(blocked.stdout) as { kind: string }).kind, blocked.stdout).toBe("blocked");
+      expect(blocked.status, blocked.stdout).not.toBe(0);
+      expect(blocked.stderr).toContain("wave 3 cannot start its Wave Gate");
+      expect(blocked.stderr).toContain("revalidation=fresh-test-evidence-required");
+      expect(existsSync(blockedRun)).toBe(false);
 
       const freshStop = {
         taskCompleted: true,
@@ -382,13 +399,13 @@ describe("reopen completed Wave", () => {
       chmodSync(statePath, 0o644);
       writeFileSync(statePath, JSON.stringify(revalidated));
       const runDir = join(runsRoot, "run.revalidated-wave");
-      mkdirSync(runDir);
       const started = spawnSync("bun", [CLI, "helper", "orchestration", "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], {
         cwd: root, encoding: "utf8", input: JSON.stringify({ wave: 3 }),
         env: { ...env, LOOM_STATE_PATH: statePath },
       });
-      expect(started.status, started.stderr).toBe(0);
-      expect((JSON.parse(started.stdout) as { kind: string }).kind, started.stdout).toBe("blocked");
+      expect(started.status, started.stdout).not.toBe(0);
+      expect(started.stderr).toContain("Not all tasks have satisfied implementation proof");
+      expect(existsSync(runDir)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(runsRoot, { recursive: true, force: true });

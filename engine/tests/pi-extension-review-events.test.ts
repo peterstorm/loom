@@ -17,11 +17,14 @@ import {
 } from "../src/core/implementation-retry";
 import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
+import { lowerModelProfile, resolveModelProfile } from "../src/core/model-profiles";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
-import { publishInitialBatch } from "../src/handlers/helpers/programs/helpers";
-import { waveGateAuthorityDigest, waveRequests } from "../src/handlers/helpers/programs/wave-gate";
+import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
+import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
+import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
+import { waveRequests } from "../src/handlers/helpers/programs/wave-review-requests";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
@@ -281,7 +284,7 @@ const reviewResult = (
   },
 });
 
-async function piCaptureRun(runSuffix: string, contextText = "Pi capture context"): Promise<Readonly<{
+async function piCaptureRun(runSuffix: string, contextText = "Pi capture context", issueRoute: "catalog" | "qualified-local" = "catalog"): Promise<Readonly<{
   runsRoot: string;
   runDir: string;
   request: AgentRequestAuthority;
@@ -312,38 +315,57 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
     authorityDigest: waveGateAuthorityDigest(1, ["T1"], graph) };
   const registered = await opened.value.registerProgram(registration);
   if (!registered.ok) throw new Error(registered.error.message);
-  const previous = process.cwd();
-  process.chdir(repository);
-  let batch: ReturnType<typeof waveRequests>;
+  // The issue-route election is ambient-env sensitive: each arm pins its own
+  // route explicitly (the qualified arm pins the qualified local route, the
+  // catalog arm deletes the election variables), so waveRequests elects the
+  // same profiles the request authority below binds.
+  const routeEnv: Readonly<Record<string, string | undefined>> = issueRoute === "qualified-local"
+    ? { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" }
+    : { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined };
+  const previousRoute = Object.keys(routeEnv).map((key) => [key, process.env[key]] as const);
+  const previousCwd = process.cwd();
   try {
-    batch = waveRequests(opened.value, registration, graph, 1, { kind: "git-repository", root: repository });
+    for (const [key, value] of Object.entries(routeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    process.chdir(repository);
+    const batch = waveRequests(opened.value, registration, graph, 1, { kind: "git-repository", root: repository });
+    const source = batch.packets.find(({ role }) => role === "code-reviewer");
+    if (source === undefined) throw new Error("historical Wave fixture lacks reviewer packet");
+    const packet = buildContextPacket({ ...source, requestId, fixedContext: [...source.fixedContext, section.value] });
+    if (!packet.ok) throw new Error(packet.error.message);
+    const published = await opened.value.publishContext(packet.value);
+    if (!published.ok) throw new Error(published.error.message);
+    const profile = issueRoute === "qualified-local" ? "qualified-local-review" : "general-review";
+    const resolved = resolveModelProfile(profile);
+    if (!resolved.ok) throw new Error(resolved.error.message);
+    const lowered = lowerModelProfile(resolved.value, "pi");
+    const request = {
+      runId: `run.${runSuffix}`,
+      requestId,
+      slotId: "slot-1",
+      program: "wave-gate",
+      role: "code-reviewer",
+      attempt: 1,
+      modelProfile: profile,
+      harnessBinding: {
+        pi: lowered,
+        claude: { harness: "claude-code", model: "sonnet" },
+      },
+      requiredSkill: null,
+      contextDigest: packet.value.digest,
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    await publishPiFixtureRequest(opened.value, request);
+    return { runsRoot, runDir, request, handle: opened.value };
   } finally {
-    process.chdir(previous);
+    process.chdir(previousCwd);
+    for (const [key, value] of previousRoute) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
-  const source = batch.packets.find(({ role }) => role === "code-reviewer");
-  if (source === undefined) throw new Error("historical Wave fixture lacks reviewer packet");
-  const packet = buildContextPacket({ ...source, requestId, fixedContext: [...source.fixedContext, section.value] });
-  if (!packet.ok) throw new Error(packet.error.message);
-  const published = await opened.value.publishContext(packet.value);
-  if (!published.ok) throw new Error(published.error.message);
-  const request = {
-    runId: `run.${runSuffix}`,
-    requestId,
-    slotId: "slot-1",
-    program: "wave-gate",
-    role: "code-reviewer",
-    attempt: 1,
-    modelProfile: "general-review",
-    harnessBinding: {
-      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-      claude: { harness: "claude-code", model: "sonnet" },
-    },
-    requiredSkill: null,
-    contextDigest: packet.value.digest,
-    outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
-  } as AgentRequestAuthority;
-  await publishPiFixtureRequest(opened.value, request);
-  return { runsRoot, runDir, request, handle: opened.value };
 }
 
 async function publishPiFixtureRequest(handle: RunDirHandle, raw: AgentRequestAuthority): Promise<void> {
@@ -351,7 +373,7 @@ async function publishPiFixtureRequest(handle: RunDirHandle, raw: AgentRequestAu
   if (!request.ok) throw new Error(JSON.stringify(request.error));
   const packet = handle.readContext(request.value.contextDigest);
   if (!packet.ok) throw new Error(packet.error.message);
-  const published = await publishInitialBatch(handle, [{ authority: request.value,
+  const published = await publishLegacyInitialBatch(handle, [{ authority: request.value,
     context: { digest: packet.value.digest, slot: `contexts/${packet.value.digest}.json` } }], [packet.value], "pi-transport-fixture");
   if (!published.ok) throw new Error(published.message);
 }
@@ -374,15 +396,35 @@ async function additionalPiFixtureRequest(staged: Awaited<ReturnType<typeof piCa
   return request.value;
 }
 
+/** The Pi tool-input and review-capture modules, merged, resolved by dynamic
+ *  specifier so they are the SAME module instances the extension loads. */
+async function piCaptureModules() {
+  const toolInputSpecifier = "../../pi/tool-input.ts";
+  const captureSpecifier = "../../pi/review-capture.ts";
+  return {
+    ...await import(/* @vite-ignore */ toolInputSpecifier),
+    ...await import(/* @vite-ignore */ captureSpecifier),
+  } as {
+    piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    capturePiSubagentResult: (
+      toolCallId: unknown,
+      resultIndex: number,
+      agentType: string,
+      messages: unknown,
+      runBinding?: unknown,
+    ) => Promise<{ kind: string; reason?: string; message?: string }>;
+  };
+}
+
 describe("Pi extension review tool_result integration", () => {
   /**
-   * Resolve `piSpawnRosterId` from the SAME module `extension()` loads.
+   * Resolve `piSpawnRosterId` from the SAME module instance `extension()` loads.
    *
    * Keep the dynamic import in one helper so every case resolves the function
-   * from the same extension module instance that `extension()` loads.
+   * from the same `pi/tool-input` module instance the extension imports.
    */
   const rosterId = async (toolCallId: unknown, index: number, agent: string): Promise<string> => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/tool-input.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
     };
@@ -426,7 +468,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("preserves write-grant injection failure when direct revocation also fails", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       injectPiWriteGrantWithRevocation: (
         task: string,
@@ -607,17 +649,40 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
   });
 
+  it("captures Pi tool_result bytes identically for an issued authority on the qualified emission route (FR-012)", async () => {
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-qualified-route", "Pi capture context", "qualified-local");
+    // The issued authority genuinely binds the qualified local emission route.
+    expect(staged.request.modelProfile).toBe("qualified-local-review");
+    expect(staged.request.harnessBinding.pi).toMatchObject({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" });
+    const toolCallId = "call-qualified-route-capture";
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
+    const correlated = await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    });
+    expect(correlated.ok).toBe(true);
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const result = reviewResult("Task: T1", "qualified-route finding");
+    const expected = (result.details.results[0].messages[0].content[0] as { text: string }).text;
+
+    await pi.emit("tool_result", { ...result, toolCallId }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad499" },
+    });
+
+    // The request-bound capture flow is route-independent: the same final
+    // payload lands byte-identically regardless of the issued emission route.
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
+  });
+
   it("retains malformed Pi transcript diagnostics in the capture rejection", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-      capturePiSubagentResult: (
-        toolCallId: unknown,
-        resultIndex: number,
-        agentType: string,
-        messages: unknown,
-      ) => Promise<{ kind: string; reason?: string; message?: string }>;
-    };
+    const module = await piCaptureModules();
     const staged = await piCaptureRun("pi-malformed-transcript-shape");
     const nativeId = module.piSpawnRosterId("call-malformed-transcript", 0, "code-reviewer");
     expect((await staged.handle.recordHarnessCorrelator({
@@ -756,7 +821,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("runs later capability cleanup after an earlier cleanup action fails", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiCleanupActions: (actions: readonly { label: string; run: () => void | Promise<void> }[]) => Promise<readonly string[]>;
     };
@@ -773,7 +838,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("continues startup cleanup and attempts every reporting channel", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiStartupSweeps: (
         sweeps: readonly { name: string; run: () => void }[],
@@ -808,7 +873,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("does not throw when one reporting channel receives the sweep failure", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiStartupSweeps: (
         sweeps: readonly { name: string; run: () => void }[],
@@ -833,7 +898,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("throws one stack-preserving aggregate only after all reporting routes and later sweeps fail", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiStartupSweeps: (
         sweeps: readonly { name: string; run: () => void }[],
@@ -953,7 +1018,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("makes rejected child write grants an unconditional direct-edit denial", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/child-write-grant.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       rejectedChildWriteGrantBlock: (rejected: boolean) => unknown;
     };
@@ -965,7 +1030,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("retains malformed completion checkpoint parser diagnostics", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/review-run-authority.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       standaloneCompletionCheckpointProblem: (checkpoint: string) => string | null;
     };
@@ -975,17 +1040,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("preserves malformed Pi transcript extraction as an explicit capture rejection", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-      capturePiSubagentResult: (
-        toolCallId: unknown,
-        resultIndex: number,
-        agentType: string,
-        messages: unknown,
-        runBinding: unknown,
-      ) => Promise<unknown>;
-    };
+    const module = await piCaptureModules();
     const staged = await piCaptureRun("malformed-transcript");
     const nativeId = module.piSpawnRosterId("call-malformed-transcript", 0, "code-reviewer");
     expect((await staged.handle.recordHarnessCorrelator({
@@ -1900,9 +1955,11 @@ describe("Pi extension review tool_result integration", () => {
       },
     });
     expect(JSON.parse(resumed)).toMatchObject({ kind: "done" });
-    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[
-      Symbol.for("@peterstorm/loom/review-authority/v1")
-    ] as { verify: (input: { cwd: string; sessionId: string }) => Promise<unknown> };
+    // The bridge is looked up through the typed, fail-closed seam rather than
+    // re-declaring the symbol string and structurally guessing the receipt
+    // shape: a missing or malformed host binding throws here instead of
+    // handing the test a `verify` that never existed.
+    const bridge = readLoomReviewAuthorityBridge(globalThis);
     expect(await bridge.verify({ cwd: projectCwd, sessionId: session })).toMatchObject({
       schemaVersion: 1,
       kind: "loom-review-authority-receipt",
@@ -2754,6 +2811,70 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("expands an implementation brief marker into the engine-rendered brief before admission and registration", async () => {
+    const planPath = join(temp, "brief-marker-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{ id: "T1", description: "render the brief", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] }],
+    });
+    const pi = await extension();
+    const input = { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T1", agentScope: "user" };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad430" } };
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-brief-marker",
+      input,
+    }, context);
+
+    expect(call).toEqual([undefined]);
+    // The child receives the engine-rendered brief (plus its write grant), and
+    // the spawn gates judged exactly those bytes before registering T1.
+    expect(input.task).toContain("**Task ID:** T1\n**Wave:** 1\n**Agent:** code-implementer-agent\n**Required Loom skill:** code-implementer");
+    expect(input.task).toContain(readFileSync(join(ROOT, "rules", "typescript-patterns.md"), "utf8").trimEnd());
+    expect(input.task).toContain(`Available at: ${planPath}`);
+    expect(input.task).toMatch(/LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/);
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual(["T1"]);
+
+    // Settle the spawn so its write grant and reservation do not outlive the case.
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId: "call-brief-marker",
+      content: [],
+      details: { results: [{ agent: "code-implementer-agent", task: input.task, exitCode: 1, messages: [] }] },
+    }, context);
+  });
+
+  it("refuses a brief marker for a Task owed no dispatch without registering anything", async () => {
+    writeState({
+      ...initialGraph(),
+      tasks: [{
+        ...initialGraph().tasks[0], status: "implemented", proof: completedWithoutTestsProof, file_list: [],
+        verification_policy: { regression: { kind: "waived", reason: "documentation-only" }, new_tests: { kind: "waived", reason: "documentation-only" } },
+      }],
+    });
+    const before = readFileSync(statePath, "utf8");
+    const pi = await extension();
+    const input = { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T1", agentScope: "user" };
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-brief-marker-implemented",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad431" } });
+
+    expect(call).toEqual([{
+      block: true,
+      reason: "BLOCKED: spawn item 1 cannot expand its implementation brief: Task T1 is implemented; it is owed no implementation dispatch",
+    }]);
+    expect(input.task).toBe("LOOM_IMPLEMENTATION_BRIEF: T1");
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
   it("issues a SCOPED write grant to a phase agent and enforces its artifact scope", async () => {
     writeState({
       ...initialGraph(),
@@ -3508,13 +3629,19 @@ describe("Pi extension review tool_result integration", () => {
     const pointer = join(subagentDir, `${session}.task_graph`);
     const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
     let registryBytes = "";
-    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    const originalTask = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    let task = originalTask;
+    let injectionFailed = false;
     const input: Record<string, unknown> = { agent: "code-implementer-agent", agentScope: "user" };
+    // The grant injection's write lands and then fails; the rollback's
+    // restore of the claimed rewrite is an ordinary write.
     Object.defineProperty(input, "task", {
       enumerable: true,
       get: () => task,
       set: (next: string) => {
         task = next;
+        if (injectionFailed) return;
+        injectionFailed = true;
         registryBytes = readFileSync(registry, "utf8");
         writeFileSync(registry, "{malformed");
         throw new Error("injected admission prompt mutation failure");
@@ -3529,6 +3656,9 @@ describe("Pi extension review tool_result integration", () => {
         block: true,
         reason: expect.stringContaining("roll back task-graph pointer"),
       }));
+      // The rewrite was claimed before the write that half-failed, so the
+      // rollback restored the child prompt rather than leaving the grant in it.
+      expect(task).toBe(originalTask);
       expect(existsSync(pointer)).toBe(true);
       writeFileSync(registry, registryBytes);
       expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);

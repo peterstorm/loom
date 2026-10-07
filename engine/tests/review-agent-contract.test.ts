@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REVIEW_SUB_AGENTS, WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/config";
+import { REVIEW_SUB_AGENTS, WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/core/agent-catalog-projections";
 import { carriedOverCount, resolveReviewFindings, resolveTaskReviewFindings } from "../src/core/review-output";
 import type { ReviewRun } from "../src/types";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../src/core/context-packets";
@@ -10,7 +10,7 @@ import { CURRENT_REVIEWER_PROTOCOL } from "../src/core/reviewer-contract";
 import { parseIssuedReviewerProtocol, parseReviewerEvidence } from "../src/core/review-output";
 import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId } from "../src/core/orchestration-contract";
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../src/core/model-profiles";
-import { sha256Hex } from "../src/core/review-packet";
+import { sha256Hex } from "../src/core/digest";
 import { extractWireContractRegion } from "../src/core/wire-contract";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");

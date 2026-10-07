@@ -9,9 +9,17 @@
  * composition a real Pi spawn goes through: hook → buildPiRoutingContext →
  * validatePiAgentDefinitionFile.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+
+// The account home `os.homedir()` answers when HOME is unset (its passwd
+// fallback), substitutable so the HOME-unset arm is deterministic.
+const accountHome = vi.hoisted(() => ({ value: null as string | null }));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => accountHome.value ?? actual.homedir() };
+});
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import handler from "../../../src/handlers/pre-tool-use/validate-agent-model";
@@ -58,8 +66,22 @@ describe("validate-agent-model: Pi spawn routing boundary", () => {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
     }
+    accountHome.value = null;
     rmSync(agentDir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it("reads the definition under the account home when HOME is unset, as Pi does", async () => {
+    // The guard, the routing loader and the Pi extension share one resolver:
+    // with HOME unset and no PI_CODING_AGENT_DIR, the definition is the
+    // account home's `.pi/agent/agents/<agent>.md` — never a cwd-relative
+    // `.pi/agent` (the former `$HOME ?? ""` spelling, which read as absent).
+    delete process.env.PI_CODING_AGENT_DIR;
+    delete process.env.HOME;
+    accountHome.value = home;
+    mkdirSync(join(home, ".pi", "agent", "agents"), { recursive: true });
+    writeFileSync(join(home, ".pi", "agent", "agents", `${AGENT}.md`), declaredRender);
+    expect(await spawn()).toEqual({ kind: "allow" });
   });
 
   const agentFile = () => join(agentDir, "agents", `${AGENT}.md`);

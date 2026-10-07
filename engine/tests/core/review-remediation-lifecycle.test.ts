@@ -95,6 +95,7 @@ import { fixFull } from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { HeadSha, PacketId } from "../../src/core/review-packet";
 import type { PriorFindingVerdict, ReviewRun, Task, TaskGraph } from "../../src/types";
+import { findingId } from "../fixtures/finding-id";
 
 // Branded as parsePacketId/parseHeadSha would mint them, so these fixtures
 // bind exactly the way the production call site does.
@@ -103,7 +104,7 @@ const HEAD = "b".repeat(40) as HeadSha;
 const AGENTS = ["code-reviewer", "silent-failure-hunter"] as const;
 
 const prior = (id: string, agent: string, severity: "critical" | "advisory", claim: string): Finding => ({
-  id,
+  id: findingId(id),
   agent,
   severity,
   file: "src/x.ts",
@@ -149,14 +150,15 @@ function start(task = reviewedTask()): Task {
 function reviewLifecycle(
   run: ReviewRun,
   verdicts: readonly PriorFindingVerdict[],
+  reasons: readonly (string | undefined)[] = [],
 ): Readonly<{ prior_findings: readonly Readonly<Record<string, unknown>>[] }> {
   return {
     prior_findings: run.prior_finding_ids.map((finding_id, index) => ({
       finding_id,
       verdict: verdicts[index],
-      reason: verdicts[index] === "resolved_by_remediation"
+      reason: reasons[index] ?? (verdicts[index] === "resolved_by_remediation"
         ? "Verified the remediation in the packet postimage"
-        : "The packet still contains the failing behavior",
+        : "The packet still contains the failing behavior"),
     })),
   };
 }
@@ -165,6 +167,7 @@ function transcript(
   run: ReviewRun,
   verdicts: readonly PriorFindingVerdict[],
   findings: readonly { severity: "critical" | "advisory"; claim: string }[] = [],
+  reasons: readonly (string | undefined)[] = [],
 ): string {
   const critical = findings.filter((finding) => finding.severity === "critical");
   const advisory = findings.filter((finding) => finding.severity === "advisory");
@@ -183,7 +186,7 @@ function transcript(
     JSON.stringify(findings.map((finding) => ({ ...finding, file: "src/x.ts", line: 2 }))),
     "```",
     "```review_lifecycle",
-    JSON.stringify(reviewLifecycle(run, verdicts)),
+    JSON.stringify(reviewLifecycle(run, verdicts, reasons)),
     "```",
   ].join("\n");
 }
@@ -193,9 +196,10 @@ function applyAgent(
   agent: string,
   verdicts: readonly PriorFindingVerdict[],
   findings: readonly { severity: "critical" | "advisory"; claim: string }[] = [],
+  reasons: readonly (string | undefined)[] = [],
 ): Task {
   const run = task.review_run!;
-  const resolution = resolveBoundReviewFindings(transcript(run, verdicts, findings), agent, run);
+  const resolution = resolveBoundReviewFindings(transcript(run, verdicts, findings, reasons), agent, run);
   expect(resolution.kind).toBe("bound-findings");
   return applyReviewResolution(task, resolution);
 }
@@ -328,16 +332,48 @@ describe("packet-bound remediation review runs", () => {
     expect(parseTaskGraph(graph(task)).ok).toBe(true);
   });
 
-  it("keeps a prior finding active when any reviewer says it is still present", () => {
+  it("retires a prior finding on its owner's resolution when a dissent carries no concrete evidence", () => {
+    // Production regression: out-of-scope reviewers answered "not re-verified"
+    // for fixed findings, and unanimity carried them across generations.
     let task = start();
     task = applyAgent(task, AGENTS[0], ["resolved_by_remediation", "resolved_by_remediation"]);
-    task = applyAgent(task, AGENTS[1], ["still_present", "resolved_by_remediation"]);
+    task = applyAgent(task, AGENTS[1], ["still_present", "resolved_by_remediation"], [], [
+      "Outside my lens; not re-verified in src/x.ts",
+    ]);
+
+    expect(task.findings).toEqual([]);
+    expect(task.resolved_findings?.map(({ finding }) => finding.id)).toEqual([
+      "code-reviewer-1",
+      "silent-failure-hunter-1",
+    ]);
+    expect(task.resolved_findings?.[0]?.resolution.assessments.map(({ verdict }) => verdict))
+      .toEqual(["resolved_by_remediation", "still_present"]);
+    expect(task.review_status).toBe("passed");
+    expect(parseTaskGraph(graph(task)).ok).toBe(true);
+  });
+
+  it("keeps a prior finding active when its owner says it is still present", () => {
+    let task = start();
+    task = applyAgent(task, AGENTS[0], ["still_present", "resolved_by_remediation"]);
+    task = applyAgent(task, AGENTS[1], ["resolved_by_remediation", "resolved_by_remediation"]);
 
     expect(task.findings?.map(({ id }) => id)).toEqual(["code-reviewer-1"]);
     expect(task.resolved_findings?.map(({ finding }) => finding.id)).toEqual([
       "silent-failure-hunter-1",
     ]);
     expect(task.review_status).toBe("blocked");
+  });
+
+  it("keeps a prior finding active when another reviewer cites file:line counter-evidence", () => {
+    let task = start();
+    task = applyAgent(task, AGENTS[0], ["resolved_by_remediation", "resolved_by_remediation"]);
+    task = applyAgent(task, AGENTS[1], ["still_present", "resolved_by_remediation"], [], [
+      "src/x.ts:12 still accepts the null result unchecked",
+    ]);
+
+    expect(task.findings?.map(({ id }) => id)).toEqual(["code-reviewer-1"]);
+    expect(task.review_status).toBe("blocked");
+    expect(parseTaskGraph(graph(task)).ok).toBe(true);
   });
 
   it("cannot retire packet-bound findings without a newer implementation generation", () => {

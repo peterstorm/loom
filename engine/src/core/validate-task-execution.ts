@@ -2,11 +2,12 @@
 
 import type { Task, TaskGraph } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
-import { isImplementationAgent, isStandaloneReviewAgent } from "./model-profiles";
+import { isImplementationAgent, isStandaloneReviewAgent } from "./agent-catalog-projections";
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext, invalidateTaskReview } from "./review-output";
 import { newWaveGate, reconcileWaveBlock, waveBlockCauses } from "./wave-gate-model";
-import { artifactCovers, type DeclaredArtifactBaseline } from "./artifact-baseline";
+import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import { artifactCovers } from "./path-coverage";
 import {
   canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,

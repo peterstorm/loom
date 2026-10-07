@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import fc from "fast-check";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { artifactCovers } from "../../src/core/path-coverage";
 import {
-  artifactCovers,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
+  DECLARED_ARTIFACT_BASELINE,
+  REPOSITORY_CHANGE_BASELINE,
+  type ArtifactBaselineScheme,
+  type SnapshotScheme,
   parseDeclaredArtifactBaseline,
   treeSnapshotDigest,
   type TreeEntry,
@@ -14,7 +18,13 @@ import {
 import {
   captureDeclaredArtifactBaseline,
   changedDeclaredArtifactsSince,
-} from "../../src/utils/artifact-baseline";
+} from "../../src/utils/declared-artifact-snapshot";
+
+function parsed<Scheme extends SnapshotScheme>(scheme: ArtifactBaselineScheme<Scheme>, raw: unknown) {
+  const baseline = scheme.parse(raw);
+  if (!baseline.ok) throw new Error(baseline.errors.join("; "));
+  return baseline.value;
+}
 
 const roots: string[] = [];
 afterEach(() => {
@@ -22,7 +32,7 @@ afterEach(() => {
 });
 
 function fixture(): string {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-artifact-baseline-")));
+  const root = canonicalTempDir("loom-artifact-baseline-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src", "existing.ts"), "before\n");
@@ -70,10 +80,39 @@ describe("declared artifact baseline", () => {
     }]);
     expect(malformed.ok).toBe(false);
 
-    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
-    const compared = changedDeclaredArtifacts(baseline, []);
+    const baseline = parsed(DECLARED_ARTIFACT_BASELINE, [{ artifact: "src/a.ts", snapshot: { kind: "missing" } }]);
+    const compared = changedDeclaredArtifacts(baseline, parsed(DECLARED_ARTIFACT_BASELINE, []));
     expect(compared.ok).toBe(false);
     expect(!compared.ok && compared.errors.join("\n")).toContain("missing declared artifact");
+  });
+
+  it("proves a baseline once: unique canonical artifacts, then compares without re-parsing", () => {
+    const duplicated = DECLARED_ARTIFACT_BASELINE.parse([
+      { artifact: "src/a.ts", snapshot: { kind: "missing" } },
+      { artifact: "src/a.ts", snapshot: { kind: "missing" } },
+    ]);
+    expect(duplicated).toEqual({ ok: false, errors: ['artifact_baseline[1].artifact duplicates "src/a.ts"'] });
+
+    const before = parsed(DECLARED_ARTIFACT_BASELINE, [
+      { artifact: "src/a.ts", snapshot: { kind: "sha256", digest: "a".repeat(64) } },
+      { artifact: "src/b.ts", snapshot: { kind: "missing" } },
+    ]);
+    const after = parsed(DECLARED_ARTIFACT_BASELINE, [
+      { artifact: "src/b.ts", snapshot: { kind: "missing" } },
+      { artifact: "src/a.ts", snapshot: { kind: "sha256", digest: "b".repeat(64) } },
+    ]);
+    expect(Object.isFrozen(before)).toBe(true);
+    expect(changedDeclaredArtifacts(before, after)).toEqual({ ok: true, value: ["src/a.ts"] });
+  });
+
+  it("refuses at compile time to compare snapshots hashed under different digest schemes", () => {
+    const declared = parsed(DECLARED_ARTIFACT_BASELINE, [{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
+    const repository = parsed(REPOSITORY_CHANGE_BASELINE, [{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
+    // @ts-expect-error a repository-change preimage is not a declared-artifact snapshot.
+    changedDeclaredArtifacts(declared, repository);
+    // @ts-expect-error and an unparsed wire array is not a proven baseline.
+    changedDeclaredArtifacts([{ artifact: "a.ts", snapshot: { kind: "missing" } }], declared);
+    expect(changedDeclaredArtifacts(repository, repository)).toEqual({ ok: true, value: [] });
   });
 
   it.each([

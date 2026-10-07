@@ -161,7 +161,6 @@ describe("quality-program helper boundaries", () => {
 
     expect(Object.keys(surface).sort()).toEqual([
       "applyWaveFacadeSubmission",
-      "handleWaveReviewContext",
       "inspectRemediationFacade",
       "inspectStandaloneFacade",
       "parseRegisteredFacadeProgram",
@@ -170,6 +169,8 @@ describe("quality-program helper boundaries", () => {
       "parseWaveGateStartInput",
       "prepareRemediationFacadeStart",
       "prepareStandaloneSuccessorFacadeStart",
+      "prepareWaveGateFacadeStart",
+      "publishedReviewerRequest",
       "readStandaloneReviewedSource",
       "recoverOrphanedWaveGateFacade",
       "renderSpawnTask",
@@ -185,20 +186,47 @@ describe("quality-program helper boundaries", () => {
       "startStandaloneFacade",
       "startWaveGateFacade",
       "waveAdvisoryDecisionRequestId",
-      "waveGateDecisionMismatch",
     ]);
+    // The program-path emission seam (T6) is deliberately volume-internal: the
+    // issued descriptor/route projection and its required registration
+    // authority are not parent-caller operations, so they must never leak onto
+    // this curated surface (FR-001/FR-020; the parent callers get the
+    // durable-compatibility `renderSpawnTask` and the publication-proving
+    // `publishedReviewerRequest` only).
+    expect(Object.keys(surface)).not.toContain("renderReviewProgramSpawn");
+    expect(Object.keys(surface)).not.toContain("publishReviewInitialBatch");
+    expect(Object.keys(surface)).not.toContain("projectEmissionTaskText");
   });
 
   it("keeps production callers on the curated program-driver Public Surface", () => {
     const productionFiles = [join(ENGINE, "src"), join(ROOT, "pi"), join(ROOT, "hooks"), join(ROOT, "scripts")]
       .flatMap(productionTypeScriptFiles)
       .filter((path) => !path.startsWith(PROGRAM_VOLUMES));
-    const owningVolumeImport = /from\s+["'][^"']*\/programs\/(?:helpers|standalone|wave-gate|remediation)["']/;
-    const offenders = productionFiles
-      .filter((path) => owningVolumeImport.test(readFileSync(path, "utf-8")))
-      .map((path) => relative(ROOT, path));
+    // Deny by default: every module under programs/ except the curated index is
+    // volume-private. The only exceptions are these named importer -> module
+    // seams, each a separate published adapter rather than a program volume.
+    const allowedVolumeImports = new Set([
+      "engine/src/handlers/helpers/orchestration.ts -> legacy-panel",
+      "engine/src/handlers/helpers/orchestration.ts -> remediation-events",
+      // The run-directory-only effect runner: the façade's transcript capture
+      // and the legacy panel driver share it, so neither restates it.
+      "engine/src/handlers/helpers/orchestration.ts -> run-directory-effects",
+      "engine/src/handlers/helpers/orchestration.ts -> standalone-disposition",
+      "engine/src/handlers/helpers/orchestration.ts -> standalone-source",
+      "pi/extension.ts -> review-authority-bridge",
+    ]);
+    const volumeSpecifier = /(?:from\s+|import\(\s*)["'][^"']*\/programs\/([\w-]+)(?:\.ts)?["']/g;
+    const volumeImports = productionFiles.flatMap((path) =>
+      [...readFileSync(path, "utf-8").matchAll(volumeSpecifier)]
+        .map((match) => match[1]!)
+        .filter((module) => module !== "index")
+        .map((module) => `${relative(ROOT, path)} -> ${module}`));
+    const volumes = new Set(readdirSync(PROGRAM_VOLUMES).filter((entry) => entry.endsWith(".ts")).map((entry) => entry.slice(0, -3)));
 
-    expect(offenders).toEqual([]);
+    expect(volumeImports.filter((edge) => !allowedVolumeImports.has(edge))).toEqual([]);
+    // The allowlist stays exact: no stale edge, and every named module still exists.
+    expect([...allowedVolumeImports].filter((edge) => !volumeImports.includes(edge))).toEqual([]);
+    expect([...allowedVolumeImports].map((edge) => edge.split(" -> ")[1]!).filter((module) => !volumes.has(module))).toEqual([]);
   });
 
   it("validates source profiles and renders exact Pi OpenAI models", () => {
@@ -527,6 +555,54 @@ describe("quality-program helper boundaries", () => {
       postimage: null,
     }]);
     expect(written.artifacts[0].diff.content).toContain("deleted file mode");
+  });
+
+  it("reviews a scoped directory as its Git-visible leaves, including deletions and symlinks", () => {
+    const root = canonicalTempDir("loom-review-packet-directory-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    mkdirSync(join(root, "feature", "nested"), { recursive: true });
+    writeFileSync(join(root, ".gitignore"), "*.log\nstate.json\n.claude/\n");
+    writeFileSync(join(root, "feature", "kept.ts"), "before\n");
+    writeFileSync(join(root, "feature", "nested", "removed.ts"), "gone\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    writeFileSync(join(root, "feature", "kept.ts"), "after\n");
+    rmSync(join(root, "feature", "nested", "removed.ts"));
+    writeFileSync(join(root, "feature", "added.ts"), "new\n");
+    writeFileSync(join(root, "feature", "debug.log"), "ignored\n");
+    symlinkSync("kept.ts", join(root, "feature", "link.ts"));
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["feature"],
+      files_modified: ["feature/kept.ts"],
+    });
+
+    const id = execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf-8", env: { ...admittedEnv(), LOOM_STATE_PATH: state } }).trim();
+
+    const written = JSON.parse(readFileSync(packet, "utf-8"));
+    expect(written.declaredPaths).toEqual(["feature"]);
+    expect(written.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual([
+      "feature/added.ts",
+      "feature/kept.ts",
+      "feature/link.ts",
+      "feature/nested/removed.ts",
+    ]);
+    const byPath = new Map(written.artifacts.map((artifact: { path: string }) => [artifact.path, artifact]));
+    expect(byPath.get("feature/added.ts")).toMatchObject({ postimage: { content: "new\n" } });
+    expect(byPath.get("feature/kept.ts")).toMatchObject({ postimage: { content: "after\n" } });
+    expect(byPath.get("feature/link.ts")).toMatchObject({ postimage: { content: "kept.ts" } });
+    expect(byPath.get("feature/nested/removed.ts")).toMatchObject({ postimage: null });
+    expect(written.artifacts[1].diff.content).toContain("+after");
+    expect(written.artifacts[3].diff.content).toContain("deleted file mode");
+    expect(cli(["helper", "review-packet", "verify", "--packet", packet], "", {}, root).trim()).toBe(id);
   });
 
   it("preserves and byte-hashes a binary postimage through the real CLI", () => {

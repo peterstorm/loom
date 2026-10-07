@@ -130,7 +130,7 @@ Eleven implementation slices across `engine/src/core/` and a new
 
 | Slice | Landed as |
 |---|---|
-| Authority kernel, panel programs, lifecycle machines | `core/orchestration-contract/`, `core/panel-program.ts`, `core/wave-gate-machine.ts`, `core/standalone-review-machine.ts`, `core/remediation-machine.ts` |
+| Authority kernel, panel programs, lifecycle machines | `core/orchestration-contract/`, `core/panel-program.ts`, `core/wave-gate-machine.ts`, `core/standalone-review.ts` (LC-2 reducer), `core/remediation-machine.ts` |
 | Fugue runtime | `orchestration/fugue-program-runtime.ts` |
 | Anchored run directory, context packets, effect receipts | `orchestration/run-directory-handle.ts`, `context-packets.ts`, `effect-runner.ts`, `no-follow-fs.ts` |
 | Four static operation DAG families + capability registry | `orchestration/dags/*-operations.ts`, `orchestration/dags/capabilities.ts` |

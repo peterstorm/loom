@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
 import { observeGitProbe } from "./git-probe";
+import { worktreeVisibleLeafPaths, type WorktreeLeafSelection } from "./git-leaves";
+import { hardenedGitEnvironment } from "./git-execution-policy";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -21,7 +23,7 @@ import { observeGitProbe } from "./git-probe";
  * implementation, one diagnostic.
  *
  * It is deliberately NOT the only path to `git` in the engine, and claiming
- * otherwise would be false: `utils/artifact-baseline.ts` and several
+ * otherwise would be false: `utils/git-leaves.ts` and several
  * handlers/orchestration modules shell out directly because they need failures
  * to THROW, where this module's helpers warn and return `undefined`. Two
  * failure contracts, chosen per call site; a caller that wants the warning
@@ -192,36 +194,6 @@ export type GitDiffResult =
 const DIFF_DRIVER_SUPPRESSION = ["--no-textconv", "--no-ext-diff"] as const;
 
 /**
- * Git evidence children receive only process-launch essentials, never ambient
- * authority such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, config injection,
- * or executable diff overrides. The shadow administration directory below also
- * excludes repository-local config, hooks, info/attributes, and fsmonitor.
- */
-function diffEnvironment(): NodeJS.ProcessEnv {
-  const inherited = [
-    "PATH", "HOME", "TMPDIR", "TEMP", "TMP",
-    "SystemRoot", "WINDIR", "PATHEXT",
-  ] as const;
-  const environment: NodeJS.ProcessEnv = {};
-  for (const name of inherited) {
-    const value = process.env[name];
-    if (value !== undefined) environment[name] = value;
-  }
-  return {
-    ...environment,
-    LANG: "C",
-    LC_ALL: "C",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_COUNT: "0",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_PAGER: "cat",
-    GIT_OPTIONAL_LOCKS: "0",
-  };
-}
-
-/**
  * Complete-postimage context is unbounded by construction, so capture carries
  * an explicit budget. `execFileSync` defaulted to 1 MiB, which made an
  * ordinary large file fail as `ENOBUFS` — indistinguishable from a broken
@@ -252,10 +224,10 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  return probeGitWithEmptyRetry(["-c", "core.fsmonitor=false", ...args], {
+  return probeGitWithEmptyRetry(args, {
     cwd: root,
     encoding: "utf8",
-    env: diffEnvironment(),
+    env: hardenedGitEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
@@ -310,7 +282,7 @@ function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessE
     writeFileSync(join(shadow, "HEAD"), `${authority.headSha}\n`);
     writeFileSync(join(shadow, "config"), shadowGitConfig(authority.objectFormat));
     return operation({
-      ...diffEnvironment(),
+      ...hardenedGitEnvironment(),
       GIT_DIR: shadow,
       GIT_WORK_TREE: root,
       GIT_INDEX_FILE: authority.indexPath,
@@ -450,6 +422,38 @@ export function diffFilesSinceAt(root: string, revision: string, files: string[]
     : diffArgsAt(root, ["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
 }
 
+/** Which Git-dirty paths to name: worktree bytes that differ from the index,
+ *  or index entries that differ from HEAD. */
+export type ChangedPathComparison = "worktree" | "index";
+
+const CHANGED_PATH_LIST_LIMIT = 100 * 1024 * 1024;
+
+/**
+ * The repository-relative paths Git reports as changed for one comparison,
+ * named inside the shadow administration directory. `git diff --name-only`
+ * re-hashes every stat-dirty tracked file, and that re-hash runs the file's
+ * clean filter — repository-authored code, the same executable path
+ * `diffArgsAt` closes for patches. In the shadow directory no filter is
+ * defined, so filter attributes are inert data and the bytes are compared raw.
+ * For a repository that does rely on a clean filter, a file whose raw bytes
+ * differ from its filtered blob is named as changed: an over-report a byte
+ * baseline absorbs, never a missed change. THROWS on failure, like the leaf
+ * enumerator it is listed beside in `repository-change-baseline.ts`.
+ */
+export function shadowChangedPaths(root: string, comparison: ChangedPathComparison): readonly string[] {
+  const argv = [
+    "diff", ...DIFF_DRIVER_SUPPRESSION, ...(comparison === "index" ? ["--cached"] : []), "--name-only", "-z", "--",
+  ];
+  const listed = withShadowGit(root, (environment) => execFileSync("git", argv, {
+    cwd: root,
+    encoding: "buffer",
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: CHANGED_PATH_LIST_LIMIT,
+  }));
+  return Object.freeze(listed.toString("utf-8").split("\0").filter((path) => path !== ""));
+}
+
 export type GitTrackedResult =
   | Readonly<{ ok: true; tracked: boolean }>
   | Readonly<{ ok: false; error: string }>;
@@ -502,6 +506,49 @@ export function diffUntracked(file: string): GitDiffResult {
  *  see `diffFilesAt`. */
 export function diffUntrackedAt(root: string, file: string): GitDiffResult {
   return diffArgsAt(root, ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file], true);
+}
+
+export type GitPathListResult =
+  | Readonly<{ ok: true; paths: readonly string[] }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Git-visible untracked leaves at or below one repository path, sorted.
+ *  `--no-index` diffs one file, never a directory, so a directory artifact's
+ *  new files must be enumerated first. */
+export function untrackedLeaves(path: string): GitPathListResult {
+  const root = currentRepoRoot("untrackedLeaves");
+  return root === undefined
+    ? { ok: false, error: "cannot list untracked files outside a Git repository" }
+    : untrackedLeavesAt(root, path);
+}
+
+/** Untracked leaves from an EXPLICIT root — see `diffFilesAt`. */
+export function untrackedLeavesAt(root: string, path: string): GitPathListResult {
+  return listedLeaves(root, path, "untracked", "untracked files");
+}
+
+/** Every Git-visible leaf at or below one repository path — tracked
+ *  (including a deleted index entry) or untracked, never ignored — sorted. */
+export function visibleLeavesAt(root: string, path: string): GitPathListResult {
+  return listedLeaves(root, path, "visible", "Git-visible files");
+}
+
+/** The warn-and-return Result adapter over the one throwing leaf enumerator
+ *  in `git-leaves.ts`, which owns the pathspec and ignore semantics. The
+ *  enumerator runs under the shared `git-execution-policy` (allow-listed
+ *  environment, fsmonitor disabled) but outside the shadow directory, whose
+ *  absent `info/exclude` would change the ignore rules it must honour. */
+function listedLeaves(
+  root: string,
+  path: string,
+  selection: WorktreeLeafSelection,
+  description: string,
+): GitPathListResult {
+  try {
+    return { ok: true, paths: worktreeVisibleLeafPaths(root, path, selection) };
+  } catch (error) {
+    return { ok: false, error: `cannot list ${description} below ${JSON.stringify(path)}: ${commandFailure(error)}` };
+  }
 }
 
 // --- Pure functions for test evidence (no git calls) ---

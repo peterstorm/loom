@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,15 +9,33 @@ import { buildContextPacket, encodeByteSection } from "../../../../src/core/cont
 import { captureKey } from "../../../../src/core/harness-capture";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
 import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
-import { prepareStandaloneReview, serializeStandaloneReviewAuthority, STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review";
-import { reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState, startStandaloneReviewMachine } from "../../../../src/core/standalone-review-machine";
-import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority, publicationFile, standalonePublicationEffectId, publishInitialBatch, reviewerProtocolResolver, standaloneRequestId } from "../../../../src/handlers/helpers/programs/helpers";
+import { prepareStandaloneReview } from "../../../../src/core/standalone-review-preparation";
+import { serializeStandaloneReviewAuthority } from "../../../../src/core/standalone-review-records";
+import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
+import { reduceStandaloneReviewMachine, startStandaloneReviewMachine } from "../../../../src/core/standalone-review";
+import { serializeStandaloneReviewMachineState } from "../../../../src/core/standalone-review-checkpoint";
+import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority } from "../../../../src/handlers/helpers/programs/registration";
+import { publicationFile } from "../../../../src/handlers/helpers/programs/durable-requests";
+import { standalonePublicationEffectId, standaloneRequestId } from "../../../../src/handlers/helpers/programs/standalone-requests";
+import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
+import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
 import { inspectStandaloneFacade, readStandaloneReviewedSource, replayStandaloneResultFromEvidence, type StandaloneCaptureWitness } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "../../../fixtures/pi-session";
+import { startNativeLegacyReview } from "../../../fixtures/standalone-native-history";
 import { readSessionRunBindings } from "../../../../src/orchestration/session-run-bindings";
+import { frozenDiffReaderPages } from "../../../fixtures/read-coverage";
+import { gitResult, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
+import {
+  CATALOG_ROUTE_ENV,
+  QUALIFIED_ROUTE_ENV,
+  withRouteEnv,
+  type EnvironmentOverlay,
+} from "../../../fixtures/issue-route-env";
+import { normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -31,13 +49,11 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   if (!result.ok) throw new Error(JSON.stringify(result));
   return result.value;
 }
-function git(root: string, args: readonly string[]) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr);
-  return result.stdout.trim();
-}
+// Deterministic commit SHAs: frozen-source sections embed the head revision, and
+// packets minted by separate fixture projects are compared byte-for-byte.
+const git = (root: string, args: readonly string[]) => gitResult(root, args, PINNED_COMMIT_DATES).stdout.trim();
 function project() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-standalone-")));
+  const root = canonicalTempDir("loom-p4-standalone-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));
@@ -73,9 +89,15 @@ async function runCli(root: string, args: readonly string[], stdin = ""): Promis
   if (result.status !== 0) throw new Error(result.stderr);
   return JSON.parse(result.stdout) as Action;
 }
+/** Manual submission from a non-capturing harness: a read-coverage attempt also hands over
+ *  the reader pages its reviewer received (`--tool-outputs`, ADR-0022) — here every page. */
 async function submit(root: string, handle: RunDirHandle, request: AgentRequestAuthority, raw: string): Promise<Action> {
+  const pages = frozenDiffReaderPages(handle, request);
+  const toolOutputs = join(root, `tool-outputs-${request.requestId.slice(-12)}.json`);
+  if (pages.length > 0) writeFileSync(toolOutputs, JSON.stringify(pages));
   return (await runCli(root, ["submit", "--runs-root", handle.identity.runsRoot, "--run", handle.runId,
-    "--request", request.requestId, "--slot", request.slotId, "--attempt", String(request.attempt)], raw));
+    "--request", request.requestId, "--slot", request.slotId, "--attempt", String(request.attempt),
+    ...(pages.length > 0 ? ["--tool-outputs", toolOutputs] : [])], raw));
 }
 async function resume(root: string, handle: RunDirHandle): Promise<Action> {
   return (await runCli(root, ["resume", "--runs-root", handle.identity.runsRoot, "--run", handle.runId]));
@@ -128,7 +150,7 @@ async function legacyPrefix(p: ReturnType<typeof project>): Promise<{ handle: Ru
     authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.authority)) }));
   value(await handle.registerProgram(registration));
   const firstPackets = packets.filter((_, index) => index % 2 === 0);
-  const published = await withFixturePiSession(p.root, () => publishInitialBatch(handle, prepared.initialRequests.map((authority) => ({ authority,
+  const published = await withFixturePiSession(p.root, () => publishLegacyInitialBatch(handle, prepared.initialRequests.map((authority) => ({ authority,
     context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), firstPackets, "standalone-review"));
   if (!published.ok) throw new Error(published.message);
   const awaiting = value(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
@@ -308,4 +330,108 @@ describe("standalone registered protocol delivery and publication", () => {
     expect(reviewerProtocolResolver(handle, registration)(request).ok).toBe(false);
     expect((await inspectStandaloneFacade(handle, registration)).ok).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issued emission route controls on the real standalone program path (T6):
+// FR-012 issuance joins retained regardless of emission-tool availability,
+// and the archived v1 contract stays extraction-only under a qualified parent.
+// ---------------------------------------------------------------------------
+
+describe("the issued emission route on the standalone program path (T6)", () => {
+  it("retains every issuance join across the extraction and emission routes and changes only task text (FR-012)", async () => {
+    // Both fixture repositories must freeze the SAME head revision: the
+    // standalone-frozen-source section embeds it, so the packet digests are
+    // byte-comparable across routes only when the fixture commits are
+    // content-identical (fixed author/committer timestamps, identical trees).
+    const startRun = async (environment: EnvironmentOverlay) => withRouteEnv({ ...PINNED_COMMIT_DATES, ...environment }, async () => {
+      const p = project();
+      const initial = await runCli(p.root, ["start", "standalone-review", "--runs-root", p.runsRoot, "--run", "run.route"],
+        JSON.stringify({ kind: "all", files: p.scope, dryRun: false }));
+      return { p, requests: initial.requests! };
+    });
+    const extraction = await startRun(CATALOG_ROUTE_ENV);
+    const emission = await startRun(QUALIFIED_ROUTE_ENV);
+    expect(extraction.requests.map(({ authority }) => authority.modelProfile))
+      .not.toEqual(emission.requests.map(({ authority }) => authority.modelProfile));
+
+    // The reserved request structure and frozen packets are route-independent.
+    expect(emission.requests.map(({ authority }) => [authority.requestId, authority.slotId, authority.role, authority.attempt,
+      authority.contextDigest, authority.outputSlot]))
+      .toEqual(extraction.requests.map(({ authority }) => [authority.requestId, authority.slotId, authority.role, authority.attempt,
+        authority.contextDigest, authority.outputSlot]));
+    for (const [{ authority }, issuedRequest] of extraction.requests.map((request, index) => [request, emission.requests[index]!.authority] as const)) {
+      const packetPath = (handleRoot: string) => join(handleRoot, "contexts", `${authority.contextDigest}.json`);
+      expect(readFileSync(packetPath(join(emission.p.root, "runs", "run.route"))))
+        .toEqual(readFileSync(packetPath(join(extraction.p.root, "runs", "run.route"))));
+      expect(issuedRequest.role).toBe(authority.role);
+    }
+
+    // The route delta on the wire is EXACTLY the descriptor line plus the
+    // appended tool-primary instruction; every other task byte is identical
+    // once the project-local run-directory paths are normalized away.
+    for (const [extractionRequest, emissionRequest] of extraction.requests.map((request, index) => [request, emission.requests[index]!] as const)) {
+      const extractionTask = normalizeRunRoot(extractionRequest.task, extraction.p.root);
+      const emissionTask = normalizeRunRoot(emissionRequest.task, emission.p.root);
+      expect(extractionTask).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      const descriptor = parseEmissionDescriptor(emissionTask);
+      expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
+        binding: { requestId: emissionRequest.authority.requestId, version: "v2" } });
+      if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+      expect(withoutEmissionRouteDelta(emissionTask, descriptor.binding, descriptor.contextDigest)).toBe(extractionTask);
+      expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+
+      // The delivery joins survive on the emission route: the packet read
+      // command still resolves the same issued v2 packet.
+      expect(executePacketCommand(emissionRequest.task)).toMatchObject({ schemaVersion: 2, requestId: emissionRequest.authority.requestId });
+      expect(executePacketCommand(extractionRequest.task)).toMatchObject({ schemaVersion: 2, requestId: extractionRequest.authority.requestId });
+    }
+  }, 120_000);
+
+  it("keeps the archived v1 contract extraction-only and byte-identical under a qualified emission-capable parent (AD-7)", async () => {
+    const legacyProject = () => {
+      const p = project();
+      mkdirSync(join(p.root, "src"), { recursive: true });
+      writeFileSync(join(p.root, "src", "repair.mjs"), "export const repair = 1;\n");
+      writeFileSync(join(p.root, "src", "types.ts"), "export type Fixture = string;\n");
+      git(p.root, ["add", "src/repair.mjs", "src/types.ts"]);
+      git(p.root, ["commit", "-qm", "fixture legacy scope"]);
+      return p;
+    };
+    const runLegacy = async (issueRoute: "catalog" | "qualified-local") => {
+      const p = legacyProject();
+      return withFixturePiSession(p.root, async () => {
+        const handle = value(createRunDirectory(p.runsRoot, "run.legacy"));
+        const started = await startNativeLegacyReview(handle, issueRoute);
+        if (!started.ok) throw new Error("fixture legacy issuance failed");
+        const action = started.action as Action;
+        return { p, handle, requests: action.requests! };
+      });
+    };
+    const catalog = await runLegacy("catalog");
+    const qualified = await runLegacy("qualified-local");
+
+    // The control is genuinely exercised: the qualified route elects the
+    // qualified-local reviewer profile, the catalog route does not.
+    expect(qualified.requests.map(({ authority }) => authority.modelProfile))
+      .toEqual(catalog.requests.map(() => "qualified-local-review"));
+    expect(catalog.requests.map(({ authority }) => authority.modelProfile))
+      .not.toEqual(qualified.requests.map(({ authority }) => authority.modelProfile));
+
+    for (const [catalogRequest, qualifiedRequest] of catalog.requests.map((request, index) => [request, qualified.requests[index]!] as const)) {
+      // AD-7: extraction-only and archived issued contracts keep their exact
+      // final-message delivery; no tool is advertised on either route.
+      expectLegacyDelivery(Object.freeze({ kind: "spawn-batch", requests: Object.freeze([catalogRequest]) }));
+      expectLegacyDelivery(Object.freeze({ kind: "spawn-batch", requests: Object.freeze([qualifiedRequest]) }));
+      expect(catalogRequest.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      expect(qualifiedRequest.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      expect(qualifiedRequest.task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+      expect(parseEmissionDescriptor(qualifiedRequest.task).kind).toBe("absent");
+      // The archived v1 route is extraction-only BY ISSUANCE, so even a
+      // qualified parent renders byte-identical tasks and packet bytes.
+      expect(normalizeRunRoot(qualifiedRequest.task, qualified.p.root)).toBe(normalizeRunRoot(catalogRequest.task, catalog.p.root));
+      expect(readFileSync(join(qualified.handle.runDirectory, "contexts", `${qualifiedRequest.authority.contextDigest}.json`)))
+        .toEqual(readFileSync(join(catalog.handle.runDirectory, "contexts", `${catalogRequest.authority.contextDigest}.json`)));
+    }
+  }, 120_000);
 });

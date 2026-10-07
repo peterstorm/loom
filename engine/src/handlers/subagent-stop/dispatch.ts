@@ -7,7 +7,7 @@
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult } from "../../types";
 import type { AgentRequestAuthority } from "../../core/orchestration-contract";
-import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
+import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";

@@ -4,8 +4,8 @@
  * filesystem adapter (symlink resolution, line counting) against temp files.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { rmSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import handler, { filesystemPorts, gateDirs } from "../../../src/handlers/pre-tool-use/rules-gate";
 import { REQUIRED_SKILLS } from "../../../src/core/rules-gate";
@@ -48,7 +48,7 @@ const payload = (over: Record<string, unknown> = {}): string =>
 const savedEnv = { gate: process.env["LOOM_GATE"], rules: process.env["LOOM_RULES_DIR"], skills: process.env["LOOM_SKILLS_DIR"] };
 
 beforeAll(() => {
-  dir = realpathSync(mkdtempSync(join(tmpdir(), "rules-gate-")));
+  dir = canonicalTempDir("rules-gate-");
   rules = join(dir, "rules");
   mkdirSync(rules);
   writeFileSync(join(rules, "architecture.md"), "a\nb\nc\n");

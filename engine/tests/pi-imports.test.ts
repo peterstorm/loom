@@ -109,20 +109,11 @@ describe("pi package manifest", () => {
     expect(extension).toContain("materializePiResources(PACKAGE_ROOT");
   });
 
-  it("binds Loom spawns to the same user agent file Pi executes", () => {
-    // The decision itself is the pure Spawn Admission core; the extension is
-    // the shell that must (a) run it and (b) implement its definition port
-    // over the exact user-scope agent file Pi executes.
-    const extension = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
-    expect(extension).toContain("admitPiSpawnBatch(");
-    expect(extension).toContain("validatePiAgentDefinitionFile(");
-    expect(extension).toContain('join(PI_AGENT_DIR, "agents", `${agent}.md`)');
-    const admission = readFileSync(
-      join(PI_DIR, "..", "engine", "src", "core", "spawn-admission.ts"),
-      "utf-8",
-    );
-    expect(admission).toContain('requestedScope !== "user"');
-  });
+  // That Loom spawns bind to the same user agent file Pi executes — the
+  // extension runs the pure Spawn Admission and implements its definition
+  // port over `<agent dir>/agents/<agent>.md`, resolved when the factory
+  // starts — is pinned through a loaded factory in
+  // `engine/tests/pi/agent-directory.test.ts`, never by the shell's spelling.
 });
 
 /** Resolve a `../engine/...` specifier to a file on disk. */
@@ -237,11 +228,22 @@ describe("pi/ imports resolve against the engine that has to satisfy them", () =
   });
 
   it("keeps isReviewAgent's home honest — the regression this file exists for", () => {
-    // Named explicitly rather than left to the generic sweep: the symbol moved
-    // to `config` ON PURPOSE, so `core/review-output` could keep claiming it is
-    // free of config, and the fix for the broken import must not be to move it
-    // back.
-    const source = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
-    expect(source).toMatch(/import\s*\{[^}]*\bisReviewAgent\b[^}]*\}\s*from\s*["']\.\.\/engine\/src\/config["']/);
+    // Named explicitly rather than left to the generic sweep: the symbol left
+    // `core/review-output` ON PURPOSE, so that module could keep claiming it is
+    // free of config, and the fix for a broken import must not be to move it
+    // back. Its one home is the pure Agent Catalog projection leaf beside the
+    // set it queries; config no longer re-exports it, so a config import of it
+    // is exactly the link-time failure this file exists to catch.
+    // Every Pi module that imports it — the spawn lifecycle and the result
+    // router, since the extension shell was split — imports it from that leaf.
+    const importsOf = (file: string): readonly string[] => [
+      ...readFileSync(join(PI_DIR, file), "utf-8")
+        .matchAll(/import\s*\{[^}]*\bisReviewAgent\b[^}]*\}\s*from\s*["']([^"']+)["']/g),
+    ].map((match) => match[1]!);
+    const importers = PI_FILES.filter((file) => importsOf(file).length > 0);
+    expect(importers).toEqual(expect.arrayContaining(["spawn-lifecycle.ts", "subagent-result-route.ts"]));
+    for (const file of importers) {
+      expect(importsOf(file), file).toEqual(["../engine/src/core/agent-catalog-projections"]);
+    }
   });
 });

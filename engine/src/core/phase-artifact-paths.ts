@@ -2,7 +2,7 @@
  * Which phase artifact a written path IS, and whether it is allowed to be one.
  *
  * Two harnesses record `spec_file`/`plan_file` from an agent's own write calls —
- * `handlers/subagent-stop/advance-phase` on Claude Code, `pi/extension`'s
+ * `handlers/subagent-stop/advance-phase` on Claude Code, `pi/subagent-stop`'s
  * `tool_result` handler on Pi. A recorded spec becomes the run authority;
  * architecture-plan transitions normally use the recorded plan but retain a
  * documented slug/date filesystem fallback when that field is absent or names
