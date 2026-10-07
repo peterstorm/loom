@@ -1,6 +1,6 @@
 import { artifactBaselineRepository, type ArtifactBaselineRepository } from "../fixtures/artifact-baseline-repository";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { git } from "../fixtures/git-repository";
+import { git, write } from "../fixtures/git-repository";
 import {
   chmodSync,
   existsSync,
@@ -15,6 +15,7 @@ import {
   changedRepositoryArtifactsSince,
   repositoryChangedPaths,
 } from "../../src/utils/repository-change-baseline";
+import { changedPathListing, changedPaths, type ChangedPathSource } from "../../src/utils/git";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -116,5 +117,42 @@ describe("repository attempt change boundaries", () => {
     writeFileSync(join(root, "data.dat"), "again\n");
     expect(changedRepositoryArtifactsSince(root, baseline)).toEqual(["data.dat"]);
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("still honours the repository's own info/exclude, which the shadow directory would drop", () => {
+    const { root } = repository();
+    write(root, ".git/info/exclude", "*.local\n");
+    writeFileSync(join(root, "secret.local"), "excluded\n");
+    writeFileSync(join(root, "visible.txt"), "untracked\n");
+
+    expect(changedPaths(root, "untracked")).toEqual(["visible.txt"]);
+    expect(repositoryChangedPaths(root)).toEqual(["visible.txt"]);
+  });
+});
+
+describe("changedPathListing route classification", () => {
+  const sources: readonly ChangedPathSource[] = ["worktree", "index", "untracked"];
+
+  it("classifies every content re-hashing diff for the shadow route and only the name listing as filter-free", () => {
+    expect(Object.fromEntries(sources.map((source) => [source, changedPathListing(source).hashing]))).toEqual({
+      worktree: "content-hashing",
+      index: "content-hashing",
+      untracked: "filter-free",
+    });
+  });
+
+  it("classifies a listing as content-hashing exactly when it is a git diff, with driver suppression", () => {
+    for (const source of sources) {
+      const { hashing, argv } = changedPathListing(source);
+      expect(hashing === "content-hashing").toBe(argv[0] === "diff");
+      if (argv[0] === "diff") expect(argv).toEqual(expect.arrayContaining(["--no-textconv", "--no-ext-diff"]));
+      expect(argv).toEqual(expect.arrayContaining(["-z", "--"]));
+    }
+  });
+
+  it("names the staged and unstaged comparisons with their own diff argv", () => {
+    expect(changedPathListing("index").argv).toContain("--cached");
+    expect(changedPathListing("worktree").argv).not.toContain("--cached");
+    expect(changedPathListing("untracked").argv).toEqual(["ls-files", "--others", "--exclude-standard", "-z", "--"]);
   });
 });
