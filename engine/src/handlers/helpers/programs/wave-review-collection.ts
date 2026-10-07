@@ -6,31 +6,25 @@
  */
 import type { AgentRequestAuthority } from '../../../core/orchestration-contract';
 import { captureKey } from '../../../core/harness-capture';
-import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
-import type { StateManager } from '../../../state-manager';
 import { applyReviewResolution } from '../../../core/review-output';
 import { specCheckNeedsReapplication } from '../../../core/spec-check';
 import { applyCurrentSpecCheckCaptureRejection, specCheckSlotBelongsToWaveEpoch, waveReviewerSlotProblem } from '../../../core/wave-gate-membership';
-import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { durableCaptureRejection } from './durable-requests';
 import { renderReviewProgramSpawn } from './spawn-task';
-import { proceed, settled, waveBlocked, type WavePhase } from './wave-gate-outcome';
+import { proceed, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 import { applyWaveFacadeSubmission } from './wave-gate-submission';
 import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-context';
 import type { IssuedWaveReviewBatch } from './wave-review-requests';
 
 /** Resume phase: settle the current batch's attempt-1 evidence, spawning any
  *  undelivered attempt-1 request; proceeds once none remains outstanding.
- *  `wave` is the caller's narrowed `registration.input.wave` and the only
- *  Wave this phase reads. */
+ *  `batch.refreshed` is the graph issuance proved; each reconciliation below
+ *  re-reads protected state because the one before it may have written. */
 export async function reconcileCurrentReviewEvidence(
-  handle: RunDirHandle,
-  manager: StateManager,
-  registration: RegisteredWaveGateProgram,
+  context: WaveResumeContext,
   batch: IssuedWaveReviewBatch,
-  captured: ReadonlySet<string>,
-  wave: number,
 ): Promise<WavePhase> {
+  const { handle, manager, registration, wave, captured } = context;
   const { refreshed, currentRuns, currentIssued } = batch;
   // Read and classify every current context once. Packet-membership filters
   // consume this cache rather than translating a later I/O failure into

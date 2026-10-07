@@ -102,6 +102,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/wave-gate-program.ts",
   "engine/src/core/reviewed-workspace.ts",
   "engine/src/core/wave-frozen-source.ts",
+  // The orchestration helper's operation table, read by handler-routes.
+  "engine/src/handlers/helpers/orchestration-operations.ts",
   "engine/src/core/model-profiles.ts",
   "engine/src/core/phases.ts",
   "engine/src/core/repository-path.ts",

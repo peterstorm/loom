@@ -1,10 +1,36 @@
 /**
- * The Wave Gate drive's outcomes: the blocked action every refusal reports,
- * the uncaught-failure report, and the phase result each resume phase returns
- * to the reducer in wave-gate.ts.
+ * The Wave Gate drive's phase seam: the context every resume phase receives,
+ * the blocked action every refusal reports, the uncaught-failure report, and
+ * the phase result each resume phase returns to the reducer in wave-gate.ts.
  */
+import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
+import type { StateManager } from '../../../state-manager';
 import type { FacadeDriveResult } from './program-result';
+
+/**
+ * What every resume phase of one reducer invocation shares. The reducer builds
+ * it once, after proving the registration owns the protected active Wave.
+ *
+ * Staleness contract:
+ * - `registration` and `wave` are durable Run Directory authority and never
+ *   change within a run. `wave` is `registration.input.wave`, already proven
+ *   to be the protected current Wave.
+ * - `captured` is the captured-attempt set, read once before the first phase.
+ *   Only the harness captures transcripts; no phase does. Captures only
+ *   accumulate, so the snapshot can miss one that landed during this
+ *   invocation but never names one that is absent. A phase that misses a
+ *   capture spawns or waits on it, and the next invocation applies it.
+ * - Protected TaskGraph state is deliberately absent: earlier phases write it,
+ *   so each phase reads `manager.load()` itself after any write it depends on.
+ */
+export type WaveResumeContext = Readonly<{
+  handle: RunDirHandle;
+  manager: StateManager;
+  registration: RegisteredWaveGateProgram;
+  wave: number;
+  captured: ReadonlySet<string>;
+}>;
 
 export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "wave-gate-blocked", message } } };

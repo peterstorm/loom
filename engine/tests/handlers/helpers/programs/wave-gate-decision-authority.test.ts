@@ -19,7 +19,7 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { applyCurrentSpecCheckCaptureRejection, specCheckSlotBelongsToWaveEpoch, waveGateDecisionMismatch, waveRefutationCommitProblem } from "../../../../src/core/wave-gate-membership";
 import { applyWaveFacadeSubmission } from "../../../../src/handlers/helpers/programs/wave-gate-submission";
-import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-review-context";
+import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
 import { publishWaveAdvisoryDecisionRequest, waveAdvisoryDecisionRequestId } from "../../../../src/handlers/helpers/programs/wave-advisory-decision";
 import { reportUncaughtWaveGateFailure } from "../../../../src/handlers/helpers/programs/wave-gate-outcome";
@@ -313,7 +313,7 @@ describe("wave review context authority", () => {
       planFile: null,
       specCheckDocuments: DOCUMENTS,
     });
-    const context = handleWaveReviewContext([packet], packet.digest);
+    const context = readWaveReviewContext([packet], packet.digest);
     expect(context).toMatchObject({
       kind: "loaded",
       value: { runId: RUN_ID, wave: 1, subject: { taskId: null }, taskRun: null },
@@ -351,7 +351,7 @@ describe("wave review context authority", () => {
       planFile: null,
       specCheckDocuments: DOCUMENTS,
     });
-    const context = handleWaveReviewContext([packet], packet.digest);
+    const context = readWaveReviewContext([packet], packet.digest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded") return;
     const closedReviewGraph = graph({
@@ -474,7 +474,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "loaded",
       value: {
         subject: { role: "code-reviewer", taskId: "T1" },
@@ -501,7 +501,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "corrupt",
       message: expect.stringContaining("taskRun fields are invalid"),
     });
@@ -525,7 +525,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "loaded",
       value: { task: { proof, testResult } },
     });
@@ -553,7 +553,7 @@ describe("wave review context authority", () => {
       planFile: null,
     });
 
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "corrupt",
       message: expect.stringContaining(message),
     });
@@ -561,7 +561,7 @@ describe("wave review context authority", () => {
 
   it("classifies valid JSON with the wrong schema as corrupt", () => {
     const packet = packetFor({ wave: 1, batchEpoch: "b".repeat(64) });
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    expect(readWaveReviewContext([packet], packet.digest)).toMatchObject({
       kind: "corrupt",
       message: expect.stringContaining("invalid top-level schema"),
     });
@@ -589,7 +589,7 @@ describe("wave review context authority", () => {
       specFile: null,
       planFile: null,
     });
-    expect(handleWaveReviewContext([packet], packet.digest).kind).toBe("corrupt");
+    expect(readWaveReviewContext([packet], packet.digest).kind).toBe("corrupt");
   });
 });
 

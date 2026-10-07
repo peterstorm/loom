@@ -4,7 +4,7 @@
  * persisted retry), record issuance under the state lock, and the resume
  * phases that drive reviewer-slot and spec-check retries to exhaustion.
  */
-import { canonicalStructuralEquals, parseRequestId, parseStoredAgentRequestAuthority, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { encodeByteSection, parseContextPacket, contextPacketDigest, type ContextPacket } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -12,7 +12,11 @@ import type { StateManager } from '../../../state-manager';
 import type { IssuedWaveReviewerProtocol } from '../../../core/review-output';
 import { WAVE_REVIEW_AGENTS } from '../../../core/model-profiles';
 import { renderCurrentWaveRetryTask, specCheckRetryDiagnostic, waveRetryDiagnostic } from '../../../core/reviewer-retry';
-import { persistedWaveAttemptTwoCompatibilityProblem } from '../../../core/wave-gate-membership';
+import {
+  deriveWaveAttemptTwoAuthority,
+  persistedWaveAttemptTwoCompatibilityProblem,
+  waveAttemptTwoRequestId,
+} from '../../../core/wave-gate-membership';
 import { reviewerRejectionReason } from '../../../core/wave-reviewer-transcript';
 import { markWaveSpecCheckRetryIssuedTransition, markWaveTaskReviewRetriesIssuedTransition, type WaveTaskReviewRetry } from '../../../core/wave-review-issuance';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
@@ -20,7 +24,7 @@ import { durableCaptureRejection, durableRefutationRequests, isCaptureRejectionO
 import { failed, type FacadeDriveResult } from './program-result';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { renderReviewProgramSpawn, renderSpawnTask } from './spawn-task';
-import { proceed, rederive, settled, waveBlocked, type WavePhase } from './wave-gate-outcome';
+import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 import { applyWaveFacadeSubmission } from './wave-gate-submission';
 import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-context';
 
@@ -32,10 +36,8 @@ export function deriveWaveAttemptTwo(
   if (attemptOne.program !== "wave-gate" || attemptOne.attempt !== 1) {
     throw new Error(`slot ${attemptOne.slotId} has no canonical Wave attempt-1 authority`);
   }
-  const requestId = parseRequestId(attemptOne.requestId.replace(/:1$/, ":2"));
-  if (!requestId.ok || requestId.value === attemptOne.requestId) {
-    throw new Error(`Wave request ${attemptOne.requestId} cannot derive canonical attempt-2 identity`);
-  }
+  const requestId = waveAttemptTwoRequestId(attemptOne);
+  if (!requestId.ok) throw new Error(requestId.error);
   const original = handle.readContext(attemptOne.contextDigest);
   if (!original.ok) throw new Error(original.error.message);
   if (original.value.schemaVersion === 2 && retryReason === null) {
@@ -56,23 +58,8 @@ export function deriveWaveAttemptTwo(
   const retryPacket = { ...original.value, requestId: requestId.value, variableContext };
   const packet = parseContextPacket({ ...retryPacket, digest: contextPacketDigest(retryPacket) });
   if (!packet.ok) throw new Error(packet.error.message);
-  // Stored mode: attemptOne was read back from this run's durable artifacts, so
-  // its role->profile/skill couplings belong to the policy tables in force when
-  // it was ISSUED. Re-checking them against today's tables strands every run on
-  // disk across an agent's profile promotion, and would also disagree with
-  // persistedWaveAttemptTwoCompatibilityProblem, which derives this same
-  // attempt-2 in stored mode.
-  const authority = parseStoredAgentRequestAuthority({
-    ...attemptOne,
-    requestId: requestId.value,
-    attempt: 2,
-    contextDigest: packet.value.digest,
-    outputSlot: {
-      kind: "fixed-artifact-slot",
-      path: attemptOne.outputSlot.path.replace(/attempt-1\.raw$/, "attempt-2.raw"),
-    },
-  });
-  if (!authority.ok) throw new Error(authority.error.violations.map(({ message }) => message).join("; "));
+  const authority = deriveWaveAttemptTwoAuthority(attemptOne, packet.value.digest);
+  if (!authority.ok) throw new Error(authority.error);
   return Object.freeze({
     request: Object.freeze({
       authority: authority.value,
@@ -198,12 +185,10 @@ async function markWaveSpecCheckRetryIssued(
  *  recover or publish every outstanding slot's attempt-2 retry, replay
  *  captured retries, and report exhaustion once no retry remains spawnable. */
 export async function driveWaveReviewRetries(
-  handle: RunDirHandle,
-  manager: StateManager,
-  registration: RegisteredWaveGateProgram,
+  context: WaveResumeContext,
   currentIssued: readonly AgentRequestAuthority[],
-  captured: ReadonlySet<string>,
 ): Promise<WavePhase> {
+  const { handle, manager, registration, captured } = context;
   const refreshed = manager.load();
   const collecting = refreshed.tasks.some((task) => registration.taskIds.includes(task.id) && task.review_run !== undefined);
   if (collecting) {
@@ -282,14 +267,12 @@ export async function driveWaveReviewRetries(
  *  recover or publish the current epoch's spec-check attempt-2 retry and
  *  replay it once captured. Proceeds with the freshly loaded graph. */
 export async function driveWaveSpecCheckRetry(
-  handle: RunDirHandle,
-  manager: StateManager,
-  registration: RegisteredWaveGateProgram,
+  context: WaveResumeContext,
   currentIssued: readonly AgentRequestAuthority[],
-  captured: ReadonlySet<string>,
 ): Promise<WavePhase<ReturnType<StateManager["load"]>>> {
+  const { handle, manager, wave, captured } = context;
   const refreshed = manager.load();
-  const specAccepted = refreshed.spec_check?.wave === registration.input.wave &&
+  const specAccepted = refreshed.spec_check?.wave === wave &&
     refreshed.spec_check.verdict !== "EVIDENCE_CAPTURE_FAILED";
   if (!specAccepted) {
     // Attempt-2 must derive from the CURRENT epoch's attempt-1, never the
@@ -355,12 +338,12 @@ export async function driveWaveSpecCheckRetry(
       const applied = await applyWaveFacadeSubmission(handle, durable.authority, bytes.value);
       if (!applied.ok) return settled(waveBlocked(handle, `captured Wave spec-check retry could not be reconciled: ${applied.message}`));
       const accepted = manager.load().spec_check;
-      if (accepted?.wave !== registration.input.wave || accepted.verdict === "EVIDENCE_CAPTURE_FAILED") {
+      if (accepted?.wave !== wave || accepted.verdict === "EVIDENCE_CAPTURE_FAILED") {
         return settled(waveBlocked(handle, "Wave spec-check attempt 2 exhausted without accepted current-wave evidence"));
       }
       return rederive;
     }
-    const attemptOneFailure = refreshed.spec_check?.wave === registration.input.wave &&
+    const attemptOneFailure = refreshed.spec_check?.wave === wave &&
       refreshed.spec_check.verdict === "EVIDENCE_CAPTURE_FAILED"
       ? refreshed.spec_check.error
       : "attempt 1 produced no accepted current-wave spec-check evidence";

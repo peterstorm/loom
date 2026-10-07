@@ -12,12 +12,12 @@ import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-
 import { applyReviewResolution } from '../../../core/review-output';
 import { parseSpecCheckOutput, settleSpecCheck, specCheckAuthorityProblem } from '../../../core/spec-check';
 import { reconcileWaveBlock } from '../../../core/wave-gate-model';
-import { epochSettledFloor, waveSpecCheckDocumentsMatch } from '../../../core/wave-review-authority';
+import { epochSettledFloor, readWaveReviewContext, waveSpecCheckDocumentsMatch } from '../../../core/wave-review-authority';
 import { waveReviewerSlotProblem } from '../../../core/wave-gate-membership';
 import { resolveWaveReviewerTranscript } from '../../../core/wave-reviewer-transcript';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { reportUncaughtWaveGateFailure } from './wave-gate-outcome';
-import { handleWaveReviewContext, issuedWaveProtocol, readRegisteredWaveProgram } from './wave-review-context';
+import { issuedWaveProtocol, readRegisteredWaveProgram } from './wave-review-context';
 
 type WaveFacadeSubmissionResult =
   | Readonly<{ ok: true }>
@@ -31,7 +31,7 @@ export async function applyWaveFacadeSubmission(
   try {
     const packet = handle.readContext(authority.contextDigest);
     if (!packet.ok) return { ok: false, message: packet.error.message };
-    const parsedContext = handleWaveReviewContext([packet.value], authority.contextDigest);
+    const parsedContext = readWaveReviewContext([packet.value], authority.contextDigest);
     if (parsedContext.kind === "absent") return { ok: false, message: "Wave request context lacks subject authority" };
     if (parsedContext.kind === "corrupt") return { ok: false, message: parsedContext.message };
     const context = parsedContext.value;

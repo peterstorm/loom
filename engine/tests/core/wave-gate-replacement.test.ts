@@ -7,26 +7,25 @@ import {
 import { advisoryDecisionApproved } from "../../src/core/wave-gate-membership";
 import { markWaveSpecCheckRetryIssuedTransition, waveBatchSpecCheckAuthority } from "../../src/core/wave-review-issuance";
 import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
-import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { WaveRequestBatch } from "../../src/core/wave-review-authority";
 import type { TaskGraph } from "../../src/types";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { agentRequestAuthority } from "../fixtures/agent-request-authority";
+import { activeWaveGateFixture, graphFixture, protectedGraphFixture } from "../fixtures/task-lifecycle";
 
 const DIGEST = "a".repeat(64);
 const registration = (overrides: Partial<Extract<RegisteredWaveGateProgram, { schemaVersion: 1 }>> = {}):
   Extract<RegisteredWaveGateProgram, { schemaVersion: 1 }> => ({
   schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: DIGEST, ...overrides,
 });
+/** An execute Wave with no Tasks whose live gate `run.previous` holds Wave 1;
+ *  the registration is minted by the State File parser, and overrides are
+ *  typed TaskGraph fields. */
 const graph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
-  current_phase: "execute",
-  current_wave: 1,
-  tasks: [],
-  active_wave_gate: {
-    schemaVersion: 1, kind: "active-wave-gate", runId: "run.previous", wave: 1,
-    authorityDigest: DIGEST, revision: 0, terminalOutcome: null,
-  },
+  ...graphFixture([]),
+  active_wave_gate: activeWaveGateFixture({ runId: "run.previous", wave: 1, authorityDigest: DIGEST }),
   ...overrides,
-} as unknown as TaskGraph);
+});
 
 describe("prepareExhaustedWaveGateRestart refusal ladder", () => {
   const restart = (state: TaskGraph, previous = registration()) =>
@@ -82,21 +81,23 @@ describe("advisoryDecisionApproved", () => {
 });
 
 describe("Wave review issuance transitions", () => {
-  const specCheck = { runId: "run.next", slotId: "slot:spec", role: "spec-check-invoker", attempt: 2 } as unknown as AgentRequestAuthority;
-  const epochGraph = (attempted: 1 | 2) => graph({
-    active_wave_gate: { ...graph().active_wave_gate!, runId: "run.next" },
-    wave_review_epoch: { runId: "run.next", wave: 1, batchEpoch: "epoch", specCheckSlotAuthority: { slot_id: "slot:spec", attempted } },
-  } as Partial<TaskGraph>);
+  const specCheck = agentRequestAuthority("run.next", { slotId: "slot:spec", role: "spec-check-invoker", attempt: 2 });
+  const EPOCH = "e".repeat(64);
+  const epochGraph = (attempted: 1 | 2) => protectedGraphFixture({
+    ...graphFixture([]),
+    active_wave_gate: activeWaveGateFixture({ runId: "run.next", wave: 1, authorityDigest: DIGEST }),
+    wave_review_epoch: { runId: "run.next", wave: 1, batchEpoch: EPOCH, specCheckSlotAuthority: { slot_id: "slot:spec", attempted } },
+  });
 
   it("marks spec-check attempt 2 on the exact current epoch slot, idempotently", () => {
-    const marked = markWaveSpecCheckRetryIssuedTransition(epochGraph(1), specCheck, "epoch");
+    const marked = markWaveSpecCheckRetryIssuedTransition(epochGraph(1), specCheck, EPOCH);
     expect(marked.ok && marked.value.wave_review_epoch?.specCheckSlotAuthority?.attempted).toBe(2);
     const already = epochGraph(2);
-    expect(markWaveSpecCheckRetryIssuedTransition(already, specCheck, "epoch")).toEqual({ ok: true, value: already });
+    expect(markWaveSpecCheckRetryIssuedTransition(already, specCheck, EPOCH)).toEqual({ ok: true, value: already });
   });
 
   it("refuses a spec-check retry from another epoch", () => {
-    expect(markWaveSpecCheckRetryIssuedTransition(epochGraph(1), specCheck, "older-epoch")).toEqual({
+    expect(markWaveSpecCheckRetryIssuedTransition(epochGraph(1), specCheck, "f".repeat(64))).toEqual({
       ok: false, error: { message: "spec-check retry authority does not match the exact current Wave review epoch slot" },
     });
   });

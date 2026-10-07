@@ -11,7 +11,6 @@ import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority } from '
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
-import type { StateManager } from '../../../state-manager';
 import { deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { deriveWaveRefutationPlan } from '../../../core/wave-gate-preparation';
 import { applyFindingOutcomes } from '../../../core/findings';
@@ -19,12 +18,11 @@ import { reconcileWaveBlock } from '../../../core/wave-gate-model';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { decideRefutationTranscriptRead, refutationRejectionDiagnostic } from '../../../core/reviewer-retry';
 import { waveRefutationCommitProblem } from '../../../core/wave-gate-membership';
-import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { durableCaptureRejection, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { failed } from './program-result';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { publishLegacyInitialBatch } from './request-publication';
-import { proceed, rederive, settled, waveBlocked, type WavePhase } from './wave-gate-outcome';
+import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 
 type WaveReadiness = Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"];
 
@@ -88,11 +86,10 @@ function waveRefutationPreparation(
  * was upheld; re-derives once a refutation retired at least one Finding.
  */
 export async function driveWaveRefutation(
-  handle: RunDirHandle,
-  manager: StateManager,
-  registration: RegisteredWaveGateProgram,
+  context: WaveResumeContext,
   current: WaveReadiness,
 ): Promise<WavePhase> {
+  const { handle, manager, registration } = context;
   if (!(current.facts.findingCounts.kind === "known" && current.facts.findingCounts.value.activeCritical > 0)) {
     return proceed();
   }

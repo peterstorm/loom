@@ -5,7 +5,8 @@
  * protected graph to exactly one status branch (non-execute, terminal,
  * implementation window, advisory decision, or the ordinary readiness path)
  * and never repeats gate policy — every fact comes from `wave-status-facts`,
- * every gate verdict from `wave-gate-checks`, and every proven action from the
+ * every gate verdict from `wave-gate-checks`, the implementation window's
+ * recovery from `implementation-window`, and every proven action from the
  * proof-carrying snapshot in `wave-gate-machine`. The renderers serialize the
  * value and contain no readiness or action policy.
  */
@@ -21,13 +22,11 @@ import type {
   WaveGateCompletionEligibility,
   WaveGateNextAction,
   WaveImplementationAction,
-  WaveImplementationDispatch,
   WaveImplementationRecovery,
   WaveCompletionResultObservation,
   WaveWorkspaceObservation,
 } from "../types";
 import { sha256Bytes } from "./digest";
-import { staleReservationsForRosterObservation } from "./validate-task-execution";
 import { renderProjectVerificationCoverage } from "./verification-manifest";
 import {
   blockedAction,
@@ -39,7 +38,7 @@ import {
   type NonEmpty,
   type OrchestrationRunId,
 } from "./orchestration-contract";
-import { deriveWaveStartReadiness, type GateDeps } from "./wave-gate-checks";
+import type { GateDeps } from "./wave-gate-checks";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
 import {
   deriveWaveReadiness,
@@ -61,7 +60,13 @@ import {
   statusReason,
   taskCounts,
 } from "./wave-status-facts";
-import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
+import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "./implementation-window";
+
+/** What status reads: the gate's own deps plus the one observation only the
+ *  implementation-window projection consumes. Gate checks never see it. */
+export type StatusDeps = GateDeps & Readonly<{
+  implementationReservations?: ImplementationReservationStatusObservation;
+}>;
 
 export type AdvisoryApprovalObservation =
   | Readonly<{ kind: "approved" }>
@@ -410,163 +415,34 @@ function committedTerminalStatus(
 }
 
 /**
- * The implementation window: an execute Wave without a live Wave Gate.
- *
- * Completion retires the outgoing registration in the same commit that
- * advances `current_wave`, and the next registration only appears when the
- * gate is started — so every Wave spends its whole implementation span with
- * `active_wave_gate === undefined`. A terminal-abandoned Run without a named
- * successor also leaves the Wave in this window: its protected tombstone is
- * retained, but cannot authorize review or block a Task retry. Routing either
- * case through the readiness path reported invalid authority and blanked all
- * fact categories. Here the facts are derivable and the owed move is known, so
- * both are reported.
- *
- * Returns null for anything that is NOT this state, so genuinely contradictory
- * authority (absent `current_wave`, a Wave with no tasks, terminal history that
- * disagrees with the graph) still falls through and fails closed.
+ * The implementation window's status: an execute Wave without a live Wave
+ * Gate. Routing it through the readiness path reported invalid authority and
+ * blanked every fact category; here the facts are derivable and the owed move
+ * is known, so both are reported. `classifyImplementationWindow` decides
+ * everything; this only renders its outcome, and returns null outside the
+ * window so the next branch runs.
  */
 function unstartedWaveStatus(
   graph: TaskGraph,
-  deps: GateDeps,
+  deps: StatusDeps,
 ): LoomStatus | null {
-  if (graph.current_wave === undefined) return null;
-  const registration = graph.active_wave_gate;
-  if (registration !== undefined &&
-      (registration.wave !== graph.current_wave || registration.terminalOutcome?.kind !== "terminal-abandoned" ||
-        registration.terminalOutcome.supersededBy !== null)) return null;
-  const wave = graph.current_wave;
-  // A terminal receipt for the current Wave means this is not an unstarted
-  // Wave. committedTerminalStatus already accepted the exact terminal graph;
-  // reaching here with one is a contradiction, not an implementation window.
-  if ((graph.wave_gate_history ?? []).some((entry) => entry.wave === wave)) return null;
-  const waveTasks = graph.tasks.filter((task) => task.wave === wave);
-  if (waveTasks.length === 0) return null;
-
-  const executing = new Set(graph.executing_tasks ?? []);
-  const completedReservation = waveTasks.find((task) =>
-    task.status === "completed" &&
-    (executing.has(task.id) || task.active_implementation_attempt !== undefined));
-  if (completedReservation !== undefined) {
-    return deriveUnavailableLoomStatus([
-      statusReason(
-        "authority-contradiction",
-        `${completedReservation.id} is completed but retains implementation reservation authority; repair the Task Graph`,
-        completedReservation.id,
-      ),
-    ]);
-  }
-  const outstanding = waveTasks.filter((task) =>
-    (task.status !== "implemented" && task.status !== "completed") ||
-    executing.has(task.id) || task.active_implementation_attempt !== undefined);
-  const observation = deps.implementationReservations;
-  const reservationCandidates = outstanding.filter((task) =>
-    executing.has(task.id) || task.active_implementation_attempt !== undefined);
-  const nonCurrentReservation = reservationCandidates.find((task) =>
-    task.reserved_at === undefined || Number.isNaN(Date.parse(task.reserved_at)));
-  if (nonCurrentReservation !== undefined) {
-    return deriveUnavailableLoomStatus([
-      statusReason(
-        "authority-contradiction",
-        `${nonCurrentReservation.id} has timestamp-less legacy implementation authority that canonical status cannot reclaim; repair or migrate the Task Graph`,
-        nonCurrentReservation.id,
-      ),
-    ]);
-  }
-  if (reservationCandidates.length > 0 && observation?.kind === "unavailable") {
-    return unavailableStatus(
-      `cannot determine implementation reservation liveness: ${observation.reason}`,
-    );
-  }
-  const reclaimable = observation?.kind === "observed"
-    ? staleReservationsForRosterObservation(
-        graph,
-        { kind: "at-registration", anyActiveForGraph: observation.anyActiveForGraph },
-        observation.observedAtMs,
-      )
-    : new Set<string>();
-  const active = outstanding.filter((task) =>
-    !reclaimable.has(task.id) &&
-    (executing.has(task.id) || task.active_implementation_attempt !== undefined));
-  const activeTaskIds = new Set(active.map((task) => task.id));
-  const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task) }));
-  const invalidRetry = derivations.find(({ derivation }) => derivation.kind === "invalid-retry");
-  if (invalidRetry?.derivation.kind === "invalid-retry") {
-    return deriveUnavailableLoomStatus([
-      statusReason(
-        "authority-contradiction",
-        `${invalidRetry.task.id} has invalid implementation retry authority: ${invalidRetry.derivation.errors.join("; ")}`,
-        invalidRetry.task.id,
-      ),
-    ]);
-  }
-  const escalated = derivations.flatMap(({ task, derivation }) =>
-    derivation.kind === "escalated"
-      ? [canonicalRecord({ taskId: task.id, receiptId: derivation.receiptId, failureKinds: derivation.failureKinds })]
-      : []);
-  const invalidAttestation = derivations.find(({ derivation }) => derivation.kind === "invalid-attestation");
-  if (invalidAttestation?.derivation.kind === "invalid-attestation") {
-    return deriveUnavailableLoomStatus([
-      statusReason(
-        "authority-contradiction",
-        `${invalidAttestation.task.id} attestation mode could not derive its attestation context: ${invalidAttestation.derivation.error}`,
-        invalidAttestation.task.id,
-      ),
-    ]);
-  }
-  const dispatches = derivations.flatMap(({ task, derivation }): readonly WaveImplementationDispatch[] =>
-    derivation.kind === "dispatch" && !activeTaskIds.has(task.id) ? [derivation.dispatch] : []);
-  let recovery: WaveImplementationRecovery;
-  let message: string;
-  const startReadiness = outstanding.length === 0 ? deriveWaveStartReadiness(graph, waveTasks) : null;
-  if (startReadiness?.kind === "not-ready") {
-    recovery = canonicalRecord({ kind: "repair-wave-start-readiness", wave, failures: startReadiness.failures });
-    message = `Wave ${wave} implementation stopped but the Wave Gate cannot start: ${startReadiness.failures.join("; ")}`;
-  } else if (startReadiness?.kind === "ready") {
-    recovery = canonicalRecord({ kind: "start-wave-gate", wave });
-    message = `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`;
-  } else if (escalated.length > 0) {
-    recovery = canonicalRecord({
-      kind: "escalate-wave-implementation",
-      wave,
-      tasks: Object.freeze(escalated) as NonEmpty<(typeof escalated)[number]>,
-    });
-    message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure`;
-  } else if (dispatches.length > 0) {
-    recovery = canonicalRecord({
-      kind: "spawn-wave-implementation",
-      wave,
-      dispatches: Object.freeze(dispatches) as NonEmpty<WaveImplementationDispatch>,
-    });
-    message = `Wave ${wave} implementation is in progress; ${dispatches.length} task(s) are ready to dispatch` +
-      (active.length === 0 ? "" : ` and ${active.length} task(s) remain active`);
-  } else if (active.length > 0) {
-    recovery = canonicalRecord({
-      kind: "await-wave-implementation",
-      wave,
-      activeTaskIds: Object.freeze(active.map((task) => task.id)) as NonEmpty<string>,
-    });
-    message = `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`;
-  } else {
-    return deriveUnavailableLoomStatus([
-      statusReason("authority-contradiction", `Wave ${wave} has outstanding Tasks but no legal implementation recovery`),
-    ]);
-  }
-  const reasons: StatusReason[] = outstanding.flatMap((task) =>
-    task.status === "implemented"
-      ? []
-      : [statusReason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id)]);
-  for (const task of active) {
-    reasons.push(statusReason("task-running", `${task.id} already has active implementation authority`, task.id));
-  }
-  for (const task of escalated) {
-    reasons.push(statusReason(
+  const window = classifyImplementationWindow(graph, deps.implementationReservations);
+  if (window.kind === "not-in-window") return null;
+  if (window.kind === "contradiction") return deriveUnavailableLoomStatus([window.reason]);
+  if (window.kind === "unavailable") return unavailableStatus(window.message);
+  const { wave, recovery, message } = window;
+  const reasons: readonly StatusReason[] = [
+    ...window.pendingTaskIds.map((taskId) =>
+      statusReason("wave-implementation-pending", `${taskId} has not reached implemented`, taskId)),
+    ...window.activeTaskIds.map((taskId) =>
+      statusReason("task-running", `${taskId} already has active implementation authority`, taskId)),
+    ...window.escalated.map((task) => statusReason(
       "implementation-escalation-required",
       `${task.taskId} reached terminal implementation failure: ${task.failureKinds.join(", ")}`,
       task.taskId,
-    ));
-  }
-  reasons.push(statusReason(recovery.kind === "repair-wave-start-readiness" ? "wave-start-not-ready" : "wave-gate-not-started", message));
+    )),
+    statusReason(recovery.kind === "repair-wave-start-readiness" ? "wave-start-not-ready" : "wave-gate-not-started", message),
+  ];
 
   return canonicalRecord({
     schemaVersion: 1,
@@ -652,7 +528,7 @@ function projectedAdvisoryStatus(
 /** Anti-corruption adapter from the protected-state parser into the canonical status contract. */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
-  deps: GateDeps,
+  deps: StatusDeps,
   lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatus {

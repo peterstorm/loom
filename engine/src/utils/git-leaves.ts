@@ -1,12 +1,15 @@
 /**
  * The leaves Git can see below a repository path — in the worktree and at a
- * revision — for the artifact baseline and reviewed-workspace shells.
+ * revision. This module is the only place that asks Git for them.
  *
- * ONE worktree enumerator serves both the declared-artifact snapshot hasher
- * and the reviewed-workspace reader, so they agree by construction on ignored
- * files, deleted index entries, symlinks and empty directories. Commands here
- * THROW on failure (the `utils/git.ts` helpers warn and return `undefined`);
- * both callers fail closed on a thrown observation.
+ * ONE worktree enumerator (`worktreeVisibleLeafPaths`) serves the
+ * declared-artifact snapshot hasher, the reviewed-workspace reader, the Review
+ * Packet builder, the Wave lint shell and the task-local diff collector, so
+ * they agree by construction on literal pathspecs, ignore rules, deleted index
+ * entries, symlinks and empty directories. A path containing glob characters
+ * is always that literal path, never a pattern. Commands here THROW on
+ * failure; `utils/git.ts` wraps the enumerator in the warn-and-return Result
+ * adapters (`visibleLeavesAt`, `untrackedLeavesAt`) its callers expect.
  */
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
@@ -72,20 +75,36 @@ function worktreeLeaf(root: string, listed: string): WorktreeLeaf {
   return Object.freeze({ kind: "unsupported", path: listed });
 }
 
+/** Which worktree leaves to list: every Git-visible one, or only untracked ones. */
+export type WorktreeLeafSelection = "visible" | "untracked";
+
 /**
- * Every Git-visible leaf at or below one repository path, sorted: tracked
- * entries (including an index entry deleted from the worktree) and untracked
- * files Git does not ignore. Ignore rules are the repository's own (its
+ * The repository-relative paths of the Git-visible leaves at or below one
+ * repository path, unique and sorted: tracked entries (including an index
+ * entry deleted from the worktree) and untracked files Git does not ignore,
+ * or only the untracked ones. Ignore rules are the repository's own (its
  * `.gitignore` files, `info/exclude` and `core.excludesFile`), and a tracked
  * file is never ignored, exactly as Git never ignores it. An empty directory
  * contributes nothing; non-regular files (FIFOs, sockets) are not Git-visible.
+ * An untracked embedded repository lists as `dir/`, exactly as Git lists it.
+ * `core.fsmonitor` is disabled, so no repository-configured hook runs.
  */
-export function worktreeVisibleLeaves(root: string, path: string): readonly WorktreeLeaf[] {
+export function worktreeVisibleLeafPaths(
+  root: string,
+  path: string,
+  selection: WorktreeLeafSelection = "visible",
+): readonly string[] {
   const listed = nulSeparatedGitPaths(root, [
     "-c", "core.fsmonitor=false", "--literal-pathspecs",
-    "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", path,
+    "ls-files", ...(selection === "visible" ? ["--cached"] : []), "--others", "--exclude-standard", "-z", "--", path,
   ]);
-  return Object.freeze([...new Set(listed)].sort(compareStrings).map((leaf) => worktreeLeaf(root, leaf)));
+  return Object.freeze([...new Set(listed)].sort(compareStrings));
+}
+
+/** Every Git-visible leaf at or below one repository path, sorted and typed
+ *  by `lstat` (see `worktreeVisibleLeafPaths` for which leaves are visible). */
+export function worktreeVisibleLeaves(root: string, path: string): readonly WorktreeLeaf[] {
+  return Object.freeze(worktreeVisibleLeafPaths(root, path).map((leaf) => worktreeLeaf(root, leaf)));
 }
 
 /** The bytes Git stores for a present leaf: a file's content, or a symlink's
@@ -106,6 +125,19 @@ export function revisionTreeLeaves(root: string, revision: string, path: string)
     }
     return Object.freeze({ mode: match[1]!, sha: match[2]!, path: match[3]! });
   });
+}
+
+/**
+ * The leaves a Review Packet reviews for one scoped directory: exactly the
+ * worktree-visible leaves the reviewed-workspace observation and the
+ * declared-artifact snapshot hash, plus every leaf at the packet base. The
+ * base leaves are the one deliberate difference: the packet reviews a diff, so
+ * a leaf deleted since the base must still show its deletion, while the
+ * workspace observation hashes current bytes, where a deleted leaf has none.
+ */
+export function reviewedDirectoryLeafPaths(root: string, baseRevision: string, path: string): readonly string[] {
+  const atBase = revisionTreeLeaves(root, baseRevision, path).map((leaf) => leaf.path);
+  return Object.freeze([...new Set([...worktreeVisibleLeafPaths(root, path), ...atBase])].sort(compareStrings));
 }
 
 /** The paths that exist at a revision. Git has no empty trees, so a path

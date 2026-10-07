@@ -33,15 +33,10 @@ import {
   CATALOG_ROUTE_ENV,
   normalizeRunRoot,
   QUALIFIED_ROUTE_ENV,
-  scrubAmbientIssueRoute,
   withoutEmissionRouteDelta,
   withRouteEnv,
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
-
-// These fixtures pin the catalog issue route; an ambient Pi handshake must not
-// re-shape issued/retry prompts (see fixtures/issue-route-env).
-scrubAmbientIssueRoute();
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));

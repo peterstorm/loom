@@ -40,7 +40,6 @@ export { resumeWaveGateFacade } from './wave-gate';
 export { prepareWaveGateFacadeStart, startWaveGateFacade } from './wave-gate-start';
 export { recoverOrphanedWaveGateFacade, restartWaveGateFacade } from './wave-gate-replacement';
 export { applyWaveFacadeSubmission } from './wave-gate-submission';
-export { handleWaveReviewContext } from './wave-review-context';
 export { waveAdvisoryDecisionRequestId } from './wave-advisory-decision';
 export {
   inspectRemediationFacade,

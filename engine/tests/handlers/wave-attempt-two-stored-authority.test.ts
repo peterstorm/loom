@@ -15,7 +15,11 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveWaveAttemptTwo } from "../../src/handlers/helpers/programs/wave-review-retries";
-import { persistedWaveAttemptTwoCompatibilityProblem } from "../../src/core/wave-gate-membership";
+import {
+  deriveWaveAttemptTwoAuthority,
+  persistedWaveAttemptTwoCompatibilityProblem,
+  waveAttemptTwoRequestId,
+} from "../../src/core/wave-gate-membership";
 import { parseWaveRetryDiagnosticSection, WAVE_RETRY_PREAMBLE, WAVE_RETRY_FIXED_TAIL } from "../../src/core/reviewer-retry";
 import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { buildContextPacket, buildReviewerContextPacket, contextPacketDigest, parseContextPacket, encodeByteSection, type ContextPacket } from "../../src/orchestration/context-packets";
@@ -171,5 +175,39 @@ describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
     expect(persistedWaveAttemptTwoCompatibilityProblem(
       attemptOne, attemptTwo, packet, derived.packet,
     )).toBeNull();
+  });
+});
+
+/** The one canonical attempt-2 envelope both retry issuance and the
+ *  persisted-retry compatibility check derive. */
+describe("deriveWaveAttemptTwoAuthority", () => {
+  it("is exactly the envelope retry issuance publishes", async () => {
+    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const { handle, attemptOne } = await publishedAttemptOne("loom-envelope-attempt2-", policy.profile, "3", "4");
+    const derived = deriveWaveAttemptTwo(handle, attemptOne, "attempt 1 was malformed");
+    const published = authorityValue(parseStoredAgentRequestAuthority(derived.request.authority));
+    expect(deriveWaveAttemptTwoAuthority(attemptOne, derived.packet.digest)).toEqual({ ok: true, value: published });
+    expect(waveAttemptTwoRequestId(attemptOne)).toEqual({ ok: true, value: published.requestId });
+  });
+
+  it("refuses, with one message on every path, an attempt 1 whose request id has no attempt suffix", async () => {
+    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const { handle, attemptOne, packet } = await publishedAttemptOne("loom-envelope-suffix-", policy.profile, "5", "6");
+    const unsuffixed = { ...attemptOne, requestId: authorityValue(parseRequestId(`wave-request:${"7".repeat(32)}`)) };
+    const message = `Wave request ${unsuffixed.requestId} cannot derive canonical attempt-2 identity`;
+    expect(waveAttemptTwoRequestId(unsuffixed)).toEqual({ ok: false, error: message });
+    expect(deriveWaveAttemptTwoAuthority(unsuffixed, packet.digest)).toEqual({ ok: false, error: message });
+    expect(persistedWaveAttemptTwoCompatibilityProblem(unsuffixed, attemptOne, packet, packet)).toBe(message);
+    expect(() => deriveWaveAttemptTwo(handle, unsuffixed, "reason")).toThrow(message);
+  });
+
+  it("refuses a persisted retry whose envelope drifted from the derivation", async () => {
+    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const { handle, attemptOne, packet } = await publishedAttemptOne("loom-envelope-drift-", policy.profile, "8", "9");
+    const derived = deriveWaveAttemptTwo(handle, attemptOne, "attempt 1 was malformed");
+    const published = authorityValue(parseStoredAgentRequestAuthority(derived.request.authority));
+    const drifted = { ...published, modelProfile: "mechanical" } as typeof published;
+    expect(persistedWaveAttemptTwoCompatibilityProblem(attemptOne, drifted, packet, derived.packet))
+      .toBe("persisted attempt-2 request envelope does not derive from attempt 1");
   });
 });

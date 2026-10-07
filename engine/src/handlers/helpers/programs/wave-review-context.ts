@@ -39,14 +39,6 @@ export function issuedWaveProtocol(
   return issued.value;
 }
 
-/** The façade preserves its public compatibility name while the producer-owned core codec parses the wire bytes. */
-export function handleWaveReviewContext(
-  packets: readonly ContextPacket[],
-  digest: string,
-): WaveReviewContextRead {
-  return readWaveReviewContext(packets, digest);
-}
-
 export type ReadableWaveReviewContext = Exclude<WaveReviewContextRead, Readonly<{ kind: "corrupt" }>>;
 
 type WaveRequestContextRead =
@@ -60,7 +52,7 @@ export function readWaveRequestContext(
 ): WaveRequestContextRead {
   const packet = handle.readContext(authority.contextDigest);
   if (!packet.ok) return { ok: false, result: waveBlocked(handle, packet.error.message) };
-  const context = handleWaveReviewContext([packet.value], authority.contextDigest);
+  const context = readWaveReviewContext([packet.value], authority.contextDigest);
   if (context.kind === "corrupt") {
     const suffix = identifyRequest ? ` (request ${authority.requestId})` : "";
     return { ok: false, result: waveBlocked(handle, `${context.message}${suffix}`) };

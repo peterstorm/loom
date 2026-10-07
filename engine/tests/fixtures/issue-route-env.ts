@@ -2,9 +2,12 @@
  * Reviewer issue-route election fixtures. Route election is ambient-env
  * sensitive: observedReviewerIssueRoute() reads this process's
  * PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and fixturePiEnvironment spreads
- * process.env into every CLI child. Suites therefore pin the route they mean
- * explicitly, so an ambient Pi handshake (a wrapper session running the suite
- * under the qualified-local model) never flips the election.
+ * process.env into every CLI child. Importing ./pi-session pins the ambient
+ * route to the catalog route for the whole worker; a suite that never imports
+ * it but reads the election in-process calls `scrubAmbientIssueRoute` itself,
+ * and any suite opts into another route explicitly with `withRouteEnv`. So an
+ * ambient Pi handshake (a wrapper session running the suite under the
+ * qualified-local model) never flips the election.
  */
 import { emissionToolPrimaryInstruction, renderEmissionDescriptor } from "../../src/core/issued-emission-capability";
 
@@ -28,7 +31,9 @@ function applyOverlay(overlay: EnvironmentOverlay): void {
   }
 }
 
-/** Pin the suite's ambient state to the catalog route (call once at module top). */
+/** Pin the worker's ambient state to the catalog route. ./pi-session calls it
+ *  on import; a suite that does not import that fixture calls it once at
+ *  module top. */
 export function scrubAmbientIssueRoute(): void {
   applyOverlay(CATALOG_ROUTE_ENV);
 }

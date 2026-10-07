@@ -59,16 +59,6 @@ import {
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
 
-// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
-// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
-// fixturePiEnvironment spreads process.env into every CLI child. These
-// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
-// session running the suite under the qualified-local model) must not flip
-// the election and re-shape issued/retry prompts.
-for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
-  delete process.env[routeEnv];
-}
-
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const CURRENT_RUNTIME = captureLoomRuntimeIdentity(PACKAGE_ROOT);

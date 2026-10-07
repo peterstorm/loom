@@ -14,7 +14,7 @@ import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/p
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
 import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
 import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
-import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-review-context";
+import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
 import { waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import { deriveWaveAttemptTwo, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-review-retries";
@@ -30,15 +30,10 @@ import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixture
 import {
   CATALOG_ROUTE_ENV,
   QUALIFIED_ROUTE_ENV,
-  scrubAmbientIssueRoute,
   withoutEmissionRouteDelta,
   withRouteEnv,
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
-
-// These fixtures pin the catalog issue route; an ambient Pi handshake must not
-// re-shape issued/retry prompts (see fixtures/issue-route-env).
-scrubAmbientIssueRoute();
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -146,7 +141,7 @@ function registration(handle: RunDirHandle) {
 }
 function payload(handle: RunDirHandle, request: AgentRequestAuthority, findings: readonly ReviewerDraftV2[] = [], verdict = "resolved_by_remediation") {
   const packet = value(handle.readContext(request.contextDigest));
-  const context = handleWaveReviewContext([packet], packet.digest);
+  const context = readWaveReviewContext([packet], packet.digest);
   if (context.kind !== "loaded" || context.value.task === null || context.value.taskRun === null) throw new Error("expected issued Task context");
   const priors = context.value.task.priorFindings.map(({ id }) => ({ finding_id: id, verdict, reason: "  verified against issued bytes\nexact reason  " }));
   if (packet.schemaVersion === 2) return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,

@@ -15,11 +15,16 @@ import { parseReviewPath, type ReviewPath } from "./review-packet";
  * `null` means the path was absent. */
 export type ObservedArtifact = Readonly<{ path: string; bytes: Iterable<number> | null }>;
 
-/** One proven reviewed file: a canonical repository path and its owned bytes,
- * or `null` when absent. A scoped file is its own artifact; a scoped directory
+/** One proven reviewed file: a canonical repository path and its bytes, or
+ * `null` when absent. A scoped file is its own artifact; a scoped directory
  * contributes one artifact per Git-visible leaf below it, or a single absent
- * artifact when it has none. */
-export type ReviewedArtifact = Readonly<{ path: ReviewPath; bytes: readonly number[] | null }>;
+ * artifact when it has none.
+ *
+ * The bytes are held as their canonical base64 text, the exact encoding
+ * `headSha` commits to. A string is immutable by construction (a non-empty
+ * typed array cannot be frozen) and costs about 1.33 bytes per source byte,
+ * where the boxed `number[]` it replaced cost eight. */
+export type ReviewedArtifact = Readonly<{ path: ReviewPath; contentBase64: string | null }>;
 
 export type ReviewedWorkspaceAuthority = Readonly<{
   taskId: string;
@@ -31,23 +36,25 @@ export type ReviewedWorkspaceAuthority = Readonly<{
   authorityDigest?: string;
 }>;
 
+declare const REVIEWED_WORKSPACE: unique symbol;
+
 /** One observation owns both the exact bytes and their derived identity.
- * `reviewedWorkspaceObservation` and `parseReviewedWorkspaceSnapshot` derive
- * `headSha` from the artifacts. The type is structural and carries no brand,
- * so it does not prove that agreement: any caller can build one, and code that
- * needs it proven passes the value through `parseReviewedWorkspaceSnapshot`,
- * which recomputes `headSha`. */
+ * Only `reviewedWorkspaceObservation` mints one. The brand makes the
+ * headSha/artifact agreement a compile-time fact, and the module-private proof
+ * set makes it a runtime one: a value spread or rebuilt around the smart
+ * constructor (as a fake port could) keeps the brand's type but not the
+ * proof, so `admitReviewedWorkspace` refuses it without re-hashing anything. */
 export type ReviewedWorkspaceObservation = Readonly<{
+  readonly [REVIEWED_WORKSPACE]: true;
   taskId: string;
   headSha: string;
   scope: readonly ReviewPath[];
   artifacts: readonly ReviewedArtifact[];
 }>;
 
-/** The name for an observation that `parseReviewedWorkspaceSnapshot` checked
- * against one Task's exact review scope. It is an alias of
- * `ReviewedWorkspaceObservation`, not a distinct type. */
-export type ReviewedWorkspaceSnapshot = ReviewedWorkspaceObservation;
+/** Every observation `reviewedWorkspaceObservation` minted. Each one is frozen
+ * all the way down, so membership stays a true proof for its whole life. */
+const mintedObservations = new WeakSet<object>();
 
 /** A proven scope beside its proven artifacts. */
 export type ReviewedArtifacts = Readonly<{ scope: readonly ReviewPath[]; artifacts: readonly ReviewedArtifact[] }>;
@@ -68,6 +75,25 @@ function parseScope(scope: readonly unknown[]): DomainResult<readonly ReviewPath
   }
   if (new Set(paths).size !== paths.length) return failed("reviewed workspace scope must contain unique paths");
   return { ok: true, value: Object.freeze(paths.sort(compareStrings)) };
+}
+
+/** The canonical base64 of observed bytes. Encoding copies them out of any
+ * mutable shell buffer. A typed array holds only bytes by construction and
+ * encodes in place; any other iterable is materialized and checked first. */
+function canonicalBase64(path: ReviewPath, bytes: Iterable<number>): DomainResult<string, string> {
+  if (bytes instanceof Uint8Array) {
+    return { ok: true, value: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64") };
+  }
+  let materialized: readonly unknown[];
+  try {
+    materialized = Array.from(bytes);
+  } catch {
+    return failed(`reviewed workspace artifact ${path} does not contain iterable bytes`);
+  }
+  if (!materialized.every(isByte)) {
+    return failed(`reviewed workspace artifact ${path} contains an invalid byte`);
+  }
+  return { ok: true, value: Buffer.from(materialized).toString("base64") };
 }
 
 /** Artifacts sorted by path, each at or below a scoped path, every scoped
@@ -93,19 +119,12 @@ export function parseReviewedArtifacts(
       return failed(`reviewed workspace contains duplicate artifact ${path.value}`);
     }
     if (artifact.bytes === null) {
-      byPath.set(path.value, Object.freeze({ path: path.value, bytes: null }));
+      byPath.set(path.value, Object.freeze({ path: path.value, contentBase64: null }));
       continue;
     }
-    let materialized: readonly unknown[];
-    try {
-      materialized = Array.from(artifact.bytes);
-    } catch {
-      return failed(`reviewed workspace artifact ${path.value} does not contain iterable bytes`);
-    }
-    if (!materialized.every(isByte)) {
-      return failed(`reviewed workspace artifact ${path.value} contains an invalid byte`);
-    }
-    byPath.set(path.value, Object.freeze({ path: path.value, bytes: Object.freeze(materialized) }));
+    const content = canonicalBase64(path.value, artifact.bytes);
+    if (!content.ok) return content;
+    byPath.set(path.value, Object.freeze({ path: path.value, contentBase64: content.value }));
   }
   const paths = [...byPath.keys()];
   const missing = scope.value.find((scoped) => !paths.some((path) => artifactCovers(scoped, path)));
@@ -118,12 +137,11 @@ export function parseReviewedArtifacts(
 
 /** Canonical content identity for proven bytes, independent of Git state. */
 export function reviewedWorkspaceHeadSha(artifacts: readonly ReviewedArtifact[]): string {
-  return sha256Hex(JSON.stringify(artifacts.map(({ path, bytes }) =>
-    [path, bytes === null ? null : Buffer.from(Uint8Array.from(bytes)).toString("base64")])));
+  return sha256Hex(JSON.stringify(artifacts.map(({ path, contentBase64 }) => [path, contentBase64])));
 }
 
-/** Smart constructor: prove the observed scope and bytes, copying mutable
- * shell buffers, then derive the digest. */
+/** Smart constructor, and the only mint: prove the observed scope and bytes,
+ * copying mutable shell buffers, then derive the digest. */
 export function reviewedWorkspaceObservation(
   taskId: string,
   scope: readonly string[],
@@ -131,23 +149,27 @@ export function reviewedWorkspaceObservation(
 ): DomainResult<ReviewedWorkspaceObservation, string> {
   const parsed = parseReviewedArtifacts(scope, artifacts);
   if (!parsed.ok) return parsed;
-  return {
-    ok: true,
-    value: Object.freeze({
-      taskId,
-      scope: parsed.value.scope,
-      artifacts: parsed.value.artifacts,
-      headSha: reviewedWorkspaceHeadSha(parsed.value.artifacts),
-    }),
-  };
+  const observation = Object.freeze({
+    taskId,
+    scope: parsed.value.scope,
+    artifacts: parsed.value.artifacts,
+    headSha: reviewedWorkspaceHeadSha(parsed.value.artifacts),
+  }) as ReviewedWorkspaceObservation;
+  mintedObservations.add(observation);
+  return { ok: true, value: observation };
 }
 
-/** Parse an untrusted observation against one Task's exact review scope. */
-export function parseReviewedWorkspaceSnapshot(
+/** Admit a minted observation as one Task's review snapshot: it must be that
+ * Task's own and cover exactly that Task's review scope. Bytes and digest are
+ * not derived again, because minting already proved them. */
+export function admitReviewedWorkspace(
   taskId: string,
   expectedScope: readonly string[],
   observation: ReviewedWorkspaceObservation,
-): DomainResult<ReviewedWorkspaceSnapshot, string> {
+): DomainResult<ReviewedWorkspaceObservation, string> {
+  if (!mintedObservations.has(observation)) {
+    return failed(`Task ${taskId} workspace observation was not minted by the reviewed-workspace core`);
+  }
   const canonicalScope = [...expectedScope].sort();
   if (new Set(canonicalScope).size !== canonicalScope.length) {
     return failed(`Task ${taskId} expected review scope contains duplicate paths`);
@@ -157,16 +179,7 @@ export function parseReviewedWorkspaceSnapshot(
       observation.scope.some((path, index) => path !== canonicalScope[index])) {
     return failed(`Task ${taskId} workspace observation differs from its exact review scope`);
   }
-  const parsed = parseReviewedArtifacts(canonicalScope, observation.artifacts);
-  if (!parsed.ok) return failed(`Task ${taskId}: ${parsed.error}`);
-  const computed = reviewedWorkspaceHeadSha(parsed.value.artifacts);
-  if (observation.headSha !== computed) {
-    return failed(`Task ${taskId} workspace bytes disagree with observed workspaceHeadSha`);
-  }
-  return {
-    ok: true,
-    value: Object.freeze({ taskId, scope: parsed.value.scope, artifacts: parsed.value.artifacts, headSha: computed }),
-  };
+  return { ok: true, value: observation };
 }
 
 export function reviewedWorkspaceDrift(

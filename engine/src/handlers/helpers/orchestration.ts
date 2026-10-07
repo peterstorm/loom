@@ -89,13 +89,15 @@ import type {
   WaveCompletionResultObservation,
 } from "../../types";
 import { deriveWaveReadiness } from "../../core/wave-gate-machine";
-import { type GateDeps, type ImplementationReservationStatusObservation } from "../../core/wave-gate-checks";
+import type { GateDeps } from "../../core/wave-gate-checks";
+import type { ImplementationReservationStatusObservation } from "../../core/implementation-window";
 import {
   deriveLoomStatusFromParsedGraph,
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
   type AdvisoryApprovalObservation,
+  type StatusDeps,
 } from "../../core/loom-status";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
 import {
@@ -166,6 +168,7 @@ import {
 import type { RegisteredWaveGateProgram } from "../../core/wave-gate-program";
 import { advisoryDecisionApproved, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
+import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
@@ -181,11 +184,6 @@ import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFaca
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
-const OPERATIONS = ["status", "inspect", "brief", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate", "attest"] as const;
-type Operation = (typeof OPERATIONS)[number];
-
-const isOperation = (value: string | undefined): value is Operation =>
-  value !== undefined && (OPERATIONS as readonly string[]).includes(value);
 
 function usage(): HookResult {
   return {
@@ -261,7 +259,7 @@ function parseStatusGraph(rawGraph: unknown): ReturnType<typeof parseTaskGraph> 
 
 function renderParsedStatus(
   parsedGraph: ReturnType<typeof parseStatusGraph>,
-  deps: GateDeps,
+  deps: StatusDeps,
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation,
 ): string {
@@ -271,7 +269,7 @@ function renderParsedStatus(
 
 export function renderStatus(
   rawGraph: unknown,
-  deps: GateDeps,
+  deps: StatusDeps,
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation = Object.freeze({ kind: "unverified" }),
 ): string {
@@ -526,7 +524,7 @@ async function deriveCurrentOrchestrationStatus(
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
   const workspace = statusWorkspaceObservation(parsedGraph, statePath);
   const completionResult = statusCompletionResult(parsedGraph, binding, workspace);
-  const statusDeps: GateDeps = Object.freeze({
+  const statusDeps: StatusDeps = Object.freeze({
     ...productionGateDeps,
     currentWaveWorkspace: workspace,
     currentWaveCompletionResult: completionResult,
@@ -1650,8 +1648,8 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
 // ---------------------------------------------------------------------------
 
 const handler: HookHandler = async (stdin, args) => {
-  const operation = args[0];
-  if (!isOperation(operation)) return usage();
+  const operation = parseOrchestrationOperation(args[0]);
+  if (operation === null) return usage();
   const rest = args.slice(1);
 
   switch (operation) {

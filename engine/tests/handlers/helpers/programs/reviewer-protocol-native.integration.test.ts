@@ -13,7 +13,7 @@ import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-revie
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../../../src/state-manager";
-import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-review-context";
+import { readWaveReviewContext } from "../../../../src/core/wave-review-authority";
 import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/registration";
 import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFromEvidence } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
@@ -262,7 +262,7 @@ async function resumeWave(root: string, handle: RunDirHandle): Promise<Action> {
 }
 function wavePayload(handle: RunDirHandle, request: AgentRequestAuthority): string {
   const packet = value(handle.readContext(request.contextDigest));
-  const context = handleWaveReviewContext([packet], packet.digest);
+  const context = readWaveReviewContext([packet], packet.digest);
   if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("missing issued Wave subject");
   return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: context.value.packetId,
     generation: context.value.taskRun.generation, prior_findings: [], findings: [] });

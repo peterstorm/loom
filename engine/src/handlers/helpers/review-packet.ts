@@ -30,9 +30,9 @@ import {
   diffBinaryFileFromRevision,
   diffBinaryUntrackedFile,
   isTrackedAt,
-  visibleLeavesAt,
   type GitDiffResult,
 } from "../../utils/git";
+import { reviewedDirectoryLeafPaths } from "../../utils/git-leaves";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
 
@@ -138,20 +138,17 @@ function nulSeparated(output: string): readonly string[] {
   return output.split("\0").filter((entry) => entry !== "");
 }
 
-/** The Git-visible leaves of a scoped directory — present now or at the
- * packet base, so a deleted leaf still shows — or null when the path names no
- * directory in either. Ignored files stay out, as they do for directory
- * artifact snapshots. */
+/** The leaves a scoped directory contributes — see `reviewedDirectoryLeafPaths`
+ * for the one leaf-set contract the packet shares with the reviewed-workspace
+ * observation — or null when the path names no directory now or at the
+ * packet base. */
 function directoryLeaves(root: string, baseSha: BaseSha, path: string): readonly string[] | null {
   const inspected = inspectRepositoryPath(root, path, "review packet path");
   const directoryNow = inspected.exists && lstatSync(inspected.absolute).isDirectory();
   const directoryAtBase = nulSeparated(git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root))
     .some((entry) => entry.split("\t")[0]!.split(" ")[1] === "tree");
   if (!directoryNow && !directoryAtBase) return null;
-  const visible = visibleLeavesAt(root, path);
-  if (!visible.ok) throw new Error(visible.error);
-  const atBase = nulSeparated(git(["ls-tree", "-r", "-z", "--name-only", "--full-tree", baseSha, "--", path], root));
-  return [...new Set([...visible.paths, ...atBase])].sort(compareStrings);
+  return reviewedDirectoryLeafPaths(root, baseSha, path);
 }
 
 /** Expand the scope into the files the packet reviews. A file scoped both

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
-import { handleWaveReviewContext } from "../../../src/handlers/helpers/programs/wave-review-context";
+import { readWaveReviewContext } from "../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests as waveRequestsWithBoundary } from "../../../src/handlers/helpers/programs/wave-review-requests";
 import { waveSpecCheckScope } from "../../../src/core/wave-review-authority";
 import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
@@ -140,7 +140,7 @@ describe("registered Wave spec-check scope", () => {
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     expect(specRequest).toBeDefined();
     const authority = specRequest!.authority as AgentRequestAuthority;
-    const context = handleWaveReviewContext(batch.packets, authority.contextDigest);
+    const context = readWaveReviewContext(batch.packets, authority.contextDigest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded" || context.value.subject.role !== "spec-check-invoker") return;
     const scope = context.value.specCheckScope;
@@ -239,7 +239,7 @@ describe("registered Wave spec-check scope", () => {
       "focused-review",
     ]);
     for (const authority of authorities) {
-      const context = handleWaveReviewContext(batch.packets, authority.contextDigest);
+      const context = readWaveReviewContext(batch.packets, authority.contextDigest);
       expect(context.kind).toBe("loaded");
       if (context.kind !== "loaded") continue;
       expect(context.value.runId).toBe(created.value.runId);
@@ -663,7 +663,7 @@ describe("Wave frozen source authority", () => {
         continue;
       }
       expect(source).toBeDefined();
-      const context = handleWaveReviewContext([packet], packet.digest);
+      const context = readWaveReviewContext([packet], packet.digest);
       if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("reviewer context must load");
       const decoded = parseWaveFrozenSource(JSON.parse(Buffer.from(source!.bytes).toString("utf8")));
       if (!decoded.ok) throw new Error(decoded.error);
@@ -675,16 +675,26 @@ describe("Wave frozen source authority", () => {
     }
   });
 
+  // Hostile observations built around the smart constructor, as a fake port
+  // could. Each keeps the brand's type through the spread but not the mint's
+  // proof, so the batch refuses it before reading a byte; the mint's own
+  // refusals of these shapes are pinned in tests/core/reviewed-workspace.test.ts.
   it.each([
-    ["missing artifact", { ...first, artifacts: [] }, "omitted declared artifact"],
-    ["mismatched digest", { ...first, headSha: "f".repeat(64) }, "disagree with observed workspaceHeadSha"],
-    ["duplicate artifact", { ...first, artifacts: [...first.artifacts, ...first.artifacts] }, "duplicate artifact"],
-    // A hostile observation built around the smart constructor, as a fake port could.
-    ["out-of-scope artifact", { ...first, artifacts: [{ path: "src/foreign.ts" as (typeof first.artifacts)[number]["path"], bytes: [] }] }, "out-of-scope artifact"],
-  ] as const)("refuses a %s observation", (_name, malformed, message) => {
+    ["missing artifact", { ...first, artifacts: [] }],
+    ["mismatched digest", { ...first, headSha: "f".repeat(64) }],
+    ["duplicate artifact", { ...first, artifacts: [...first.artifacts, ...first.artifacts] }],
+    ["out-of-scope artifact", { ...first, artifacts: [{ path: "src/foreign.ts" as (typeof first.artifacts)[number]["path"], contentBase64: "" }] }],
+  ] as const)("refuses a %s observation", (_name, malformed) => {
     const batch = prepare([malformed, second]);
     expect(batch.ok).toBe(false);
-    if (!batch.ok) expect(batch.error.message).toContain(message);
+    if (!batch.ok) expect(batch.error.message).toBe("Task T1 workspace observation was not minted by the reviewed-workspace core");
+  });
+
+  it("refuses an honestly minted observation of another scope", () => {
+    const otherScope = observedWorkspace("T1", ["src/b.ts"], [{ path: "src/b.ts", bytes: Buffer.from("first task") }]);
+    const batch = prepare([otherScope, second]);
+    expect(batch.ok).toBe(false);
+    if (!batch.ok) expect(batch.error.message).toBe("Task T1 workspace observation differs from its exact review scope");
   });
 
   it("refuses missing, duplicate, and foreign Task observations", () => {
@@ -1030,7 +1040,7 @@ describe("wave-review-authority spec-check scope decoding", () => {
     const packet = packetFor([{
       id: "T1", description: "legacy", completionAnchors: ["FR-1"], contributions: [], declaredFiles: ["a.ts"],
     }]);
-    const context = handleWaveReviewContext([packet], packet.digest);
+    const context = readWaveReviewContext([packet], packet.digest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded" || context.value.specCheckScope === null) return;
     expect(context.value.specCheckScope[0]?.modifiedFiles).toEqual([]);
@@ -1041,13 +1051,13 @@ describe("wave-review-authority spec-check scope decoding", () => {
       id: "T1", description: "current", completionAnchors: ["FR-1"], contributions: [],
       declaredFiles: ["a.ts"], modifiedFiles: ["a.ts"],
     }]);
-    expect(handleWaveReviewContext([current], current.digest).kind).toBe("loaded");
+    expect(readWaveReviewContext([current], current.digest).kind).toBe("loaded");
 
     const blank = packetFor([{
       id: "T1", description: "blank", completionAnchors: ["FR-1"], contributions: [],
       declaredFiles: ["a.ts"], modifiedFiles: ["  "],
     }]);
-    expect(handleWaveReviewContext([blank], blank.digest).kind).toBe("corrupt");
+    expect(readWaveReviewContext([blank], blank.digest).kind).toBe("corrupt");
   });
 
   it("accepts repeated modified paths, which the state schema also accepts", () => {
@@ -1057,7 +1067,7 @@ describe("wave-review-authority spec-check scope decoding", () => {
       id: "T1", description: "repeated", completionAnchors: ["FR-1"], contributions: [],
       declaredFiles: ["a.ts"], modifiedFiles: ["a.ts", "a.ts"],
     }]);
-    expect(handleWaveReviewContext([repeated], repeated.digest).kind).toBe("loaded");
+    expect(readWaveReviewContext([repeated], repeated.digest).kind).toBe("loaded");
   });
 });
 
@@ -1080,6 +1090,7 @@ describe("an installed epoch is replayed only when it is the same epoch", () => 
     batchEpoch: DIGEST("b"),
     specCheckDocuments: documents,
     settledFloor,
+    subjects: Object.freeze([]),
     requests: Object.freeze([]),
     packets: Object.freeze([]),
     taskRuns: Object.freeze([]),
