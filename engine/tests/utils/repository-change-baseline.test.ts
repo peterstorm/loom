@@ -1,14 +1,13 @@
 import { artifactBaselineRepository, type ArtifactBaselineRepository } from "../fixtures/artifact-baseline-repository";
-import { execFileSync } from "node:child_process";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { git } from "../fixtures/git-repository";
 import {
   chmodSync,
   existsSync,
-  mkdtempSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -94,19 +93,21 @@ describe("repository attempt change boundaries", () => {
     // `git diff --name-only` re-hashes a stat-dirty tracked file through its
     // clean filter, so the change boundary must name dirty paths through the
     // shadow administration directory, where no repository filter is defined.
-    const root = mkdtempSync(join(tmpdir(), "loom-change-baseline-filter-"));
+    const root = canonicalTempDir("loom-change-baseline-filter-");
     cleanup.push(root);
     const marker = join(root, "CLEAN_EXECUTED");
-    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
-    git("init", "--quiet");
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "loom@example.invalid"]);
+    git(root, ["config", "user.name", "Loom Test"]);
+    git(root, ["config", "commit.gpgsign", "false"]);
     writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
     writeFileSync(join(root, "data.dat"), "before\n");
     writeFileSync(join(root, "staged.dat"), "before\n");
-    git("add", ".");
-    git("-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base");
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
     writeFileSync(join(root, "staged.dat"), "staged\n");
-    git("add", "staged.dat");
-    git("config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`);
+    git(root, ["add", "staged.dat"]);
+    git(root, ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`]);
     writeFileSync(join(root, "data.dat"), "after\n");
     writeFileSync(join(root, "new.dat"), "untracked\n");
 
