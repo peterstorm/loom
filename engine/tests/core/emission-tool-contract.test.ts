@@ -3,7 +3,7 @@ import {
   EMISSION_TOOL_SPECS, frozenPayloadSchemaParameters, issueEmissionBinding,
   type EmissionSchemaVersion, type EmissionToolSpec,
 } from "../../src/core/emission-tool";
-import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/harness-capture";
+import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/emission-tool";
 import type { PayloadProducerKindName } from "../../src/core/model-profiles";
 import { emissionToolDefinition } from "../../../pi/emission-tool";
 import { JUDGE_VERDICT_SCHEMA_V1, JUDGE_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/panel-contract";
@@ -89,7 +89,7 @@ describe("emission tool parameter schemas byte-match the frozen payload schema b
  * proven where the tool is actually REGISTERED, not only at the parameters
  * constructor above. `emissionToolDefinition` is the production definition
  * pi/emission-readiness.ts registers — the same definition the readiness barrier and
- * the Pi validation suite (`engine/tests/pi/emission-tool.test.ts`) drive —
+ * the Pi validation suite (`engine/tests/pi/emission-tool-runtime.test.ts`) drive —
  * so one minted binding per supported (kind, version) registry cell proves
  * 100% of the per-kind emission-tool parameter schemas byte-match the frozen
  * payload schema bytes AT the registered surface: the exact tool name, the

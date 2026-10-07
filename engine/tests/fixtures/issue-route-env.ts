@@ -6,7 +6,7 @@
  * explicitly, so an ambient Pi handshake (a wrapper session running the suite
  * under the qualified-local model) never flips the election.
  */
-import { emissionToolPrimaryInstruction, renderEmissionDescriptor } from "../../src/core/spawn-admission";
+import { emissionToolPrimaryInstruction, renderEmissionDescriptor } from "../../src/core/issued-emission-capability";
 
 /** A process-environment overlay: `undefined` unsets the variable for the operation. */
 export type EnvironmentOverlay = Readonly<Record<string, string | undefined>>;

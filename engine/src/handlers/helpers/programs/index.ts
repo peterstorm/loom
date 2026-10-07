@@ -19,7 +19,7 @@ export { publishedReviewerRequest } from './durable-requests';
 export { reviewerProtocolResolver } from './reviewer-protocol-resolution';
 // `renderSpawnTask` is the durable-compatibility/extraction-only render: it
 // never carries an issued emission descriptor. The program-path emission
-// seam (`renderReviewProgramSpawnTask`/`publishReviewInitialBatch` and their
+// seam (`renderReviewProgramSpawn`/`publishReviewInitialBatch` and their
 // required `RegisteredReviewProgram` authority) is deliberately NOT on this
 // surface — descriptor/route projection is internal to the programs volume,
 // and publication without an explicit route decision is unrepresentable for

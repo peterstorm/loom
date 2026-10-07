@@ -26,7 +26,7 @@ import {
   REVIEWER_OUTPUT_CONTRACT,
 } from "../../engine/src/core/reviewer-contract";
 import { renderReviewerWireInstructions } from "../../engine/src/core/reviewer-protocol";
-import { emissionToolPrimaryInstruction } from "../../engine/src/core/spawn-admission";
+import { emissionToolPrimaryInstruction } from "../../engine/src/core/issued-emission-capability";
 import type { IssuedEmissionBinding } from "../../engine/src/core/emission-tool";
 import type { CalibrationCase } from "../../engine/src/core/model-calibration";
 import { err, ok, type Result } from "../kernel";

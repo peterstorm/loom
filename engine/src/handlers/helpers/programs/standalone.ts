@@ -39,7 +39,7 @@ import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standalo
 import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
-import { observedReviewerIssueRoute, renderReviewProgramSpawnTask } from './spawn-task';
+import { observedReviewerIssueRoute, renderReviewProgramSpawn } from './spawn-task';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { type RegisteredStandaloneProgram } from './registration';
 
@@ -768,7 +768,7 @@ async function resumeAwaitingResults(
       idempotencyKey: { runId: handle.runId, effectId: effectId.value },
       receipt: publication.receipt,
       requests: missing.map((request) => {
-        const task = renderReviewProgramSpawnTask(
+        const spawn = renderReviewProgramSpawn(
           handle,
           request.authority,
           "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.",
@@ -778,8 +778,8 @@ async function resumeAwaitingResults(
         return {
           ...request,
           task: request.authority.attempt === 2
-            ? standaloneRetryTask(task, rejectedDiagnostics.get(request.authority.slotId) ?? null, activeAuthority)
-            : task,
+            ? standaloneRetryTask(spawn.task, spawn.route, rejectedDiagnostics.get(request.authority.slotId) ?? null, activeAuthority)
+            : spawn.task,
         };
       }),
     } };

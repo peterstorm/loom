@@ -51,7 +51,7 @@ export type RegisteredFacadeProgram = RegisteredStandaloneProgram | RegisteredRe
  * (schemaVersion, reviewerProtocol digest) flow through the program path as
  * explicit inputs to the projection seam instead of a second ambient read
  * inside the render. Review-program callers cross the required
- * `renderReviewProgramSpawnTask`/`publishReviewInitialBatch` interfaces;
+ * `renderReviewProgramSpawn`/`publishReviewInitialBatch` interfaces;
  * durable compatibility replay remains the separate authority-free render.
  */
 export type RegisteredReviewProgram = RegisteredStandaloneProgram | RegisteredWaveGateProgram;

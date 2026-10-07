@@ -34,7 +34,7 @@ import {
 //
 // Purity boundary: this module is a declared pure module, so it never imports
 // the emission transport modules (`emission-ingestion`/`emission-tool`/
-// `harness-capture`). The kernel capabilities arrive as the injected port —
+// `emission-observation`). The kernel capabilities arrive as the injected port —
 // `legacy-panel-decisions`, which imports the emission transport, supplies the
 // ONE production adapter. The structural types below mirror the kernel's frozen contract
 // shapes; a kernel drift fails to compile at the adapter, never silently

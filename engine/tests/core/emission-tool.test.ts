@@ -2,20 +2,18 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   acknowledgeEmissionExecution,
-  EMISSION_CONSTRAINED_SAMPLING_REQUEST,
-} from "../../src/core/harness-capture";
-import {
-  admitEmissionArguments,
   admitIssuedEmissionArguments,
   canonicalizeEmissionWireArguments,
+  EMISSION_CONSTRAINED_SAMPLING_REQUEST,
   EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
+  issuedEmissionParameters,
   issueEmissionBinding,
-  notProvidedEmissionCapability,
-  providedEmissionCapability,
   type EmissionArgumentAdmission,
   type EmissionParseFailureCode,
   type EmissionSchemaVersion,
+  type EmissionToolSpec,
+  type IssuedEmissionBinding,
 } from "../../src/core/emission-tool";
 import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/model-profiles";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
@@ -27,7 +25,7 @@ import {
   validReviewerArgumentsV3,
   whitespaceOnlyArguments,
 } from "../fixtures/emission-arguments";
-import { canonicalStructuralEquals, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
+import { canonicalStructuralEquals } from "../../src/core/orchestration-contract/identity";
 
 /** A binding for one registry cell, through the ONE mint. */
 function mintedBinding<K extends PayloadProducerKindName>(kind: K, version: EmissionSchemaVersion) {
@@ -35,6 +33,11 @@ function mintedBinding<K extends PayloadProducerKindName>(kind: K, version: Emis
   if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
   return minted.value;
 }
+
+const REVIEWER_V2 = mintedBinding("reviewer-payload", "v2");
+const REVIEWER_V3 = mintedBinding("reviewer-payload", "v3");
+const JUDGE_V1 = mintedBinding("judge-verdict", "v1");
+const REFUTATION_V1 = mintedBinding("refutation-verdict", "v1");
 
 /** Non-empty prose matching the frozen verdict schemas' min(1) constraints. */
 const proseArb = fc.stringMatching(/^[a-z0-9][a-z0-9 .,;:\-]{0,60}$/);
@@ -117,9 +120,9 @@ describe("EMISSION_TOOL_SPECS", () => {
   });
 });
 
-describe("admitEmissionArguments", () => {
+describe("admitIssuedEmissionArguments — the ONE admission under an issued binding", () => {
   it("admits valid reviewer-payload arguments through the same full parser the fallback uses", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v2", REVIEWER_PAYLOAD_EXAMPLE_V2);
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V2, REVIEWER_PAYLOAD_EXAMPLE_V2);
     expect(admitted.kind).toBe("valid");
     if (admitted.kind === "valid") {
       expect(canonicalStructuralEquals(admitted.payload, REVIEWER_PAYLOAD_EXAMPLE_V2)).toBe(true);
@@ -128,7 +131,7 @@ describe("admitEmissionArguments", () => {
 
   it("admits valid standalone-successor (v3) arguments through the registry's v3 parser", () => {
     const payload = validReviewerArgumentsV3();
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", payload);
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V3, payload);
     expect(admitted.kind).toBe("valid");
     if (admitted.kind === "valid") {
       expect(canonicalStructuralEquals(admitted.payload, payload)).toBe(true);
@@ -136,12 +139,12 @@ describe("admitEmissionArguments", () => {
   });
 
   it("admits valid judge-verdict arguments — shape, score domain, prose sanitization", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", validJudgeArguments("extensibility"));
+    const admitted = admitIssuedEmissionArguments(JUDGE_V1, validJudgeArguments("extensibility"));
     expect(admitted.kind).toBe("valid");
   });
 
   it("admits valid refutation-verdict arguments", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", validRefutationArguments("reproduction"));
+    const admitted = admitIssuedEmissionArguments(REFUTATION_V1, validRefutationArguments("reproduction"));
     expect(admitted.kind).toBe("valid");
   });
 
@@ -159,7 +162,7 @@ describe("admitEmissionArguments", () => {
           { minLength: 1, maxLength: 4 },
         ),
         (criterion, rankings) => {
-          const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", { criterion, rankings });
+          const admitted = admitIssuedEmissionArguments(JUDGE_V1, { criterion, rankings });
           return admitted.kind === "valid";
         },
       ),
@@ -167,7 +170,7 @@ describe("admitEmissionArguments", () => {
   });
 
   it("refuses schema-invalid arguments as never-ingestable with the parse's own code", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", {
+    const admitted = admitIssuedEmissionArguments(JUDGE_V1, {
       criterion: "extensibility",
       rankings: [{ candidate: "candidate-x.md", score: 11, fatal_flaw: null, strongest_idea: "out of the score domain" }],
     });
@@ -199,8 +202,8 @@ describe("admitEmissionArguments", () => {
     const issues = parsed.error.issues;
     expect(issues.length).toBeGreaterThan(5);
 
-    const first = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", args);
-    const second = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", args);
+    const first = admitIssuedEmissionArguments(JUDGE_V1, args);
+    const second = admitIssuedEmissionArguments(JUDGE_V1, args);
     expect(first.kind).toBe("refused");
     if (first.kind !== "refused") return;
     // Deterministic: structurally equal arguments refuse with the identical
@@ -218,7 +221,7 @@ describe("admitEmissionArguments", () => {
   });
 
   it("refuses prose-brace payloads the sanitization strips to nothing", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", {
+    const admitted = admitIssuedEmissionArguments(REFUTATION_V1, {
       criterion: "reproduction",
       verdicts: [{ finding_id: "T1:x-1", verdict: "upheld", reasoning: " { } " }],
     });
@@ -228,22 +231,40 @@ describe("admitEmissionArguments", () => {
   it("refuses arguments that cannot be serialized deterministically", () => {
     const circular: Record<string, unknown> = { criterion: "x" };
     circular["self"] = circular;
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", circular);
+    const admitted = admitIssuedEmissionArguments(JUDGE_V1, circular);
     expect(admitted.kind).toBe("refused");
     if (admitted.kind === "refused") expect(admitted.code).toBe("invalid-json");
   });
 
-  it("refuses an unsupported schema version", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v2", {});
-    expect(admitted.kind).toBe("refused");
-    if (admitted.kind === "refused") {
-      expect(admitted.code).toBe("unsupported-schema-version");
-      expect(admitted.message).toContain("v2");
+  it("refuses an unsupported schema version at the mint, where it is reachable — no binding, no admission", () => {
+    // The (kind, version) degradation is an issuance refusal: the mint is the
+    // only producer of a binding, so admission never sees an unsupported cell.
+    const minted = issueEmissionBinding({ requestId: "request:emission-tool", kind: "judge-verdict", version: "v2" });
+    expect(minted.ok).toBe(false);
+    if (!minted.ok) {
+      expect(minted.error.code).toBe("unsupported-schema-version");
+      expect(minted.error.message).toContain("v2");
+    }
+  });
+
+  it("treats a binding forged past the mint as a broken invariant, never as refusable model input", () => {
+    // Forging needs an explicit cast past the nominal brand; the one
+    // binding→cell lookup then throws rather than inventing a refusal code.
+    const forged = { ...JUDGE_V1, version: "v2" } as unknown as IssuedEmissionBinding;
+    expect(() => admitIssuedEmissionArguments(forged, validJudgeArguments("extensibility"))).toThrow(/invariant failed/);
+    expect(() => issuedEmissionParameters(forged)).toThrow(/invariant failed/);
+  });
+
+  it("registers exactly the binding cell's frozen parameters — the one lookup both shells read", () => {
+    for (const binding of [REVIEWER_V2, REVIEWER_V3, JUDGE_V1, REFUTATION_V1]) {
+      const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[binding.kind.kind];
+      const cell = spec.schemaVersions[binding.version];
+      expect(issuedEmissionParameters(binding)).toEqual(frozenPayloadSchemaParameters(cell!.schemaBytes));
     }
   });
 
   it("refuses reviewer-payload arguments that do not conform to the issued v2 schema", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v2", { arbitrary: "not a payload" });
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V2, { arbitrary: "not a payload" });
     expect(admitted.kind).toBe("refused");
     if (admitted.kind === "refused") {
       expect(admitted.code).toBe("invalid-payload");
@@ -252,7 +273,7 @@ describe("admitEmissionArguments", () => {
   });
 
   it("refuses arguments whose serialized bytes exceed the reviewer payload byte budget", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v2", {
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V2, {
       schemaVersion: 2,
       kind: "standalone-review",
       findings: [],
@@ -265,33 +286,6 @@ describe("admitEmissionArguments", () => {
   });
 });
 
-describe("EmissionToolCapability", () => {
-  it("mints the provided capability with its branded schema digest", () => {
-    const digest = "a".repeat(64) as ArtifactDigest;
-    const capability = providedEmissionCapability(digest);
-    expect(canonicalStructuralEquals(capability, { kind: "provided", schemaDigest: digest })).toBe(true);
-  });
-
-  it("mints the not-provided capability with its degradation class as data", () => {
-    const refused = notProvidedEmissionCapability(
-      "the loaded runtime revision does not contain the emission-tool module",
-      "refuse",
-    );
-    expect(canonicalStructuralEquals(refused, {
-      kind: "not-provided",
-      reason: "the loaded runtime revision does not contain the emission-tool module",
-      degradation: "refuse",
-    })).toBe(true);
-
-    const extraction = notProvidedEmissionCapability("no Loom extension seam", "extraction");
-    expect(canonicalStructuralEquals(extraction, {
-      kind: "not-provided",
-      reason: "no Loom extension seam",
-      degradation: "extraction",
-    })).toBe(true);
-  });
-});
-
 describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", () => {
   /** Whitespace-only prose the frozen bytes' shape rules admit: JSON Schema
    *  expresses minLength only — the zod refinements (trim, NUL, surrogate,
@@ -299,7 +293,7 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
    *  emission edge's parse instead (AD-5's stated limit on the frozen
    *  schema's guarantees). The REAL pi validation half — these arguments
    *  passing `validateToolArguments` against the exact frozen bytes — is
-   *  pinned by engine/tests/pi/emission-tool.test.ts. */
+   *  pinned by engine/tests/pi/emission-tool-runtime.test.ts. */
   const whitespacePerKind: readonly (readonly [PayloadProducerKindName, EmissionSchemaVersion])[] = [
     ["reviewer-payload", "v2"],
     ["judge-verdict", "v1"],
@@ -308,24 +302,21 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
 
   it("refuses whitespace-only advisory prose the frozen JSON Schema's shape rules admit", () => {
     for (const [kindName, version] of whitespacePerKind) {
-      const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS[kindName], version, whitespaceOnlyArguments(kindName));
+      const admitted = admitIssuedEmissionArguments(mintedBinding(kindName, version), whitespaceOnlyArguments(kindName));
       expect(admitted.kind, `${kindName}/${version}`).toBe("refused");
     }
   });
 
   it("refuses with the parse's own vocabulary — reviewer through the fallback's parser, verdicts through the frozen schema", () => {
-    const reviewer = admitEmissionArguments(
-      EMISSION_TOOL_SPECS["reviewer-payload"], "v2",
-      whitespaceOnlyArguments("reviewer-payload"),
-    );
+    const reviewer = admitIssuedEmissionArguments(REVIEWER_V2, whitespaceOnlyArguments("reviewer-payload"));
     expect(reviewer.kind).toBe("refused");
     if (reviewer.kind === "refused") expect(reviewer.code).toBe("invalid-payload");
 
-    const judge = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", whitespaceOnlyArguments("judge-verdict"));
+    const judge = admitIssuedEmissionArguments(JUDGE_V1, whitespaceOnlyArguments("judge-verdict"));
     expect(judge.kind).toBe("refused");
     if (judge.kind === "refused") expect(judge.code).toBe("invalid-schema");
 
-    const refutation = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", whitespaceOnlyArguments("refutation-verdict"));
+    const refutation = admitIssuedEmissionArguments(REFUTATION_V1, whitespaceOnlyArguments("refutation-verdict"));
     expect(refutation.kind).toBe("refused");
     if (refutation.kind === "refused") expect(refutation.code).toBe("invalid-schema");
   });
@@ -333,7 +324,7 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
   it("never admits whitespace-only prose over arbitrary other-valid shapes (the gate is the parse, not a shape check)", () => {
     fc.assert(
       fc.property(fc.constantFrom(" ", "  \t ", "\n\r"), (whitespace) => {
-        const judge = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", {
+        const judge = admitIssuedEmissionArguments(JUDGE_V1, {
           criterion: "extensibility",
           rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: whitespace }],
         });
@@ -344,7 +335,6 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
 });
 
 describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", () => {
-  const JUDGE_SPEC = EMISSION_TOOL_SPECS["judge-verdict"];
   const JUDGE_BINDING = mintedBinding("judge-verdict", "v1");
   const validJudgeArgs = validJudgeArguments("extensibility");
 
@@ -365,20 +355,13 @@ describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", (
   it("carries the refusal the shell must THROW — the admission's own code and message, never a shell-invented string", () => {
     const args = { criterion: "extensibility", rankings: [{ candidate: "candidate-x.md", score: 11, fatal_flaw: null, strongest_idea: "out of domain" }] };
     const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, args);
-    const direct = admitEmissionArguments(JUDGE_SPEC, "v1", args);
+    const direct = admitIssuedEmissionArguments(JUDGE_BINDING, args);
     expect(outcome.kind).toBe("refused");
     expect(direct.kind).toBe("refused");
     if (outcome.kind === "refused" && direct.kind === "refused") {
       expect(outcome.code).toBe(direct.code);
       expect(outcome.message).toBe(direct.message);
     }
-  });
-
-  it("cannot be asked to admit under a version its tool does not carry — the mint refuses the cell before any shell exists", () => {
-    // The unsupported (kind, version) degradation is refused at issuance: no
-    // binding exists for it, so the execute shell never sees one.
-    expect(issueEmissionBinding({ requestId: "request:emission-tool", kind: "judge-verdict", version: "v2" }))
-      .toMatchObject({ ok: false, error: { code: "unsupported-schema-version" } });
   });
 
   it("refuses whitespace-only prose the harness validator admits — the shell is engine-authoritative", () => {
@@ -428,7 +411,6 @@ void _refusedCodeIsClosed;
 
 describe("canonicalizeEmissionWireArguments — the emission edge's wire-form canonicalization", () => {
   const v2Schema = frozenPayloadSchemaParameters(REVIEWER_PAYLOAD_SCHEMA_V2);
-  const v2Spec = EMISSION_TOOL_SPECS["reviewer-payload"];
   /** The EXACT wire shape the wave-gate reviewer children produced on the
    *  unconstrained local route: every declared non-string field serialized as
    *  a JSON-encoded string, payload content otherwise conforming. */
@@ -456,7 +438,7 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
       kind: "standalone-review",
       findings: [stringifiedFinding],
     });
-    const admitted = admitEmissionArguments(v2Spec, "v2", canonical);
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V2, canonical);
     expect(admitted.kind).toBe("valid");
   });
 
@@ -470,7 +452,7 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
       prior_findings: [],
       findings: [stringifiedFinding],
     });
-    expect(admitEmissionArguments(v2Spec, "v2", canonical).kind).toBe("valid");
+    expect(admitIssuedEmissionArguments(REVIEWER_V2, canonical).kind).toBe("valid");
   });
 
   it("is idempotent and preserves unchanged subtrees — canonical arguments canonicalize to THEMSELVES", () => {
@@ -499,7 +481,7 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
     expect(result).toBe(unparseable);
     // The unchanged form still refuses through the registry's parser — the
     // gate is untouched by the transport parse.
-    const admitted = admitEmissionArguments(v2Spec, "v2", result);
+    const admitted = admitIssuedEmissionArguments(REVIEWER_V2, result);
     expect(admitted.kind).toBe("refused");
     if (admitted.kind === "refused") expect(admitted.code).toBe("invalid-payload");
   });
@@ -562,7 +544,7 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
     };
     expect(canonical.schemaVersion).toBe(2);
     expect(Array.isArray(canonical.findings)).toBe(true);
-    expect(admitEmissionArguments(v2Spec, "v2", canonical).kind).toBe("valid");
+    expect(admitIssuedEmissionArguments(REVIEWER_V2, canonical).kind).toBe("valid");
   });
 
   it("passes through verbatim for non-object schemas, primitive arguments, and unknown shapes", () => {

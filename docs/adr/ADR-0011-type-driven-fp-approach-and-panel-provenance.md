@@ -92,7 +92,7 @@ shapes:
   (`EMISSION_TOOL_SPECS`) maps each producer kind/version to its exact tool name,
   frozen schema bytes and the same engine parser the fallback uses. The only
   constructor of tool parameters is `frozenPayloadSchemaParameters`, built from the
-  issued frozen bytes. Argument admission is `admitEmissionArguments`; issued
+  issued frozen bytes. Argument admission is `admitIssuedEmissionArguments`; issued
   bindings come from `issueEmissionBinding`, and capability is the closed
   `EmissionToolCapability` (`providedEmissionCapability` /
   `notProvidedEmissionCapability`).
@@ -101,13 +101,16 @@ shapes:
   `IngestionSelection` / `VerdictSourceSelection` with provenance. The module
   imports neither `panel-program.ts` nor I/O adapters.
 - **Admission.** The parent-side expected-capability decision is consumed in
-  `engine/src/core/spawn-admission.ts`, the existing pure seam, rather than in a
-  parallel module. Child readiness is a separate launcher barrier (plan
-  ADR-0014), not a second admission decision.
+  `engine/src/core/spawn-admission.ts`, the existing pure seam, as its last
+  per-item gate, rather than by a parallel admission path. The decision itself
+  (descriptor grammar, issued claims, route qualification) lives in
+  `engine/src/core/issued-emission-capability.ts`, which spawn admission
+  composes. Child readiness is a separate launcher barrier (plan ADR-0014), not a
+  second admission decision.
 - **Corrections layered on the base (2026-09-19).** Preferred, never
   strict-required, sampling (`constrainedSampling: { type: "json_schema", strict:
   "prefer" }`, defined once as `EMISSION_CONSTRAINED_SAMPLING_REQUEST` in
-  `engine/src/core/harness-capture.ts` and registered by `pi/emission-tool.ts`; INV-1); per-route qualification; one
+  `engine/src/core/emission-tool.ts` and registered by `pi/emission-tool.ts`; INV-1); per-route qualification; one
   existing request-slot budget. These correct contracts; they do not change the
   selected architecture.
 - **Provenance.** Panel manifest:

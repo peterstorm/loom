@@ -12,13 +12,12 @@
 
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
+import type { AdmittedSpawnItem, SpawnAdmissionPorts } from "../engine/src/core/spawn-admission";
 import {
   issuedReviewerPayloadClaim,
   qualifyIssuedSpawnEmissionRoute,
-  type AdmittedSpawnItem,
   type IssuedSpawnEmissionAuthority,
-  type SpawnAdmissionPorts,
-} from "../engine/src/core/spawn-admission";
+} from "../engine/src/core/issued-emission-capability";
 import type { LoomAgentName } from "../engine/src/core/model-profiles";
 import { hasStandaloneReviewContext } from "../engine/src/core/review-output";
 import { subagentDir } from "../engine/src/config";

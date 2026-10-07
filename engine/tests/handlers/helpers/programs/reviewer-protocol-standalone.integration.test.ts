@@ -9,7 +9,7 @@ import { buildContextPacket, encodeByteSection } from "../../../../src/core/cont
 import { captureKey } from "../../../../src/core/harness-capture";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
 import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
-import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/spawn-admission";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
 import { prepareStandaloneReview } from "../../../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority } from "../../../../src/core/standalone-review-records";

@@ -24,7 +24,8 @@ import { candidateFilename, type PanelLens } from "../../../src/core/panel-contr
 import { panelVerdictSourceProvenance, panelVerdictSourceRecord } from "../../../src/core/panel-verdict-source";
 import { selectVerdictSource } from "../../../src/core/emission-ingestion";
 import { issueEmissionBinding } from "../../../src/core/emission-tool";
-import { captureKey, observeEmissionCalls } from "../../../src/core/harness-capture";
+import { captureKey } from "../../../src/core/harness-capture";
+import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
 import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
@@ -43,7 +44,7 @@ import {
 import { StateManager } from "../../../src/state-manager";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
-import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/spawn-admission";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/issued-emission-capability";
 import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { waveRequests, installWaveReviewRuns } from "../../../src/handlers/helpers/programs/wave-review-requests";

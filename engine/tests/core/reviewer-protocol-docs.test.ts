@@ -6,14 +6,11 @@ import {
 import {
   renderReviewerWireContract, renderReviewerWireInstructions,
 } from "../../src/core/reviewer-protocol";
+import { EMISSION_TOOL_SPECS, issueEmissionBinding, type IssuedEmissionBinding } from "../../src/core/emission-tool";
 import {
-  EMISSION_TOOL_SPECS, issueEmissionBinding, notProvidedEmissionCapability,
-  providedEmissionCapability, type IssuedEmissionBinding,
-} from "../../src/core/emission-tool";
-import {
-  decideRequestEmissionRoute, emissionToolPrimaryInstruction, issuedReviewerPayloadClaim,
-  projectEmissionTaskText, type IssuedProducerClaim,
-} from "../../src/core/spawn-admission";
+  decideRequestEmissionRoute, emissionToolPrimaryInstruction, issuedReviewerPayloadClaim, notProvidedEmissionCapability,
+  projectEmissionTaskText, providedEmissionCapability, type IssuedProducerClaim,
+} from "../../src/core/issued-emission-capability";
 import { renderPanelVerdictInstructions, type PanelVerdictInstructionRoute } from "../../src/core/panel-verdict-source";
 import { sha256Hex } from "../../src/core/digest";
 import {

@@ -64,7 +64,7 @@ Concrete shape:
   choice. Schema constraints are described only as limits on the arguments of a call
   that happens, never as forcing the call.
 - **Exact tool name in new instructions only.**
-  `emissionToolPrimaryInstruction(binding)` in `engine/src/core/spawn-admission.ts`
+  `emissionToolPrimaryInstruction(binding)` in `engine/src/core/issued-emission-capability.ts`
   renders the issued binding's exact `toolName`, the one-call rule ("never call it a
   second time in this spawn") and the final-message fallback for an unavailable or
   refusing tool. It is projected only onto emission-enabled requests (ADR-0017).
@@ -73,7 +73,7 @@ Concrete shape:
   carries the matching tool-primary wording for reviewers.
 - **The acknowledgment decision is pure and in the core.**
   `acknowledgeEmissionExecution(binding, args)` in
-  `engine/src/core/harness-capture.ts` admits the arguments under the issued binding
+  `engine/src/core/emission-tool.ts` admits the arguments under the issued binding
   through `admitIssuedEmissionArguments` (`engine/src/core/emission-tool.ts`): the
   same function engine selection runs again later over the observed call, so the two
   shells share one admission rather than two call sequences kept equal by convention.
@@ -104,7 +104,7 @@ Concrete shape:
   - A core refusal is always thrown, never returned.
   - Termination is never assumed for a batch that has any non-terminating or
     cancelled result.
-- **Tests** (`engine/tests/pi/emission-tool.test.ts`, which drives the real Pi agent
+- **Tests** (`engine/tests/pi/emission-tool-runtime.test.ts`, which drives the real Pi agent
   loop):
   - A valid emission settles without a follow-up model request.
   - A mixed batch does not terminate.

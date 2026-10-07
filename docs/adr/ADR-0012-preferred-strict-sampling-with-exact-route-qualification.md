@@ -39,15 +39,15 @@ Operators configure provider capability flags (strict sampling, tool-call parser
 
 ### Sampling request
 
-- `engine/src/core/harness-capture.ts` holds one source for the request: the `EmissionConstrainedSamplingRequest` type and the frozen `EMISSION_CONSTRAINED_SAMPLING_REQUEST` constant. The literal types `type: "json_schema"` and `strict: "prefer"` make a required request impossible to represent in the engine's own contract. The frozen registry's tool specs carry no separate sampling request.
+- `engine/src/core/emission-tool.ts` holds one source for the request: the `EmissionConstrainedSamplingRequest` type and the frozen `EMISSION_CONSTRAINED_SAMPLING_REQUEST` constant. The literal types `type: "json_schema"` and `strict: "prefer"` make a required request impossible to represent in the engine's own contract. The frozen registry's tool specs carry no separate sampling request.
 - The engine core imports no Pi package. The Pi registration surface claims the shape as pi-ai's `ConstrainedSamplingConfig` through a confined cast.
-- INV-1 (`.claude/linter/rules/inv-1-no-strict-require-constraint.json`) blocks the spelling `strict: "require"` in `.ts`/`.tsx` sources and fails closed. It is a spelling guard. Behavioural acceptance runs against the real resolver in `engine/tests/pi/emission-tool.test.ts`.
+- INV-1 (`.claude/linter/rules/inv-1-no-strict-require-constraint.json`) blocks the spelling `strict: "require"` in `.ts`/`.tsx` sources and fails closed. It is a spelling guard. Behavioural acceptance runs against the real resolver in `engine/tests/pi/emission-tool-runtime.test.ts`.
 - The resolver's strict-flag truth table is qualification evidence, not an engine contract. A resolver behaviour change triggers requalification.
 
 ### Route classification
 
 - **Constrained emission:** the route accepts the exact frozen tool schema and demonstrates the advertised JSON Schema constraints under adversarial probes.
-- **Unconstrained emission:** the route accepts the exact frozen tool schema but does not enforce preferred strict sampling. The engine parser (`admitEmissionArguments`, protocol admission, and the verdict parsers) stays authoritative. This is the recorded class of the one currently qualified route.
+- **Unconstrained emission:** the route accepts the exact frozen tool schema but does not enforce preferred strict sampling. The engine parser (`admitIssuedEmissionArguments`, protocol admission, and the verdict parsers) stays authoritative. This is the recorded class of the one currently qualified route.
 - **Extraction-only:** the harness or route cannot support the exact tool schema. The tool is not advertised, the schema is not rewritten, and final-message extraction runs unchanged. Claude Code, unsupported historical reviewer protocols, and non-qualified routes take this path explicitly, and the issued capability records the reason.
 
 ### Qualification binding
@@ -72,4 +72,4 @@ Operators configure provider capability flags (strict sampling, tool-call parser
 - Providers that reject `$defs`/`$ref` or a root `oneOf` stay extraction-only for this feature. Loom accepts narrower coverage rather than reshaping schemas.
 - Qualification is ongoing operational work. Every model switch, schema digest change, or relevant Pi upgrade needs a new live run, and unqualified cloud routes stay extraction-only until someone with access collects evidence.
 - vLLM-native enforcement (`guided_json`/`structured_outputs`) belongs to the pi-ai resolver and is out of Loom's scope (FR-030), so a stronger guarantee on the local route depends on an upstream change.
-- The qualified route is hard-coded policy data in `spawn-admission.ts`. Adding or changing a route needs a code change and new evidence, which is deliberate friction.
+- The qualified route is hard-coded policy data in `issued-emission-capability.ts`. Adding or changing a route needs a code change and new evidence, which is deliberate friction.

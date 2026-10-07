@@ -24,7 +24,7 @@
  * Pure in behavior (no I/O, clock or randomness), but NOT enrolled in
  * DEFAULT_PURE_MODULES: the purity closure audits every transitive import,
  * and this module imports the emission transport (emission-ingestion,
- * emission-tool, harness-capture), which declared pure modules never import
+ * emission-tool, emission-observation), which declared pure modules never import
  * (ADR-0018), and the unenrolled legacy-archive. Instead, the
  * no-io-in-pure-modules rule runs over this file's own text in
  * legacy-panel-decisions-purity.test.ts; its imports are not audited.
@@ -53,7 +53,7 @@ import {
 } from "./panel-verdict-source";
 import { selectVerdictSource } from "./emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "./emission-tool";
-import { observeEmissionCalls } from "./harness-capture";
+import { observeEmissionCalls } from "./emission-observation";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "./review-panel";
 import { aggregateVerdicts, architectureCriterion, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type ArchitectureCriterion, type JudgeVerdict } from "./panel-contract";
 import type { VerdictEnvelope } from "./panel-kernel";

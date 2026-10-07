@@ -26,10 +26,11 @@ import {
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { parseRegisteredFacadeProgram, publishedReviewerRequest } from "../engine/src/handlers/helpers/programs";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
-import { observeEmissionCalls, type FinalPayload } from "../engine/src/core/harness-capture";
+import type { FinalPayload } from "../engine/src/core/harness-capture";
+import { observeEmissionCalls } from "../engine/src/core/emission-observation";
 import { selectCanonicalPayload } from "../engine/src/core/emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../engine/src/core/emission-tool";
-import { issuedReviewerPayloadClaim } from "../engine/src/core/spawn-admission";
+import { issuedReviewerPayloadClaim } from "../engine/src/core/issued-emission-capability";
 import {
   boundDiagnosticMessage,
   boundedThrownCause,

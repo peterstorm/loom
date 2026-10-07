@@ -1,6 +1,6 @@
 /**
  * The offline Pi child loop shared by the emission suites
- * (`pi/emission-tool.test.ts`, `pi/emission-vertical-slice.test.ts`): the REAL
+ * (`pi/emission-tool-runtime.test.ts`, `pi/emission-vertical-slice.test.ts`): the REAL
  * pi-agent-core `runAgentLoop` with ONLY the model transport scripted (one
  * `AssistantMessageEventStream` per turn), the same offline-reproduction
  * posture the committed qualification probe used.

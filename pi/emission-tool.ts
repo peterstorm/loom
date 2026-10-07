@@ -45,22 +45,19 @@
  */
 
 import {
+  acknowledgeEmissionExecution,
   canonicalizeEmissionWireArguments,
+  EMISSION_CONSTRAINED_SAMPLING_REQUEST,
   EMISSION_TOOL_SPECS,
-  frozenPayloadSchemaParameters,
+  issuedEmissionParameters,
   issueEmissionBinding,
   type EmissionBindingRefusalCode,
-  type EmissionToolName,
-  type EmissionToolSpec,
-  type IssuedEmissionBinding,
-} from "../engine/src/core/emission-tool";
-import {
-  acknowledgeEmissionExecution,
-  EMISSION_CONSTRAINED_SAMPLING_REQUEST,
   type EmissionConstrainedSamplingRequest,
   type EmissionExecutionOutcome,
   type EmissionToolAcknowledgment,
-} from "../engine/src/core/harness-capture";
+  type EmissionToolName,
+  type IssuedEmissionBinding,
+} from "../engine/src/core/emission-tool";
 import { isRecord } from "../engine/src/core/plain-record";
 import {
   boundDiagnosticMessage,
@@ -420,19 +417,12 @@ export type EmissionToolDefinition = Readonly<{
 }>;
 
 export function emissionToolDefinition(binding: IssuedEmissionBinding): EmissionToolDefinition {
-  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[binding.kind.kind];
-  // Constructor invariant: a MINTED binding's (kind, version) pair is
-  // registry-carried by construction; the guard keeps the invariant honest
-  // instead of a non-null assertion (unreachable for minted bindings).
-  const schemaVersion = spec.schemaVersions[binding.version];
-  if (schemaVersion === undefined) {
-    throw new Error(
-      `emission tool definition invariant failed: binding ${binding.requestId} names ${binding.kind.kind}/${binding.version}, which the frozen registry does not carry`,
-    );
-  }
-  const parameters = frozenPayloadSchemaParameters(schemaVersion.schemaBytes);
+  // A MINTED binding's (kind, version) pair is registry-carried by
+  // construction, and its tool name is the registry cell's own; the kernel's
+  // one binding→cell lookup guards that invariant.
+  const parameters = issuedEmissionParameters(binding);
   return canonicalRecord({
-    name: spec.toolName,
+    name: binding.toolName,
     label: `Emission ${binding.kind.kind} ${binding.version}`,
     description: `Emit the frozen ${binding.kind.kind} ${binding.version} payload. Parameters ARE the frozen schema.`,
     parameters,

@@ -75,7 +75,7 @@ has no descriptor, that has to be normal.
 ## Decision
 **Render tool-primary instructions and the emission descriptor only for requests whose issued route is emission-enabled. Every other request keeps its caller's final-message instruction verbatim, and the descriptor is a projection of issued authority, never a standalone permission claim.**
 
-Route decision (pure, `engine/src/core/spawn-admission.ts`):
+Route decision (pure, `engine/src/core/issued-emission-capability.ts`):
 - `decideRequestEmissionRoute(claim, capability)` returns a closed
   `EmissionRouteDecision`: `emission` (binding + context digest),
   `extraction-only` (with reason) or `refused` (with reason).
@@ -97,7 +97,7 @@ Route decision (pure, `engine/src/core/spawn-admission.ts`):
   the same `kind` and no consumer translates between vocabularies.
 
 Instruction and descriptor projection:
-- `projectEmissionTaskText(route, baseInstruction)` (`spawn-admission.ts`) is
+- `projectEmissionTaskText(route, baseInstruction)` (`issued-emission-capability.ts`) is
   the single task-text projection.
   - **Emission routes** get `renderEmissionDescriptor(binding, contextDigest)`
     plus `baseInstruction` followed by `emissionToolPrimaryInstruction(binding)`.
@@ -169,7 +169,7 @@ Invariants:
   are byte-identical to their pre-feature forms.
 - A descriptor alone never authorizes emission. Admission requires matching
   issued authority.
-- Tests: `engine/tests/core/spawn-admission.test.ts` (expected capability and
+- Tests: `engine/tests/core/issued-emission-capability.test.ts` (expected capability and
   explicit extraction-only routes), `engine/tests/core/reviewer-protocol-docs.test.ts`
   (new vs archived/extraction-only wording) and `engine/tests/wire-contract.test.ts`
   (stamp/schema consistency). The extraction-only flow is documented in

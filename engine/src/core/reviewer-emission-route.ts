@@ -27,7 +27,7 @@ import type { IssuedEmissionBindingOf } from "./emission-tool";
 import {
   issuedReviewerPayloadClaim,
   qualifyIssuedSpawnEmissionRoute,
-} from "./spawn-admission";
+} from "./issued-emission-capability";
 
 /** The registered review program's protocol projection the claim mint reads:
  *  archived schema 1 (no emission schema) or a current schema-2/3 protocol

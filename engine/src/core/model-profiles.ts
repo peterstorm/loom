@@ -39,7 +39,7 @@ export type Harness = "claude-code" | "pi";
 /**
  * The one local vLLM deployment the catalog targets: the single owner of its
  * provider/served-model literal. Emission route qualification
- * (`spawn-admission.ts`) is separate policy that names this route rather than
+ * (`issued-emission-capability.ts`) is separate policy that names this route rather than
  * re-spelling it, so a catalog rename cannot desynchronize the two.
  */
 export const DESKTOP_VLLM_ROUTE = Object.freeze({

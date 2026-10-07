@@ -5,7 +5,7 @@ import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../en
 import { extractTestEvidence } from "../engine/src/core/test-evidence";
 import { boundedThrownCause, describeUnknown } from "../engine/src/core/orchestration-contract/identity";
 import type { IssuedEmissionBinding } from "../engine/src/core/emission-tool";
-import type { EmissionCallFrame } from "../engine/src/core/harness-capture";
+import type { EmissionCallFrame } from "../engine/src/core/emission-observation";
 import { isRecord } from "../engine/src/core/plain-record";
 import { emissionToolFamily } from "./emission-tool";
 

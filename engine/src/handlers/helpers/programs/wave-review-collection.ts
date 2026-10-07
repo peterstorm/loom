@@ -13,7 +13,7 @@ import { specCheckNeedsReapplication } from '../../../core/spec-check';
 import { applyCurrentSpecCheckCaptureRejection, specCheckSlotBelongsToWaveEpoch, waveReviewerSlotProblem } from '../../../core/wave-gate-membership';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { durableCaptureRejection } from './durable-requests';
-import { renderReviewProgramSpawnTask } from './spawn-task';
+import { renderReviewProgramSpawn } from './spawn-task';
 import { proceed, settled, waveBlocked, type WavePhase } from './wave-gate-outcome';
 import { applyWaveFacadeSubmission } from './wave-gate-submission';
 import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-context';
@@ -155,7 +155,7 @@ export async function reconcileCurrentReviewEvidence(
       requests: uncapturedInitialReviews.map((authority) => ({
         authority,
         context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-        task: renderReviewProgramSpawnTask(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.", registration),
+        task: renderReviewProgramSpawn(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.", registration).task,
       })),
     } });
   }
