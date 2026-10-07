@@ -1,7 +1,9 @@
 /**
- * The stored reservation record parses into exactly one role arm. A record
- * carrying several role authorities, or an authority for a role its agent
- * does not play, is refused rather than half-read by whichever applier runs.
+ * A spawn producer's role claims parse into exactly one role arm before the
+ * slot is reserved. Claims carrying several role authorities, an authority
+ * for a role their agent does not play, or an implementation authority for
+ * another Task are refused at the producer — the stored reservation can only
+ * hold a parsed `ReservedSlot`.
  */
 
 import fc from "fast-check";
@@ -19,9 +21,9 @@ import {
   specCheckAuthorityOf,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
-  type ReservedSlotRecord,
+  type ReservedSlotClaims,
 } from "../../../pi/reserved-slot";
-import { slot } from "../fixtures/pi-reserved-slot";
+import { slotClaims } from "../fixtures/pi-reserved-slot";
 
 function implementationAuthority() {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -61,7 +63,7 @@ const ROLES = [
 
 describe("parseReservedSlot", () => {
   it("parses a record with no role authority as the legacy arm", () => {
-    const parsed = parseReservedSlot(slot({ agentType: "code-reviewer", taskId: "T1" }));
+    const parsed = parseReservedSlot(slotClaims({ agentType: "code-reviewer", taskId: "T1" }));
     expect(parsed).toEqual({ ok: true, value: { role: "legacy", agentType: "code-reviewer", taskId: "T1" } });
     const value = parsed.ok ? parsed.value : undefined;
     expect([implementationAuthorityOf(value), reviewAuthorityOf(value), specCheckAuthorityOf(value)])
@@ -69,7 +71,7 @@ describe("parseReservedSlot", () => {
   });
 
   it.each(ROLES)("parses a lone $role authority on its own agent into that arm only", ({ role, agentType, field }) => {
-    const parsed = parseReservedSlot(slot({ agentType, taskId: "T1", ...field }));
+    const parsed = parseReservedSlot(slotClaims({ agentType, taskId: "T1", ...field }));
     expect(parsed.ok && parsed.value.role).toBe(role);
     const value = parsed.ok ? parsed.value : undefined;
     expect(implementationAuthorityOf(value)).toBe(role === "implementation" ? IMPLEMENTATION : null);
@@ -82,7 +84,7 @@ describe("parseReservedSlot", () => {
       fc.subarray([...ROLES], { minLength: 2 }),
       fc.constantFrom(...ROLES.map(({ agentType }) => agentType)),
       (roles, agentType) => {
-        const record: ReservedSlotRecord = slot({
+        const record: ReservedSlotClaims = slotClaims({
           agentType,
           taskId: "T1",
           ...Object.assign({}, ...roles.map(({ field }) => field)),
@@ -100,10 +102,35 @@ describe("parseReservedSlot", () => {
       fc.constantFrom(...ROLES.map(({ agentType }) => agentType), "architecture-agent"),
       ({ agentType: owner, field }, agentType) => {
         fc.pre(agentType !== owner);
-        const parsed = parseReservedSlot(slot({ agentType, taskId: "T1", ...field }));
+        const parsed = parseReservedSlot(slotClaims({ agentType, taskId: "T1", ...field }));
         expect(parsed.ok).toBe(false);
         expect(!parsed.ok && parsed.error).toMatch(/but the agent is not/);
       },
     ));
+  });
+
+  it("refuses an implementation authority for a Task other than the one the slot reserves", () => {
+    for (const taskId of ["T2", null] as const) {
+      const parsed = parseReservedSlot(slotClaims({
+        agentType: "code-implementer-agent",
+        taskId,
+        implementationAuthority: IMPLEMENTATION,
+      }));
+      expect(parsed).toEqual({
+        ok: false,
+        error: `reserved slot for code-implementer-agent reserves Task ${taskId ?? "missing"}, but its implementation authority is for T1`,
+      });
+    }
+  });
+
+  it("returns frozen slots, the implementation arm naming its authority's Task", () => {
+    const parsed = parseReservedSlot(slotClaims({
+      agentType: "code-implementer-agent", taskId: "T1", implementationAuthority: IMPLEMENTATION,
+    }));
+    expect(parsed).toEqual({
+      ok: true,
+      value: { agentType: "code-implementer-agent", taskId: "T1", role: "implementation", authority: IMPLEMENTATION },
+    });
+    expect(parsed.ok && Object.isFrozen(parsed.value)).toBe(true);
   });
 });

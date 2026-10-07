@@ -35,12 +35,11 @@ import { selectCanonicalPayload, selectVerdictSource } from "../../engine/src/co
 import { parseContextDigest } from "../../engine/src/core/orchestration-contract/identity";
 import { piEmissionCallFrames, piResultFinalPayloadCandidates } from "../../pi/transcript-adapter";
 import {
-  decideReadinessGate,
   EMISSION_READINESS_COMMAND,
   EMISSION_READINESS_ENTRY_TYPE,
   LOOM_EMISSION_BINDING_ENV,
-  parseReadinessStageObservation,
 } from "../../pi/emission-tool";
+import { decideReadinessGate, parseReadinessStageObservation } from "../../pi/emission-readiness-gate";
 import { err, ok, type Result } from "../kernel";
 import { piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine } from "../pi-json-stream";
 import {

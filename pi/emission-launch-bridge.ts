@@ -4,9 +4,12 @@
  * The synchronous request/reply bridge between this extension and the shared
  * normal subagent launcher: capability probing, staging of admitted
  * emission-enabled launches, the launcher's resolve handshake, and the
- * readiness verifier the launcher runs before any Task prompt. Also owns the
- * launch-slot vocabulary the result side uses to authenticate a launcher's
- * pre-prompt startup refusal.
+ * readiness verifier the launcher runs before any Task prompt. The verifier is
+ * RPC I/O plus response parsing only: every child readiness and route state it
+ * observes is decided by the pure gate in `pi/emission-readiness-gate.ts`, so
+ * the bridge carries no refusal vocabulary of its own beyond RPC transport
+ * failures. Also owns the launch-slot vocabulary the result side uses to
+ * authenticate a launcher's pre-prompt startup refusal.
  */
 
 import type { SpawnEmissionExpectation } from "../engine/src/core/issued-emission-capability";
@@ -20,13 +23,17 @@ import {
 } from "../engine/src/core/orchestration-contract/identity";
 import type { ContextDigest } from "../engine/src/core/orchestration-contract";
 import type { IssuedEmissionBinding, IssuedEmissionBindingOf } from "../engine/src/core/emission-tool";
+import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "./emission-tool";
 import {
   decideReadinessGate,
-  EMISSION_READINESS_COMMAND,
-  EMISSION_READINESS_ENTRY_TYPE,
+  decideStartupRoute,
   parseReadinessStageObservation,
-  type EmissionReadinessExpectation,
-} from "./emission-tool";
+  type EmissionReadinessGateDecision,
+  type EmissionStartupExpectation,
+  type ReadinessObservation,
+  type ReadinessProbeFacts,
+  type RouteObservation,
+} from "./emission-readiness-gate";
 
 export const LOOM_SUBAGENT_LAUNCH_CHANNEL = "loom:subagent-launch:v2";
 
@@ -249,21 +256,6 @@ const launchRequestMismatch = (
   return null;
 };
 
-const readinessPayloadFromEntries = (
-  entries: readonly unknown[],
-): DomainResult<unknown, Readonly<{ message: string }>> => {
-  if (entries.length !== 1) {
-    return failure({ message: `readiness invocation produced ${entries.length} entries; exactly one is required` });
-  }
-  const entry = entries[0];
-  if (!isRecord(entry) || entry.customType !== EMISSION_READINESS_ENTRY_TYPE || !Object.hasOwn(entry, "data")) {
-    return failure({
-      message: `readiness invocation did not produce one ${EMISSION_READINESS_ENTRY_TYPE} custom entry`,
-    });
-  }
-  return success(entry.data);
-};
-
 const emissionBindingEnvironment = (
   expectation: Extract<SpawnEmissionExpectation, { kind: "emission-enabled" }>,
 ): string => JSON.stringify({
@@ -288,86 +280,152 @@ const readinessRpcRefusal = (operation: string, thrown: unknown): PiReadinessRef
   );
 };
 
-/** One readiness RPC step: await the call, then check its response. A throw
- * from the call is refused as `<operation>`, a throw while inspecting the
- * response as `<operation> response`; a check that returns a reason refuses
- * with that reason. `null` means the step passed and the next one may run. */
-const readinessExchange = async <T>(
+/** One readiness RPC step: await the call, then parse its response. A throw
+ * from the call is refused as `<operation>`, a throw while parsing the
+ * response as `<operation> response`; a parse failure is an RPC protocol
+ * violation refused with its reason. Child readiness states are never refused
+ * here — they parse into the gate's observations and the gate decides. */
+const readinessExchange = async <T, R>(
   operation: string,
   call: () => Promise<T>,
-  responseRefusal: (response: T) => string | null,
-): Promise<PiReadinessRefusal | null> => {
+  parseResponse: (response: T) => DomainResult<R, string>,
+): Promise<DomainResult<R, PiReadinessRefusal>> => {
   let response: T;
   try {
     response = await call();
   } catch (thrown) {
-    return readinessRpcRefusal(operation, thrown);
+    return failure(readinessRpcRefusal(operation, thrown));
   }
   try {
-    const reason = responseRefusal(response);
-    return reason === null ? null : readinessRefusal(reason);
+    const parsed = parseResponse(response);
+    return parsed.ok ? success(parsed.value) : failure(readinessRefusal(parsed.error));
   } catch (thrown) {
-    return readinessRpcRefusal(`${operation} response`, thrown);
+    return failure(readinessRpcRefusal(`${operation} response`, thrown));
   }
 };
 
-const commandInventoryRefusal = (commands: unknown): string | null => {
+/** Whether discovery listed the readiness command as an extension command. A
+ *  malformed inventory breaks the RPC protocol; it is not an absent command. */
+const parseReadinessCommandListing = (commands: unknown): DomainResult<boolean, string> => {
   if (!Array.isArray(commands) || !commands.every((command) =>
     isRecord(command) && typeof command.name === "string" &&
     (command.source === undefined || typeof command.source === "string"))) {
-    return "Emission readiness RPC get_commands returned a malformed command inventory";
+    return failure("Emission readiness RPC get_commands returned a malformed command inventory");
   }
-  return commands.some((command) => command.name === EMISSION_READINESS_COMMAND && command.source === "extension")
-    ? null
-    : `Required extension command /${EMISSION_READINESS_COMMAND} is unavailable`;
+  return success(commands.some((command) =>
+    command.name === EMISSION_READINESS_COMMAND && command.source === "extension"));
 };
 
-const readinessEntriesRefusal = (launch: PiEmissionLaunchExpectation) => (entries: unknown): string | null => {
-  if (!Array.isArray(entries)) return "Emission readiness RPC invocation returned a malformed entry list";
-  const payload = readinessPayloadFromEntries(entries);
-  if (!payload.ok) return payload.error.message;
-  const expectation: EmissionReadinessExpectation = Object.freeze({
-    binding: launch.expectation.binding,
-    contextDigest: launch.expectation.contextDigest,
-    revision: launch.revision,
-    readinessCommand: EMISSION_READINESS_COMMAND,
-  });
-  const decision = decideReadinessGate(expectation, parseReadinessStageObservation({
-    channelAlive: true,
-    channelDiagnostic: null,
-    commandListed: true,
-    readiness: Object.freeze({ kind: "observed" as const, payload: payload.value }),
-  }));
-  return decision.kind === "refused" ? decision.message : null;
+/** The one invocation's entries as the gate's readiness observation: exactly
+ *  one bound readiness custom entry is observed; any other answer is malformed
+ *  readiness. A non-list breaks the RPC protocol. */
+const parseReadinessEntries = (entries: unknown): DomainResult<ReadinessObservation, string> => {
+  if (!Array.isArray(entries)) return failure("Emission readiness RPC invocation returned a malformed entry list");
+  if (entries.length !== 1) {
+    return success(Object.freeze({
+      kind: "malformed" as const,
+      reason: `readiness invocation produced ${entries.length} entries; exactly one is required`,
+    }));
+  }
+  const entry = entries[0];
+  if (!isRecord(entry) || entry.customType !== EMISSION_READINESS_ENTRY_TYPE || !Object.hasOwn(entry, "data")) {
+    return success(Object.freeze({
+      kind: "malformed" as const,
+      reason: `readiness invocation did not produce one ${EMISSION_READINESS_ENTRY_TYPE} custom entry`,
+    }));
+  }
+  return success(Object.freeze({ kind: "observed" as const, payload: entry.data }));
 };
 
-const routeRefusal = (launch: PiEmissionLaunchExpectation) => (state: unknown): string | null => {
+/** The child's route after `set_model`, as the gate's route observation. */
+const parseRouteState = (state: unknown): RouteObservation => {
   if (!isRecord(state) || !isRecord(state.model) ||
       typeof state.model.provider !== "string" || typeof state.model.id !== "string") {
-    return "Emission readiness RPC get_state returned no exact provider/model record";
+    return Object.freeze({
+      kind: "failed" as const,
+      reason: "Emission readiness RPC get_state returned no exact provider/model record",
+    });
   }
-  const { route } = launch.expectation;
-  return state.model.provider === route.provider && state.model.id === route.model
-    ? null
-    : `the child route ${state.model.provider}/${state.model.id} does not match ${route.provider}/${route.model}`;
+  return Object.freeze({
+    kind: "bound" as const,
+    model: Object.freeze({
+      provider: state.model.provider,
+      id: state.model.id,
+      api: typeof state.model.api === "string" ? state.model.api : null,
+      baseUrl: typeof state.model.baseUrl === "string" ? state.model.baseUrl : null,
+    }),
+  });
 };
 
+const startupExpectationOf = (launch: PiEmissionLaunchExpectation): EmissionStartupExpectation => Object.freeze({
+  binding: launch.expectation.binding,
+  contextDigest: launch.expectation.contextDigest,
+  revision: launch.revision,
+  readinessCommand: EMISSION_READINESS_COMMAND,
+  route: Object.freeze({
+    kind: "issued-model" as const,
+    provider: launch.expectation.route.provider,
+    modelId: launch.expectation.route.model,
+  }),
+});
+
+/** The readiness never runs on an unlisted command: absence is decided
+ *  without an invocation (an unknown /command would reach the model). */
+const NOT_INVOKED: ReadinessObservation = Object.freeze({
+  kind: "absent" as const,
+  reason: "the readiness command was not listed, so it was never invoked",
+});
+
+/** Readiness probe facts as the verifier observed them. `get_commands`
+ *  answered by the time any fact exists, so the channel is alive. */
+const observedReadinessFacts = (commandListed: boolean, readiness: ReadinessObservation): ReadinessProbeFacts =>
+  Object.freeze({ channelAlive: true, channelDiagnostic: null, commandListed, readiness });
+
+/**
+ * The verifier the installed launcher runs before the Task prompt: I/O in the
+ * protocol's order (discover → invoke readiness once → bind route → observe
+ * route), each response parsed into the gate's observations, and every child
+ * state refused by the gate's one vocabulary (`pi/emission-readiness-gate.ts`).
+ */
 const readinessVerifier = (
   launch: PiEmissionLaunchExpectation,
-): PiEmissionRpcDirective["verifyReadiness"] => async (client) =>
-  await readinessExchange("get_commands", () => client.getCommands(), commandInventoryRefusal) ??
-  // Exactly one invocation in this verifier. The installed launcher also
-  // enforces this count and refuses prompt delivery if a verifier cheats.
-  await readinessExchange("invoke_readiness", () => client.invokeReadiness(), readinessEntriesRefusal(launch)) ??
+): PiEmissionRpcDirective["verifyReadiness"] => async (client) => {
+  const expectation = startupExpectationOf(launch);
+  const listed = await readinessExchange("get_commands", () => client.getCommands(), parseReadinessCommandListing);
+  if (!listed.ok) return listed.error;
+  // Exactly one invocation in this verifier, and none for an unlisted command.
+  // The installed launcher also enforces this count and refuses prompt
+  // delivery if a verifier cheats. The gate decides inside the guarded
+  // response parse: a hostile payload's throw is a bounded RPC refusal.
+  const readiness = !listed.value
+    ? success<EmissionReadinessGateDecision, PiReadinessRefusal>(
+        decideReadinessGate(expectation, parseReadinessStageObservation(observedReadinessFacts(false, NOT_INVOKED))),
+      )
+    : await readinessExchange("invoke_readiness", () => client.invokeReadiness(), (entries) => {
+        const observation = parseReadinessEntries(entries);
+        return observation.ok
+          ? success(decideReadinessGate(
+              expectation,
+              parseReadinessStageObservation(observedReadinessFacts(true, observation.value)),
+            ))
+          : observation;
+      });
+  if (!readiness.ok) return readiness.error;
+  if (readiness.value.kind === "refused") return readinessRefusal(readiness.value.message);
+  const ready = readiness.value;
   // Route selection is deliberately after readiness. Both this verifier and
   // the installed launcher observe the exact provider/model before Task prompt.
-  await readinessExchange(
+  const bound = await readinessExchange(
     "set_model",
     () => client.setModel(launch.expectation.route.provider, launch.expectation.route.model),
-    () => null,
-  ) ??
-  await readinessExchange("get_state", () => client.getState(), routeRefusal(launch)) ??
-  Object.freeze({ ok: true as const });
+    () => success(undefined),
+  );
+  if (!bound.ok) return bound.error;
+  const route = await readinessExchange("get_state", () => client.getState(), (state) => success(parseRouteState(state)));
+  if (!route.ok) return route.error;
+  const decision = decideStartupRoute(expectation.route, ready, route.value);
+  return decision.kind === "open" ? Object.freeze({ ok: true as const }) : readinessRefusal(decision.message);
+};
 
 /** Register the synchronous request/reply adapter consumed by the installed
  * normal subagent launcher. The bridge owns no model process; it retains only

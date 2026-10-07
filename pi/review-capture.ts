@@ -3,9 +3,11 @@
  *
  * Authenticates a launcher's pre-prompt emission startup refusal against the
  * reserved launch, and turns a finalized Pi transcript into the shared
- * capture runtime's observation: the issued reviewer emission binding selects
- * between emission-tool arguments and final-message extraction, archived and
- * refutation requests keep explicit extraction, and every refusal stays typed.
+ * capture runtime's observation: the correlated request is authenticated by
+ * the same `authenticatePiIssuedReviewRequest` spawn admission crosses, the
+ * issued reviewer emission binding selects between emission-tool arguments
+ * and final-message extraction, archived and refutation requests keep
+ * explicit extraction, and every refusal stays typed.
  */
 
 import { isRecord } from "../engine/src/core/plain-record";
@@ -24,13 +26,11 @@ import {
   type CaptureOutcome,
   type TerminalCaptureRefusal,
 } from "../engine/src/orchestration/harness-capture-runtime";
-import { parseRegisteredFacadeProgram, publishedReviewerRequest } from "../engine/src/handlers/helpers/programs";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import type { FinalPayload } from "../engine/src/core/harness-capture";
 import { observeEmissionCalls } from "../engine/src/core/emission-observation";
 import { selectCanonicalPayload } from "../engine/src/core/emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../engine/src/core/emission-tool";
-import { issuedReviewerPayloadClaim } from "../engine/src/core/issued-emission-capability";
 import {
   boundDiagnosticMessage,
   boundedThrownCause,
@@ -50,11 +50,11 @@ import {
   type PiSubagentLaunchSlot,
 } from "./emission-launch-bridge";
 import {
-  classifyPiIssuedReviewRequest,
+  authenticatePiIssuedReviewRequest,
   piRequestCorrelation,
   type PiIssuedReviewRequestClass,
 } from "./review-run-authority";
-import type { PiSessionId, PiSpawnReservation } from "./spawn-reservation";
+import type { PiSessionId, PiSpawnReservation, PiSpawnReservationItem } from "./spawn-reservation";
 import { piSpawnRosterId } from "./tool-input";
 
 type PiEmissionStartupRefusalMarker = Readonly<{
@@ -127,7 +127,7 @@ export function classifyPiEmissionStartupRefusal(input: Readonly<{
   rawResult: unknown;
   result: Extract<PiSubagentResultEntry, { ok: true }>["result"];
   reservation: PiSpawnReservation;
-  reservedItem: PiSpawnReservation["items"][number];
+  reservedItem: PiSpawnReservationItem;
   runBinding: SessionRunBinding;
   toolCallId: unknown;
   resultIndex: number;
@@ -328,35 +328,22 @@ export async function capturePiSubagentResult(
       return captureUnavailable("request-correlation", describeCaptureFailure(correlation.outcome));
     }
     const { handle, request } = correlation.value;
-    const registration = handle.readProgramRegistration(16_777_216);
-    if (!registration.ok) {
-      return captureUnavailable("program-registration", `program registration is unavailable: ${registration.error.message}`);
+    const authenticated = authenticatePiIssuedReviewRequest(handle, request, 16_777_216);
+    switch (authenticated.kind) {
+      case "authenticated":
+        return piIssuedReviewerCaptureObservation(authenticated.classified, messages ?? []);
+      case "registration-unreadable":
+      case "registration-invalid":
+        return captureUnavailable("program-registration", `program registration is unavailable: ${authenticated.message}`);
+      case "unclaimed-program":
+        return captureUnclaimedProgramObservation(authenticated.registration, messages);
+      case "unclassified":
+        return captureUnavailable("program-registration", authenticated.message);
+      case "publication-unavailable":
+        return captureUnavailable("request-publication", `reviewer request publication is unavailable: ${authenticated.message}`);
+      case "other-program":
+        return archivedReviewerCaptureObservation(messages);
     }
-    const parsedRegistration = parseRegisteredFacadeProgram(registration.value);
-    if (parsedRegistration.kind === "invalid") {
-      return captureUnavailable("program-registration", `program registration is unavailable: ${parsedRegistration.message}`);
-    }
-    if (parsedRegistration.kind === "unclaimed") {
-      return captureUnclaimedProgramObservation(registration.value, messages);
-    }
-    if (parsedRegistration.program.kind === "wave-gate" || parsedRegistration.program.kind === "standalone-review") {
-      const classified = classifyPiIssuedReviewRequest(handle.runId, parsedRegistration.program, request);
-      if (!classified.ok) {
-        return captureUnavailable("program-registration", classified.error.message);
-      }
-      const published = publishedReviewerRequest(handle, request, 16_777_216);
-      if (!published.ok) {
-        return captureUnavailable("request-publication", `reviewer request publication is unavailable: ${published.message}`);
-      }
-      const captureAuthority: PiIssuedReviewRequestClass = classified.value.kind === "review-program-emission"
-        ? Object.freeze({
-            kind: "review-program-emission" as const,
-            claim: issuedReviewerPayloadClaim(parsedRegistration.program, published.value.authority),
-          })
-        : classified.value;
-      return piIssuedReviewerCaptureObservation(captureAuthority, messages ?? []);
-    }
-    return archivedReviewerCaptureObservation(messages);
   };
   const outcome = await captureHarnessResult({
     harness: "pi",

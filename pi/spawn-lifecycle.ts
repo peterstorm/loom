@@ -6,9 +6,13 @@
  * roster identities, task-graph pointer lease, request correlators, review
  * and spec-check authorities and write grants, injects the grants into the
  * child prompts, stages emission launches, registers task execution, and
- * records the reservation the `tool_result` side settles against. Every claim
- * made before a refusal is rolled back; whatever cannot be rolled back stays
- * on the parent session as cleanup debt that shutdown retries.
+ * records the reservation the `tool_result` side settles against. Every
+ * capability it takes is recorded in the batch's claims ledger
+ * (`pi/spawn-claims.ts`); a refusal releases the ledger in its one planned
+ * order, and whatever cannot be released stays on the parent session as
+ * cleanup debt that shutdown retries. Each reserved item is built by the one
+ * constructor in `pi/spawn-reservation.ts`, so a contradictory slot refuses
+ * the spawn here rather than reaching settlement.
  *
  * Pi dispatches the live argument object it handed the `tool_call` handler,
  * so the injected prompts are written into `event.input` in place. The
@@ -27,6 +31,7 @@ import {
   rollbackTaskExecutionRegistration,
 } from "../engine/src/handlers/task-execution";
 import { isRecord } from "../engine/src/core/plain-record";
+import { hasStandaloneReviewContext } from "../engine/src/core/review-output";
 import { isReviewAgent, subagentDir } from "../engine/src/config";
 import { StateManager } from "../engine/src/state-manager";
 import {
@@ -34,9 +39,7 @@ import {
   bindSessionTaskGraphPointer,
   fsSessionRegistry,
   rollbackSessionTaskGraphPointer,
-  type SessionTaskGraphPointerBinding,
 } from "../engine/src/machine";
-import type { AgentId } from "../engine/src/machine/evidence";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import { planPiWriteGrants } from "../engine/src/core/pi-write-grant-plan";
@@ -44,6 +47,7 @@ import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import {
   currentPiReviewAuthority,
   currentPiSpecCheckAuthority,
+  parseReservedSlot,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
 } from "./reserved-slot";
@@ -64,19 +68,32 @@ import {
   type PiEmissionLaunchExpectation,
 } from "./emission-launch-bridge";
 import { recordPiSpawnCorrelators } from "./review-run-authority";
+import type { TrustedReviewWitnesses } from "./trusted-review-witness";
 import {
   cleanupFailureSuffix,
   describeCause,
   injectPiWriteGrantWithRevocation,
-  runPiCleanupActions,
-  type PiCleanupAction,
 } from "./cleanup-actions";
 import {
-  retainSpawnCleanupDebt,
+  claimEmissionLaunches,
+  claimGrantInjection,
+  claimPointerLease,
+  claimRosterEntry,
+  claimWriteGrant,
+  NO_SPAWN_CLAIMS,
+  releaseSpawnClaims,
+  remainingSpawnDebt,
+  type SpawnClaims,
+} from "./spawn-claims";
+import {
+  legacyReservationItem,
+  reservationItemOf,
   type PiParentSessions,
   type PiSessionId,
+  type PiSpawnReservationItem,
 } from "./spawn-reservation";
 import type { SpawnBatchGraphAuthority } from "./spawn-preparation";
+import type { DomainResult } from "../engine/src/core/orchestration-contract/identity";
 
 /** A `tool_call` refusal in the shape Pi reads. */
 export type PiSpawnRefusal = Readonly<{ block: true; reason: string }>;
@@ -96,6 +113,8 @@ export type PiSpawnLifecycleRequest = Readonly<{
 export type PiSpawnLifecyclePorts = Readonly<{
   parentSessions: PiParentSessions;
   emissionLaunchBridge: PiEmissionLaunchBridge;
+  /** The witness aggregate a standalone review's first exact spawn binds. */
+  reviewWitnesses: TrustedReviewWitnesses;
   /** The content-addressed runtime revision staged emission launches carry. */
   runtimeRevision: string;
   /** Fail-closed existence probe for the governing task graph. */
@@ -112,7 +131,7 @@ export async function reservePiSpawnLifecycle(
   ports: PiSpawnLifecyclePorts,
 ): Promise<PiSpawnRefusal | undefined> {
   const { event, cwd, sessionId, safeSessionId, admission } = request;
-  const { parentSessions, emissionLaunchBridge, runtimeRevision, graphExists, enterGuard } = ports;
+  const { parentSessions, emissionLaunchBridge, reviewWitnesses, runtimeRevision, graphExists, enterGuard } = ports;
   const {
     active: orchestrationGraphActive,
     path: orchestrationGraphPath,
@@ -168,127 +187,46 @@ export async function reservePiSpawnLifecycle(
       reason: `Duplicate Pi subagent toolCallId ${JSON.stringify(toolCallId)} in session ${safeSessionId}; refusing spawn.`,
     };
   }
-  type LifecycleWriteGrant = Readonly<{
-    token: string;
-    task: string;
-    originalTask: string;
-    injected: boolean;
-  }>;
   type SpawnLifecycleState = PiSpawnLifecycleAssociation & Readonly<{
     dispatchTaskExecutionSpawn: TaskExecutionSpawn;
-    writeGrant: LifecycleWriteGrant | null;
+    /** The child prompt carrying this slot's write grant, once injected. */
+    grantedTask: string | null;
     reviewAuthority: PiReviewAttemptAuthority | null;
-    implementationAuthority: ImplementationAttemptAuthority | null;
   }>;
   let spawnLifecycle: readonly SpawnLifecycleState[] = Object.freeze(
     associatePiSpawnLifecycle(admission.itemAdmissions, toolCallId).map((association) => Object.freeze({
       ...association,
       dispatchTaskExecutionSpawn: association.admission.taskExecutionSpawn,
-      writeGrant: null,
+      grantedTask: null,
       reviewAuthority: null,
-      implementationAuthority: null,
     })),
   );
   const replaceLifecycleState = (replacement: SpawnLifecycleState): void => {
     spawnLifecycle = Object.freeze(spawnLifecycle.map((state) =>
       state.slot === replacement.slot ? replacement : state));
   };
-  const reserved: AgentId[] = [];
-  let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
+  const emissionLaunchOf = (state: SpawnLifecycleState) =>
+    reservedReviewerEmissionLaunch(state.admission.emissionExpectation, event.input, state.slot);
+  // Every capability taken so far, and the run binding a debt record names.
+  let claims: SpawnClaims = NO_SPAWN_CLAIMS;
   let orchestrationRunBinding: SessionRunBinding | null = null;
   let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
-  let emissionLaunchStaged = false;
-  const grantRollbackActions = (revoked: Set<string>): readonly PiCleanupAction[] =>
-    spawnLifecycle.flatMap(({ slot, writeGrant }): readonly PiCleanupAction[] => writeGrant === null ? [] : [
-      {
-        label: `revoke write grant for spawn item ${slot + 1}`,
-        run: () => {
-          revokePiWriteGrant(writeGrant.token);
-          revoked.add(writeGrant.token);
-        },
-      },
-      ...(writeGrant.injected ? [{
-        label: `restore child prompt for spawn item ${slot + 1}`,
-        run: () => replacePiSpawnTask(event.input, slot, writeGrant.originalTask),
-      }] : []),
-    ]);
-  const rosterRollbackActions = (removed: Set<AgentId>): readonly PiCleanupAction[] =>
-    [...reserved].reverse().map((agentId) => ({
-      label: `remove active roster entry ${agentId}`,
-      run: async () => {
-        await fsSessionRegistry.removeActive(safeSessionId, agentId);
-        removed.add(agentId);
-      },
-    }));
-  const retainAdmissionCleanupDebt = (
-    revoked: ReadonlySet<string>,
-    removed: ReadonlySet<AgentId>,
-    pointerReleased: boolean,
-  ): void => {
-    const remainingGrantTokens = spawnLifecycle
-      .flatMap(({ writeGrant }) => writeGrant === null ? [] : [writeGrant.token])
-      .filter((token) => !revoked.has(token));
-    const remainingRosterIds = new Set(reserved.filter((agentId) => !removed.has(agentId)));
-    const remainingPointerBinding = pointerReleased ? null : taskGraphPointerBinding;
-    if (remainingGrantTokens.length === 0 && remainingRosterIds.size === 0 && remainingPointerBinding === null) return;
-    const runtime = parentSessions.runtimeFor(safeSessionId);
-    if (remainingGrantTokens.length > 0) {
-      runtime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
-    }
-    retainSpawnCleanupDebt(runtime, toolCallId, {
+  const rollbackLifecycle = async (): Promise<readonly string[]> => {
+    const { errors, releases } = await releaseSpawnClaims(claims, toolCallId, {
+      removeEmissionLaunches: () => emissionLaunchBridge.removeToolCall(safeSessionId, toolCallId),
+      revokeGrant: revokePiWriteGrant,
+      restorePrompt: (slot, originalTask) => replacePiSpawnTask(event.input, slot, originalTask),
+      removeRosterEntry: (agentId) => fsSessionRegistry.removeActive(safeSessionId, agentId),
+      releasePointer: rollbackSessionTaskGraphPointer,
+    });
+    const debt = remainingSpawnDebt(claims, releases, {
       sessionId: safeSessionId,
       needsTaskGraphLifecycle,
       graphActiveAtSpawn: orchestrationGraphActive,
       orchestrationRunBinding,
-      pointerBinding: remainingPointerBinding,
-      items: Object.freeze(spawnLifecycle.flatMap((state) =>
-        remainingRosterIds.has(state.rosterId)
-          ? [Object.freeze({
-              agentType: state.admission.item.agent,
-              rosterId: state.rosterId,
-              taskId: extractTaskId(state.admission.item.task),
-              implementationAuthority: null,
-              reviewAuthority: null,
-              specCheckAuthority: null,
-              emissionLaunch: reservedReviewerEmissionLaunch(
-                state.admission.emissionExpectation,
-                event.input,
-                state.slot,
-              ),
-              kind: state.dispatchTaskExecutionSpawn.kind,
-            })]
-          : [])),
     });
-  };
-  const rollbackLifecycle = async (): Promise<readonly string[]> => {
-    const revokedGrantTokens = new Set<string>();
-    const removedRosterIds = new Set<AgentId>();
-    let pointerReleased = false;
-    const pointerActions: PiCleanupAction[] = [];
-    if (taskGraphPointerBinding !== null) {
-      const ownedPointer = taskGraphPointerBinding;
-      pointerActions.push({
-        label: "roll back task-graph pointer",
-        run: async () => {
-          const result = await rollbackSessionTaskGraphPointer(ownedPointer);
-          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
-          pointerReleased = true;
-        },
-      });
-    }
-    const errors = await runPiCleanupActions([
-      ...(emissionLaunchStaged ? [{
-        label: `remove emission launch capabilities for ${toolCallId}`,
-        run: () => {
-          emissionLaunchBridge.removeToolCall(safeSessionId, toolCallId);
-          emissionLaunchStaged = false;
-        },
-      }] : []),
-      ...grantRollbackActions(revokedGrantTokens),
-      ...rosterRollbackActions(removedRosterIds),
-      ...pointerActions,
-    ]);
-    retainAdmissionCleanupDebt(revokedGrantTokens, removedRosterIds, pointerReleased);
+    parentSessions.retainWriteGrantDebt(safeSessionId, toolCallId, debt.grantTokens);
+    parentSessions.retainSpawnCleanupDebt(safeSessionId, toolCallId, debt.reservation);
     return errors;
   };
   // Observe graph activity before this prospective batch writes its own
@@ -307,15 +245,21 @@ export async function reservePiSpawnLifecycle(
       : undefined;
   try {
     mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
-    for (const { rosterId } of spawnLifecycle) {
-      await fsSessionRegistry.markActive(safeSessionId, rosterId);
-      reserved.push(rosterId);
+    for (const state of spawnLifecycle) {
+      await fsSessionRegistry.markActive(safeSessionId, state.rosterId);
+      // The debt shape of a roster entry carries no role authority: none is
+      // committed until the whole reservation is.
+      claims = claimRosterEntry(claims, legacyReservationItem(
+        { rosterId: state.rosterId, emissionLaunch: emissionLaunchOf(state), kind: state.dispatchTaskExecutionSpawn.kind },
+        state.admission.item.agent,
+        extractTaskId(state.admission.item.task),
+      ));
     }
     if (needsTaskGraphLifecycle && graphExists(orchestrationGraphPath)) {
-      taskGraphPointerBinding = await bindSessionTaskGraphPointer(
+      claims = claimPointerLease(claims, await bindSessionTaskGraphPointer(
         safeSessionId,
         orchestrationGraphPath,
-      );
+      ));
     }
     // Bind every Loom-owned Pi native spawn identity to the exact issued
     // request before the harness can dispatch the batch. The durable run
@@ -327,6 +271,12 @@ export async function reservePiSpawnLifecycle(
       safeSessionId,
       event.input,
     );
+    // The first exact standalone spawn makes its run current for the root;
+    // a retry of the same run never reorders it.
+    if (orchestrationRunBinding !== null &&
+        spawnLifecycle.some(({ admission }) => hasStandaloneReviewContext(admission.item.task))) {
+      reviewWitnesses.touch(safeSessionId, orchestrationRunBinding);
+    }
     const unboundSpecChecks = orchestrationRunBinding === null
       ? spawnLifecycle.filter(({ admission }) => admission.item.agent === "spec-check-invoker")
       : [];
@@ -396,39 +346,20 @@ export async function reservePiSpawnLifecycle(
         taskGraphPath: orchestrationGraphPath,
         ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
       });
-      // Track the issued token on the paired item before prompt injection
-      // can fail. If immediate revocation also fails, outer rollback
-      // retries this exact association instead of orphaning a sibling's
-      // grant.
-      replaceLifecycleState(Object.freeze({
-        ...state,
-        writeGrant: Object.freeze({
-          token: grant.token,
-          task: item.task,
-          originalTask: item.task,
-          injected: false,
-        }),
-      }));
+      // Claim the issued token for its slot before prompt injection can
+      // fail. If immediate revocation also fails, the rollback retries this
+      // exact grant instead of orphaning a sibling's.
+      claims = claimWriteGrant(claims, { slot, token: grant.token, originalTask: item.task });
       const task = await injectPiWriteGrantWithRevocation(item.task, grant, slot);
-      const tracked = spawnLifecycle[slot];
-      if (tracked === undefined || tracked.writeGrant === null) {
-        throw new Error(`Pi write-grant slot ${slot + 1} lost its issued grant association`);
-      }
-      replaceLifecycleState(Object.freeze({
-        ...tracked,
-        writeGrant: Object.freeze({ ...tracked.writeGrant, task }),
-      }));
+      replaceLifecycleState(Object.freeze({ ...state, grantedTask: task }));
     }
     // Mutate before task-state validation. Rollback restores prompts and
     // revokes grants, leaving no post-validation operation that can fail
     // after executing_tasks/baselines have committed.
     for (const state of spawnLifecycle) {
-      if (state.writeGrant === null) continue;
-      replacePiSpawnTask(event.input, state.slot, state.writeGrant.task);
-      replaceLifecycleState(Object.freeze({
-        ...state,
-        writeGrant: Object.freeze({ ...state.writeGrant, injected: true }),
-      }));
+      if (state.grantedTask === null) continue;
+      replacePiSpawnTask(event.input, state.slot, state.grantedTask);
+      claims = claimGrantInjection(claims, state.slot);
     }
     spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => {
       const spawn = state.admission.taskExecutionSpawn;
@@ -470,7 +401,7 @@ export async function reservePiSpawnLifecycle(
     if (launchExpectations.length > 0) {
       const staged = emissionLaunchBridge.stage(launchExpectations);
       if (!staged.ok) throw new Error(staged.reason);
-      emissionLaunchStaged = true;
+      claims = claimEmissionLaunches(claims);
     }
   } catch (error) {
     const cleanupErrors = await rollbackLifecycle();
@@ -542,36 +473,40 @@ export async function reservePiSpawnLifecycle(
       "implementation authority alignment lost its structural spawn association",
     );
   }
-  spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => Object.freeze({
-    ...state,
-    implementationAuthority: alignment.authoritiesBySlot[state.slot] ?? null,
-  })));
+  // Parse every slot's role claims at the producer: a contradictory slot
+  // refuses the registered batch here, never at settlement.
+  const reservedItem = (state: SpawnLifecycleState): DomainResult<PiSpawnReservationItem, string> => {
+    const slot = parseReservedSlot({
+      agentType: state.admission.item.agent,
+      taskId: extractTaskId(state.admission.item.task),
+      implementationAuthority: alignment.authoritiesBySlot[state.slot] ?? null,
+      reviewAuthority: state.reviewAuthority,
+      specCheckAuthority: state.admission.item.agent === "spec-check-invoker" ? specCheckAuthority : null,
+    });
+    if (!slot.ok) return slot;
+    return reservationItemOf(
+      { rosterId: state.rosterId, emissionLaunch: emissionLaunchOf(state), kind: state.dispatchTaskExecutionSpawn.kind },
+      slot.value,
+    );
+  };
+  const items: PiSpawnReservationItem[] = [];
+  for (const state of spawnLifecycle) {
+    const item = reservedItem(state);
+    if (!item.ok) return refuseRegisteredBatch(taskRegistration.authorities, item.error);
+    items.push(item.value);
+  }
   const sessionRuntime = parentSessions.runtimeFor(safeSessionId);
-  const issuedGrantTokens = spawnLifecycle.flatMap(({ writeGrant }) =>
-    writeGrant === null ? [] : [writeGrant.token]);
+  const issuedGrantTokens = claims.grants.map(({ token }) => token);
   if (issuedGrantTokens.length > 0) {
     sessionRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(issuedGrantTokens));
   }
-  sessionRuntime.spawnReservations.set(toolCallId, {
+  sessionRuntime.spawnReservations.set(toolCallId, Object.freeze({
     sessionId: safeSessionId,
     needsTaskGraphLifecycle,
     graphActiveAtSpawn: orchestrationGraphActive,
     orchestrationRunBinding,
-    pointerBinding: taskGraphPointerBinding,
-    items: Object.freeze(spawnLifecycle.map((state) => ({
-      agentType: state.admission.item.agent,
-      rosterId: state.rosterId,
-      taskId: extractTaskId(state.admission.item.task),
-      implementationAuthority: state.implementationAuthority,
-      reviewAuthority: state.reviewAuthority,
-      specCheckAuthority: state.admission.item.agent === "spec-check-invoker" ? specCheckAuthority : null,
-      emissionLaunch: reservedReviewerEmissionLaunch(
-        state.admission.emissionExpectation,
-        event.input,
-        state.slot,
-      ),
-      kind: state.dispatchTaskExecutionSpawn.kind,
-    }))),
-  });
+    pointerBinding: claims.pointer,
+    items: Object.freeze(items),
+  }));
   return undefined;
 }

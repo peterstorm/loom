@@ -5,9 +5,15 @@
  * batch — its slots, their authorities, its run and pointer bindings, and
  * whether a task graph was active at spawn — and is the authoritative
  * expectation the `tool_result` side settles against. This module owns that
- * aggregate, its durable recovery from Run Directory correlators after the
- * in-memory copy is lost, and the per-session runtime that retains cleanup
- * debt until every capability it names is released.
+ * aggregate and the one constructor of its items (`reservationItemOf`, with
+ * the authority-free `legacyReservationItem` for cleanup debt and recovery),
+ * its durable recovery from Run Directory correlators after the in-memory
+ * copy is lost, and the per-session runtime that retains cleanup debt until
+ * every capability it names is released.
+ *
+ * The reservation itself is in-memory only: recovery rebuilds it from the Run
+ * Directory's correlators, never from a persisted reservation record, so the
+ * item shape is free to be the typed `ReservedSlot` union.
  */
 
 import type { TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
@@ -25,20 +31,91 @@ import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
-import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
+import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import {
   piSubagentResultFailed,
   type PiSubagentResultEntry,
 } from "./subagent-result-batch";
 import {
-  type PiReviewAttemptAuthority,
-  type PiSpecCheckAttemptAuthority,
+  legacyReservedSlot,
+  type ImplementationReservedSlot,
+  type LegacyReservedSlot,
+  type ReservedSlot,
+  type ReviewReservedSlot,
+  type SpecCheckReservedSlot,
 } from "./reserved-slot";
 import { parsePiMessages } from "./transcript-adapter";
 import type { PiReservedEmissionLaunch } from "./emission-launch-bridge";
 import { piSpawnRosterId } from "./tool-input";
 
 export type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
+
+/** The identity every reserved item carries beside its slot. */
+type PiReservedItemIdentity = Readonly<{
+  rosterId: AgentId;
+  emissionLaunch: PiReservedEmissionLaunch | null;
+}>;
+
+/**
+ * One reserved spawn item: its lifecycle kind and the `ReservedSlot` it
+ * answers for, joined so each kind admits only the role authorities it can
+ * carry. An implementation spawn holds implementation authority (or none);
+ * a non-implementation spawn holds review or spec-check authority (or none);
+ * a standalone spawn never holds Task-state authority. `kind` is the closed
+ * lifecycle union, not an independent boolean pair: two booleans admitted the
+ * impossible {implementation: true, standalone: true} and left the third
+ * lifecycle state nameless.
+ */
+export type PiSpawnReservationItem =
+  | (PiReservedItemIdentity & Readonly<{ kind: "implementation" }> & (ImplementationReservedSlot | LegacyReservedSlot))
+  | (PiReservedItemIdentity & Readonly<{ kind: "non-implementation" }> &
+      (ReviewReservedSlot | SpecCheckReservedSlot | LegacyReservedSlot))
+  | (PiReservedItemIdentity & Readonly<{ kind: "standalone" }> & LegacyReservedSlot);
+
+type PiReservedItemShape = PiReservedItemIdentity & Readonly<{ kind: TaskExecutionSpawn["kind"] }>;
+
+/**
+ * The one constructor of a reserved item from a parsed slot. Refuses a role
+ * authority the item's lifecycle kind cannot carry, so the per-kind invariant
+ * is checked at the producer, before dispatch.
+ */
+export function reservationItemOf(
+  shape: PiReservedItemShape,
+  slot: ReservedSlot,
+): DomainResult<PiSpawnReservationItem, string> {
+  const identity = { rosterId: shape.rosterId, emissionLaunch: shape.emissionLaunch };
+  const refuse = (): DomainResult<PiSpawnReservationItem, string> =>
+    failure(`reserved ${shape.kind} spawn item for ${slot.agentType} cannot carry ${slot.role} authority`);
+  switch (shape.kind) {
+    case "implementation":
+      return slot.role === "implementation" || slot.role === "legacy"
+        ? success(Object.freeze({ ...identity, kind: shape.kind, ...slot }))
+        : refuse();
+    case "non-implementation":
+      return slot.role === "review" || slot.role === "spec-check" || slot.role === "legacy"
+        ? success(Object.freeze({ ...identity, kind: shape.kind, ...slot }))
+        : refuse();
+    case "standalone":
+      return slot.role === "legacy"
+        ? success(Object.freeze({ ...identity, kind: shape.kind, ...slot }))
+        : refuse();
+  }
+}
+
+/**
+ * A reserved item that keeps no role authority — total, because every
+ * lifecycle kind admits the legacy slot. Admission cleanup debt (whose
+ * authorities were never committed) and durably recovered reservations (whose
+ * Task identity the Run Directory does not record) are built only this way.
+ */
+export function legacyReservationItem(
+  shape: PiReservedItemShape,
+  agentType: string,
+  taskId: string | null,
+): PiSpawnReservationItem {
+  const slot = legacyReservedSlot(agentType, taskId);
+  return Object.freeze({ rosterId: shape.rosterId, emissionLaunch: shape.emissionLaunch, kind: shape.kind, ...slot });
+}
 
 export type PiSpawnReservation = Readonly<{
   sessionId: PiSessionId;
@@ -57,20 +134,7 @@ export type PiSpawnReservation = Readonly<{
   graphActiveAtSpawn: boolean;
   orchestrationRunBinding: SessionRunBinding | null;
   pointerBinding: SessionTaskGraphPointerBinding | null;
-  items: readonly Readonly<{
-    agentType: string;
-    rosterId: AgentId;
-    taskId: string | null;
-    implementationAuthority: ImplementationAttemptAuthority | null;
-    reviewAuthority: PiReviewAttemptAuthority | null;
-    specCheckAuthority: PiSpecCheckAttemptAuthority | null;
-    emissionLaunch: PiReservedEmissionLaunch | null;
-    /** The closed lifecycle union, not an independent boolean pair: two
-     *  booleans admitted the impossible {implementation: true, standalone:
-     *  true} and left the third lifecycle state nameless. The source union's
-     *  exhaustiveness carries through the adapter. */
-    kind: TaskExecutionSpawn["kind"];
-  }>[];
+  items: readonly PiSpawnReservationItem[];
 }>;
 
 /**
@@ -174,18 +238,15 @@ export function recoverPiSpawnReservation(
       graphActiveAtSpawn: true,
       orchestrationRunBinding: binding,
       pointerBinding: null,
+      // The Run Directory records request identity, not Task identity or
+      // lifecycle kind: a recovered item is a standalone legacy slot.
       items: Object.freeze(indexes.map((index) => {
         const item = byIndex.get(index)!;
-        return Object.freeze({
-          agentType: item.agentType,
-          rosterId: item.rosterId,
-          taskId: null,
-          implementationAuthority: null,
-          reviewAuthority: null,
-          specCheckAuthority: null,
-          emissionLaunch: null,
-          kind: "standalone" as const,
-        });
+        return legacyReservationItem(
+          { rosterId: item.rosterId, emissionLaunch: null, kind: "standalone" },
+          item.agentType,
+          null,
+        );
       })),
     }));
   }
@@ -210,47 +271,58 @@ const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   spawnReservations: new Map(),
 });
 
-export const retainSpawnCleanupDebt = (
-  runtime: PiParentSessionRuntime,
-  toolCallId: string,
-  reservation: PiSpawnReservation,
-): void => {
-  if (reservation.items.length === 0 && reservation.pointerBinding === null) {
-    runtime.spawnReservations.delete(toolCallId);
-  } else {
-    runtime.spawnReservations.set(toolCallId, Object.freeze(reservation));
-  }
-};
+/** Does this reservation still name a capability someone must release? */
+const holdsCleanupDebt = (reservation: PiSpawnReservation): boolean =>
+  reservation.items.length > 0 || reservation.pointerBinding !== null;
 
 /**
  * Every parent session's runtime in one Pi process. A Pi process may host
  * overlapping sessions, so reservations and capabilities are aggregates owned
  * by one parsed session, never process-global maps whose shutdown can consume
- * another session's state. A runtime exists only while it holds debt.
+ * another session's state. A runtime exists only while it holds debt: the two
+ * retain operations record what a tool call still owes and forget the session's
+ * runtime in the same step once it owes nothing, so no caller can retain debt
+ * and forget to prune (or prune before retaining).
  */
 export type PiParentSessions = Readonly<{
   get: (sessionId: PiSessionId) => PiParentSessionRuntime | undefined;
   /** The session's runtime, created empty on first use. */
   runtimeFor: (sessionId: PiSessionId) => PiParentSessionRuntime;
-  /** Forget the session's runtime once it holds no grant and no reservation. */
-  prune: (sessionId: PiSessionId, runtime: PiParentSessionRuntime) => void;
+  /** Retain exactly these unrevoked write-grant tokens for the tool call
+   *  (none: forget its grants), then prune the session if it owes nothing. */
+  retainWriteGrantDebt: (sessionId: PiSessionId, toolCallId: string, tokens: readonly string[]) => void;
+  /** Retain the reservation while it still names a roster entry or pointer
+   *  lease (otherwise forget it), then prune the session if it owes nothing. */
+  retainSpawnCleanupDebt: (sessionId: PiSessionId, toolCallId: string, reservation: PiSpawnReservation) => void;
 }>;
 
 export function createPiParentSessions(): PiParentSessions {
   const runtimes = new Map<PiSessionId, PiParentSessionRuntime>();
+  const runtimeFor = (sessionId: PiSessionId): PiParentSessionRuntime => {
+    const existing = runtimes.get(sessionId);
+    if (existing) return existing;
+    const created = emptyParentSessionRuntime();
+    runtimes.set(sessionId, created);
+    return created;
+  };
+  const pruneIfIdle = (sessionId: PiSessionId): void => {
+    const runtime = runtimes.get(sessionId);
+    if (runtime !== undefined && runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0) {
+      runtimes.delete(sessionId);
+    }
+  };
   return Object.freeze({
     get: (sessionId: PiSessionId) => runtimes.get(sessionId),
-    runtimeFor: (sessionId: PiSessionId) => {
-      const existing = runtimes.get(sessionId);
-      if (existing) return existing;
-      const created = emptyParentSessionRuntime();
-      runtimes.set(sessionId, created);
-      return created;
+    runtimeFor,
+    retainWriteGrantDebt: (sessionId: PiSessionId, toolCallId: string, tokens: readonly string[]) => {
+      if (tokens.length > 0) runtimeFor(sessionId).issuedWriteGrants.set(toolCallId, Object.freeze([...tokens]));
+      else runtimes.get(sessionId)?.issuedWriteGrants.delete(toolCallId);
+      pruneIfIdle(sessionId);
     },
-    prune: (sessionId: PiSessionId, runtime: PiParentSessionRuntime) => {
-      if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0) {
-        runtimes.delete(sessionId);
-      }
+    retainSpawnCleanupDebt: (sessionId: PiSessionId, toolCallId: string, reservation: PiSpawnReservation) => {
+      if (holdsCleanupDebt(reservation)) runtimeFor(sessionId).spawnReservations.set(toolCallId, Object.freeze(reservation));
+      else runtimes.get(sessionId)?.spawnReservations.delete(toolCallId);
+      pruneIfIdle(sessionId);
     },
   });
 }

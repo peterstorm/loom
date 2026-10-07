@@ -2,12 +2,14 @@
  * The authority a reserved Pi spawn slot carries, and the pure checks that
  * decide whether that authority still matches protected TaskGraph state.
  *
- * The extension stores one flat `ReservedSlotRecord` per spawned item (three
- * nullable role authorities, because the item's role is only known once the
- * admission settles). Settlement never reads that record directly: it parses
- * it once into `ReservedSlot`, a union keyed by role, so a slot carrying two
- * role authorities — or an authority for a role its agent does not play — is
- * refused at the seam instead of being half-read by whichever applier runs.
+ * A reservation stores `ReservedSlot`, a union keyed by the one role
+ * authority the slot carries. The spawn lifecycle gathers its role claims as
+ * `ReservedSlotClaims` (three nullable authorities, because which one a slot
+ * holds is only known once admission settles) and parses them HERE, at the
+ * producer: a slot carrying two role authorities, an authority for a role its
+ * agent does not play, or an implementation authority for another Task is
+ * refused before dispatch, where the spawn can still be rolled back — never
+ * discovered by an applier after the child has run.
  */
 
 import { IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../engine/src/core/model-profiles";
@@ -55,10 +57,12 @@ export type PiReviewAttemptAuthority =
     }>;
 
 /**
- * The reservation fields as the extension stores them: every role authority is
- * present, `null` when the slot holds none. There is no third "absent" state.
+ * The role claims a spawn lifecycle gathers for one slot before it is
+ * reserved: every role authority present, `null` when the slot holds none.
+ * Producer input only — never stored; `parseReservedSlot` turns it into the
+ * `ReservedSlot` a reservation keeps.
  */
-export type ReservedSlotRecord = Readonly<{
+export type ReservedSlotClaims = Readonly<{
   agentType: string;
   taskId: string | null;
   implementationAuthority: ImplementationAttemptAuthority | null;
@@ -68,59 +72,87 @@ export type ReservedSlotRecord = Readonly<{
 
 type ReservedSlotBase = Readonly<{ agentType: string; taskId: string | null }>;
 
+/** An implementation slot names its Task: the authority's own. */
+export type ImplementationReservedSlot =
+  Readonly<{ agentType: string; taskId: string; role: "implementation"; authority: ImplementationAttemptAuthority }>;
+export type ReviewReservedSlot = Readonly<ReservedSlotBase & { role: "review"; authority: PiReviewAttemptAuthority }>;
+export type SpecCheckReservedSlot =
+  Readonly<ReservedSlotBase & { role: "spec-check"; authority: PiSpecCheckAttemptAuthority }>;
+/** A reservation with no role authority at all — the compatibility arm each
+ *  applier treats under its own legacy rule, and the shape cleanup debt and
+ *  durably recovered reservations keep. */
+export type LegacyReservedSlot = Readonly<ReservedSlotBase & { role: "legacy" }>;
+
 /**
  * The reserved slot a result answers for, keyed by the one role authority it
- * carries. `legacy` is a reservation with no role authority at all — the
- * compatibility arm each applier treats under its own legacy rule.
+ * carries.
  */
 export type ReservedSlot =
-  | Readonly<ReservedSlotBase & { role: "implementation"; authority: ImplementationAttemptAuthority }>
-  | Readonly<ReservedSlotBase & { role: "review"; authority: PiReviewAttemptAuthority }>
-  | Readonly<ReservedSlotBase & { role: "spec-check"; authority: PiSpecCheckAttemptAuthority }>
-  | Readonly<ReservedSlotBase & { role: "legacy" }>;
+  | ImplementationReservedSlot
+  | ReviewReservedSlot
+  | SpecCheckReservedSlot
+  | LegacyReservedSlot;
 
 export type ReservedSlotParse =
   | Readonly<{ ok: true; value: ReservedSlot }>
   | Readonly<{ ok: false; error: string }>;
 
+/** The authority-free slot: total, because it claims nothing to contradict. */
+export const legacyReservedSlot = (agentType: string, taskId: string | null): LegacyReservedSlot =>
+  Object.freeze({ agentType, taskId, role: "legacy" as const });
+
 /**
- * Parse the stored record into its role arm. Refuses a record that carries
- * more than one role authority, or an authority whose role the reserved agent
- * does not play (an implementation authority on a reviewer, for example).
+ * Parse one slot's claims into its role arm. Refuses claims that carry more
+ * than one role authority, an authority whose role the reserved agent does not
+ * play (an implementation authority on a reviewer, for example), or an
+ * implementation authority for a Task other than the one the slot reserves.
  */
-export function parseReservedSlot(record: ReservedSlotRecord): ReservedSlotParse {
-  const base = { agentType: record.agentType, taskId: record.taskId };
-  // One row per role authority the record carries: the slot it parses to, and
-  // whether the reserved agent plays that role (`playedBy` names the role's
-  // agents for the refusal).
-  const carried: readonly Readonly<{ slot: ReservedSlot; plays: boolean; playedBy: string }>[] = [
-    ...(record.implementationAuthority === null ? [] : [{
-      slot: { ...base, role: "implementation" as const, authority: record.implementationAuthority },
-      plays: IMPL_AGENTS.has(record.agentType),
+export function parseReservedSlot(claims: ReservedSlotClaims): ReservedSlotParse {
+  const base = { agentType: claims.agentType, taskId: claims.taskId };
+  const refuse = (problem: string): ReservedSlotParse =>
+    Object.freeze({ ok: false as const, error: `reserved slot for ${claims.agentType} ${problem}` });
+  const accept = (value: ReservedSlot): ReservedSlotParse => Object.freeze({ ok: true as const, value: Object.freeze(value) });
+  // One row per role authority the claims carry: the role, the slot it parses
+  // to, and whether the reserved agent plays that role (`playedBy` names the
+  // role's agents for the refusal).
+  const carried: readonly Readonly<{ role: ReservedSlot["role"]; parsed: ReservedSlotParse; plays: boolean; playedBy: string }>[] = [
+    ...(claims.implementationAuthority === null ? [] : [{
+      role: "implementation" as const,
+      parsed: claims.taskId === claims.implementationAuthority.taskId
+        ? accept({
+            agentType: claims.agentType,
+            taskId: claims.implementationAuthority.taskId,
+            role: "implementation",
+            authority: claims.implementationAuthority,
+          })
+        : refuse(
+            `reserves Task ${claims.taskId ?? "missing"}, but its implementation authority is for ${claims.implementationAuthority.taskId}`,
+          ),
+      plays: IMPL_AGENTS.has(claims.agentType),
       playedBy: "an implementation agent",
     }]),
-    ...(record.reviewAuthority === null ? [] : [{
-      slot: { ...base, role: "review" as const, authority: record.reviewAuthority },
-      plays: REVIEW_SUB_AGENTS.has(record.agentType),
+    ...(claims.reviewAuthority === null ? [] : [{
+      role: "review" as const,
+      parsed: accept({ ...base, role: "review", authority: claims.reviewAuthority }),
+      plays: REVIEW_SUB_AGENTS.has(claims.agentType),
       playedBy: "a reviewer",
     }]),
-    ...(record.specCheckAuthority === null ? [] : [{
-      slot: { ...base, role: "spec-check" as const, authority: record.specCheckAuthority },
-      plays: record.agentType === SPEC_CHECK_AGENT,
+    ...(claims.specCheckAuthority === null ? [] : [{
+      role: "spec-check" as const,
+      parsed: accept({ ...base, role: "spec-check", authority: claims.specCheckAuthority }),
+      plays: claims.agentType === SPEC_CHECK_AGENT,
       playedBy: SPEC_CHECK_AGENT,
     }]),
   ];
-  const refuse = (problem: string): ReservedSlotParse =>
-    Object.freeze({ ok: false as const, error: `reserved slot for ${record.agentType} ${problem}` });
   if (carried.length > 1) {
-    const roles = carried.map(({ slot }) => slot.role);
+    const roles = carried.map(({ role }) => role);
     return refuse(`carries ${carried.length} role authorities (${roles.join(", ")}); exactly one is allowed`);
   }
   const [only] = carried;
-  if (only === undefined) return Object.freeze({ ok: true as const, value: Object.freeze({ ...base, role: "legacy" as const }) });
+  if (only === undefined) return accept(legacyReservedSlot(claims.agentType, claims.taskId));
   return only.plays
-    ? Object.freeze({ ok: true as const, value: Object.freeze(only.slot) })
-    : refuse(`carries ${only.slot.role} authority, but the agent is not ${only.playedBy}`);
+    ? only.parsed
+    : refuse(`carries ${only.role} authority, but the agent is not ${only.playedBy}`);
 }
 
 /** The slot's implementation authority, or `null` for every other arm and for no reservation. */

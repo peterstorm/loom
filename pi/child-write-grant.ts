@@ -6,8 +6,13 @@
  * consumes the one-time capability injected into its own task and binds its
  * own session before the first model turn; a child whose grant was rejected
  * keeps direct edits blocked for the rest of its session. This module owns
- * that per-process registry, the activation, and the pure decision of what a
- * binding still owes after shutdown released part of it.
+ * that per-process registry, the activation, and both halves of the binding's
+ * cleanup-authority lifecycle as pure decisions: what a rejected activation's
+ * partial binding still owes (`rejectedChildWriteGrantDebt`) and what a
+ * binding still owes after shutdown released part of it
+ * (`retainedChildWriteGrant`). The activation reaches the session registry,
+ * the pointer lease and stderr only through `PiChildWriteGrantPorts`, so both
+ * halves run against in-memory fakes.
  */
 
 import type { BeforeAgentStartEventResult } from "@earendil-works/pi-coding-agent";
@@ -16,6 +21,7 @@ import {
   fsSessionRegistry,
   parseAgentId,
   parseSessionId,
+  type SessionId,
   type SessionTaskGraphPointerBinding,
 } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
@@ -62,18 +68,57 @@ function piSystemAgentIdentity(systemPrompt: string): string {
   return matches[0]![1]!;
 }
 
+/** The I/O one child activation performs, injectable so the rollback and
+ *  cleanup-pending lifecycle runs against in-memory fakes. */
+export type PiChildWriteGrantPorts = Readonly<{
+  markActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
+  removeActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
+  bindPointer: (sessionId: SessionId, taskGraphPath: string) => Promise<SessionTaskGraphPointerBinding>;
+  writeStderr: (line: string) => void;
+}>;
+
+const productionPiChildWriteGrantPorts: PiChildWriteGrantPorts = Object.freeze({
+  markActive: (sessionId: SessionId, agentId: AgentId) => fsSessionRegistry.markActive(sessionId, agentId),
+  removeActive: (sessionId: SessionId, agentId: AgentId) => fsSessionRegistry.removeActive(sessionId, agentId),
+  bindPointer: (sessionId: SessionId, taskGraphPath: string) => bindSessionTaskGraphPointer(sessionId, taskGraphPath),
+  writeStderr: (line: string): void => { process.stderr.write(line); },
+});
+
+/** The roster entry a failed activation had already written. */
+type PartialChildBinding = Readonly<{ sessionId: SessionId; agentId: AgentId }>;
+
+/**
+ * What a rejected activation still owes: when its partial roster entry could
+ * not be removed, that entry stays as `roster-cleanup-pending` authority so
+ * shutdown retries it; a clean (or never-made) partial binding owes nothing.
+ * Pure; the shell stores the answer. A failed bind leaves no pointer lease,
+ * so the roster entry is the only debt this half of the lifecycle can hold.
+ */
+export function rejectedChildWriteGrantDebt(
+  partial: PartialChildBinding | null,
+  cleanupErrors: readonly string[],
+): Extract<ActiveChildWriteGrant, { kind: "roster-cleanup-pending" }> | null {
+  return partial !== null && cleanupErrors.length > 0
+    ? { kind: "roster-cleanup-pending", agentId: partial.agentId, pointerBinding: null }
+    : null;
+}
+
 /**
  * Consume the write grant injected into this child's task and bind the child
  * session to it. A rejected grant marks the session rejected, removes any
- * roster entry the partial binding made, and answers a hidden diagnostic
- * message; a prompt without a grant marker is untouched.
+ * roster entry the partial binding made (retaining it as cleanup debt when
+ * that removal fails), and answers a hidden diagnostic message; a prompt
+ * without a grant marker is untouched.
  */
 export async function activatePiChildWriteGrant(
   event: Readonly<{ prompt: string; systemPrompt: string }>,
   ctx: Readonly<{ cwd: string; sessionManager: Readonly<{ getSessionId: () => string | undefined }> }>,
   grants: PiChildWriteGrants,
+  ports: PiChildWriteGrantPorts = productionPiChildWriteGrantPorts,
 ): Promise<BeforeAgentStartEventResult | undefined> {
-  let partialBinding: { sessionId: NonNullable<ReturnType<typeof parseSessionId>>; agentId: AgentId } | null = null;
+  // The one mutable cell: set between the roster write and the binding that
+  // completes it, read only by the rejection arm below.
+  let partialBinding: PartialChildBinding | null = null;
   try {
     if (!PI_WRITE_GRANT_MARKER.test(event.prompt)) return;
     const childAgent = piSystemAgentIdentity(event.systemPrompt);
@@ -82,9 +127,9 @@ export async function activatePiChildWriteGrant(
     const sessionId = parseSessionId(ctx.sessionManager.getSessionId() ?? "");
     const agentId = parseAgentId(grant.agentId);
     if (!sessionId || !agentId) throw new Error("child session or grant agent identity is invalid");
-    await fsSessionRegistry.markActive(sessionId, agentId);
+    await ports.markActive(sessionId, agentId);
     partialBinding = { sessionId, agentId };
-    const pointerBinding = await bindSessionTaskGraphPointer(sessionId, grant.taskGraphPath);
+    const pointerBinding = await ports.bindPointer(sessionId, grant.taskGraphPath);
     grants.active.set(sessionId, {
       kind: "active",
       agentId,
@@ -93,39 +138,38 @@ export async function activatePiChildWriteGrant(
       grantCwd: grant.cwd,
     });
     partialBinding = null;
-    process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
+    ports.writeStderr(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
   } catch (error) {
-    const rejectedSession = ctx.sessionManager.getSessionId() ?? "";
-    if (parseSessionId(rejectedSession)) grants.rejectedSessions.add(rejectedSession);
-    // Bound to a const before the closure captures it: `partialBinding` is a
-    // mutable outer `let`, so the narrowing from the `if` does not survive
-    // into the deferred `run`, and the cleanup would dereference whatever the
-    // variable held when it finally ran rather than what was checked.
-    const orphanedBinding = partialBinding;
-    const cleanupErrors: readonly string[] = orphanedBinding === null
-      ? Object.freeze([])
-      : await runPiCleanupActions([{
-          label: `remove partial child roster entry ${orphanedBinding.agentId}`,
-          run: () => fsSessionRegistry.removeActive(orphanedBinding.sessionId, orphanedBinding.agentId),
-        }]);
-    for (const cleanupError of cleanupErrors) {
-      process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
-    }
-    if (orphanedBinding !== null && cleanupErrors.length > 0) {
-      grants.active.set(orphanedBinding.sessionId, {
-        kind: "roster-cleanup-pending",
-        agentId: orphanedBinding.agentId,
-        pointerBinding: null,
-      });
-    }
-    const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}` +
-      cleanupFailureSuffix(cleanupErrors);
-    process.stderr.write(message + "\n");
-    return {
-      message: { customType: "loom-write-grant-error", content: message, display: false },
-    };
+    return rejectChildWriteGrant(error, partialBinding, ctx.sessionManager.getSessionId() ?? "", grants, ports);
   }
   return undefined;
+}
+
+async function rejectChildWriteGrant(
+  error: unknown,
+  partial: PartialChildBinding | null,
+  rejectedSession: string,
+  grants: PiChildWriteGrants,
+  ports: PiChildWriteGrantPorts,
+): Promise<BeforeAgentStartEventResult> {
+  if (parseSessionId(rejectedSession)) grants.rejectedSessions.add(rejectedSession);
+  const cleanupErrors: readonly string[] = partial === null
+    ? Object.freeze([])
+    : await runPiCleanupActions([{
+        label: `remove partial child roster entry ${partial.agentId}`,
+        run: () => ports.removeActive(partial.sessionId, partial.agentId),
+      }]);
+  for (const cleanupError of cleanupErrors) {
+    ports.writeStderr(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
+  }
+  const debt = rejectedChildWriteGrantDebt(partial, cleanupErrors);
+  if (partial !== null && debt !== null) grants.active.set(partial.sessionId, debt);
+  const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}` +
+    cleanupFailureSuffix(cleanupErrors);
+  ports.writeStderr(message + "\n");
+  return {
+    message: { customType: "loom-write-grant-error", content: message, display: false },
+  };
 }
 
 /**

@@ -47,7 +47,6 @@ import {
   piReviewAuthorityProblem,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
-  type ReservedSlotRecord,
 } from "./reserved-slot";
 
 type LoomTask = TaskGraph["tasks"][number];
@@ -326,15 +325,13 @@ export function clearCurrentReservedAuthority(
 
 /**
  * Retire a reservation whose Task is already completed or gone. Takes only the
- * reservation's implementation authority, so the extension's stored
- * reservation item and a parsed `ReservedSlot` projection both satisfy it.
+ * slot's implementation authority (`null`: a legacy reservation holding none).
  */
 export function retireCompletedOrMissingImplementation(
   state: TaskGraph,
   taskId: string,
-  reservation: Pick<ReservedSlotRecord, "implementationAuthority">,
+  expected: ImplementationAttemptAuthority | null,
 ): Readonly<{ state: TaskGraph; retired: boolean }> {
-  const expected = reservation.implementationAuthority;
   if (!reservedAuthorityIsCurrent(state, taskId, expected)) return { state, retired: false };
   const task = state.tasks.find((candidate) => candidate.id === taskId);
   if (task !== undefined && task.status !== "completed") return { state, retired: false };

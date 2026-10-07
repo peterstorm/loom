@@ -16,18 +16,20 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 /**
- * The Pi review path is THREE files since the `tool_result` god-handler was split:
- * `subagent-stop.ts` owns the standalone-run bypass and the missing-result
- * reconciliation, `subagent-result.ts` is the shell that binds the Task and runs
- * the locked reducer, and `subagent-settlement.ts` is the pure core that applies
- * and logs the resolution;
+ * The Pi review path is FOUR files since the `tool_result` god-handler was split:
+ * `subagent-stop.ts` owns the missing-result reconciliation and executes each
+ * result's route, `subagent-result-route.ts` is the pure routing decision that
+ * owns the standalone-run bypass, `subagent-result.ts` is the shell that binds
+ * the Task and runs the locked reducer, and `subagent-settlement.ts` is the pure
+ * core that applies and logs the resolution;
  * `extension.ts` only registers the dispatcher. The parity property is about
  * the HARNESS, not about which file holds which half, so the structural
- * assertions read all three — concatenated in dispatch order, so the "checked
+ * assertions read all four — concatenated in dispatch order, so the "checked
  * before written" orderings below still mean what they say.
  */
 const PI_REVIEW_SHELL = [
   readFileSync(join(REPO_ROOT, "pi", "subagent-stop.ts"), "utf-8"),
+  readFileSync(join(REPO_ROOT, "pi", "subagent-result-route.ts"), "utf-8"),
   readFileSync(join(REPO_ROOT, "pi", "subagent-result.ts"), "utf-8"),
   readFileSync(join(REPO_ROOT, "pi", "subagent-settlement.ts"), "utf-8"),
 ].join("\n");

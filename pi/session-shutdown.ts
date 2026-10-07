@@ -18,22 +18,23 @@ import {
 import type { AgentId } from "../engine/src/machine/evidence";
 import { revokePiWriteGrant } from "./write-grant";
 import { runPiCleanupActions, type PiCleanupAction } from "./cleanup-actions";
-import { retainSpawnCleanupDebt, type PiParentSessions } from "./spawn-reservation";
+import type { PiParentSessions } from "./spawn-reservation";
 import { retainedChildWriteGrant, type PiChildWriteGrants } from "./child-write-grant";
-import { forgetTrustedReviewRuns } from "./review-run-authority";
+import type { TrustedReviewWitnesses } from "./trusted-review-witness";
 import type { PiEmissionLaunchBridge } from "./emission-launch-bridge";
 
 export type PiSessionShutdownPorts = Readonly<{
   parentSessions: PiParentSessions;
   childWriteGrants: PiChildWriteGrants;
   emissionLaunchBridge: PiEmissionLaunchBridge;
+  reviewWitnesses: TrustedReviewWitnesses;
 }>;
 
 /** Release the session's capabilities; throws one aggregate naming every
  *  cleanup that failed, after all of them were attempted. */
 export async function shutdownPiSession(rawSessionId: string, ports: PiSessionShutdownPorts): Promise<void> {
-  const { parentSessions, childWriteGrants, emissionLaunchBridge } = ports;
-  forgetTrustedReviewRuns(rawSessionId);
+  const { parentSessions, childWriteGrants, emissionLaunchBridge, reviewWitnesses } = ports;
+  reviewWitnesses.forget(rawSessionId);
   const sessionId = parseSessionId(rawSessionId);
   const binding = childWriteGrants.active.get(rawSessionId);
   // Staged emission launches are capabilities too: their removal is one more
@@ -112,23 +113,22 @@ export async function shutdownPiSession(rawSessionId: string, ports: PiSessionSh
   // entire aggregate after one failure retries already-released pointer
   // leases as `not-owned`, turning a recoverable cleanup debt permanent.
   if (sessionId && parentRuntime !== undefined) {
-    for (const [toolCallId, tokens] of parentRuntime.issuedWriteGrants) {
-      const remaining = tokens.filter((token) => !revokedTokens.has(token));
-      if (remaining.length === 0) parentRuntime.issuedWriteGrants.delete(toolCallId);
-      else parentRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(remaining));
+    // Snapshot before retaining: each retain may forget an entry, and the last
+    // one forgets the session runtime itself once it owes nothing.
+    for (const [toolCallId, tokens] of [...parentRuntime.issuedWriteGrants]) {
+      parentSessions.retainWriteGrantDebt(sessionId, toolCallId, tokens.filter((token) => !revokedTokens.has(token)));
     }
-    for (const [toolCallId, reservation] of parentRuntime.spawnReservations) {
+    for (const [toolCallId, reservation] of [...parentRuntime.spawnReservations]) {
       const items = reservation.items.filter((item) => !removedRosterIds.has(item.rosterId));
       const pointerBinding = reservation.pointerBinding !== null && releasedPointers.has(reservation.pointerBinding)
         ? null
         : reservation.pointerBinding;
-      retainSpawnCleanupDebt(parentRuntime, toolCallId, {
+      parentSessions.retainSpawnCleanupDebt(sessionId, toolCallId, {
         ...reservation,
         items: Object.freeze(items),
         pointerBinding,
       });
     }
-    parentSessions.prune(sessionId, parentRuntime);
   }
   if (binding !== undefined) {
     const retained = retainedChildWriteGrant(binding, removedRosterIds, releasedPointers);
