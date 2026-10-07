@@ -75,8 +75,9 @@ import type { TrustedReviewWitnesses } from "./trusted-review-witness";
 import {
   cleanupFailureSuffix,
   describeCause,
+  directReleaseFailureSuffix,
   injectPiWriteGrantWithRevocation,
-  runPiCleanupActions,
+  type PiCleanupAction,
 } from "./cleanup-actions";
 import {
   claimEmissionLaunches,
@@ -86,6 +87,7 @@ import {
   claimWitnessRun,
   claimWriteGrant,
   NO_SPAWN_CLAIMS,
+  releaseExactPointerLease,
   releaseSpawnClaims,
   remainingSpawnDebt,
   spawnRollbackStepLabel,
@@ -100,6 +102,19 @@ import {
 } from "./spawn-reservation";
 import type { SpawnBatchGraphAuthority } from "./spawn-preparation";
 import type { DomainResult } from "../engine/src/core/orchestration-contract/identity";
+
+/**
+ * The ledger after a claim; when the ledger refuses it, the capability just
+ * taken is owed by no rollback, so it is released directly and the refusal
+ * thrown (carrying that release's failure, if any).
+ */
+async function claimOrReleaseUnclaimed(
+  claimed: DomainResult<SpawnClaims, string>,
+  releaseUnclaimed: PiCleanupAction,
+): Promise<SpawnClaims> {
+  if (claimed.ok) return claimed.value;
+  throw new Error(`${claimed.error}${await directReleaseFailureSuffix(releaseUnclaimed)}`);
+}
 
 /** A `tool_call` refusal in the shape Pi reads. */
 export type PiSpawnRefusal = Readonly<{ block: true; reason: string }>;
@@ -267,10 +282,11 @@ export async function reservePiSpawnLifecycle(
       await fsSessionRegistry.markActive(safeSessionId, state.rosterId);
     }
     if (needsTaskGraphLifecycle && graphExists(orchestrationGraphPath)) {
-      claims = claimPointerLease(claims, await bindSessionTaskGraphPointer(
-        safeSessionId,
-        orchestrationGraphPath,
-      ));
+      const lease = await bindSessionTaskGraphPointer(safeSessionId, orchestrationGraphPath);
+      claims = await claimOrReleaseUnclaimed(claimPointerLease(claims, lease), {
+        label: "roll back unclaimed task-graph pointer",
+        run: () => releaseExactPointerLease(rollbackSessionTaskGraphPointer, lease),
+      });
     }
     // Bind every Loom-owned Pi native spawn identity to the exact issued
     // request before the harness can dispatch the batch. The durable run
@@ -289,7 +305,11 @@ export async function reservePiSpawnLifecycle(
     if (orchestrationRunBinding !== null &&
         spawnLifecycle.some(({ admission }) => hasStandaloneReviewContext(admission.item.task)) &&
         reviewWitnesses.touch(safeSessionId, orchestrationRunBinding) === "bound") {
-      claims = claimWitnessRun(claims, orchestrationRunBinding);
+      const bound = orchestrationRunBinding;
+      claims = await claimOrReleaseUnclaimed(claimWitnessRun(claims, bound), {
+        label: `retract unclaimed review run ${bound.runId}`,
+        run: () => reviewWitnesses.retract(safeSessionId, bound),
+      });
     }
     const unboundSpecChecks = orchestrationRunBinding === null
       ? spawnLifecycle.filter(({ admission }) => admission.item.agent === "spec-check-invoker")
@@ -365,15 +385,10 @@ export async function reservePiSpawnLifecycle(
       // exact grant instead of orphaning a sibling's. A slot the ledger
       // refuses (one already holding a grant) leaves this token unowed by
       // the rollback, so it is revoked here before the refusal propagates.
-      const claimed = claimWriteGrant(claims, { slot, token: grant.token });
-      if (!claimed.ok) {
-        const revocation = await runPiCleanupActions([{
-          label: `revoke unclaimed write grant for spawn item ${slot + 1}`,
-          run: () => revokePiWriteGrant(grant.token),
-        }]);
-        throw new Error(`${claimed.error}${cleanupFailureSuffix(revocation)}`);
-      }
-      claims = claimed.value;
+      claims = await claimOrReleaseUnclaimed(claimWriteGrant(claims, { slot, token: grant.token }), {
+        label: `revoke unclaimed write grant for spawn item ${slot + 1}`,
+        run: () => revokePiWriteGrant(grant.token),
+      });
       const task = await injectPiWriteGrantWithRevocation(item.task, grant, slot);
       replaceLifecycleState(Object.freeze({ ...state, grantedTask: task }));
     }

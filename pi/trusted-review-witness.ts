@@ -101,9 +101,6 @@ type TrustedReviewRoot = Readonly<{
   runs: ReadonlyMap<string, TrustedReviewRun>;
 }>;
 
-const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
-  `${runsRoot}\0${runDirectory}`;
-
 /** The Standalone Review root a session's verification reads. */
 const standaloneReviewRoot = (cwd: string): string => resolve(cwd, ".claude/reviews/review-and-fix-runs");
 
@@ -193,52 +190,77 @@ async function verifyTrustedReviewRun(
   }) };
 }
 
+/** Where a binding's run lives in the aggregate: its root and run identities,
+ *  derived in this one place. */
+type TrustedRunLocation = Readonly<{ rootIdentity: string; runIdentity: string }>;
+
+const trustedRunLocation = ({ runsRoot, runDirectory }: SessionRunBinding): TrustedRunLocation =>
+  Object.freeze({ rootIdentity: resolve(runsRoot), runIdentity: `${runsRoot}\0${runDirectory}` });
+
+const EMPTY_TRUSTED_ROOT: TrustedReviewRoot = Object.freeze({ nextTouch: 1, runs: new Map<string, TrustedReviewRun>() });
+
+/** The root with one run touched: a new run is bound at the root's next touch
+ *  ordinal; an existing one keeps its ordinal, so it is never reordered. */
+function rootWithRunTouched(
+  root: TrustedReviewRoot,
+  runIdentity: string,
+  binding: SessionRunBinding,
+  updateCaptures: (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>,
+): TrustedReviewRoot {
+  const previous = root.runs.get(runIdentity);
+  const runs = new Map(root.runs);
+  runs.set(runIdentity, Object.freeze({
+    binding,
+    captures: updateCaptures(previous?.captures ?? new Map<CaptureKey, TrustedReviewCapture>()),
+    touchedAt: previous?.touchedAt ?? root.nextTouch,
+  }));
+  return Object.freeze({ nextTouch: previous === undefined ? root.nextTouch + 1 : root.nextTouch, runs });
+}
+
+/** The root with one run removed — `null` when no run remains, because an
+ *  empty root must never linger as a container with no current run. */
+function rootWithoutRun(root: TrustedReviewRoot, runIdentity: string): TrustedReviewRoot | null {
+  const runs = new Map(root.runs);
+  runs.delete(runIdentity);
+  return runs.size === 0 ? null : Object.freeze({ nextTouch: root.nextTouch, runs });
+}
+
 /** One isolated witness aggregate; the extension factory creates exactly one. */
 export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
   const sessions = new Map<string, Map<string, TrustedReviewRoot>>();
+
+  /** Store a session's root, or drop it (`null`): the one rule by which an
+   *  emptied root and an emptied session are collapsed rather than kept. */
+  const storeRoot = (sessionId: string, rootIdentity: string, root: TrustedReviewRoot | null): void => {
+    const sessionRoots = sessions.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
+    if (root === null) sessionRoots.delete(rootIdentity);
+    else sessionRoots.set(rootIdentity, root);
+    if (sessionRoots.size === 0) sessions.delete(sessionId);
+    else sessions.set(sessionId, sessionRoots);
+  };
 
   const updateRun = (
     sessionId: string,
     binding: SessionRunBinding,
     updateCaptures: (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>,
   ): TrustedReviewRunTouch => {
-    const sessionRoots = sessions.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
-    sessions.set(sessionId, sessionRoots);
-    const rootIdentity = resolve(binding.runsRoot);
-    const root = sessionRoots.get(rootIdentity) ?? Object.freeze({
-      nextTouch: 1,
-      runs: new Map<string, TrustedReviewRun>(),
-    });
-    const identity = trustedRunIdentity(binding);
-    const previous = root.runs.get(identity);
-    const runs = new Map(root.runs);
-    runs.set(identity, Object.freeze({
-      binding,
-      captures: updateCaptures(previous?.captures ?? new Map<CaptureKey, TrustedReviewCapture>()),
-      touchedAt: previous?.touchedAt ?? root.nextTouch,
-    }));
-    sessionRoots.set(rootIdentity, Object.freeze({
-      nextTouch: previous === undefined ? root.nextTouch + 1 : root.nextTouch,
-      runs,
-    }));
-    return previous === undefined ? "bound" : "already-bound";
+    const { rootIdentity, runIdentity } = trustedRunLocation(binding);
+    const root = sessions.get(sessionId)?.get(rootIdentity) ?? EMPTY_TRUSTED_ROOT;
+    const touch = root.runs.has(runIdentity) ? "already-bound" : "bound";
+    storeRoot(sessionId, rootIdentity, rootWithRunTouched(root, runIdentity, binding, updateCaptures));
+    return touch;
   };
 
   return Object.freeze({
     touch: (sessionId: string, binding: SessionRunBinding): TrustedReviewRunTouch =>
       updateRun(sessionId, binding, (captures) => captures),
     retract: (sessionId: string, binding: SessionRunBinding): void => {
-      const sessionRoots = sessions.get(sessionId);
-      const rootIdentity = resolve(binding.runsRoot);
-      const root = sessionRoots?.get(rootIdentity);
-      const identity = trustedRunIdentity(binding);
-      const run = root?.runs.get(identity);
-      if (sessionRoots === undefined || root === undefined || run === undefined || run.captures.size > 0) return;
-      const runs = new Map(root.runs);
-      runs.delete(identity);
-      if (runs.size > 0) sessionRoots.set(rootIdentity, Object.freeze({ nextTouch: root.nextTouch, runs }));
-      else sessionRoots.delete(rootIdentity);
-      if (sessionRoots.size === 0) sessions.delete(sessionId);
+      const { rootIdentity, runIdentity } = trustedRunLocation(binding);
+      const root = sessions.get(sessionId)?.get(rootIdentity);
+      const run = root?.runs.get(runIdentity);
+      // Only an unwitnessed run is dropped: a witnessed one is authority.
+      if (root === undefined || run === undefined || run.captures.size > 0) return;
+      storeRoot(sessionId, rootIdentity, rootWithoutRun(root, runIdentity));
     },
     remember: (sessionId, binding, role, task, outcome): void => {
       const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
@@ -290,7 +312,7 @@ export function createTrustedReviewWitnesses(): TrustedReviewWitnesses {
       // Exact accepted replay is idempotent. Once accepted, older witnesses for
       // this root are retired so they can never make a later verification
       // ambiguous or become fallback authority after a new run is touched.
-      sessionRoots.set(expectedRoot, Object.freeze({
+      storeRoot(input.sessionId, expectedRoot, Object.freeze({
         nextTouch: root.nextTouch,
         runs: new Map([[current[0], current[1]]]),
       }));

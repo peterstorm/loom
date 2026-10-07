@@ -113,10 +113,12 @@ export type ReservedSlotParse =
   | Readonly<{ ok: true; value: ReservedSlot }>
   | Readonly<{ ok: false; error: string }>;
 
+/** Each arm of `S` without its proof: distributes over the union, so every
+ *  arm keeps its own `role` discriminant. */
+type WithoutProof<S> = S extends unknown ? Omit<S, typeof reservedSlotBrand> : never;
+
 /** A slot's fields before this module attaches its proof. */
-type UnprovenReservedSlot = ReservedSlot extends infer S
-  ? S extends ReservedSlot ? Omit<S, typeof reservedSlotBrand> : never
-  : never;
+type UnprovenReservedSlot = WithoutProof<ReservedSlot>;
 
 /** The ONE place the proof is attached — reached only from the two producers
  *  below, after their checks. The assertion adds the type-only brand and

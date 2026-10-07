@@ -91,13 +91,13 @@ import { capturePiSubagentResult, classifyPiEmissionStartupRefusal } from "./rev
 import { describeCause } from "./cleanup-actions";
 import {
   pointerLeaseOnly,
-  releaseSpawnClaims,
-  remainingSpawnClaims,
+  releaseDurableSpawnClaims,
+  remainingDurableClaims,
   settledSpawnClaims,
   spawnDebtOf,
   spawnSettlementStepLabel,
   withoutPointerLease,
-  type SpawnClaims,
+  type DurableSpawnClaims,
 } from "./spawn-claims";
 import {
   missingResultMarkersProblem,
@@ -216,41 +216,38 @@ function resolveStopReservation(
 }
 
 /**
- * Release the part `select` picks of the claims ledger the batch still holds
- * (`settledSpawnClaims`: its committed grants, reservation roster and pointer
- * lease) through the same plan and remaining-debt rule admission rollback
- * uses. Every step runs; the session keeps exactly what failed, so shutdown
- * can retry a transient result-time failure without replaying released
- * capabilities.
+ * Release the part `select` picks of the durable claims ledger the batch
+ * still holds (`settledSpawnClaims`: its committed grants, reservation roster
+ * and pointer lease) through the same plan and remaining-debt rule admission
+ * rollback uses — and through durable release ports only, because a
+ * dispatched batch holds no launch, prompt rewrite or witness claim. Every
+ * step runs; the session keeps exactly what failed, so shutdown can retry a
+ * transient result-time failure without replaying released capabilities.
+ *
+ * Roster entries are removed under the owner's session: every reservation is
+ * stored, recovered and retained under the session it names, so the owner is
+ * the one removal authority.
  */
 async function releaseSettledClaims(
   batch: PiStopBatch,
-  reviewWitnesses: TrustedReviewWitnesses,
-  emissionLaunchBridge: PiEmissionLaunchBridge,
-  select: (held: SpawnClaims) => SpawnClaims,
+  select: (held: DurableSpawnClaims) => DurableSpawnClaims,
 ): Promise<readonly string[]> {
   const { owner, parentSessions } = batch;
   if (owner === null) return [];
   const runtime = parentSessions.get(owner.sessionId);
   const stored = runtime?.spawnReservations.get(owner.toolCallId);
-  const reservation = stored ?? batch.reservation;
-  const held = settledSpawnClaims(runtime?.issuedWriteGrants.get(owner.toolCallId) ?? [], reservation);
-  const { errors, releases } = await releaseSpawnClaims(
+  const held = settledSpawnClaims(runtime?.issuedWriteGrants.get(owner.toolCallId) ?? [], stored ?? batch.reservation);
+  const { errors, releases } = await releaseDurableSpawnClaims(
     select(held),
     (step) => spawnSettlementStepLabel(step, owner),
     {
-      removeEmissionLaunches: () => emissionLaunchBridge.removeToolCall(owner.sessionId, owner.toolCallId),
       revokeGrant: revokePiWriteGrant,
-      restorePrompt: () => {
-        throw new Error("a dispatched batch's child prompts are not restorable");
-      },
-      retractWitnessRun: (binding) => reviewWitnesses.retract(owner.sessionId, binding),
-      removeRosterEntry: (agentId) => fsSessionRegistry.removeActive(reservation?.sessionId ?? owner.sessionId, agentId),
+      removeRosterEntry: (agentId) => fsSessionRegistry.removeActive(owner.sessionId, agentId),
       releasePointer: rollbackSessionTaskGraphPointer,
     },
   );
   for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
-  const owed = remainingSpawnClaims(held, releases);
+  const owed = remainingDurableClaims(held, releases);
   parentSessions.retainWriteGrantDebt(owner.sessionId, owner.toolCallId, owed.grants);
   if (stored !== undefined) {
     parentSessions.retainSpawnCleanupDebt(owner.sessionId, owner.toolCallId, spawnDebtOf(owed, stored).reservation);
@@ -923,7 +920,7 @@ export async function dispatchPiSubagentStop(
   });
   const processingErrors: string[] = [
     ...(resolved.recoveryFailure === null ? [] : [resolved.recoveryFailure]),
-    ...await releaseSettledClaims(batch, reviewWitnesses, emissionLaunchBridge, withoutPointerLease),
+    ...await releaseSettledClaims(batch, withoutPointerLease),
   ];
   if (resolved.recoveryFailure !== null) return processingErrorResponse(processingErrors);
   const { reservation } = batch;
@@ -972,6 +969,6 @@ export async function dispatchPiSubagentStop(
     processingErrors.push(...await settleBatchResults(batch, reviewWitnesses, event, sessionId, rawResults, entries));
   }
   // The pointer lease is released once, last, after every result settled.
-  processingErrors.push(...await releaseSettledClaims(batch, reviewWitnesses, emissionLaunchBridge, pointerLeaseOnly));
+  processingErrors.push(...await releaseSettledClaims(batch, pointerLeaseOnly));
   return processingErrorResponse(processingErrors);
 }
