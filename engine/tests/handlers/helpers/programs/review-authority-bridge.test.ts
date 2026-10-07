@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { LoomReviewAuthorityReceipt } from "../../../../src/core/review-authority-receipt";
 import {
-  LOOM_REVIEW_AUTHORITY_BRIDGE, parseLoomReviewAuthorityReceipt, publishLoomReviewAuthorityBridge, readLoomReviewAuthorityBridge,
-  type LoomReviewAuthorityReceipt,
+  LOOM_REVIEW_AUTHORITY_BRIDGE, publishLoomReviewAuthorityBridge, readLoomReviewAuthorityBridge,
 } from "../../../../src/handlers/helpers/programs/review-authority-bridge";
 
 const receipt: LoomReviewAuthorityReceipt = Object.freeze<LoomReviewAuthorityReceipt>({
@@ -68,30 +68,3 @@ describe("review-authority bridge publication", () => {
   });
 });
 
-describe("review-authority receipt parse", () => {
-  it("brands a well-formed receipt", () => {
-    expect(parseLoomReviewAuthorityReceipt(receipt)).toEqual({ ok: true, value: receipt });
-  });
-
-  it.each([
-    ["shape", "a non-object", null],
-    ["shape", "an extra field", { ...receipt, extra: 1 }],
-    ["schema", "another schema version", { ...receipt, schemaVersion: 2 }],
-    ["schema", "another kind", { ...receipt, kind: "receipt" }],
-    ["sessionId", "an empty session", { ...receipt, sessionId: "" }],
-    ["runId", "an empty Run id", { ...receipt, runId: "" }],
-    ["runId", "a path-like Run id", { ...receipt, runId: "../escape" }],
-    ["runsRoot", "a relative runs root", { ...receipt, runsRoot: "runs" }],
-    ["runDirectory", "a relative Run directory", { ...receipt, runDirectory: "runs/review-run-1" }],
-    ["requestIds", "no captured requests", { ...receipt, requestIds: [] }],
-    ["requestIds", "a non-string request", { ...receipt, requestIds: [7] }],
-    ["resultDigest", "an uppercase digest", { ...receipt, resultDigest: "B".repeat(64) }],
-    ["reviewedSource", "a short head revision", { ...receipt, reviewedSource: { ...receipt.reviewedSource, headRevision: "abc" } }],
-    ["reviewedSource", "an absent file with a digest", { ...receipt, reviewedSource: { ...receipt.reviewedSource,
-      files: [{ path: "x", kind: "absent", digest: "d".repeat(64), byteLength: 0 }] } }],
-    ["reviewedSource", "a file of unknown kind", { ...receipt, reviewedSource: { ...receipt.reviewedSource,
-      files: [{ path: "x", kind: "link", digest: "d".repeat(64), byteLength: 1 }] } }],
-  ])("refuses %s: %s", (field, _name, raw) => {
-    expect(parseLoomReviewAuthorityReceipt(raw)).toEqual({ ok: false, error: `receipt ${field} is malformed` });
-  });
-});

@@ -41,7 +41,7 @@ import {
   replayStandaloneResultFromEvidence,
   replayStandaloneCapturedEvidence,
 } from "../engine/src/handlers/helpers/programs";
-import type { LoomReviewAuthorityReceipt } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
+import type { LoomReviewAuthorityReceipt } from "../engine/src/core/review-authority-receipt";
 import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
 import {
   readSessionRunBindings,

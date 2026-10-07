@@ -12,7 +12,7 @@ import type { StandaloneSuccessorStartInput, RegisteredStandaloneSuccessorProgra
 import { admitStandaloneReviewerResult, readStandaloneCaptureWitnesses, replayStandaloneCliCaptures, standaloneRefutationPreparation, type StandaloneCaptureWitness, type StandaloneEvidenceReplayResult } from './standalone-evidence';
 // Retain existing caller entry points, not the union of the evidence volume's internal exports.
 export { replayStandaloneCliCaptures, replayStandaloneResultFromEvidence, readStandaloneReviewedSource, standaloneRefutationPreparation } from './standalone-evidence';
-export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult, StandaloneReviewedSource, StandaloneReviewedSourceFile } from './standalone-evidence';
+export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult } from './standalone-evidence';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import { publishStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';

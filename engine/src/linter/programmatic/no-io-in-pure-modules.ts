@@ -120,6 +120,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/proof-boundary-observation.ts",
   // Engine-issued spawn task text over shell-gathered facts.
   "engine/src/core/spawn-task-text.ts",
+  // The Pi review-authority receipt contract and its reviewed-source codec.
+  "engine/src/core/review-authority-receipt.ts",
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",
