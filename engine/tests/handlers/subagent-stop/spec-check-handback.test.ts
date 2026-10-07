@@ -54,7 +54,7 @@ describe("specCheckTranscriptDelivery", () => {
     // text read parses an echoed skill template instead of the delivered report.
     const path = transcript(handbackTurn(REPORT));
     expect(specCheckTranscriptDelivery(parsedAt(path), "legacy text"))
-      .toEqual({ kind: "delivered", source: "handback", text: REPORT });
+      .toEqual({ kind: "delivered", text: REPORT });
     const parsed = parseSpecCheckOutput(REPORT);
     expect(parsed.high).toEqual(["the pilot recorded 0 observations"]);
     expect(parsed.highCount).toBe(1);
@@ -63,13 +63,13 @@ describe("specCheckTranscriptDelivery", () => {
   it("keeps the legacy text when the final turn delivered no handback", () => {
     const path = transcript([{ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: REPORT }] } }]);
     expect(specCheckTranscriptDelivery(parsedAt(path), "legacy text"))
-      .toEqual({ kind: "delivered", source: "legacy", text: "legacy text" });
+      .toEqual({ kind: "delivered", text: "legacy text" });
   });
 
   it("keeps the legacy text when the handback failed, so nothing undelivered is parsed", () => {
     const path = transcript(handbackTurn(REPORT, true));
     expect(specCheckTranscriptDelivery(parsedAt(path), "legacy text"))
-      .toEqual({ kind: "delivered", source: "legacy", text: "legacy text" });
+      .toEqual({ kind: "delivered", text: "legacy text" });
   });
 
   it("reports a torn final turn as corrupt, carrying the projection's typed error beside the legacy text", () => {
@@ -93,13 +93,13 @@ describe("readSpecCheckReport — one settled, bounded read, every outcome a val
       { type: "user", message: { role: "user", content: "SPEC_CHECK_CRITICAL_COUNT: 0 (template echo)" } },
       ...handbackTurn(REPORT),
     ]);
-    expect(await readSpecCheckReport(path)).toEqual({ kind: "delivered", source: "handback", text: REPORT });
+    expect(await readSpecCheckReport(path)).toEqual({ kind: "delivered", text: REPORT });
   });
 
   it("returns the legacy text when no handback was delivered", async () => {
     const path = transcript([{ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: REPORT }] } }]);
     expect(await readSpecCheckReport(path))
-      .toEqual({ kind: "delivered", source: "legacy", text: parseTranscript(readFileSync(path, "utf8")) });
+      .toEqual({ kind: "delivered", text: parseTranscript(readFileSync(path, "utf8")) });
   });
 
   it("returns a corrupt final turn as its own outcome with the legacy text of the same bytes", async () => {
@@ -153,7 +153,7 @@ describe("settleSpecCheckReportRead — the visible settlement policy", () => {
   });
 
   it("parses a delivered report with no diagnostic", () => {
-    expect(settleSpecCheckReportRead({ kind: "delivered", source: "handback", text: REPORT }))
+    expect(settleSpecCheckReportRead({ kind: "delivered", text: REPORT }))
       .toEqual({ kind: "report", text: REPORT, diagnostic: null });
   });
 });

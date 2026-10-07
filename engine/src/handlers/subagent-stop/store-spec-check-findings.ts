@@ -25,13 +25,14 @@ import { match } from "ts-pattern";
 
 /**
  * What the spec-check transcript's final turn delivered, from the ONE settled
- * read: the report text to parse, or a final turn the strict projection found
- * malformed (a torn last line the legacy text read tolerates), carrying its
- * typed corruption error beside the legacy text.
+ * read: the report text to parse — the one delivered SubagentHandback's
+ * message, or the legacy text read when none or several were delivered — or a
+ * final turn the strict projection found malformed (a torn last line the
+ * legacy text read tolerates), carrying its typed corruption error beside the
+ * legacy text.
  */
 export type SpecCheckTranscriptDelivery =
-  /** `handback`: exactly one delivered SubagentHandback; `legacy`: none or several, so the legacy text read. */
-  | Readonly<{ kind: "delivered"; source: "handback" | "legacy"; text: string }>
+  | Readonly<{ kind: "delivered"; text: string }>
   | Readonly<{ kind: "corrupt-final-turn"; error: string; legacyText: string }>;
 
 /** Every outcome of reading a located spec-check transcript. */
@@ -56,9 +57,7 @@ export function specCheckTranscriptDelivery(transcript: ClaudeTranscript, legacy
   const candidates = claudeTranscriptCandidates(transcript);
   if (!candidates.ok) return Object.freeze({ kind: "corrupt-final-turn", error: candidates.error, legacyText });
   const handbacks = candidates.value.filter(({ origin }) => origin.endsWith(".handback"));
-  return handbacks.length === 1
-    ? Object.freeze({ kind: "delivered", source: "handback", text: handbacks[0]!.text })
-    : Object.freeze({ kind: "delivered", source: "legacy", text: legacyText });
+  return Object.freeze({ kind: "delivered", text: handbacks.length === 1 ? handbacks[0]!.text : legacyText });
 }
 
 /**
@@ -158,8 +157,6 @@ export const runStoreSpecCheckFindings = async (
     ? { kind: "failure", reason: `spec-check transcript is unreadable: no transcript can be located at ${rawPath || "<unset>"}` }
     : settleSpecCheckReportRead(await readSpecCheckReport(resolvedTranscriptPath));
   if (report.kind === "report" && report.diagnostic !== null) process.stderr.write(`[loom] ${report.diagnostic}\n`);
-  const transcriptFailure = report.kind === "failure" ? report.reason : null;
-  const findings = parseSpecCheckOutput(report.kind === "report" ? report.text : "");
   let observation;
   try {
     const observedState = manager.load();
@@ -195,20 +192,21 @@ export const runStoreSpecCheckFindings = async (
     // Read back from the epoch, never re-projected: only a packet-correlated
     // capture carries floor authority, and it is exactly what this Agent saw.
     const runAt = new Date().toISOString();
-    const settlement = transcriptFailure === null
-      ? settleSpecCheck(state, {
-          kind: "registered-transcript",
-          parsed: findings,
-          wave,
-          runAt,
-          floor: epochSettledFloor(state.wave_review_epoch),
-        })
-      : settleSpecCheck(state, {
-          kind: "capture-failure",
-          wave,
-          runAt,
-          error: `${transcriptFailure} - re-run /wave-gate`,
-        });
+    const settlement = match(report)
+      .with({ kind: "report" }, ({ text }) => settleSpecCheck(state, {
+        kind: "registered-transcript",
+        parsed: parseSpecCheckOutput(text),
+        wave,
+        runAt,
+        floor: epochSettledFloor(state.wave_review_epoch),
+      }))
+      .with({ kind: "failure" }, ({ reason }) => settleSpecCheck(state, {
+        kind: "capture-failure",
+        wave,
+        runAt,
+        error: `${reason} - re-run /wave-gate`,
+      }))
+      .exhaustive();
     const value = settlement.specCheck.verdict === "EVIDENCE_CAPTURE_FAILED"
       ? passthroughResult(`WARNING: ${settlement.specCheck.error} — marking evidence_capture_failed`)
       : passthroughResult(

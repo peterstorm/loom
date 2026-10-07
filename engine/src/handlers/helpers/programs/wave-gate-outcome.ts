@@ -44,17 +44,18 @@ export type WaveResumeContext = Readonly<{
 }>;
 
 /** Build the one phase context of a reducer invocation, deriving `wave` from
- *  the registration. `null` when the registration names no exact Wave, which
- *  no context may represent. */
+ *  the registration, as the reducer's first phase: it proceeds with the
+ *  context, or settles the invocation as blocked when the registration names
+ *  no exact Wave, which no context may represent. */
 export function waveResumeContext(
   handle: RunDirHandle,
   manager: StateManager,
   registration: RegisteredWaveGateProgram,
   captured: ReadonlySet<string>,
-): WaveResumeContext | null {
+): WavePhase<WaveResumeContext> {
   const wave = registration.input.wave;
-  if (wave === null) return null;
-  return Object.freeze({ handle, manager, registration, wave, captured }) as WaveResumeContext;
+  if (wave === null) return settled(waveBlocked(handle, "registered Wave Gate authority lacks an exact Wave"));
+  return proceed(Object.freeze({ handle, manager, registration, wave, captured }) as WaveResumeContext);
 }
 
 export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {

@@ -27,7 +27,7 @@
 import { gunzipSync } from "node:zlib";
 import { match } from "ts-pattern";
 import { projectContextPacket, type ContextProjectionInput } from "./context-packet-projection";
-import { parseStandaloneReviewerContextPacketV3, withStoredSectionBytes } from "./context-packets";
+import { parseStandaloneReviewerContextPacketV3, withStoredSectionBytes, type SectionBlobLookup } from "./context-packets";
 import { sha256Bytes } from "./digest";
 import { parseArtifactDigest, type ArtifactDigest, type DomainResult } from "./orchestration-contract";
 import { isRecord, parseExactRecord } from "./plain-record";
@@ -220,7 +220,7 @@ export function parsePredecessorArchiveArguments(args: readonly string[]):
  */
 export type PublishedPacketFile = Readonly<{
   fileBytes: Uint8Array;
-  readSectionBlob: (digest: string) => DomainResult<Uint8Array | null, string>;
+  readSectionBlob: SectionBlobLookup;
 }>;
 
 /**
@@ -294,14 +294,9 @@ function predecessorRecord(expanded: ExpandedPredecessor, verified: Uint8Array):
   if (expanded.encoding === "gzip-base64") return decodeJsonBytes(verified, "expanded predecessor archive");
   const decoded = decodeJsonBytes(verified, "published predecessor packet");
   if (!decoded.ok) return decoded;
-  const unreadable: string[] = [];
-  const restored = withStoredSectionBytes(decoded.value, (digest) => {
-    const blob = expanded.readSectionBlob(digest);
-    if (blob.ok) return blob.value;
-    unreadable.push(blob.error);
-    return null;
-  });
-  if (unreadable.length > 0) return archiveRefused(unreadable[0]!);
+  // The restore seam carries the lookup's own refusal: an unreadable blob is
+  // refused with the lookup's message, an absent one with the restore's.
+  const restored = withStoredSectionBytes(decoded.value, expanded.readSectionBlob);
   return restored.ok ? { ok: true, value: restored.value } : archiveRefused(restored.error.message);
 }
 

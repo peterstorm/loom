@@ -581,16 +581,36 @@ export function storedContextPacket(packet: ContextPacket | StandaloneReviewerCo
 }
 
 /**
+ * One Run Directory's section-blob lookup, by section digest: the blob's bytes,
+ * `null` for an absent blob, or the lookup's own refusal for a blob that exists
+ * but cannot be read. Absence and unreadability stay distinct so a restore can
+ * name which one it met.
+ */
+export type SectionBlobLookup = (digest: string) => DomainResult<Uint8Array | null, string>;
+
+/**
+ * Why a stored packet's sections could not be restored: a malformed section
+ * identity or an absent blob (`invalid-context-packet`), or a lookup that
+ * refused to read a blob (`section-blob-unreadable`, carrying the lookup's own
+ * message verbatim).
+ */
+export type StoredSectionRestoreError =
+  | ContextPacketError
+  | Readonly<{ kind: "section-blob-unreadable"; field: string; digest: string; message: string }>;
+
+/**
  * Restore the bytes of every section a stored packet file names by identity
  * only, from its Run Directory's blob store, so the ordinary packet parser can
  * re-hash each section against its digest. A section still carrying inline
  * bytes is a packet written before external section storage; immutable run
  * evidence keeps that form, so it passes through for the parser unchanged.
+ * The first section that cannot be restored ends the walk with its refusal;
+ * no later blob is looked up.
  */
 export function withStoredSectionBytes(
   raw: unknown,
-  readBlob: (digest: string) => Uint8Array | null,
-): DomainResult<unknown, ContextPacketError> {
+  readBlob: SectionBlobLookup,
+): DomainResult<unknown, StoredSectionRestoreError> {
   if (!isRecord(raw)) return success(raw);
   const resolved: Record<string, unknown> = { ...raw };
   for (const key of ["fixedContext", "variableContext"] as const) {
@@ -606,9 +626,13 @@ export function withStoredSectionBytes(
       if (typeof digest !== "string" || !SECTION_BLOB_NAME.test(digest)) {
         return failure(`${key}[${index}].digest`, "a stored context section must name its blob by a sha256 hex digest");
       }
-      const bytes = readBlob(digest);
-      if (bytes === null) return failure(`${key}[${index}]`, `context section blob ${digest} is missing from the run's blob store`);
-      restored.push({ ...section, bytes });
+      const field = `${key}[${index}]`;
+      const blob = readBlob(digest);
+      if (!blob.ok) {
+        return { ok: false, error: canonicalRecord({ kind: "section-blob-unreadable" as const, field, digest, message: blob.error }) };
+      }
+      if (blob.value === null) return failure(field, `context section blob ${digest} is missing from the run's blob store`);
+      restored.push({ ...section, bytes: blob.value });
     }
     resolved[key] = restored;
   }
