@@ -39,7 +39,8 @@ import {
 import type { AgentId } from "../engine/src/machine/evidence";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
-import { runtimeBaselineRestoreForTasks } from "../engine/src/utils/runtime-baseline-restore";
+import { runtimeWriteBoundaryForTasks } from "../engine/src/utils/runtime-baseline-restore";
+import { STRICT_RUNTIME_WRITE_BOUNDARY, type RuntimeWriteBoundary } from "../engine/src/runtime-compatibility";
 import {
   RUN_DIR_ENV,
   describeCaptureFailure,
@@ -104,35 +105,34 @@ const isLoomOwnedResultAgent = (agentType: string): boolean =>
   agentType === "spec-check-invoker";
 
 /**
- * The runtime-baseline restoration map for the implementation settlements this
- * batch finalizes: the whole runtime revision domain, provably clean at the
+ * The write boundary for the implementation settlements this batch finalizes: the whole runtime revision domain, provably clean at the
  * in-flight attempts' start, hashed at those attempt-start bytes by the write
  * boundary's revision comparison. An implementation attempt's writes live
  * inside the runtime revision domain (`engine/src`, `pi`) and are NOT bounded
  * by its declared artifact list — the attempt writing those files is the
  * product — so without this restoration the settlement reads its own
  * authorized writes as runtime drift and refuses the state update that records
- * its outcome. Any proven-unrestorable input yields an empty map, which keeps
- * the strict full-domain comparison in force (fail closed).
+ * its outcome. Any proven-unrestorable input yields the strict boundary, which
+ * keeps the full-domain live comparison in force (fail closed).
  */
 function implementationBaselineRestoreFor(
   manager: StateManager,
   taskIds: readonly string[],
-): ReadonlyMap<string, string | null> {
-  if (taskIds.length === 0) return new Map();
+): RuntimeWriteBoundary {
+  if (taskIds.length === 0) return STRICT_RUNTIME_WRITE_BOUNDARY;
   try {
     const state = manager.load();
     const tasks = state.tasks.filter((task) => taskIds.includes(task.id));
-    if (tasks.length === 0) return new Map();
+    if (tasks.length === 0) return STRICT_RUNTIME_WRITE_BOUNDARY;
     const boundary = observeTaskGraphProjectBoundary(manager.getPath());
-    if (boundary.kind !== "git-repository") return new Map();
-    return runtimeBaselineRestoreForTasks(boundary.root, tasks);
+    if (boundary.kind !== "git-repository") return STRICT_RUNTIME_WRITE_BOUNDARY;
+    return runtimeWriteBoundaryForTasks(boundary.root, tasks);
   } catch (error) {
     process.stderr.write(
       `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
       `${describeCause(error)}\n`,
     );
-    return new Map();
+    return STRICT_RUNTIME_WRITE_BOUNDARY;
   }
 }
 
@@ -298,13 +298,13 @@ export async function dispatchPiSubagentStop(
       // The crashed attempt may have written engine/src/pi artifacts (declared
       // or not) before failing: restore the whole in-flight batch's baseline
       // domain for the write boundary's revision comparison, exactly like the
-      // finalize path below. Unprovable inputs yield an empty map: strict stays.
+      // finalize path below. Unprovable inputs yield the strict boundary.
       const crashRestore = implementationBaselineRestoreFor(
         plainManager,
         (reservation?.items ?? []).flatMap((reserved) =>
           reserved.kind === "implementation" && reserved.taskId !== null ? [reserved.taskId] : []),
       );
-      const manager = crashRestore.size > 0
+      const manager = crashRestore.kind === "restoring"
         ? StateManager.fromLocalSession(reservation?.sessionId ?? "", crashRestore) ?? plainManager
         : plainManager;
       const applied = await manager.updateAndReturn((state) => {
@@ -369,13 +369,13 @@ export async function dispatchPiSubagentStop(
     // Restore the reserved attempts' declared artifacts to their attempt-start
     // bytes for the write boundary's revision comparison, so the settlement of
     // an attempt that (correctly) wrote engine/src or pi files is not refused
-    // as runtime drift. Unprovable inputs yield an empty map: strict stays.
+    // as runtime drift. Unprovable inputs yield the strict boundary.
     const finalizeRestore = implementationBaselineRestoreFor(
       manager,
       reservation.items.flatMap((item) =>
         item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []),
     );
-    if (finalizeRestore.size > 0) {
+    if (finalizeRestore.kind === "restoring") {
       try {
         manager = StateManager.fromLocalSession(reservation.sessionId, finalizeRestore) ?? manager;
       } catch (error) {
@@ -859,7 +859,7 @@ export async function dispatchPiSubagentStop(
       // engine/src/pi artifacts: restore those attempts' declared, clean-at-spawn
       // artifacts to their attempt-start bytes for the write boundary's revision
       // comparison (see implementationBaselineRestoreFor). Unprovable inputs yield
-      // an empty map and the strict full-domain comparison stays.
+      // the strict boundary, so the full-domain live comparison stays.
       let settlementMgr = mgr;
       try {
         const state = mgr.load();
@@ -870,7 +870,7 @@ export async function dispatchPiSubagentStop(
           ]),
         ];
         const settleRestore = implementationBaselineRestoreFor(mgr, settleTaskIds);
-        if (settleRestore.size > 0) {
+        if (settleRestore.kind === "restoring") {
           settlementMgr = StateManager.fromLocalSession(sessionId, settleRestore) ?? mgr;
         }
       } catch (error) {
