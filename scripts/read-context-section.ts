@@ -7,27 +7,21 @@
  * Read-only, for agents (spec-check) that consume small authority sections
  * whole rather than paging through the reviewer reader. Section bytes resolve
  * from the run's blob store and every section is re-hashed by the packet
- * parser; a packet that does not prove the expected digest is refused.
+ * parser; a packet that does not prove the expected digest is refused. The
+ * argument grammar is `parseContextSectionArguments`, owned with the
+ * projection reader's in `core/context-packet-projection`.
  */
+import { parseContextSectionArguments } from "../engine/src/core/context-packet-projection";
 import { parseContextPacket } from "../engine/src/orchestration/context-packets";
 import { safeIoCause } from "../engine/src/core/safe-io-cause";
 import { CONTEXT_PACKET_BOUNDS, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 
 const SECTION_OUTPUT_BOUND = 4 * 1024 * 1024;
 
-function flag(args: readonly string[], name: string): string {
-  const index = args.indexOf(name);
-  const value = index < 0 ? undefined : args[index + 1];
-  if (value === undefined || value.startsWith("--")) throw Error(`${name} requires a value`);
-  return value;
-}
-
 try {
-  const args = process.argv.slice(2);
-  const path = flag(args, "--packet");
-  const digest = flag(args, "--digest");
-  const label = flag(args, "--section");
-  if (!path.startsWith("/")) throw Error("--packet must be an absolute path");
+  const args = parseContextSectionArguments(process.argv.slice(2));
+  if (!args.ok) throw Error(args.error);
+  const { path, digest, label } = args.value;
   const stored = readStoredContextPacketFile(path, CONTEXT_PACKET_BOUNDS);
   if (!stored.ok) throw Error(stored.error);
   const packet = parseContextPacket(stored.value.record);

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256Bytes } from "../../src/core/digest";
 import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
-import { parseContextProjectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
+import { parseContextProjectionArguments, parseContextSectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/wave-frozen-source";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
@@ -342,5 +342,23 @@ describe("read-only packet command", () => {
       expect(projected).toMatchObject({ text: f.text.slice(offset, offset + limit), offset });
       expect(JSON.stringify(f.packet)).toBe(f.bytes);
     }), { seed: 4101, numRuns: 15 });
+  });
+});
+
+describe("whole-section reader arguments", () => {
+  const args = ["--packet", "/run/contexts/p.json", "--digest", "a".repeat(64), "--section", "wave-review-authority"];
+
+  it("reads each flag's value in any order, at its first occurrence", () => {
+    const expected = { ok: true, value: { path: "/run/contexts/p.json", digest: "a".repeat(64), label: "wave-review-authority" } };
+    expect(parseContextSectionArguments(args)).toEqual(expected);
+    expect(parseContextSectionArguments([...args.slice(4), ...args.slice(0, 4)])).toEqual(expected);
+    expect(parseContextSectionArguments([...args, "--section", "other"])).toEqual(expected);
+  });
+
+  it("refuses an absent, empty or flag-shaped value, and a relative packet path", () => {
+    expect(parseContextSectionArguments(args.slice(2))).toEqual({ ok: false, error: "--packet requires a value" });
+    expect(parseContextSectionArguments(["--packet", "/p.json", "--digest", "", "--section", "s"])).toEqual({ ok: false, error: "--digest requires a value" });
+    expect(parseContextSectionArguments(["--packet", "/p.json", "--digest", "d", "--section", "--packet"])).toEqual({ ok: false, error: "--section requires a value" });
+    expect(parseContextSectionArguments(["--packet", "contexts/p.json", "--digest", "d", "--section", "s"])).toEqual({ ok: false, error: "--packet must be an absolute path" });
   });
 });

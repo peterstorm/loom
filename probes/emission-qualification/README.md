@@ -3,8 +3,8 @@
 **Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md` (FR-002, AS-023, SC-007, AD-2)
 **Qualified route:** `desktop-vllm` (vLLM) · model `glm-5.3-flash-spark-tp2-v14` (the served spark-preset profile) · each schema's digest below
 **Run:** `node probes/emission-qualification/probe.mjs` (fixtures first: `npx tsx probes/emission-qualification/gen-fixtures.mts`). The run exits nonzero whenever `probe-report.json` records an error, including every malformed SSE chunk in a captured stream (a phase with one draws no raw-argument conclusion).
-**Code:** `probe.mjs` (driver: proxy, Pi child, phases) · `probe-analysis.mjs` (pure stream assembly, phase analysis, classification, exit status) · `fixture-manifest.mts` (pure manifest derivation, detectors pinned) · `gen-fixtures.mts` (writes `fixtures/manifest.json`) · `qual-extension.ts` (child extension)
-**Tests (no network):** `probe-analysis.test.mjs` (over `recordings/` and synthetic streams), `fixture-manifest.test.ts` (the committed manifest is byte-identical to its generator's output); both run in the engine suite.
+**Code:** `probe.mjs` (driver: proxy, phases; the Pi RPC child comes from the shared `../lib/rpc-child.mjs`) · `probe-analysis.mjs` (pure stream assembly, phase analysis, classification, exit status) · `fixture-manifest.mts` (pure manifest derivation, detectors pinned) · `gen-fixtures.mts` (writes `fixtures/manifest.json`) · `qual-extension.ts` (child extension)
+**Tests (no network):** `probe-analysis.test.mjs` (over `recordings/` and synthetic streams), `fixture-manifest.test.ts` (the committed manifest is byte-identical to its generator's output), `../lib/rpc-child.test.mjs` (the shared RPC-child bus and lifecycle against a fake `pi`); all run in the engine suite.
 **Date:** 2026-09-19 · **Raw evidence:** `recordings/` (every wire request + response, verbatim)
 
 ## Method

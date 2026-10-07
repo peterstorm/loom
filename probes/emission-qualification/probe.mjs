@@ -24,12 +24,12 @@
  *   node probes/emission-qualification/probe.mjs [--model <id>] [--only <tool>]
  */
 
-import { spawn } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { responseTo, sleep, spawnRpcChild } from "../lib/rpc-child.mjs";
 import { analyzePhase, classifyOutcome, detector, probeExitCode, streamErrors } from "./probe-analysis.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -114,67 +114,17 @@ function startRecordingProxy(key) {
   });
 }
 
-function makeBus(stdout) {
-  const events = [];
-  const waiters = [];
-  let buffer = "";
-  stdout.on("data", (data) => {
-    buffer += data.toString();
-    let index;
-    while ((index = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, index);
-      buffer = buffer.slice(index + 1);
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        events.push({ type: "__non_json__", line: line.slice(0, 120) });
-        continue;
-      }
-      // Streaming deltas re-embed the growing partial message — retaining them
-      // unslimmed makes a long thinking stream quadratic in memory. No waiter
-      // needs their payload; keep a slim marker.
-      events.push(event.type === "message_update" ? { type: "message_update", slimmed: true } : event);
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        const waiter = waiters[i];
-        if (waiter.predicate(event)) {
-          waiters.splice(i, 1);
-          clearTimeout(waiter.timer);
-          waiter.resolve(event);
-        }
-      }
-    }
-  });
-  return {
-    events,
-    waitFor(predicate, ms, label) {
-      const existing = events.find(predicate);
-      if (existing) return Promise.resolve(existing);
-      return new Promise((resolve, reject) => {
-        const waiter = {
-          predicate,
-          resolve,
-          timer: setTimeout(() => {
-            const at = waiters.indexOf(waiter);
-            if (at !== -1) waiters.splice(at, 1);
-            reject(new Error(`${label}: no matching event within ${ms}ms`));
-          }, ms),
-        };
-        waiters.push(waiter);
-      });
-    },
-  };
-}
+/** Streaming deltas re-embed the growing partial message — retaining them
+ *  unslimmed makes a long thinking stream quadratic in memory. No waiter
+ *  needs their payload (waiters see the full event); keep a slim marker. */
+const slimStreamingDeltas = (event) => (event.type === "message_update" ? { type: "message_update", slimmed: true } : event);
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function runPhase(bus, child, records, argsEntries, instruction, label) {
+async function runPhase(rpc, records, argsEntries, instruction, label) {
+  const { bus } = rpc;
   const recordStart = records.length;
   const argsStart = argsEntries.length;
   const promptId = `p-${label}`;
-  child.stdin.write(`${JSON.stringify({ id: promptId, type: "prompt", message: instruction })}\n`);
-  const response = await bus.waitFor((e) => e.type === "response" && e.id === promptId, STATE_TIMEOUT_MS, `prompt ${label}`);
+  const response = await rpc.request({ id: promptId, type: "prompt", message: instruction }, responseTo.id(promptId), STATE_TIMEOUT_MS, `prompt ${label}`);
   if (!response.success) {
     // The prompt gate rejected the instruction — no model request was made.
     // The phase still owns its window bounds, so the final re-analysis reads
@@ -183,13 +133,12 @@ async function runPhase(bus, child, records, argsEntries, instruction, label) {
     // vocabulary (AD-2: never dressed as a route verdict).
     return { promptRejected: response.error ?? "prompt rejected", phaseRecords: [], phaseArgs: [], recordStart, argsStart, argsEnd: argsEntries.length };
   }
-  const responseIndex = bus.events.indexOf(response);
-  const start = Date.now();
-  while (Date.now() - start < CALL_TIMEOUT_MS) {
-    const settledAfter = bus.events.some((e, i) => e.type === "agent_settled" && i > responseIndex);
-    if (settledAfter) break;
-    await sleep(250);
-  }
+  // The phase settles on the first agent_settled AFTER this prompt's response
+  // (an earlier phase's settle never counts). An unsettled phase is bounded by
+  // CALL_TIMEOUT_MS and then analyzed as observed — its missing settle is not
+  // itself an error, so the timeout is absorbed here.
+  const afterResponse = bus.events.indexOf(response) + 1;
+  await bus.waitFor((e) => e.type === "agent_settled", CALL_TIMEOUT_MS, `settle ${label}`, afterResponse).catch(() => undefined);
   await sleep(SETTLE_GRACE_MS);
   const phaseRecords = records.slice(recordStart).filter((r) => r.request);
   const phaseArgs = argsEntries.slice(argsStart);
@@ -260,56 +209,46 @@ async function main() {
   const { server, port, records } = await startRecordingProxy(key);
   mkdirSync(recordingsDir, { recursive: true });
 
-  const child = spawn(
-    "pi",
-    ["--mode", "rpc", "--no-session", "-ne", "-e", path.join(here, "qual-extension.ts"), "--provider", "desktop-vllm", "--model", model],
+  const rpc = spawnRpcChild(
+    ["--no-session", "-ne", "-e", path.join(here, "qual-extension.ts"), "--provider", "desktop-vllm", "--model", model],
     {
       cwd: here,
       env: { ...process.env, QUAL_PROXY_BASE_URL: `http://127.0.0.1:${port}/v1` },
-      stdio: ["pipe", "pipe", "pipe"],
+      retain: slimStreamingDeltas,
     },
   );
-  const bus = makeBus(child.stdout);
-  const stderrChunks = [];
-  child.stderr.on("data", (d) => stderrChunks.push(d.toString()));
   const argsEntries = [];
+  // Track execute-arg records as they arrive, from the child's first event
+  // on. Identical payloads are recorded once (by fingerprint).
+  const stopArgsWatch = rpc.bus.onEvent((event) => {
+    if (event.type !== "entry_appended" || event.entry?.customType !== "loom-emission-qual-args") return;
+    const fingerprint = JSON.stringify(event.entry.data);
+    if (!argsEntries.some((e) => e.fingerprint === fingerprint)) {
+      argsEntries.push({ ...event.entry.data, fingerprint, at: Date.now() });
+    }
+  });
   // Same-window bounds per phase: the re-analysis before the report is written
   // re-reads EXACTLY these [start, end) windows over the final record objects.
   const phaseBounds = new Map();
 
   const report = { model, provider: "desktop-vllm", upstream: UPSTREAM_BASE_URL, startedAt: new Date().toISOString(), tools: {}, errors: [] };
 
-  let argsWatcher;
   try {
-    child.stdin.write(`${JSON.stringify({ id: "gs1", type: "get_state" })}\n`);
-    await bus.waitFor((e) => e.type === "response" && e.command === "get_state", STATE_TIMEOUT_MS, "get_state");
-    child.stdin.write(`${JSON.stringify({ type: "set_thinking_level", level: "low" })}\n`);
-    const thinking = await bus.waitFor((e) => e.type === "response" && e.command === "set_thinking_level", STATE_TIMEOUT_MS, "set_thinking_level");
+    await rpc.request({ id: "gs1", type: "get_state" }, responseTo.command("get_state"), STATE_TIMEOUT_MS, "get_state");
+    const thinking = await rpc.request({ type: "set_thinking_level", level: "low" }, responseTo.command("set_thinking_level"), STATE_TIMEOUT_MS, "set_thinking_level");
     if (!thinking.success) report.errors.push(`set_thinking_level rejected: ${JSON.stringify(thinking).slice(0, 200)}`);
-
-    // Track execute-arg records continuously.
-    argsWatcher = setInterval(() => {
-      for (const event of bus.events) {
-        if (event.type === "entry_appended" && event.entry?.customType === "loom-emission-qual-args") {
-          const fingerprint = JSON.stringify(event.entry.data);
-          if (!argsEntries.some((e) => e.fingerprint === fingerprint)) {
-            argsEntries.push({ ...event.entry.data, fingerprint, at: Date.now() });
-          }
-        }
-      }
-    }, 100);
 
     for (const spec of specs) {
       const toolReport = { schemaDigest: spec.schemaDigest, schemaKB: +(spec.schemaBytes.length / 1024).toFixed(1), acceptance: undefined, violation: undefined, classification: undefined };
       const fixtureInstruction =
         `Call the ${spec.registeredToolName} tool exactly once, with arguments EXACTLY this JSON object (no extra or missing fields):\n${spec.fixtureJson}\nDo not call any other tool.`;
-      const acceptancePhase = await runPhase(bus, child, records, argsEntries, fixtureInstruction, `acc-${spec.version}`);
+      const acceptancePhase = await runPhase(rpc, records, argsEntries, fixtureInstruction, `acc-${spec.version}`);
       const acceptanceEnd = records.length;
       toolReport.acceptance = analyzePhase(spec, acceptancePhase);
 
       const violationInstruction =
         `Call the ${spec.registeredToolName} tool exactly once. ${spec.violationInstruction}. Everything else stays exactly as in this JSON:\n${spec.fixtureJson}`;
-      const violationPhase = await runPhase(bus, child, records, argsEntries, violationInstruction, `vio-${spec.version}`);
+      const violationPhase = await runPhase(rpc, records, argsEntries, violationInstruction, `vio-${spec.version}`);
       const violationEnd = records.length;
       toolReport.violation = analyzePhase(spec, violationPhase);
 
@@ -330,11 +269,10 @@ async function main() {
   } catch (error) {
     report.errors.push(String(error?.message ?? error));
   } finally {
-    if (argsWatcher !== undefined) clearInterval(argsWatcher);
+    stopArgsWatch();
   }
 
-  child.kill("SIGKILL");
-  await sleep(200);
+  await rpc.kill(200);
   server.close();
 
   // Final re-analysis over the completed record set: a response stream that
@@ -366,7 +304,7 @@ async function main() {
       writeFileSync(path.join(recordingsDir, `${String(record.id).padStart(3, "0")}-response.sse`), record.response?.raw ?? "");
     }
   }
-  const stderrText = stderrChunks.join("").trim();
+  const stderrText = rpc.stderr();
   if (stderrText) report.stderr = stderrText.slice(0, 800);
 
   console.log(JSON.stringify(report, null, 2));

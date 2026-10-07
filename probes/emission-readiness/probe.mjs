@@ -30,13 +30,13 @@
  * Run: node probes/emission-readiness/probe.mjs [--variant <name>] (default: all four)
  */
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { responseTo, sleep, spawnRpcChild } from "../lib/rpc-child.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,59 +95,6 @@ function startCountingServer() {
   });
 }
 
-/** RPC framing: strict JSONL, split on \n only. */
-function makeBus(stdout) {
-  const events = [];
-  const waiters = [];
-  let buffer = "";
-  stdout.on("data", (data) => {
-    buffer += data.toString();
-    let index;
-    while ((index = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, index);
-      buffer = buffer.slice(index + 1);
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        events.push({ type: "__non_json__", line: line.slice(0, 120) });
-        continue;
-      }
-      events.push(event);
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        const waiter = waiters[i];
-        if (waiter.predicate(event)) {
-          waiters.splice(i, 1);
-          clearTimeout(waiter.timer);
-          waiter.resolve(event);
-        }
-      }
-    }
-  });
-  return {
-    events,
-    waitFor(predicate, ms, label) {
-      const existing = events.find(predicate);
-      if (existing) return Promise.resolve(existing);
-      return new Promise((resolve, reject) => {
-        const waiter = {
-          predicate,
-          resolve,
-          timer: setTimeout(() => {
-            const index = waiters.indexOf(waiter);
-            if (index !== -1) waiters.splice(index, 1);
-            reject(new Error(`${label}: no matching event within ${ms}ms`));
-          }, ms),
-        };
-        waiters.push(waiter);
-      });
-    },
-  };
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function runVariant(variant) {
   const { server, port, hits } = await startCountingServer();
   const baseUrl = `http://127.0.0.1:${port}/v1`;
@@ -156,10 +103,8 @@ async function runVariant(variant) {
   const extPath = path.join(tmp, "probe-extension.mjs");
   await copyFile(path.join(here, "probe-extension.mjs"), extPath);
 
-  const child = spawn(
-    "pi",
+  const rpc = spawnRpcChild(
     [
-      "--mode", "rpc",
       "--no-session",
       "-ne", // no extension discovery — only the probe extension loads
       "-e", extPath,
@@ -175,9 +120,9 @@ async function runVariant(variant) {
         PROBE_REVISION: EXPECTED.revision,
         PROBE_COUNT_KEY: "probe-key",
       },
-      stdio: ["pipe", "pipe", "pipe"],
     },
   );
+  const { bus } = rpc;
 
   const result = {
     variant,
@@ -195,25 +140,20 @@ async function runVariant(variant) {
     failures: [],
   };
 
-  const bus = makeBus(child.stdout);
-  const stderrChunks = [];
-  child.stderr.on("data", (d) => stderrChunks.push(d.toString()));
-  child.on("error", (error) => result.failures.push(`spawn error: ${error.message}`));
+  rpc.child.on("error", (error) => result.failures.push(`spawn error: ${error.message}`));
 
   try {
     // 1. The RPC channel itself must answer before any readiness expectation —
     //    this distinguishes "child up, readiness missing" (a readiness
     //    refusal) from "child never came up" (infrastructure failure).
-    child.stdin.write(`${JSON.stringify({ id: "gs1", type: "get_state" })}\n`);
-    await bus.waitFor((e) => e.type === "response" && e.command === "get_state", STATE_TIMEOUT_MS, "get_state");
+    await rpc.request({ id: "gs1", type: "get_state" }, responseTo.command("get_state"), STATE_TIMEOUT_MS, "get_state");
     result.rpcAlive = true;
 
     // 2. The readiness command must be REGISTERED before it is invoked — an
     //    unknown "/command" would fall through to a normal user prompt and
     //    trigger a real model request, which is exactly what the gate must
     //    never do. The command list is the launcher-side discovery surface.
-    child.stdin.write(`${JSON.stringify({ id: "gc1", type: "get_commands" })}\n`);
-    const commands = await bus.waitFor((e) => e.type === "response" && e.command === "get_commands", STATE_TIMEOUT_MS, "get_commands");
+    const commands = await rpc.request({ id: "gc1", type: "get_commands" }, responseTo.command("get_commands"), STATE_TIMEOUT_MS, "get_commands");
     const readinessCommand = EXPECTED.readinessCommand;
     const listed = (commands.data?.commands ?? []).some((c) => c.name === readinessCommand && c.source === "extension");
     result.readinessCommandRegistered = listed;
@@ -222,8 +162,7 @@ async function runVariant(variant) {
       // 3. Invoke readiness: the extension command executes immediately —
       //    preflight succeeds without a model request — and its
       //    entry_appended readiness lands on the subscribed stdout.
-      child.stdin.write(`${JSON.stringify({ id: "rr1", type: "prompt", message: `/${readinessCommand}` })}\n`);
-      const invocation = await bus.waitFor((e) => e.type === "response" && e.id === "rr1", STATE_TIMEOUT_MS, "readiness invocation");
+      const invocation = await rpc.request({ id: "rr1", type: "prompt", message: `/${readinessCommand}` }, responseTo.id("rr1"), STATE_TIMEOUT_MS, "readiness invocation");
       if (!invocation.success) result.failures.push(`readiness invocation failed: ${JSON.stringify(invocation).slice(0, 200)}`);
 
       // 4. The bounded readiness wait.
@@ -267,8 +206,7 @@ async function runVariant(variant) {
       // selection would fall through to the child's DEFAULT (real) provider,
       // which is exactly the under-capability class the gate exists to
       // prevent. No set_model success, no prompt.
-      child.stdin.write(`${JSON.stringify({ id: "sm1", type: "set_model", provider: "probe", modelId: "probe-model" })}\n`);
-      const setModel = await bus.waitFor((e) => e.type === "response" && e.command === "set_model", STATE_TIMEOUT_MS, "set_model");
+      const setModel = await rpc.request({ id: "sm1", type: "set_model", provider: "probe", modelId: "probe-model" }, responseTo.command("set_model"), STATE_TIMEOUT_MS, "set_model");
       if (!setModel.success) {
         result.failures.push(`set_model failed: ${JSON.stringify(setModel).slice(0, 200)}`);
       } else {
@@ -278,11 +216,13 @@ async function runVariant(variant) {
         } else {
           result.modelSet = true;
           result.selectedModel = { provider: model.provider, id: model.id, api: model.api, baseUrl: model.baseUrl };
-          child.stdin.write(`${JSON.stringify({ type: "set_auto_retry", enabled: false })}\n`);
-          child.stdin.write(
-            `${JSON.stringify({ id: "p1", type: "prompt", message: "Emit the probe payload with claim 'gate open' and severity 'advisory'." })}\n`,
+          rpc.send({ type: "set_auto_retry", enabled: false });
+          const promptResponse = await rpc.request(
+            { id: "p1", type: "prompt", message: "Emit the probe payload with claim 'gate open' and severity 'advisory'." },
+            responseTo.id("p1"),
+            STATE_TIMEOUT_MS,
+            "prompt",
           );
-          const promptResponse = await bus.waitFor((e) => e.type === "response" && e.id === "p1", STATE_TIMEOUT_MS, "prompt");
           if (!promptResponse.success) result.failures.push(`prompt preflight failed: ${JSON.stringify(promptResponse).slice(0, 200)}`);
           result.prompted = true;
         }
@@ -321,12 +261,11 @@ async function runVariant(variant) {
   }
 
   // 6. Cleanup kills only this probe's child.
-  child.kill("SIGKILL");
-  await sleep(100);
+  await rpc.kill(100);
   server.close();
   result.requestCount = hits.length;
   result.firstRequestAt ??= hits[0]?.at;
-  const stderrText = stderrChunks.join("").trim();
+  const stderrText = rpc.stderr();
   if (stderrText) result.stderr = stderrText.slice(0, 400);
 
   // 7. Variant assertions.
