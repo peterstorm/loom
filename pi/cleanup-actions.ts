@@ -131,14 +131,22 @@ export async function injectPiWriteGrantWithRevocation(
   try {
     return ports.inject(task, grant);
   } catch (injectionError) {
-    const cleanupErrors = await runPiCleanupActions([{
+    const cleanupSuffix = await directReleaseFailureSuffix({
       label: `directly revoke write grant for spawn item ${spawnIndex + 1}`,
       run: () => ports.revoke(grant.token),
-    }]);
+    });
     throw new Error(
-      `write-grant injection failed: ${describeCause(injectionError)}` +
-        cleanupFailureSuffix(cleanupErrors),
+      `write-grant injection failed: ${describeCause(injectionError)}${cleanupSuffix}`,
       { cause: injectionError },
     );
   }
 }
+
+/**
+ * Attempt the one direct release a refusal owes — a capability taken but no
+ * longer owned by any rollback — and return the cleanup-failure suffix the
+ * refusal carries: empty when the release succeeded, so its failure never
+ * hides the refusal's own cause.
+ */
+export const directReleaseFailureSuffix = async (release: PiCleanupAction): Promise<string> =>
+  cleanupFailureSuffix(await runPiCleanupActions([release]));

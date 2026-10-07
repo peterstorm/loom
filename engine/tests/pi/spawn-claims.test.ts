@@ -14,10 +14,13 @@ import {
   claimRosterEntry,
   claimWitnessRun,
   claimWriteGrant,
+  NO_DURABLE_SPAWN_CLAIMS,
   NO_SPAWN_CLAIMS,
   planSpawnRollback,
   pointerLeaseOnly,
+  releaseDurableSpawnClaims,
   releaseSpawnClaims,
+  remainingDurableClaims,
   remainingSpawnClaims,
   remainingSpawnDebt,
   settledSpawnClaims,
@@ -25,6 +28,8 @@ import {
   spawnRollbackStepLabel,
   spawnSettlementStepLabel,
   withoutPointerLease,
+  type DurableClaimReleasePorts,
+  type DurableReleaseStep,
   type SpawnClaimReleasePorts,
   type SpawnClaims,
 } from "../../../pi/spawn-claims";
@@ -56,8 +61,8 @@ const value = <T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
 const fullClaims = (): SpawnClaims => {
   let claims = claimRosterEntry(NO_SPAWN_CLAIMS, rosterItem(0));
   claims = claimRosterEntry(claims, rosterItem(1));
-  claims = claimPointerLease(claims, pointer);
-  claims = claimWitnessRun(claims, witnessRun);
+  claims = value(claimPointerLease(claims, pointer));
+  claims = value(claimWitnessRun(claims, witnessRun));
   claims = value(claimWriteGrant(claims, { slot: 0, token: "token-0" }));
   claims = value(claimWriteGrant(claims, { slot: 1, token: "token-1" }));
   claims = value(claimGrantInjection(claims, { slot: 0, originalTask: "Task ID: T1" }));
@@ -124,6 +129,22 @@ describe("the ledger is total", () => {
       ok: false,
       error: "spawn item 1 already holds a claimed write grant",
     });
+  });
+
+  it("refuses a second witness run or pointer lease rather than overwriting the first", () => {
+    const witnessed = value(claimWitnessRun(NO_SPAWN_CLAIMS, witnessRun));
+    const laterRun = { ...witnessRun, runId: "run.later" } as unknown as SessionRunBinding;
+    expect(claimWitnessRun(witnessed, laterRun)).toEqual({
+      ok: false,
+      error: "spawn batch already holds claimed review run run.spawn-claims",
+    });
+    const leased = value(claimPointerLease(NO_SPAWN_CLAIMS, pointer));
+    expect(claimPointerLease(leased, pointer)).toEqual({
+      ok: false,
+      error: "spawn batch already holds a claimed task-graph pointer lease",
+    });
+    // The refused claim leaves the first binding the one a release retracts.
+    expect(planSpawnRollback(witnessed)).toEqual([{ kind: "retract-witness-run", binding: witnessRun }]);
   });
 
   it("refuses an injection for a slot with no claimed grant, or one already injected", () => {
@@ -205,7 +226,7 @@ describe("releaseSpawnClaims and remainingSpawnDebt", () => {
   });
 
   it("keeps the pointer lease as debt when its exact ownership was lost", async () => {
-    const claims = claimPointerLease(NO_SPAWN_CLAIMS, pointer);
+    const claims = value(claimPointerLease(NO_SPAWN_CLAIMS, pointer));
     const { ports } = fakePorts(new Set(), "not-owned");
     const { errors, releases } = await releaseSpawnClaims(claims, admissionLabel, ports);
     expect(errors).toEqual(["roll back task-graph pointer: exact pointer ownership lost (not-owned)"]);
@@ -242,45 +263,52 @@ describe("settlement through the same ledger", () => {
     items: Object.freeze([rosterItem(0), rosterItem(1)]),
   });
   const grants = Object.freeze([{ slot: 1, token: "token-1" }]);
-  const owner = { sessionId, toolCallId: "call-1" } as const;
-  const settlementLabel = (step: Parameters<typeof spawnRollbackStepLabel>[0]) => spawnSettlementStepLabel(step, owner);
+  const owner = { sessionId } as const;
+  const settlementLabel = (step: DurableReleaseStep) => spawnSettlementStepLabel(step, owner);
+
+  /** Settlement's release ports: the durable three, and nothing a dispatched
+   *  batch cannot hold. */
+  const fakeDurablePorts = (failing: ReadonlySet<Port> = new Set()) => {
+    const { ports: { revokeGrant, removeRosterEntry, releasePointer }, calls } = fakePorts(failing);
+    const ports: DurableClaimReleasePorts = { revokeGrant, removeRosterEntry, releasePointer };
+    return { ports, calls };
+  };
 
   it("holds a dispatched batch's committed grants, roster entries and pointer lease, and nothing process-local", () => {
     expect(settledSpawnClaims(grants, reservation)).toEqual({
-      ...NO_SPAWN_CLAIMS,
       grants,
       roster: reservation.items,
       pointer,
     });
-    expect(settledSpawnClaims([], undefined)).toEqual(NO_SPAWN_CLAIMS);
+    expect(settledSpawnClaims([], undefined)).toEqual(NO_DURABLE_SPAWN_CLAIMS);
   });
 
   it("releases capabilities before results and the pointer lease last, keeping the lease owed in between", async () => {
     const held = settledSpawnClaims(grants, reservation);
-    const first = fakePorts();
-    const capabilities = await releaseSpawnClaims(withoutPointerLease(held), settlementLabel, first.ports);
+    const first = fakeDurablePorts();
+    const capabilities = await releaseDurableSpawnClaims(withoutPointerLease(held), settlementLabel, first.ports);
     expect(first.calls).toEqual([
       "revokeGrant:token-1",
       `removeRosterEntry:${rosterId(1)}`,
       `removeRosterEntry:${rosterId(0)}`,
     ]);
-    const owedBetween = remainingSpawnClaims(held, capabilities.releases);
+    const owedBetween = remainingDurableClaims(held, capabilities.releases);
     expect(spawnDebtOf(owedBetween, reservation)).toEqual({
       grants: [],
       reservation: { ...debtContext, pointerBinding: pointer, items: [] },
     });
-    const last = fakePorts();
-    const lease = await releaseSpawnClaims(pointerLeaseOnly(owedBetween), settlementLabel, last.ports);
+    const last = fakeDurablePorts();
+    const lease = await releaseDurableSpawnClaims(pointerLeaseOnly(owedBetween), settlementLabel, last.ports);
     expect(last.calls).toEqual(["releasePointer"]);
-    expect(remainingSpawnClaims(owedBetween, lease.releases)).toEqual(NO_SPAWN_CLAIMS);
+    expect(remainingDurableClaims(owedBetween, lease.releases)).toEqual(NO_DURABLE_SPAWN_CLAIMS);
   });
 
   it("names settlement failures in the settlement vocabulary and retains them as debt", async () => {
     const held = settledSpawnClaims(grants, reservation);
-    const { errors, releases } = await releaseSpawnClaims(
+    const { errors, releases } = await releaseDurableSpawnClaims(
       held,
       settlementLabel,
-      fakePorts(new Set<Port>(["revokeGrant", "removeRosterEntry", "releasePointer"])).ports,
+      fakeDurablePorts(new Set<Port>(["revokeGrant", "removeRosterEntry", "releasePointer"])).ports,
     );
     expect(errors).toEqual([
       "revoke write grant for spawn item 2: revokeGrant unavailable",
@@ -288,6 +316,31 @@ describe("settlement through the same ledger", () => {
       "remove reserved roster entry for code-implementer-agent: removeRosterEntry unavailable",
       `release parent task-graph pointer lease for ${sessionId}: releasePointer unavailable`,
     ]);
-    expect(spawnDebtOf(remainingSpawnClaims(held, releases), reservation)).toEqual({ grants, reservation });
+    expect(spawnDebtOf(remainingDurableClaims(held, releases), reservation)).toEqual({ grants, reservation });
+  });
+
+  it("releases a durable ledger in exactly the order and with exactly the debt an admission rollback would", async () => {
+    await fc.assert(fc.asyncProperty(
+      fc.uniqueArray(fc.nat({ max: 3 }), { maxLength: 3 }),
+      fc.nat({ max: 3 }),
+      fc.boolean(),
+      fc.subarray<Port>(["revokeGrant", "removeRosterEntry", "releasePointer"]),
+      async (grantSlots, rosterSize, leased, failingPorts) => {
+        const durable = Object.freeze({
+          grants: grantSlots.map((slot) => ({ slot, token: `token-${slot}` })),
+          roster: Array.from({ length: rosterSize }, (_, slot) => rosterItem(slot)),
+          pointer: leased ? pointer : null,
+        });
+        const failing = new Set<Port>(failingPorts);
+        const settlement = fakeDurablePorts(failing);
+        const settled = await releaseDurableSpawnClaims(durable, settlementLabel, settlement.ports);
+        const admission = fakePorts(failing);
+        const rolledBack = await releaseSpawnClaims({ ...NO_SPAWN_CLAIMS, ...durable }, admissionLabel, admission.ports);
+        expect(settlement.calls).toEqual(admission.calls);
+        expect(settled.errors).toHaveLength(rolledBack.errors.length);
+        expect(remainingDurableClaims(durable, settled.releases))
+          .toEqual(remainingDurableClaims(durable, rolledBack.releases));
+      },
+    ));
   });
 });
