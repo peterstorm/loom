@@ -1,84 +1,45 @@
 #!/usr/bin/env bun
-/** Read-only projection. No Run handle, publication, mutable source or execution authority. */
+/**
+ * Read-only projection. No Run handle, publication, mutable source or execution authority.
+ *
+ * The shell only parses arguments, reads the outer packet file and prints the
+ * bounded projection: the projection is `core/context-packet-projection`, and
+ * the whole `--archive` path (predecessor expansion and its trust rules) is
+ * `projectArchivedPredecessor` in `core/predecessor-archive`, with the stored
+ * packet reader injected as its one published-packet port.
+ */
 import { parseContextProjectionArguments, projectContextPacket } from "../engine/src/core/context-packet-projection";
-import { parseStandaloneReviewerContextPacketV3 } from "../engine/src/core/context-packets";
+import { parsePredecessorArchiveArguments, projectArchivedPredecessor, type ArchivedPredecessorRefusal,
+  type ResolvePublishedPacket } from "../engine/src/core/predecessor-archive";
 import type { DomainResult } from "../engine/src/core/orchestration-contract";
-import { expandGzipPredecessorArchive, parsePredecessorArchiveArguments, parsePredecessorArchiveRecord, verifyPredecessorArchiveBytes,
-  type PredecessorArchivePurpose, type PredecessorArchiveRecord, type PredecessorArchiveRefusal } from "../engine/src/core/predecessor-archive";
 import { safeIoCause } from "../engine/src/core/safe-io-cause";
 import { CONTEXT_PACKET_MAX_BYTES, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 
 // A retained archive expands to at most one stored Context Packet, whichever encoding retained it.
 const ARCHIVE_BOUNDS = { expandedBytes: CONTEXT_PACKET_MAX_BYTES, encodedBytes: CONTEXT_PACKET_MAX_BYTES };
 
-const decodeUtf8 = (bytes: Uint8Array): string => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+/** The production published-packet port: the exact file, bounded by the reference's own length. */
+const resolveReference: ResolvePublishedPacket = (reference) =>
+  readStoredContextPacketFile(reference.path, { file: reference.byteLength, section: CONTEXT_PACKET_MAX_BYTES });
 
-/** Shell boundary: a codec refusal becomes the thrown cause (a decoder's own error keeps its class). */
-function orThrow<T>(result: DomainResult<T, PredecessorArchiveRefusal>): T {
+/** Shell boundary: a refusal becomes the thrown cause (a decoder's own error keeps its class). */
+function orThrow<T>(result: DomainResult<T, string | ArchivedPredecessorRefusal>): T {
   if (result.ok) return result.value;
-  throw result.error.kind === "expansion-failed" ? result.error.cause : Error(result.error.message);
-}
-
-/** One identity field of an archived predecessor packet, as the string the projection binds. */
-function archivedIdentity(packet: unknown, key: "requestId" | "digest" | "role" | "requiredSkill"): string {
-  const value = typeof packet === "object" && packet !== null ? (packet as Record<string, unknown>)[key] : undefined;
-  if (typeof value !== "string") throw Error(`archived predecessor packet lacks a string ${key}`);
-  return value;
-}
-
-/** One retained encoding's expanded bytes and the predecessor packet record they carry, still unverified. */
-function expandRetainedEncoding(retained: PredecessorArchiveRecord, purpose: PredecessorArchivePurpose):
-    Readonly<{ expanded: Uint8Array; prior: unknown }> {
-  if (retained.encoding === "published-packet-reference") {
-    if (retained.purpose !== purpose) throw Error("invalid explicit predecessor reference");
-    // The reference pins the predecessor's packet FILE bytes; its sections
-    // resolve from the predecessor run's own blob store.
-    const predecessor = readStoredContextPacketFile(retained.path, { file: retained.byteLength, section: CONTEXT_PACKET_MAX_BYTES });
-    if (!predecessor.ok) throw Error(predecessor.error);
-    return { expanded: predecessor.value.fileBytes, prior: predecessor.value.record };
-  }
-  const expanded = orThrow(expandGzipPredecessorArchive(retained));
-  return { expanded, prior: JSON.parse(decodeUtf8(expanded)) };
-}
-
-/** Expand one retained archive section to its verified predecessor packet record. */
-function expandRetainedPredecessor(sectionBytes: Uint8Array, purpose: PredecessorArchivePurpose): unknown {
-  const retained = orThrow(parsePredecessorArchiveRecord(JSON.parse(decodeUtf8(sectionBytes)), ARCHIVE_BOUNDS));
-  const { expanded, prior } = expandRetainedEncoding(retained, purpose);
-  orThrow(verifyPredecessorArchiveBytes(retained, expanded));
-  return prior;
+  const refusal = result.error;
+  if (typeof refusal === "string") throw Error(refusal);
+  throw refusal.kind === "decoder-failed" ? refusal.cause : Error(refusal.message);
 }
 
 try {
-  const args = parsePredecessorArchiveArguments(process.argv.slice(2));
-  if (!args.ok) throw Error(args.error);
-  const { regular, selection } = args.value;
-  const input = parseContextProjectionArguments(regular);
-  if (!input.ok) throw Error(input.error);
+  const { regular, selection } = orThrow(parsePredecessorArchiveArguments(process.argv.slice(2)));
+  const input = orThrow(parseContextProjectionArguments(regular));
   // Existing reader ceiling is not a reviewer response or whole-Run budget.
-  const ceiling = input.value.purpose === "standalone-successor" ? CONTEXT_PACKET_MAX_BYTES : 128 * 1024 * 1024;
-  const stored = readStoredContextPacketFile(input.value.path, { file: ceiling, section: ceiling });
-  if (!stored.ok) throw Error(stored.error);
-  const raw = stored.value.record;
-  let projected;
-  if (selection.kind === "none") projected = projectContextPacket(raw, input.value);
-  else {
-    const outer = projectContextPacket(raw, { ...input.value, selection: { kind: "index", offset: 0, limit: 32 } });
-    if (!outer.ok || input.value.purpose !== "standalone-successor") throw Error("archive requires exact successor packet identity");
-    const packet = parseStandaloneReviewerContextPacketV3(raw);
-    if (!packet.ok) throw Error(packet.error.message);
-    const section = packet.value.variableContext.find(row => row.label === selection.label && row.label.startsWith("predecessor-context:"));
-    if (section === undefined) throw Error("archive label is absent");
-    const prior = expandRetainedPredecessor(Uint8Array.from(section.bytes), selection.purpose);
-    // Inner identity is retained DATA within the independently selected outer section,
-    // not authority for issuance or capture. Decode purpose is explicit, never guessed.
-    projected = projectContextPacket(prior, { ...input.value, requestId: archivedIdentity(prior, "requestId"),
-      digest: archivedIdentity(prior, "digest"), role: archivedIdentity(prior, "role"),
-      requiredSkill: archivedIdentity(prior, "requiredSkill"),
-      purpose: selection.purpose === "standalone-successor" ? "standalone-successor" : undefined });
-  }
-  if (!projected.ok) throw Error(projected.error);
-  const output = JSON.stringify(projected.value);
+  const ceiling = input.purpose === "standalone-successor" ? CONTEXT_PACKET_MAX_BYTES : 128 * 1024 * 1024;
+  const { record } = orThrow(readStoredContextPacketFile(input.path, { file: ceiling, section: ceiling }));
+  const projected = orThrow(selection.kind === "none"
+    ? projectContextPacket(record, input)
+    : projectArchivedPredecessor(record, input, selection, { bounds: ARCHIVE_BOUNDS, resolveReference }));
+  const output = JSON.stringify(projected);
   if (Buffer.byteLength(output) > 48 * 1024) throw Error("projection exceeds output bound");
   process.stdout.write(output + "\n");
 } catch (cause) {

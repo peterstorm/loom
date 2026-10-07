@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { gzipSync } from "node:zlib";
+import type { ContextProjectionInput } from "../../src/core/context-packet-projection";
+import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../src/core/context-packets";
 import { sha256Bytes } from "../../src/core/digest";
+import { parseRequestId } from "../../src/core/orchestration-contract";
 import {
   admitFrozenPredecessorArchive, expandGzipPredecessorArchive, parsePredecessorArchiveArguments, parsePredecessorArchiveRecord,
-  publishedPacketReference, serializePublishedPacketReference, verifyPredecessorArchiveBytes,
-  type PredecessorArchiveRecord, type PredecessorArchiveRefusal,
+  projectArchivedPredecessor, publishedPacketReference, serializePublishedPacketReference, verifyPredecessorArchiveBytes,
+  type ArchivedPredecessorRefusal, type PredecessorArchiveRecord, type PredecessorArchiveRefusal, type PublishedPacketReference,
+  type ResolvePublishedPacket,
 } from "../../src/core/predecessor-archive";
 
 const BOUNDS = { expandedBytes: 16_777_216, encodedBytes: 16_777_216 };
@@ -157,5 +161,130 @@ describe("predecessor archive selection arguments", () => {
     ["an unsupported purpose", [...regular, "--archive", "a", "--archive-purpose", "v3"], "archive requires exact label and explicit --archive-purpose v1-v2 or standalone-successor"],
   ])("refuses %s", (_name, args, error) => {
     expect(parsePredecessorArchiveArguments(args)).toEqual({ ok: false, error });
+  });
+});
+
+describe("projectArchivedPredecessor: the reader's whole --archive path", () => {
+  const ROLE = "code-reviewer";
+  const LABEL = `predecessor-context:${ROLE}`;
+  const PREDECESSOR_PATH = "/runs/prior/contexts/predecessor.json";
+  const unwrap = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
+    if (!result.ok) throw Error(JSON.stringify(result.error));
+    return result.value;
+  };
+  const requestId = (name: string) => unwrap(parseRequestId(`request:${name}`));
+  const section = (label: string, text: string) => unwrap(encodeByteSection(label, text));
+  /** A packet as the reader sees it: its stored JSON record, never the in-memory sealed object. */
+  const stored = (packet: unknown): unknown => JSON.parse(JSON.stringify(packet));
+
+  const predecessor = unwrap(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
+    fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }));
+  const predecessorBytes = bytesOf(JSON.stringify(predecessor));
+  const reference = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...referenceRecord(predecessorBytes, PREDECESSOR_PATH), ...overrides });
+  const gzipArchive = (overrides: Record<string, unknown> = {}) => JSON.stringify({ ...gzipRecord(predecessorBytes), ...overrides });
+
+  /** The plain in-memory published-packet port: exact file bytes and record by path, recording each lookup. */
+  const resolverOf = (files: ReadonlyMap<string, Uint8Array>) => {
+    const lookups: PublishedPacketReference[] = [];
+    const resolveReference: ResolvePublishedPacket = (ref) => {
+      lookups.push(ref);
+      const fileBytes = files.get(ref.path);
+      return fileBytes === undefined
+        ? { ok: false, error: `context packet ${ref.path} is unreadable` }
+        : { ok: true, value: { fileBytes, record: JSON.parse(Buffer.from(fileBytes).toString("utf8")) as unknown } };
+    };
+    return { lookups, resolveReference };
+  };
+
+  /** One successor v3 packet retaining `retained` (raw section text) under LABEL, plus its exact reader input. */
+  function successor(retained: string) {
+    const packet = unwrap(buildStandaloneReviewerContextPacketV3({ requestId: requestId("successor"), role: ROLE,
+      requiredSkill: "review", fixedContext: [], variableContext: [section(LABEL, retained)] }));
+    const input: ContextProjectionInput = { path: "/runs/successor/contexts/successor.json", requestId: packet.requestId,
+      digest: packet.digest, role: ROLE, requiredSkill: "review", selection: { kind: "index", offset: 0, limit: 32 },
+      purpose: "standalone-successor" };
+    return { outer: stored(packet), input };
+  }
+
+  type ReadOptions = Readonly<{ purpose?: "v1-v2" | "standalone-successor"; label?: string;
+    files?: ReadonlyMap<string, Uint8Array>; input?: Partial<ContextProjectionInput> }>;
+  const read = (retained: string, options: ReadOptions = {}) => {
+    const { outer, input } = successor(retained);
+    const resolver = resolverOf(options.files ?? new Map([[PREDECESSOR_PATH, predecessorBytes]]));
+    const result = projectArchivedPredecessor(outer, { ...input, ...options.input },
+      { kind: "archive", label: options.label ?? LABEL, purpose: options.purpose ?? "v1-v2" },
+      { bounds: BOUNDS, resolveReference: resolver.resolveReference });
+    return { result, lookups: resolver.lookups };
+  };
+  const refusedWith = (outcome: ReturnType<typeof read>): ArchivedPredecessorRefusal => {
+    if (outcome.result.ok) throw Error("expected a refusal");
+    return outcome.result.error;
+  };
+
+  it.each([["a published packet reference", reference()], ["an earlier inline gzip archive", gzipArchive()]])(
+    "expands %s to the predecessor packet's own projection under its retained identity", (_name, retained) => {
+      expect(unwrap(read(retained).result)).toMatchObject({ schemaVersion: 2, requestId: predecessor.requestId,
+        digest: predecessor.digest, role: ROLE, requiredSkill: "review", sections: expect.arrayContaining([expect.objectContaining({ label: "prior-notes" })]) });
+    });
+
+  it("resolves a reference through the port exactly once, with the parsed reference itself", () => {
+    const outcome = read(reference());
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.lookups).toEqual([referenceRecord(predecessorBytes, PREDECESSOR_PATH)]);
+    expect(read(gzipArchive()).lookups).toEqual([]);
+  });
+
+  it("decodes a successor-purpose predecessor as a standalone successor packet, never guessing the decoder", () => {
+    const prior = unwrap(buildStandaloneReviewerContextPacketV3({ requestId: requestId("prior-successor"), role: ROLE,
+      requiredSkill: "review", fixedContext: [], variableContext: [section("prior-notes", "notes")] }));
+    const priorBytes = bytesOf(JSON.stringify(prior));
+    const files = new Map([[PREDECESSOR_PATH, priorBytes]]);
+    const asSuccessor = JSON.stringify(referenceRecord(priorBytes, PREDECESSOR_PATH, "standalone-successor"));
+    expect(unwrap(read(asSuccessor, { purpose: "standalone-successor", files }).result))
+      .toMatchObject({ schemaVersion: 3, requestId: prior.requestId });
+    // The same v3 bytes under the v1-v2 decode purpose are refused by the v1/v2 packet parser.
+    expect(refusedWith(read(JSON.stringify(referenceRecord(priorBytes, PREDECESSOR_PATH)), { files })))
+      .toMatchObject({ kind: "refused", message: expect.stringMatching(/^packet integrity or supported contract check failed/) });
+  });
+
+  it.each([
+    ["an outer packet read without the successor purpose", reference(), { input: { purpose: undefined } }, "archive requires exact successor packet identity"],
+    ["an outer packet that differs from the expected identity", reference(), { input: { digest: "0".repeat(64) } }, "archive requires exact successor packet identity"],
+    ["an absent label", reference(), { label: `${LABEL}:attempt-2` }, "archive label is absent"],
+    ["a label outside the predecessor namespace", reference(), { label: "notes" }, "archive label is absent"],
+    ["an unsupported encoding", reference({ encoding: "zstd" }), {}, "unsupported predecessor encoding"],
+    ["a relative reference path", reference({ path: "predecessor.json" }), {}, "invalid explicit predecessor reference"],
+    ["a purpose that differs from the selection", reference({ purpose: "standalone-successor" }), {}, "invalid explicit predecessor reference"],
+    ["a byteLength past the expansion bound", reference({ byteLength: 16_777_217 }), {}, "invalid explicit predecessor reference"],
+    ["a reference whose digest differs", reference({ digest: "0".repeat(64) }), {}, "archive bytes differ"],
+    ["a reference whose length differs", reference({ byteLength: predecessorBytes.byteLength - 1 }), {}, "archive bytes differ"],
+    ["a reference whose file the port cannot read", reference(), { files: new Map() }, `context packet ${PREDECESSOR_PATH} is unreadable`],
+    ["a gzip archive whose digest differs", gzipArchive({ digest: "0".repeat(64) }), {}, "archive bytes differ"],
+    ["non-canonical base64", gzipArchive({ contentBase64: `${gzipRecord(predecessorBytes).contentBase64}\n` }), {}, "invalid archive encoding"],
+    ["a retained record that is not an object", "[]", {}, "retained predecessor archive is not a JSON object"],
+  ] satisfies readonly (readonly [string, string, ReadOptions, string])[])("refuses %s", (_name, retained, options, message) => {
+    expect(refusedWith(read(retained, options))).toEqual({ kind: "refused", message });
+  });
+
+  it.each([
+    ["a retained record that is not JSON", "not json", SyntaxError],
+    ["a gzip archive declaring fewer bytes than it expands to", gzipArchive({ byteLength: predecessorBytes.byteLength - 1 }), RangeError],
+    ["a gzip archive whose expansion is not JSON", JSON.stringify(gzipRecord(bytesOf("not json"))), SyntaxError],
+  ])("refuses %s with the decoder's own error as the cause", (_name, retained, decoderError) => {
+    const refusal = refusedWith(read(retained));
+    expect(refusal.kind).toBe("decoder-failed");
+    if (refusal.kind === "decoder-failed") expect(refusal.cause).toBeInstanceOf(decoderError);
+  });
+
+  it("refuses a verified predecessor that lacks its retained identity, naming the first missing field", () => {
+    const anonymous = bytesOf(JSON.stringify({ requestId: "request:prior", digest: "d" }));
+    expect(refusedWith(read(JSON.stringify(referenceRecord(anonymous, PREDECESSOR_PATH)), { files: new Map([[PREDECESSOR_PATH, anonymous]]) })))
+      .toEqual({ kind: "refused", message: "archived predecessor packet lacks a string role" });
+  });
+
+  it("refuses a verified predecessor whose bytes are not an issued packet of its retained identity", () => {
+    const forged = bytesOf(JSON.stringify({ requestId: predecessor.requestId, digest: predecessor.digest, role: ROLE, requiredSkill: "review" }));
+    expect(refusedWith(read(JSON.stringify(referenceRecord(forged, PREDECESSOR_PATH)), { files: new Map([[PREDECESSOR_PATH, forged]]) })))
+      .toMatchObject({ kind: "refused", message: expect.stringMatching(/^packet integrity or supported contract check failed/) });
   });
 });

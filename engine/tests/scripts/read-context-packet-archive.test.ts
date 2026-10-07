@@ -1,8 +1,10 @@
 /**
  * Subprocess cases for `scripts/read-context-packet.ts --archive`: the issued
- * LOOM_CONTEXT_READ_COMMAND's predecessor-expansion path. The pure decode
- * rules are unit-tested in tests/core/predecessor-archive.test.ts; these pin
- * the shell's wiring — every refusal exits 1 with no stdout, and the success
+ * LOOM_CONTEXT_READ_COMMAND's predecessor-expansion path. The pure decode and
+ * expansion rules (`projectArchivedPredecessor`, with a plain in-memory
+ * published-packet port) are unit-tested in tests/core/predecessor-archive.test.ts;
+ * these pin the shell's wiring — the real stored-packet adapter, every refusal
+ * exits 1 with no stdout naming exactly its cause class, and the success
  * projection is the retained predecessor packet's own index.
  */
 import { afterAll, describe, expect, it } from "vitest";
@@ -54,11 +56,12 @@ function successorRetaining(retained: string): string[] {
 
 const read = (args: readonly string[]) => spawnSync("bun", [SCRIPT, ...args], { encoding: "utf8" });
 const archive = (purpose = "v1-v2", label = LABEL) => ["--archive", label, "--archive-purpose", purpose];
-const refused = (args: readonly string[]) => {
+/** Exit 1, no stdout, and the bounded stderr naming exactly the refusal's cause class. */
+const refused = (args: readonly string[], causeClass = "Error") => {
   const result = read(args);
   expect(result.status, result.stdout).toBe(1);
   expect(result.stdout).toBe("");
-  expect(result.stderr).toMatch(/^Context Packet read failed \([A-Za-z]+\): .* No authority granted\.\n$/);
+  expect(result.stderr).toMatch(new RegExp(`^Context Packet read failed \\(${causeClass}\\): .* No authority granted\\.\\n$`));
   return result.stderr;
 };
 
@@ -89,19 +92,18 @@ describe("read-context-packet --archive", { timeout: 60_000 }, () => {
     refused([...successorRetaining(reference()), ...extra]);
   });
 
+  // The record-level refusal rules are pinned at their seam
+  // (projectArchivedPredecessor in tests/core/predecessor-archive.test.ts).
+  // Here: one refusal per surfaced cause class, plus the production
+  // published-packet adapter's own file bound (a reference shorter than its
+  // file is refused by the bounded read itself).
   it.each([
-    ["an unsupported encoding", reference({ encoding: "zstd" })],
-    ["a relative reference path", reference({ path: "predecessor.json" })],
-    ["a purpose that differs from the selection", reference({ purpose: "standalone-successor" })],
-    ["a byteLength past the expansion bound", reference({ byteLength: 16_777_217 })],
-    ["a reference whose digest differs", reference({ digest: "0".repeat(64) })],
-    ["a reference whose length differs", reference({ byteLength: predecessorBytes.length - 1 })],
-    ["a gzip archive whose digest differs", gzipArchive({ digest: "0".repeat(64) })],
-    ["a gzip archive declaring fewer bytes than it expands to", gzipArchive({ byteLength: predecessorBytes.length - 1 })],
-    ["non-canonical base64", gzipArchive({ contentBase64: `${gzipSync(predecessorBytes).toString("base64")}\n` })],
-    ["a retained record that is not JSON", "not json"],
-  ])("refuses %s", (_name, retained) => {
-    refused([...successorRetaining(retained), ...archive()]);
+    ["an unsupported encoding", reference({ encoding: "zstd" }), "Error"],
+    ["a reference whose length differs", reference({ byteLength: predecessorBytes.length - 1 }), "Error"],
+    ["a gzip archive declaring fewer bytes than it expands to", gzipArchive({ byteLength: predecessorBytes.length - 1 }), "RangeError"],
+    ["a retained record that is not JSON", "not json", "SyntaxError"],
+  ])("refuses %s", (_name, retained, causeClass) => {
+    refused([...successorRetaining(retained), ...archive()], causeClass);
   });
 
   it("refuses an archive selected against a packet read without the successor purpose", () => {

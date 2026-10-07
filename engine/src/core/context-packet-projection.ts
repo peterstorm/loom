@@ -60,6 +60,30 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     ...(purpose === undefined ? {} : { purpose }) } };
 }
 
+/** The whole-section reader's request (`scripts/read-context-section.ts`): one packet file, its expected digest, one label. */
+export type ContextSectionReadInput = Readonly<{ path: string; digest: string; label: string }>;
+
+/**
+ * The whole-section reader's CLI grammar, beside the projection reader's so
+ * both reader grammars have one owner. Each of `--packet`, `--digest` and
+ * `--section` is read at its first occurrence and must carry a value: a
+ * missing, empty or `--`-prefixed value is absent (the shared value-is-a-flag
+ * rule). The packet path must be absolute.
+ */
+export function parseContextSectionArguments(args: readonly string[]): DomainResult<ContextSectionReadInput, string> {
+  const flag = (name: string): string | undefined => {
+    const index = args.indexOf(name);
+    const value = index < 0 ? undefined : args[index + 1];
+    return value === undefined || value.length === 0 || value.startsWith("--") ? undefined : value;
+  };
+  const path = flag("--packet"), digest = flag("--digest"), label = flag("--section");
+  if (path === undefined) return failed("--packet requires a value");
+  if (digest === undefined) return failed("--digest requires a value");
+  if (label === undefined) return failed("--section requires a value");
+  if (!path.startsWith("/")) return failed("--packet must be an absolute path");
+  return { ok: true, value: Object.freeze({ path, digest, label }) };
+}
+
 const decode = (bytes: Iterable<number>): string => new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
 const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
