@@ -3,15 +3,15 @@
  *
  * Everything that ties a Pi spawn or result to an exactly issued Run
  * Directory request: the task's request/context markers, the session's run
- * bindings, the issued-request read the Spawn Admission's emission port
- * performs, recording native correlators before dispatch, authenticating and
- * terminalising results against their correlated request, and the
- * process-local witnesses of captured transcripts that the Loom review
- * authority bridge replays before it accepts a Standalone Review as done.
+ * bindings, the one authentication of an issued review request against its
+ * registered program and immutable publication (shared by the Spawn
+ * Admission's emission port and result capture), recording native
+ * correlators before dispatch, and authenticating and terminalising results
+ * against their correlated request. The witnesses of captured transcripts
+ * the review-authority bridge replays are a separate injected aggregate,
+ * `pi/trusted-review-witness.ts`.
  */
 
-import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
 import {
   issuedReviewerPayloadClaim,
   qualifyIssuedSpawnEmissionRoute,
@@ -29,104 +29,26 @@ import {
   RUNS_ROOT_ENV,
   terminalCaptureRefusal,
   terminalizeCaptureRejection,
-  type CaptureOutcome,
   type CorrelatedRequestResolution,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRegisteredRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
 import {
   parseRegisteredFacadeProgram,
   publishedReviewerRequest,
-  readStandaloneReviewedSource,
   renderSpawnTask,
-  replayStandaloneResultFromEvidence,
-  replayStandaloneCapturedEvidence,
 } from "../engine/src/handlers/helpers/programs";
-import type { LoomReviewAuthorityReceipt } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
-import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
-import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
-import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review-machine";
+import { captureKey } from "../engine/src/core/harness-capture";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
-import {
-  parseArtifactDigest,
-  parseContextDigest,
-  type ArtifactDigest,
-  type ContextDigest,
-  type RequestId,
-  type SlotId,
+import type {
+  AgentRequestAuthority,
+  ContextDigest,
+  RequestId,
 } from "../engine/src/core/orchestration-contract";
 import { piSpawnRosterId, replacePiSpawnTask } from "./tool-input";
-
-type TrustedReviewCapture = Readonly<{
-  /** The receipt's own branded identities: the witness is compared against
-   *  issued authority, so it keeps the authority's types, not bare strings. */
-  requestId: RequestId;
-  slotId: SlotId;
-  attempt: 1 | 2;
-  /** The harness-reported agent type, compared against the issued role. */
-  role: string;
-  /** Branded, because this proof compares two 64-hex fields: as plain strings
-   *  the context digest and the transcript digest were mutually interchangeable
-   *  at the construction site, which is the one place a swap must be impossible.
-   */
-  contextDigest: ContextDigest;
-  digest: ArtifactDigest;
-  byteLength: number;
-}>;
-
-type TrustedReviewRun = Readonly<{
-  binding: SessionRunBinding;
-  captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>;
-  touchedAt: number;
-}>;
-
-type TrustedReviewRoot = Readonly<{
-  nextTouch: number;
-  runs: ReadonlyMap<string, TrustedReviewRun>;
-}>;
-
-const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRoot>>();
-const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
-  `${runsRoot}\0${runDirectory}`;
-
-function updateTrustedReviewRun(
-  sessionId: string,
-  binding: SessionRunBinding,
-  updateCaptures: (captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>) => ReadonlyMap<CaptureKey, TrustedReviewCapture>,
-): void {
-  const sessionRoots = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
-  trustedReviewRuns.set(sessionId, sessionRoots);
-  const rootIdentity = resolve(binding.runsRoot);
-  const root = sessionRoots.get(rootIdentity) ?? Object.freeze({
-    nextTouch: 1,
-    runs: new Map<string, TrustedReviewRun>(),
-  });
-  const identity = trustedRunIdentity(binding);
-  const previous = root.runs.get(identity);
-  const runs = new Map(root.runs);
-  runs.set(identity, Object.freeze({
-    binding,
-    captures: updateCaptures(previous?.captures ?? new Map<CaptureKey, TrustedReviewCapture>()),
-    touchedAt: previous?.touchedAt ?? root.nextTouch,
-  }));
-  sessionRoots.set(rootIdentity, Object.freeze({
-    nextTouch: previous === undefined ? root.nextTouch + 1 : root.nextTouch,
-    runs,
-  }));
-}
-
-/** First exact standalone spawn selects the current run; retries never reorder runs. */
-function touchTrustedReviewRun(sessionId: string, binding: SessionRunBinding): void {
-  updateTrustedReviewRun(sessionId, binding, captures => captures);
-}
-
-/** Session shutdown retires every witness the session accumulated. */
-export function forgetTrustedReviewRuns(sessionId: string): void {
-  trustedReviewRuns.delete(sessionId);
-}
 
 export type PiOrchestrationMarkers = Readonly<{
   requestId: string;
@@ -141,43 +63,6 @@ export function orchestrationMarkers(task: string, item: string): PiOrchestratio
     throw new Error(`${item} must carry exactly one LOOM_REQUEST_ID and one LOOM_CONTEXT_DIGEST authority marker`);
   }
   return Object.freeze({ requestId: requestIds[0]!, contextDigest: contextDigests[0]! });
-}
-
-export function rememberTrustedReviewCapture(
-  sessionId: string,
-  binding: SessionRunBinding,
-  role: string,
-  task: string,
-  outcome: Extract<CaptureOutcome, { kind: "captured" }>,
-): void {
-  const markers = orchestrationMarkers(task, `captured ${outcome.receipt.requestId}`);
-  if (markers === null || markers.requestId !== outcome.receipt.requestId) {
-    throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
-  }
-  const contextDigest = parseContextDigest(markers.contextDigest);
-  if (!contextDigest.ok) {
-    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
-  }
-  const digest = parseArtifactDigest(outcome.receipt.digest);
-  if (!digest.ok) {
-    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid receipt digest: ${digest.error.message}`);
-  }
-  updateTrustedReviewRun(sessionId, binding, previous => {
-    const captures = new Map(previous);
-    captures.set(
-      captureKey(outcome.receipt.slotId, outcome.receipt.attempt),
-      Object.freeze({
-        requestId: outcome.receipt.requestId,
-        slotId: outcome.receipt.slotId,
-        attempt: outcome.receipt.attempt,
-        role,
-        contextDigest: contextDigest.value,
-        digest: digest.value,
-        byteLength: outcome.receipt.byteLength,
-      }),
-    );
-    return captures;
-  });
 }
 
 function environmentRunBinding(): SessionRunBinding | null {
@@ -323,6 +208,66 @@ export function qualifyPiIssuedReviewRequest(
  * explicit capable-route adapter already used by the T6 projection fixtures. */
 export type PiIssuedReviewRouteQualifier = typeof qualifyPiIssuedReviewRequest;
 
+type PublishedPiReviewRequest = Extract<ReturnType<typeof publishedReviewerRequest>, { ok: true }>["value"];
+
+/**
+ * What one reserved request means under its Run Directory's registered
+ * program. `authenticated` is a review-program or refutation request whose
+ * exact immutable publication independently authenticates the same
+ * authority; every other arm names the one step that refused, so each shell
+ * keeps its own rendering while both read the same facts.
+ */
+export type PiIssuedReviewRequestAuthentication =
+  | Readonly<{
+      kind: "authenticated";
+      classified: PiIssuedReviewRequestClass;
+      published: PublishedPiReviewRequest;
+    }>
+  | Readonly<{ kind: "registration-unreadable"; message: string }>
+  | Readonly<{ kind: "registration-invalid"; message: string }>
+  /** The Run Directory claims no program (`registration` is the raw read,
+   *  `null` when the file is proven absent). */
+  | Readonly<{ kind: "unclaimed-program"; registration: unknown }>
+  /** A registered program that is not a review program. */
+  | Readonly<{ kind: "other-program" }>
+  | Readonly<{ kind: "unclassified"; message: string }>
+  | Readonly<{ kind: "publication-unavailable"; message: string }>;
+
+/**
+ * The one issued-review-request authentication sequence: read and parse the
+ * program registration, classify the request against it, then require its
+ * exact immutable publication. Spawn admission (`readPiIssuedSpawnRequest`)
+ * and result capture (`pi/review-capture.ts`) both cross this seam, so they
+ * cannot drift on what an issued request means. The classified claim is
+ * already exact: publication authenticates the same request id and context
+ * digest it was derived from, and the program supplies the schema digest.
+ */
+export function authenticatePiIssuedReviewRequest(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  maximumBytes?: number,
+): PiIssuedReviewRequestAuthentication {
+  const stored = handle.readProgramRegistration(maximumBytes);
+  if (!stored.ok) return Object.freeze({ kind: "registration-unreadable" as const, message: stored.error.message });
+  const registration = parseRegisteredFacadeProgram(stored.value);
+  if (registration.kind === "invalid") {
+    return Object.freeze({ kind: "registration-invalid" as const, message: registration.message });
+  }
+  if (registration.kind === "unclaimed") {
+    return Object.freeze({ kind: "unclaimed-program" as const, registration: stored.value });
+  }
+  if (registration.program.kind !== "wave-gate" && registration.program.kind !== "standalone-review") {
+    return Object.freeze({ kind: "other-program" as const });
+  }
+  const classified = classifyPiIssuedReviewRequest(handle.runId, registration.program, request);
+  if (!classified.ok) return Object.freeze({ kind: "unclassified" as const, message: classified.error.message });
+  // Reservation and registration do not issue a spawn. The exact immutable
+  // publication receipt must independently authenticate this same authority.
+  const published = publishedReviewerRequest(handle, request, maximumBytes);
+  if (!published.ok) return Object.freeze({ kind: "publication-unavailable" as const, message: published.message });
+  return Object.freeze({ kind: "authenticated" as const, classified: classified.value, published: published.value });
+}
+
 /** Authenticate a descriptor against this session's reserved Run Directory
  *  request before the pure admission may enable an emission capability. */
 export function readPiIssuedSpawnRequest(
@@ -343,21 +288,19 @@ export function readPiIssuedSpawnRequest(
     if (matches.length !== 1 || matches[0]!.contextDigest !== contextDigest || matches[0]!.role !== agent) {
       return failure({ message: `no unique reserved ${agent} request ${requestId} binds context ${contextDigest}` });
     }
-    const request = matches[0]!;
-    const stored = opened.value.readProgramRegistration();
-    if (!stored.ok) return failure({ message: stored.error.message });
-    const registration = parseRegisteredFacadeProgram(stored.value);
-    if (registration.kind !== "registered" ||
-        (registration.program.kind !== "wave-gate" && registration.program.kind !== "standalone-review")) {
-      return failure({ message: `request ${requestId} has no matching registered review program` });
+    const authenticated = authenticatePiIssuedReviewRequest(opened.value, matches[0]!);
+    switch (authenticated.kind) {
+      case "authenticated":
+        return qualifyRoute(authenticated.classified, authenticated.published.authority);
+      case "registration-unreadable":
+      case "unclassified":
+      case "publication-unavailable":
+        return failure({ message: authenticated.message });
+      case "registration-invalid":
+      case "unclaimed-program":
+      case "other-program":
+        return failure({ message: `request ${requestId} has no matching registered review program` });
     }
-    const classified = classifyPiIssuedReviewRequest(opened.value.runId, registration.program, request);
-    if (!classified.ok) return classified;
-    // Reservation and registration do not issue a spawn. The exact immutable
-    // publication receipt must independently authenticate this same authority.
-    const published = publishedReviewerRequest(opened.value, request);
-    if (!published.ok) return failure({ message: published.message });
-    return qualifyRoute(classified.value, published.value.authority);
   } catch (error) {
     return failure({ message: error instanceof Error ? error.message : String(error) });
   }
@@ -462,9 +405,6 @@ export async function recordPiSpawnCorrelators(
     consumed.add(request.requestId);
   }
   for (const [index, task] of canonicalTasks.entries()) replacePiSpawnTask(rawInput, index, task);
-  if (itemAdmissions.some(({ item }) => hasStandaloneReviewContext(item.task))) {
-    touchTrustedReviewRun(rawSessionId, runBinding);
-  }
   return runBinding;
 }
 
@@ -571,117 +511,4 @@ export function standaloneCompletionCheckpointProblem(checkpoint: string): strin
   } catch (error) {
     return `completion checkpoint is invalid JSON: ${error instanceof Error ? error.message : String(error)}`;
   }
-}
-
-type TrustedRunVerification =
-  | Readonly<{ kind: "rejected"; message: string }>
-  | Readonly<{ kind: "accepted"; receipt: LoomReviewAuthorityReceipt }>;
-
-function trustedCaptureProblem(handle: RunDirHandle, run: TrustedReviewRun): string | null {
-  const issued = handle.readIssuedRequests();
-  const captured = handle.readCapturedAttempts();
-  if (!issued.ok) return issued.error.message;
-  if (!captured.ok) return captured.error.message;
-  for (const key of captured.value) {
-    const authority = issued.value.find((request) =>
-      captureKey(request.slotId, request.attempt) === key);
-    const trusted = run.captures.get(key);
-    if (authority === undefined || trusted === undefined || authority.requestId !== trusted.requestId ||
-        authority.role !== trusted.role || authority.contextDigest !== trusted.contextDigest) {
-      return `captured slot ${key} was not witnessed with identical request authority`;
-    }
-    const bytes = handle.readTranscriptBytes(authority);
-    if (!bytes.ok) return bytes.error.message;
-    const digest = createHash("sha256").update(bytes.value).digest("hex");
-    if (digest !== trusted.digest || bytes.value.byteLength !== trusted.byteLength) {
-      return `captured slot ${key} changed after Pi witnessed it`;
-    }
-  }
-  const absentWitness = [...run.captures.keys()].find((key) => !captured.value.has(key));
-  if (absentWitness !== undefined) {
-    return `witnessed slot ${absentWitness} is absent from the Run Directory`;
-  }
-  return run.captures.size === 0 ? "no transcript capture was witnessed" : null;
-}
-
-async function verifyTrustedReviewRun(
-  input: Readonly<{ sessionId: string }>,
-  run: TrustedReviewRun,
-): Promise<TrustedRunVerification> {
-  const reject = (message: string): TrustedRunVerification => ({
-    kind: "rejected",
-    message: `${run.binding.runId}: ${message}`,
-  });
-  const opened = openRegisteredRunDirectory(run.binding.runsRoot, run.binding.runDirectory);
-  if (!opened.ok) return reject(opened.error.message);
-  const programRaw = opened.value.readProgramRegistration();
-  if (!programRaw.ok || programRaw.value === null) {
-    return reject(programRaw.ok ? "registered program is missing" : programRaw.error.message);
-  }
-  const program = parseRegisteredFacadeProgram(programRaw.value);
-  if (program.kind !== "registered" || program.program.kind !== "standalone-review") {
-    return reject("registered program is not a valid Standalone Review");
-  }
-  const captureProblem = trustedCaptureProblem(opened.value, run);
-  if (captureProblem !== null) return reject(captureProblem);
-  const replayed = program.program.schemaVersion === 3
-    ? await replayStandaloneCapturedEvidence(opened.value, program.program, run.captures)
-    : replayStandaloneResultFromEvidence(opened.value, program.program, run.captures);
-  if (!replayed.ok) return reject(`engine evidence replay did not prove completion: ${replayed.message}`);
-  let resultBytes: Buffer;
-  try {
-    resultBytes = readRunBytesNoFollow(join(opened.value.runDirectory, "result.json"));
-  } catch (error) {
-    return reject(`cannot read canonical result artifact: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (!resultBytes.equals(Buffer.from(replayed.json, "utf8"))) {
-    return reject("result.json does not match checkpoint-independent evidence replay");
-  }
-  if (program.program.schemaVersion === 3) {
-    const receipt = opened.value.readReceipt(replayed.ready.publicationIntent.effectId, 16_384);
-    if (!receipt.ok || receipt.value?.kind !== "artifact-set-published") return reject("successor result publication receipt is unavailable");
-    const published = reduceStandaloneReviewMachine(replayed.ready, { kind: "result-published", result: JSON.parse(replayed.json), receipt: receipt.value });
-    if (!published.ok || published.value.kind !== "done") return reject("successor result publication receipt differs from native replay");
-  }
-  const reviewedSource = readStandaloneReviewedSource(opened.value, program.program, 16_777_216,
-    replayed.ready.authority.schemaVersion === 3 ? replayed.ready.authority.successor : undefined);
-  if (!reviewedSource.ok) return reject(`reviewed source attestation failed: ${reviewedSource.message}`);
-  return { kind: "accepted", receipt: Object.freeze({
-    schemaVersion: 1,
-    kind: "loom-review-authority-receipt",
-    sessionId: input.sessionId,
-    runId: run.binding.runId,
-    runsRoot: run.binding.runsRoot,
-    runDirectory: run.binding.runDirectory,
-    requestIds: Object.freeze([...new Set([...run.captures.values()].map(({ requestId }) => requestId))].sort()),
-    resultDigest: replayed.digest,
-    reviewedSource: reviewedSource.value,
-  }) };
-}
-
-export async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<LoomReviewAuthorityReceipt> {
-  const sessionRoots = trustedReviewRuns.get(input.sessionId);
-  if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
-  const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
-  const root = sessionRoots.get(expectedRoot);
-  if (root === undefined || root.runs.size === 0) {
-    throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId} and root ${expectedRoot}`);
-  }
-  const current = [...root.runs.entries()].reduce((latest, candidate) =>
-    candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
-  const outcome = await verifyTrustedReviewRun(input, current[1]);
-  if (trustedReviewRuns.get(input.sessionId)?.get(expectedRoot) !== root) {
-    throw new Error("current witnessed Standalone Review changed during verification; no older authority accepted");
-  }
-  if (outcome.kind === "rejected") {
-    throw new Error(`current witnessed Standalone Review rejected: ${outcome.message}`);
-  }
-  // Exact accepted replay is idempotent. Once accepted, older witnesses for
-  // this root are retired so they can never make a later verification
-  // ambiguous or become fallback authority after a new run is touched.
-  sessionRoots.set(expectedRoot, Object.freeze({
-    nextTouch: root.nextTouch,
-    runs: new Map([[current[0], current[1]]]),
-  }));
-  return outcome.receipt;
 }

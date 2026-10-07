@@ -138,19 +138,19 @@ describe("retireCompletedOrMissingImplementation", () => {
 
   it("retires a legacy reservation for a completed or missing Task without touching its input", () => {
     const completed = graph("completed");
-    const retired = retireCompletedOrMissingImplementation(completed, "T1", { implementationAuthority: null });
+    const retired = retireCompletedOrMissingImplementation(completed, "T1", null);
     expect(retired.retired).toBe(true);
     expect(retired.state.executing_tasks).toEqual([]);
     expect(completed.executing_tasks).toEqual(["T1"]);
 
-    const missing = retireCompletedOrMissingImplementation(graph("pending"), "T9", { implementationAuthority: null });
+    const missing = retireCompletedOrMissingImplementation(graph("pending"), "T9", null);
     expect(missing.retired).toBe(true);
     expect(missing.state.executing_tasks).toEqual(["T1"]);
   });
 
   it("keeps a still-pending Task's reservation", () => {
     const pending = graph("pending");
-    expect(retireCompletedOrMissingImplementation(pending, "T1", { implementationAuthority: null }))
+    expect(retireCompletedOrMissingImplementation(pending, "T1", null))
       .toEqual({ state: pending, retired: false });
   });
 });

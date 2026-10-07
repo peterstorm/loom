@@ -212,7 +212,7 @@ describe("quality-program helper boundaries", () => {
       "engine/src/handlers/helpers/orchestration.ts -> standalone-disposition",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-source",
       "pi/extension.ts -> review-authority-bridge",
-      "pi/review-run-authority.ts -> review-authority-bridge",
+      "pi/trusted-review-witness.ts -> review-authority-bridge",
     ]);
     const volumeSpecifier = /(?:from\s+|import\(\s*)["'][^"']*\/programs\/([\w-]+)(?:\.ts)?["']/g;
     const volumeImports = productionFiles.flatMap((path) =>

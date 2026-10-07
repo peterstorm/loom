@@ -181,8 +181,12 @@ The exact parsed immutable generation record beside one session's `.task_graph` 
 _Avoid_: Pointer owner flag, shared pointer, best-effort rollback
 
 **Trusted Review Witness Aggregate**:
-The process-local Pi authority grouped by session, Standalone Review root, and Review Run. A run becomes current when its first exact standalone spawn is bound before dispatch; retries and later captures enrich that run without reordering it. Verification considers only the current run for that root; rejection or missing capture never falls back, exact acceptance is idempotent and retires older root witnesses, and session shutdown prunes the session aggregate.
+The process-local Pi authority grouped by session, Standalone Review root, and Review Run — one instance per loaded extension factory, injected into spawn admission, result capture, the review-authority bridge and session shutdown rather than reached as module state. A run becomes current when its first exact standalone spawn is bound before dispatch; retries and later captures enrich that run without reordering it. Verification considers only the current run for that root; rejection or missing capture never falls back, exact acceptance is idempotent and retires older root witnesses, and session shutdown prunes the session aggregate.
 _Avoid_: Review cache, accepted result fallback, global witness map
+
+**Spawn Claims Ledger**:
+The immutable record of every capability one Pi spawn batch has taken while its admission is in progress — staged emission launches, issued write grants and whether their prompt was rewritten, reserved roster entries, the task-graph pointer lease. A refused admission releases it in one planned order (capabilities first, roster entries newest-first, the pointer lease last), attempting every release; exactly what failed to release stays on the parent session as cleanup debt. Role authority is never part of the ledger: none is committed until the whole reservation is.
+_Avoid_: Rollback list, cleanup closure, admission state
 
 **Plan**:
 The architecture document produced in Phase 3. Defines component design, file structure, and implementation phases that decompose parses into a task graph.
@@ -410,6 +414,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - Review Agents consume one immutable **Review Packet** per Task
 - A **Session TaskGraph Pointer Lease Registry** restores its previous target only after the generation's final exact lease is released
 - A **Trusted Review Witness Aggregate** verifies only the latest first-bound Standalone Review Run for one session/root; retries/captures never reorder runs, and session shutdown prunes the aggregate
+- A refused Pi spawn admission releases its **Spawn Claims Ledger**; only the releases that failed remain as the session's cleanup debt
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
 - A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel

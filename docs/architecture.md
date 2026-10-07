@@ -72,17 +72,17 @@ Claude Code lifecycle coverage:
 - deriving package identity from `import.meta.url` and capturing a content-addressed **Runtime Revision** published to child CLI processes (`pi/extension.ts`);
 - preparing each spawn batch through one ordered pipeline — observe its governing task graph, expand implementation brief markers, then run the Spawn Admission core (`pi/spawn-preparation.ts`, `pi/implementation-brief-expansion.ts`, `pi/spawn-graph.ts`);
 - reading and rewriting Pi tool-call payloads and deriving per-slot roster identities (`pi/tool-input.ts`);
-- reserving an admitted batch's lifecycle — roster rows, pointer lease, request correlators, review and spec-check authorities, write grants, task execution — with rollback before Pi may dispatch it (`pi/spawn-lifecycle.ts`);
-- rendering resources through `pi/resources.ts`;
+- reserving an admitted batch's lifecycle — roster rows, pointer lease, request correlators, review and spec-check authorities, write grants, task execution — before Pi may dispatch it (`pi/spawn-lifecycle.ts`), recording every capability it takes in the batch's claims ledger, whose pure rollback plan and remaining-debt derivation `pi/spawn-claims.ts` owns;
+- rendering resources through `pi/resources.ts`, and resolving the Pi user agent directory the spawn definition port reads (`pi/agent-directory.ts`);
 - adapting Pi messages through `pi/transcript-adapter.ts`;
-- settling finished subagent results: `pi/subagent-result-batch.ts` parses the harness batch, `pi/reserved-slot.ts` parses each stored reservation into one role authority, `pi/subagent-settlement.ts` holds the pure locked reducers, and `pi/subagent-result.ts` is the shell that observes evidence and runs them under the TaskGraph lock;
+- settling finished subagent results: `pi/subagent-result-batch.ts` parses the harness batch, `pi/reserved-slot.ts` parses each slot's role claims into one role authority at the spawn producer (the reservation stores only that parsed slot), `pi/subagent-settlement.ts` holds the pure locked reducers, and `pi/subagent-result.ts` is the shell that observes evidence and runs them under the TaskGraph lock;
 - minting and consuming scoped write grants through `pi/write-grant.ts`;
-- correlating native Pi batch-item identities to engine-issued request identities and witnessing captured review transcripts (`pi/review-run-authority.ts`);
+- correlating native Pi batch-item identities to engine-issued request identities, and the one issued-review-request authentication spawn admission and capture share (`pi/review-run-authority.ts`); witnessing captured standalone review transcripts in the per-factory Trusted Review Witness Aggregate (`pi/trusted-review-witness.ts`);
 - capturing exact final result bytes into reserved Run Directory slots (`pi/review-capture.ts`);
-- staging emission-enabled launches with the installed subagent launcher (`pi/emission-launch-bridge.ts`);
-- holding each parent session's spawn reservations and cleanup debt (`pi/spawn-reservation.ts`), and settling a completed batch against its reservation through the SubagentStop dispatcher and its per-concern appliers (`pi/subagent-stop.ts`, `pi/subagent-result.ts`, `pi/reserved-results.ts`);
+- staging emission-enabled launches with the installed subagent launcher (`pi/emission-launch-bridge.ts`), whose readiness verifier is decided by the launcher's pure readiness and route gate (`pi/emission-readiness-gate.ts`);
+- holding each parent session's spawn reservations and cleanup debt (`pi/spawn-reservation.ts`), and settling a completed batch against its reservation through the SubagentStop dispatcher, its pure per-result routing (`pi/subagent-result-route.ts`) and its per-concern appliers (`pi/subagent-stop.ts`, `pi/subagent-result.ts`, `pi/reserved-results.ts`);
 - activating a child's write grant and keeping a rejected child's direct edits blocked (`pi/child-write-grant.ts`), and releasing every capability a session still holds at shutdown (`pi/session-shutdown.ts`);
-- holding an emission-enabled child behind its launcher readiness barrier (`pi/emission-readiness.ts`);
+- holding an emission-enabled child behind its launcher readiness barrier (`pi/emission-readiness.ts`, over the pure child surface in `pi/emission-tool.ts`);
 - running interactive phase Agents as RPC children and relaying their standard dialogs to the parent TUI.
 
 The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the Pi package manifest pins the bridge's absence.

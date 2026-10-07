@@ -80,16 +80,21 @@ import { canonicalStructuralEquals, parseContextDigest } from "../../src/core/or
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import {
+  decideEmissionHoldTransition,
   decideEmissionToolRegistration,
   describeEmissionRegistrationContradiction,
+  emissionHoldWedgesPrompt,
   emissionReadinessReport,
   emissionToolDefinition,
   EMISSION_HOLD_ENTRY_TYPE,
   EMISSION_READINESS_COMMAND,
   EMISSION_READINESS_ENTRY_TYPE,
   emissionToolFamily,
+  initialEmissionHold,
   LOOM_EMISSION_BINDING_ENV,
   parseEmissionChildProvisioning,
+  type EmissionHoldEvent,
+  type EmissionHoldState,
   type EmissionToolRegistration,
 } from "../../../pi/emission-tool";
 import { piEmissionCallFrames } from "../../../pi/transcript-adapter";
@@ -1328,6 +1333,64 @@ describe("the child's emission-tool registration state machine — idempotent on
       expect(message, label).toContain(registeredA.version);
       expect(message, label).toContain(registeredA.schemaDigest);
     }
+  });
+});
+
+describe("the child's readiness hold transitions — fail-closed as data (AD-4)", () => {
+  const ARMED: EmissionHoldState = { kind: "armed" };
+  const RELEASED: EmissionHoldState = { kind: "released" };
+  const UNPROVISIONED: EmissionHoldState = { kind: "unprovisioned" };
+  const holdStates = fc.constantFrom<EmissionHoldState>(ARMED, RELEASED, UNPROVISIONED);
+  const holdEvents = fc.oneof(
+    fc.boolean().map((active): EmissionHoldEvent => ({ kind: "readiness-reported", active })),
+    fc.constant<EmissionHoldEvent>({ kind: "session-shutdown" }),
+  );
+
+  it("arms every provisioned child — refused provisioning included — and no non-emission child", () => {
+    expect(initialEmissionHold(parseEmissionChildProvisioning(undefined))).toEqual(UNPROVISIONED);
+    expect(initialEmissionHold(parseEmissionChildProvisioning("{not json"))).toEqual(ARMED);
+    const binding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-hold");
+    const provisioned = parseEmissionChildProvisioning(JSON.stringify({
+      requestId: binding.requestId,
+      contextDigest: "c".repeat(64),
+      kind: binding.kind.kind,
+      version: binding.version,
+    }));
+    expect(provisioned.kind).toBe("provisioned");
+    expect(initialEmissionHold(provisioned)).toEqual(ARMED);
+  });
+
+  it("releases an armed hold only for an ACTIVE readiness report, and at shutdown with its forensic marker", () => {
+    expect(decideEmissionHoldTransition(ARMED, { kind: "readiness-reported", active: true }))
+      .toEqual({ next: RELEASED, release: true, diagnostic: null });
+    expect(decideEmissionHoldTransition(ARMED, { kind: "readiness-reported", active: false }))
+      .toEqual({ next: ARMED, release: false, diagnostic: null });
+    expect(decideEmissionHoldTransition(ARMED, { kind: "session-shutdown" }))
+      .toEqual({ next: RELEASED, release: true, diagnostic: "shutdown-released" });
+    expect(emissionHoldWedgesPrompt(ARMED)).toBe(true);
+    expect(emissionHoldWedgesPrompt(RELEASED)).toBe(false);
+    expect(emissionHoldWedgesPrompt(UNPROVISIONED)).toBe(false);
+  });
+
+  it("never re-arms, never releases twice, and leaves a never-armed hold inert under every event sequence", () => {
+    fc.assert(fc.property(holdStates, fc.array(holdEvents, { maxLength: 8 }), (initial, events) => {
+      let state = initial;
+      let releases = 0;
+      for (const event of events) {
+        const transition = decideEmissionHoldTransition(state, event);
+        if (transition.release) releases += 1;
+        // A release always lands on `released`; without one the hold stays put.
+        expect(transition.next).toEqual(transition.release ? RELEASED : state);
+        // Only an armed hold moves at all.
+        if (state.kind !== "armed") expect(transition).toEqual({ next: state, release: false, diagnostic: null });
+        state = transition.next;
+      }
+      expect(releases).toBeLessThanOrEqual(initial.kind === "armed" ? 1 : 0);
+      // The hold opens before shutdown only through an active readiness report.
+      const opened = events.findIndex((event) => event.kind === "session-shutdown" ||
+        (event.kind === "readiness-reported" && event.active));
+      expect(state).toEqual(initial.kind === "armed" && opened >= 0 ? RELEASED : initial);
+    }));
   });
 });
 

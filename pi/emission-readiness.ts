@@ -3,24 +3,31 @@
  *
  * Registers the readiness command an emission-enabled child's launcher
  * invokes, and the awaited `before_agent_start` hold that wedges any prompt
- * delivered without that exchange. The registration decision and readiness
- * report are pure (`pi/emission-tool.ts`); this module is their Pi shell and
- * owns the child's process-local registration and hold state.
+ * delivered without that exchange. Every decision is pure in
+ * `pi/emission-tool.ts` — provisioning, registration, the readiness report and
+ * the hold transition law; this module is their Pi shell: it applies those
+ * decisions and owns the child's two process-local cells (registration and
+ * hold state) plus the one pending promise a wedged prompt awaits.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { boundedThrownCause } from "../engine/src/core/orchestration-contract/identity";
 import {
+  decideEmissionHoldTransition,
   decideEmissionToolRegistration,
   describeEmissionRegistrationContradiction,
+  emissionHoldWedgesPrompt,
   emissionReadinessReport,
   emissionToolDefinition,
   EMISSION_HOLD_ENTRY_TYPE,
   EMISSION_READINESS_COMMAND,
   EMISSION_READINESS_ENTRY_TYPE,
+  initialEmissionHold,
   LOOM_EMISSION_BINDING_ENV,
   parseEmissionChildProvisioning,
+  type EmissionHoldEvent,
   type EmissionHoldPhase,
+  type EmissionHoldState,
   type EmissionToolRegistration,
 } from "./emission-tool";
 
@@ -40,25 +47,13 @@ export function registerPiEmissionReadiness(pi: ExtensionAPI, runtimeRevision: s
   // never carry this barrier. A non-emission child (no provisioning env) has
   // no hold, and the command refuses explicitly when invoked.
   const emissionChild = parseEmissionChildProvisioning(process.env[LOOM_EMISSION_BINDING_ENV]);
-  // The one transition a child's registration takes, wrapping the side
-  // effect that makes it true (pi.registerTool): unregistered → registered.
-  // The transition DECISION is pure (pi/emission-tool.ts); the shell applies
-  // it — this field is the child's process-local aggregate, the same posture
-  // as the parent session runtimes in `pi/spawn-reservation.ts`.
+  // The child's process-local aggregates. Each moves only through its pure
+  // decision in pi/emission-tool.ts; the shell applies the side effect that
+  // makes the transition true (pi.registerTool, resolving the hold promise).
   const emissionRegistrationState: { state: EmissionToolRegistration } = { state: { kind: "unregistered" } };
-  type EmissionHold =
-    | Readonly<{ kind: "unprovisioned" }>
-    | Readonly<{ kind: "armed"; wait: Promise<void>; release: () => void }>
-    | Readonly<{ kind: "released" }>;
-  const armEmissionHold = (): EmissionHold => {
-    const deferred = Promise.withResolvers<void>();
-    return Object.freeze({ kind: "armed" as const, wait: deferred.promise, release: () => deferred.resolve() });
-  };
-  const emissionHoldState: { current: EmissionHold } = {
-    current: emissionChild.kind === "not-provisioned"
-      ? Object.freeze({ kind: "unprovisioned" as const })
-      : armEmissionHold(),
-  };
+  const emissionHold: { state: EmissionHoldState } = { state: initialEmissionHold(emissionChild) };
+  const holdGate = Promise.withResolvers<void>();
+
   const appendEmissionHoldDiagnostic = (phase: EmissionHoldPhase): void => {
     try {
       pi.appendEntry(EMISSION_HOLD_ENTRY_TYPE, { phase });
@@ -70,6 +65,12 @@ export function registerPiEmissionReadiness(pi: ExtensionAPI, runtimeRevision: s
         `loom(pi): emission hold ${phase} diagnostic append failed (${cause.name}: ${cause.message}); the hold remains fail-closed\n`,
       );
     }
+  };
+  const applyHoldEvent = (event: EmissionHoldEvent): void => {
+    const transition = decideEmissionHoldTransition(emissionHold.state, event);
+    emissionHold.state = transition.next;
+    if (transition.release) holdGate.resolve();
+    if (transition.diagnostic !== null) appendEmissionHoldDiagnostic(transition.diagnostic);
   };
 
   pi.registerCommand(EMISSION_READINESS_COMMAND, {
@@ -111,40 +112,26 @@ export function registerPiEmissionReadiness(pi: ExtensionAPI, runtimeRevision: s
         registeredTools: pi.getAllTools().map((tool) => tool.name),
       });
       pi.appendEntry(EMISSION_READINESS_ENTRY_TYPE, report);
-      // The hold releases only when the registered tool is in the ACTUAL
-      // active set: an honestly-inactive tool is reported (the gate refuses)
-      // and its prompts stay wedged — fail-closed, never silently degraded.
-      const hold = emissionHoldState.current;
-      if (active && hold.kind === "armed") {
-        emissionHoldState.current = Object.freeze({ kind: "released" as const });
-        hold.release();
-      }
+      // Report first, then release: the hold opens only for a tool in the
+      // ACTUAL active set (decideEmissionHoldTransition).
+      applyHoldEvent({ kind: "readiness-reported", active });
       return undefined;
     },
   });
 
   pi.on("before_agent_start", async () => {
-    const hold = emissionHoldState.current;
-    if (hold.kind !== "armed") return undefined;
+    if (!emissionHoldWedgesPrompt(emissionHold.state)) return undefined;
     appendEmissionHoldDiagnostic("entered");
-    await hold.wait;
+    await holdGate.promise;
     appendEmissionHoldDiagnostic("resolved");
     return undefined;
   });
 
-  // Fail-safe hold resolution (AD-4's cleanup arm): a provisioned child whose
-  // hold is still ARMED at session shutdown must not leave its awaited
-  // before_agent_start handler pending forever — the wedged coroutine cannot
-  // outlive the session it gates. Releasing at shutdown admits no model
-  // request (the session is ending), so the barrier stays fail-closed for
-  // every prompt; the shutdown-released entry is the honest forensic marker
-  // that readiness never opened on this child. An already-released (or
-  // never-armed) hold is inert here.
+  // Fail-safe hold resolution (AD-4's cleanup arm): a still-armed hold must not
+  // leave its awaited before_agent_start handler pending past the session it
+  // gates. The transition law decides; an already-released or never-armed hold
+  // is inert.
   pi.on("session_shutdown", async () => {
-    const hold = emissionHoldState.current;
-    if (hold.kind !== "armed") return;
-    emissionHoldState.current = Object.freeze({ kind: "released" as const });
-    hold.release();
-    appendEmissionHoldDiagnostic("shutdown-released");
+    applyHoldEvent({ kind: "session-shutdown" });
   });
 }

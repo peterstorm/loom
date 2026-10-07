@@ -37,6 +37,8 @@ import { parsePiSubagentResults, type PiSubagentResult } from "../../../pi/subag
 import {
   currentPiReviewAuthority,
   currentPiSpecCheckAuthority,
+  implementationAuthorityOf,
+  specCheckAuthorityOf,
   type PiReviewAttemptAuthority,
 } from "../../../pi/reserved-slot";
 import { slot } from "../fixtures/pi-reserved-slot";
@@ -246,43 +248,24 @@ describe("parsed results through the appliers", () => {
   });
 });
 
-describe("contradictory reserved slots are refused at the applier seam", () => {
-  it("refuses a reviewer slot carrying two role authorities before touching review state", async () => {
-    const store = fakeStore(graph());
-    const applied = await applyReviewPiResult({
-      store,
+describe("contradictory reserved slots are unrepresentable before any applier runs", () => {
+  // The appliers take a parsed `ReservedSlot`; the only way to build one is the
+  // producer's parse, which refuses these claims outright. No applier can
+  // therefore receive — or half-read — a contradictory slot.
+  it("refuses a reviewer slot carrying two role authorities at the producer", () => {
+    const specCheckAuthority = specCheckAuthorityOf(graphWithSpecCheckAuthority().reservedSlot);
+    expect(() => slot({
       agentType: "code-reviewer",
-      result: result({ messages: assistantText("review output") }),
-      reservedSlot: slot({
-        agentType: "code-reviewer",
-        taskId: "T1",
-        reviewAuthority: { kind: "legacy", taskId: "T1", agentType: "code-reviewer", generation: 0 },
-        specCheckAuthority: graphWithSpecCheckAuthority().reservedSlot.specCheckAuthority,
-      }),
-      parentPrompt: "",
-    });
-
-    expect(applied.processingErrors).toEqual([
-      expect.stringContaining("carries 2 role authorities (review, spec-check)"),
-    ]);
-    expect(store.current()).toEqual(parsedGraph(graph()));
+      taskId: "T1",
+      reviewAuthority: { kind: "legacy", taskId: "T1", agentType: "code-reviewer", generation: 0 },
+      specCheckAuthority,
+    })).toThrow("carries 2 role authorities (review, spec-check)");
   });
 
-  it("refuses a failed result whose slot holds another role's authority", async () => {
-    const fixture = graphWithSpecCheckAuthority();
-    const store = fakeStore(fixture.state);
-    const applied = await applyFailedPiResult({
-      store,
-      agentType: "code-reviewer",
-      result: result({ exitCode: 1 }),
-      reservedSlot: slot({ ...fixture.reservedSlot, agentType: "code-reviewer", taskId: "T1" }),
-      now: NOW,
-    });
-
-    expect(applied.processingErrors).toEqual([
-      expect.stringContaining("carries spec-check authority, but the agent is not spec-check-invoker"),
-    ]);
-    expect(store.current()).toEqual(fixture.state);
+  it("refuses a reviewer slot holding another role's authority at the producer", () => {
+    const specCheckAuthority = specCheckAuthorityOf(graphWithSpecCheckAuthority().reservedSlot);
+    expect(() => slot({ agentType: "code-reviewer", taskId: "T1", specCheckAuthority }))
+      .toThrow("carries spec-check authority, but the agent is not spec-check-invoker");
   });
 });
 
@@ -1602,7 +1585,7 @@ describe("applyImplementationPiResult", () => {
         new_tests: verificationPolicy.newTests,
       },
     }), process.cwd(), "pi-completed-modern-cleanup");
-    const authority = modern.reservedSlot.implementationAuthority;
+    const authority = implementationAuthorityOf(modern.reservedSlot);
     if (authority === null || authority === undefined) throw new Error("modern cleanup authority missing");
     const prompt = "Task ID: T1";
     const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
@@ -2206,7 +2189,7 @@ describe("applyImplementationPiResult", () => {
       status: "pending",
       revalidation_required: true,
       implementation_attempt_history: [{
-        authorityDigest: modern.reservedSlot.implementationAuthority?.authorityDigest,
+        authorityDigest: implementationAuthorityOf(modern.reservedSlot)?.authorityDigest,
         transition: "infrastructure-blocked",
       }],
     });
@@ -2229,7 +2212,7 @@ describe("applyImplementationPiResult", () => {
 
     expect(applied.log.join("\n")).toContain("result ignored (stale)");
     expect(store.current().tasks[0]?.active_implementation_attempt).toEqual(
-      replacement.reservedSlot.implementationAuthority,
+      implementationAuthorityOf(replacement.reservedSlot),
     );
     expect(store.current().executing_tasks).toEqual(["T1"]);
     expect(store.current().tasks[0]?.implementation_attempt_history ?? []).toEqual([]);

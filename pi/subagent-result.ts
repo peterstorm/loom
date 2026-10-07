@@ -2,8 +2,9 @@
  * Apply one finished Pi subagent result through narrow protected-state and
  * repository ports — the imperative shell of Pi subagent settlement.
  *
- * Every applier follows one protocol: parse the stored reservation into a
- * `ReservedSlot` (`reserved-slot.ts`), observe evidence outside the lock
+ * Every applier follows one protocol: read the reservation's `ReservedSlot`
+ * (`reserved-slot.ts`; already parsed at the spawn producer, so a
+ * contradictory slot cannot reach evidence), observe evidence outside the lock
  * (transcript, filesystem artifacts, spec/plan bytes), run one pure reducer
  * from `subagent-settlement.ts` under `TaskGraphStore.updateAndReturn`, and
  * return the outcome. The only decisions left here are the ones that need
@@ -61,12 +62,10 @@ import { piSubagentFailureSignals, type PiSubagentResult } from "./subagent-resu
 import { describeCause } from "./cleanup-actions";
 import {
   implementationAuthorityOf,
-  parseReservedSlot,
   reviewAuthorityOf,
   specCheckAuthorityOf,
   type PiReviewAttemptAuthority,
   type ReservedSlot,
-  type ReservedSlotRecord,
 } from "./reserved-slot";
 import {
   applicationState,
@@ -123,26 +122,13 @@ export type RepositoryProbe = Readonly<{
   isRepo(): boolean;
 }>;
 
-type SlotParse =
-  | Readonly<{ ok: true; slot: ReservedSlot | undefined }>
-  | Readonly<{ ok: false; outcome: PiResultOutcome }>;
-
-/** Parse the stored reservation once, at the applier seam: a contradictory slot never reaches evidence. */
-function parseSlot(record: ReservedSlotRecord | undefined): SlotParse {
-  if (record === undefined) return { ok: true, slot: undefined };
-  const parsed = parseReservedSlot(record);
-  return parsed.ok
-    ? { ok: true, slot: parsed.value }
-    : { ok: false, outcome: processingFailure(`loom(pi): ${parsed.error} — evidence NOT applied`) };
-}
-
 async function settleCompletedOrMissingImplementation(
   store: TaskGraphStore,
   taskId: string,
   expected: ImplementationAttemptAuthority | null,
 ): Promise<boolean> {
   return store.updateAndReturn((state) => {
-    const retired = retireCompletedOrMissingImplementation(state, taskId, { implementationAuthority: expected });
+    const retired = retireCompletedOrMissingImplementation(state, taskId, expected);
     return { state: retired.state, value: retired.retired };
   });
 }
@@ -273,7 +259,7 @@ type FailedPiResultArgs = Readonly<{
   store: TaskGraphStore;
   agentType: string;
   result: PiSubagentResult;
-  reservedSlot: ReservedSlotRecord | undefined;
+  reservedSlot: ReservedSlot | undefined;
   now: string;
   projectBoundary: TaskGraphProjectBoundary;
 }>;
@@ -330,10 +316,7 @@ async function applyFailedSpecCheckResult(args: Readonly<{
  * legacy implementation reservation may still be released during cleanup.
  */
 export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiResultOutcome> {
-  const { store, agentType, result } = args;
-  const parsedSlot = parseSlot(args.reservedSlot);
-  if (!parsedSlot.ok) return parsedSlot.outcome;
-  const { slot } = parsedSlot;
+  const { store, agentType, result, reservedSlot: slot } = args;
   const failure =
     `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
 
@@ -427,11 +410,11 @@ type ImplementationPiResultArgs = Readonly<{
   authoritativeStatePath: string;
   agentType: string;
   result: PiSubagentResult;
-  reservedSlot: ReservedSlotRecord | undefined;
+  reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>;
 
-/** The implementation arguments after the reservation was parsed at the seam. */
+/** The implementation arguments with the reserved slot under its local name. */
 type SlottedImplementationArgs = Omit<ImplementationPiResultArgs, "reservedSlot"> &
   Readonly<{ slot: ReservedSlot | undefined }>;
 
@@ -833,9 +816,7 @@ async function applyBoundImplementationPiResult(
 
 /** Resolve one Pi implementation result through exact modern or cleanup-only legacy authority. */
 export async function applyImplementationPiResult(args: ImplementationPiResultArgs): Promise<PiResultOutcome> {
-  const parsedSlot = parseSlot(args.reservedSlot);
-  if (!parsedSlot.ok) return parsedSlot.outcome;
-  const slotted: SlottedImplementationArgs = { ...args, slot: parsedSlot.slot };
+  const slotted: SlottedImplementationArgs = { ...args, slot: args.reservedSlot };
   const binding = resolveImplementationBindingForResult(slotted);
   if (binding.kind === "unbound") return binding.outcome;
   const result = await applyBoundImplementationPiResult(slotted, binding);
@@ -908,12 +889,10 @@ export async function applyReviewPiResult(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
   result: PiSubagentResult;
-  reservedSlot: ReservedSlotRecord | undefined;
+  reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>): Promise<PiResultOutcome> {
-  const parsedSlot = parseSlot(args.reservedSlot);
-  if (!parsedSlot.ok) return parsedSlot.outcome;
-  const { slot } = parsedSlot;
+  const slot = args.reservedSlot;
   const binding = resolveReviewTaskBinding({ ...args, slot });
   if (binding.kind === "blocked") return binding.outcome;
 
@@ -956,13 +935,11 @@ export async function applyReviewPiResult(args: Readonly<{
 export async function applySpecCheckPiResult(args: Readonly<{
   store: TaskGraphStore;
   result: PiSubagentResult;
-  reservedSlot: ReservedSlotRecord | undefined;
+  reservedSlot: ReservedSlot | undefined;
   now: string;
   projectBoundary: TaskGraphProjectBoundary;
 }>): Promise<PiResultOutcome> {
-  const parsedSlot = parseSlot(args.reservedSlot);
-  if (!parsedSlot.ok) return parsedSlot.outcome;
-  const authority = specCheckAuthorityOf(parsedSlot.slot);
+  const authority = specCheckAuthorityOf(args.reservedSlot);
   const parsedMessages = parsePiMessages(args.result.messages);
   const observation: PiSpecCheckObservation = parsedMessages.ok
     ? { kind: "parsed", findings: parseSpecCheckOutput(transcriptTextOf(parsedMessages.value)) }

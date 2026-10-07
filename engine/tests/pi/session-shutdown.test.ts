@@ -14,6 +14,7 @@ import { createPiParentSessions } from "../../../pi/spawn-reservation";
 import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
 import { issuePiWriteGrant } from "../../../pi/write-grant";
 import type { PiEmissionLaunchBridge } from "../../../pi/emission-launch-bridge";
+import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness";
 
 let root: string;
 let priorSubagentDir: string | undefined;
@@ -74,6 +75,7 @@ describe("shutdownPiSession", () => {
       parentSessions,
       childWriteGrants: createPiChildWriteGrants(),
       emissionLaunchBridge: failingBridge(removed),
+      reviewWitnesses: createTrustedReviewWitnesses(),
     })).rejects.toThrow(`Loom Pi session shutdown cleanup failed: ${failure}`);
 
     expect(removed).toEqual(["parent-session"]);
@@ -82,5 +84,17 @@ describe("shutdownPiSession", () => {
     expect(grantFiles()).toEqual([]);
     expect(parentSessions.get(sessionId)).toBeUndefined();
     expect(stderr).toHaveBeenCalledWith(`loom(pi): shutdown cleanup failed: ${failure}\n`);
+  });
+
+  it("prunes exactly this session from the injected review witness aggregate", async () => {
+    const forgotten: string[] = [];
+    const witnesses = { ...createTrustedReviewWitnesses(), forget: (session: string) => { forgotten.push(session); } };
+    await shutdownPiSession("parent-session", {
+      parentSessions: createPiParentSessions(),
+      childWriteGrants: createPiChildWriteGrants(),
+      emissionLaunchBridge: { ...failingBridge([]), removeSession: () => undefined },
+      reviewWitnesses: witnesses,
+    });
+    expect(forgotten).toEqual(["parent-session"]);
   });
 });

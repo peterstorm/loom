@@ -8,16 +8,21 @@
  *
  * - `spawn-preparation` — the ordered observe → expand → admit pipeline
  * - `spawn-lifecycle` — reservation of an admitted batch before dispatch
+ * - `spawn-claims` — the claims ledger a refused reservation rolls back
  * - `subagent-stop` — settlement of a completed batch (`tool_result`)
+ * - `subagent-result-route` — the pure per-result routing decisions
  * - `child-write-grant` — a child's write capability and its rejection
  * - `session-shutdown` — release of every capability a session still holds
  * - `emission-readiness` — the in-child launcher readiness barrier
+ * - `emission-readiness-gate` — the launcher's pure readiness/route gate
  * - `tool-input` — tool-call payload readers, the spawn task writer, roster ids
  * - `emission-launch-bridge` — the installed subagent launcher port
- * - `review-run-authority` — request-bound run authority and review witnesses
+ * - `review-run-authority` — request-bound run authority
+ * - `trusted-review-witness` — the Trusted Review Witness Aggregate
  * - `review-capture` — capture of one request-bound result
  * - `spawn-reservation` — the parent session's reservations and cleanup debt
  * - `cleanup-actions` — best-effort cleanup and startup hygiene
+ * - `agent-directory` — the Pi user agent directory the definition port reads
  */
 
 import { dirname, join } from "node:path";
@@ -87,11 +92,12 @@ import {
 import {
   qualifyPiIssuedReviewRequest,
   readPiIssuedSpawnRequest,
-  verifyTrustedStandaloneReview,
   type PiIssuedReviewRouteQualifier,
 } from "./review-run-authority";
+import { createTrustedReviewWitnesses } from "./trusted-review-witness";
 import { runPiStartupSweeps, type PiStartupSweepSource } from "./cleanup-actions";
 import { createPiParentSessions } from "./spawn-reservation";
+import { piAgentDefinitionPath, resolvePiAgentDirectory } from "./agent-directory";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -101,11 +107,7 @@ const LOADED_RUNTIME_IDENTITY = captureLoomRuntimeIdentity(PACKAGE_ROOT);
 // Resource materialization remains process-scoped: one loaded extension owns
 // one content-addressed cache. Spawn-facing agent discovery is session setup
 // state instead and is sampled inside the extension factory below.
-const PI_RESOURCE_CACHE = join(
-  process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
-  "cache",
-  "loom-resources",
-);
+const PI_RESOURCE_CACHE = join(resolvePiAgentDirectory(process.env, homedir()), "cache", "loom-resources");
 const isPiSpawnTool = (toolName: string): boolean =>
   toolName === "subagent" || toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL;
 
@@ -183,15 +185,18 @@ export default function (
   qualifyIssuedRoute: PiIssuedReviewRouteQualifier = qualifyPiIssuedReviewRequest,
 ) {
   assertAnchoredFilesystemPlatformSupported();
-  const piAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  // Resolved when the factory starts, not at module import: the Pi session
+  // under test may select a different PI_CODING_AGENT_DIR.
+  const piAgentDir = resolvePiAgentDirectory(process.env, homedir());
   registerInteractiveSubagentTool(pi, PACKAGE_ROOT, piAgentDir);
-  publishLoomReviewAuthorityBridge(globalThis, { verify: verifyTrustedStandaloneReview });
+  // The per-factory session aggregates every handler below shares.
+  const parentSessions = createPiParentSessions();
+  const childWriteGrants = createPiChildWriteGrants();
+  const reviewWitnesses = createTrustedReviewWitnesses();
+  publishLoomReviewAuthorityBridge(globalThis, { verify: reviewWitnesses.verify });
   const emissionLaunchBridge = registerPiEmissionLaunchBridge(
     pi.events as unknown as PiSubagentLaunchEventBus | undefined,
   );
-
-  const parentSessions = createPiParentSessions();
-  const childWriteGrants = createPiChildWriteGrants();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
   // The package.json "pi" manifest declares NO raw skills or prompt
@@ -379,7 +384,7 @@ export default function (
               transport: event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ? "interactive-rpc" : "headless",
               packageRoot: PACKAGE_ROOT,
               validateDefinition: (agent) =>
-                validatePiAgentDefinitionFile(join(piAgentDir, "agents", `${agent}.md`), agent, PACKAGE_ROOT, routing.context),
+                validatePiAgentDefinitionFile(piAgentDefinitionPath(piAgentDir, agent), agent, PACKAGE_ROOT, routing.context),
               readSourceAgent: (agent) => {
                 enterGuard("validate-agent-skill");
                 const sourceAgentPath = join(PACKAGE_ROOT, "agents", `${agent}.md`);
@@ -421,6 +426,7 @@ export default function (
         }, {
           parentSessions,
           emissionLaunchBridge,
+          reviewWitnesses,
           runtimeRevision: LOADED_RUNTIME_IDENTITY.revision,
           graphExists: pathExistsFailClosed,
           enterGuard: (guard) => { currentGuard = guard; },
@@ -473,6 +479,7 @@ export default function (
       parentSessions,
       childWriteGrants,
       emissionLaunchBridge,
+      reviewWitnesses,
     });
   });
 
@@ -561,7 +568,7 @@ export default function (
 
   pi.on("tool_result", async (event, ctx) => {
     if (!isPiSpawnTool(event.toolName)) return;
-    return dispatchPiSubagentStop(event, ctx, { parentSessions, emissionLaunchBridge });
+    return dispatchPiSubagentStop(event, ctx, { parentSessions, emissionLaunchBridge, reviewWitnesses });
   });
 
   // ─── Commands ─────────────────────────────────────────────────────────
