@@ -16,6 +16,7 @@ import {
   parseScopeSafety,
   parseStandaloneReviewScope,
   selectStandaloneReviewers,
+  type StandaloneChangedPaths,
 } from "../../src/core/standalone-review-scope";
 
 const SHA40 = "0123456789abcdef0123456789abcdef01234567";
@@ -65,6 +66,35 @@ describe("parseChangedPaths", () => {
     expect(parsed.ok && Object.isFrozen(parsed.value.unstaged)).toBe(true);
     expect(errorsOf(parseChangedPaths(changedPaths({ staged: ["src/a.ts", "src/a.ts"] })))).toContain("duplicate paths");
     expect(errorsOf(parseChangedPaths({ ...changedPaths(), extra: true }))).toContain("unknown field 'extra'");
+  });
+
+  it("property: every admitted path list is the strictly ascending set of its input paths", () => {
+    const segment = fc.stringMatching(/^[a-z][a-z0-9_-]{0,6}$/);
+    const path = fc.tuple(fc.array(segment, { minLength: 0, maxLength: 2 }), segment)
+      .map(([dirs, leaf]) => [...dirs, `${leaf}.ts`].join("/"));
+    fc.assert(fc.property(fc.array(path, { maxLength: 12 }), (paths) => {
+      const parsed = parseChangedPaths(changedPaths({ unstaged: paths, committed: paths }));
+      const distinct = new Set(paths).size === paths.length;
+      expect(parsed.ok).toBe(distinct);
+      if (!parsed.ok) return;
+      for (const list of [parsed.value.unstaged, parsed.value.committed]) {
+        expect([...list]).toEqual([...new Set(paths)].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)));
+        expect(list.every((entry, index) => index === 0 || list[index - 1]! < entry)).toBe(true);
+      }
+    }), { numRuns: 200 });
+  });
+
+  it("brands the parsed revisions and path lists so plain strings cannot stand in for them", () => {
+    const parsed = parseChangedPaths(changedPaths({ base_revision: SHA64 }));
+    if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+    const value: StandaloneChangedPaths = parsed.value;
+    expect(value.headRevision).toBe(SHA40);
+    expect(value.baseRevision).toBe(SHA64);
+    // @ts-expect-error a bare string is not a parser-proven GitRevision.
+    const forgedRevision: StandaloneChangedPaths["headRevision"] = "main";
+    // @ts-expect-error an unsorted plain array is not a parser-proven SortedReviewPaths.
+    const forgedPaths: StandaloneChangedPaths["unstaged"] = ["src/z.ts", "src/a.ts"];
+    expect([forgedRevision, forgedPaths]).toHaveLength(2);
   });
 });
 

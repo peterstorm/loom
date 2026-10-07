@@ -7,6 +7,7 @@
 import type { Finding } from "./findings";
 import type { LoomAgentName } from "./model-profiles";
 import type { NonEmpty } from "./orchestration-contract";
+import { isExactGitSha } from "./git-sha";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
@@ -39,19 +40,31 @@ export type StandaloneReviewMetadata = (
   readonly languages: readonly string[];
 }>;
 
-export interface StandaloneChangedPaths {
+declare const GIT_REVISION: unique symbol;
+/**
+ * A full lowercase SHA-1 or SHA-256 Git object id, exactly as `git rev-parse`/
+ * `git merge-base` emit it. Minted only by `parseChangedPaths`, so a frozen
+ * authority can never name a branch or abbreviation where a SHA was meant.
+ */
+export type GitRevision = string & { readonly [GIT_REVISION]: true };
+
+declare const SORTED_REVIEW_PATHS: unique symbol;
+/** Canonical repository paths in ascending order with no duplicate. Minted only by `parseChangedPaths`. */
+export type SortedReviewPaths = readonly ReviewPath[] & { readonly [SORTED_REVIEW_PATHS]: true };
+
+export type StandaloneChangedPaths = Readonly<{
   /**
    * Tracked files whose worktree content differs from the INDEX, plus untracked
    * non-ignored files. The producer runs `git diff --name-only` without
    * `--cached`, so a path already staged with no further edits appears in
    * `staged` alone, not here.
    */
-  readonly unstaged: readonly string[];
-  readonly staged: readonly string[];
-  readonly committed: readonly string[];
-  readonly baseRevision: string | null;
-  readonly headRevision: string;
-}
+  unstaged: SortedReviewPaths;
+  staged: SortedReviewPaths;
+  committed: SortedReviewPaths;
+  baseRevision: GitRevision | null;
+  headRevision: GitRevision;
+}>;
 
 export type StandaloneScopeSource = "explicit" | "changed-path-union";
 export type StandaloneScopeSafety = Readonly<{
@@ -93,10 +106,12 @@ export function parseStandaloneReviewScope(raw: unknown, label = "review scope")
   return errors.length > 0 || head === undefined ? fail(errors) : ok(Object.freeze([head, ...tail]));
 }
 
-function parsePathList(raw: unknown, label: string, errors: string[]): readonly ReviewPath[] {
+const NO_PATHS = Object.freeze([]) as unknown as SortedReviewPaths;
+
+function parsePathList(raw: unknown, label: string, errors: string[]): SortedReviewPaths {
   if (!Array.isArray(raw)) {
     errors.push(`${label} must be an array`);
-    return [];
+    return NO_PATHS;
   }
   const paths: ReviewPath[] = [];
   raw.forEach((entry, index) => {
@@ -105,18 +120,19 @@ function parsePathList(raw: unknown, label: string, errors: string[]): readonly 
     else errors.push(...parsed.errors);
   });
   if (new Set(paths).size !== paths.length) errors.push(`${label} must not contain duplicate paths`);
-  return Object.freeze([...paths].sort(compareStrings));
+  // The one SortedReviewPaths proof site: every entry parsed, sorted here; a
+  // duplicate fails the whole parse, so a returned value is also distinct.
+  return Object.freeze([...paths].sort(compareStrings)) as unknown as SortedReviewPaths;
 }
 
 /**
- * A git revision at this boundary, exactly as the sibling boundaries SHA it:
- * `parseGitSha` (review-packet.ts) and `reviewedSourceSchema.headRevision`
- * (the standalone pi-goal repository, src/integration/loom-review.ts).
- * Producers emit the full hex from `git rev-parse`/`git merge-base`; accepting
- * any other string let a tampered frozen authority name a branch where only a
- * SHA was meant.
+ * A git revision at this boundary uses the one exact grammar the sibling
+ * boundaries share (`isExactGitSha`, core/git-sha.ts) and that
+ * `reviewedSourceSchema.headRevision` (the standalone pi-goal repository,
+ * src/integration/loom-review.ts) mirrors. The anchored grammar already
+ * refuses surrounding whitespace.
  */
-const GIT_REVISION = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const gitRevisionOf = (raw: unknown): GitRevision | null => isExactGitSha(raw) ? raw as GitRevision : null;
 
 export function parseChangedPaths(raw: unknown): ParseResult<StandaloneChangedPaths> {
   if (!isRecord(raw)) return fail(["changed_paths must be an object"]);
@@ -124,18 +140,13 @@ export function parseChangedPaths(raw: unknown): ParseResult<StandaloneChangedPa
   const unstaged = parsePathList(raw.unstaged, "changed_paths.unstaged", errors);
   const staged = parsePathList(raw.staged, "changed_paths.staged", errors);
   const committed = parsePathList(raw.committed, "changed_paths.committed", errors);
-  const baseRevision = raw.base_revision === null ||
-      (typeof raw.base_revision === "string" && raw.base_revision.trim() === raw.base_revision && GIT_REVISION.test(raw.base_revision))
-    ? raw.base_revision as string | null
-    : null;
+  const baseRevision = raw.base_revision === null ? null : gitRevisionOf(raw.base_revision);
   if (raw.base_revision !== null && baseRevision === null) {
     errors.push("changed_paths.base_revision must be null or a 40/64-hex git SHA without surrounding whitespace");
   }
-  const headRevision = typeof raw.head_revision === "string" && raw.head_revision.trim() === raw.head_revision && GIT_REVISION.test(raw.head_revision)
-    ? raw.head_revision
-    : "";
-  if (headRevision === "") errors.push("changed_paths.head_revision must be a 40/64-hex git SHA without surrounding whitespace");
-  return errors.length > 0
+  const headRevision = gitRevisionOf(raw.head_revision);
+  if (headRevision === null) errors.push("changed_paths.head_revision must be a 40/64-hex git SHA without surrounding whitespace");
+  return errors.length > 0 || headRevision === null
     ? fail(errors)
     : ok(Object.freeze({ unstaged, staged, committed, baseRevision, headRevision }));
 }
