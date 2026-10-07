@@ -37,7 +37,10 @@ export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, MAX_THROWN_CAUSE_TEXT_LENGTH, boundDiagn
 export { fieldFailureError } from './errors';
 export { MAX_DENSE_DATA_ARRAY_LENGTH, MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, digestRawTranscriptBytes } from './bytes';
 export { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot } from './artifacts';
-export { sameAgentRequestAuthority, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, parseAgentRosterSlot, parseArtifactRef, parseExactRoster, type AgentRequestAuthority, type AgentRosterSlot, type ArtifactRef, type ExactRoster, type RosterViolation } from './roster';
+// canonicalExactRosterJson: the roster's own canonical JSON (its derived
+// `byId` view omitted), committed so the durable panel programs compare
+// recorded and replayed rosters without knowing which roster fields are derived.
+export { canonicalExactRosterJson, sameAgentRequestAuthority, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, parseAgentRosterSlot, parseArtifactRef, parseExactRoster, type AgentRequestAuthority, type AgentRosterSlot, type ArtifactRef, type ExactRoster, type RosterViolation } from './roster';
 export { batchPublicationIdentity, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, type AtomicInitialPublicationClaim, type BatchPublicationIdentity, type BatchPublishedReceipt, type InitialBatchPublicationIntent, type InitialPublicationEffectExecutor, type InitialPublicationEffectPort, type InitialPublicationIssuanceAuthority, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest, type TrustedPublicationRegistrationLoader } from './publication';
 export { acceptedAgentResult, parseCompleteRoster, type AcceptedAgentResult, type CompleteRoster, type CompleteRosterError, type SemanticPayloadParseError, type SemanticPayloadParser } from './completion';
 export { infrastructureRetryDiagnostic, semanticRetryDiagnostic, terminalBlockedDiagnostic, type BlockedDiagnostic, type InfrastructureRetryDiagnostic, type TerminalBlockedDiagnostic } from './diagnostics';

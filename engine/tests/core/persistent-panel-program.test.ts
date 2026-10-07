@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { sha256Hex } from "../../src/core/digest";
 import { safeRecord } from "../../src/core/exact-data";
-import { panelError, persistentFailure, persistentSuccess, type PersistentPanelResult } from "../../src/core/panel-authority";
+import { panelError, persistentFailure, persistentSuccess } from "../../src/core/panel-authority";
 import { parseOrchestrationRunId, type OrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
   createPanelProofs,
@@ -27,7 +27,7 @@ import {
   type PanelStep,
 } from "../../src/core/persistent-panel-program";
 import { createPanelPublications } from "../fixtures/panel-authority";
-import { value } from "../fixtures/parse-result";
+import { refusal, value } from "../fixtures/parse-result";
 
 // ---------------------------------------------------------------------------
 // The tally program: count increments until finished; a count of 13 is an
@@ -74,6 +74,8 @@ const TALLY: PanelProgramDefinition<"refutation", TallyAuthority, TallyAuthority
       : persistentFailure(panelError("refutation", "invalid-authority", runId.error.message));
   },
   authorityJson: (authority) => Object.freeze({ runId: authority.runId }),
+  // A tally state derives nothing from its own content: its JSON is canonical.
+  canonicalStateJson: (stateJson) => stateJson,
 };
 
 const AUTHORITY: TallyAuthority = Object.freeze({ runId: value(parseOrchestrationRunId("run.tally")) });
@@ -81,10 +83,6 @@ const OTHER_AUTHORITY: TallyAuthority = Object.freeze({ runId: value(parseOrches
 const INCREMENT = Object.freeze({ schemaVersion: 1, type: "increment" });
 const FINISH = Object.freeze({ schemaVersion: 1, type: "finish" });
 const increments = (count: number) => Array.from({ length: count }, () => INCREMENT);
-const refusal = <T>(result: PersistentPanelResult<T>) => {
-  if (result.ok) throw new Error("expected a refusal");
-  return result.error;
-};
 /** Record `count` increments one submission at a time, as a shell would. */
 const recordIncrements = (count: number): TallyStep => {
   let step = TALLY.start(AUTHORITY);
@@ -156,16 +154,43 @@ describe("persistent panel program kernel: replay, checkpoints and persistence",
       .toMatchObject({ kind: "malformed-checkpoint", message: "refutation checkpoint event prefix does not replay to the supplied state" });
   });
 
-  it.each<[string, (raw: Record<string, unknown>) => unknown, Readonly<{ kind: string; message?: string }>]>([
-    ["another program's kind", (raw) => ({ ...raw, kind: "architecture-panel-checkpoint" }),
-      { kind: "malformed-checkpoint", message: "refutation checkpoint must be an exact schemaVersion 2 record" }],
-    ["a recorded state its prefix disagrees with", (raw) => ({ ...raw, state: { ...(raw.state as object), count: 7 } }),
-      { kind: "malformed-checkpoint", message: "refutation checkpoint state disagrees with its immutable event prefix" }],
-    ["an authority its codec refuses", (raw) => ({ ...raw, authority: { runId: 7 } }), { kind: "invalid-authority" }],
-  ])("refuses a checkpoint carrying %s", (_name, tamper, expected) => {
+  /** The durable JSON of a two-increment checkpoint, as a shell reads it back. */
+  const durableCheckpoint = (): Record<string, unknown> => {
     const history = value(parsePanelProgramHistory(TALLY, AUTHORITY, increments(2), resolver));
-    const checkpoint = JSON.parse(JSON.stringify(value(panelProgramCheckpoint(TALLY, recordIncrements(2).state, history.events, resolver)))) as Record<string, unknown>;
-    expect(refusal(parsePanelProgramCheckpoint(TALLY, tamper(checkpoint), resolver))).toMatchObject(expected);
+    return JSON.parse(JSON.stringify(value(panelProgramCheckpoint(TALLY, recordIncrements(2).state, history.events, resolver)))) as Record<string, unknown>;
+  };
+  const NOT_EXACT = { kind: "malformed-checkpoint", message: "refutation checkpoint must be an exact schemaVersion 2 record" } as const;
+  const DISAGREES = { kind: "malformed-checkpoint", message: "refutation checkpoint state disagrees with its immutable event prefix" } as const;
+
+  it.each<[string, (raw: Record<string, unknown>) => unknown, Readonly<{ kind: string; message?: string }>]>([
+    ["another program's kind", (raw) => ({ ...raw, kind: "architecture-panel-checkpoint" }), NOT_EXACT],
+    ["a forward schemaVersion", (raw) => ({ ...raw, schemaVersion: 3 }), NOT_EXACT],
+    ["a past schemaVersion", (raw) => ({ ...raw, schemaVersion: 1 }), NOT_EXACT],
+    ["an extra top-level key", (raw) => ({ ...raw, note: "unrecorded" }), NOT_EXACT],
+    ["a recorded state its prefix disagrees with", (raw) => ({ ...raw, state: { ...(raw.state as object), count: 7 } }), DISAGREES],
+    // The kernel filters no key by name: a field called like a roster's derived
+    // view is recorded content like any other, unless the program's canonical
+    // projection says otherwise.
+    ["a recorded state with a key named like a derived view", (raw) => ({ ...raw, state: { ...(raw.state as object), byId: {} } }), DISAGREES],
+    ["an authority its codec refuses", (raw) => ({ ...raw, authority: { runId: 7 } }), { kind: "invalid-authority" }],
+    ["an authority that is not a record at all", (raw) => ({ ...raw, authority: "run.tally" }), { kind: "invalid-authority" }],
+  ])("refuses a checkpoint carrying %s", (_name, tamper, expected) => {
+    expect(refusal(parsePanelProgramCheckpoint(TALLY, tamper(durableCheckpoint()), resolver))).toMatchObject(expected);
+  });
+
+  it("compares recorded and replayed states only through the program's canonical projection", () => {
+    // A twin whose state JSON carries a derived `echo` view its canonical form omits.
+    const withoutEcho = (stateJson: unknown): unknown => {
+      if (typeof stateJson !== "object" || stateJson === null) return stateJson;
+      return Object.fromEntries(Object.entries(stateJson).filter(([key]) => key !== "echo"));
+    };
+    const twin: typeof TALLY = { ...TALLY, canonicalStateJson: withoutEcho };
+    const echoed = { ...durableCheckpoint(), state: { ...(durableCheckpoint().state as object), echo: { size: 2 } } };
+    expect(value(parsePanelProgramCheckpoint(twin, echoed, resolver)).state).toMatchObject({ count: 2 });
+    expect(refusal(parsePanelProgramCheckpoint(TALLY, echoed, resolver))).toMatchObject(DISAGREES);
+    // The projection decides agreement, never membership: the twin still refuses real disagreement.
+    const disagreeing = { ...echoed, state: { ...echoed.state, count: 7 } };
+    expect(refusal(parsePanelProgramCheckpoint(twin, disagreeing, resolver))).toMatchObject(DISAGREES);
   });
 
   it("plans the journal append and checkpoint replacement of one recorded step, keyed by sequence and content", () => {

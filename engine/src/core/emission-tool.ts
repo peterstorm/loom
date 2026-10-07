@@ -595,10 +595,10 @@ export function issueEmissionBinding<K extends string>(
       message: `issued emission binding carries no canonical request id: ${requestId.error.message}`,
     }));
   }
-  // The closed vocabulary is parsed at the boundary — an untrusted claimed
-  // version string that names no vocabulary member refuses exactly where the
-  // definedness check refused before, and the typed lookup below can never
-  // select an out-of-vocabulary key.
+  // The closed version vocabulary is parsed at the boundary: an untrusted
+  // claimed version that names no vocabulary member refuses here as
+  // `unsupported-schema-version`, so the typed registry lookup below only ever
+  // reads a vocabulary key.
   const claimedVersion = issued.version;
   if (!isEmissionSchemaVersion(claimedVersion)) {
     return failure(canonicalRecord({
@@ -638,12 +638,14 @@ export function issueEmissionBinding<K extends string>(
       }));
     }
   }
-  // The vocabulary parses above prove the kind and version are registry
-  // members, the definedness check proves the pair selects a cell, and the
-  // tool name and digest are the cell's own — this is the one justified
-  // construction cast at the ONE minting point (it also applies the nominal
-  // brand), so every minted binding is a certified valid-pair record by
-  // construction and no consumer ever re-narrows or re-verifies.
+  // The checks above prove the pair: the version is a vocabulary member
+  // (`isEmissionSchemaVersion`), the kind is an own registry key
+  // (`isPayloadProducerKindName`), and a defined `spec.schemaVersions[version]`
+  // proves the kind carries that version; the tool name and digest are that
+  // cell's own. This is the one justified construction cast at the ONE
+  // minting point (it also applies the nominal brand), so every minted
+  // binding is a certified valid-pair record by construction and no consumer
+  // ever re-narrows or re-verifies.
   return success(canonicalRecord({
     requestId: requestId.value,
     kind: Object.freeze({ kind: issued.kind }),

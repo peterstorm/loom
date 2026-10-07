@@ -1,7 +1,8 @@
 /**
  * The legacy panel program's functional core (core/legacy-panel-decisions), at
- * its interface: registration, the dispatch program's journal replay
- * (`nextPanelProgramAction`, over plain event arrays), the issuance join, record parsing,
+ * its interface: registration, the legacy journal translation ahead of the
+ * dispatch program's replay (`nextPanelProgramAction`, over plain event
+ * arrays, refusing typed), the issuance join, record parsing,
  * verdict-source selection, settlement, and the deterministic operation
  * reducer — all over plain data, no Run Directory. The shell in
  * handlers/helpers/programs/legacy-panel is pinned over a real Run Directory
@@ -16,8 +17,9 @@ import fc from "fast-check";
 import { agentRequestAuthority } from "../../../fixtures/agent-request-authority";
 import { issueEmissionBinding } from "../../../../src/core/emission-tool";
 import { observeEmissionCalls } from "../../../../src/core/emission-observation";
+import { AWAIT_PANEL_RESULTS } from "../../../../src/core/panel-program";
 import {
-  AWAIT_PANEL_RESULTS,
+  describePanelJournalReplayError,
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
   logicalPanelRequestId,
@@ -123,16 +125,23 @@ describe("nextPanelProgramAction: the dispatch program's journal replay over pla
     expect(nextPanelProgramAction(empty, [])).toMatchObject({ ok: true, value: { type: "done", panel: "refutation" } });
   });
 
-  it.each<[string, RegisteredPanelProgram, readonly unknown[], string]>([
-    ["an event the journal translation refuses", refutation(), [{ type: "bogus" }], "events[0].type must be spawn-outcome or engine-outcome"],
-    ["an event the reducer refuses, as its JSON error", refutation(),
+  it.each<[string, RegisteredPanelProgram, readonly unknown[], unknown, string]>([
+    ["an event the journal translation refuses", refutation(), [{ type: "bogus" }],
+      { kind: "journal-refused", message: "events[0].type must be spawn-outcome or engine-outcome" },
+      "events[0].type must be spawn-outcome or engine-outcome"],
+    ["an event the reducer refuses, with its typed program error", refutation(),
       [{ type: "engine-outcome", operationId: "refutation-prepare-verifiers", outcome: "succeeded" }],
+      { kind: "event-refused", error: { kind: "duplicate-operation-outcome", operationId: "refutation-prepare-verifiers" } },
       JSON.stringify({ kind: "duplicate-operation-outcome", operationId: "refutation-prepare-verifiers" })],
-    ["an input the program start refuses, as its joined errors",
+    ["an input the program start refuses, with the start's errors",
       { schemaVersion: 1, kind: "architecture", input: { candidateLenses: [], judgeCriteria: [] }, context: null }, [],
+      { kind: "start-refused", errors: ["candidate lenses must be non-empty", "judge criteria must be non-empty"] },
       "candidate lenses must be non-empty\njudge criteria must be non-empty"],
-  ])("refuses %s", (_name, registered, events, error) => {
-    expect(nextPanelProgramAction(registered, events)).toEqual({ ok: false, error });
+  ])("refuses %s, typed, and describes it as operator text", (_name, registered, events, error, description) => {
+    const next = nextPanelProgramAction(registered, events);
+    expect(next).toEqual({ ok: false, error });
+    if (next.ok) throw new Error("unreachable");
+    expect(describePanelJournalReplayError(next.error)).toBe(description);
   });
 
   it("replays any prefix of settled verifiers deterministically, waiting until every lens settled", () => {
