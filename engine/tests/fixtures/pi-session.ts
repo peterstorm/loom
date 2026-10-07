@@ -10,7 +10,7 @@ import { canonicalTempDir } from "./canonical-temp-dir";
 // that read the issue-route election from process.env. Importing it has no
 // side effect: the ambient issue route is pinned to the catalog route by the
 // Vitest setup file (tests/setup/catalog-issue-route.ts) before every test
-// file, and a suite opts into another route explicitly with `withRouteEnv`
+// file, and a suite opts into another route explicitly with `withEnvOverlay`
 // from ./issue-route-env.
 
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));

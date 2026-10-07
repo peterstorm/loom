@@ -18,7 +18,7 @@ import { git } from "../../../fixtures/git-repository";
 import { fixturePiEnvironment } from "../../../fixtures/pi-session";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
-import { withRouteEnv } from "../../../fixtures/issue-route-env";
+import { withEnvOverlay } from "../../../fixtures/issue-route-env";
 import { value } from "../../../fixtures/parse-result";
 import { catalogAuthority, mustAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
@@ -291,7 +291,7 @@ describe("positive program-path issuance through the qualified local Pi parent (
     expect(specCheck?.authority.modelProfile).toBe("spec-check-review");
     expect(specCheck?.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     const { readPiIssuedSpawnRequest } = await import("../../../../../pi/review-run-authority");
-    await withRouteEnv({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.local-wave") }, () => {
+    await withEnvOverlay({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.local-wave") }, () => {
       for (const { authority, task } of requests.filter(({ authority }) => authority.role !== "spec-check-invoker")) {
         expect(authority.modelProfile).toBe("qualified-local-review");
         expect(authority.harnessBinding.pi).toMatchObject({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
@@ -332,7 +332,7 @@ describe("the Pi issuance read behind the spawn admission port (T6)", () => {
     if (reviewer === undefined) throw new Error("fixture did not publish a reviewer request");
     const authority = mustAuthority(reviewer.authority);
     const { readPiIssuedSpawnRequest } = await import("../../../../../pi/review-run-authority");
-    await withRouteEnv({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.issued-port") }, () => {
+    await withEnvOverlay({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.issued-port") }, () => {
       const issued = readPiIssuedSpawnRequest("019fca39-f989-7510-8e62-50dadbcad4ff", authority.requestId, authority.contextDigest, authority.role);
       expect(issued).toMatchObject({ ok: true, value: {
         role: "code-reviewer",
@@ -416,7 +416,7 @@ describe("the standalone successor v3 program path projects the issued route (T6
       modelProfile: profile.id,
       harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
     });
-    await withRouteEnv({ PI_CODING_AGENT: "true" }, async () => {
+    await withEnvOverlay({ PI_CODING_AGENT: "true" }, async () => {
       const published = await publishReviewInitialBatch(handle, [{ authority, context: {
         digest: packet.digest, slot: { kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` },
       } }], [packet], "standalone-successor-v3", standaloneV3Registration);

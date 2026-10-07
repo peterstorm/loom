@@ -5,8 +5,9 @@
  * normal subagent launcher: capability probing, staging of admitted
  * emission-enabled launches, the launcher's resolve handshake, and the
  * readiness verifier the launcher runs before any Task prompt. The verifier is
- * RPC I/O plus response parsing only: every child readiness and route state it
- * observes is decided by the pure gate in `pi/emission-readiness-gate.ts`, so
+ * RPC I/O plus response parsing only: its steps run in the one launcher order
+ * of `pi/emission-readiness-sequence.ts`, and every child readiness and route
+ * state it observes is decided by the pure gate in `pi/emission-readiness-gate.ts`, so
  * the bridge carries no refusal vocabulary of its own beyond RPC transport
  * failures. Also owns the launch-slot vocabulary the result side uses to
  * authenticate a launcher's pre-prompt startup refusal.
@@ -24,16 +25,12 @@ import {
 import type { ContextDigest } from "../engine/src/core/orchestration-contract";
 import type { IssuedEmissionBinding, IssuedEmissionBindingOf } from "../engine/src/core/emission-tool";
 import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "./emission-readiness-protocol";
+import type { EmissionStartupExpectation, ReadinessObservation, RouteObservation } from "./emission-readiness-gate";
 import {
-  decideReadinessGate,
-  decideStartupRoute,
-  parseReadinessStageObservation,
-  type EmissionReadinessGateDecision,
-  type EmissionStartupExpectation,
-  type ReadinessObservation,
-  type ReadinessProbeFacts,
-  type RouteObservation,
-} from "./emission-readiness-gate";
+  runEmissionStartupSequence,
+  type ChannelObservation,
+  type EmissionStartupSteps,
+} from "./emission-readiness-sequence";
 
 export const LOOM_SUBAGENT_LAUNCH_CHANNEL = "loom:subagent-launch:v2";
 
@@ -369,57 +366,53 @@ const startupExpectationOf = (launch: PiEmissionLaunchExpectation): EmissionStar
   }),
 });
 
-/** The readiness never runs on an unlisted command: absence is decided
- *  without an invocation (an unknown /command would reach the model). */
-const NOT_INVOKED: ReadinessObservation = Object.freeze({
-  kind: "absent" as const,
-  reason: "the readiness command was not listed, so it was never invoked",
-});
-
-/** Readiness probe facts as the verifier observed them. `get_commands`
- *  answered by the time any fact exists, so the channel is alive. */
-const observedReadinessFacts = (commandListed: boolean, readiness: ReadinessObservation): ReadinessProbeFacts =>
-  Object.freeze({ channelAlive: true, channelDiagnostic: null, commandListed, readiness });
+/** The installed launcher hands the verifier a client over an answering RPC
+ *  channel (its own channel check precedes the verifier), so the verifier's
+ *  channel step is the observed fact, not a further exchange: a channel that
+ *  stops answering surfaces as the next exchange's RPC refusal. */
+const CHANNEL_ANSWERING: ChannelObservation = Object.freeze({ channelAlive: true, channelDiagnostic: null });
 
 /**
- * The verifier the installed launcher runs before the Task prompt: I/O in the
- * protocol's order (discover → invoke readiness once → bind route → observe
- * route), each response parsed into the gate's observations, and every child
- * state refused by the gate's one vocabulary (`pi/emission-readiness-gate.ts`).
+ * The verifier's adapter of the launcher step port
+ * (`pi/emission-readiness-sequence.ts`): each step is one RPC exchange whose
+ * response is parsed into the gate's observations, and every transport or
+ * protocol failure is the bounded RPC refusal. Exactly one readiness
+ * invocation, and none for an unlisted command — the sequence guarantees it,
+ * and the installed launcher also enforces the count and refuses prompt
+ * delivery if a verifier cheats. Route selection follows readiness: set_model,
+ * then the exact provider/model get_state observes.
+ */
+const verifierSteps = (client: PiSubagentReadinessClient): EmissionStartupSteps<PiReadinessRefusal> => Object.freeze({
+  observeChannel: async () => success(CHANNEL_ANSWERING),
+  discoverReadinessCommand: () => readinessExchange("get_commands", () => client.getCommands(), (commands) => {
+    const listed = parseReadinessCommandListing(commands);
+    return listed.ok ? success(Object.freeze({ commandListed: listed.value })) : listed;
+  }),
+  observeReadiness: () => readinessExchange("invoke_readiness", () => client.invokeReadiness(), (entries) => {
+    const observation = parseReadinessEntries(entries);
+    return observation.ok ? success(Object.freeze({ readiness: observation.value })) : observation;
+  }),
+  bindRoute: async (route) => {
+    const bound = await readinessExchange("set_model", () => client.setModel(route.provider, route.modelId), () => success(undefined));
+    if (!bound.ok) return bound;
+    return readinessExchange("get_state", () => client.getState(), (state) => success(parseRouteState(state)));
+  },
+  // The gate reads the child's payload: a hostile payload's throw is a
+  // bounded refusal of the invocation's response, never a rejected verifier.
+  gateThrew: (thrown) => readinessRpcRefusal("invoke_readiness response", thrown),
+});
+
+/**
+ * The verifier the installed launcher runs before the Task prompt: the one
+ * launcher step sequence over the verifier's RPC adapter, every child state
+ * refused by the gate's one vocabulary (`pi/emission-readiness-gate.ts`).
  */
 const readinessVerifier = (
   launch: PiEmissionLaunchExpectation,
 ): PiEmissionRpcDirective["verifyReadiness"] => async (client) => {
-  const expectation = startupExpectationOf(launch);
-  // The one gate decision path; the listed/unlisted split only supplies its inputs.
-  const decide = (commandListed: boolean, readiness: ReadinessObservation): EmissionReadinessGateDecision =>
-    decideReadinessGate(expectation, parseReadinessStageObservation(observedReadinessFacts(commandListed, readiness)));
-  const listed = await readinessExchange("get_commands", () => client.getCommands(), parseReadinessCommandListing);
-  if (!listed.ok) return listed.error;
-  // Exactly one invocation in this verifier, and none for an unlisted command.
-  // The installed launcher also enforces this count and refuses prompt
-  // delivery if a verifier cheats. The gate decides inside the guarded
-  // response parse: a hostile payload's throw is a bounded RPC refusal.
-  const readiness = !listed.value
-    ? success<EmissionReadinessGateDecision, PiReadinessRefusal>(decide(false, NOT_INVOKED))
-    : await readinessExchange("invoke_readiness", () => client.invokeReadiness(), (entries) => {
-        const observation = parseReadinessEntries(entries);
-        return observation.ok ? success(decide(true, observation.value)) : observation;
-      });
-  if (!readiness.ok) return readiness.error;
-  if (readiness.value.kind === "refused") return readinessRefusal(readiness.value.message);
-  const ready = readiness.value;
-  // Route selection is deliberately after readiness. Both this verifier and
-  // the installed launcher observe the exact provider/model before Task prompt.
-  const bound = await readinessExchange(
-    "set_model",
-    () => client.setModel(launch.expectation.route.provider, launch.expectation.route.model),
-    () => success(undefined),
-  );
-  if (!bound.ok) return bound.error;
-  const route = await readinessExchange("get_state", () => client.getState(), (state) => success(parseRouteState(state)));
-  if (!route.ok) return route.error;
-  const decision = decideStartupRoute(expectation.route, ready, route.value);
+  const run = await runEmissionStartupSequence(startupExpectationOf(launch), verifierSteps(client));
+  if (!run.ok) return run.error;
+  const decision = run.value.decision;
   return decision.kind === "open" ? Object.freeze({ ok: true as const }) : readinessRefusal(decision.message);
 };
 

@@ -65,10 +65,6 @@ import {
 } from "../../src/core/persistent-panel";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 
-/** The remediation suites' unwrap is the shared parse-result `value` — one
- *  implementation, re-exported under the name these suites import. */
-export { value as valueOf } from "./parse-result";
-
 export const digest = (n: number): string => n.toString(16).padStart(64, "0").slice(-64);
 
 const reviewerBindings = {

@@ -22,35 +22,36 @@ import {
   type GitRepository,
   type TemporaryIndex,
 } from "../../src/orchestration/git-remediation";
-import { standaloneFixture, valueOf } from "./standalone-remediation-authority";
+import { standaloneFixture } from "./standalone-remediation-authority";
+import { value } from "./parse-result";
 
 /** Build real opaque P3 installation authority around an already-staged fixture index. */
 export function verifiedRemediationInstallation(
   repository: GitRepository,
   temporary: TemporaryIndex,
 ): CurrentVerifiedIndexInstallation {
-  const stagedPaths = valueOf(readStagedPaths(repository, temporary));
+  const stagedPaths = value(readStagedPaths(repository, temporary));
   if (stagedPaths.length === 0) throw new Error("fixture installation requires a non-empty staged path set");
   const standalone = standaloneFixture(stagedPaths, false);
-  const accounting = valueOf(prepareDefectFamilyAccounting(standalone.input.standaloneResult, { kind: "not-required" }));
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, null));
+  const accounting = value(prepareDefectFamilyAccounting(standalone.input.standaloneResult, { kind: "not-required" }));
+  const plan = value(prepareDefectFamilyVerification(accounting, null));
   if (plan.kind !== "not-required") throw new Error("fixture not-required plan required");
-  const started = valueOf(startRemediation(standalone.input));
-  const dirty = valueOf(observeDirtyPaths(repository));
-  const preexisting = valueOf(observeStagedPaths(repository));
-  const rawWitness = valueOf(snapshotRepositoryWitness(repository));
-  const repositoryWitness = valueOf(parseRepositorySnapshotWitness(rawWitness));
+  const started = value(startRemediation(standalone.input));
+  const dirty = value(observeDirtyPaths(repository));
+  const preexisting = value(observeStagedPaths(repository));
+  const rawWitness = value(snapshotRepositoryWitness(repository));
+  const repositoryWitness = value(parseRepositorySnapshotWitness(rawWitness));
   const actualPaths = dirty.map(({ path }) => path).sort();
   if (JSON.stringify(actualPaths) !== JSON.stringify(stagedPaths)) {
     throw new Error(`fixture dirty paths must equal temporary staged paths: ${actualPaths.join(", ")}`);
   }
-  const audited = valueOf(auditRemediationPaths(started.authority, {
+  const audited = value(auditRemediationPaths(started.authority, {
     expectedDirtyPaths: actualPaths,
     actualDirtyPaths: dirty,
     preexistingStagedPaths: preexisting,
     repositoryWitness,
   }));
-  const candidate = valueOf(captureRemediationCandidateWorkspace({
+  const candidate = value(captureRemediationCandidateWorkspace({
     repositoryStartPath: repository.root,
     verification: plan,
     pathSources: {
@@ -61,18 +62,18 @@ export function verifiedRemediationInstallation(
     },
     runDirectory: temporary.directory,
   }, repositoryWitness));
-  const stagedDigest = valueOf(digestTemporaryIndex(repository, temporary));
-  const staged = valueOf(stageTemporaryIndex(audited, stagedDigest, repositoryWitness));
-  const verified = valueOf(verifyTemporaryIndex(staged, {
+  const stagedDigest = value(digestTemporaryIndex(repository, temporary));
+  const staged = value(stageTemporaryIndex(audited, stagedDigest, repositoryWitness));
+  const verified = value(verifyTemporaryIndex(staged, {
     actualTemporaryIndexStagedPaths: stagedPaths,
     actualIndexDigest: stagedDigest,
     currentRepositoryWitness: repositoryWitness,
   }));
-  const installable = valueOf(evaluateInstallableDefectFamilyAccounting(plan, candidate.candidateWitness, {
+  const installable = value(evaluateInstallableDefectFamilyAccounting(plan, candidate.candidateWitness, {
     auditedInstalledPaths: audited.paths.paths,
     dirtyOrStagedPaths: actualPaths,
   }, []));
-  return valueOf(prepareVerifiedIndexInstallation(
+  return value(prepareVerifiedIndexInstallation(
     verified,
     installable,
     `effect:test-install:${verified.digest}`,

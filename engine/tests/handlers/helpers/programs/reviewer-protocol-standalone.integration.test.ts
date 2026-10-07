@@ -32,7 +32,7 @@ import { gitResult, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository
 import {
   CATALOG_ROUTE_ENV,
   QUALIFIED_ROUTE_ENV,
-  withRouteEnv,
+  withEnvOverlay,
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
 import { normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
@@ -344,7 +344,7 @@ describe("the issued emission route on the standalone program path (T6)", () => 
     // standalone-frozen-source section embeds it, so the packet digests are
     // byte-comparable across routes only when the fixture commits are
     // content-identical (fixed author/committer timestamps, identical trees).
-    const startRun = async (environment: EnvironmentOverlay) => withRouteEnv({ ...PINNED_COMMIT_DATES, ...environment }, async () => {
+    const startRun = async (environment: EnvironmentOverlay) => withEnvOverlay({ ...PINNED_COMMIT_DATES, ...environment }, async () => {
       const p = project();
       const initial = await runCli(p.root, ["start", "standalone-review", "--runs-root", p.runsRoot, "--run", "run.route"],
         JSON.stringify({ kind: "all", files: p.scope, dryRun: false }));

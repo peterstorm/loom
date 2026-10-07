@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";
+import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
+import { value } from "../fixtures/parse-result";
 import { parseRequestId, parseOrchestrationRunId, parseAgentRequestAuthority, parseIssuedSpawnRequest, createPublicationAuthorityResolver,
   type AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
@@ -21,19 +22,19 @@ import { observeEmissionCalls } from "../../src/core/emission-observation";
 import { emissionCallFrame } from "../fixtures/emission-call-frame";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
-const prior = valueOf(prepareStandaloneLineageSource(standaloneFixture(undefined, true).input.standaloneResult, "/owned/predecessor"));
-const prepared = valueOf(prepareStandaloneSuccessor(prior, bytes({ runId: "run.v3", snapshot: prior.scope.map(path => ({ kind: "absent", path })),
+const prior = value(prepareStandaloneLineageSource(standaloneFixture(undefined, true).input.standaloneResult, "/owned/predecessor"));
+const prepared = value(prepareStandaloneSuccessor(prior, bytes({ runId: "run.v3", snapshot: prior.scope.map(path => ({ kind: "absent", path })),
   reviewers: prior.reviewers }), { kind: "historical-decision-unavailable" }));
 const payload = () => ({ schemaVersion: 3, kind: "standalone-successor-review", lineageDigest: prepared.lineageDigest, snapshotDigest: prepared.snapshotDigest,
   priorAssessments: prepared.inventory.map(row => ({ origin: standaloneOriginReference(row.origin), verdict: "still-present", reason: "Still applies." })), findings: [] });
 
 function fixture(role = "code-reviewer", attempt: 1 | 2 = 1) {
-  const policy = valueOf(resolveAgentPolicy(role));
-  const profile = valueOf(resolveModelProfile(policy.profile));
-  const identity = { runId: valueOf(parseOrchestrationRunId(prepared.runId)), requestId: valueOf(parseRequestId(`request:${role}:${attempt}`)),
+  const policy = value(resolveAgentPolicy(role));
+  const profile = value(resolveModelProfile(policy.profile));
+  const identity = { runId: value(parseOrchestrationRunId(prepared.runId)), requestId: value(parseRequestId(`request:${role}:${attempt}`)),
     role: policy.agent, attempt, requiredSkill: policy.requiredSkill };
-  const packet = valueOf(buildStandaloneSuccessorReviewerContext(prepared, identity, []));
-  const authority = valueOf(parseAgentRequestAuthority({ ...identity, slotId: `slot:${role}`, program: "standalone-review",
+  const packet = value(buildStandaloneSuccessorReviewerContext(prepared, identity, []));
+  const authority = value(parseAgentRequestAuthority({ ...identity, slotId: `slot:${role}`, program: "standalone-review",
     modelProfile: policy.profile, harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
     contextDigest: packet.digest, outputSlot: `transcripts/${role}/attempt-${attempt}.raw` }));
   const context = { digest: packet.digest, slot: { kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` } };
@@ -41,10 +42,10 @@ function fixture(role = "code-reviewer", attempt: 1 | 2 = 1) {
     requestIds: [authority.requestId], contextDigests: [authority.contextDigest], issuedRequests: [{ authority, context }] };
   const receipt = { ...content, publicationDigest: sha256Hex(JSON.stringify(content)) };
   const publications = createPublicationAuthorityResolver(() => ({ ok: true, value: [...bytes(receipt)] }));
-  const request = valueOf(parseIssuedSpawnRequest(publications, { authority, context, issuance: { schemaVersion: 1,
+  const request = value(parseIssuedSpawnRequest(publications, { authority, context, issuance: { schemaVersion: 1,
     kind: "issued-spawn-request-proof", runId: authority.runId, effectId: content.effectId, publicationDigest: receipt.publicationDigest, batchIndex: 0 } }));
   const registration = standaloneSuccessorReviewerRegistration(prepared);
-  const issued = valueOf(parseIssuedStandaloneSuccessorReviewer({ request, packet, registration, prepared }));
+  const issued = value(parseIssuedStandaloneSuccessorReviewer({ request, packet, registration, prepared }));
   return { request, packet, registration, prepared, issued };
 }
 
@@ -52,10 +53,10 @@ function fixture(role = "code-reviewer", attempt: 1 | 2 = 1) {
  *  it: the durable v3 registration's protocol projection through the core
  *  reviewer-route derivation, on the qualified Pi route with a Pi parent. */
 function successorBinding(authority: AgentRequestAuthority): IssuedEmissionBindingOf<"reviewer-payload"> {
-  const protocol = valueOf(projectRegisteredReviewerProtocol({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 }));
+  const protocol = value(projectRegisteredReviewerProtocol({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 }));
   if (protocol === null) throw new Error("fixture registration must project a reviewer protocol");
   const qualified = { ...authority, harnessBinding: { ...authority.harnessBinding,
-    pi: lowerModelProfile(valueOf(resolveModelProfile("qualified-local-review")), "pi") } } as AgentRequestAuthority;
+    pi: lowerModelProfile(value(resolveModelProfile("qualified-local-review")), "pi") } } as AgentRequestAuthority;
   const route = issuedReviewerEmissionRoute(protocol, qualified, true);
   if (route.kind !== "emission") throw new Error(`fixture successor route must be emission, got ${route.kind}`);
   return route.binding;
@@ -67,8 +68,8 @@ describe("explicit standalone v3 wire and descriptor conservation", () => {
     expect(sha256Hex(REVIEWER_PAYLOAD_SCHEMA_V2)).toBe("3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37");
     expect(sha256Hex(REVIEWER_IMPACT_RUBRIC_V1)).toBe("4f36c09cc1e7c27e2d8ff36c86ad22c7723c1a4715bd9c198bbed40e2c2f3a6b");
     expect(new TextEncoder().encode(REVIEWER_PAYLOAD_SCHEMA_V2).length).toBe(10257);
-    const v2 = valueOf(buildReviewerContextPacket({ requestId: valueOf(parseRequestId("request:initial")), role: "code-reviewer", requiredSkill: "none",
-      fixedContext: [valueOf(encodeByteSection("source", "unchanged"))], variableContext: [] }));
+    const v2 = value(buildReviewerContextPacket({ requestId: value(parseRequestId("request:initial")), role: "code-reviewer", requiredSkill: "none",
+      fixedContext: [value(encodeByteSection("source", "unchanged"))], variableContext: [] }));
     expect(v2.schemaVersion).toBe(2);
     expect(parseContextPacket(v2)).toEqual({ ok: true, value: v2 });
     expect(parseStandaloneReviewerContextPacketV3(v2).ok).toBe(false);
@@ -121,7 +122,7 @@ describe("publication-bound successor admission at actual core seams", () => {
     expect(f.issued.protocolVersion).toBe(3);
     expect(parseContextPacket(f.packet).ok).toBe(false);
     expect(parseStandaloneReviewerContextPacketV3(f.packet)).toEqual({ ok: true, value: f.packet });
-    const accepted = valueOf(admitStandaloneSuccessorReviewer(f.issued, bytes(payload())));
+    const accepted = value(admitStandaloneSuccessorReviewer(f.issued, bytes(payload())));
     expect(accepted.request.attempt).toBe(attempt);
     expect(accepted.lineageDigest).toBe(prepared.lineageDigest);
     expect(accepted.newFindings).toEqual([]);
@@ -145,9 +146,9 @@ describe("publication-bound successor admission at actual core seams", () => {
   });
   it("requires exact full roster and current requests, not copied/replayed foreign evidence", () => {
     const fixtures = prepared.reviewers.map(role => fixture(role));
-    const evidence = fixtures.map(f => valueOf(admitStandaloneSuccessorReviewer(f.issued, bytes(payload()))));
+    const evidence = fixtures.map(f => value(admitStandaloneSuccessorReviewer(f.issued, bytes(payload()))));
     const requests: readonly AgentRequestAuthority[] = fixtures.map(f => f.request.authority);
-    expect(valueOf(aggregateIssuedStandaloneSuccessorEvidence(prepared, requests, evidence))[0]?.state).toBe("active");
+    expect(value(aggregateIssuedStandaloneSuccessorEvidence(prepared, requests, evidence))[0]?.state).toBe("active");
     expect(aggregateIssuedStandaloneSuccessorEvidence(prepared, requests, evidence.slice(1)).ok).toBe(false);
     expect(aggregateIssuedStandaloneSuccessorEvidence(prepared, requests, [{ ...evidence[0]! }, evidence[1]!]).ok).toBe(false);
     expect(aggregateIssuedStandaloneSuccessorEvidence(prepared, [fixture("code-reviewer", 2).request.authority, requests[1]!], evidence).ok).toBe(false);
@@ -158,7 +159,7 @@ describe("publication-bound successor admission at actual core seams", () => {
     const f = fixture();
     const raw = bytes({ ...payload(), findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Distinct assertion", reason: "Nonblocking." },
       relation: { kind: "distinct-related", origin: standaloneOriginReference(prepared.inventory[0]!.origin), distinction: "Different violated assertion." } }] });
-    const accepted = valueOf(admitStandaloneSuccessorReviewer(f.issued, raw));
+    const accepted = value(admitStandaloneSuccessorReviewer(f.issued, raw));
     expect(accepted.newFindings[0]).toMatchObject({ origin: { kind: "current", runId: prepared.runId, requestId: f.request.authority.requestId,
       transcriptDigest: sha256Hex(new TextDecoder().decode(raw)), ordinal: 2 }, finding: { id: "code-reviewer-2", protocolVersion: 2 } });
     expect(accepted.newFindings[0]?.origin).not.toHaveProperty("publication");
@@ -196,7 +197,7 @@ describe("the successor's issued emission authority (T9)", () => {
       toolName: EMISSION_TOOL_SPECS["reviewer-payload"].toolName,
       schemaDigest: STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest,
     });
-    expect(binding).toEqual(valueOf(issueEmissionBinding({
+    expect(binding).toEqual(value(issueEmissionBinding({
       requestId: "request:code-reviewer:1", kind: "reviewer-payload", version: "v3", schemaDigest: STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest,
     })));
   });
@@ -230,10 +231,10 @@ describe("emission-sourced successor payloads cross the unchanged issuance joins
     );
     expect(selection.kind).toBe("emission-tool-arguments");
     if (selection.kind !== "emission-tool-arguments") throw new Error("fixture must select the emission arm");
-    const admitted = valueOf(admitStandaloneSuccessorReviewer(f.issued, Uint8Array.from(selection.payload.bytes)));
+    const admitted = value(admitStandaloneSuccessorReviewer(f.issued, Uint8Array.from(selection.payload.bytes)));
     // The joins are source-blind: identical lineage, coverage and attribution
     // to the extraction-sourced admission of the same payload.
-    const extractionAdmitted = valueOf(admitStandaloneSuccessorReviewer(f.issued, bytes(payload())));
+    const extractionAdmitted = value(admitStandaloneSuccessorReviewer(f.issued, bytes(payload())));
     expect(admitted.request.attempt).toBe(extractionAdmitted.request.attempt);
     expect(admitted.lineageDigest).toBe(extractionAdmitted.lineageDigest);
     expect(admitted.payload.snapshotDigest).toBe(extractionAdmitted.payload.snapshotDigest);
