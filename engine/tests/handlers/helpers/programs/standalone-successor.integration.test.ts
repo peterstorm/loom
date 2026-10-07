@@ -304,7 +304,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");
       const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review-preparation");
-      const machine = await import("../../../../src/core/standalone-review-machine");
+      const machine = await import("../../../../src/core/standalone-review");
       const checkpoint = await import("../../../../src/core/standalone-review-checkpoint");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const handle = value(handles.createRunDirectory(join(root, "runs"), "source"));

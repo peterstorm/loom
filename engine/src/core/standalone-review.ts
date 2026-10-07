@@ -8,8 +8,9 @@
  * a registrar to separate them would bypass that chain; only read-only membership
  * predicates leave this module. Everything outside the chain — scope and roster policy,
  * preparation, capture, transcript admission, records, the Refutation Panel and the
- * checkpoint codec — has its own module. The lineage, successor-reviewer and machine
- * entry modules retain their existing APIs; this implementation never imports them.
+ * checkpoint codec — has its own module. Callers import the LC-2 reducer, publication
+ * reader and lineage preparation from here directly; the successor-reviewer entry module
+ * retains its existing API, and this implementation never imports it.
  */
 import { isDeepStrictEqual } from "node:util";
 import { match } from "ts-pattern";

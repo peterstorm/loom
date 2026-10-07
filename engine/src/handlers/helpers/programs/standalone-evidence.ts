@@ -8,11 +8,17 @@ import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-succe
 import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
 import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
-import { aggregateStandaloneReview, proveStandaloneRosterCompletion, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
+import {
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
+  type StandaloneReviewerProtocolResolver,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineState,
+} from '../../../core/standalone-review';
 import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
 import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
-import { reduceStandaloneReviewMachine, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
 import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';

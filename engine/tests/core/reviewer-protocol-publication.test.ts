@@ -1,17 +1,21 @@
 import { createHash } from "node:crypto";
-import { prepareStandaloneLineageSource } from "../../src/core/standalone-lineage";
+import {
+  prepareStandaloneLineageSource,
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+} from "../../src/core/standalone-review";
 import { findingOf } from "../../src/core/standalone-finding-origin";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { acceptedAgentResult, createPublicationAuthorityResolver, parseArtifactRef, parseEffectId, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId, prepareInitialBatchPublicationIntent } from "../../src/core/orchestration-contract";
-import { aggregateStandaloneReview, proveStandaloneRosterCompletion } from "../../src/core/standalone-review";
 import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 import { renderStandaloneReviewSummary, serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../src/core/standalone-review-records";
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
-import { reduceStandaloneReviewMachine, startStandaloneReviewMachine } from "../../src/core/standalone-review-machine";
 import { parseAdjudicatedStandaloneReview, parseHistoricalStandaloneAggregate } from "../../src/core/legacy-archive";
 import { parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";

@@ -17,10 +17,15 @@ import type { RegisteredStandaloneSuccessorProgram, StandaloneSuccessorStartInpu
 import { standaloneReviewerProtocolResolver } from "./reviewer-protocol-resolution";
 import { canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import { parseStandaloneReviewMachineState } from "../../../core/standalone-review-checkpoint";
-import { reduceStandaloneReviewMachine, type StandaloneDoneState } from "../../../core/standalone-review-machine";
+import {
+  reduceStandaloneReviewMachine,
+  type StandaloneDoneState,
+  prepareStandaloneLineageSource,
+  prepareStandaloneSuccessor,
+  type StandaloneLineageSource,
+} from "../../../core/standalone-review";
 import { serializeStandaloneReviewAuthority } from "../../../core/standalone-review-records";
 import { STANDALONE_LINEAGE_LIMITS, type StandalonePreviousSnapshot } from "../../../core/standalone-lineage-contract";
-import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, type StandaloneLineageSource } from "../../../core/standalone-lineage";
 import { admitFrozenPredecessorArchive, publishedPacketReference, serializePublishedPacketReference,
   type PredecessorArchivePurpose, type PredecessorArchiveRecord } from "../../../core/predecessor-archive";
 import { admitAnchoredRunAuthority, chargePredecessorBytes, enterPredecessorRun, predecessorAttemptRoster, predecessorContextLabel,

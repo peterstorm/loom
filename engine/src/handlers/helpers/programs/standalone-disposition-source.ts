@@ -8,7 +8,7 @@ import {
   readPublishedStandaloneDisposition,
   type StandaloneLineageSource,
   type PreparedStandaloneDisposition,
-} from "../../../core/standalone-lineage";
+} from "../../../core/standalone-review";
 import type { PublishedStandaloneDisposition, StandaloneDispositionPublicationReference } from "../../../core/standalone-review-model";
 import { parseRegisteredStandaloneDispositionProgram, startStandaloneDisposition,
   standaloneDispositionReceipt, reduceStandaloneDisposition, checkStandaloneDispositionCheckpoint,

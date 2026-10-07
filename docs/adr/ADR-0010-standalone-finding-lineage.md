@@ -139,11 +139,12 @@ remediation/rerun, and do not equate no fresh panel work with no active blockers
 The standalone review aggregate, its LC-2 reducer and lineage preparation are one
 cohesive implementation owned by `engine/src/core/standalone-review.ts`: prepared-source
 membership feeds issued reviewer evidence, which feeds LC-2 finalization/publication,
-which alone can admit the next source. The old `standalone-review-machine.ts`,
-`standalone-lineage.ts` and `standalone-successor-reviewer.ts` modules are consumed
-named entry surfaces for actual callers, not three independent implementations, driver
-adapters or per-function forwarding wrappers; they preserve consumed names/signatures
-and point only inward, and the implementation never imports its entry surfaces.
+which alone can admit the next source. Callers import the LC-2 reducer, publication
+reader and lineage preparation from that owner directly: the former
+`standalone-review-machine.ts` and `standalone-lineage.ts` re-export facades were
+deleted (2026-10, PR #66 deepen pass) because they moved no complexity and gave
+callers two valid paths for one concept. `standalone-successor-reviewer.ts` remains a
+consumed named entry surface pointing only inward; the implementation never imports it.
 Only the membership proof chain shares that owner. Concerns outside it are separate
 pure modules on an acyclic graph: below the core, `standalone-review-scope.ts` (scope,
 changed-path/metadata parsing, reviewer selection), `standalone-review-model.ts`
@@ -154,7 +155,7 @@ changed-path/metadata parsing, reviewer selection), `standalone-review-model.ts`
 `standalone-review-preparation.ts` (which admits a successor only through the core's
 read-only `isPreparedStandaloneSuccessor` predicate) and `standalone-review-checkpoint.ts`.
 No module exports a membership registrar. Moved symbols are imported from their owners,
-not re-exported through the entry surfaces.
+never re-exported through a facade.
 The disposition reducer owns only its no-agent publication. Shell shared computation
 is extracted **downward** into three named lower owners — `program-result.ts`
 (dependency-free ProgramParse/FacadeDriveResult vocabulary), `standalone-evidence.ts`

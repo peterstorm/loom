@@ -48,7 +48,7 @@ import {
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
-import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review-machine";
+import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import {
   parseArtifactDigest,

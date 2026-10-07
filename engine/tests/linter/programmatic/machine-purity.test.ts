@@ -22,7 +22,8 @@ const requireFromEngine = createRequire(resolve(REPO_ROOT, "engine/package.json"
 const ACCOUNTING = "engine/src/core/defect-family-accounting.ts";
 const MACHINE_ROOT = "engine/src/machine/advance.ts";
 const PARSER = "engine/src/core/structured-test-report.ts";
-const SOURCE_AUTHORITY = "engine/src/core/standalone-review-machine.ts";
+// The Standalone Review custody core: LC-2 reducer, publication proof and source admission.
+const SOURCE_AUTHORITY = "engine/src/core/standalone-review.ts";
 
 // Exact runtime entry points, NOT package-prefix allowances. Updates require re-audit.
 const SAX_ENTRY = requireFromEngine.resolve("saxes");
@@ -268,13 +269,13 @@ const IMPURE_PROBES = [
   'import { isDeepStrictEqual, debuglog } from "node:util";',
 ] as const;
 
-// The modules granted named deterministic hashing. standalone-review.ts and
-// panel-program.ts left this list when their hashing moved into digest.ts; both
-// stay in DEFAULT_PURE_MODULES, so the shipped-default-rule case still audits them.
+// The modules granted named deterministic hashing. standalone-review.ts (the
+// source authority) and panel-program.ts left this list when their hashing moved
+// into digest.ts; both stay in DEFAULT_PURE_MODULES, so the shipped-default-rule
+// case still audits them.
 const HASH_MODULES = [
   "engine/src/core/review-packet.ts",
   "engine/src/core/digest.ts",
-  SOURCE_AUTHORITY,
   "engine/src/core/parse-spec.ts",
   "engine/src/core/orchestration-contract/bytes.ts",
   "engine/src/core/orchestration-contract/publication.ts",
@@ -287,7 +288,7 @@ describe("functional core — executable purity closure", () => {
     expect(auditClosure(DEFAULT_PURE_MODULES).errors).toEqual([]);
     const audit = auditClosure([ACCOUNTING]);
     expect(audit.errors).toEqual([]);
-    for (const required of [SOURCE_AUTHORITY, PARSER, "engine/src/core/standalone-review.ts",
+    for (const required of [SOURCE_AUTHORITY, PARSER,
       "engine/src/core/orchestration-contract/index.ts", "engine/src/core/completion-suite.ts",
       "engine/src/core/verification-manifest.ts", "engine/src/types.ts", ...HASH_MODULES, ...SAX_RUNTIME.keys()]) {
       expect(audit.visited, `walk must reach ${required}`).toContain(required);
@@ -318,7 +319,7 @@ describe("functional core — executable purity closure", () => {
 
   it("declares each hashing module once and keeps the former hashers on the pure list", () => {
     expect(new Set(HASH_MODULES).size).toBe(HASH_MODULES.length);
-    expect(DEFAULT_PURE_MODULES).toEqual(expect.arrayContaining(["engine/src/core/standalone-review.ts", "engine/src/core/panel-program.ts"]));
+    expect(DEFAULT_PURE_MODULES).toEqual(expect.arrayContaining([SOURCE_AUTHORITY, "engine/src/core/panel-program.ts"]));
   });
 
   it.each([ACCOUNTING, ...HASH_MODULES])("%s allows only named deterministic hashing", (mod) => {
@@ -429,7 +430,7 @@ describe("audited reviewer runtime closure", () => {
       .toMatchObject([{ line: 131, text: "str += chars[Math.floor(Math.random() * chars.length)];" }]);
   });
 
-  it.each([CONTRACT, LINEAGE_CONTRACT, CODEC, "engine/src/core/standalone-lineage.ts", "engine/src/core/standalone-successor-reviewer.ts", "engine/src/core/context-packets.ts"].flatMap((mod) =>
+  it.each([CONTRACT, LINEAGE_CONTRACT, CODEC, SOURCE_AUTHORITY, "engine/src/core/standalone-successor-reviewer.ts", "engine/src/core/context-packets.ts"].flatMap((mod) =>
     [...IMPURE_PROBES, 'import "zod";', 'import "zod/v4/core";', 'import "zod/v4/other";', 'import "jsonc-parser/lib/umd/main.js";', 'import "jsonc-parser-extra";',
       ...([CONTRACT, LINEAGE_CONTRACT].includes(mod) ? ['import "jsonc-parser";'] : ['import "zod/v4";']),
       ...(mod === CODEC ? [] : ['import "jsonc-parser";'])].map((probe) => [mod, probe] as const),

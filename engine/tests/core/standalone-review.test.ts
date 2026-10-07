@@ -34,6 +34,12 @@ import {
   proveStandaloneRosterCompletion,
   parseStandaloneRosterCompletionProof,
   type StandaloneRosterCompletionProof,
+  STANDALONE_REVIEW_DECLARED_TRANSITIONS,
+  isDeclaredStandaloneReviewTransition,
+  parseAuthoritativeStandaloneReviewResult,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineEvent,
 } from "../../src/core/standalone-review";
 import {
   bindStandaloneCaptureAuthority,
@@ -56,14 +62,6 @@ import {
   aggregateLegacyStandaloneReview,
   parseAdjudicatedStandaloneReview,
 } from "../../src/core/legacy-archive";
-import {
-  STANDALONE_REVIEW_DECLARED_TRANSITIONS,
-  isDeclaredStandaloneReviewTransition,
-  parseAuthoritativeStandaloneReviewResult,
-  reduceStandaloneReviewMachine,
-  startStandaloneReviewMachine,
-  type StandaloneReviewMachineEvent,
-} from "../../src/core/standalone-review-machine";
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, type StandaloneRefutationCompletionReceipt } from "../../src/core/standalone-refutation-completion";
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
 import { prepareStandaloneReviewHarnessCapture } from "../../src/handlers/helpers/standalone-review";

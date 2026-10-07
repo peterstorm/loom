@@ -17,7 +17,7 @@ export async function startNativeLegacyReview(handle: RunDirHandle, issueRoute: 
   const standaloneRequests = await import("../../src/handlers/helpers/programs/standalone-requests");
   const publication = await import("../../src/handlers/helpers/programs/request-publication");
   const history = await import("./standalone-reviewer-protocol");
-  const machine = await import("../../src/core/standalone-review-machine");
+  const machine = await import("../../src/core/standalone-review");
   const checkpoint = await import("../../src/core/standalone-review-checkpoint");
   const scope = ["src/repair.mjs", "src/types.ts", "README.md"];
   const head = changedPaths.gitText(["rev-parse", "HEAD"], "refuse");

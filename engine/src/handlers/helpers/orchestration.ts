@@ -191,7 +191,7 @@ import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import { REMEDIATION_EVENT_RESOURCE_POLICY } from "./programs/remediation-events";
 import { parseStandaloneDispositionStartBytes } from "../../core/standalone-disposition-machine";
 import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from "../../core/standalone-lineage-contract";
-import { projectStandaloneLineageSource } from "../../core/standalone-lineage";
+import { projectStandaloneLineageSource } from "../../core/standalone-review";
 import { type StandaloneDispositionSelection } from "../../core/standalone-review-model";
 import { readAuthenticatedStandaloneLineageSource } from "./programs/standalone-source";
 import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFacade,

@@ -30,7 +30,7 @@ import {
   isAuthoritativeStandaloneReviewResult,
   readStandaloneReviewPublication,
   type AuthoritativeStandaloneReviewResult,
-} from "./standalone-review-machine";
+} from "./standalone-review";
 import { parseFindingId as parseCanonicalFindingId, parseStoredFindings, type Finding, type FindingId, type RefutedFinding } from "./findings";
 import { STANDALONE_LINEAGE_LIMITS } from "./standalone-lineage-contract";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
