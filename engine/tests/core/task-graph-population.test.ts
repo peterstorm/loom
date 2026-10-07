@@ -96,6 +96,7 @@ const command = (overrides: Partial<TaskGraphPopulationCommand> = {}): TaskGraph
   specIndex,
   observedSpecFile: "spec.md",
   force: false,
+  proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
   ...overrides,
 });
 
@@ -152,6 +153,7 @@ describe("populateTaskGraph aggregate command", () => {
     const result = populateTaskGraph(graph(), command({
       tasks: roster([authoredTask("T1", 1), authoredTask("T2", 2, ["AS-001"])]),
       proofBoundary: {
+        kind: "captured",
         baselines: new Map([
           ["T1", gitBaseline("src/T1.ts", parsedDigest.value)],
           ["T2", missingBaseline("src/T2.ts")],
@@ -162,6 +164,7 @@ describe("populateTaskGraph aggregate command", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.value.state.proof_boundary_observation).toEqual({ kind: "captured", revision: populationRevision });
     const [first, second] = result.value.state.tasks;
     // The boundary always predates the Task's production (INV-DF1): captured at
     // the population revision, BEFORE any work exists.
@@ -192,6 +195,8 @@ describe("populateTaskGraph aggregate command", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    // The absence and its cause persist on the graph, not only in the shell's notice.
+    expect(result.value.state.proof_boundary_observation).toEqual({ kind: "absent", cause: "fixture: no Git repository root" });
     const task = result.value.state.tasks[0]!;
     expect(task).not.toHaveProperty("artifact_baseline");
     expect(task).not.toHaveProperty("start_sha");

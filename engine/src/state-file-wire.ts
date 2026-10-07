@@ -70,6 +70,7 @@ import {
   type SpecIndexObservation,
 } from "./core/requirement-coverage";
 import { parseStoredSpecCheck } from "./core/spec-check";
+import { parseProofBoundaryObservation, type ProofBoundaryObservation } from "./core/proof-boundary-observation";
 import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wave-gate-model";
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
@@ -2115,6 +2116,7 @@ type ParsedTaskGraphParts = Readonly<{
   waveGates: Readonly<Record<string, unknown>>;
   specCheck: SpecCheck | undefined;
   specIndexObservation: SpecIndexObservation | undefined;
+  proofBoundaryObservation: ProofBoundaryObservation | undefined;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
 }>;
@@ -2157,6 +2159,9 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(parts.specIndexObservation === undefined
       ? {}
       : { spec_index_observation: parts.specIndexObservation }),
+    ...(parts.proofBoundaryObservation === undefined
+      ? {}
+      : { proof_boundary_observation: parts.proofBoundaryObservation }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
     ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
@@ -2170,7 +2175,8 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
 
 function parseTaskGraphDocumentFields(
   obj: Record<string, unknown>,
-): ParseResult<Pick<ParsedTaskGraphParts, "phaseArtifacts" | "skippedPhases" | "specIndexObservation">> {
+): ParseResult<Pick<ParsedTaskGraphParts,
+  "phaseArtifacts" | "skippedPhases" | "specIndexObservation" | "proofBoundaryObservation">> {
   const lifecycleErrors = taskGraphLifecycleErrors(obj);
   if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
   const phaseArtifacts = Object.freeze({ ...(obj.phase_artifacts as Record<string, string>) });
@@ -2185,7 +2191,19 @@ function parseTaskGraphDocumentFields(
       specIndexObservationPath(specIndexObservation.value) !== (obj.spec_file ?? null)) {
     return parseErr("spec_index_observation path must match protected spec_file authority");
   }
-  return parseOk({ phaseArtifacts, skippedPhases, specIndexObservation: specIndexObservation.value });
+  // Legacy graphs predate the observation; absence stays absent (unknown).
+  const proofBoundaryObservation = obj.proof_boundary_observation === undefined
+    ? undefined
+    : parseProofBoundaryObservation(obj.proof_boundary_observation);
+  if (proofBoundaryObservation !== undefined && !proofBoundaryObservation.ok) {
+    return parseErr(proofBoundaryObservation.error);
+  }
+  return parseOk({
+    phaseArtifacts,
+    skippedPhases,
+    specIndexObservation: specIndexObservation.value,
+    proofBoundaryObservation: proofBoundaryObservation?.value,
+  });
 }
 
 /**

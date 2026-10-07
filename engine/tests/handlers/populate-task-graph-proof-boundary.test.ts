@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -83,33 +84,45 @@ const decompose = (planFile: string): string => JSON.stringify({
 
 const populatedTask = (statePath: string) =>
   (JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).tasks[0];
+const persistedObservation = (statePath: string) =>
+  (JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph).proof_boundary_observation;
 
 describe("populate-task-graph proof boundary", () => {
-  it("reports an absent boundary and its cause in the population result", async () => {
-    const { planFile } = project(false);
+  it("reports an absent boundary and its cause in the population result and the persisted graph", async () => {
+    const { planFile, statePath } = project(false);
     const result = await populate(decompose(planFile), []);
     expect(result.kind).toBe("passthrough");
     if (result.kind !== "passthrough") return;
     expect(result.systemMessage).toContain("Task proof boundaries NOT captured: no Git repository root");
     expect(result.systemMessage).toContain("each Task's first dispatch stamps its own boundary");
+    expect(persistedObservation(statePath)).toMatchObject({
+      kind: "absent",
+      cause: expect.stringContaining("no Git repository root"),
+    });
   });
 
-  it("captures the boundary in a repository and reports no absence", async () => {
-    const { planFile, statePath } = project(true);
+  it("captures the boundary in a repository, persists its revision and reports no absence", async () => {
+    const { dir, planFile, statePath } = project(true);
     const result = await populate(decompose(planFile), []);
     expect(result.kind).toBe("passthrough");
     if (result.kind !== "passthrough") return;
     expect(result.systemMessage).not.toContain("NOT captured");
-    expect(populatedTask(statePath)).toBeDefined();
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf-8" }).trim();
+    expect(persistedObservation(statePath)).toEqual({ kind: "captured", revision: head });
+    expect(populatedTask(statePath)?.start_sha).toBe(head);
   });
 
-  it("degrades an unreadable capture source to an absent boundary it reports", async () => {
-    const { planFile } = project(true);
+  it("degrades an unreadable capture source to an absent boundary it reports and persists", async () => {
+    const { planFile, statePath } = project(true);
     capture.failure = new Error("declared artifact src/other.ts is unreadable");
     const result = await populate(decompose(planFile), []);
     expect(result.kind).toBe("passthrough");
     if (result.kind !== "passthrough") return;
     expect(result.systemMessage).toContain("Task proof boundaries NOT captured: declared artifact src/other.ts is unreadable");
+    expect(persistedObservation(statePath)).toEqual({
+      kind: "absent",
+      cause: "declared artifact src/other.ts is unreadable",
+    });
   });
 
   it.each([

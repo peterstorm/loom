@@ -29,6 +29,7 @@ import { observeSpecIndex } from "../../orchestration/spec-index-observation";
 import { specIndexUnavailableMessage } from "../../core/requirement-coverage";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-artifact-snapshot";
 import { observeExactHead } from "../../utils/git";
+import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -207,16 +208,11 @@ function prepareVerificationManifest(
     : { ok: false, error: `${manifestPath} is invalid: ${parsed.error.errors.join("; ")}` };
 }
 
-/** The population-time proof boundary captured from GIT, or an honest absence.
- *  Absent is a distinct fact from captured: the degraded case leaves the first
- *  dispatch stamping its own boundary instead of inventing one here, and its
- *  cause is reported in the population result so the weaker boundary stays
- *  visible to the operator. */
-type PreparedProofBoundary =
-  | Readonly<{ kind: "captured"; boundary: PopulationProofBoundary }>
-  | Readonly<{ kind: "absent"; cause: string }>;
-
-const proofBoundaryAbsent = (cause: string): PreparedProofBoundary => Object.freeze({ kind: "absent", cause });
+/** Absent is a distinct fact from captured: the degraded case leaves the first
+ *  dispatch stamping its own boundary instead of inventing one here, and the
+ *  graph persists its cause as `proof_boundary_observation`, which the
+ *  population result renders so the weaker boundary stays visible. */
+const proofBoundaryAbsent = (cause: string): PopulationProofBoundary => Object.freeze({ kind: "absent", cause });
 
 /** An unreadable Git object or declared artifact, which baseline capture
  *  reports as a plain `Error` (including a failed `git` child) — as opposed to
@@ -236,7 +232,7 @@ const isUnreadableCaptureSource = (error: unknown): error is Error =>
 function captureProofBoundary(
   repositoryRoot: CanonicalGitRootObservation,
   tasks: readonly [AuthoredTask, ...AuthoredTask[]],
-): PreparedProofBoundary {
+): PopulationProofBoundary {
   if (repositoryRoot.kind !== "repository") {
     return proofBoundaryAbsent(`no Git repository root: ${repositoryRoot.cause}`);
   }
@@ -245,13 +241,11 @@ function captureProofBoundary(
   try {
     return Object.freeze({
       kind: "captured",
-      boundary: Object.freeze({
-        baselines: new Map(tasks.map((task) => [
-          task.id,
-          captureDeclaredArtifactBaselineAtRevision(repositoryRoot.root, head.headSha, task.file_list),
-        ])),
-        revision: head.headSha,
-      }),
+      baselines: new Map(tasks.map((task) => [
+        task.id,
+        captureDeclaredArtifactBaselineAtRevision(repositoryRoot.root, head.headSha, task.file_list),
+      ])),
+      revision: head.headSha,
     });
   } catch (error) {
     if (!isUnreadableCaptureSource(error)) throw error;
@@ -456,7 +450,7 @@ const handler: HookHandler = async (stdin, args) => {
     force,
     ...(issue === undefined ? {} : { issue }),
     ...(repo === undefined ? {} : { repo }),
-    ...(proofBoundary.kind === "captured" ? { proofBoundary: proofBoundary.boundary } : {}),
+    proofBoundary,
   });
   const preflight = populateTaskGraph(existingState, command);
   if (!preflight.ok) return { kind: "error", message: preflight.error.message };
@@ -476,9 +470,9 @@ const handler: HookHandler = async (stdin, args) => {
 
   const taskCount = decompose.tasks.length;
   process.stderr.write(`Task graph populated: ${taskCount} tasks, waves: ${applied.value.waves.join(", ")}\n`);
-  const boundaryNotice = proofBoundary.kind === "absent"
-    ? `Task proof boundaries NOT captured: ${proofBoundary.cause}; each Task's first dispatch stamps its own boundary.`
-    : null;
+  // Rendered from the persisted observation, the one record later readers see.
+  const observation = applied.value.state.proof_boundary_observation;
+  const boundaryNotice = observation === undefined ? null : renderProofBoundaryNotice(observation);
   if (boundaryNotice !== null) process.stderr.write(`${boundaryNotice}\n`);
 
   return {

@@ -26,6 +26,7 @@ import type {
 import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./core/verification-manifest";
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
+import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 import type {
@@ -1065,6 +1066,9 @@ export interface TaskGraph {
    * Tasks and Requirement Content Hashes were populated. Absent on legacy
    * graphs; never contains the derived ParsedSpec itself. */
   readonly spec_index_observation?: SpecIndexObservation;
+  /** Whether population captured every Task's proof boundary from Git, or the
+   * cause it could not. Absent on legacy graphs, which means unknown. */
+  readonly proof_boundary_observation?: ProofBoundaryObservation;
   readonly plan_file: string | null;
   readonly plan_title?: string;
   /** `readonly` for the same reason `Task.findings` is: every producer already
