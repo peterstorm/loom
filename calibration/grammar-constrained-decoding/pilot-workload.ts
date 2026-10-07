@@ -1,6 +1,14 @@
 /**
- * The pilot's fixed workload — PURE: fixture parsing, matched prompt
- * rendering, request identity and the deterministic rubric assessor.
+ * The pilot's fixed workload — PURE: fixture parsing, case-input resolution,
+ * request identity and matched prompt rendering.
+ *
+ * Case inputs are cell-indexed: a preregistered case's `source` resolves,
+ * against the corpus and the fixture file, to the one input its cell can
+ * render — a corpus revision snapshot for a reviewer cell, a judge fixture for
+ * the judge cell, a refutation fixture for the refutation cell. A source that
+ * names a missing case or a fixture of another cell is refused at resolution,
+ * before anything is dispatched, so a mismatched input is unrepresentable
+ * past this seam.
  *
  * Matched requests (AD-11): both arms of a pair receive byte-identical task
  * bodies (same source snapshot, same schema, same rubric, same seed-free
@@ -19,26 +27,15 @@ import {
 } from "../../engine/src/core/reviewer-contract";
 import { renderReviewerWireInstructions } from "../../engine/src/core/reviewer-protocol";
 import { emissionToolPrimaryInstruction } from "../../engine/src/core/spawn-admission";
-import { EMISSION_TOOL_SPECS, type IssuedEmissionBinding } from "../../engine/src/core/emission-tool";
-import {
-  matchCalibrationFindings,
-  type CalibrationCase,
-  type CalibrationPrediction,
-} from "../../engine/src/core/model-calibration";
-import {
-  contentDigest,
-  type CellKey,
-  type EscapedDefect,
-  type PilotArm,
-  type Result,
-  type WorkloadCase,
-} from "./pilot-core";
+import type { IssuedEmissionBinding } from "../../engine/src/core/emission-tool";
+import type { CalibrationCase } from "../../engine/src/core/model-calibration";
+import { err, ok, type Result } from "../kernel";
+import type { Preregistration } from "./pilot-preregistration";
+import { contentDigest, hex64, parserOf, PILOT_CELLS, text, type CellKey, type DeepReadonly, type PilotArm } from "./pilot-vocabulary";
 
 // ---------------------------------------------------------------------------
 // Fixture file (content-addressed by the preregistration)
 // ---------------------------------------------------------------------------
-
-const text = z.string().min(1);
 
 const judgeFixtureSchema = z.object({
   kind: z.literal("judge-verdict"),
@@ -69,38 +66,104 @@ const fixtureFileSchema = z.object({
   reviewer: z.object({
     corpus: text,
     /** The issued standalone-successor context the v3 cell supplies (no prior findings). */
-    v3Context: z.object({ lineageDigest: z.string().regex(/^[0-9a-f]{64}$/), snapshotDigest: z.string().regex(/^[0-9a-f]{64}$/) }).strict(),
+    v3Context: z.object({ lineageDigest: hex64, snapshotDigest: hex64 }).strict(),
   }).strict(),
   fixtures: z.record(z.string(), z.discriminatedUnion("kind", [judgeFixtureSchema, refutationFixtureSchema])),
 }).strict();
 
-export type WorkloadFixtures = Readonly<z.infer<typeof fixtureFileSchema>>;
-export type JudgeFixture = Readonly<z.infer<typeof judgeFixtureSchema>>;
-export type RefutationFixture = Readonly<z.infer<typeof refutationFixtureSchema>>;
+export type WorkloadFixtures = DeepReadonly<z.infer<typeof fixtureFileSchema>>;
+export type JudgeFixture = DeepReadonly<z.infer<typeof judgeFixtureSchema>>;
+export type RefutationFixture = DeepReadonly<z.infer<typeof refutationFixtureSchema>>;
 
-export function parseWorkloadFixtures(raw: unknown): Result<WorkloadFixtures, readonly string[]> {
-  const parsed = fixtureFileSchema.safeParse(raw);
-  return parsed.success
-    ? { ok: true, value: parsed.data }
-    : { ok: false, error: parsed.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`) };
-}
+export const parseWorkloadFixtures: (raw: unknown) => Result<WorkloadFixtures, readonly string[]> = parserOf(fixtureFileSchema);
 
 // ---------------------------------------------------------------------------
-// Case sources
+// Case inputs (cell-indexed)
 // ---------------------------------------------------------------------------
 
-/** A resolved case input: a corpus revision snapshot (reviewer cells) or a fixture. */
+export type ReviewerCell = "reviewer-payload/v2" | "reviewer-payload/v3";
+
+/** A resolved case input, indexed by the one cell it can feed. */
 export type CaseInput =
-  | Readonly<{ kind: "corpus"; corpusCase: CalibrationCase; changedPaths: readonly string[] }>
-  | Readonly<{ kind: "judge"; fixture: JudgeFixture }>
-  | Readonly<{ kind: "refutation"; fixture: RefutationFixture }>;
+  | Readonly<{ cell: ReviewerCell; corpusCase: CalibrationCase; changedPaths: readonly string[] }>
+  | Readonly<{ cell: "judge-verdict/v1"; fixture: JudgeFixture }>
+  | Readonly<{ cell: "refutation-verdict/v1"; fixture: RefutationFixture }>;
+
+/** The key of one preregistered case's resolved input: `<cell>|<caseId>`. */
+export const caseInputKey = (cell: CellKey, caseId: string): string => `${cell}|${caseId}`;
+
+/** The revision-derived changed-path scope of a corpus snapshot (git in the shell, a constant in tests). */
+export type ChangedPathsOf = (revision: string) => readonly string[];
 
 /** Parse a case's `source` pointer: `corpus:<case id>` or `fixture:<fixture id>`. */
 export function parseCaseSource(source: string): Result<Readonly<{ kind: "corpus" | "fixture"; id: string }>, string> {
   const found = /^(corpus|fixture):(.+)$/.exec(source);
   return found?.[1] !== undefined && found[2] !== undefined
-    ? { ok: true, value: { kind: found[1] as "corpus" | "fixture", id: found[2] } }
-    : { ok: false, error: `case source ${JSON.stringify(source)} is neither corpus:<id> nor fixture:<id>` };
+    ? ok({ kind: found[1] as "corpus" | "fixture", id: found[2] })
+    : err(`case source ${JSON.stringify(source)} is neither corpus:<id> nor fixture:<id>`);
+}
+
+/** Resolve one case's `source` to the input its cell can render, or why it cannot. */
+export function resolveCaseInput(
+  cell: CellKey,
+  source: string,
+  corpus: ReadonlyMap<string, CalibrationCase>,
+  fixtures: WorkloadFixtures,
+  changedPathsOf: ChangedPathsOf,
+): Result<CaseInput, string> {
+  const parsed = parseCaseSource(source);
+  if (!parsed.ok) return parsed;
+  const { kind, id } = parsed.value;
+  const corpusCase = (reviewerCell: ReviewerCell): Result<CaseInput, string> => {
+    if (kind !== "corpus") return err(`case source ${source} is not a corpus case, which cell ${cell} needs`);
+    const found = corpus.get(id);
+    return found === undefined
+      ? err(`corpus case ${id} is not in the corpus`)
+      : ok(Object.freeze({ cell: reviewerCell, corpusCase: found, changedPaths: changedPathsOf(found.revision) }));
+  };
+  const fixture = (): Result<WorkloadFixtures["fixtures"][string], string> => {
+    if (kind !== "fixture") return err(`case source ${source} is not a workload fixture, which cell ${cell} needs`);
+    const found = fixtures.fixtures[id];
+    return found === undefined ? err(`workload fixture ${id} is not in the fixture file`) : ok(found);
+  };
+  return match(cell)
+    .with("reviewer-payload/v2", "reviewer-payload/v3", corpusCase)
+    .with("judge-verdict/v1", (judgeCell): Result<CaseInput, string> => {
+      const found = fixture();
+      if (!found.ok) return found;
+      return found.value.kind === "judge-verdict"
+        ? ok(Object.freeze({ cell: judgeCell, fixture: found.value }))
+        : err(`workload fixture ${id} is a ${found.value.kind} fixture, which cannot feed cell ${cell}`);
+    })
+    .with("refutation-verdict/v1", (refutationCell): Result<CaseInput, string> => {
+      const found = fixture();
+      if (!found.ok) return found;
+      return found.value.kind === "refutation-verdict"
+        ? ok(Object.freeze({ cell: refutationCell, fixture: found.value }))
+        : err(`workload fixture ${id} is a ${found.value.kind} fixture, which cannot feed cell ${cell}`);
+    })
+    .exhaustive();
+}
+
+/** Every preregistered case's input, keyed by `caseInputKey`, or every case
+ *  that cannot be resolved — refused before any window opens. */
+export function resolveWindowInputs(
+  prereg: Preregistration,
+  fixtures: WorkloadFixtures,
+  corpusCases: readonly CalibrationCase[],
+  changedPathsOf: ChangedPathsOf,
+): Result<ReadonlyMap<string, CaseInput>, readonly string[]> {
+  const corpus = new Map(corpusCases.map((entry) => [entry.id, entry] as const));
+  const inputs = new Map<string, CaseInput>();
+  const problems: string[] = [];
+  for (const cell of prereg.cells) {
+    for (const entry of cell.workload.cases) {
+      const resolved = resolveCaseInput(cell.cell, entry.source, corpus, fixtures, changedPathsOf);
+      if (resolved.ok) inputs.set(caseInputKey(cell.cell, entry.caseId), resolved.value);
+      else problems.push(`${cell.cell} case ${entry.caseId}: ${resolved.error}`);
+    }
+  }
+  return problems.length > 0 ? err(Object.freeze(problems)) : ok(inputs);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,24 +177,6 @@ export function pilotRequestId(windowId: string, pairId: string, arm: PilotArm, 
   return `cal-${contentDigest(`${windowId}\0${pairId}`).slice(0, 16)}-${armCode}-a${attempt}`;
 }
 
-export const CELL_PRODUCER = {
-  "reviewer-payload/v2": { kind: "reviewer-payload", version: "v2" },
-  "reviewer-payload/v3": { kind: "reviewer-payload", version: "v3" },
-  "judge-verdict/v1": { kind: "judge-verdict", version: "v1" },
-  "refutation-verdict/v1": { kind: "refutation-verdict", version: "v1" },
-} as const satisfies Readonly<Record<CellKey, Readonly<{ kind: keyof typeof EMISSION_TOOL_SPECS; version: "v1" | "v2" | "v3" }>>>;
-
-/** The frozen schema bytes of a cell — read from the registry, never restated. */
-export function cellSchemaBytes(cell: CellKey): string {
-  const producer = CELL_PRODUCER[cell];
-  const versions: Readonly<Partial<Record<string, Readonly<{ schemaBytes: string }>>>> = EMISSION_TOOL_SPECS[producer.kind].schemaVersions;
-  const entry = versions[producer.version];
-  // Constructor invariant: every CELL_PRODUCER pair is a registry cell (the
-  // contract suite and the preflight digest check both re-prove it).
-  if (entry === undefined) throw new Error(`frozen registry carries no ${cell} cell`);
-  return entry.schemaBytes;
-}
-
 // ---------------------------------------------------------------------------
 // Prompt rendering (matched across arms)
 // ---------------------------------------------------------------------------
@@ -143,20 +188,19 @@ export type WireRoute =
 const VERDICT_FINAL_MESSAGE_CONTRACT =
   "Emit exactly one JSON object conforming to the verdict schema above. No other final output.";
 
-/** The task body shared byte-for-byte by both arms of a pair. */
-export function renderTaskBody(cell: CellKey, input: CaseInput, fixtures: WorkloadFixtures): Result<string, string> {
-  const schema = cellSchemaBytes(cell);
-  const ok = (value: string): Result<string, never> => ({ ok: true, value });
-  return match([cell, input] as const)
-    .with(["reviewer-payload/v2", { kind: "corpus" }], ([, corpus]) => ok(reviewerBody(corpus, schema, null)))
-    .with(["reviewer-payload/v3", { kind: "corpus" }], ([, corpus]) => ok(reviewerBody(corpus, schema, fixtures.reviewer.v3Context)))
-    .with(["judge-verdict/v1", { kind: "judge" }], ([, judge]) => ok(judgeBody(judge.fixture, schema)))
-    .with(["refutation-verdict/v1", { kind: "refutation" }], ([, refutation]) => ok(refutationBody(refutation.fixture, schema)))
-    .otherwise((): Result<string, string> => ({ ok: false, error: `case input ${input.kind} cannot feed cell ${cell}` }));
+/** The task body shared byte-for-byte by both arms of a pair: the input's cell decides it. */
+export function renderTaskBody(input: CaseInput, fixtures: WorkloadFixtures): string {
+  const schema = PILOT_CELLS[input.cell].schemaBytes;
+  return match(input)
+    .with({ cell: "reviewer-payload/v2" }, (corpus) => reviewerBody(corpus, schema, null))
+    .with({ cell: "reviewer-payload/v3" }, (corpus) => reviewerBody(corpus, schema, fixtures.reviewer.v3Context))
+    .with({ cell: "judge-verdict/v1" }, (judge) => judgeBody(judge.fixture, schema))
+    .with({ cell: "refutation-verdict/v1" }, (refutation) => refutationBody(refutation.fixture, schema))
+    .exhaustive();
 }
 
 function reviewerBody(
-  input: Extract<CaseInput, { kind: "corpus" }>,
+  input: Extract<CaseInput, { cell: ReviewerCell }>,
   schema: string,
   v3: WorkloadFixtures["reviewer"]["v3Context"] | null,
 ): string {
@@ -227,7 +271,7 @@ function refutationBody(fixture: RefutationFixture, schema: string): string {
 
 /** The wire section — the ONLY difference between the arms of a pair. */
 function renderWireSection(cell: CellKey, route: WireRoute): string {
-  const reviewer = cell === "reviewer-payload/v2" || cell === "reviewer-payload/v3";
+  const reviewer = PILOT_CELLS[cell].kind === "reviewer-payload";
   return match(route)
     .with({ arm: "emission-enabled" }, ({ binding }) => reviewer
       ? renderReviewerWireInstructions({ kind: "emission", toolName: binding.toolName })
@@ -240,86 +284,4 @@ function renderWireSection(cell: CellKey, route: WireRoute): string {
 
 export function renderPilotPrompt(body: string, cell: CellKey, route: WireRoute): string {
   return `${body}\n\n## Output\n\n${renderWireSection(cell, route)}\n`;
-}
-
-// ---------------------------------------------------------------------------
-// The deterministic rubric assessor (one of the blinded assessors)
-// ---------------------------------------------------------------------------
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** Reviewer payload findings as calibration predictions (v2 and v3 share the finding fields). */
-function reviewerPredictions(payload: unknown): readonly CalibrationPrediction[] {
-  if (!isRecord(payload) || !Array.isArray(payload["findings"])) return [];
-  return payload["findings"].flatMap((finding): CalibrationPrediction[] =>
-    isRecord(finding) && typeof finding["claim"] === "string"
-      ? [{
-          claim: finding["claim"],
-          file: typeof finding["file"] === "string" ? finding["file"] : null,
-          line: typeof finding["line"] === "number" ? finding["line"] : null,
-        }]
-      : []);
-}
-
-/**
- * Escaped known defects in ONE accepted payload, each resolved to its
- * preregistered severity. Fails closed: an escaped defect id the case does
- * not declare, or a judge ranking that cannot be compared, is an error
- * naming it — never dropped, so a lookup drift or an unscorable ranking can
- * never read as fewer escapes.
- */
-export function rubricEscapes(workloadCase: WorkloadCase, input: CaseInput, payload: unknown): Result<readonly EscapedDefect[], string> {
-  const escaped = escapedDefectIds(input, payload);
-  if (!escaped.ok) return { ok: false, error: `case ${workloadCase.caseId}: ${escaped.error}` };
-  const known = new Map(workloadCase.knownDefects.map((defect) => [defect.defectId, defect] as const));
-  const escapes: EscapedDefect[] = [];
-  const unknown: string[] = [];
-  for (const defectId of escaped.value) {
-    const defect = known.get(defectId);
-    if (defect === undefined) unknown.push(JSON.stringify(defectId));
-    else escapes.push(Object.freeze({ defectId, severity: defect.severity }));
-  }
-  return unknown.length > 0
-    ? { ok: false, error: `case ${workloadCase.caseId} declares no known defect ${unknown.join(", ")}` }
-    : { ok: true, value: Object.freeze(escapes) };
-}
-
-/**
- * The defect ids ONE accepted payload lets escape, by the same rule for both
- * arms (the assessor never sees the arm). Reviewer cells reuse the corpus
- * match rules (`matchCalibrationFindings`); a judge escape is a planted fatal
- * flaw that is not named or that scores at least as high as every sound
- * candidate; a refutation escape is a real defect verdicted `refuted`
- * (`uncertain` counts toward neither side, as in the tally). A named planted
- * flaw whose ranking cannot be compared — its own or a sound candidate's
- * score is not a number — is an error, never read as "not escaped".
- */
-function escapedDefectIds(input: CaseInput, payload: unknown): Result<readonly string[], string> {
-  const escaped = (ids: readonly string[]): Result<readonly string[], never> => ({ ok: true, value: ids });
-  return match(input)
-    .with({ kind: "corpus" }, ({ corpusCase }) => {
-      if (corpusCase.state !== "vulnerable") return escaped([]);
-      const matching = matchCalibrationFindings(corpusCase.expectedCriticals, reviewerPredictions(payload));
-      return escaped(matching.missedExpectations.map((expectation) => expectation.id));
-    })
-    .with({ kind: "judge" }, ({ fixture }): Result<readonly string[], string> => {
-      const rankings = isRecord(payload) && Array.isArray(payload["rankings"]) ? payload["rankings"].filter(isRecord) : [];
-      const flawed = rankings.find((ranking) => ranking["candidate"] === fixture.plantedFlaw.candidate);
-      if (flawed === undefined || flawed["fatal_flaw"] === null) return escaped([fixture.plantedFlaw.defectId]);
-      const unscored = rankings.filter((ranking) => typeof ranking["score"] !== "number").map((ranking) => JSON.stringify(ranking["candidate"]));
-      if (unscored.length > 0) {
-        return { ok: false, error: `the judge ranking of candidate(s) ${unscored.join(", ")} carries no numeric score, so the planted flaw cannot be ranked` };
-      }
-      const score = (ranking: Readonly<Record<string, unknown>>): number => Number(ranking["score"]);
-      const others = rankings.filter((ranking) => ranking["candidate"] !== fixture.plantedFlaw.candidate);
-      return escaped(others.every((other) => score(flawed) >= score(other)) ? [fixture.plantedFlaw.defectId] : []);
-    })
-    .with({ kind: "refutation" }, ({ fixture }) => {
-      if (fixture.groundTruth.kind !== "real-defect") return escaped([]);
-      const verdicts = isRecord(payload) && Array.isArray(payload["verdicts"]) ? payload["verdicts"].filter(isRecord) : [];
-      const entry = verdicts.find((verdict) => verdict["finding_id"] === fixture.finding.findingId);
-      return escaped(entry === undefined || entry["verdict"] === "refuted" ? [fixture.groundTruth.defectId] : []);
-    })
-    .exhaustive();
 }

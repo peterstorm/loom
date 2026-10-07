@@ -1,24 +1,30 @@
 /**
- * Test fixtures shared by the pilot's shell-level suites: the retained
- * workload with its resolved case inputs, and a fake route — a plain
- * `ArmDispatch` function and a fake clock wired into the window dispatch path
- * (`pilot-window.ts`) exactly where the script wires the live Pi adapter.
+ * Test fixtures shared by the pilot's suites: the retained workload with its
+ * case inputs resolved by the PRODUCTION resolver (`resolveWindowInputs`,
+ * with a constant changed-path lookup in place of git), sample builders over
+ * the observation parser, and a fake route — a plain `ArmDispatch` function
+ * and a fake clock wired into the window dispatch path (`pilot-window.ts`)
+ * exactly where `recordWindow` wires the live Pi adapter.
  */
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-contract";
 import { parseCalibrationCorpus, type CalibrationCase } from "../../engine/src/core/model-calibration";
+import type { ArmDispatch, ArmRequest } from "./pilot-dispatch";
 import {
-  parsePreregistration,
+  parseSampleObservation,
   type AttemptObservation,
   type ExtractionArmAttempt,
-  type PreflightDecision,
-  type Preregistration,
-} from "./pilot-core";
-import type { ArmDispatch, ArmRequest } from "./pilot-dispatch";
-import { parseCaseSource, parseWorkloadFixtures, type CaseInput, type WorkloadFixtures } from "./pilot-workload";
-import { caseInputKey, dispatchSchedule, type SampleRecord } from "./pilot-window";
+  type SampleObservation,
+} from "./pilot-observation";
+import type { PreflightDecision } from "./pilot-preflight";
+import { buildPairSchedule, parsePreregistration, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
+import type { WindowWorkload } from "./pilot-retention";
+import type { CellKey, PilotArm } from "./pilot-vocabulary";
+import { dispatchSchedule, type SampleRecord } from "./pilot-window";
+import { parseWorkloadFixtures, resolveWindowInputs, type CaseInput, type WorkloadFixtures } from "./pilot-workload";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(HERE, "../..");
@@ -30,35 +36,85 @@ export const READY: PreflightDecision = {
   runtime: { stagedRuntimeRevision: "sha256:abc", loadedRuntime: { kind: "unobserved" }, piVersion: "0.83.0" },
 };
 
+export const preregBytes = readFileSync(join(HERE, "preregistration.json"));
+export const fixtureBytes = readFileSync(join(HERE, "workload-fixtures.json"));
+
 function retainedWorkload(): Readonly<{ prereg: Preregistration; fixtures: WorkloadFixtures; cases: readonly CalibrationCase[] }> {
-  const prereg = parsePreregistration(JSON.parse(readFileSync(join(HERE, "preregistration.json"), "utf-8")));
+  const prereg = parsePreregistration(JSON.parse(preregBytes.toString("utf-8")));
   if (!prereg.ok) throw new Error(prereg.error.join("\n"));
-  const fixtures = parseWorkloadFixtures(JSON.parse(readFileSync(join(HERE, "workload-fixtures.json"), "utf-8")));
+  const fixtures = parseWorkloadFixtures(JSON.parse(fixtureBytes.toString("utf-8")));
   if (!fixtures.ok) throw new Error(fixtures.error.join("\n"));
   const corpus = parseCalibrationCorpus(readFileSync(join(REPO_ROOT, fixtures.value.reviewer.corpus), "utf-8"));
   if (!corpus.ok) throw new Error(corpus.errors.join("\n"));
   return { prereg: prereg.value, fixtures: fixtures.value, cases: corpus.value.cases };
 }
 
-/** Case inputs as the script resolves them, minus the git-derived changed paths. */
-function caseInput(source: string, cases: readonly CalibrationCase[], fixtures: WorkloadFixtures): CaseInput {
-  const parsed = parseCaseSource(source);
-  if (!parsed.ok) throw new Error(parsed.error);
-  const { kind, id } = parsed.value;
-  if (kind === "corpus") {
-    const corpusCase = cases.find((entry) => entry.id === id);
-    if (corpusCase === undefined) throw new Error(`corpus case ${id} missing`);
-    return { kind: "corpus", corpusCase, changedPaths: [] };
-  }
-  const fixture = fixtures.fixtures[id];
-  if (fixture === undefined) throw new Error(`fixture ${id} missing`);
-  return fixture.kind === "judge-verdict" ? { kind: "judge", fixture } : { kind: "refutation", fixture };
-}
-
 const workload = retainedWorkload();
 export const { prereg, fixtures } = workload;
-export const inputs: ReadonlyMap<string, CaseInput> = new Map(prereg.cells.flatMap((cell) => cell.workload.cases.map((entry) =>
-  [caseInputKey(cell.cell, entry.caseId), caseInput(entry.source, workload.cases, fixtures)] as const)));
+export const corpusCases: readonly CalibrationCase[] = workload.cases;
+
+/** The window workload `recordWindow` resolves, with no git-derived changed paths. */
+export const WORKLOAD: WindowWorkload = { fixtures, corpusCases, changedPathsOf: () => [] };
+
+const resolved = resolveWindowInputs(prereg, fixtures, corpusCases, WORKLOAD.changedPathsOf);
+if (!resolved.ok) throw new Error(resolved.error.join("\n"));
+export const inputs: ReadonlyMap<string, CaseInput> = resolved.value;
+
+/** A test preregistration: the retained one, optionally with every cell (but
+ *  `unconstrained`, which keeps the retained unconstrained qualification)
+ *  qualified as a capable (constrained) route and a cheaper bootstrap. */
+export function testPreregistration(options: Readonly<{ constrained?: boolean; extractionOnly?: CellKey; unconstrained?: CellKey }> = {}): Preregistration {
+  const raw = JSON.parse(preregBytes.toString("utf-8")) as { guardrails: { bootstrapResamples: number }; cells: Array<{ cell: string; qualification: unknown }> };
+  raw.guardrails.bootstrapResamples = 200;
+  for (const cell of raw.cells) {
+    if (options.constrained && options.unconstrained !== cell.cell) {
+      cell.qualification = { kind: "constrained-emission", enforcedConstraints: ["type", "required", "enum", "additionalProperties"], evidence: "test" };
+    }
+    if (options.extractionOnly === cell.cell) {
+      cell.qualification = { kind: "extraction-only", reason: "route rejects the schema", evidence: "test" };
+    }
+  }
+  const parsed = parsePreregistration(raw);
+  if (!parsed.ok) throw new Error(parsed.error.join("\n"));
+  return parsed.value;
+}
+
+export type AttemptSpec = Readonly<{
+  outcome: Record<string, unknown>;
+  emissionCalls?: number;
+  toolErrors?: readonly Record<string, unknown>[];
+}>;
+
+export const ACCEPT_EMISSION: AttemptSpec = { outcome: { kind: "accepted", source: "emission-tool", fallbackOverRefusal: false, payloadDigest: "a".repeat(64) }, emissionCalls: 1 };
+export const ACCEPT_EXTRACTION: AttemptSpec = { outcome: { kind: "accepted", source: "extraction", fallbackOverRefusal: false, payloadDigest: "b".repeat(64) } };
+
+/** One arm's sample of a scheduled pair, built through the observation parser. */
+export function sample(pair: ScheduledPair, arm: PilotArm, ms: number, attempts: readonly AttemptSpec[]): SampleObservation {
+  const parsed = parseSampleObservation({
+    pairId: pair.pairId,
+    cell: pair.cell,
+    caseId: pair.caseId,
+    arm,
+    dispatchToIngestionMs: ms,
+    attempts: attempts.map((spec, index) => ({
+      attempt: index + 1,
+      elapsedMs: ms / attempts.length,
+      readinessMs: arm === "emission-enabled" ? 50 : null,
+      modelRequests: 1 + (spec.toolErrors?.length ?? 0),
+      emissionCalls: spec.emissionCalls ?? 0,
+      toolErrors: spec.toolErrors ?? [],
+      toolAcknowledged: spec.outcome["source"] === "emission-tool",
+      followUpTurnsAfterAck: 0,
+      outcome: spec.outcome,
+    })),
+    rawArgumentObservation: "unavailable",
+  });
+  if (!parsed.ok) throw new Error(parsed.error.join("\n"));
+  return parsed.value;
+}
+
+/** The first scheduled pair of the retained preregistration. */
+export const firstPair = (): ScheduledPair => buildPairSchedule(prereg)[0] as ScheduledPair;
 
 type Outcome = AttemptObservation["outcome"];
 export type Script = (request: ArmRequest) => Outcome;
@@ -73,8 +129,31 @@ export const accepted = (request: ArmRequest): Outcome => ({
 export const REJECTED: Outcome = { kind: "rejected", cause: { kind: "extraction-failure", detail: "final message carried no JSON" } };
 export const TIMEOUT: Outcome = { kind: "timeout", afterMs: ATTEMPT_MS };
 
+/**
+ * A canonical payload each cell's frozen parser accepts, which lets every
+ * known defect escape: a reviewer payload with no findings, a judge verdict
+ * that names no fatal flaw, a refutation verdict that refutes the finding.
+ */
+function acceptedPayloadFor(cell: CellKey): unknown {
+  switch (cell) {
+    case "reviewer-payload/v2":
+      return { ...REVIEWER_PAYLOAD_EXAMPLE_V2, findings: [] };
+    case "reviewer-payload/v3":
+      return {
+        schemaVersion: 3, kind: "standalone-successor-review",
+        lineageDigest: fixtures.reviewer.v3Context.lineageDigest, snapshotDigest: fixtures.reviewer.v3Context.snapshotDigest,
+        priorAssessments: [], findings: [],
+      };
+    case "judge-verdict/v1":
+      return { criterion: "correctness", rankings: [{ candidate: "a.md", score: 7, fatal_flaw: null, strongest_idea: "reuse the budget" }] };
+    case "refutation-verdict/v1":
+      return { criterion: "correctness", verdicts: [{ finding_id: "f1", verdict: "refuted", reasoning: "the guard holds" }] };
+  }
+}
+
 /** A route substitute: every attempt advances the fake clock by ATTEMPT_MS,
- *  is recorded, and settles with the scripted outcome. */
+ *  is recorded, and settles with the scripted outcome (an accepted one
+ *  carrying its cell's canonical payload). */
 export function fakeRoute(script: Script): FakeRoute {
   const requests: ArmRequest[] = [];
   let clock = 0;
@@ -82,7 +161,7 @@ export function fakeRoute(script: Script): FakeRoute {
     requests.push(request);
     clock += ATTEMPT_MS;
     const outcome = script(request);
-    const acceptedPayload = outcome.kind === "accepted" ? { findings: [], nonce: requests.length } : null;
+    const acceptedPayload = outcome.kind === "accepted" ? acceptedPayloadFor(request.cell) : null;
     const observation: AttemptObservation = request.arm === "emission-enabled"
       ? {
           attempt: request.attempt, elapsedMs: ATTEMPT_MS, readinessMs: 5, modelRequests: 1, emissionCalls: 1, toolErrors: [],
@@ -99,7 +178,7 @@ export function fakeRoute(script: Script): FakeRoute {
   return { dispatch, now: () => clock, requests };
 }
 
-/** The window dispatch path the script runs, over a fake route. */
+/** The window dispatch path `recordWindow` runs, over a fake route. */
 export async function runWindow(route: FakeRoute, onSample: (record: SampleRecord) => void = () => {}) {
   const landed: SampleRecord[] = [];
   const progress: string[] = [];

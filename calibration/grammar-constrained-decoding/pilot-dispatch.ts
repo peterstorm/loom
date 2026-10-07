@@ -28,12 +28,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { match } from "ts-pattern";
-import {
-  EMISSION_TOOL_SPECS,
-  issueEmissionBinding,
-  type EmissionToolSpec,
-  type IssuedEmissionBindingOf,
-} from "../../engine/src/core/emission-tool";
+import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../engine/src/core/emission-tool";
 import { observeEmissionCalls, parseFinalPayload } from "../../engine/src/core/harness-capture";
 import { selectCanonicalPayload, selectVerdictSource } from "../../engine/src/core/emission-ingestion";
 import { parseContextDigest } from "../../engine/src/core/orchestration-contract/identity";
@@ -45,19 +40,17 @@ import {
   LOOM_EMISSION_BINDING_ENV,
   parseReadinessStageObservation,
 } from "../../pi/emission-tool";
+import { err, ok, type Result } from "../kernel";
+import { piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine } from "../pi-json-stream";
 import {
   classifyEmissionToolError,
-  contentDigest,
   type AttemptObservation,
-  type CellKey,
   type EmissionArmAttempt,
   type ExtractionArmAttempt,
-  type PilotArm,
   type RejectionCause,
-  type Result,
   type ToolError,
-} from "./pilot-core";
-import { CELL_PRODUCER } from "./pilot-workload";
+} from "./pilot-observation";
+import { contentDigest, PILOT_CELLS, type CellKey, type PilotArm } from "./pilot-vocabulary";
 
 // ---------------------------------------------------------------------------
 // Issued binding per cell (path-refined, minted by the engine's one mint)
@@ -71,18 +64,18 @@ export type CellBinding =
  *  context digest is the content address of the exact prompt the child gets. */
 export function mintCellBinding(cell: CellKey, requestId: string, prompt: string): Result<CellBinding, string> {
   const contextDigest = parseContextDigest(contentDigest(prompt));
-  if (!contextDigest.ok) return { ok: false, error: contextDigest.error.message };
-  const producer = CELL_PRODUCER[cell];
+  if (!contextDigest.ok) return err(contextDigest.error.message);
+  const producer = PILOT_CELLS[cell];
   if (producer.kind === "reviewer-payload") {
     const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: producer.version });
     return minted.ok
-      ? { ok: true, value: Object.freeze({ path: "reviewer" as const, binding: minted.value, contextDigest: contextDigest.value }) }
-      : { ok: false, error: minted.error.message };
+      ? ok(Object.freeze({ path: "reviewer" as const, binding: minted.value, contextDigest: contextDigest.value }))
+      : err(minted.error.message);
   }
   const minted = issueEmissionBinding({ requestId, kind: producer.kind, version: producer.version });
   return minted.ok
-    ? { ok: true, value: Object.freeze({ path: "verdict" as const, binding: minted.value, contextDigest: contextDigest.value }) }
-    : { ok: false, error: minted.error.message };
+    ? ok(Object.freeze({ path: "verdict" as const, binding: minted.value, contextDigest: contextDigest.value }))
+    : err(minted.error.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,10 +101,6 @@ export type AttemptClassification = Readonly<{
 
 type Rec = Readonly<Record<string, unknown>>;
 const isRecord = (value: unknown): value is Rec => typeof value === "object" && value !== null && !Array.isArray(value);
-const textOf = (content: unknown): string =>
-  Array.isArray(content)
-    ? content.filter(isRecord).filter((block) => block["type"] === "text").map((block) => String(block["text"] ?? "")).join("")
-    : typeof content === "string" ? content : "";
 
 const encoder = new TextEncoder();
 
@@ -206,16 +195,12 @@ function ingest<S extends AcceptedSource>(
   cell: CellKey,
   decision: Accepted<S>,
 ): Result<Readonly<{ outcome: Readonly<{ kind: "accepted" } & S & { payloadDigest: string }>; payload: unknown }>, PayloadRefused> {
-  const producer = CELL_PRODUCER[cell];
-  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[producer.kind];
-  const parser = spec.schemaVersions[producer.version];
-  if (parser === undefined) return { ok: false, error: { kind: "payload-refused", detail: `frozen registry carries no ${cell} parser` } };
-  const parsed = parser.parsePayload(decision.bytes);
-  if (!parsed.ok) return { ok: false, error: { kind: "payload-refused", detail: `${parsed.error.code}: ${parsed.error.message}` } };
+  const parsed = PILOT_CELLS[cell].parsePayload(decision.bytes);
+  if (!parsed.ok) return err({ kind: "payload-refused", detail: `${parsed.error.code}: ${parsed.error.message}` });
   const outcome = Object.freeze<{ kind: "accepted" } & S & { payloadDigest: string }>({
     kind: "accepted", ...decision.selection, payloadDigest: contentDigest(JSON.stringify(parsed.value)),
   });
-  return { ok: true, value: Object.freeze({ outcome, payload: parsed.value }) };
+  return ok(Object.freeze({ outcome, payload: parsed.value }));
 }
 
 /** A settled attempt's outcome: the frozen parser's accepted payload, or the
@@ -262,7 +247,7 @@ function emissionCounters(toolName: string, records: readonly Rec[], assistantIn
     .filter(({ message }) => message["role"] === "toolResult" && message["toolName"] === toolName);
   const toolErrors: ToolError[] = emissionResults
     .filter(({ message }) => message["isError"] === true)
-    .map(({ message }) => classifyEmissionToolError(textOf(message["content"])));
+    .map(({ message }) => classifyEmissionToolError(piContentText(message["content"])));
   const firstAck = emissionResults.find(({ message }) => message["isError"] === false);
   return {
     emissionCalls: callIds.size,
@@ -531,10 +516,12 @@ function killProcessGroup(child: ChildProcess): void {
   }
 }
 
+/** The extraction arm reads the launcher's print-mode JSON stream line by line
+ *  as it arrives (`pi-json-stream.ts`), keeping only what each line yields; a
+ *  stream with any malformed line is an infrastructure failure of the attempt. */
 async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest): Promise<AttemptClassification> {
   const started = performance.now();
-  const messages: unknown[] = [];
-  const malformed: string[] = [];
+  const decoded: PiJsonLine[] = [];
   const launch = await new Promise<ExtractionLaunchEnd>((resolve) => {
     const child = spawn(config.piCommand, [
       "--mode", "json", "-p", "--no-session", "-ne", "-e", stagedExtension(config),
@@ -544,16 +531,13 @@ async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest)
     ], { cwd: config.repoRoot, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     let buffer = "";
     let stderr = "";
+    let lineNumber = 0;
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; killProcessGroup(child); }, config.timeoutMs);
     const consume = (line: string): void => {
-      if (!line.trim()) return;
-      try {
-        const event: unknown = JSON.parse(line);
-        if (isRecord(event) && event["type"] === "message_end" && isRecord(event["message"])) messages.push(event["message"]);
-      } catch (error) {
-        malformed.push(error instanceof Error ? error.message : String(error));
-      }
+      lineNumber += 1;
+      const read = readPiJsonLine(line, lineNumber);
+      if (read.kind !== "ignored") decoded.push(read);
     };
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf-8");
@@ -569,15 +553,17 @@ async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest)
     child.on("close", (code) => {
       clearTimeout(timer);
       consume(buffer);
+      const stream = settlePiJsonStream(decoded);
       if (timedOut) resolve({ kind: "timeout", afterMs: config.timeoutMs });
       else if (code !== 0) resolve({ kind: "infrastructure-failure", reason: stderr.trim() || `pi exited ${code}` });
-      else if (malformed.length > 0) resolve({ kind: "infrastructure-failure", reason: `Pi JSON stream contained ${malformed.length} malformed line(s): ${malformed.join("; ")}` });
+      else if (!stream.ok) resolve({ kind: "infrastructure-failure", reason: stream.error });
       else resolve({ kind: "settled" });
     });
   });
   return classifyAttemptTranscript({
-    arm: "extraction-only", cell: request.cell, cellBinding: request.cellBinding, messages, attempt: request.attempt,
-    elapsedMs: performance.now() - started, launch,
+    arm: "extraction-only", cell: request.cell, cellBinding: request.cellBinding,
+    messages: decoded.flatMap((line) => (line.kind === "message" ? [line.message] : [])),
+    attempt: request.attempt, elapsedMs: performance.now() - started, launch,
   });
 }
 

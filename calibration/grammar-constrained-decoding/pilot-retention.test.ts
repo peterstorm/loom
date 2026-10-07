@@ -1,14 +1,10 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import {
-  contentDigest,
-  decidePreflight,
-  type PreflightFacts,
-  type Preregistration,
-  type Result,
-} from "./pilot-core";
+import type { Result } from "../kernel";
+import { decidePreflight, type PreflightFacts } from "./pilot-preflight";
+import type { Preregistration } from "./pilot-preregistration";
 import {
   checkPreregistrationUnchanged,
   decideRetainedWindow,
@@ -16,6 +12,7 @@ import {
   parseObservationLog,
   parsePreregistrationFile,
   parseRetainedWindow,
+  pilotWindowId,
   planDispatch,
   recordWindow,
   retentionStep,
@@ -23,9 +20,11 @@ import {
   type DecisionOutcome,
   type LoadedPreregistration,
   type WindowRecord,
+  type WindowRun,
   type WindowStore,
 } from "./pilot-retention";
-import { accepted, fakeRoute, HERE, inputs, prereg, READY, runWindow } from "./pilot-test-fixtures";
+import { accepted, ATTEMPT_MS, fakeRoute, HERE, prereg, READY, REPO_ROOT, runWindow, WORKLOAD, type FakeRoute } from "./pilot-test-fixtures";
+import { contentDigest } from "./pilot-vocabulary";
 
 /**
  * The retention rules of one AD-11 window (AS-017), pinned at the
@@ -93,14 +92,20 @@ const decided = (result: Result<DecisionOutcome, string>): Extract<DecisionOutco
 
 const json = (store: MemoryStore, name: string): Record<string, unknown> => JSON.parse(store.files.get(name) ?? "null");
 
+/** A `--pilot` run over a store, dispatching through a route (by default one that must never be reached). */
+const windowRun = (store: MemoryStore, record: WindowRecord, overrides: Partial<WindowRun> = {}, route?: FakeRoute): WindowRun => ({
+  store, record, preregistration: LOADED, workload: WORKLOAD,
+  dispatch: route?.dispatch ?? (() => { throw new Error("a window that does not dispatch never reaches the route"); }),
+  monotonicNow: route?.now ?? (() => { throw new Error("a window that does not dispatch reads no monotonic clock"); }),
+  onPair: () => {},
+  externalAssessments: [], now: clock,
+  ...overrides,
+});
+
 /** A blocked window as `--pilot` leaves it. */
 async function blockedWindow(): Promise<MemoryStore> {
   const store = memoryStore();
-  decided(await recordWindow({
-    store, record: windowRecord(false), preregistration: LOADED,
-    dispatch: () => { throw new Error("a blocked preflight never dispatches"); },
-    externalAssessments: [], now: clock,
-  }));
+  decided(await recordWindow(windowRun(store, windowRecord(false))));
   return store;
 }
 
@@ -186,34 +191,63 @@ describe("recordWindow (--pilot)", () => {
     const store = await blockedWindow();
     const before = new Map(store.files);
     const writes = store.writes.length;
-    const again = await recordWindow({
-      store, record: windowRecord(false), preregistration: LOADED,
-      dispatch: () => { throw new Error("unreachable"); }, externalAssessments: [], now: clock,
-    });
+    const again = await recordWindow(windowRun(store, windowRecord(false)));
     expect(again).toEqual({ ok: false, error: "window mem:/window/ already exists; a retained window is never overwritten" });
     expect(store.writes).toHaveLength(writes);
     expect(store.files).toEqual(before);
   });
 
-  it("persists every sample as it lands and closes the window with its observation count", async () => {
+  it("runs the matched dispatch over the port and clock it is given, persisting each sample as it lands", async () => {
     const store = memoryStore();
-    const persistedAtLanding: number[] = [];
-    const outcome = await recordWindow({
-      store, record: windowRecord(true), preregistration: LOADED,
-      dispatch: async (persist) => {
-        const { records } = await runWindow(fakeRoute(accepted), (record) => {
-          persist(record);
-          persistedAtLanding.push((store.files.get(WINDOW_FILES.observations) ?? "").trim().split("\n").length);
-        });
-        return { records, inputs };
+    const route = fakeRoute(accepted);
+    // Each dispatch sees how many observations were persisted before it.
+    const persistedAtDispatch: number[] = [];
+    const counted: FakeRoute = {
+      ...route,
+      dispatch: async (request) => {
+        persistedAtDispatch.push((store.files.get(WINDOW_FILES.observations) ?? "").split("\n").filter(Boolean).length);
+        return route.dispatch(request);
       },
-      externalAssessments: [], now: clock,
-    });
-    decided(outcome);
+    };
+    const progress: string[] = [];
+    decided(await recordWindow(windowRun(store, windowRecord(true), { onPair: (index, total) => { progress.push(`${index + 1}/${total}`); } }, counted)));
     const lines = (store.files.get(WINDOW_FILES.observations) ?? "").trim().split("\n");
-    expect(persistedAtLanding).toEqual(lines.map((_line, index) => index + 1));
-    expect((store.files.get(WINDOW_FILES.payloads) ?? "").trim().split("\n")).toHaveLength(lines.length);
+    // The fake route answers every attempt at once: attempt n sees the n-1 samples before it persisted.
+    expect(persistedAtDispatch).toEqual(lines.map((_line, index) => index));
+    expect(route.requests).toHaveLength(lines.length);
+    expect(progress).toHaveLength(lines.length / 2);
+    const samples = lines.map((line) => JSON.parse(line) as { pairId: string; arm: string; dispatchToIngestionMs: number });
+    // The window's sample timing is read from the injected monotonic clock.
+    expect(samples.every((entry) => entry.dispatchToIngestionMs === ATTEMPT_MS)).toBe(true);
+    const payloads = (store.files.get(WINDOW_FILES.payloads) ?? "").trim().split("\n").map((line) => JSON.parse(line) as { pairId: string; arm: string });
+    expect(payloads.map(({ pairId, arm }) => `${pairId}|${arm}`)).toEqual(samples.map(({ pairId, arm }) => `${pairId}|${arm}`));
     expect(json(store, WINDOW_FILES.window)["observations"]).toBe(lines.length);
+    // The rubric read every case input the window resolved: every accepted sample is blinded and scored.
+    expect((json(store, "assessments/rubric-v1.json")["entries"] as unknown[]).length).toBe(lines.length);
+  });
+
+  it("refuses a window whose case inputs do not resolve before writing anything", async () => {
+    const store = memoryStore();
+    const [first, ...rest] = prereg.cells;
+    if (first === undefined) throw new Error("the preregistration has no cell");
+    const [broken, ...cases] = first.workload.cases;
+    if (broken === undefined) throw new Error(`${first.cell} has no case`);
+    const unresolvable: Preregistration = { ...prereg, cells: [{ ...first, workload: { ...first.workload, cases: [{ ...broken, source: "corpus:gone" }, ...cases] } }, ...rest] };
+    const route = fakeRoute(accepted);
+    const outcome = await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: unresolvable } }, route));
+    expect(outcome).toEqual({
+      ok: false,
+      error: `window test-window cannot dispatch: its preregistered case inputs do not resolve:\n  - ${first.cell} case ${broken.caseId}: corpus case gone is not in the corpus`,
+    });
+    expect(store.writes).toEqual([]);
+    expect(route.requests).toHaveLength(0);
+    // A window that will not dispatch never resolves its inputs.
+    decided(await recordWindow(windowRun(memoryStore(), windowRecord(false), { preregistration: { ...LOADED, prereg: unresolvable } })));
+  });
+
+  it("names a window by its preregistration id and a path-safe start time", () => {
+    expect(pilotWindowId("gcd-ad11-pilot-1", "2026-10-03T09:23:39.047Z")).toBe("gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z");
+    expect(readdirSync(join(HERE, "windows")).every((id) => id.startsWith(`${prereg.id}--`) && !/[:.]/.test(id))).toBe(true);
   });
 
   it("records how a window ended even when the rubric cannot assess it (key and packet kept, no rubric file, no decision)", async () => {
@@ -225,18 +259,11 @@ describe("recordWindow (--pilot)", () => {
         workload: { ...cell.workload, cases: cell.workload.cases.map((entry) => ({ ...entry, knownDefects: [] })) },
       })),
     };
-    let samples = 0;
-    const outcome = await recordWindow({
-      store, record: windowRecord(true), preregistration: { ...LOADED, prereg: undeclared },
-      dispatch: async (persist) => {
-        const { records } = await runWindow(fakeRoute(accepted), persist);
-        samples = records.length;
-        return { records, inputs };
-      },
-      externalAssessments: [], now: clock,
-    });
+    const route = fakeRoute(accepted);
+    const outcome = await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: undeclared } }, route));
     expect(outcome).toMatchObject({ ok: false, error: expect.stringMatching(/^the rubric assessor cannot assess window test-window:/) });
     const window = json(store, WINDOW_FILES.window);
+    const samples = route.requests.length;
     expect(samples).toBeGreaterThan(0);
     expect(window["observations"]).toBe(samples);
     expect(typeof window["endedAt"]).toBe("string");
@@ -307,6 +334,31 @@ describe("decideRetainedWindow (--decide)", () => {
     expect(store.writes).toHaveLength(writes);
     expect(store.files.get(WINDOW_FILES.decision)).toBe(decisionBefore);
     expect(store.files.get(WINDOW_FILES.decisionLog)).toBe(logBefore);
+  });
+
+  it("re-decides every retained window to exactly its retained decision and cells", () => {
+    const loadRetained = (path: string): Result<LoadedPreregistration, string> => {
+      const parsed = parsePreregistrationFile(readFileSync(join(REPO_ROOT, path)), path);
+      return parsed.ok ? { ok: true, value: { ref: { path, digest: parsed.value.digest, id: parsed.value.prereg.id }, prereg: parsed.value.prereg } } : parsed;
+    };
+    const windows = readdirSync(join(HERE, "windows"));
+    expect(windows.length).toBeGreaterThan(0);
+    for (const id of windows) {
+      const dir = join(HERE, "windows", id);
+      const files = new Map<string, string>();
+      for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+        if (entry.isFile()) {
+          const path = join(entry.parentPath, entry.name);
+          files.set(path.slice(dir.length + 1), readFileSync(path, "utf-8"));
+        }
+      }
+      const retained = JSON.parse(files.get(WINDOW_FILES.decision) ?? "null") as { decision: unknown; cells: unknown };
+      const store = memoryStore(files);
+      decided(decideRetainedWindow({ store, loadPreregistration: loadRetained, externalAssessments: [], now: clock }));
+      const fresh = json(store, WINDOW_FILES.decision);
+      expect(JSON.stringify(fresh["decision"]), id).toBe(JSON.stringify(retained.decision));
+      expect(JSON.stringify(fresh["cells"]), id).toBe(JSON.stringify(retained.cells));
+    }
   });
 
   it("refuses a window whose observation log is corrupt", async () => {

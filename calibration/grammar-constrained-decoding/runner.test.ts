@@ -3,16 +3,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  buildPairSchedule,
-  evaluatePilot,
-  parseBlindingKey,
-  parseQualityAssessment,
-  type Preregistration,
-} from "./pilot-core";
+import { evaluatePilot } from "./pilot-core";
 import type { ArmRequest } from "./pilot-dispatch";
-import { pilotRequestId, renderTaskBody, rubricEscapes, type CaseInput } from "./pilot-workload";
-import { blind, blindedPacket, caseInputKey, dispatchSchedule, rubricAssessment } from "./pilot-window";
+import { buildPairSchedule } from "./pilot-preregistration";
+import { parseBlindingKey, parseQualityAssessment } from "./pilot-quality";
+import { rubricAssessment } from "./pilot-rubric";
+import { caseInputKey, pilotRequestId, renderTaskBody, type CaseInput } from "./pilot-workload";
+import { blind, blindedPacket, dispatchSchedule } from "./pilot-window";
 import {
   accepted,
   ATTEMPT_MS,
@@ -39,11 +36,16 @@ import {
  *   refusal. The retention rules behind them are pinned directly at the
  *   `WindowStore` port in pilot-retention.test.ts;
  * - against a fake route (pilot-test-fixtures.ts) wired into the window
- *   dispatch path the script runs (`pilot-window.ts`): the matched-arm
+ *   dispatch path `recordWindow` runs (`pilot-window.ts`): the matched-arm
  *   dispatch, the attempt-2 retry budget, the blinding key / packet and the
  *   rubric assessor wiring, and the fail-closed aborts on a missing input or
- *   an inconsistent recorded sample. Transcript classification is covered in
- *   pilot.test.ts, the live Pi adapter in pilot-dispatch.test.ts.
+ *   an inconsistent recorded sample. `recordWindow`'s own wiring of the
+ *   dispatch port, the clock and the per-sample persistence is pinned in
+ *   pilot-retention.test.ts, the rubric in pilot-rubric.test.ts, and the live
+ *   Pi adapter with its transcript classification in pilot-dispatch.test.ts.
+ *   What stays untested is only the script's construction of the live
+ *   adapters themselves (`piArmDispatch`, `performance.now`, git's
+ *   changed-path lookup, the filesystem store), which needs a model route.
  */
 
 const temps: string[] = [];
@@ -146,11 +148,7 @@ const inputOf = (cell: ArmRequest["cell"], caseId: string): CaseInput => {
   return input;
 };
 
-const taskBody = (cell: ArmRequest["cell"], caseId: string): string => {
-  const body = renderTaskBody(cell, inputOf(cell, caseId), fixtures);
-  if (!body.ok) throw new Error(body.error);
-  return body.value;
-};
+const taskBody = (cell: ArmRequest["cell"], caseId: string): string => renderTaskBody(inputOf(cell, caseId), fixtures);
 
 describe("run-model-calibration --pilot dispatch path against a fake route", () => {
   it("dispatches each scheduled pair once per arm, in scheduled order, over the same task body", async () => {
@@ -248,13 +246,7 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     if (!rubric.ok) throw new Error(rubric.error.join("; "));
     expect(rubric.value).toMatchObject({ assessorId: "rubric-v1", blinded: true });
     expect(rubric.value.entries.map((entry) => entry.blindId)).toEqual(blinded.key.entries.map((entry) => entry.blindId));
-    blinded.entries.forEach((entry, index) => {
-      const workloadCase = prereg.cells.find((cell) => cell.cell === entry.cell)?.workload.cases.find((item) => item.caseId === entry.caseId);
-      if (workloadCase === undefined) throw new Error(`${entry.cell} ${entry.caseId} is not preregistered`);
-      const escapes = rubricEscapes(workloadCase, inputOf(entry.cell, entry.caseId), entry.payload);
-      expect(escapes.ok).toBe(true);
-      expect(rubric.value.entries[index]?.escapedDefects).toEqual(escapes.ok ? [...escapes.value] : null);
-    });
+    expect(rubric.value.entries.some((entry) => entry.escapedDefects.length > 0)).toBe(true);
 
     const evaluated = evaluatePilot({
       preregistration: prereg, preflight: READY, observations: records.map((record) => record.sample),
@@ -298,45 +290,4 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     });
   });
 
-  describe("fails closed on an unresolvable entry — never zero escapes", () => {
-    const blindedWindow = async () => blind(WINDOW_ID, (await runWindow(fakeRoute(accepted))).records).entries;
-
-    it("refuses an entry whose case is not preregistered", async () => {
-      const [first, ...rest] = await blindedWindow();
-      if (first === undefined) throw new Error("the window blinded no entry");
-      const assessed = rubricAssessment(prereg, [{ ...first, caseId: "not-preregistered" }, ...rest], inputs);
-      expect(assessed).toEqual({ ok: false, error: [expect.stringContaining(`${first.blindId} (${first.cell} case not-preregistered): the case is not preregistered`)] });
-    });
-
-    it("refuses an entry whose case has no resolved input", async () => {
-      const entries = await blindedWindow();
-      const [first] = entries;
-      if (first === undefined) throw new Error("the window blinded no entry");
-      const missing = new Map([...inputs].filter(([key]) => key !== caseInputKey(first.cell, first.caseId)));
-      const assessed = rubricAssessment(prereg, entries, missing);
-      expect(assessed.ok).toBe(false);
-      expect(assessed.ok ? [] : assessed.error).toContainEqual(expect.stringContaining(`${first.blindId} (${first.cell} case ${first.caseId}): no resolved input`));
-    });
-
-    it("refuses an escaped defect id the case does not declare, naming every such entry", async () => {
-      const entries = await blindedWindow();
-      const undeclared: Preregistration = {
-        ...prereg,
-        cells: prereg.cells.map((cell) => ({
-          ...cell,
-          workload: { ...cell.workload, cases: cell.workload.cases.map((entry) => ({ ...entry, knownDefects: [] })) },
-        })),
-      };
-      const declared = rubricAssessment(prereg, entries, inputs);
-      if (!declared.ok) throw new Error(declared.error.join("; "));
-      const escaping = declared.value.entries.filter((entry) => entry.escapedDefects.length > 0);
-      expect(escaping.length).toBeGreaterThan(0);
-
-      const assessed = rubricAssessment(undeclared, entries, inputs);
-      expect(assessed.ok).toBe(false);
-      const problems = assessed.ok ? [] : assessed.error;
-      expect(problems).toHaveLength(escaping.length);
-      for (const entry of escaping) expect(problems).toContainEqual(expect.stringMatching(new RegExp(`${entry.blindId} .*declares no known defect`)));
-    });
-  });
 });

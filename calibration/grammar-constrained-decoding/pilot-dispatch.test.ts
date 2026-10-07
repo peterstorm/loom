@@ -2,9 +2,12 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-contract";
 import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE, LOOM_EMISSION_BINDING_ENV } from "../../pi/emission-tool";
-import { parseSampleObservation, type AttemptObservation, type PilotArm } from "./pilot-core";
+import { parseSampleObservation, type AttemptObservation } from "./pilot-observation";
+import { contentDigest, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import {
+  classifyAttemptTranscript,
   importRpcLauncher,
   mintCellBinding,
   piArmDispatch,
@@ -27,6 +30,9 @@ import { pilotRequestId } from "./pilot-workload";
  *   bound readiness entry through the loom-owned gate, the route bind and
  *   re-observation) and then streams a scripted transcript;
  * - extraction-only: a fake `pi` executable printing a scripted JSON stream.
+ *
+ * The adapter's pure half, transcript classification through the engine's own
+ * selection kernel, is pinned directly at the end.
  */
 
 const CELL = "judge-verdict/v1" as const;
@@ -258,7 +264,16 @@ describe("piArmDispatch extraction-only arm (print-mode JSON child)", () => {
 
   it("is an infrastructure failure on a malformed stream line or a non-zero exit", async () => {
     const malformed = await extraction(fakePi([messageEnd(finalText(JSON.stringify(PAYLOAD))), "{not json"]));
-    expect(malformed.observation.outcome).toMatchObject({ kind: "infrastructure-failure", reason: expect.stringContaining("1 malformed line(s)") });
+    expect(malformed.observation.outcome).toMatchObject({
+      kind: "infrastructure-failure", reason: expect.stringMatching(/^Pi JSON stream contained 1 malformed line\(s\): line 2: /),
+    });
+    // The decoded messages still feed the counters of the failed attempt.
+    expect(malformed.observation.modelRequests).toBe(1);
+    // Valid JSON that is not an event object is malformed too: a dropped event could be the answer.
+    const notAnEvent = await extraction(fakePi(["42", messageEnd(finalText(JSON.stringify(PAYLOAD)))]));
+    expect(notAnEvent.observation.outcome).toEqual({
+      kind: "infrastructure-failure", reason: "Pi JSON stream contained 1 malformed line(s): line 1: not a JSON event object",
+    });
     const crashed = await extraction(fakePi([], 3));
     expect(crashed.observation.outcome).toEqual({ kind: "infrastructure-failure", reason: "stderr tail" });
     const missing = await extraction(join(tmpdir(), "no-such-pi-binary"));
@@ -272,5 +287,105 @@ describe("piArmDispatch extraction-only arm (print-mode JSON child)", () => {
     const result = await extraction(fakePi([], 0, 5), 100);
     expect(result.observation.outcome).toEqual({ kind: "timeout", afterMs: 100 });
     expect(result.observation.elapsedMs).toBeLessThan(2_000);
+  });
+});
+describe("transcript classification through the engine's own selection", () => {
+  const judgePayload = { criterion: "correctness", rankings: [{ candidate: "a.md", score: 7, fatal_flaw: null, strongest_idea: "reuse the budget" }] };
+  const cellBinding = (cell: CellKey): CellBinding => {
+    const minted = mintCellBinding(cell, pilotRequestId("w", `${cell}#c#r1`, "emission-enabled", 1), "prompt");
+    if (!minted.ok) throw new Error(minted.error);
+    return minted.value;
+  };
+  const toolCall = (id: string, name: string, args: unknown) => ({ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id, name, arguments: args }] });
+  const toolResult = (id: string, name: string, isError: boolean, text: string) => ({ role: "toolResult", toolCallId: id, toolName: name, isError, content: [{ type: "text", text }] });
+  const finalText = (text: string) => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text }] });
+  const classify = (cell: CellKey, messages: readonly unknown[], launch: Parameters<typeof classifyAttemptTranscript>[0]["launch"] = { kind: "settled" }) =>
+    classifyAttemptTranscript({ arm: "emission-enabled", cell, cellBinding: cellBinding(cell), messages, attempt: 1, elapsedMs: 1234, readinessMs: 80, launch });
+
+  it("accepts one successful emission call (tool-only completion, no final text)", () => {
+    const result = classify("judge-verdict/v1", [toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "accepted")]);
+    expect(result.observation).toMatchObject({ emissionCalls: 1, toolAcknowledged: true, followUpTurnsAfterAck: 0, modelRequests: 1, outcome: { kind: "accepted", source: "emission-tool" } });
+    expect(result.acceptedPayload).toEqual(judgePayload);
+  });
+
+  it("accepts a reviewer v2 emission and counts a follow-up turn after the acknowledgment", () => {
+    const result = classify("reviewer-payload/v2", [
+      toolCall("c1", "loom_emit_reviewer_payload", REVIEWER_PAYLOAD_EXAMPLE_V2),
+      toolResult("c1", "loom_emit_reviewer_payload", false, "accepted"),
+      finalText("done"),
+    ]);
+    expect(result.observation).toMatchObject({ followUpTurnsAfterAck: 1, outcome: { kind: "accepted", source: "emission-tool" } });
+  });
+
+  it("falls back to final-message extraction when the model never emits", () => {
+    const result = classify("judge-verdict/v1", [finalText(JSON.stringify(judgePayload))]);
+    expect(result.observation).toMatchObject({ emissionCalls: 0, outcome: { kind: "accepted", source: "extraction", fallbackOverRefusal: false } });
+  });
+
+  it("records Pi's validation re-prompt and refuses the incomplete observation (no silent recovery)", () => {
+    const result = classify("judge-verdict/v1", [
+      toolCall("c1", "loom_emit_judge_verdict", { ...judgePayload, rankings: [{ ...judgePayload.rankings[0], score: 12 }] }),
+      toolResult("c1", "loom_emit_judge_verdict", true, "Validation failed for tool \"loom_emit_judge_verdict\":\n  - score: must be <= 10"),
+      toolCall("c2", "loom_emit_judge_verdict", judgePayload),
+      toolResult("c2", "loom_emit_judge_verdict", false, "accepted"),
+    ]);
+    expect(result.observation.toolErrors).toEqual([{ class: "harness-schema-validation" }]);
+    expect(result.observation.emissionCalls).toBe(2);
+    expect(result.observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "observation-refused" } });
+  });
+
+  it("rejects two distinct successful calls as duplicate-call ambiguity, even with valid final text", () => {
+    const result = classify("judge-verdict/v1", [
+      toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "ok"),
+      toolCall("c2", "loom_emit_judge_verdict", judgePayload), toolResult("c2", "loom_emit_judge_verdict", false, "ok"),
+      finalText(JSON.stringify(judgePayload)),
+    ]);
+    expect(result.observation.outcome).toEqual({ kind: "rejected", cause: { kind: "duplicate-call", calls: 2 } });
+  });
+
+  it("rejects an unusable final message and a frozen-parser refusal separately", () => {
+    // PR #52's fail-closed admission: no final text, or two candidate text blocks, is an extraction failure.
+    expect(classify("judge-verdict/v1", []).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "extraction-failure" } });
+    expect(classify("judge-verdict/v1", [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "{}" }, { type: "text", text: "{}" }] }]).observation.outcome)
+      .toMatchObject({ kind: "rejected", cause: { kind: "extraction-failure" } });
+    // Admitted text that the frozen parser refuses is an ingestion refusal, not an extraction failure.
+    expect(classify("judge-verdict/v1", [finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+    expect(classify("judge-verdict/v1", [finalText(JSON.stringify({ criterion: "c", rankings: [{ candidate: "a", score: 12, fatal_flaw: null, strongest_idea: "x" }] }))]).observation.outcome)
+      .toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+  });
+
+  it("classifies the extraction-only arm by its final message alone, with no emission counters", () => {
+    const extraction = (messages: readonly unknown[]) => classifyAttemptTranscript({
+      arm: "extraction-only", cell: "judge-verdict/v1", cellBinding: cellBinding("judge-verdict/v1"), messages, attempt: 1, elapsedMs: 5, launch: { kind: "settled" },
+    });
+    // A call to the tool the arm was never offered is not an emission call: the baseline extracts.
+    const result = extraction([
+      toolCall("c1", "loom_emit_judge_verdict", judgePayload),
+      toolResult("c1", "loom_emit_judge_verdict", true, "Tool loom_emit_judge_verdict not found"),
+      finalText(JSON.stringify(judgePayload)),
+    ]);
+    expect(result.observation).toEqual({
+      attempt: 1, elapsedMs: 5, readinessMs: null, modelRequests: 2, emissionCalls: 0, toolErrors: [], toolAcknowledged: false, followUpTurnsAfterAck: 0,
+      outcome: { kind: "accepted", source: "extraction", fallbackOverRefusal: false, payloadDigest: contentDigest(JSON.stringify(judgePayload)) },
+    });
+    expect(extraction([]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "extraction-failure" } });
+    expect(extraction([finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+  });
+
+  it("canonicalizes an accepted payload identically for both arms, whatever the model's key order", () => {
+    const reordered = `{"rankings":[{"strongest_idea":"reuse the budget","fatal_flaw":null,"score":7,"candidate":"a.md"}],"criterion":"correctness"}`;
+    const emission = classify("judge-verdict/v1", [toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "accepted")]);
+    const extraction = classifyAttemptTranscript({
+      arm: "extraction-only", cell: "judge-verdict/v1", cellBinding: cellBinding("judge-verdict/v1"), messages: [finalText(reordered)],
+      attempt: 1, elapsedMs: 5, launch: { kind: "settled" },
+    });
+    expect(JSON.stringify(extraction.acceptedPayload)).toBe(JSON.stringify(emission.acceptedPayload));
+    expect(extraction.observation.outcome).toMatchObject({ payloadDigest: (emission.observation.outcome as { payloadDigest: string }).payloadDigest });
+  });
+
+  it("passes launch failures through as their own terminal classes", () => {
+    expect(classify("judge-verdict/v1", [], { kind: "startup-refused", reason: "readiness refused" }).observation.outcome).toEqual({ kind: "startup-refused", reason: "readiness refused" });
+    expect(classify("judge-verdict/v1", [], { kind: "timeout", afterMs: 900_000 }).observation.outcome).toEqual({ kind: "timeout", afterMs: 900_000 });
+    expect(classify("judge-verdict/v1", [], { kind: "infrastructure-failure", reason: "spawn" }).observation.outcome).toEqual({ kind: "infrastructure-failure", reason: "spawn" });
   });
 });
