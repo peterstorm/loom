@@ -3,7 +3,7 @@
  * (AD-6/AD-7, FR-001/FR-012), consumed by both shells that need it: the
  * request programs' render path (`reviewerEmissionProjection`, which renders
  * the descriptor and tool-primary instruction) and the capture runtime
- * (`resolveReviewerCaptureEmissionAuthority`, which selects against the same
+ * (`reviewerCaptureEmissionAuthority`, which selects against the same
  * binding). Each shell keeps only its read of the durable registration; the
  * eligibility predicate, the claim mint and the qualified-route decision live
  * here once, so the two sides cannot disagree about which requests are
