@@ -21,23 +21,38 @@
  * one place.
  *
  * Recording a claim, planning its release, and deriving what a failed release
- * still owes are pure and total: a claim the ledger cannot honour (a duplicate
+ * still owes are pure and total. Every claim kind obeys one refusal rule
+ * (`recordSpawnClaim`): a claim is refused as data exactly when recording it
+ * would let the ledger owe less than was taken — a duplicate roster id or
  * grant slot, an injection for a slot with no grant, a second witness run or
- * pointer lease) is refused as data rather than silently dropped or
- * overwritten. Executing the plan is one function over injected release
- * ports, so the release-and-debt state machine runs against in-memory fakes.
+ * pointer lease — rather than silently dropped or overwritten. Admission takes
+ * every claim through `claimOrCompensate`, which releases whatever a refused
+ * claim left unowned through the same plan, so no call site pairs a claim with
+ * a hand-written release. Executing a plan is one function over injected
+ * release ports, so the release-and-debt state machine runs against in-memory
+ * fakes.
  * The plan's order is the security order: capability releases (launches,
  * grants, prompt restores) first, then the witness binding, then roster
  * entries newest-first, then the pointer lease; every step runs even when an
  * earlier one fails.
  */
 
-import type { SessionTaskGraphPointerBinding } from "../engine/src/machine";
+import {
+  fsSessionRegistry,
+  rollbackSessionTaskGraphPointer,
+  type SessionTaskGraphPointerBinding,
+} from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
-import { runPiCleanupActions } from "./cleanup-actions";
-import type { PiIssuedWriteGrant, PiSpawnReservation, PiSpawnReservationItem } from "./spawn-reservation";
+import { cleanupFailureSuffix, runPiCleanupActions } from "./cleanup-actions";
+import { revokePiWriteGrant } from "./write-grant";
+import type {
+  PiIssuedWriteGrant,
+  PiSessionId,
+  PiSpawnReservation,
+  PiSpawnReservationItem,
+} from "./spawn-reservation";
 
 /** One child prompt rewritten to carry its slot's write grant, with the
  *  prompt a release restores. */
@@ -77,8 +92,15 @@ export const NO_SPAWN_CLAIMS: SpawnClaims = Object.freeze({
   witnessRun: null,
 });
 
-export const claimRosterEntry = (claims: SpawnClaims, item: PiSpawnReservationItem): SpawnClaims =>
-  Object.freeze({ ...claims, roster: Object.freeze([...claims.roster, item]) });
+/** Record a roster entry the batch is about to mark active; an entry already
+ *  claimed is refused, because releases are logged by roster id and one
+ *  removal would then discharge both claims. */
+export function claimRosterEntry(claims: SpawnClaims, item: PiSpawnReservationItem): DomainResult<SpawnClaims, string> {
+  if (claims.roster.some(({ rosterId }) => rosterId === item.rosterId)) {
+    return failure(`spawn batch already holds claimed roster entry ${item.rosterId}`);
+  }
+  return success(Object.freeze({ ...claims, roster: Object.freeze([...claims.roster, item]) }));
+}
 
 /** Record the batch's task-graph pointer lease; a second lease is refused,
  *  because the release would then owe only the later one. */
@@ -128,10 +150,65 @@ export function claimGrantInjection(claims: SpawnClaims, rewrite: SpawnPromptRew
   }));
 }
 
-/** Staging is one fact per batch (its release removes every launch the tool
- *  call staged), so recording it again changes nothing. */
+/** Staging is one fact per batch: its one release removes every launch the
+ *  tool call staged, however often it staged, so the ledger can never owe less
+ *  than was taken and recording it again is never refused and changes nothing. */
 export const claimEmissionLaunches = (claims: SpawnClaims): SpawnClaims =>
   Object.freeze({ ...claims, emissionLaunchesStaged: true });
+
+/**
+ * One capability a batch claims. Admission records a roster entry before it
+ * marks it active and a prompt rewrite before it writes the prompt; every
+ * other capability is recorded just after it is taken.
+ */
+export type SpawnClaim =
+  | Readonly<{ kind: "roster-entry"; item: PiSpawnReservationItem }>
+  | Readonly<{ kind: "pointer-lease"; pointer: SessionTaskGraphPointerBinding }>
+  | Readonly<{ kind: "witness-run"; binding: SessionRunBinding }>
+  | Readonly<{ kind: "write-grant"; grant: PiIssuedWriteGrant }>
+  | Readonly<{ kind: "grant-injection"; rewrite: SpawnPromptRewrite }>
+  | Readonly<{ kind: "emission-launches" }>;
+
+/** Record any claim under the ledger's one refusal rule: a claim is refused
+ *  exactly when recording it would let the ledger owe less than was taken. */
+export function recordSpawnClaim(claims: SpawnClaims, claim: SpawnClaim): DomainResult<SpawnClaims, string> {
+  switch (claim.kind) {
+    case "roster-entry":
+      return claimRosterEntry(claims, claim.item);
+    case "pointer-lease":
+      return claimPointerLease(claims, claim.pointer);
+    case "witness-run":
+      return claimWitnessRun(claims, claim.binding);
+    case "write-grant":
+      return claimWriteGrant(claims, claim.grant);
+    case "grant-injection":
+      return claimGrantInjection(claims, claim.rewrite);
+    case "emission-launches":
+      return success(claimEmissionLaunches(claims));
+  }
+}
+
+/**
+ * What a refused claim leaves taken but owned by no rollback, as a ledger of
+ * its own: the capability itself when it was taken before being recorded, and
+ * nothing when the claim precedes the taking (a roster entry not yet marked, a
+ * prompt not yet rewritten).
+ */
+export function unownedOnRefusal(claim: SpawnClaim): SpawnClaims {
+  switch (claim.kind) {
+    case "roster-entry":
+    case "grant-injection":
+      return NO_SPAWN_CLAIMS;
+    case "pointer-lease":
+      return Object.freeze({ ...NO_SPAWN_CLAIMS, pointer: claim.pointer });
+    case "witness-run":
+      return Object.freeze({ ...NO_SPAWN_CLAIMS, witnessRun: claim.binding });
+    case "write-grant":
+      return Object.freeze({ ...NO_SPAWN_CLAIMS, grants: Object.freeze([Object.freeze({ ...claim.grant })]) });
+    case "emission-launches":
+      return Object.freeze({ ...NO_SPAWN_CLAIMS, emissionLaunchesStaged: true });
+  }
+}
 
 /**
  * The durable ledger a dispatched batch still holds at settlement: its
@@ -333,7 +410,7 @@ export type SpawnClaimReleasePorts = DurableClaimReleasePorts & Readonly<{
 }>;
 
 /** Release exactly this pointer lease, or throw naming the ownership lost. */
-export async function releaseExactPointerLease(
+async function releaseExactPointerLease(
   releasePointer: DurableClaimReleasePorts["releasePointer"],
   pointer: SessionTaskGraphPointerBinding,
 ): Promise<void> {
@@ -424,3 +501,31 @@ export async function releaseSpawnClaims(
   });
   return Object.freeze({ errors, releases: Object.freeze({ ...durable, ...local }) });
 }
+
+/**
+ * Record a claim, or refuse it with what it left unowned already released.
+ * A refused claim's capability is owed by no later rollback, so its
+ * compensation is the ledger's own planned release of exactly that capability
+ * (`unownedOnRefusal`): a claim kind cannot exist without the release that
+ * compensates it. The refusal carries the compensation's failures, if any.
+ */
+export async function claimOrCompensate(
+  claims: SpawnClaims,
+  claim: SpawnClaim,
+  labelOf: (step: SpawnRollbackStep) => string,
+  ports: SpawnClaimReleasePorts,
+): Promise<DomainResult<SpawnClaims, string>> {
+  const recorded = recordSpawnClaim(claims, claim);
+  if (recorded.ok) return recorded;
+  const { errors } = await releaseSpawnClaims(unownedOnRefusal(claim), labelOf, ports);
+  return failure(`${recorded.error}${cleanupFailureSuffix(errors)}`);
+}
+
+/** The production durable release ports of one parent session: roster
+ *  entries are removed under that session alone. */
+export const piDurableClaimReleasePorts = (sessionId: PiSessionId): DurableClaimReleasePorts =>
+  Object.freeze({
+    revokeGrant: revokePiWriteGrant,
+    removeRosterEntry: (agentId: AgentId) => fsSessionRegistry.removeActive(sessionId, agentId),
+    releasePointer: rollbackSessionTaskGraphPointer,
+  });

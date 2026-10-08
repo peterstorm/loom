@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   claimEmissionLaunches,
   claimGrantInjection,
+  claimOrCompensate,
   claimPointerLease,
   claimRosterEntry,
   claimWitnessRun,
@@ -18,6 +19,7 @@ import {
   NO_SPAWN_CLAIMS,
   planSpawnRollback,
   pointerLeaseOnly,
+  recordSpawnClaim,
   releaseDurableSpawnClaims,
   releaseSpawnClaims,
   remainingDurableClaims,
@@ -27,9 +29,11 @@ import {
   spawnDebtOf,
   spawnRollbackStepLabel,
   spawnSettlementStepLabel,
+  unownedOnRefusal,
   withoutPointerLease,
   type DurableClaimReleasePorts,
   type DurableReleaseStep,
+  type SpawnClaim,
   type SpawnClaimReleasePorts,
   type SpawnClaims,
 } from "../../../pi/spawn-claims";
@@ -59,8 +63,8 @@ const value = <T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
 /** A two-slot batch that claimed everything: roster, pointer, a standalone
  *  witness run, both grants (slot 0 injected), and staged launches. */
 const fullClaims = (): SpawnClaims => {
-  let claims = claimRosterEntry(NO_SPAWN_CLAIMS, rosterItem(0));
-  claims = claimRosterEntry(claims, rosterItem(1));
+  let claims = value(claimRosterEntry(NO_SPAWN_CLAIMS, rosterItem(0)));
+  claims = value(claimRosterEntry(claims, rosterItem(1)));
   claims = value(claimPointerLease(claims, pointer));
   claims = value(claimWitnessRun(claims, witnessRun));
   claims = value(claimWriteGrant(claims, { slot: 0, token: "token-0" }));
@@ -147,6 +151,22 @@ describe("the ledger is total", () => {
     expect(planSpawnRollback(witnessed)).toEqual([{ kind: "retract-witness-run", binding: witnessRun }]);
   });
 
+  it("refuses a second claim of one roster entry, so one removal can never discharge two claims", () => {
+    const claimed = value(claimRosterEntry(NO_SPAWN_CLAIMS, rosterItem(0)));
+    expect(claimRosterEntry(claimed, rosterItem(0))).toEqual({
+      ok: false,
+      error: `spawn batch already holds claimed roster entry ${rosterId(0)}`,
+    });
+    expect(value(claimRosterEntry(claimed, rosterItem(1))).roster).toEqual([rosterItem(0), rosterItem(1)]);
+  });
+
+  it("never refuses staged launches: their one release owes every staging", () => {
+    const staged = value(recordSpawnClaim(NO_SPAWN_CLAIMS, { kind: "emission-launches" }));
+    const restaged = value(recordSpawnClaim(staged, { kind: "emission-launches" }));
+    expect(restaged).toEqual(staged);
+    expect(planSpawnRollback(restaged)).toEqual([{ kind: "remove-emission-launches" }]);
+  });
+
   it("refuses an injection for a slot with no claimed grant, or one already injected", () => {
     expect(claimGrantInjection(NO_SPAWN_CLAIMS, { slot: 3, originalTask: "orig" })).toEqual({
       ok: false,
@@ -182,6 +202,95 @@ describe("the ledger is total", () => {
         expect(restores.sort()).toEqual([...injected].sort());
       },
     ));
+  });
+});
+
+describe("claimOrCompensate", () => {
+  /** Each claim taken before it is recorded, with a ledger already holding
+   *  one like it, and the release port call that compensates its refusal. */
+  const takenClaims: ReadonlyArray<Readonly<{
+    claim: SpawnClaim;
+    held: SpawnClaims;
+    refusal: string;
+    compensation: string;
+    failingPort: Port;
+    failedStep: string;
+  }>> = [
+    {
+      claim: { kind: "pointer-lease", pointer },
+      held: value(claimPointerLease(NO_SPAWN_CLAIMS, pointer)),
+      refusal: "spawn batch already holds a claimed task-graph pointer lease",
+      compensation: "releasePointer",
+      failingPort: "releasePointer",
+      failedStep: "roll back task-graph pointer: releasePointer unavailable",
+    },
+    {
+      claim: { kind: "witness-run", binding: { ...witnessRun, runId: "run.later" } as unknown as SessionRunBinding },
+      held: value(claimWitnessRun(NO_SPAWN_CLAIMS, witnessRun)),
+      refusal: "spawn batch already holds claimed review run run.spawn-claims",
+      compensation: "retractWitnessRun:run.later",
+      failingPort: "retractWitnessRun",
+      failedStep: "retract unwitnessed review run run.later: retractWitnessRun unavailable",
+    },
+    {
+      claim: { kind: "write-grant", grant: { slot: 0, token: "second" } },
+      held: value(claimWriteGrant(NO_SPAWN_CLAIMS, { slot: 0, token: "first" })),
+      refusal: "spawn item 1 already holds a claimed write grant",
+      compensation: "revokeGrant:second",
+      failingPort: "revokeGrant",
+      failedStep: "revoke write grant for spawn item 1: revokeGrant unavailable",
+    },
+  ];
+
+  it("records an accepted claim and releases nothing", async () => {
+    const { ports, calls } = fakePorts();
+    const claimed = await claimOrCompensate(NO_SPAWN_CLAIMS, { kind: "pointer-lease", pointer }, admissionLabel, ports);
+    expect(claimed).toEqual({ ok: true, value: value(claimPointerLease(NO_SPAWN_CLAIMS, pointer)) });
+    expect(calls).toEqual([]);
+  });
+
+  it.each(takenClaims)("refuses a held $claim.kind and releases exactly the one it just took", async (taken) => {
+    const { ports, calls } = fakePorts();
+    expect(await claimOrCompensate(taken.held, taken.claim, admissionLabel, ports))
+      .toEqual({ ok: false, error: taken.refusal });
+    expect(calls).toEqual([taken.compensation]);
+  });
+
+  it.each(takenClaims)("carries a failed compensation of a refused $claim.kind in its refusal", async (taken) => {
+    const { ports, calls } = fakePorts(new Set([taken.failingPort]));
+    expect(await claimOrCompensate(taken.held, taken.claim, admissionLabel, ports))
+      .toEqual({ ok: false, error: `${taken.refusal} Cleanup failures: ${taken.failedStep}` });
+    expect(calls).toEqual([taken.compensation]);
+  });
+
+  it("names a refused pointer lease whose exact ownership was already lost", async () => {
+    const { ports } = fakePorts(new Set(), "not-owned");
+    expect(await claimOrCompensate(takenClaims[0]!.held, { kind: "pointer-lease", pointer }, admissionLabel, ports)).toEqual({
+      ok: false,
+      error: "spawn batch already holds a claimed task-graph pointer lease " +
+        "Cleanup failures: roll back task-graph pointer: exact pointer ownership lost (not-owned)",
+    });
+  });
+
+  it("releases nothing for a refused claim recorded before its capability is taken", async () => {
+    const { ports, calls } = fakePorts();
+    const rostered = value(claimRosterEntry(NO_SPAWN_CLAIMS, rosterItem(0)));
+    expect(await claimOrCompensate(rostered, { kind: "roster-entry", item: rosterItem(0) }, admissionLabel, ports))
+      .toEqual({ ok: false, error: `spawn batch already holds claimed roster entry ${rosterId(0)}` });
+    expect(await claimOrCompensate(NO_SPAWN_CLAIMS, { kind: "grant-injection", rewrite: { slot: 2, originalTask: "t" } }, admissionLabel, ports))
+      .toEqual({ ok: false, error: "spawn item 3 has no claimed write grant to inject" });
+    expect(calls).toEqual([]);
+  });
+
+  it("compensates any refusal with exactly the release its capability would owe in a rollback", () => {
+    // The compensation is the ledger's own plan for the refused capability:
+    // a claim recorded after taking plans its one release step, a claim
+    // recorded before taking plans none.
+    const planned = (claim: SpawnClaim) => planSpawnRollback(unownedOnRefusal(claim)).map(({ kind }) => kind);
+    expect(takenClaims.map(({ claim }) => planned(claim))).toEqual([["release-pointer"], ["retract-witness-run"], ["revoke-grant"]]);
+    expect(planned({ kind: "roster-entry", item: rosterItem(0) })).toEqual([]);
+    expect(planned({ kind: "grant-injection", rewrite: { slot: 0, originalTask: "t" } })).toEqual([]);
+    expect(planned({ kind: "emission-launches" })).toEqual(["remove-emission-launches"]);
   });
 });
 

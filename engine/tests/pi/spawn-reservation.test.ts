@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createPiParentSessions,
   legacyReservationItem,
+  ownPiSpawnReservation,
   reservationItemOf,
   type PiSpawnReservation,
 } from "../../../pi/spawn-reservation";
@@ -141,5 +142,21 @@ describe("reservationItemOf — the per-kind slot invariant at the producer", ()
         rosterId, emissionLaunch: null, kind, agentType: "code-reviewer", taskId: null, role: "legacy",
       });
     }
+  });
+});
+
+describe("ownPiSpawnReservation — settlement reads one session", () => {
+  const otherSession = parseSessionId("019fca39-f989-7510-8e62-50dadbcad481")!;
+
+  it("owns a reservation naming its owner session, unchanged", () => {
+    const named = reservation({ items: [legacyItem], pointerBinding: pointer });
+    expect(ownPiSpawnReservation(sessionId, named)).toEqual({ ok: true, value: named });
+  });
+
+  it("refuses a reservation naming another session", () => {
+    expect(ownPiSpawnReservation(otherSession, reservation())).toEqual({
+      ok: false,
+      error: `Pi spawn reservation names session ${sessionId}, not its owner session ${otherSession}`,
+    });
   });
 });

@@ -79,6 +79,7 @@ import { observeSpawnBatchGraph } from "./spawn-graph";
 import { renderTaskImplementationBrief } from "../engine/src/orchestration/implementation-brief";
 import { prepareSpawnBatch } from "./spawn-preparation";
 import { reservePiSpawnLifecycle } from "./spawn-lifecycle";
+import { piDurableClaimReleasePorts } from "./spawn-claims";
 import { dispatchPiSubagentStop } from "./subagent-stop";
 import {
   activatePiChildWriteGrant,
@@ -444,6 +445,7 @@ export default function (
           parentSessions,
           emissionLaunchBridge,
           reviewWitnesses,
+          durableClaimReleases: piDurableClaimReleasePorts,
           runtimeRevision: LOADED_RUNTIME_IDENTITY.revision,
           graphExists: pathExistsFailClosed,
           enterGuard: (guard) => { currentGuard = guard; },
