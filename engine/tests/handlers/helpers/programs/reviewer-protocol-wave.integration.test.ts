@@ -33,15 +33,12 @@ import {
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
 import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { value } from "../../../fixtures/parse-result";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
 const roots: string[] = [];
 afterEach(() => { disposeFixturePiSessions(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 // Deterministic commit SHAs: frozen-source sections embed workspaceHead, and
 // sections minted by separate fixture projects are compared byte-for-byte.
 const git = (root: string, args: readonly string[]) => gitWithEnvironment(root, args, PINNED_COMMIT_DATES);

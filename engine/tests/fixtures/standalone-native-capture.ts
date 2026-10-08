@@ -5,7 +5,7 @@ import type { AgentRequestAuthority } from "../../src/core/orchestration-contrac
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { LOOM_REVIEW_AUTHORITY_BRIDGE, readLoomReviewAuthorityBridge } from "../../src/handlers/helpers/programs/review-authority-bridge";
 import { fixtureSession } from "./pi-session";
-import { value } from "./standalone-successor-remediation";
+import { value } from "./parse-result";
 import { runReadCoverage } from "../../src/orchestration/standalone-read-coverage-evidence";
 import { claudeReadLines, frozenDiffReaderPages, piReadMessages } from "./read-coverage";
 

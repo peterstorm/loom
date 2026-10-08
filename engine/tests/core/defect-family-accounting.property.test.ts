@@ -9,11 +9,7 @@ import {
 import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import { VERIFICATION_MANIFEST_KIND, freezeVerificationManifest } from "../../src/core/verification-manifest";
 import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
-
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
-  if (!result.ok) throw new Error(`fixture construction failed: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
+import { value } from "../fixtures/parse-result";
 
 const source = standaloneFixture(["src/main.ts", "src/property-family.ts"], true).input.standaloneResult;
 const findingId = source.survivingCriticals[0]!.id;
@@ -59,7 +55,7 @@ function declarationRaw(ids: readonly string[], siblingPaths: readonly string[])
 }
 
 function manifest(ids: readonly string[]) {
-  return valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  return value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
     kind: VERIFICATION_MANIFEST_KIND,
     checks: ids.map((id, index) => ({
@@ -94,14 +90,14 @@ describe("Defect-Family Accounting properties", () => {
       fc.uniqueArray(safePath, { minLength: 0, maxLength: 8 }),
       fc.integer(),
       (ids, siblings, seed) => {
-        const baseline = valueOf(prepareDefectFamilyAccounting(source, declarationRaw(ids, siblings)));
+        const baseline = value(prepareDefectFamilyAccounting(source, declarationRaw(ids, siblings)));
         const raw = declarationRaw(rotate(ids, seed), rotate(siblings, ~seed));
-        const permuted = valueOf(prepareDefectFamilyAccounting(source, raw));
+        const permuted = value(prepareDefectFamilyAccounting(source, raw));
 
         expect(permuted).toEqual(baseline);
         expect(permuted.selectedCheckIds).toEqual([...ids].sort());
         expect(permuted.siblingPaths).toEqual([...siblings].sort());
-        const plan = valueOf(prepareDefectFamilyVerification(permuted, manifest(ids)));
+        const plan = value(prepareDefectFamilyVerification(permuted, manifest(ids)));
         expect(plan.kind).toBe("selected-operator-checks");
         if (plan.kind === "selected-operator-checks") {
           expect(plan.commands.map(({ checkId }) => checkId)).toEqual([...ids].sort());
@@ -133,11 +129,11 @@ describe("Defect-Family Accounting properties", () => {
     fc.assert(fc.property(
       fc.uniqueArray(safeName, { minLength: 0, maxLength: 8 }),
       (names) => {
-        const gitWitness = valueOf(parseRepositorySnapshotWitness({
+        const gitWitness = value(parseRepositorySnapshotWitness({
           baseTreeDigest: digest(1), indexDigest: digest(2), worktreeDigest: digest(3),
         }));
         const exclusions = names.map((name) => `.loom/completion-reports/${name}.json`);
-        const left = valueOf(createCandidateRepositoryWitness({
+        const left = value(createCandidateRepositoryWitness({
           kind: "candidate-repository-witness",
           repositoryRoot: "/repo",
           workspaceDigest: digest(4),
@@ -146,7 +142,7 @@ describe("Defect-Family Accounting properties", () => {
           gitWitness,
           generatedReportExclusions: exclusions,
         }));
-        const reordered = valueOf(parseCandidateRepositoryWitness({
+        const reordered = value(parseCandidateRepositoryWitness({
           ...left,
           generatedReportExclusions: [...exclusions].reverse(),
         }));
@@ -161,7 +157,7 @@ describe("Defect-Family Accounting properties", () => {
   it("takes immutable snapshots instead of retaining caller-owned arrays or declaration records", () => {
     fc.assert(fc.property(checkIds, fc.uniqueArray(safePath, { minLength: 1, maxLength: 8 }), (ids, siblings) => {
       const raw = declarationRaw(ids, siblings);
-      const accounting = valueOf(prepareDefectFamilyAccounting(source, raw));
+      const accounting = value(prepareDefectFamilyAccounting(source, raw));
       const parsed = accounting.declaration;
       const firstGroup = raw.groups[0]!;
       const firstCheckId = accounting.selectedCheckIds[0];

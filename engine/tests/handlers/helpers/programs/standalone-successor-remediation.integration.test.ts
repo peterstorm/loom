@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { gitResult } from "../../../fixtures/git-repository";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
 import { addRepairTest, CHECK_ID, hash, publishedSuccessorForRemediation, repairDeclaration,
-  REPORT_PATH, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
+  REPORT_PATH, successorRemediationRepository } from "../../../fixtures/standalone-successor-remediation";
+import { value } from "../../../fixtures/parse-result";
 
 const roots: string[] = [];
 const operations = new Set<Promise<void>>();

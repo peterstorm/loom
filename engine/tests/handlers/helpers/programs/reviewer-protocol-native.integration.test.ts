@@ -18,16 +18,13 @@ import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src
 import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFromEvidence } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
+import { value } from "../../../fixtures/parse-result";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const roots: string[] = [];
 afterEach(() => { disposeFixturePiSessions(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const empty = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[] }>;
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 function fixture() {
   const root = canonicalTempDir("loom-p4-native-");
   roots.push(root);

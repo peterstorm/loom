@@ -24,11 +24,7 @@ import {
   TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,
 } from "../../src/core/proof-obligations";
-
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-}
+import { value } from "../fixtures/parse-result";
 
 function authority(
   semanticAttempt: 1 | 2,
@@ -36,7 +32,7 @@ function authority(
   second: number,
   taskId = "T1",
 ): ImplementationAttemptAuthority {
-  return valueOf(createImplementationAttemptAuthority({
+  return value(createImplementationAttemptAuthority({
     taskId,
     wave: 1,
     semanticAttempt,
@@ -54,7 +50,7 @@ const proof = () => derivePendingTaskProof({
 });
 
 function suite(attempt: ImplementationAttemptAuthority) {
-  const authorized = valueOf(createTaskCompletionSuiteAuthority(attempt));
+  const authorized = value(createTaskCompletionSuiteAuthority(attempt));
   return {
     schemaVersion: 1,
     kind: "task-completion-suite-result",

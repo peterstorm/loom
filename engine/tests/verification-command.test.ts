@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFile, type ExecFileException } from "node:child_process";
+import vitestConfig from "../vitest.config";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
 
@@ -122,13 +123,21 @@ describe("canonical verification command", () => {
     expect(enginePackage.scripts.typecheck).toBe("bun scripts/typecheck.ts");
     expect(enginePackage.scripts["typecheck:unused"]).toBe("npm run typecheck");
     expect(enginePackage.scripts.test).toBe("npm run test:unit && env -u PI_CODING_AGENT npm run test:smoke");
-    expect(enginePackage.scripts["test:unit"]).toBe("env -u PI_CODING_AGENT vitest run --testTimeout=15000 --reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml");
+    expect(enginePackage.scripts["test:unit"]).toBe("env -u PI_CODING_AGENT vitest run --reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml");
     expect(enginePackage.scripts["test:smoke"]).toBe(smokeFiles.map(([path]) => `${path.endsWith(".ts") ? "bun" : "bash"} ../${path}`).join(" && "));
-    // The worker budget is part of the canonical command: it moved out of the
-    // CLI flag into a checked config so it can differ by platform (macos-15 CI
-    // runners expose 3 vCPUs; four forked workers starved the Vitest main
-    // thread past its 60s RPC deadline and failed fully green runs).
-    expect(readFileSync("vitest.config.ts", "utf8")).toContain('maxWorkers: process.platform === "darwin" ? 2 : 4');
+  });
+
+  it("keeps the suite's runner policy in the checked config every entry point loads", () => {
+    // Timeout, worker budget and the per-test event-loop turn live in
+    // vitest.config.ts, not CLI flags, so `npm run test:unit` and a direct
+    // `npx vitest run` run the same suite. Without the turn, back-to-back
+    // synchronous tests starve the worker's `onTaskUpdate` RPC reply past its
+    // fixed 60s timer and fail fully green runs.
+    const test = vitestConfig.test!;
+    expect(test.testTimeout).toBe(15_000);
+    expect(test.setupFiles).toEqual(["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"]);
+    const cap = process.platform === "darwin" ? 2 : 4;
+    expect(test.maxWorkers).toBe(Math.max(1, Math.min(cap, availableParallelism())));
   });
 
   it("missing local Pi is blocked even if a global Pi is on PATH", async () => {

@@ -6,11 +6,7 @@ import {
   settleImplementationAttempt,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
-
-const unwrap = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
-  if (!result.ok) throw new Error(`implementation settlement fixture failed: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
+import { labelledValue } from "./parse-result";
 
 /**
  * The real settlement receipt of one failed semantic implementation attempt
@@ -22,7 +18,7 @@ export function semanticAttemptReceipt(
   attemptNumber: 1 | 2,
   history: readonly ImplementationAttemptSettlementReceipt[],
 ): ImplementationAttemptSettlementReceipt {
-  const authority = unwrap(createImplementationAttemptAuthority({
+  const authority = labelledValue("implementation settlement", createImplementationAttemptAuthority({
     taskId,
     wave: 1,
     semanticAttempt: attemptNumber,
@@ -32,7 +28,7 @@ export function semanticAttemptReceipt(
     taskScopeBaseline: [],
     dirtySetBaseline: [],
   }));
-  const suiteAuthority = unwrap(createTaskCompletionSuiteAuthority(authority));
+  const suiteAuthority = labelledValue("implementation settlement", createTaskCompletionSuiteAuthority(authority));
   const result = settleImplementationAttempt({
     id: taskId,
     status: "pending",

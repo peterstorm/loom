@@ -1,7 +1,7 @@
 import type { ContextPacket } from "../../src/core/context-packets";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import type { ReviewerIssueRoute } from "../../src/core/model-profiles";
-import { value } from "./standalone-successor-remediation";
+import { value } from "./parse-result";
 
 /** Genuine owned legacy issuance, never a relocated history pack or downgraded current Run.
  *  `issueRoute` elects the roster's reviewer profile through the catalog's one

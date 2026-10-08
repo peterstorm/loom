@@ -19,11 +19,7 @@ import {
   createImplementationAttemptContext,
   deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
-
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-}
+import { value } from "./fixtures/parse-result";
 
 const attemptBaseline = [{
   artifact: "engine/src/a.ts",
@@ -38,7 +34,7 @@ function authority(
   reservationId = "state-reservation-1",
   semanticAttempt: 1 | 2 = 1,
 ): ImplementationAttemptAuthority {
-  return valueOf(createImplementationAttemptAuthority({
+  return value(createImplementationAttemptAuthority({
     taskId: "T1",
     wave: 1,
     semanticAttempt,
@@ -91,8 +87,8 @@ function errorOf(raw: Record<string, unknown>): string {
 }
 
 function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = true) {
-  const suite = valueOf(createTaskCompletionSuiteAuthority(attempt));
-  const observation = valueOf(parseImplementationObservation({
+  const suite = value(createTaskCompletionSuiteAuthority(attempt));
+  const observation = value(parseImplementationObservation({
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-08-23T00:01:00.000Z",
@@ -130,7 +126,7 @@ function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = tru
 }
 
 function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
-  const suite = valueOf(createTaskCompletionSuiteAuthority(attempt));
+  const suite = value(createTaskCompletionSuiteAuthority(attempt));
   const settled = settleImplementationAttempt({
     id: "T1",
     status: "pending",
@@ -452,7 +448,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       reserved_at: active.reservedAt,
       ...overrides,
     }, { executing_tasks: ["T1"] });
-    const foreign = valueOf(createImplementationAttemptAuthority({
+    const foreign = value(createImplementationAttemptAuthority({
       taskId: "T2",
       wave: 1,
       semanticAttempt: 1,
@@ -516,7 +512,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       implementation_retry_history_start: 0,
     }, { executing_tasks: ["T1"] }))).toContain("must be absent from implementation_attempt_history");
 
-    const differentDigestSameReservation = valueOf(createImplementationAttemptAuthority({
+    const differentDigestSameReservation = value(createImplementationAttemptAuthority({
       taskId: "T1",
       wave: 1,
       semanticAttempt: 1,
@@ -540,7 +536,7 @@ describe("Task attempt authority StateManager lockstep", () => {
       ...attemptBaseline,
       { artifact: "engine/src/prior.ts", snapshot: { kind: "missing" as const } },
     ];
-    const active = valueOf(createImplementationAttemptAuthority({
+    const active = value(createImplementationAttemptAuthority({
       taskId: "T1", wave: 1, semanticAttempt: 1, reservationId: "scope-reservation",
       headSha: "c".repeat(40), reservedAt: "2026-08-23T00:00:00.000Z",
       taskScopeBaseline: scopedBaseline, dirtySetBaseline: repositoryBaseline,

@@ -8,7 +8,8 @@ import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } 
 import { git, gitResult } from "../../../fixtures/git-repository";
 import { nativeSuccessorCapture } from "../../../fixtures/standalone-native-capture";
 import { representativeNativeWorkload } from "../../../fixtures/standalone-native-workload";
-import { addRepairTest, hash, publishedSuccessorForRemediation, repairDeclaration, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
+import { addRepairTest, hash, publishedSuccessorForRemediation, repairDeclaration, successorRemediationRepository } from "../../../fixtures/standalone-successor-remediation";
+import { value } from "../../../fixtures/parse-result";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 

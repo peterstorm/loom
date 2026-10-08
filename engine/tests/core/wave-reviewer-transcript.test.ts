@@ -21,17 +21,13 @@ import { attributeFindings } from "../../src/core/findings";
 import { resolveWaveReviewerTranscript, reviewerRejectionReason } from "../../src/core/wave-reviewer-transcript";
 import type { Finding, ReviewRun, Task } from "../../src/types";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { value } from "../fixtures/parse-result";
 
 // ---------------------------------------------------------------------------
 // Issued Wave reviewer authority, minted through the production publication
 // and protocol joins (the same construction `reviewer-protocol-authority.test.ts`
 // uses; no forged membership).
 // ---------------------------------------------------------------------------
-
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 
 const runId = value(parseOrchestrationRunId("run.wave-reviewer-transcript"));
 const PACKET = "a".repeat(64);

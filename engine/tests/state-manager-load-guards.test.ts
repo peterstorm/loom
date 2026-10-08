@@ -33,6 +33,7 @@ import { canonicalJson } from "../src/core/review-packet";
 import { sha256Hex } from "../src/core/digest";
 import fc from "fast-check";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../src/core/reviewer-contract";
+import { value } from "./fixtures/parse-result";
 
 function currentReviewTask(generation = 1) {
   const slot = { agent: "code-reviewer", slot_id: "slot:code-reviewer", attempted: 1 as const, request_id: "request:code-reviewer:1", context_digest: "d".repeat(64) };
@@ -622,13 +623,8 @@ const activeWaveGate = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-}
-
 function operatorManifest(reportRequired = false): FrozenVerificationManifest {
-  return valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  return value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
     kind: "loom-verification-manifest",
     checks: [{
@@ -649,7 +645,7 @@ function acceptedReceipt(
   manifest: FrozenVerificationManifest = defaultVerificationManifest(),
 ): AcceptedWaveCompletionReceipt {
   const active = activeWaveGate();
-  const authority = valueOf(authorizeWaveCompletionSuite(manifest, active, DIGEST("c")));
+  const authority = value(authorizeWaveCompletionSuite(manifest, active, DIGEST("c")));
   const rawResult = {
     kind: "wave-completion-suite-result",
     runId: authority.runId,

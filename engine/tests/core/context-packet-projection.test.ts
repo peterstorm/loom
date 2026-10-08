@@ -12,14 +12,11 @@ import { parseContextProjectionArguments, parseContextSectionArguments, projectC
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/wave-frozen-source";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
+import { value } from "../fixtures/parse-result";
 
 const script = fileURLToPath(new URL("../../../scripts/read-context-packet.ts", import.meta.url));
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-const value = <T>(result: { ok: true; value: T } | { ok: false }): T => {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-};
 function fixture(version: 1 | 2 | 3 = 2) {
   const root = canonicalTempDir("loom-reader-");
   roots.push(root);

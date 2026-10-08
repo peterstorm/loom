@@ -64,13 +64,9 @@ import {
   submitRefutationVerdict,
 } from "../../src/core/persistent-panel";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
+import { value } from "../fixtures/parse-result";
 
 const digest = (character: string): string => character.repeat(64);
-
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
-  if (!result.ok) throw new Error(`fixture construction failed: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
 
 function source(withCritical = true): AuthoritativeStandaloneReviewResult {
   return standaloneFixture(withCritical ? ["src/main.ts", "src/family.ts"] : ["src/clean.ts"], withCritical).input.standaloneResult;
@@ -109,7 +105,7 @@ function declarationRaw(
 }
 
 function declaration(inventory = source()): PreparedDefectFamilyAccounting {
-  return valueOf(prepareDefectFamilyAccounting(inventory, declarationRaw(inventory)));
+  return value(prepareDefectFamilyAccounting(inventory, declarationRaw(inventory)));
 }
 
 function mixedDeclarationRaw(
@@ -166,25 +162,25 @@ function frozenManifest(checkIds: readonly string[] = ["project:defect-family"])
       report: { kind: "required-file", path: `.loom/completion-reports/${index}.json` },
     })),
   };
-  return valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(raw))));
+  return value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(raw))));
 }
 
 function selectedPlan(
   inventory = source(),
   parsedDeclaration = declaration(inventory),
 ): Extract<DefectFamilyVerificationPlan, { readonly kind: "selected-operator-checks" }> {
-  const plan = valueOf(prepareDefectFamilyVerification(parsedDeclaration, frozenManifest()));
+  const plan = value(prepareDefectFamilyVerification(parsedDeclaration, frozenManifest()));
   if (plan.kind !== "selected-operator-checks") throw new Error("selected plan required");
   return plan;
 }
 
 function candidate(offset = 0): CandidateRepositoryWitness {
-  const gitWitness = valueOf(parseRepositorySnapshotWitness({
+  const gitWitness = value(parseRepositorySnapshotWitness({
     baseTreeDigest: digest(String((offset + 1) % 10)),
     indexDigest: digest(String((offset + 2) % 10)),
     worktreeDigest: digest(String((offset + 3) % 10)),
   }));
-  return valueOf(createCandidateRepositoryWitness({
+  return value(createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",
     repositoryRoot: "/repo",
     workspaceDigest: digest(String((offset + 4) % 10)),
@@ -199,14 +195,14 @@ function authorization(
   plan: Extract<DefectFamilyVerificationPlan, { readonly kind: "selected-operator-checks" }>,
   witness: CandidateRepositoryWitness,
 ): AuthorizedRemediationCheck {
-  const scope = valueOf(createRemediationCheckScope(plan.source, witness, {
+  const scope = value(createRemediationCheckScope(plan.source, witness, {
     kind: "standalone-remediation",
     remediationRunId: "run.remediation-p3",
     sourceRunId: plan.source.sourceRunId,
     registrationDigest: digest("a"),
     candidateWitnessDigest: witness.digest,
   }));
-  return valueOf(authorizeRemediationChecks(plan, scope))[0];
+  return value(authorizeRemediationChecks(plan, scope))[0];
 }
 
 function observed(
@@ -215,7 +211,7 @@ function observed(
 ): EngineObservedRepairedCheck {
   const summary = parseReportSummary(3, 0, "vitest-json");
   if (summary === null) throw new Error("summary fixture failed");
-  return valueOf(parseRegisteredRemediationCheckObservation(check, witness, witness, {
+  return value(parseRegisteredRemediationCheckObservation(check, witness, witness, {
     kind: "remediation-check-observed",
     checkId: check.command.checkId,
     registrationDigest: check.scope.registrationDigest,
@@ -464,7 +460,7 @@ function sourceWithEveryFindingClass(): AuthoritativeStandaloneReviewResult {
 describe("source-bound Defect-Family Accounting", () => {
   it("derives a defensive, immutable inventory only from actual opaque LC-2 authority", () => {
     const fixture = standaloneFixture(["src/main.ts", "src/family.ts"], true);
-    const accounting = valueOf(prepareDefectFamilyAccounting(fixture.input.standaloneResult, declarationRaw(fixture.input.standaloneResult)));
+    const accounting = value(prepareDefectFamilyAccounting(fixture.input.standaloneResult, declarationRaw(fixture.input.standaloneResult)));
     const inventory = accounting.source;
 
     expect(inventory.sourceRunId).toBe(fixture.input.standaloneResult.runId);
@@ -478,16 +474,16 @@ describe("source-bound Defect-Family Accounting", () => {
   });
 
   it("needs no manifest or process observation for zero criticals, but still parses audit facts", () => {
-    const accounting = valueOf(prepareDefectFamilyAccounting(source(false), { kind: "not-required" }));
-    const plan = valueOf(prepareDefectFamilyVerification(accounting, null));
+    const accounting = value(prepareDefectFamilyAccounting(source(false), { kind: "not-required" }));
+    const plan = value(prepareDefectFamilyVerification(accounting, null));
     const witness = candidate();
-    const assessment = valueOf(evaluateInstallableDefectFamilyAccounting(plan, witness, {
+    const assessment = value(evaluateInstallableDefectFamilyAccounting(plan, witness, {
       auditedInstalledPaths: [], dirtyOrStagedPaths: [],
     }, []));
     expect(plan.kind).toBe("not-required");
     expect(assessment).toMatchObject({ status: "not-required", reason: "no-surviving-critical-findings" });
     expect(deepFrozen(assessment)).toBe(true);
-    expect(valueOf(inspectInstallableDefectFamilyAssessment(assessment))).toMatchObject({
+    expect(value(inspectInstallableDefectFamilyAssessment(assessment))).toMatchObject({
       status: "not-required", candidateWitnessDigest: null,
     });
     expect(inspectInstallableDefectFamilyAssessment({
@@ -501,13 +497,13 @@ describe("source-bound Defect-Family Accounting", () => {
   it("accepts an all-unresolved declaration with zero groups and evaluates it as blocked", () => {
     const inventory = source();
     const findingId = inventory.survivingCriticals[0]!.id;
-    const parsed = valueOf(prepareDefectFamilyAccounting(inventory, {
+    const parsed = value(prepareDefectFamilyAccounting(inventory, {
       kind: "declared-defect-family-accounting",
       provenance: "DECLARED",
       dispositions: [{ findingId, status: "unresolved", reason: "The repair is not implemented." }],
       groups: [],
     }));
-    const plan = valueOf(prepareDefectFamilyVerification(parsed, null));
+    const plan = value(prepareDefectFamilyVerification(parsed, null));
     const assessment = evaluateInstallableDefectFamilyAccounting(plan, candidate(), {
       auditedInstalledPaths: [], dirtyOrStagedPaths: [],
     }, []);
@@ -603,7 +599,7 @@ describe("source-bound Defect-Family Accounting", () => {
       expect(compatible.value.declaration.groups).toHaveLength(2);
       expect(compatible.value.declaration.groups.map(({ repairGroupId }) => repairGroupId)).toEqual(["family:first", "family:second"]);
       expect(compatible.value.siblingPaths).toEqual(["src/shared.ts"]);
-      const permuted = valueOf(prepareDefectFamilyAccounting(inventory, {
+      const permuted = value(prepareDefectFamilyAccounting(inventory, {
         ...base,
         dispositions: [...base.dispositions].reverse(),
         groups: [...base.groups].reverse(),
@@ -613,7 +609,7 @@ describe("source-bound Defect-Family Accounting", () => {
       const plan = selectedPlan(inventory, compatible.value);
       const witness = candidate();
       const check = observed(authorization(plan, witness), witness);
-      const assessment = valueOf(evaluateInstallableDefectFamilyAccounting(plan, witness, {
+      const assessment = value(evaluateInstallableDefectFamilyAccounting(plan, witness, {
         auditedInstalledPaths: ["src/main.ts"], dirtyOrStagedPaths: ["src/main.ts"],
       }, [check]));
       expect(assessment.status).toBe("repair-checked");
@@ -671,7 +667,7 @@ describe("report observation resource limits", () => {
       checkId: check.command.checkId, scope: check.scope, manifestDigest: check.manifestDigest, authorityDigest: check.authorityDigest,
       process: { kind: "observed" as const, exitCode: 0, timedOut: false, signal: null },
       report: {
-        outcome: { kind: "produced" as const, path: check.command.reportPolicy.path, digest: valueOf(parseArtifactDigest(createHash("sha256").update(bytes).digest("hex"))), byteLength: bytes.byteLength },
+        outcome: { kind: "produced" as const, path: check.command.reportPolicy.path, digest: value(parseArtifactDigest(createHash("sha256").update(bytes).digest("hex"))), byteLength: bytes.byteLength },
         bytes, mode: 33_188, parsedReportFacts: parseStructuredTestReportBytes(bytes),
       },
       diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
@@ -722,14 +718,14 @@ describe("fixed command, candidate, and engine-observation authority", () => {
         timeoutMs: 60_000, report: { kind: "not-required" },
       }],
     };
-    const noReport = valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(noReportRaw))));
+    const noReport = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(noReportRaw))));
     expect(prepareDefectFamilyVerification(parsedDeclaration, noReport).ok).toBe(false);
     expect(prepareDefectFamilyVerification(parsedDeclaration, null).ok).toBe(false);
   });
 
   it("parses candidate identity canonically and detects byte, Git, roster, and exclusion drift", () => {
     const left = candidate();
-    const same = valueOf(parseCandidateRepositoryWitness({
+    const same = value(parseCandidateRepositoryWitness({
       ...left,
       generatedReportExclusions: [...left.generatedReportExclusions].reverse(),
     }));
@@ -753,7 +749,7 @@ describe("fixed command, candidate, and engine-observation authority", () => {
     const witness = candidate();
     const check = authorization(plan, witness);
     const observation = observed(check, witness);
-    const assessment = valueOf(evaluateInstallableDefectFamilyAccounting(plan, witness, {
+    const assessment = value(evaluateInstallableDefectFamilyAccounting(plan, witness, {
       auditedInstalledPaths: ["src/family.ts"], dirtyOrStagedPaths: ["src/family.ts"],
     }, [observation]));
 
@@ -767,7 +763,7 @@ describe("fixed command, candidate, and engine-observation authority", () => {
       historicalRed: "DECLARED",
       repairedTests: "ENGINE_OBSERVED",
     });
-    const projection = valueOf(inspectInstallableDefectFamilyAssessment(assessment));
+    const projection = value(inspectInstallableDefectFamilyAssessment(assessment));
     expect(projection).toMatchObject({
       status: "repair-checked",
       sourceRunId: plan.source.sourceRunId,
@@ -779,7 +775,7 @@ describe("fixed command, candidate, and engine-observation authority", () => {
 
   it("refuses forged aggregate authority and observation rosters before accessing fields", () => {
     const accounting = declaration();
-    const plan = valueOf(prepareDefectFamilyVerification(accounting, frozenManifest()));
+    const plan = value(prepareDefectFamilyVerification(accounting, frozenManifest()));
     if (plan.kind !== "selected-operator-checks") throw new Error("selected plan required");
     const witness = candidate();
     const observation = observed(authorization(plan, witness), witness);
@@ -841,8 +837,8 @@ describe("fixed command, candidate, and engine-observation authority", () => {
       expect(parseRegisteredRemediationCheckObservation(check, witness, witness, raw).ok).toBe(false);
     }
 
-    const foreignSource = valueOf(prepareDefectFamilyAccounting(source(false), { kind: "not-required" })).source;
-    const foreignScope = valueOf(createRemediationCheckScope(foreignSource, witness, {
+    const foreignSource = value(prepareDefectFamilyAccounting(source(false), { kind: "not-required" })).source;
+    const foreignScope = value(createRemediationCheckScope(foreignSource, witness, {
       kind: "standalone-remediation",
       remediationRunId: "run.remediation-p3",
       sourceRunId: foreignSource.sourceRunId,
@@ -856,7 +852,7 @@ describe("fixed command, candidate, and engine-observation authority", () => {
     const inventory = source();
     const base = declarationRaw(inventory);
     const group = (base.groups as Record<string, unknown>[])[0]!;
-    const parsed = valueOf(prepareDefectFamilyAccounting(inventory, {
+    const parsed = value(prepareDefectFamilyAccounting(inventory, {
       ...base,
       groups: [{
         ...group,
@@ -873,7 +869,7 @@ describe("fixed command, candidate, and engine-observation authority", () => {
     const plan = selectedPlan(inventory, parsed);
     const witness = candidate();
     const observation = observed(authorization(plan, witness), witness);
-    const accepted = valueOf(evaluateInstallableDefectFamilyAccounting(plan, witness, {
+    const accepted = value(evaluateInstallableDefectFamilyAccounting(plan, witness, {
       auditedInstalledPaths: ["src/family.ts", "src/repaired-sibling.ts"],
       dirtyOrStagedPaths: ["src/family.ts", "src/repaired-sibling.ts"],
     }, [observation]));

@@ -6,14 +6,10 @@ import {
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
 import { TRUSTED_LEDGER_ONLY_POLICY, derivePendingTaskProof } from "../../src/core/proof-obligations";
-
-const valueOf = <T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T => {
-  if (!result.ok) throw new Error("implementation escalation fixture construction failed");
-  return result.value;
-};
+import { labelledValue } from "./parse-result";
 
 const authority = (semanticAttempt: 1 | 2, reservationId: string, second: number) =>
-  valueOf(createImplementationAttemptAuthority({
+  labelledValue("implementation escalation", createImplementationAttemptAuthority({
     taskId: "T1",
     wave: 1,
     semanticAttempt,
@@ -25,7 +21,7 @@ const authority = (semanticAttempt: 1 | 2, reservationId: string, second: number
   }));
 
 const suite = (attempt: ReturnType<typeof authority>) => {
-  const authorized = valueOf(createTaskCompletionSuiteAuthority(attempt));
+  const authorized = labelledValue("implementation escalation", createTaskCompletionSuiteAuthority(attempt));
   return {
     schemaVersion: 1,
     kind: "task-completion-suite-result",

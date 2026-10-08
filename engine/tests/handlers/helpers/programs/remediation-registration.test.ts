@@ -24,7 +24,7 @@ import {
   type DefectFamilyVerificationPlan,
   type PreparedDefectFamilyAccounting,
 } from "../../../../src/core/defect-family-accounting";
-import { canonicalStructuralEquals, type DomainResult, type OrchestrationRunId } from "../../../../src/core/orchestration-contract";
+import { canonicalStructuralEquals, type OrchestrationRunId } from "../../../../src/core/orchestration-contract";
 import { parseRepositorySnapshotWitness } from "../../../../src/core/remediation-machine";
 import { sha256Hex } from "../../../../src/core/digest";
 import {
@@ -34,7 +34,7 @@ import {
 } from "../../../../src/core/verification-manifest";
 import type { AuthoritativeStandaloneReviewResult } from "../../../../src/core/standalone-review";
 import { standaloneFixture } from "../../../fixtures/standalone-remediation-authority";
-import { value } from "../../../fixtures/parse-result";
+import { refusal, value } from "../../../fixtures/parse-result";
 
 // ---------------------------------------------------------------------------
 // Fixtures — built only through the production parsers (no forged authority).
@@ -188,12 +188,6 @@ const registered = (request: CreateRemediationRegistrationInput): RegisteredReme
 
 /** The stored form: exactly what JSON persistence hands back to the parser. */
 const stored = (record: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
-
-function refusal<T>(result: DomainResult<T, RemediationRegistrationError>): RemediationRegistrationError {
-  expect(result.ok, `expected refusal, got ${JSON.stringify(result)}`).toBe(false);
-  if (result.ok) throw new Error("expected refusal");
-  return result.error;
-}
 
 const refusedWith = (message: string): RemediationRegistrationError =>
   ({ kind: "invalid-remediation-registration", message });

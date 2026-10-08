@@ -6,11 +6,7 @@ import { admitStandaloneSuccessorPacketSize, standaloneSuccessorPackets } from "
 import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-review";
 import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
 import { wrapStandalonePanelLine } from "../../src/orchestration/standalone-panel-context";
-const value = <T>(result: { ok: true; value: T } | { ok: false }): T => {
-  if (!result.ok) throw Error("fixture parser refused");
-  return result.value;
-};
-
+import { value } from "../fixtures/parse-result";
 describe("immutable successor section serialization", () => {
   it("conserves exact canonical JSON bytes across repeated packets and round trips", () => {
     fc.assert(fc.property(fc.string(), text => {

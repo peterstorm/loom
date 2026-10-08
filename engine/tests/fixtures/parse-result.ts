@@ -8,8 +8,11 @@
  * fixture it was building.
  */
 
-type Success<T> = Readonly<{ ok: true; value: T }>;
-type Refused = Readonly<{ ok: false }>;
+// Plain readonly object types, not `Readonly<...>`: inference through the
+// mapped type collapses `T` to `unknown` for a function whose returns form
+// a union of several arms.
+type Success<T> = { readonly ok: true; readonly value: T };
+type Refused = { readonly ok: false };
 
 function render(result: object): string {
   try {
@@ -32,8 +35,8 @@ export function labelledValue<T>(label: string, result: Success<T> | Refused): T
   return result.value;
 }
 
-/** The refusal of a result that must fail, or a thrown failure when it succeeded. */
-export function refusal<E>(result: Readonly<{ ok: true }> | Readonly<{ ok: false; error: E }>): E {
-  if (result.ok) throw new Error("expected a refusal, got success");
+/** The refusal of a result that must fail, or a thrown failure naming the success that came back. */
+export function refusal<E>(result: { readonly ok: true } | { readonly ok: false; readonly error: E }): E {
+  if (result.ok) throw new Error(`expected a refusal, got ${render(result)}`);
   return result.error;
 }
