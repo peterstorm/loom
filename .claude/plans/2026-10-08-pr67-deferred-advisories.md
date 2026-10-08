@@ -54,3 +54,18 @@ repository owned by another uid now fails Git's ownership check loudly, rather t
 - `npm run verify` from the repository root.
 - Registered remediation from `raf-pr67-p01` (frozen head `bde4282f`), every changed path outside that slice's frozen
   scope named as a `supportPath`, with `defectFamily: {"kind":"not-required"}`.
+
+## PR #68 review and its advisories (fixed on this branch)
+
+The registered read-coverage review of PR #68 (`455fd273..34492dbf`) ran five slices, `raf-pr68-p01` … `raf-pr68-p05`. All 31
+reviewers were credited with full read coverage and none needed a retry. The review found 0 criticals and 28 advisories.
+
+- **Initial revision:** all 28 were deferred, because the request was for review only. A reason correction followed in
+  `raf-pr68-pNN-policy-r2`.
+- **Correction revision, `raf-pr68-pNN-policy-accepted`:** all 28 are now **accepted** and fixed.
+
+| WS | Commit | Change |
+|---|---|---|
+| V1 | be3b96f2 | `spawnGit` returns a closed `GitSpawnOutcome`, so no caller decodes status or stderr by hand. A fatal Git exit that arrives with an empty stderr is retried, then refused with an explanation. That is the macOS CI failure in `config.ts gitRepositoryRootFrom`; the cause is inferred as a lost capture on Bun/darwin. The remediation wrapper is renamed `runRemediationGit`. Config takes an injectable `GitSpawn`. One test fixture now owns the policy argv prefix. The seam guard parses source with the TypeScript compiler API. `XDG_CONFIG_HOME=/dev/null`, so Git's implicit `~/.config/git/ignore` no longer applies either. |
+| V2 | fbfbd0c8 | `pi/spawn-claims.ts` is pure again. Its production ports and the parent-session release orchestrators move to `pi/spawn-claim-shell.ts`. `reservePiSpawnLifecycle` takes two arguments again, with a named test seam. The child binding is released as a `DurableSpawnClaims` ledger. One label function serves every release. Shared Pi test fixtures live in `tests/fixtures/held-spawn-batch.ts`. |
+| V3 | 4ea8e46f | Each artifact-baseline scheme carries a private runtime tag, which is also its brand. `canonicalPanelStateJson` requires an explicit authority type, with a readable diagnostic. `platformWorkerBudget` is a pure, tested function. The remediation-check fixture is shared, and `refusalMessage` is renamed. |
