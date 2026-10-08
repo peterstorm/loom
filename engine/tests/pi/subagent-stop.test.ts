@@ -21,6 +21,7 @@ import {
   type PiSpawnReservation,
 } from "../../../pi/spawn-reservation";
 import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness";
+import { piDurableClaimReleasePorts } from "../../../pi/spawn-claims";
 
 const ENV_KEYS = ["LOOM_SUBAGENT_DIR", "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"] as const;
 let root: string;
@@ -77,6 +78,7 @@ const ownerHolding = async (reservation: PiSpawnReservation) => {
       removeSession: () => undefined,
     },
     reviewWitnesses: createTrustedReviewWitnesses(),
+    durableClaimReleases: piDurableClaimReleasePorts,
   };
   return { parentSessions, ports };
 };

@@ -9,14 +9,16 @@
  * are what cleanup debt records. Its process-local claims (launches, prompt
  * rewrites, the witness binding) exist only while admission runs.
  *
- * Two shells release a ledger. Admission (`reservePiSpawnLifecycle`) records
+ * Three shells release a ledger. Admission (`reservePiSpawnLifecycle`) records
  * each claim as it takes the capability and, on a refusal, releases the whole
- * ledger (`releaseSpawnClaims`). Settlement (`pi/subagent-stop.ts`) derives the
- * durable ledger a dispatched batch still holds from its committed grants and
- * reservation (`settledSpawnClaims`) and releases it at `tool_result`
- * (`releaseDurableSpawnClaims`) — through ports for durable claims only, since
- * a dispatched batch can hold nothing else. Both run one plan and derive what
- * is still owed by one rule (`remainingSpawnClaims` over
+ * ledger (`releaseSpawnClaims`). Settlement (`pi/subagent-stop.ts`) and session
+ * shutdown (`pi/session-shutdown.ts`) both release what one tool call still
+ * holds on its parent session through `releaseHeldSpawnClaims`: the durable
+ * ledger of its committed grants and its stored reservation, parsed against
+ * the holder's session (`settledSpawnClaims`, `ownPiSpawnReservation`), and
+ * released through durable ports only (`releaseDurableSpawnClaims`), since a
+ * dispatched batch can hold nothing else. All three run one plan and derive
+ * what is still owed by one rule (`remainingSpawnClaims` over
  * `remainingDurableClaims`, `spawnDebtOf`), so a new capability kind changes
  * one place.
  *
@@ -28,7 +30,11 @@
  * pointer lease — rather than silently dropped or overwritten. Admission takes
  * every claim through `claimOrCompensate`, which releases whatever a refused
  * claim left unowned through the same plan, so no call site pairs a claim with
- * a hand-written release. Executing a plan is one function over injected
+ * a hand-written release. A durable capability whose compensation fails is
+ * owned by no ledger — the refusal is that the ledger already holds one of its
+ * kind — so it is returned as an `OrphanedSpawnClaim`, kept on the parent
+ * session, and retried by `releaseOrphanedSpawnClaims` at every settlement and
+ * at shutdown until it is released. Executing a plan is one function over injected
  * release ports, so the release-and-debt state machine runs against in-memory
  * fakes.
  * The plan's order is the security order: capability releases (launches,
@@ -47,11 +53,13 @@ import type { SessionRunBinding } from "../engine/src/orchestration/session-run-
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import { cleanupFailureSuffix, runPiCleanupActions } from "./cleanup-actions";
 import { revokePiWriteGrant } from "./write-grant";
-import type {
-  PiIssuedWriteGrant,
-  PiSessionId,
-  PiSpawnReservation,
-  PiSpawnReservationItem,
+import {
+  ownPiSpawnReservation,
+  type PiIssuedWriteGrant,
+  type PiParentSessions,
+  type PiSessionId,
+  type PiSpawnReservation,
+  type PiSpawnReservationItem,
 } from "./spawn-reservation";
 
 /** One child prompt rewritten to carry its slot's write grant, with the
@@ -227,6 +235,15 @@ export const settledSpawnClaims = (
     pointer: reservation?.pointerBinding ?? null,
   });
 
+/** Only the grants: what shutdown revokes for every tool call before any
+ *  roster or pointer housekeeping. */
+export const grantsOnly = (claims: DurableSpawnClaims): DurableSpawnClaims =>
+  Object.freeze({ ...NO_DURABLE_SPAWN_CLAIMS, grants: claims.grants });
+
+/** Everything but the grants: shutdown's housekeeping after every revocation. */
+export const withoutGrants = (claims: DurableSpawnClaims): DurableSpawnClaims =>
+  Object.freeze({ ...claims, grants: NO_DURABLE_SPAWN_CLAIMS.grants });
+
 /** Everything but the pointer lease: what settlement releases before it
  *  processes the batch's results. */
 export const withoutPointerLease = (claims: DurableSpawnClaims): DurableSpawnClaims =>
@@ -316,6 +333,30 @@ export function spawnSettlementStepLabel(step: DurableReleaseStep, owner: Readon
       return `remove reserved roster entry for ${step.item.agentType}`;
     case "release-pointer":
       return `release parent task-graph pointer lease for ${owner.sessionId}`;
+  }
+}
+
+/** The label a session shutdown reports a failed step under. */
+export function spawnShutdownStepLabel(step: DurableReleaseStep, holder: SpawnClaimHolder): string {
+  switch (step.kind) {
+    case "revoke-grant":
+      return `revoke outstanding write grant for spawn item ${step.slot + 1} of ${holder.toolCallId}`;
+    case "remove-roster-entry":
+      return `remove shutdown roster entry for ${step.item.agentType}`;
+    case "release-pointer":
+      return `release shutdown task-graph pointer lease for ${holder.sessionId}`;
+  }
+}
+
+/** The label a retried orphaned claim reports a failed step under. */
+export function orphanedClaimStepLabel(step: DurableReleaseStep): string {
+  switch (step.kind) {
+    case "revoke-grant":
+      return `revoke orphaned write grant for spawn item ${step.slot + 1}`;
+    case "remove-roster-entry":
+      return `remove orphaned roster entry ${step.item.rosterId}`;
+    case "release-pointer":
+      return "release orphaned task-graph pointer lease";
   }
 }
 
@@ -410,7 +451,7 @@ export type SpawnClaimReleasePorts = DurableClaimReleasePorts & Readonly<{
 }>;
 
 /** Release exactly this pointer lease, or throw naming the ownership lost. */
-async function releaseExactPointerLease(
+export async function releaseExactPointerLease(
   releasePointer: DurableClaimReleasePorts["releasePointer"],
   pointer: SessionTaskGraphPointerBinding,
 ): Promise<void> {
@@ -503,22 +544,133 @@ export async function releaseSpawnClaims(
 }
 
 /**
+ * A durable capability a refused claim took whose compensating release
+ * failed. No ledger can own it — the refusal is precisely that the ledger
+ * already holds one of its kind — so the parent session keeps it as cleanup
+ * debt of its own, which settlement and shutdown retry
+ * (`releaseOrphanedSpawnClaims`). Only durable kinds can be orphaned: a failed
+ * launch removal or witness retraction is process-local and is discharged by
+ * shutdown's session-wide launch removal and witness forget.
+ */
+export type OrphanedSpawnClaim = Extract<SpawnClaim, { kind: "write-grant" | "pointer-lease" }>;
+
+/** Why a claim was refused, and the capability its failed compensation left
+ *  orphaned, if any. */
+export type SpawnClaimRefusal = Readonly<{
+  /** The refusal, with the compensation's failures appended. */
+  reason: string;
+  orphaned: OrphanedSpawnClaim | null;
+}>;
+
+/** What a release of a claim's capability (a compensation, or an orphan's
+ *  retry) left orphaned: the claim itself when it is durable and its
+ *  capability was not released, otherwise nothing. */
+export function orphanedOnRelease(claim: SpawnClaim, releases: DurableClaimReleases): OrphanedSpawnClaim | null {
+  switch (claim.kind) {
+    case "write-grant":
+      return releases.revokedTokens.has(claim.grant.token) ? null : claim;
+    case "pointer-lease":
+      return releases.pointerReleased ? null : claim;
+    case "roster-entry":
+    case "grant-injection":
+    case "witness-run":
+    case "emission-launches":
+      return null;
+  }
+}
+
+/**
  * Record a claim, or refuse it with what it left unowned already released.
  * A refused claim's capability is owed by no later rollback, so its
  * compensation is the ledger's own planned release of exactly that capability
  * (`unownedOnRefusal`): a claim kind cannot exist without the release that
- * compensates it. The refusal carries the compensation's failures, if any.
+ * compensates it. The refusal carries the compensation's failures, if any,
+ * and the durable capability that failure orphaned, for the caller to keep as
+ * session debt.
  */
 export async function claimOrCompensate(
   claims: SpawnClaims,
   claim: SpawnClaim,
   labelOf: (step: SpawnRollbackStep) => string,
   ports: SpawnClaimReleasePorts,
-): Promise<DomainResult<SpawnClaims, string>> {
+): Promise<DomainResult<SpawnClaims, SpawnClaimRefusal>> {
   const recorded = recordSpawnClaim(claims, claim);
   if (recorded.ok) return recorded;
-  const { errors } = await releaseSpawnClaims(unownedOnRefusal(claim), labelOf, ports);
-  return failure(`${recorded.error}${cleanupFailureSuffix(errors)}`);
+  const { errors, releases } = await releaseSpawnClaims(unownedOnRefusal(claim), labelOf, ports);
+  return failure(Object.freeze({
+    reason: `${recorded.error}${cleanupFailureSuffix(errors)}`,
+    orphaned: orphanedOnRelease(claim, releases),
+  }));
+}
+
+/**
+ * Retry every orphaned claim the session keeps — revocations before pointer
+ * releases, the security order — through the ledger's own planned release of
+ * that one capability, discharging each one released. An orphan that still
+ * fails stays as debt; its failures are returned, labelled.
+ */
+export async function releaseOrphanedSpawnClaims(
+  sessionId: PiSessionId,
+  parentSessions: PiParentSessions,
+  ports: DurableClaimReleasePorts,
+): Promise<readonly string[]> {
+  const orphans = [...parentSessions.get(sessionId)?.orphanedClaims ?? []];
+  const errors: string[] = [];
+  for (const orphan of [
+    ...orphans.filter(({ kind }) => kind === "write-grant"),
+    ...orphans.filter(({ kind }) => kind === "pointer-lease"),
+  ]) {
+    const attempt = await releaseDurableSpawnClaims(unownedOnRefusal(orphan), orphanedClaimStepLabel, ports);
+    if (orphanedOnRelease(orphan, attempt.releases) === null) parentSessions.dischargeOrphanedClaim(sessionId, orphan);
+    errors.push(...attempt.errors);
+  }
+  return errors;
+}
+
+/** The parsed session and tool call one batch's durable claims and cleanup
+ *  debt are filed under on the parent session. */
+export type SpawnClaimHolder = Readonly<{ sessionId: PiSessionId; toolCallId: string }>;
+
+/** What releasing one tool call's held claims did. */
+export type HeldSpawnClaimsRelease = Readonly<{
+  /** The failed release steps, labelled. */
+  errors: readonly string[];
+  /** Why the tool call's stored reservation was left untouched as debt: it
+   *  names another session (`ownPiSpawnReservation`'s refusal), or `null`. */
+  foreignReservation: string | null;
+}>;
+
+/**
+ * Release the part `select` picks of the durable ledger one tool call still
+ * holds on its parent session — its committed grants, and the roster entries
+ * and pointer lease of its stored reservation once that is parsed against the
+ * holder's session — then retain exactly what is still owed. Settlement and
+ * shutdown both release through here, so they share one plan, one release
+ * order and one remaining-debt rule. A stored reservation naming another
+ * session is never released under the holder: it stays as debt, reported as
+ * data. The reservation is re-read from the session on every call, where the
+ * previous release retained it, so a retry never replays a released capability.
+ */
+export async function releaseHeldSpawnClaims(
+  holder: SpawnClaimHolder,
+  parentSessions: PiParentSessions,
+  select: (held: DurableSpawnClaims) => DurableSpawnClaims,
+  labelOf: (step: DurableReleaseStep) => string,
+  ports: DurableClaimReleasePorts,
+): Promise<HeldSpawnClaimsRelease> {
+  const { sessionId, toolCallId } = holder;
+  const runtime = parentSessions.get(sessionId);
+  const stored = runtime?.spawnReservations.get(toolCallId);
+  const owned = stored === undefined ? undefined : ownPiSpawnReservation(sessionId, stored);
+  const reservation = owned?.ok === true ? owned.value : undefined;
+  const held = settledSpawnClaims(runtime?.issuedWriteGrants.get(toolCallId) ?? [], reservation);
+  const { errors, releases } = await releaseDurableSpawnClaims(select(held), labelOf, ports);
+  const owed = remainingDurableClaims(held, releases);
+  parentSessions.retainWriteGrantDebt(sessionId, toolCallId, owed.grants);
+  if (reservation !== undefined) {
+    parentSessions.retainSpawnCleanupDebt(sessionId, toolCallId, spawnDebtOf(owed, reservation).reservation);
+  }
+  return Object.freeze({ errors, foreignReservation: owned?.ok === false ? owned.error : null });
 }
 
 /** The production durable release ports of one parent session: roster

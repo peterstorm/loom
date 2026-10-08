@@ -46,6 +46,7 @@ import {
 } from "./reserved-slot";
 import { parsePiMessages } from "./transcript-adapter";
 import type { PiReservedEmissionLaunch } from "./emission-launch-bridge";
+import type { OrphanedSpawnClaim } from "./spawn-claims";
 import { piSpawnRosterId } from "./tool-input";
 
 export type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
@@ -290,11 +291,18 @@ export interface PiParentSessionRuntime {
   /** Per tool call, the grants it issued and has not yet revoked, in slot order. */
   readonly issuedWriteGrants: Map<string, readonly PiIssuedWriteGrant[]>;
   readonly spawnReservations: Map<string, PiSpawnReservation>;
+  /** Durable capabilities a refused claim took whose compensation failed:
+   *  owned by no tool call's ledger, retried until released. Read-only here;
+   *  only `addOrphanedClaim` / `dischargeOrphanedClaim` change it. */
+  readonly orphanedClaims: ReadonlySet<OrphanedSpawnClaim>;
 }
 
-const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
+type MutableParentSessionRuntime = PiParentSessionRuntime & Readonly<{ orphanedClaims: Set<OrphanedSpawnClaim> }>;
+
+const emptyParentSessionRuntime = (): MutableParentSessionRuntime => ({
   issuedWriteGrants: new Map(),
   spawnReservations: new Map(),
+  orphanedClaims: new Set(),
 });
 
 /** Does this reservation still name a capability someone must release? */
@@ -306,7 +314,8 @@ const holdsCleanupDebt = (reservation: PiSpawnReservation): boolean =>
  * overlapping sessions, so reservations and capabilities are aggregates owned
  * by one parsed session, never process-global maps whose shutdown can consume
  * another session's state. A runtime exists only while it holds debt: the two
- * retain operations record what a tool call still owes and forget the session's
+ * retain operations record what a tool call still owes, and discharging an
+ * orphaned claim drops that one capability, each forgetting the session's
  * runtime in the same step once it owes nothing, so no caller can retain debt
  * and forget to prune (or prune before retaining).
  */
@@ -320,11 +329,16 @@ export type PiParentSessions = Readonly<{
   /** Retain the reservation while it still names a roster entry or pointer
    *  lease (otherwise forget it), then prune the session if it owes nothing. */
   retainSpawnCleanupDebt: (sessionId: PiSessionId, toolCallId: string, reservation: PiSpawnReservation) => void;
+  /** Keep a capability a failed compensation orphaned as session debt. */
+  addOrphanedClaim: (sessionId: PiSessionId, orphan: OrphanedSpawnClaim) => void;
+  /** Forget an orphaned claim once released, then prune the session if it
+   *  owes nothing. */
+  dischargeOrphanedClaim: (sessionId: PiSessionId, orphan: OrphanedSpawnClaim) => void;
 }>;
 
 export function createPiParentSessions(): PiParentSessions {
-  const runtimes = new Map<PiSessionId, PiParentSessionRuntime>();
-  const runtimeFor = (sessionId: PiSessionId): PiParentSessionRuntime => {
+  const runtimes = new Map<PiSessionId, MutableParentSessionRuntime>();
+  const runtimeFor = (sessionId: PiSessionId): MutableParentSessionRuntime => {
     const existing = runtimes.get(sessionId);
     if (existing) return existing;
     const created = emptyParentSessionRuntime();
@@ -333,7 +347,8 @@ export function createPiParentSessions(): PiParentSessions {
   };
   const pruneIfIdle = (sessionId: PiSessionId): void => {
     const runtime = runtimes.get(sessionId);
-    if (runtime !== undefined && runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0) {
+    if (runtime !== undefined && runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0 &&
+        runtime.orphanedClaims.size === 0) {
       runtimes.delete(sessionId);
     }
   };
@@ -348,6 +363,13 @@ export function createPiParentSessions(): PiParentSessions {
     retainSpawnCleanupDebt: (sessionId: PiSessionId, toolCallId: string, reservation: PiSpawnReservation) => {
       if (holdsCleanupDebt(reservation)) runtimeFor(sessionId).spawnReservations.set(toolCallId, Object.freeze(reservation));
       else runtimes.get(sessionId)?.spawnReservations.delete(toolCallId);
+      pruneIfIdle(sessionId);
+    },
+    addOrphanedClaim: (sessionId: PiSessionId, orphan: OrphanedSpawnClaim) => {
+      runtimeFor(sessionId).orphanedClaims.add(orphan);
+    },
+    dischargeOrphanedClaim: (sessionId: PiSessionId, orphan: OrphanedSpawnClaim) => {
+      runtimes.get(sessionId)?.orphanedClaims.delete(orphan);
       pruneIfIdle(sessionId);
     },
   });
