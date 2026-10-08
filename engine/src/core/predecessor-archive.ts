@@ -30,7 +30,7 @@ import { projectContextPacket, type ContextProjectionInput } from "./context-pac
 import { parseStandaloneReviewerContextPacketV3, withStoredSectionBytes, type SectionBlobLookup } from "./context-packets";
 import { sha256Bytes } from "./digest";
 import { parseArtifactDigest, type ArtifactDigest, type DomainResult } from "./orchestration-contract";
-import { isRecord, parseExactRecord } from "./plain-record";
+import { hasExactPlainKeys, isRecord } from "./plain-record";
 
 /** How the reader must decode the retained predecessor packet — explicit, never guessed. */
 export type PredecessorArchivePurpose = "v1-v2" | "standalone-successor";
@@ -78,11 +78,10 @@ const refuse = <T>(kind: Exclude<PredecessorArchiveRefusal["kind"], "expansion-f
   ({ ok: false, error: { kind, message } });
 
 // Record admission is the shared kernel's: `isRecord` asks only the shape
-// question, and the exact key set (own string keys only, symbol keys refused,
-// a null or Object.prototype prototype required) is `parseExactRecord`'s. The
-// refusal kinds here are fixed, so the kernel's diagnostics are not surfaced.
-const hasExactKeys = (record: unknown, keys: readonly string[]): boolean =>
-  parseExactRecord(record, keys, "predecessor-archive").ok;
+// question, and each encoding's exact key set is the STRICT predicate
+// `hasExactPlainKeys` (own string keys only, symbol keys refused, a null or
+// Object.prototype prototype required) — never the lax `hasExactKeys`. The
+// refusal kinds here are fixed, so no kernel diagnostics are surfaced.
 const boundedLength = (raw: unknown, maximum: number): raw is number =>
   typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 && raw <= maximum;
 
@@ -92,7 +91,7 @@ export function parsePredecessorArchiveRecord(raw: unknown, bounds: PredecessorA
   const digest = parseArtifactDigest(raw["digest"]);
   if (raw["encoding"] === "published-packet-reference") {
     const path = raw["path"], purpose = raw["purpose"];
-    if (!hasExactKeys(raw, ["encoding", "byteLength", "digest", "path", "purpose"]) ||
+    if (!hasExactPlainKeys(raw, ["encoding", "byteLength", "digest", "path", "purpose"]) ||
         !boundedLength(raw["byteLength"], bounds.expandedBytes) || !digest.ok ||
         typeof path !== "string" || !path.startsWith("/") ||
         !isPurpose(purpose)) {
@@ -103,7 +102,7 @@ export function parsePredecessorArchiveRecord(raw: unknown, bounds: PredecessorA
   }
   if (raw["encoding"] === "gzip-base64") {
     const content = raw["contentBase64"];
-    if (!hasExactKeys(raw, ["encoding", "contentBase64", "byteLength", "digest"]) ||
+    if (!hasExactPlainKeys(raw, ["encoding", "contentBase64", "byteLength", "digest"]) ||
         !boundedLength(raw["byteLength"], bounds.expandedBytes) || !digest.ok ||
         typeof content !== "string" || content.length > bounds.encodedBytes) {
       return refuse("invalid-gzip-record", "archive exceeds bounded expansion or compressed bound");

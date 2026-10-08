@@ -33,17 +33,13 @@ import {
   WaveCompletionResultObservation,
   WaveWorkspaceObservation,
 } from "../../src/types";
+import { value } from "../fixtures/parse-result";
 
 const digest = (fill: string): ArtifactDigest => fill.repeat(64) as ArtifactDigest;
 const workspace = (fill: string): WaveWorkspaceObservation => ({
   kind: "observed",
   workspaceDigest: digest(fill),
 });
-
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("invalid test fixture");
-  return result.value;
-}
 
 const registration: ActiveWaveGateRegistration = {
   schemaVersion: 1,
@@ -83,7 +79,7 @@ const task: Task = {
 };
 
 function manifestWithReport(): FrozenVerificationManifest {
-  return valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  return value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
     kind: "loom-verification-manifest",
     checks: [{
@@ -104,7 +100,7 @@ function acceptedReceipt(
   reportDigest = digest("c"),
   reportByteLength = 10,
 ): AcceptedWaveCompletionReceipt {
-  const authority = valueOf(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest));
+  const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest));
   const evaluated = evaluateWaveCompletionSuite(authority, {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
@@ -178,7 +174,7 @@ function observedResult(
     >;
   }>,
 ): WaveCompletionResultObservation {
-  const authority = valueOf(authorizeWaveCompletionSuite(manifest, registration, digest("b")));
+  const authority = value(authorizeWaveCompletionSuite(manifest, registration, digest("b")));
   const result: WaveCompletionSuiteResult = {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
@@ -227,7 +223,7 @@ function readinessIdentity(
   observation: WaveWorkspaceObservation | undefined,
   completionResult?: WaveCompletionResultObservation,
 ) {
-  const readiness = valueOf(deriveWaveReadiness(state, deps(observation, completionResult)));
+  const readiness = value(deriveWaveReadiness(state, deps(observation, completionResult)));
   return {
     digest: readiness.readinessDigest,
     effectId: readiness.completionIntent.effectId,
@@ -235,7 +231,7 @@ function readinessIdentity(
 }
 
 describe("Wave completion suite gate readiness", () => {
-  const emptyOperator = valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  const emptyOperator = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1, kind: "loom-verification-manifest", checks: [],
   }))));
 
@@ -261,9 +257,9 @@ describe("Wave completion suite gate readiness", () => {
       expect(renderLoomStatusHuman(status)).toContain(diagnostic);
       expect(JSON.stringify(checkWaveCompletionSuite(state, 1, observation))).toContain(diagnostic);
     }
-    const ready = valueOf(deriveWaveReadiness(modernGraph(receipt, manifest), deps(workspace("b"))));
+    const ready = value(deriveWaveReadiness(modernGraph(receipt, manifest), deps(workspace("b"))));
     expect(ready.gateDecision.verdict.kind).toBe("pass");
-    const committed = valueOf(commitWaveGateCompletion(ready));
+    const committed = value(commitWaveGateCompletion(ready));
     const changedManifest = manifest.projectChecks.length === 0 ? manifestWithReport() : defaultVerificationManifest();
     const historical = { ...committed.graph, verification_manifest: changedManifest };
     const expectedHistoricalCoverage = coverage.kind === "configured" ? coverage : {
@@ -277,7 +273,7 @@ describe("Wave completion suite gate readiness", () => {
   });
 
   it("does not borrow current configuration for schema-v1 history", () => {
-    const committed = valueOf(commitWaveGateCompletion(valueOf(deriveWaveReadiness(graph(), deps()))));
+    const committed = value(commitWaveGateCompletion(value(deriveWaveReadiness(graph(), deps()))));
     expect(deriveWaveCompletionSuiteReadiness({ ...committed.graph, verification_manifest: manifestWithReport() }, 1, workspace("d")))
       .toEqual({ kind: "legacy-unavailable", verificationManifestDigest: null });
   });
@@ -293,7 +289,7 @@ describe("Wave completion suite gate readiness", () => {
       passed: false,
       reason: expect.stringContaining("accepted-suite-missing"),
     });
-    expect(valueOf(deriveWaveReadiness(state, deps(workspace("b"), observation))).facts.waveCompletionSuiteReadiness)
+    expect(value(deriveWaveReadiness(state, deps(workspace("b"), observation))).facts.waveCompletionSuiteReadiness)
       .toMatchObject({ kind: "known", value: { kind: "required", reason: "accepted-suite-missing" } });
   });
 
@@ -367,7 +363,7 @@ describe("Wave completion suite gate readiness", () => {
 
     expect(decision.verdict).toEqual({ kind: "pass", taskIds: ["T1"], nextWave: null });
     expect(decision.checks[4]).toMatchObject({ passed: true });
-    const fact = deriveLoomStatus(valueOf(deriveWaveReadiness(state, deps(workspace("b")))))
+    const fact = deriveLoomStatus(value(deriveWaveReadiness(state, deps(workspace("b")))))
       .facts.waveCompletionSuiteReadiness;
     expect(fact).toEqual({
       kind: "known",
@@ -419,7 +415,7 @@ describe("Wave completion suite gate readiness", () => {
     }), "loom:full-tier-lint contradicts its report policy"],
   ])("refuses a parsed accepted receipt with mismatched %s authority", (_label, mutate, diagnostic) => {
     const manifest = manifestWithReport();
-    const receipt = valueOf(parseAcceptedWaveCompletionReceipt(acceptedReceipt(manifest)));
+    const receipt = value(parseAcceptedWaveCompletionReceipt(acceptedReceipt(manifest)));
     const state = modernGraph(receipt, manifest);
     expect(deriveWaveCompletionSuiteReadiness(state, 1, workspace("b"))).toMatchObject({ kind: "accepted" });
     expect(checkWaveCompletionSuite(state, 1, workspace("b"))).toMatchObject({ passed: true });
@@ -427,7 +423,7 @@ describe("Wave completion suite gate readiness", () => {
     // Recompute integrity only: a canonical receipt is not proof of current protected authority.
     const { resultDigest: originalDigest, ...body } = receipt;
     const changedBody = mutate(body);
-    const changed = valueOf(parseAcceptedWaveCompletionReceipt({
+    const changed = value(parseAcceptedWaveCompletionReceipt({
       ...changedBody,
       resultDigest: sha256Hex(canonicalJson(changedBody)),
     }));
@@ -444,7 +440,7 @@ describe("Wave completion suite gate readiness", () => {
       passed: false,
       reason: expect.stringContaining("accepted-suite-invalid"),
     });
-    expect(commitWaveGateCompletion(valueOf(deriveWaveReadiness(mismatched, deps(workspace("b")))))).toMatchObject({
+    expect(commitWaveGateCompletion(value(deriveWaveReadiness(mismatched, deps(workspace("b")))))).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("completion readiness is ineligible") },
     });
@@ -463,7 +459,7 @@ describe("Wave completion suite gate readiness", () => {
       .toMatchObject({ kind: "fail", reason: expect.stringContaining("git status failed") });
     expect(evaluateWaveGate(state, null, deps(workspace("d"))).verdict)
       .toMatchObject({ kind: "fail", reason: expect.stringContaining("stale") });
-    expect(valueOf(deriveWaveReadiness(state, deps(workspace("d")))).facts.waveCompletionSuiteReadiness)
+    expect(value(deriveWaveReadiness(state, deps(workspace("d")))).facts.waveCompletionSuiteReadiness)
       .toMatchObject({
         kind: "known",
         value: {
@@ -483,7 +479,7 @@ describe("Wave completion suite gate readiness", () => {
       passed: true,
       summary: "4. Wave completion suite: legacy-unavailable (verification_manifest and active receipt absent).",
     });
-    expect(valueOf(deriveWaveReadiness(state, deps())).facts.waveCompletionSuiteReadiness).toEqual({
+    expect(value(deriveWaveReadiness(state, deps())).facts.waveCompletionSuiteReadiness).toEqual({
       kind: "known",
       value: { kind: "legacy-unavailable", verificationManifestDigest: null },
     });
@@ -544,7 +540,7 @@ describe("Wave completion authority and atomic commit", () => {
   });
 
   it("refuses modern completion without a current accepted suite", () => {
-    const readiness = valueOf(deriveWaveReadiness(modernGraph(undefined), deps(workspace("b"))));
+    const readiness = value(deriveWaveReadiness(modernGraph(undefined), deps(workspace("b"))));
     expect(commitWaveGateCompletion(readiness)).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("completion readiness is ineligible") },
@@ -555,8 +551,8 @@ describe("Wave completion authority and atomic commit", () => {
     const manifest = manifestWithReport();
     const receipt = acceptedReceipt(manifest);
     const state = modernGraph(receipt, manifest);
-    const committed = valueOf(commitWaveGateCompletion(
-      valueOf(deriveWaveReadiness(state, deps(workspace("b")))),
+    const committed = value(commitWaveGateCompletion(
+      value(deriveWaveReadiness(state, deps(workspace("b")))),
     ));
 
     expect(committed.completedRegistration).toEqual({
@@ -588,8 +584,8 @@ describe("Wave completion authority and atomic commit", () => {
   });
 
   it("writes schema v1 only for field-absent legacy compatibility", () => {
-    const committed = valueOf(commitWaveGateCompletion(
-      valueOf(deriveWaveReadiness(graph(), deps())),
+    const committed = value(commitWaveGateCompletion(
+      value(deriveWaveReadiness(graph(), deps())),
     ));
 
     expect(committed.completedRegistration.schemaVersion).toBe(1);

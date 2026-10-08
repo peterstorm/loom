@@ -4,6 +4,7 @@ import {
   collectDenseArray,
   exactRecordErrors,
   hasExactKeys,
+  hasExactPlainKeys,
   isPlainRecord,
   isRecord,
   parseExactRecord,
@@ -146,6 +147,51 @@ describe("hasExactKeys", () => {
       Object.defineProperty({ ...visible }, name, { value: true, enumerable: false });
     expect(hasExactKeys(hidden({ kind: "x" }, "extra"), ["kind"])).toBe(false);
     expect(hasExactKeys(hidden({ kind: "x" }, "revision"), ["kind", "revision"])).toBe(true);
+  });
+});
+
+describe("hasExactPlainKeys", () => {
+  const withSymbol = (record: Record<string, unknown>) => ({ ...record, [Symbol("hidden")]: true });
+  const withPrototype = (record: Record<string, unknown>, prototype: object | null) =>
+    Object.assign(Object.create(prototype) as object, record);
+
+  it("admits exactly the records parseExactRecord admits, over arbitrary values and key lists", () => {
+    const candidate = fc.oneof(
+      fc.anything({ withNullPrototype: true, withMap: true, withSet: true, withDate: true, withBoxedValues: true }),
+      fc.tuple(fieldList, fc.constantFrom("plain", "null", "foreign", "symbol")).map(([present, shape]) =>
+        shape === "plain" ? recordOf(present)
+        : shape === "null" ? withPrototype(recordOf(present), null)
+        : shape === "foreign" ? withPrototype(recordOf(present), { inherited: true })
+        : withSymbol(recordOf(present))),
+    );
+    fc.assert(fc.property(candidate, fieldList, (raw, keys) => {
+      expect(hasExactPlainKeys(raw, keys)).toBe(parseExactRecord(raw, keys, "root").ok);
+    }));
+  });
+
+  it("is the lax predicate plus a plain prototype and no symbol keys", () => {
+    fc.assert(fc.property(fieldList, fieldList, (keys, present) => {
+      const record = recordOf(present);
+      expect(hasExactPlainKeys(record, keys)).toBe(hasExactKeys(record, keys));
+      expect(hasExactPlainKeys(withPrototype(record, null), keys)).toBe(hasExactKeys(record, keys));
+      // Where the lax predicate admits, the strict one still refuses a symbol key or a foreign prototype.
+      expect(hasExactPlainKeys(withSymbol(record), keys)).toBe(false);
+      expect(hasExactPlainKeys(withPrototype(record, { inherited: true }), keys)).toBe(false);
+    }));
+    expect(hasExactKeys(withSymbol({ kind: "x" }), ["kind"])).toBe(true);
+    expect(hasExactKeys(withPrototype({ kind: "x" }, { inherited: true }), ["kind"])).toBe(true);
+  });
+
+  it.each(nonPlainObjects)("refuses a %s whatever its keys", (_label, make) => {
+    const value = make();
+    expect(hasExactPlainKeys(value, Object.getOwnPropertyNames(value))).toBe(false);
+  });
+
+  it("refuses non-records and narrows an admitted record", () => {
+    for (const raw of [null, undefined, "x", 1, [], ["kind"]]) expect(hasExactPlainKeys(raw, ["kind"])).toBe(false);
+    const raw: unknown = JSON.parse('{"kind":"x"}');
+    if (!hasExactPlainKeys(raw, ["kind"])) throw new Error("an exact JSON record must be admitted");
+    expect(raw.kind).toBe("x");
   });
 });
 

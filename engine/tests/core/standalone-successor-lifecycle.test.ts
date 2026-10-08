@@ -44,10 +44,6 @@ import { freezePathAuthority, parseRemediationPathAuthority, createStandaloneRes
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
-const parseValue = <T>(result: { ok: true; value: T } | { ok: false; errors: readonly string[] }): T => {
-  if (!result.ok) throw new Error(result.errors.join("; "));
-  return result.value;
-};
 const predecessor = (refute = false) => standaloneFixture(undefined, true, { refute }).input.standaloneResult;
 const critical = REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!;
 const advisory = { severity: "advisory" as const, file: null, line: null, claim: "New independent advisory", reason: "Useful, nonblocking improvement." };
@@ -95,7 +91,7 @@ function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: strin
     scopeSafety: source.scope.map(path => ({ path, status: "safe" })),
     reviewerContexts: packets.map(attempts => ({ attempts: [attempts[0]!.digest, attempts[1]!.digest] })),
   }));
-  const authority = parseValue(parseStandaloneReviewAuthority(JSON.parse(serializeStandaloneReviewAuthority(initial.authority)), prepared));
+  const authority = value(parseStandaloneReviewAuthority(JSON.parse(serializeStandaloneReviewAuthority(initial.authority)), prepared));
   const requests = authority.roster.orderedSlots.map(slot => ({ authority: slot.attempts[0],
     context: { digest: slot.attempts[0].contextDigest, slot: `contexts/${slot.attempts[0].contextDigest}.json` } }));
   const intent = value(prepareInitialBatchPublicationIntent(runId, `effect:${runId}:reviewers`, requests));
@@ -123,7 +119,7 @@ function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: strin
 
 function finalize(collected: ReturnType<typeof collect>, refute = false) {
   const completion = value(collected.completion);
-  const aggregate: StandaloneReviewState = parseValue(aggregateStandaloneReview({ authority: collected.authority, completion }));
+  const aggregate: StandaloneReviewState = value(aggregateStandaloneReview({ authority: collected.authority, completion }));
   const aggregating = value(reduceStandaloneReviewMachine(collected.awaiting, { kind: "complete-roster-proved", completion }));
   let state: StandaloneReviewMachineState;
   let resolver: PublicationAuthorityResolver = collected.resolver;

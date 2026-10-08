@@ -28,6 +28,7 @@ import {
   parseCanonicalRepositoryRoot,
   type CanonicalRepositoryRoot,
 } from "../../src/utils/workspace-digest";
+import { value } from "../fixtures/parse-result";
 
 type ProjectCommandCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 
@@ -92,11 +93,6 @@ function refusalText(result: { readonly ok: false; readonly error: unknown }): s
   return JSON.stringify(rest);
 }
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
-  if (!result.ok) throw new Error(`fixture construction failed: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
-
 const digest = (character: string): string => character.repeat(64);
 const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
 
@@ -110,7 +106,7 @@ function remediationCheck(
 ): AuthorizedRemediationCheck {
   const source = standaloneFixture(["src/main.ts"], true).input.standaloneResult;
   const findingId = source.survivingCriticals[0]!.id;
-  const accounting = valueOf(prepareDefectFamilyAccounting(source, {
+  const accounting = value(prepareDefectFamilyAccounting(source, {
     kind: "declared-defect-family-accounting",
     provenance: "DECLARED",
     dispositions: [{ findingId, status: "repaired", repairGroupId: `family:${name}` }],
@@ -133,7 +129,7 @@ function remediationCheck(
       }],
     }],
   }));
-  const manifest = valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  const manifest = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
     kind: VERIFICATION_MANIFEST_KIND,
     checks: [{
@@ -146,14 +142,14 @@ function remediationCheck(
       report: { kind: "required-file", path: reportPath },
     }],
   }))));
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, manifest));
+  const plan = value(prepareDefectFamilyVerification(accounting, manifest));
   if (plan.kind !== "selected-operator-checks") throw new Error("selected remediation plan required");
-  const gitWitness = valueOf(parseRepositorySnapshotWitness({
+  const gitWitness = value(parseRepositorySnapshotWitness({
     baseTreeDigest: digest("1"),
     indexDigest: digest("2"),
     worktreeDigest: digest("3"),
   }));
-  const candidate = valueOf(createCandidateRepositoryWitness({
+  const candidate = value(createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",
     repositoryRoot: root,
     workspaceDigest: digest("4"),
@@ -162,14 +158,14 @@ function remediationCheck(
     gitWitness,
     generatedReportExclusions: [reportPath],
   }));
-  const scope = valueOf(createRemediationCheckScope(plan.source, candidate, {
+  const scope = value(createRemediationCheckScope(plan.source, candidate, {
     kind: "standalone-remediation",
     remediationRunId: `run.runner-${name}`,
     sourceRunId: plan.source.sourceRunId,
     registrationDigest: digest("a"),
     candidateWitnessDigest: candidate.digest,
   }));
-  return valueOf(authorizeRemediationChecks(plan, scope))[0];
+  return value(authorizeRemediationChecks(plan, scope))[0];
 }
 
 afterEach(() => {

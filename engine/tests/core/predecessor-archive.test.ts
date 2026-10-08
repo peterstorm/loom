@@ -70,8 +70,18 @@ describe("predecessor archive codec: retained-record ADT", () => {
     ["a gzip record with a path", { ...gzipRecord(packet), path: "/x" }, "invalid-gzip-record"],
     ["a gzip record with a numeric payload", { ...gzipRecord(packet), contentBase64: 7 }, "invalid-gzip-record"],
     ["non-canonical base64", { ...gzipRecord(packet), contentBase64: `${gzipRecord(packet).contentBase64}\n` }, "noncanonical-base64"],
+    // Exact keys are the STRICT predicate's: what the lax one would ignore still refuses.
+    ["a reference with a symbol key", { ...referenceRecord(packet), [Symbol("hidden")]: 1 }, "invalid-reference"],
+    ["a reference with a foreign prototype", Object.assign(Object.create({ inherited: true }) as object, referenceRecord(packet)), "invalid-reference"],
+    ["a gzip record with a symbol key", { ...gzipRecord(packet), [Symbol("hidden")]: 1 }, "invalid-gzip-record"],
+    ["a gzip record with a foreign prototype", Object.assign(Object.create({ inherited: true }) as object, gzipRecord(packet)), "invalid-gzip-record"],
   ])("refuses %s", (_name, raw, kind) => {
     expect(refusalKind(raw)).toBe(kind);
+  });
+
+  it("admits a null-prototype record, the other plain prototype", () => {
+    expect(parsed(Object.assign(Object.create(null) as object, referenceRecord(packet)))).toEqual(parsed(referenceRecord(packet)));
+    expect(parsed(Object.assign(Object.create(null) as object, gzipRecord(packet))).encoding).toBe("gzip-base64");
   });
 
   it("holds byteLength and the encoded payload to the caller's bounds", () => {

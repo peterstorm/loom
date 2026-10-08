@@ -16,6 +16,7 @@ import {
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { sha256Bytes } from "../../src/core/digest";
+import { value } from "../fixtures/parse-result";
 
 const digest = (character: string): string => character.repeat(64);
 const activeAuthority = Object.freeze({
@@ -55,11 +56,6 @@ function bytes(raw: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(raw));
 }
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-}
-
 function deepFrozen(raw: unknown): boolean {
   if (typeof raw !== "object" || raw === null) return true;
   if (!Object.isFrozen(raw)) return false;
@@ -67,7 +63,7 @@ function deepFrozen(raw: unknown): boolean {
 }
 
 function suiteFor(manifest: FrozenVerificationManifest) {
-  return valueOf(authorizeWaveCompletionSuite(manifest, activeAuthority, digest("b")));
+  return value(authorizeWaveCompletionSuite(manifest, activeAuthority, digest("b")));
 }
 
 const safeIdSuffix = fc.stringMatching(/^[a-z][a-z0-9-]{0,15}$/);
@@ -97,11 +93,11 @@ describe("verification manifest exact parsing", () => {
 
   it("round-trips valid documents and deeply freezes parsed and frozen authority", () => {
     fc.assert(fc.property(validDocumentArbitrary, (raw) => {
-      const parsed = valueOf(parseVerificationManifest(raw));
-      const frozen = valueOf(freezeVerificationManifest(bytes(raw)));
-      const rehydrated = valueOf(parseFrozenVerificationManifest(JSON.parse(JSON.stringify(frozen))));
+      const parsed = value(parseVerificationManifest(raw));
+      const frozen = value(freezeVerificationManifest(bytes(raw)));
+      const rehydrated = value(parseFrozenVerificationManifest(JSON.parse(JSON.stringify(frozen))));
 
-      expect(valueOf(parseVerificationManifest(JSON.parse(JSON.stringify(parsed))))).toEqual(parsed);
+      expect(value(parseVerificationManifest(JSON.parse(JSON.stringify(parsed))))).toEqual(parsed);
       expect(rehydrated).toEqual(frozen);
       expect(deepFrozen(parsed)).toBe(true);
       expect(deepFrozen(frozen)).toBe(true);
@@ -115,8 +111,8 @@ describe("verification manifest exact parsing", () => {
   });
 
   it("retains only the exact source and frozen keys", () => {
-    const parsed = valueOf(parseVerificationManifest(document([{ ...check(), report: requiredReport() }])));
-    const frozen = valueOf(freezeVerificationManifest(bytes(document())));
+    const parsed = value(parseVerificationManifest(document([{ ...check(), report: requiredReport() }])));
+    const frozen = value(freezeVerificationManifest(bytes(document())));
     expect(Object.keys(parsed)).toEqual(["schemaVersion", "kind", "checks"]);
     expect(Object.keys(parsed.checks[0]!)).toEqual([
       "id", "scope", "executable", "args", "cwd", "timeoutMs", "report",
@@ -142,7 +138,7 @@ describe("verification manifest exact parsing", () => {
   });
 
   it("accepts an empty source and default while keeping the authorized suite non-empty", () => {
-    const operator = valueOf(freezeVerificationManifest(bytes(document([]))));
+    const operator = value(freezeVerificationManifest(bytes(document([]))));
     for (const manifest of [defaultVerificationManifest(), operator]) {
       const suite = suiteFor(manifest);
       expect(suite.checks).toHaveLength(1);
@@ -279,7 +275,7 @@ describe("fixed-command execution authority", () => {
 
   it("maps every source check to a canonical project command", () => {
     fc.assert(fc.property(validDocumentArbitrary, (raw) => {
-      const manifest = valueOf(freezeVerificationManifest(bytes(raw)));
+      const manifest = value(freezeVerificationManifest(bytes(raw)));
       const suite = suiteFor(manifest);
       expect(suite.checks.filter((candidate) => candidate.kind === "project-command"))
         .toEqual(manifest.projectChecks);
@@ -297,10 +293,10 @@ describe("fixed-command execution authority", () => {
       { ...baseline, timeoutMs: baseline.timeoutMs + 1 },
       { ...baseline, report: requiredReport(".loom/completion-reports/changed.json") },
     ];
-    const baselineManifest = valueOf(freezeVerificationManifest(bytes(document([baseline]))));
+    const baselineManifest = value(freezeVerificationManifest(bytes(document([baseline]))));
     const baselineSuite = suiteFor(baselineManifest);
     for (const mutation of mutations) {
-      const manifest = valueOf(freezeVerificationManifest(bytes(document([mutation]))));
+      const manifest = value(freezeVerificationManifest(bytes(document([mutation]))));
       const suite = suiteFor(manifest);
       expect(manifest.manifestDigest).not.toBe(baselineManifest.manifestDigest);
       expect(suite.suiteDigest).not.toBe(baselineSuite.suiteDigest);
@@ -310,8 +306,8 @@ describe("fixed-command execution authority", () => {
   it("binds the operator raw-byte digest into manifest authority", () => {
     const compact = bytes(document());
     const pretty = new TextEncoder().encode(JSON.stringify(document(), null, 2));
-    const compactManifest = valueOf(freezeVerificationManifest(compact));
-    const prettyManifest = valueOf(freezeVerificationManifest(pretty));
+    const compactManifest = value(freezeVerificationManifest(compact));
+    const prettyManifest = value(freezeVerificationManifest(pretty));
     expect(compactManifest.projectChecks).toEqual(prettyManifest.projectChecks);
     expect(compactManifest.source.kind).toBe("operator-file");
     expect(prettyManifest.source.kind).toBe("operator-file");
@@ -319,7 +315,7 @@ describe("fixed-command execution authority", () => {
   });
 
   it("rejects tampering with every frozen authority field", () => {
-    const manifest = valueOf(freezeVerificationManifest(bytes(document())));
+    const manifest = value(freezeVerificationManifest(bytes(document())));
     const mutations = [
       { ...manifest, schemaVersion: 2 },
       { ...manifest, kind: "other" },

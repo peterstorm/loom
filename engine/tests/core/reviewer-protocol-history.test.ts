@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { z } from "zod";
 import { parseContextPacket } from "../../src/core/context-packets";
@@ -32,19 +32,18 @@ import { loadReviewerV1Golden, type ReviewerV1Golden } from "../fixtures/reviewe
 import inventory from "../fixtures/reviewer-protocol-v1/inventory.json";
 import storage from "../fixtures/reviewer-protocol-v1/storage.json";
 import { decodeReviewerV1Pack, parseReviewerV1Pack } from "../fixtures/reviewer-protocol-v1/pack";
+import { value } from "../fixtures/parse-result";
 import archive from "../../../references/reviewer-protocol-v1/inventory.json";
-
-// Packing/replay cases are synchronous CPU work; allow task-update RPCs between cases.
-afterEach(() => new Promise<void>((resolve) => setImmediate(resolve)));
 
 const names = ["pr48-clean", "seven-reviewers-retry"] as const;
 const sha256 = (bytes: Uint8Array | string): string => createHash("sha256").update(bytes).digest("hex");
 const record = z.record(z.string(), z.unknown());
 const text = (bytes: Uint8Array): string => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 
-function required<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
+/** Compute once, on first use; later calls return the same value. */
+function once<T>(compute: () => T): () => T {
+  let computed: Readonly<{ value: T }> | undefined;
+  return () => (computed ??= { value: compute() }).value;
 }
 
 function bytesAt(files: ReviewerV1Golden["files"], path: string): Uint8Array {
@@ -58,7 +57,7 @@ function jsonAt(files: ReviewerV1Golden["files"], path: string): unknown {
 }
 
 function registeredAuthority(files: ReviewerV1Golden["files"]): FrozenStandaloneReviewAuthority {
-  return required(parsedAuthority(required(parseRegistration(jsonAt(files, "program.json")))));
+  return value(parsedAuthority(value(parseRegistration(jsonAt(files, "program.json")))));
 }
 
 /** Existing persistence port, backed only by independently captured publications. */
@@ -112,22 +111,22 @@ function contextualPublications(files: ReviewerV1Golden["files"]): PublicationAu
 }
 
 function protocols(files: ReviewerV1Golden["files"]): ReviewerProtocolAuthorityResolver {
-  const registration = required(parseRegistration(jsonAt(files, "program.json")));
-  const authority = required(parsedAuthority(registration));
+  const registration = value(parseRegistration(jsonAt(files, "program.json")));
+  const authority = value(parsedAuthority(registration));
   if (registration.schemaVersion !== 1) throw new Error("historical registration must remain v1");
   const resolvePublication = contextualPublications(files);
   return (request) => {
     try {
     for (const [path, bytes] of files) {
       if (!path.startsWith("artifacts/publications/")) continue;
-      const receipt = required(parseBatchPublishedReceipt(JSON.parse(text(bytes))));
+      const receipt = value(parseBatchPublishedReceipt(JSON.parse(text(bytes))));
       const index = receipt.issuedRequests.findIndex((entry) => sameAgentRequestAuthority(entry.authority, request));
       if (index < 0) continue;
-      const issued = required(parseIssuedSpawnRequest(resolvePublication, {
+      const issued = value(parseIssuedSpawnRequest(resolvePublication, {
         ...receipt.issuedRequests[index], issuance: { schemaVersion: 1, kind: "issued-spawn-request-proof",
           runId: receipt.runId, effectId: receipt.effectId, publicationDigest: receipt.publicationDigest, batchIndex: index },
       }));
-      const packet = required(parseContextPacket(jsonAt(files, `contexts/${request.contextDigest}.json`)));
+      const packet = value(parseContextPacket(jsonAt(files, `contexts/${request.contextDigest}.json`)));
       return parseIssuedReviewerProtocol({ request: issued, packet,
         registration: { schemaVersion: registration.schemaVersion, runId: authority.runId, program: registration.kind },
         subject: { kind: "standalone-review", runId: authority.runId, scope: authority.scope },
@@ -141,7 +140,7 @@ function protocols(files: ReviewerV1Golden["files"]): ReviewerProtocolAuthorityR
 }
 
 function historicalProtocol(files: ReviewerV1Golden["files"], request: FrozenStandaloneReviewAuthority["roster"]["orderedSlots"][number]["attempts"][number]): IssuedStandaloneReviewerProtocol {
-  const protocol = required(protocols(files)(request));
+  const protocol = value(protocols(files)(request));
   if (protocol.subject.kind !== "standalone-review") throw new Error("standalone history required");
   return protocol as IssuedStandaloneReviewerProtocol;
 }
@@ -152,7 +151,7 @@ function replay(files: ReviewerV1Golden["files"], raw: unknown = jsonAt(files, "
 
 function ready(files: ReviewerV1Golden["files"]) {
   // An in-memory replay projection, NOT a historical checkpoint rewrite.
-  const state = required(replay(files, { ...record.parse(jsonAt(files, "checkpoint.json")), kind: "ready-to-finalize" }));
+  const state = value(replay(files, { ...record.parse(jsonAt(files, "checkpoint.json")), kind: "ready-to-finalize" }));
   if (state.kind !== "ready-to-finalize") throw new Error(`Expected ready, received ${state.kind}`);
   return state;
 }
@@ -162,9 +161,9 @@ function copyFiles(files: ReviewerV1Golden["files"]): Map<string, Uint8Array> {
   return new Map([...files].map(([path, bytes]) => [path, Uint8Array.from(bytes)]));
 }
 
-function replaceJson(files: ReviewerV1Golden["files"], path: string, value: unknown): ReadonlyMap<string, Uint8Array> {
+function replaceJson(files: ReviewerV1Golden["files"], path: string, replacement: unknown): ReadonlyMap<string, Uint8Array> {
   const copy = copyFiles(files);
-  copy.set(path, new TextEncoder().encode(JSON.stringify(value)));
+  copy.set(path, new TextEncoder().encode(JSON.stringify(replacement)));
   return copy;
 }
 
@@ -194,11 +193,18 @@ describe("bounded lossless historical fixture storage", () => {
 
   for (const name of names) describe(name, () => {
     const packed = () => readFileSync(new URL(`../fixtures/reviewer-protocol-v1/${name}.json.gz`, import.meta.url));
-    const entries = () => [...loadReviewerV1Golden(name).files].map(([path, bytes]) =>
-      ({ path, base64bytes: Buffer.from(bytes).toString("base64") }));
-    const canonical = () => Buffer.from(JSON.stringify(entries()));
+    // One pack decode per golden, shared by every storage case (the per-path
+    // corruption cases alone are 90): the entries are frozen, so no case can
+    // leak a mutation into another, and each case still builds its own Buffer.
+    const entries = once(() => Object.freeze([...loadReviewerV1Golden(name).files].map(([path, bytes]) =>
+      Object.freeze({ path, base64bytes: Buffer.from(bytes).toString("base64") }))));
+    const canonicalJson = once(() => JSON.stringify(entries()));
+    const canonical = () => Buffer.from(canonicalJson());
 
-    it("encodes deterministically twice, including gzip metadata", () => {
+    // Two independent level-9 deflates of the whole canonical pack (8.8 MB and
+    // 18 MB) ARE the determinism claim, and this case is the first to decode the
+    // shared entries; it runs several seconds under load, so it states its budget.
+    it("encodes deterministically twice, including gzip metadata", { timeout: 30_000 }, () => {
       const raw = canonical();
       const first = gzipSync(raw, { level: 9 });
       const second = gzipSync(raw, { level: 9 });
@@ -222,8 +228,8 @@ describe("bounded lossless historical fixture storage", () => {
       expect(alternative.equals(packed())).toBe(false);
       const inflated = gunzipSync(alternative, { maxOutputLength: raw.length });
       expect(inflated.equals(raw)).toBe(true);
-      const decoded = required(parseReviewerV1Pack(name, inflated));
-      const stored = required(decodeReviewerV1Pack(name, packed()));
+      const decoded = value(parseReviewerV1Pack(name, inflated));
+      const stored = value(decodeReviewerV1Pack(name, packed()));
       expect([...decoded.keys()]).toEqual([...stored.keys()]);
       for (const entry of inventory.goldens.find((entry) => entry.name === name)!.files) {
         const bytes = bytesAt(decoded, entry.path);
@@ -240,8 +246,8 @@ describe("bounded lossless historical fixture storage", () => {
     });
 
     it("round trips every exact logical byte into independent copies", () => {
-      const decoded = required(decodeReviewerV1Pack(name, packed()));
-      const fresh = required(parseReviewerV1Pack(name, canonical()));
+      const decoded = value(decodeReviewerV1Pack(name, packed()));
+      const fresh = value(parseReviewerV1Pack(name, canonical()));
       for (const entry of inventory.goldens.find((entry) => entry.name === name)!.files) {
         expect(sha256(bytesAt(decoded, entry.path))).toBe(entry.sha256);
         expect(bytesAt(decoded, entry.path).length).toBe(entry.byteLength);
@@ -400,7 +406,7 @@ for (const name of names) describe(`historical ${name}`, () => {
     const contexts = [...files].filter(([path]) => path.startsWith("contexts/"));
     expect(contexts).toHaveLength(name === "pr48-clean" ? 10 : 17);
     for (const [path, bytes] of contexts) {
-      const packet = required(parseContextPacket(JSON.parse(text(bytes))));
+      const packet = value(parseContextPacket(JSON.parse(text(bytes))));
       expect(path).toBe(`contexts/${packet.digest}.json`);
       expect(packet.schemaVersion).toBe(1);
       if (packet.role !== "review-verifier-agent") {
@@ -410,32 +416,32 @@ for (const name of names) describe(`historical ${name}`, () => {
   });
 
   it("replays the complete LC-2 checkpoint and independently publishes identical result bytes", () => {
-    const state = required(replay(files));
+    const state = value(replay(files));
     expect(state.kind).toBe("done");
     if (state.kind !== "done") throw new Error("Historical checkpoint did not complete");
     expect(serializeStandaloneReviewAuthority(state.authority)).toBe(serializeStandaloneReviewAuthority(registeredAuthority(files)));
     expect(isAuthoritativeStandaloneReviewResult(state.result)).toBe(true);
     const prepared = ready(files);
-    const result = required(parseAuthoritativeStandaloneReviewResult(prepared, jsonAt(files, "result.json"),
+    const result = value(parseAuthoritativeStandaloneReviewResult(prepared, jsonAt(files, "result.json"),
       jsonAt(files, `receipts/${prepared.publicationIntent.effectId}.json`)));
     const serialized = new TextEncoder().encode(serializeAdjudicatedStandaloneReview(result));
     expect(serialized).toEqual(bytesAt(files, "result.json"));
     expect(sha256(serialized)).toBe(golden.resultDigest);
     expect(serialized.length).toBe(golden.resultByteLength);
     expect(isAuthoritativeStandaloneReviewResult(result)).toBe(true);
-    expect(required(canonicalStandaloneResultArtifact(result)).digest).toBe(golden.resultDigest);
-    const restored = required(replay(files, JSON.parse(serializeStandaloneReviewMachineState(state))));
+    expect(value(canonicalStandaloneResultArtifact(result)).digest).toBe(golden.resultDigest);
+    const restored = value(replay(files, JSON.parse(serializeStandaloneReviewMachineState(state))));
     expect(restored.kind).toBe("done");
     if (restored.kind !== "done") throw new Error("Round trip lost done state");
     expect(serializeAdjudicatedStandaloneReview(restored.result)).toBe(text(serialized));
     for (const accepted of prepared.completion.results) {
       const bytes = bytesAt(files, accepted.authority.outputSlot.path);
-      expect(required(capturedReviewerResultFromBytes(accepted.value.artifact, bytes))).toEqual(accepted.value);
+      expect(value(capturedReviewerResultFromBytes(accepted.value.artifact, bytes))).toEqual(accepted.value);
     }
   });
 
   it("pins exact final counts, ordered IDs, duplicate claims, attempts, and panel history", () => {
-    const state = required(replay(files));
+    const state = value(replay(files));
     if (state.kind !== "done") throw new Error("Expected completed history");
     const result = state.result;
     const prepared = ready(files);
@@ -501,7 +507,7 @@ for (const name of names) describe(`historical ${name}`, () => {
       const at = offset % bytes.length;
       bytes[at] = bytes[at]! ^ 1;
       expect(capturedReviewerResultFromBytes(result.value.artifact, bytes).ok).toBe(false);
-      expect(required(capturedReviewerResultFromBytes(result.value.artifact,
+      expect(value(capturedReviewerResultFromBytes(result.value.artifact,
         bytesAt(files, result.authority.outputSlot.path)))).toEqual(result.value);
     }), { numRuns: 30 });
   });
@@ -510,10 +516,10 @@ for (const name of names) describe(`historical ${name}`, () => {
     const receipts = [...files].filter(([path]) => path.startsWith("receipts/effect:capture:"));
     expect(receipts).toHaveLength(name === "pr48-clean" ? 0 : 11);
     for (const [, bytes] of receipts) {
-      const receipt = required(parseEffectReceipt(JSON.parse(text(bytes))));
+      const receipt = value(parseEffectReceipt(JSON.parse(text(bytes))));
       if (receipt.kind !== "raw-transcript-captured") throw new Error("Expected historical raw capture receipt");
       const raw = bytesAt(files, receipt.artifact.slot.path);
-      expect(required(capturedReviewerResultFromBytes(receipt.artifact, raw)).artifact).toEqual(receipt.artifact);
+      expect(value(capturedReviewerResultFromBytes(receipt.artifact, raw)).artifact).toEqual(receipt.artifact);
       const changed = Uint8Array.from(raw);
       changed[0] = changed[0]! ^ 1;
       expect(capturedReviewerResultFromBytes(receipt.artifact, changed).ok).toBe(false);
@@ -568,7 +574,7 @@ describe("issued v1 retry history and derived unfinished test prefixes", () => {
     expect(event.diagnostic).toBe(!rejected.ok ? rejected.problems[0] : null);
     expect(event.requestId).toBe(slot.attempts[0].requestId);
     const packets = slot.attempts.map(({ contextDigest }) =>
-      required(parseContextPacket(jsonAt(files, `contexts/${contextDigest}.json`))));
+      value(parseContextPacket(jsonAt(files, `contexts/${contextDigest}.json`))));
     expect(packets[0]!.outputContract).toBe("Review the exact frozen scope. Return the Loom Machine Summary and findings contract for your reviewer role.");
     expect(packets[1]!.outputContract).toBe(packets[0]!.outputContract);
     expect(packets[1]!.fixedContext.find(({ label }) => label === "standalone-frozen-source"))
@@ -584,8 +590,8 @@ describe("issued v1 retry history and derived unfinished test prefixes", () => {
     const slot = authority.roster.orderedSlots[0];
     const sibling = prepared.completion.results[1]!;
     const started = startStandaloneReviewMachine(authority);
-    const awaiting = required(reduceStandaloneReviewMachine(started, { kind: "review-batch-published", runId: authority.runId }));
-    const acceptedSibling = required(reduceStandaloneReviewMachine(awaiting, { kind: "result-accepted", result: sibling }));
+    const awaiting = value(reduceStandaloneReviewMachine(started, { kind: "review-batch-published", runId: authority.runId }));
+    const acceptedSibling = value(reduceStandaloneReviewMachine(awaiting, { kind: "result-accepted", result: sibling }));
     const retry = prepared.completion.results[0];
     const retryPublication = `artifacts/publications/${sha256(retry.issuedRequest.issuance.effectId)}.json`;
     const pendingFiles = copyFiles(files);
@@ -593,17 +599,17 @@ describe("issued v1 retry history and derived unfinished test prefixes", () => {
     pendingFiles.delete(`requests/${retry.authority.requestId}.json`);
     pendingFiles.delete(retry.authority.outputSlot.path);
     pendingFiles.delete("result.json");
-    const pendingOne = required(replay(pendingFiles, JSON.parse(serializeStandaloneReviewMachineState(acceptedSibling))));
+    const pendingOne = value(replay(pendingFiles, JSON.parse(serializeStandaloneReviewMachineState(acceptedSibling))));
     expect(pendingOne.kind).toBe("awaiting-results");
     expect(pendingOne.accepted).toEqual(acceptedSibling.accepted);
     expect(pendingOne.pending.find(({ slotId }) => slotId === slot.slotId)?.expectedAttempt).toBe(1);
     const admission = admitStandaloneTranscript(historicalProtocol(files, slot.attempts[0]), bytesAt(files, slot.attempts[0].outputSlot.path));
     if (admission.ok) throw new Error("Historical first attempt must be refused");
-    const pendingTwo = required(reduceStandaloneReviewMachine(acceptedSibling, {
+    const pendingTwo = value(reduceStandaloneReviewMachine(acceptedSibling, {
       kind: "result-rejected", request: slot.attempts[0], message: admission.problems.join("; "),
     }));
     const raw: unknown = JSON.parse(serializeStandaloneReviewMachineState(pendingTwo));
-    const unpublished = required(replay(pendingFiles, raw));
+    const unpublished = value(replay(pendingFiles, raw));
     expect(unpublished.kind).toBe("awaiting-results");
     expect(unpublished.accepted).toEqual(acceptedSibling.accepted);
     expect(unpublished.pending.find(({ slotId }) => slotId === slot.slotId)).toMatchObject({
@@ -611,7 +617,7 @@ describe("issued v1 retry history and derived unfinished test prefixes", () => {
     });
     const partiallyPublished = copyFiles(pendingFiles);
     partiallyPublished.set(`requests/${retry.authority.requestId}.json`, Uint8Array.from(bytesAt(files, `requests/${retry.authority.requestId}.json`)));
-    expect(serializeStandaloneReviewMachineState(required(replay(partiallyPublished, raw))))
+    expect(serializeStandaloneReviewMachineState(value(replay(partiallyPublished, raw))))
       .toBe(serializeStandaloneReviewMachineState(unpublished));
     expect(sha256(bytesAt(files, retryPublication))).toBe(sha256(bytesAt(loadReviewerV1Golden("seven-reviewers-retry").files, retryPublication)));
   });
@@ -656,14 +662,14 @@ describe("isolated legacy examples (not authoritative historical Runs)", () => {
       ["advisory", "Review output parsing failed - 1 of 2 advisory findings not captured"],
       ["critical", "captured blocker"], ["advisory", "captured benefit"],
     ]);
-    const aggregate = required(aggregateLegacyStandaloneReview({ runId: "illustrative-shortfall", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
+    const aggregate = value(aggregateLegacyStandaloneReview({ runId: "illustrative-shortfall", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
     expect(aggregate.aggregate.findings.map(({ id }) => id)).toEqual(["code-reviewer-1", "code-reviewer-2", "code-reviewer-3", "code-reviewer-4"]);
     expect(aggregate.aggregate.findings.filter(({ severity }) => severity === "critical")).toHaveLength(2);
   });
 
   it("preserves explicit duplicate multiplicity after normalization and filters sentinels", () => {
     const output = illustrative("normalization-and-duplicates");
-    const aggregate = required(aggregateLegacyStandaloneReview({ runId: "illustrative-duplicates", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
+    const aggregate = value(aggregateLegacyStandaloneReview({ runId: "illustrative-duplicates", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
     expect(aggregate.kind).toBe("clean");
     expect(aggregate.aggregate.findings).toEqual([1, 2].map((ordinal) => ({
       severity: "advisory", file: "src/x.ts", line: 4, claim: "repeated benefit", id: `code-reviewer-${ordinal}`, agent: "code-reviewer",
@@ -674,7 +680,7 @@ describe("isolated legacy examples (not authoritative historical Runs)", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 12 }), fc.constantFrom(" ", "   ", "\n", "\t", " \n\t "), (count, whitespace) => {
       const output = ["### Machine Summary", "CRITICAL_COUNT: 0", `ADVISORY_COUNT: ${count}`, "```findings",
         JSON.stringify(Array.from({ length: count }, () => ({ severity: "advisory", file: "src/x.ts", line: 4, claim: `${whitespace}repeated${whitespace}benefit${whitespace}` }))), "```"].join("\n");
-      const aggregate = required(aggregateLegacyStandaloneReview({ runId: "illustrative-property", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
+      const aggregate = value(aggregateLegacyStandaloneReview({ runId: "illustrative-property", scope: ["src/x.ts"], transcripts: [{ agent: "code-reviewer", output }] }));
       expect(aggregate.aggregate.findings.map(({ id, claim }) => [id, claim])).toEqual(
         Array.from({ length: count }, (_, ordinal) => [`code-reviewer-${ordinal + 1}`, "repeated benefit"]));
     }), { numRuns: 50 });

@@ -28,6 +28,7 @@ import type { WaveReviewContextAuthority } from "../../src/core/wave-review-auth
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { findingId } from "../fixtures/finding-id";
+import { value } from "../fixtures/parse-result";
 
 const proof = (() => {
   const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
@@ -61,11 +62,7 @@ const task = (id: string, wave: number, status: Task["status"] = "completed"): T
 const pendingTask = (id: string, wave: number): Task => taskFixture({
   id, description: id, agent: "code-implementer-agent", wave, status: "pending", depends_on: [],
 });
-const resultValue = <T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T => {
-  if (!result.ok) throw new Error("fixture authority parse failed");
-  return result.value;
-};
-const laterWaveAttempt = (): ImplementationAttemptAuthority => resultValue(createImplementationAttemptAuthority({
+const laterWaveAttempt = (): ImplementationAttemptAuthority => value(createImplementationAttemptAuthority({
   taskId: "T23",
   wave: 4,
   semanticAttempt: 1,
@@ -190,7 +187,7 @@ describe("later-Wave progress refusal", () => {
     [(entry) => ({ ...entry, active_implementation_attempt: laterWaveAttempt() }), "active Implementation Attempt"],
     [(entry) => ({
       ...entry,
-      implementation_attempt_history: [resultValue(createReclaimedImplementationAttemptReceipt(
+      implementation_attempt_history: [value(createReclaimedImplementationAttemptReceipt(
         laterWaveAttempt(),
         "2026-08-24T00:01:00.000Z",
       ))],

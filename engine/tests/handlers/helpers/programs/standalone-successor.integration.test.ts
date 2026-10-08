@@ -17,6 +17,7 @@ import { standaloneOriginReference, standaloneDecisionReference } from "../../..
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
 import type { StandaloneReviewerPayloadV3 } from "../../../../src/core/standalone-lineage-contract";
+import { value } from "../../../fixtures/parse-result";
 
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
 const roots: string[] = [];
@@ -27,9 +28,6 @@ function ownedSession<T>(root: string, operation: () => Promise<T>): Promise<T> 
   operations.add(settled); void settled.then(() => operations.delete(settled)); return result;
 }
 afterEach(async () => { await Promise.all([...operations]); disposeFixturePiSessions(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw Error(JSON.stringify(result)); return result.value;
-}
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const json = (raw: unknown) => JSON.stringify(raw);
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];

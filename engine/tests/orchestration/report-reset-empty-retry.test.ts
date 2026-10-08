@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { value } from "../fixtures/parse-result";
 
 const scripted = vi.hoisted(() => ({
   queue: [] as SpawnAnswer[],
@@ -118,15 +119,10 @@ function writeStaleReport(root: CanonicalRepositoryRoot, contents: string): stri
   return report;
 }
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
-  if (!result.ok) throw new Error(`fixture construction failed: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
-
 function remediationCheck(root: CanonicalRepositoryRoot, name: string): AuthorizedRemediationCheck {
   const source = standaloneFixture(["src/main.ts"], true).input.standaloneResult;
   const findingId = source.survivingCriticals[0]!.id;
-  const accounting = valueOf(prepareDefectFamilyAccounting(source, {
+  const accounting = value(prepareDefectFamilyAccounting(source, {
     kind: "declared-defect-family-accounting",
     provenance: "DECLARED",
     dispositions: [{ findingId, status: "repaired", repairGroupId: `family:${name}` }],
@@ -149,7 +145,7 @@ function remediationCheck(root: CanonicalRepositoryRoot, name: string): Authoriz
       }],
     }],
   }));
-  const manifest = valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  const manifest = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
     kind: VERIFICATION_MANIFEST_KIND,
     checks: [{
@@ -162,14 +158,14 @@ function remediationCheck(root: CanonicalRepositoryRoot, name: string): Authoriz
       report: { kind: "required-file", path: REPORT_PATH },
     }],
   }))));
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, manifest));
+  const plan = value(prepareDefectFamilyVerification(accounting, manifest));
   if (plan.kind !== "selected-operator-checks") throw new Error("selected remediation plan required");
-  const gitWitness = valueOf(parseRepositorySnapshotWitness({
+  const gitWitness = value(parseRepositorySnapshotWitness({
     baseTreeDigest: digest("1"),
     indexDigest: digest("2"),
     worktreeDigest: digest("3"),
   }));
-  const candidate = valueOf(createCandidateRepositoryWitness({
+  const candidate = value(createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",
     repositoryRoot: root,
     workspaceDigest: digest("4"),
@@ -178,14 +174,14 @@ function remediationCheck(root: CanonicalRepositoryRoot, name: string): Authoriz
     gitWitness,
     generatedReportExclusions: [REPORT_PATH],
   }));
-  const scope = valueOf(createRemediationCheckScope(plan.source, candidate, {
+  const scope = value(createRemediationCheckScope(plan.source, candidate, {
     kind: "standalone-remediation",
     remediationRunId: `run.reset-${name}`,
     sourceRunId: plan.source.sourceRunId,
     registrationDigest: digest("a"),
     candidateWitnessDigest: candidate.digest,
   }));
-  return valueOf(authorizeRemediationChecks(plan, scope))[0];
+  return value(authorizeRemediationChecks(plan, scope))[0];
 }
 
 function refusalText(result: { readonly ok: false; readonly error: unknown }): string {

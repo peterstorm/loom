@@ -569,6 +569,10 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  // Budget: the fresh import transforms and evaluates the copied extension's
+  // whole module graph (no transform cache applies to new paths) and hashes
+  // every engine/src and pi file for its identity — ~3.3s idle, the intrinsic
+  // cost of loading a second runtime, not a weaker assertion.
   it("BLOCKS a subagent spawn when the checkout drifts from the loaded extension runtime", async () => {
     // The earliest of the three skew guards, and the only one whose blocking arm
     // had no test: the CLI-entry and state-write backstops are exercised against
@@ -620,7 +624,7 @@ describe("Pi extension review tool_result integration", () => {
       restoreEnv(PI_EXTENSION_RUNTIME_REVISION_ENV, savedRuntimeRevision);
       rmSync(skewRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("captures Pi tool_result bytes through request-bound run authority", async () => {
     const pi = await extension();

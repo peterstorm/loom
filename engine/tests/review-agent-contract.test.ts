@@ -12,6 +12,7 @@ import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIs
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../src/core/model-profiles";
 import { sha256Hex } from "../src/core/digest";
 import { extractWireContractRegion } from "../src/core/wire-contract";
+import { value } from "./fixtures/parse-result";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const agentFile = (name: string): string =>
@@ -172,11 +173,6 @@ describe("every archived v1 REVIEW_SUB_AGENT retains the Machine Summary contrac
     expect(carriedOverCount(resolved.findings.blockStatus)).toBe(0);
   });
 });
-
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 
 /** Independent in-memory publication bytes, parsed by the real issuance boundary. */
 function issuedContract(role: string, version: 1 | 2) {

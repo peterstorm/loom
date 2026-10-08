@@ -49,6 +49,7 @@ import { createPiParentSessions, legacyReservationItem, type PiSpawnReservation 
 import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AgentId } from "../../src/machine/evidence";
 import type { SessionRunBinding } from "../../src/orchestration/session-run-bindings";
+import { value } from "../fixtures/parse-result";
 
 const sessionId = parseSessionId("spawn-claims-session")!;
 const pointer = { directory: "/state", pointerName: "p", registryName: "r", target: "/graph.json" } as unknown as SessionTaskGraphPointerBinding;
@@ -62,11 +63,6 @@ const debtContext = {
   graphActiveAtSpawn: true,
   orchestrationRunBinding: null,
 } as const;
-
-const value = <T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>): T => {
-  if (!result.ok) throw new Error(result.error);
-  return result.value;
-};
 
 /** A two-slot batch that claimed everything: roster, pointer, a standalone
  *  witness run, both grants (slot 0 injected), and staged launches. */

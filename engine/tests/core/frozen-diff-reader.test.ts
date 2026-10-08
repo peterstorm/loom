@@ -9,6 +9,7 @@ import {
   FROZEN_DIFF_PAGE_UNITS, STANDALONE_FROZEN_DIFF_SECTION, freezeDiff, observeReadCoverage, readCoverageGaps,
 } from "../../src/core/standalone-read-coverage";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { value } from "../fixtures/parse-result";
 
 /**
  * The reader's --diff mode against a real v2 packet (ADR-0022): what the
@@ -18,11 +19,6 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 const script = fileURLToPath(new URL("../../../scripts/read-context-packet.ts", import.meta.url));
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-const value = <T>(result: { ok: true; value: T } | { ok: false }): T => {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-};
-
 // Quotes, backslashes and tabs are what JSON escaping inflates; a page of them must still fit one Bash output.
 const HOSTILE = Array.from({ length: 4_000 }, (_, i) => `const s${i} = "\\"quoted\\" \\\\ back\\tslash";`).join("\n") + "\n";
 const DIFF = freezeDiff({ baseRevision: "base", headRevision: "head", files: [

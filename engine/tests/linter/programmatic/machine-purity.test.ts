@@ -1,5 +1,5 @@
 /** Executable FC/IS closure for the Guarded Skill Machine, Defect-Family Accounting, and the emission kernel with the legacy panel decisions. */
-import { afterEach, describe, it, expect } from "vitest";
+import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import ts from "typescript";
 import { readFileSync } from "node:fs";
@@ -12,10 +12,6 @@ import {
   isPureModule,
   DEFAULT_PURE_MODULES,
 } from "../../../src/linter/programmatic/no-io-in-pure-modules";
-
-// Closure scans are deliberately synchronous. Yield between cases so the
-// unchanged root runner can acknowledge task updates under parallel CPU load.
-afterEach(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
 
 const REPO_ROOT = resolve(__dirname, "../../../..");
 const requireFromEngine = createRequire(resolve(REPO_ROOT, "engine/package.json"));
