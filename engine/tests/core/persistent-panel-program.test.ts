@@ -185,7 +185,8 @@ describe("persistent panel program kernel: replay, checkpoints and persistence",
       return Object.fromEntries(Object.entries(stateJson).filter(([key]) => key !== "echo"));
     };
     const twin: typeof TALLY = { ...TALLY, canonicalStateJson: withoutEcho };
-    const echoed = { ...durableCheckpoint(), state: { ...(durableCheckpoint().state as object), echo: { size: 2 } } };
+    const durable = durableCheckpoint();
+    const echoed = { ...durable, state: { ...(durable.state as object), echo: { size: 2 } } };
     expect(value(parsePanelProgramCheckpoint(twin, echoed, resolver)).state).toMatchObject({ count: 2 });
     expect(refusal(parsePanelProgramCheckpoint(TALLY, echoed, resolver))).toMatchObject(DISAGREES);
     // The projection decides agreement, never membership: the twin still refuses real disagreement.
