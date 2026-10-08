@@ -4,6 +4,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFile, type ExecFileException } from "node:child_process";
 import vitestConfig from "../vitest.config";
+import { platformWorkerBudget } from "../vitest-worker-budget";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
 
@@ -136,8 +137,8 @@ describe("canonical verification command", () => {
     const test = vitestConfig.test!;
     expect(test.testTimeout).toBe(15_000);
     expect(test.setupFiles).toEqual(["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"]);
-    const cap = process.platform === "darwin" ? 2 : 4;
-    expect(test.maxWorkers).toBe(Math.max(1, Math.min(cap, availableParallelism())));
+    // The budget policy itself is pinned with explicit inputs in vitest-worker-budget.test.ts.
+    expect(test.maxWorkers).toBe(platformWorkerBudget(process.platform, availableParallelism()));
   });
 
   it("missing local Pi is blocked even if a global Pi is on PATH", async () => {

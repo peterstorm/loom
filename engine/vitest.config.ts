@@ -1,5 +1,6 @@
 import { availableParallelism } from "node:os";
 import { configDefaults, defineConfig } from "vitest/config";
+import { platformWorkerBudget } from "./vitest-worker-budget";
 
 /**
  * Suite-wide policy lives here, not in CLI flags, so `npm run test:unit` and a
@@ -24,20 +25,14 @@ import { configDefaults, defineConfig } from "vitest/config";
  * reviewer fixtures; 15s is the one per-test budget for every entry point.
  * A test that is intrinsically heavier states its own timeout and why.
  *
- * `maxWorkers` is a CPU budget, never more forked workers than the host has
- * cores. Every worker also spawns cold `bun` CLI children, and contention
- * stretches each test's synchronous spans and wall time. macos-15 runners
- * expose 3 vCPUs and keep two workers; ubuntu-24.04 runners expose 4 and
- * Linux keeps the four it always pinned. Many-core developer machines stay
- * capped at the same counts.
+ * `maxWorkers` is this host's `platformWorkerBudget`; that module documents
+ * the per-platform caps.
  */
-const PLATFORM_WORKER_CAP = process.platform === "darwin" ? 2 : 4;
-
 export default defineConfig({
   test: {
     include: [...configDefaults.include, "../calibration/**/*.test.ts", "../probes/**/*.test.{ts,mjs}"],
     setupFiles: ["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"],
     testTimeout: 15_000,
-    maxWorkers: Math.max(1, Math.min(PLATFORM_WORKER_CAP, availableParallelism())),
+    maxWorkers: platformWorkerBudget(process.platform, availableParallelism()),
   },
 });
