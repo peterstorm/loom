@@ -2,7 +2,8 @@
  * The spawn claims ledger: what an admission-time refusal and a `tool_result`
  * settlement must release, in which order, and exactly what stays as cleanup
  * debt when a release fails — all against plain in-memory release ports, no
- * session registry or pointer lease on disk.
+ * session registry or pointer lease on disk. The shell's parent-session
+ * orchestrators (`pi/spawn-claim-shell.ts`) run against the same fakes.
  */
 
 import fc from "fast-check";
@@ -23,8 +24,6 @@ import {
   pointerLeaseOnly,
   recordSpawnClaim,
   releaseDurableSpawnClaims,
-  releaseHeldSpawnClaims,
-  releaseOrphanedSpawnClaims,
   releaseSpawnClaims,
   remainingDurableClaims,
   remainingSpawnClaims,
@@ -32,20 +31,21 @@ import {
   settledSpawnClaims,
   spawnDebtOf,
   spawnRollbackStepLabel,
-  spawnSettlementStepLabel,
-  spawnShutdownStepLabel,
+  settlementReleasePhrasing,
+  shutdownReleasePhrasing,
   unownedOnRefusal,
   withoutGrants,
   withoutPointerLease,
   type DurableClaimReleasePorts,
-  type DurableReleaseStep,
   type DurableSpawnClaims,
   type OrphanedSpawnClaim,
   type SpawnClaim,
   type SpawnClaimReleasePorts,
   type SpawnClaims,
 } from "../../../pi/spawn-claims";
+import { releaseHeldSpawnClaims, releaseOrphanedSpawnClaims } from "../../../pi/spawn-claim-shell";
 import { createPiParentSessions, legacyReservationItem, type PiSpawnReservation } from "../../../pi/spawn-reservation";
+import { HELD_GRANT, parentSessionsHolding, reviewerReservationNaming } from "../fixtures/held-spawn-batch";
 import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AgentId } from "../../src/machine/evidence";
 import type { SessionRunBinding } from "../../src/orchestration/session-run-bindings";
@@ -395,7 +395,7 @@ describe("settlement through the same ledger", () => {
   });
   const grants = Object.freeze([{ slot: 1, token: "token-1" }]);
   const owner = { sessionId } as const;
-  const settlementLabel = (step: DurableReleaseStep) => spawnSettlementStepLabel(step, owner);
+  const settlementPhrasing = settlementReleasePhrasing(owner);
 
   /** Settlement's release ports: the durable three, and nothing a dispatched
    *  batch cannot hold. */
@@ -411,7 +411,7 @@ describe("settlement through the same ledger", () => {
   it("releases capabilities before results and the pointer lease last, keeping the lease owed in between", async () => {
     const held = settledSpawnClaims(grants, reservation);
     const first = durablePorts();
-    const capabilities = await releaseDurableSpawnClaims(withoutPointerLease(held), settlementLabel, first.ports);
+    const capabilities = await releaseDurableSpawnClaims(withoutPointerLease(held), settlementPhrasing, first.ports);
     expect(first.calls).toEqual([
       "revokeGrant:token-1",
       `removeRosterEntry:${rosterId(1)}`,
@@ -423,7 +423,7 @@ describe("settlement through the same ledger", () => {
       reservation: { ...debtContext, pointerBinding: pointer, items: [] },
     });
     const last = durablePorts();
-    const lease = await releaseDurableSpawnClaims(pointerLeaseOnly(owedBetween), settlementLabel, last.ports);
+    const lease = await releaseDurableSpawnClaims(pointerLeaseOnly(owedBetween), settlementPhrasing, last.ports);
     expect(last.calls).toEqual(["releasePointer"]);
     expect(remainingDurableClaims(owedBetween, lease.releases)).toEqual(NO_DURABLE_SPAWN_CLAIMS);
   });
@@ -432,7 +432,7 @@ describe("settlement through the same ledger", () => {
     const held = settledSpawnClaims(grants, reservation);
     const { errors, releases } = await releaseDurableSpawnClaims(
       held,
-      settlementLabel,
+      settlementPhrasing,
       durablePorts(new Set<Port>(["revokeGrant", "removeRosterEntry", "releasePointer"])).ports,
     );
     expect(errors).toEqual([
@@ -458,7 +458,7 @@ describe("settlement through the same ledger", () => {
         });
         const failing = new Set<Port>(failingPorts);
         const settlement = durablePorts(failing);
-        const settled = await releaseDurableSpawnClaims(durable, settlementLabel, settlement.ports);
+        const settled = await releaseDurableSpawnClaims(durable, settlementPhrasing, settlement.ports);
         const admission = fakePorts(failing);
         const rolledBack = await releaseSpawnClaims({ ...NO_SPAWN_CLAIMS, ...durable }, admissionLabel, admission.ports);
         expect(settlement.calls).toEqual(admission.calls);
@@ -511,20 +511,10 @@ describe("orphaned claims: a failed compensation's capability as session debt", 
 
 describe("releaseHeldSpawnClaims: one tool call's held claims on its session", () => {
   const holder = Object.freeze({ sessionId, toolCallId: "call-held" });
-  const reservationNaming = (owner: typeof sessionId): PiSpawnReservation => Object.freeze({
-    ...debtContext,
-    sessionId: owner,
-    pointerBinding: pointer,
-    items: Object.freeze([rosterItem(0), rosterItem(1)]),
-  });
-  const holding = (reservation: PiSpawnReservation) => {
-    const parentSessions = createPiParentSessions();
-    const runtime = parentSessions.runtimeFor(sessionId);
-    runtime.spawnReservations.set(holder.toolCallId, reservation);
-    runtime.issuedWriteGrants.set(holder.toolCallId, Object.freeze([{ slot: 0, token: "token-0" }]));
-    return parentSessions;
-  };
-  const label = (step: DurableReleaseStep) => spawnShutdownStepLabel(step, holder);
+  const reservationNaming = (owner: typeof sessionId): PiSpawnReservation =>
+    reviewerReservationNaming(owner, [rosterId(0), rosterId(1)], pointer);
+  const holding = (reservation: PiSpawnReservation) => parentSessionsHolding(sessionId, holder.toolCallId, reservation);
+  const label = shutdownReleasePhrasing(holder);
   const everything = (held: DurableSpawnClaims) => held;
 
   it("releases an owned reservation's grants, roster newest-first, then its lease, owing nothing", async () => {
@@ -533,7 +523,7 @@ describe("releaseHeldSpawnClaims: one tool call's held claims on its session", (
     expect(await releaseHeldSpawnClaims(holder, parentSessions, everything, label, ports))
       .toEqual({ errors: [], foreignReservation: null });
     expect(calls).toEqual([
-      "revokeGrant:token-0",
+      `revokeGrant:${HELD_GRANT.token}`,
       `removeRosterEntry:${rosterId(1)}`,
       `removeRosterEntry:${rosterId(0)}`,
       "releasePointer",
@@ -550,7 +540,7 @@ describe("releaseHeldSpawnClaims: one tool call's held claims on its session", (
       errors: [],
       foreignReservation: `Pi spawn reservation names session ${other}, not its owner session ${sessionId}`,
     });
-    expect(calls).toEqual(["revokeGrant:token-0"]);
+    expect(calls).toEqual([`revokeGrant:${HELD_GRANT.token}`]);
     expect(parentSessions.get(sessionId)?.spawnReservations.get(holder.toolCallId)).toBe(foreign);
     expect(parentSessions.get(sessionId)?.issuedWriteGrants.has(holder.toolCallId)).toBe(false);
   });
@@ -559,7 +549,7 @@ describe("releaseHeldSpawnClaims: one tool call's held claims on its session", (
     const parentSessions = holding(reservationNaming(sessionId));
     const first = durablePorts();
     await releaseHeldSpawnClaims(holder, parentSessions, grantsOnly, label, first.ports);
-    expect(first.calls).toEqual(["revokeGrant:token-0"]);
+    expect(first.calls).toEqual([`revokeGrant:${HELD_GRANT.token}`]);
     const rest = durablePorts();
     await releaseHeldSpawnClaims(holder, parentSessions, withoutGrants, label, rest.ports);
     expect(rest.calls).toEqual([`removeRosterEntry:${rosterId(1)}`, `removeRosterEntry:${rosterId(0)}`, "releasePointer"]);

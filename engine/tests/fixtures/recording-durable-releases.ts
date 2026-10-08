@@ -6,7 +6,8 @@
  */
 
 import type { SessionTaskGraphPointerBinding } from "../../src/machine";
-import { piDurableClaimReleasePorts, type DurableClaimReleasePorts } from "../../../pi/spawn-claims";
+import type { DurableClaimReleasePorts } from "../../../pi/spawn-claims";
+import { piDurableClaimReleasePorts } from "../../../pi/spawn-claim-shell";
 import type { PiSessionId } from "../../../pi/spawn-reservation";
 
 export type RecordingDurableReleases = Readonly<{

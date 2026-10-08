@@ -10,6 +10,8 @@
  * - `spawn-lifecycle` — reservation of an admitted batch before dispatch
  * - `spawn-claims` — the claims ledger a refused reservation rolls back and a
  *   settled batch releases
+ * - `spawn-claim-shell` — the ledger's production release ports and the
+ *   parent-session release orchestrators settlement and shutdown share
  * - `subagent-stop` — settlement of a completed batch (`tool_result`)
  * - `subagent-result-route` — the pure per-result routing decisions
  * - `child-write-grant` — a child's write capability and its rejection
@@ -79,7 +81,7 @@ import { observeSpawnBatchGraph } from "./spawn-graph";
 import { renderTaskImplementationBrief } from "../engine/src/orchestration/implementation-brief";
 import { prepareSpawnBatch } from "./spawn-preparation";
 import { reservePiSpawnLifecycle } from "./spawn-lifecycle";
-import { piDurableClaimReleasePorts } from "./spawn-claims";
+import { piDurableClaimReleasePorts } from "./spawn-claim-shell";
 import { dispatchPiSubagentStop } from "./subagent-stop";
 import {
   activatePiChildWriteGrant,

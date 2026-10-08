@@ -13,17 +13,22 @@
  * each claim as it takes the capability and, on a refusal, releases the whole
  * ledger (`releaseSpawnClaims`). Settlement (`pi/subagent-stop.ts`) and session
  * shutdown (`pi/session-shutdown.ts`) both release what one tool call still
- * holds on its parent session through `releaseHeldSpawnClaims`: the durable
- * ledger of its committed grants and its stored reservation, parsed against
- * the holder's session (`settledSpawnClaims`, `ownPiSpawnReservation`), and
- * released through durable ports only (`releaseDurableSpawnClaims`), since a
- * dispatched batch can hold nothing else. All three run one plan and derive
- * what is still owed by one rule (`remainingSpawnClaims` over
- * `remainingDurableClaims`, `spawnDebtOf`), so a new capability kind changes
- * one place.
+ * holds on its parent session through `pi/spawn-claim-shell.ts`, which parses
+ * the durable ledger of its committed grants and its stored reservation
+ * against the holder's session (`settledSpawnClaims`) and releases it through
+ * durable ports only (`releaseDurableSpawnClaims`), since a dispatched batch
+ * can hold nothing else. Shutdown releases a child's write-grant binding —
+ * its roster entry and pointer lease — as a durable ledger too. Every release
+ * runs one plan and derives what is still owed by one rule
+ * (`remainingSpawnClaims` over `remainingDurableClaims`, `spawnDebtOf`), so a
+ * new capability kind changes one place. Each shell names a failed step in
+ * its own words through one label function (`durableReleaseStepLabel`) and a
+ * phrasing record per shell.
  *
- * Recording a claim, planning its release, and deriving what a failed release
- * still owes are pure and total. Every claim kind obeys one refusal rule
+ * This module is the functional core: it imports no production port and
+ * mutates no session. Recording a claim, planning its release, and deriving
+ * what a failed release still owes are pure and total; the release executors
+ * cross only the ports they are handed. Every claim kind obeys one refusal rule
  * (`recordSpawnClaim`): a claim is refused as data exactly when recording it
  * would let the ledger owe less than was taken — a duplicate roster id or
  * grant slot, an injection for a slot with no grant, a second witness run or
@@ -33,47 +38,44 @@
  * a hand-written release. A durable capability whose compensation fails is
  * owned by no ledger — the refusal is that the ledger already holds one of its
  * kind — so it is returned as an `OrphanedSpawnClaim`, kept on the parent
- * session, and retried by `releaseOrphanedSpawnClaims` at every settlement and
- * at shutdown until it is released. Executing a plan is one function over injected
- * release ports, so the release-and-debt state machine runs against in-memory
- * fakes.
+ * session, and retried by the shell's `releaseOrphanedSpawnClaims` at every
+ * settlement and at shutdown until it is released. Executing a plan is one
+ * function over injected release ports, so the release-and-debt state machine
+ * runs against in-memory fakes.
  * The plan's order is the security order: capability releases (launches,
  * grants, prompt restores) first, then the witness binding, then roster
  * entries newest-first, then the pointer lease; every step runs even when an
  * earlier one fails.
  */
 
-import {
-  fsSessionRegistry,
-  rollbackSessionTaskGraphPointer,
-  type SessionTaskGraphPointerBinding,
-} from "../engine/src/machine";
+import type { SessionTaskGraphPointerBinding } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import { cleanupFailureSuffix, runPiCleanupActions } from "./cleanup-actions";
-import { revokePiWriteGrant } from "./write-grant";
-import {
-  ownPiSpawnReservation,
-  type PiIssuedWriteGrant,
-  type PiParentSessions,
-  type PiSessionId,
-  type PiSpawnReservation,
-  type PiSpawnReservationItem,
+import type {
+  PiIssuedWriteGrant,
+  PiSessionId,
+  PiSpawnReservation,
+  PiSpawnReservationItem,
 } from "./spawn-reservation";
 
 /** One child prompt rewritten to carry its slot's write grant, with the
  *  prompt a release restores. */
 export type SpawnPromptRewrite = Readonly<{ slot: number; originalTask: string }>;
 
+/** The least a claimed roster entry carries: the id its removal names. */
+export type RosterClaim = Readonly<{ rosterId: AgentId }>;
+
 /** The claims that outlive the `tool_call` taking them: what a dispatched
- *  batch holds at settlement and what cleanup debt records. */
-export type DurableSpawnClaims = Readonly<{
+ *  batch holds at settlement and what cleanup debt records. A spawn batch's
+ *  roster entries are reservation items; a child binding's is its bare id. */
+export type DurableSpawnClaims<R extends RosterClaim = PiSpawnReservationItem> = Readonly<{
   /** In issuance (slot) order; at most one per slot. */
   grants: readonly PiIssuedWriteGrant[];
-  /** The authority-free reservation item of every roster entry reserved, in
-   *  reservation order — the shape cleanup debt keeps for an entry. */
-  roster: readonly PiSpawnReservationItem[];
+  /** Every roster entry reserved, in reservation order — for a batch, the
+   *  authority-free reservation item cleanup debt keeps for an entry. */
+  roster: readonly R[];
   pointer: SessionTaskGraphPointerBinding | null;
 }>;
 
@@ -253,10 +255,12 @@ export const withoutPointerLease = (claims: DurableSpawnClaims): DurableSpawnCla
 export const pointerLeaseOnly = (claims: DurableSpawnClaims): DurableSpawnClaims =>
   Object.freeze({ ...NO_DURABLE_SPAWN_CLAIMS, pointer: claims.pointer });
 
+type RevokeGrantStep = Readonly<{ kind: "revoke-grant"; slot: number; token: string }>;
+
 /** A release step for a durable claim — the only steps settlement plans. */
-export type DurableReleaseStep =
-  | Readonly<{ kind: "revoke-grant"; slot: number; token: string }>
-  | Readonly<{ kind: "remove-roster-entry"; item: PiSpawnReservationItem }>
+export type DurableReleaseStep<R extends RosterClaim = PiSpawnReservationItem> =
+  | RevokeGrantStep
+  | Readonly<{ kind: "remove-roster-entry"; item: R }>
   | Readonly<{ kind: "release-pointer"; pointer: SessionTaskGraphPointerBinding }>;
 
 export type SpawnRollbackStep =
@@ -265,7 +269,7 @@ export type SpawnRollbackStep =
   | Readonly<{ kind: "retract-witness-run"; binding: SessionRunBinding }>
   | DurableReleaseStep;
 
-const revokeStep = ({ slot, token }: PiIssuedWriteGrant): DurableReleaseStep =>
+const revokeStep = ({ slot, token }: PiIssuedWriteGrant): RevokeGrantStep =>
   Object.freeze({ kind: "revoke-grant" as const, slot, token });
 
 const restoreStep = (rewrite: SpawnPromptRewrite): SpawnRollbackStep =>
@@ -284,7 +288,7 @@ const orphanRestoreSteps = (claims: SpawnClaims): readonly SpawnRollbackStep[] =
   claims.promptRewrites.filter(({ slot }) => !claims.grants.some((grant) => grant.slot === slot)).map(restoreStep);
 
 /** Roster entries newest-first, then the pointer lease. */
-const rosterAndPointerSteps = (claims: DurableSpawnClaims): readonly DurableReleaseStep[] => [
+const rosterAndPointerSteps = <R extends RosterClaim>(claims: DurableSpawnClaims<R>): readonly DurableReleaseStep<R>[] => [
   ...[...claims.roster].reverse().map((item) => Object.freeze({ kind: "remove-roster-entry" as const, item })),
   ...(claims.pointer === null ? [] : [Object.freeze({ kind: "release-pointer" as const, pointer: claims.pointer })]),
 ];
@@ -301,64 +305,81 @@ export function planSpawnRollback(claims: SpawnClaims): readonly SpawnRollbackSt
 }
 
 /** The durable claims' releases, in the order `planSpawnRollback` gives them. */
-const planDurableRelease = (claims: DurableSpawnClaims): readonly DurableReleaseStep[] =>
+const planDurableRelease = <R extends RosterClaim>(claims: DurableSpawnClaims<R>): readonly DurableReleaseStep<R>[] =>
   Object.freeze([...claims.grants.map(revokeStep), ...rosterAndPointerSteps(claims)]);
 
-const revokeGrantLabel = (slot: number): string => `revoke write grant for spawn item ${slot + 1}`;
+/** How one shell names each durable release step it reports a failure under. */
+export type DurableReleasePhrasing<R extends RosterClaim = PiSpawnReservationItem> = Readonly<{
+  /** Given the 1-based spawn item whose grant is revoked. */
+  revokeGrant: (item: number) => string;
+  removeRosterEntry: (entry: R) => string;
+  releasePointer: string;
+}>;
+
+/** The label a failed durable release step is reported under, in a shell's
+ *  own phrasing. */
+function durableReleaseStepLabel<R extends RosterClaim>(
+  step: DurableReleaseStep<R>,
+  phrasing: DurableReleasePhrasing<R>,
+): string {
+  switch (step.kind) {
+    case "revoke-grant":
+      return phrasing.revokeGrant(step.slot + 1);
+    case "remove-roster-entry":
+      return phrasing.removeRosterEntry(step.item);
+    case "release-pointer":
+      return phrasing.releasePointer;
+  }
+}
+
+const revokeGrantPhrase = (item: number): string => `revoke write grant for spawn item ${item}`;
+
+const ADMISSION_RELEASE_PHRASING: DurableReleasePhrasing = Object.freeze({
+  revokeGrant: revokeGrantPhrase,
+  removeRosterEntry: ({ rosterId }: PiSpawnReservationItem) => `remove active roster entry ${rosterId}`,
+  releasePointer: "roll back task-graph pointer",
+});
 
 /** The label an admission rollback reports a failed step under. */
 export function spawnRollbackStepLabel(step: SpawnRollbackStep, toolCallId: string): string {
   switch (step.kind) {
     case "remove-emission-launches":
       return `remove emission launch capabilities for ${toolCallId}`;
-    case "revoke-grant":
-      return revokeGrantLabel(step.slot);
     case "restore-prompt":
       return `restore child prompt for spawn item ${step.slot + 1}`;
     case "retract-witness-run":
       return `retract unwitnessed review run ${step.binding.runId}`;
-    case "remove-roster-entry":
-      return `remove active roster entry ${step.item.rosterId}`;
-    case "release-pointer":
-      return "roll back task-graph pointer";
+    default:
+      return durableReleaseStepLabel(step, ADMISSION_RELEASE_PHRASING);
   }
 }
 
-/** The label a `tool_result` settlement reports a failed step under. */
-export function spawnSettlementStepLabel(step: DurableReleaseStep, owner: Readonly<{ sessionId: string }>): string {
-  switch (step.kind) {
-    case "revoke-grant":
-      return revokeGrantLabel(step.slot);
-    case "remove-roster-entry":
-      return `remove reserved roster entry for ${step.item.agentType}`;
-    case "release-pointer":
-      return `release parent task-graph pointer lease for ${owner.sessionId}`;
-  }
-}
+/** The parsed session and tool call one batch's durable claims and cleanup
+ *  debt are filed under on the parent session. */
+export type SpawnClaimHolder = Readonly<{ sessionId: PiSessionId; toolCallId: string }>;
 
-/** The label a session shutdown reports a failed step under. */
-export function spawnShutdownStepLabel(step: DurableReleaseStep, holder: SpawnClaimHolder): string {
-  switch (step.kind) {
-    case "revoke-grant":
-      return `revoke outstanding write grant for spawn item ${step.slot + 1} of ${holder.toolCallId}`;
-    case "remove-roster-entry":
-      return `remove shutdown roster entry for ${step.item.agentType}`;
-    case "release-pointer":
-      return `release shutdown task-graph pointer lease for ${holder.sessionId}`;
-  }
-}
+/** How a `tool_result` settlement names a failed step. */
+export const settlementReleasePhrasing = (owner: Readonly<{ sessionId: string }>): DurableReleasePhrasing =>
+  Object.freeze({
+    revokeGrant: revokeGrantPhrase,
+    removeRosterEntry: ({ agentType }: PiSpawnReservationItem) => `remove reserved roster entry for ${agentType}`,
+    releasePointer: `release parent task-graph pointer lease for ${owner.sessionId}`,
+  });
 
-/** The label a retried orphaned claim reports a failed step under. */
-export function orphanedClaimStepLabel(step: DurableReleaseStep): string {
-  switch (step.kind) {
-    case "revoke-grant":
-      return `revoke orphaned write grant for spawn item ${step.slot + 1}`;
-    case "remove-roster-entry":
-      return `remove orphaned roster entry ${step.item.rosterId}`;
-    case "release-pointer":
-      return "release orphaned task-graph pointer lease";
-  }
-}
+/** How a session shutdown names a failed step of one tool call's release. */
+export const shutdownReleasePhrasing = (holder: SpawnClaimHolder): DurableReleasePhrasing =>
+  Object.freeze({
+    revokeGrant: (item: number) => `revoke outstanding write grant for spawn item ${item} of ${holder.toolCallId}`,
+    removeRosterEntry: ({ agentType }: PiSpawnReservationItem) => `remove shutdown roster entry for ${agentType}`,
+    releasePointer: `release shutdown task-graph pointer lease for ${holder.sessionId}`,
+  });
+
+/** How a retried orphaned claim names a failed step. */
+export const ORPHANED_CLAIM_RELEASE_PHRASING: DurableReleasePhrasing = Object.freeze({
+  revokeGrant: (item: number) => `revoke orphaned write grant for spawn item ${item}`,
+  removeRosterEntry: ({ rosterId }: PiSpawnReservationItem) => `remove orphaned roster entry ${rosterId}`,
+  releasePointer: "release orphaned task-graph pointer lease",
+});
 
 /** The durable capabilities one release attempt actually released. */
 export type DurableClaimReleases = Readonly<{
@@ -376,7 +397,10 @@ export type SpawnClaimReleases = DurableClaimReleases & Readonly<{
 
 /** The durable claims still owed after a release attempt: exactly those whose
  *  release failed or was never attempted. */
-export function remainingDurableClaims(claims: DurableSpawnClaims, releases: DurableClaimReleases): DurableSpawnClaims {
+export function remainingDurableClaims<R extends RosterClaim>(
+  claims: DurableSpawnClaims<R>,
+  releases: DurableClaimReleases,
+): DurableSpawnClaims<R> {
   return Object.freeze({
     grants: Object.freeze(claims.grants.filter(({ token }) => !releases.revokedTokens.has(token))),
     roster: Object.freeze(claims.roster.filter((item) => !releases.removedRosterIds.has(item.rosterId))),
@@ -451,7 +475,7 @@ export type SpawnClaimReleasePorts = DurableClaimReleasePorts & Readonly<{
 }>;
 
 /** Release exactly this pointer lease, or throw naming the ownership lost. */
-export async function releaseExactPointerLease(
+async function releaseExactPointerLease(
   releasePointer: DurableClaimReleasePorts["releasePointer"],
   pointer: SessionTaskGraphPointerBinding,
 ): Promise<void> {
@@ -465,8 +489,8 @@ type DurableReleaseLog = { revokedTokens: Set<string>; removedRosterIds: Set<Age
 const emptyDurableReleaseLog = (): DurableReleaseLog =>
   ({ revokedTokens: new Set(), removedRosterIds: new Set(), pointerReleased: false });
 
-async function releaseDurableStep(
-  step: DurableReleaseStep,
+async function releaseDurableStep<R extends RosterClaim>(
+  step: DurableReleaseStep<R>,
   ports: DurableClaimReleasePorts,
   log: DurableReleaseLog,
 ): Promise<void> {
@@ -487,7 +511,7 @@ async function releaseDurableStep(
 }
 
 /** Attempt every step, never stopping at a failure; the failures, labelled. */
-const attemptEvery = <S extends SpawnRollbackStep>(
+const attemptEvery = <S>(
   steps: readonly S[],
   labelOf: (step: S) => string,
   run: (step: S) => Promise<void>,
@@ -495,18 +519,22 @@ const attemptEvery = <S extends SpawnRollbackStep>(
   runPiCleanupActions(steps.map((step) => ({ label: labelOf(step), run: () => run(step) })));
 
 /**
- * Attempt every planned release of a durable ledger — settlement's — and
- * report the failures (under `labelOf`'s names) together with what was
- * actually released: the input `remainingDurableClaims` turns into what is
- * still owed.
+ * Attempt every planned release of a durable ledger — settlement's,
+ * shutdown's, an orphan's or a child binding's — and report the failures (in
+ * `phrasing`'s words) together with what was actually released: the input
+ * `remainingDurableClaims` turns into what is still owed.
  */
-export async function releaseDurableSpawnClaims(
-  claims: DurableSpawnClaims,
-  labelOf: (step: DurableReleaseStep) => string,
+export async function releaseDurableSpawnClaims<R extends RosterClaim>(
+  claims: DurableSpawnClaims<R>,
+  phrasing: DurableReleasePhrasing<R>,
   ports: DurableClaimReleasePorts,
 ): Promise<Readonly<{ errors: readonly string[]; releases: DurableClaimReleases }>> {
   const log = emptyDurableReleaseLog();
-  const errors = await attemptEvery(planDurableRelease(claims), labelOf, (step) => releaseDurableStep(step, ports, log));
+  const errors = await attemptEvery(
+    planDurableRelease(claims),
+    (step) => durableReleaseStepLabel(step, phrasing),
+    (step) => releaseDurableStep(step, ports, log),
+  );
   return Object.freeze({ errors, releases: Object.freeze({ ...log }) });
 }
 
@@ -602,82 +630,3 @@ export async function claimOrCompensate(
     orphaned: orphanedOnRelease(claim, releases),
   }));
 }
-
-/**
- * Retry every orphaned claim the session keeps — revocations before pointer
- * releases, the security order — through the ledger's own planned release of
- * that one capability, discharging each one released. An orphan that still
- * fails stays as debt; its failures are returned, labelled.
- */
-export async function releaseOrphanedSpawnClaims(
-  sessionId: PiSessionId,
-  parentSessions: PiParentSessions,
-  ports: DurableClaimReleasePorts,
-): Promise<readonly string[]> {
-  const orphans = [...parentSessions.get(sessionId)?.orphanedClaims ?? []];
-  const errors: string[] = [];
-  for (const orphan of [
-    ...orphans.filter(({ kind }) => kind === "write-grant"),
-    ...orphans.filter(({ kind }) => kind === "pointer-lease"),
-  ]) {
-    const attempt = await releaseDurableSpawnClaims(unownedOnRefusal(orphan), orphanedClaimStepLabel, ports);
-    if (orphanedOnRelease(orphan, attempt.releases) === null) parentSessions.dischargeOrphanedClaim(sessionId, orphan);
-    errors.push(...attempt.errors);
-  }
-  return errors;
-}
-
-/** The parsed session and tool call one batch's durable claims and cleanup
- *  debt are filed under on the parent session. */
-export type SpawnClaimHolder = Readonly<{ sessionId: PiSessionId; toolCallId: string }>;
-
-/** What releasing one tool call's held claims did. */
-export type HeldSpawnClaimsRelease = Readonly<{
-  /** The failed release steps, labelled. */
-  errors: readonly string[];
-  /** Why the tool call's stored reservation was left untouched as debt: it
-   *  names another session (`ownPiSpawnReservation`'s refusal), or `null`. */
-  foreignReservation: string | null;
-}>;
-
-/**
- * Release the part `select` picks of the durable ledger one tool call still
- * holds on its parent session — its committed grants, and the roster entries
- * and pointer lease of its stored reservation once that is parsed against the
- * holder's session — then retain exactly what is still owed. Settlement and
- * shutdown both release through here, so they share one plan, one release
- * order and one remaining-debt rule. A stored reservation naming another
- * session is never released under the holder: it stays as debt, reported as
- * data. The reservation is re-read from the session on every call, where the
- * previous release retained it, so a retry never replays a released capability.
- */
-export async function releaseHeldSpawnClaims(
-  holder: SpawnClaimHolder,
-  parentSessions: PiParentSessions,
-  select: (held: DurableSpawnClaims) => DurableSpawnClaims,
-  labelOf: (step: DurableReleaseStep) => string,
-  ports: DurableClaimReleasePorts,
-): Promise<HeldSpawnClaimsRelease> {
-  const { sessionId, toolCallId } = holder;
-  const runtime = parentSessions.get(sessionId);
-  const stored = runtime?.spawnReservations.get(toolCallId);
-  const owned = stored === undefined ? undefined : ownPiSpawnReservation(sessionId, stored);
-  const reservation = owned?.ok === true ? owned.value : undefined;
-  const held = settledSpawnClaims(runtime?.issuedWriteGrants.get(toolCallId) ?? [], reservation);
-  const { errors, releases } = await releaseDurableSpawnClaims(select(held), labelOf, ports);
-  const owed = remainingDurableClaims(held, releases);
-  parentSessions.retainWriteGrantDebt(sessionId, toolCallId, owed.grants);
-  if (reservation !== undefined) {
-    parentSessions.retainSpawnCleanupDebt(sessionId, toolCallId, spawnDebtOf(owed, reservation).reservation);
-  }
-  return Object.freeze({ errors, foreignReservation: owned?.ok === false ? owned.error : null });
-}
-
-/** The production durable release ports of one parent session: roster
- *  entries are removed under that session alone. */
-export const piDurableClaimReleasePorts = (sessionId: PiSessionId): DurableClaimReleasePorts =>
-  Object.freeze({
-    revokeGrant: revokePiWriteGrant,
-    removeRosterEntry: (agentId: AgentId) => fsSessionRegistry.removeActive(sessionId, agentId),
-    releasePointer: rollbackSessionTaskGraphPointer,
-  });
