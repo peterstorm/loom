@@ -17,7 +17,14 @@ export type GitProbeObservation<T, E> =
  * campaign observed transient empty success for `rev-parse --show-toplevel`
  * (twice), `rev-parse HEAD^{tree}` (once), and `--verify HEAD` (once inside a
  * review-packet CLI child, where it surfaced as `git returned an invalid HEAD:
- * ""`). The bounded retries discharge that observed transient; they
+ * ""`). The same capture loss reaches stderr: macos-15 verify run 37744264682
+ * saw `rev-parse --show-toplevel` in a non-repository exit 128 with an EMPTY
+ * stderr inside a CLI child (`git rev-parse failed (exit 128): no
+ * diagnostic`), although Git writes a diagnostic for every fatal exit — so a
+ * probe whose classification reads that diagnostic (config's root probe)
+ * treats a silent fatal exit as an empty observation too, and the
+ * policy-bound seam renders any such exit as a lost capture rather than as
+ * Git's answer. The bounded retries discharge these observed transients; they
  * cannot corrupt a legitimate result, because an operation that legitimately
  * produces no output re-runs and returns empty again. A confirmed-empty is
  * handed back to the caller, whose own emptiness guards refuse loudly with

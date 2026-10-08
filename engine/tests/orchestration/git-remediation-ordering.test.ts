@@ -74,7 +74,7 @@ describe("git boundary emptiness-guard ordering", () => {
     expect(opened.ok).toBe(false);
     if (opened.ok) throw new Error("expected refusal");
     expect(opened.error.operation).toBe("rev-parse");
-    expect(opened.error.message).toBe("git could not be run: spawn boom");
+    expect(opened.error.message).toBe("git could not start: spawn boom");
     // The error arm fired on the first attempt; the probe never retried it.
     expect(script.responses).toHaveLength(0);
   });

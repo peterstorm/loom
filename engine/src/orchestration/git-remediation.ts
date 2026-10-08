@@ -66,7 +66,7 @@ import {
 import { compareCandidateRepositoryWitnesses } from "../core/defect-family-accounting";
 import { recaptureRemediationCandidateWorkspace } from "./remediation-candidate";
 import { confirmedEmptyPassthrough, observeGitProbe } from "../utils/git-probe";
-import { spawnGit, type SpawnGitRun } from "../utils/git-execution-policy";
+import { describeGitOutcome, gitExitedWith, spawnGit, type GitSpawn } from "../utils/git-execution-policy";
 
 /** Fixed argument template. Nothing here is ever built from caller input. */
 const LITERAL_PATHSPECS = "--literal-pathspecs";
@@ -95,22 +95,7 @@ type GitInvocation = Readonly<{
 }>;
 
 /**
- * The minimal spawn result the Git boundary reads. Kept structural so tests can
- * stub each failure arm ({error}, {signal}, {status}) without fabricating the
- * full SpawnSyncReturns shape.
- */
-export type GitSpawnResult = Readonly<{
-  error?: Error | null;
-  status: number | null;
-  signal: NodeJS.Signals | null;
-  stdout: Buffer;
-  stderr: Buffer;
-}>;
-
-export type GitSpawn = (args: readonly string[], run: SpawnGitRun) => GitSpawnResult;
-
-/**
- * Run one Git command. Every invocation goes through here so the argument
+ * Run one remediation Git command. Every invocation goes through here so the argument
  * array, cwd, temporary index, and bounds cannot be bypassed by an individual
  * operation; the executable and environment are the shared execution
  * policy's, applied by `spawnGit`. The temporary index is the one location
@@ -126,33 +111,27 @@ export type GitSpawn = (args: readonly string[], run: SpawnGitRun) => GitSpawnRe
  * accidentally place it where Git would reject it — or, worse, omit it and
  * silently start interpreting paths as patterns.
  *
- * EXPORTED for tests: the `spawn` seam pins the process-level failure arms
- * (git binary missing, killed by a signal) without forking a real process.
+ * Named apart from the policy's own `runGit` (which throws and takes no
+ * repository root): this one is the remediation boundary's `DomainResult`
+ * wrapper. EXPORTED for tests: the `spawn` port pins every outcome arm (git
+ * binary missing, killed by a signal, timed out, over budget, a silent fatal
+ * exit) with plain `GitSpawnOutcome` values, without forking a real process.
  */
-export function runGit(
+export function runRemediationGit(
   repositoryRoot: string,
   invocation: GitInvocation,
   spawn: GitSpawn = spawnGit,
 ): DomainResult<Buffer, GitBoundaryError> {
-  const result = spawn([LITERAL_PATHSPECS, ...invocation.args], {
+  const outcome = spawn([LITERAL_PATHSPECS, ...invocation.args], {
     cwd: repositoryRoot,
     timeout: DEFAULT_TIMEOUT_MS,
     maxBuffer: DEFAULT_MAX_OUTPUT_BYTES,
     ...(invocation.indexFile === undefined ? {} : { location: { GIT_INDEX_FILE: invocation.indexFile } }),
     ...(invocation.stdin === undefined ? {} : { input: invocation.stdin }),
   });
-
-  if (result.error !== undefined && result.error !== null) {
-    return failure(invocation.operation, `git could not be run: ${result.error.message}`);
-  }
-  if (result.signal !== null) {
-    return failure(invocation.operation, `git terminated on signal ${result.signal}`);
-  }
-  if (result.status !== 0) {
-    const stderr = (result.stderr ?? Buffer.alloc(0)).toString("utf-8").trim();
-    return failure(invocation.operation, `git exited ${result.status ?? "unknown"}${stderr === "" ? "" : `: ${stderr}`}`);
-  }
-  return success(result.stdout ?? Buffer.alloc(0));
+  return gitExitedWith(outcome, [0])
+    ? success(outcome.stdout)
+    : failure(invocation.operation, `git ${describeGitOutcome(outcome)}`);
 }
 
 const digestOf = (value: string): ArtifactDigest =>
@@ -166,7 +145,7 @@ function runGitProbingEmpty(
   invocation: GitInvocation,
 ): DomainResult<Buffer, GitBoundaryError> {
   const observed = observeGitProbe(
-    () => runGit(repositoryRoot, invocation),
+    () => runRemediationGit(repositoryRoot, invocation),
     (value) => value.length === 0,
   );
   return confirmedEmptyPassthrough(observed);
@@ -407,7 +386,7 @@ export function createTemporaryIndex(
 ): DomainResult<TemporaryIndex, GitBoundaryError> {
   const directory = mkdtempSync(join(tmpdir(), "loom-remediation-index-"));
   const path = join(directory, "index");
-  const seeded = runGit(repository.root, {
+  const seeded = runRemediationGit(repository.root, {
     operation: "read-tree",
     args: ["read-tree", "HEAD"],
     indexFile: path,
@@ -475,17 +454,17 @@ export function stageAuditedPaths(
   }
 
   // The core verifies the contract's argument templates are exactly the
-  // literal-pathspec form. Checking the global one against what `runGit`
+  // literal-pathspec form. Checking the global one against what `runRemediationGit`
   // prepends means the two cannot silently diverge — a contract asking for a
   // different global option must not be run under this one.
   if (contract.globalArgs.length !== 1 || contract.globalArgs[0] !== LITERAL_PATHSPECS) {
     return failure("add", `pathspec contract declares unexpected global arguments: ${contract.globalArgs.join(" ")}`);
   }
 
-  const staged = runGit(repository.root, {
+  const staged = runRemediationGit(repository.root, {
     operation: "add",
     // `--pathspec-from-file` is a subcommand option; the global one is
-    // prepended by runGit. Both come from the contract the core validated.
+    // prepended by runRemediationGit. Both come from the contract the core validated.
     args: ["add", "--all", ...contract.pathspecArgs],
     // The core computed these bytes and digested them; recomputing the
     // manifest here would be a second implementation free to disagree.

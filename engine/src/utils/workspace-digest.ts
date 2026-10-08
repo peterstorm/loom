@@ -11,7 +11,7 @@ import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
-import { spawnGit } from "./git-execution-policy";
+import { describeGitOutcome, gitExitedWith, spawnGit } from "./git-execution-policy";
 import { confirmedEmptyPassthrough, observeGitProbe } from "./git-probe";
 import { inspectRepositoryPath } from "./repository-path";
 
@@ -96,13 +96,10 @@ type GitOutput = WorkspaceDigestResult<Buffer>;
 /** Runs under the shared `git-execution-policy`, as the leaf enumerator does,
  *  so the digest roster and every other observer share one ignore rule set. */
 function runGitOnce(cwd: string, operation: "resolve-root" | "list-paths", args: readonly string[]): GitOutput {
-  const executed = spawnGit(["-C", cwd, "--literal-pathspecs", ...args], { maxBuffer: MAX_GIT_OUTPUT_BYTES });
-  if (executed.error !== undefined || executed.status !== 0) {
-    const stderr = Buffer.from(executed.stderr ?? []).toString("utf-8").trim();
-    const detail = executed.error?.message ?? (stderr || `git exited with ${String(executed.status)}`);
-    return failure({ kind: "git-command-failed", operation, message: detail.slice(0, 4_096) });
-  }
-  return success(Buffer.from(executed.stdout ?? []));
+  const outcome = spawnGit(["-C", cwd, "--literal-pathspecs", ...args], { maxBuffer: MAX_GIT_OUTPUT_BYTES });
+  return gitExitedWith(outcome, [0])
+    ? success(outcome.stdout)
+    : failure({ kind: "git-command-failed", operation, message: `git ${describeGitOutcome(outcome)}`.slice(0, 4_096) });
 }
 
 function runGit(cwd: string, operation: "resolve-root" | "list-paths", args: readonly string[]): GitOutput {
