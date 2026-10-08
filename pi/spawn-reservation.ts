@@ -137,6 +137,28 @@ export type PiSpawnReservation = Readonly<{
   items: readonly PiSpawnReservationItem[];
 }>;
 
+declare const ownerSession: unique symbol;
+
+/**
+ * A reservation proven to name the session it is settled under, so every
+ * settlement stage — roster removal under the owner, the State File resolved
+ * from `sessionId`, the debt retained — reads one session. Built only by
+ * `ownPiSpawnReservation`.
+ */
+export type OwnedPiSpawnReservation = PiSpawnReservation & Readonly<{ [ownerSession]: true }>;
+
+/** Parse a reservation against the session that owns its settlement; one
+ *  naming another session is refused. */
+export function ownPiSpawnReservation(
+  owner: PiSessionId,
+  reservation: PiSpawnReservation,
+): DomainResult<OwnedPiSpawnReservation, string> {
+  if (reservation.sessionId !== owner) {
+    return failure(`Pi spawn reservation names session ${reservation.sessionId}, not its owner session ${owner}`);
+  }
+  return success(reservation as OwnedPiSpawnReservation);
+}
+
 /**
  * Did this batch run outside orchestration entirely?
  *

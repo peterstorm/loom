@@ -41,7 +41,6 @@ import {
   anyActiveSubagent,
   bindSessionTaskGraphPointer,
   fsSessionRegistry,
-  rollbackSessionTaskGraphPointer,
 } from "../engine/src/machine";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
@@ -55,7 +54,7 @@ import {
   type PiSpecCheckAttemptAuthority,
 } from "./reserved-slot";
 import { alignPiImplementationAuthorities } from "./reserved-results";
-import { issuePiWriteGrant, revokePiWriteGrant } from "./write-grant";
+import { issuePiWriteGrant } from "./write-grant";
 import { LOOM_INTERACTIVE_SUBAGENT_TOOL } from "./interactive-subagent";
 import {
   associatePiSpawnLifecycle,
@@ -75,23 +74,19 @@ import type { TrustedReviewWitnesses } from "./trusted-review-witness";
 import {
   cleanupFailureSuffix,
   describeCause,
-  directReleaseFailureSuffix,
   injectPiWriteGrantWithRevocation,
-  type PiCleanupAction,
 } from "./cleanup-actions";
 import {
-  claimEmissionLaunches,
-  claimGrantInjection,
-  claimPointerLease,
-  claimRosterEntry,
-  claimWitnessRun,
-  claimWriteGrant,
+  claimOrCompensate,
   NO_SPAWN_CLAIMS,
-  releaseExactPointerLease,
   releaseSpawnClaims,
   remainingSpawnDebt,
   spawnRollbackStepLabel,
+  type DurableClaimReleasePorts,
+  type SpawnClaim,
+  type SpawnClaimReleasePorts,
   type SpawnClaims,
+  type SpawnRollbackStep,
 } from "./spawn-claims";
 import {
   legacyReservationItem,
@@ -102,19 +97,6 @@ import {
 } from "./spawn-reservation";
 import type { SpawnBatchGraphAuthority } from "./spawn-preparation";
 import type { DomainResult } from "../engine/src/core/orchestration-contract/identity";
-
-/**
- * The ledger after a claim; when the ledger refuses it, the capability just
- * taken is owed by no rollback, so it is released directly and the refusal
- * thrown (carrying that release's failure, if any).
- */
-async function claimOrReleaseUnclaimed(
-  claimed: DomainResult<SpawnClaims, string>,
-  releaseUnclaimed: PiCleanupAction,
-): Promise<SpawnClaims> {
-  if (claimed.ok) return claimed.value;
-  throw new Error(`${claimed.error}${await directReleaseFailureSuffix(releaseUnclaimed)}`);
-}
 
 /** A `tool_call` refusal in the shape Pi reads. */
 export type PiSpawnRefusal = Readonly<{ block: true; reason: string }>;
@@ -136,6 +118,9 @@ export type PiSpawnLifecyclePorts = Readonly<{
   emissionLaunchBridge: PiEmissionLaunchBridge;
   /** The witness aggregate a standalone review's first exact spawn binds. */
   reviewWitnesses: TrustedReviewWitnesses;
+  /** The durable release ports (`piDurableClaimReleasePorts` in production)
+   *  a refusal releases the session's grants, roster entries and lease by. */
+  durableClaimReleases: (sessionId: PiSessionId) => DurableClaimReleasePorts;
   /** The content-addressed runtime revision staged emission launches carry. */
   runtimeRevision: string;
   /** Fail-closed existence probe for the governing task graph. */
@@ -144,15 +129,30 @@ export type PiSpawnLifecyclePorts = Readonly<{
   enterGuard: (guard: string) => void;
 }>;
 
-/** Reserve one admitted batch's lifecycle, or refuse it with every claim it
- *  made rolled back (or retained as cleanup debt). Resolves `undefined` when
- *  the batch may dispatch. */
+/**
+ * Reserve one admitted batch's lifecycle, or refuse it with every claim it
+ * made rolled back (or retained as cleanup debt). Resolves `undefined` when
+ * the batch may dispatch.
+ *
+ * Every Pi tool call starts from an empty ledger. `held` names claims the
+ * batch already holds; the ledger refuses a claim only when one like it is
+ * held, so passing one is how a test reaches each refusal through admission.
+ */
 export async function reservePiSpawnLifecycle(
   request: PiSpawnLifecycleRequest,
   ports: PiSpawnLifecyclePorts,
+  held: SpawnClaims = NO_SPAWN_CLAIMS,
 ): Promise<PiSpawnRefusal | undefined> {
   const { event, cwd, sessionId, safeSessionId, admission } = request;
-  const { parentSessions, emissionLaunchBridge, reviewWitnesses, runtimeRevision, graphExists, enterGuard } = ports;
+  const {
+    parentSessions,
+    emissionLaunchBridge,
+    reviewWitnesses,
+    durableClaimReleases,
+    runtimeRevision,
+    graphExists,
+    enterGuard,
+  } = ports;
   const {
     active: orchestrationGraphActive,
     path: orchestrationGraphPath,
@@ -229,18 +229,25 @@ export async function reservePiSpawnLifecycle(
   const emissionLaunchOf = (state: SpawnLifecycleState) =>
     reservedReviewerEmissionLaunch(state.admission.emissionExpectation, event.input, state.slot);
   // Every capability taken so far, and the run binding a debt record names.
-  let claims: SpawnClaims = NO_SPAWN_CLAIMS;
+  let claims: SpawnClaims = held;
   let orchestrationRunBinding: SessionRunBinding | null = null;
   let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
+  const releasePorts: SpawnClaimReleasePorts = Object.freeze({
+    ...durableClaimReleases(safeSessionId),
+    removeEmissionLaunches: () => emissionLaunchBridge.removeToolCall(safeSessionId, toolCallId),
+    restorePrompt: (slot: number, originalTask: string) => replacePiSpawnTask(event.input, slot, originalTask),
+    retractWitnessRun: (binding: SessionRunBinding) => reviewWitnesses.retract(safeSessionId, binding),
+  });
+  const rollbackLabel = (step: SpawnRollbackStep): string => spawnRollbackStepLabel(step, toolCallId);
+  // Record a claim in the ledger; a refusal, with whatever it left unowned
+  // already released, propagates to the rollback below.
+  const claim = async (taken: SpawnClaim): Promise<void> => {
+    const claimed = await claimOrCompensate(claims, taken, rollbackLabel, releasePorts);
+    if (!claimed.ok) throw new Error(claimed.error);
+    claims = claimed.value;
+  };
   const rollbackLifecycle = async (): Promise<readonly string[]> => {
-    const { errors, releases } = await releaseSpawnClaims(claims, (step) => spawnRollbackStepLabel(step, toolCallId), {
-      removeEmissionLaunches: () => emissionLaunchBridge.removeToolCall(safeSessionId, toolCallId),
-      revokeGrant: revokePiWriteGrant,
-      restorePrompt: (slot, originalTask) => replacePiSpawnTask(event.input, slot, originalTask),
-      retractWitnessRun: (binding) => reviewWitnesses.retract(safeSessionId, binding),
-      removeRosterEntry: (agentId) => fsSessionRegistry.removeActive(safeSessionId, agentId),
-      releasePointer: rollbackSessionTaskGraphPointer,
-    });
+    const { errors, releases } = await releaseSpawnClaims(claims, rollbackLabel, releasePorts);
     const debt = remainingSpawnDebt(claims, releases, {
       sessionId: safeSessionId,
       needsTaskGraphLifecycle,
@@ -274,19 +281,18 @@ export async function reservePiSpawnLifecycle(
       // an entry that was never written is a no-op. The debt shape of a
       // roster entry carries no role authority: none is committed until the
       // whole reservation is.
-      claims = claimRosterEntry(claims, legacyReservationItem(
-        { rosterId: state.rosterId, emissionLaunch: emissionLaunchOf(state), kind: state.dispatchTaskExecutionSpawn.kind },
-        state.admission.item.agent,
-        extractTaskId(state.admission.item.task),
-      ));
+      await claim({
+        kind: "roster-entry",
+        item: legacyReservationItem(
+          { rosterId: state.rosterId, emissionLaunch: emissionLaunchOf(state), kind: state.dispatchTaskExecutionSpawn.kind },
+          state.admission.item.agent,
+          extractTaskId(state.admission.item.task),
+        ),
+      });
       await fsSessionRegistry.markActive(safeSessionId, state.rosterId);
     }
     if (needsTaskGraphLifecycle && graphExists(orchestrationGraphPath)) {
-      const lease = await bindSessionTaskGraphPointer(safeSessionId, orchestrationGraphPath);
-      claims = await claimOrReleaseUnclaimed(claimPointerLease(claims, lease), {
-        label: "roll back unclaimed task-graph pointer",
-        run: () => releaseExactPointerLease(rollbackSessionTaskGraphPointer, lease),
-      });
+      await claim({ kind: "pointer-lease", pointer: await bindSessionTaskGraphPointer(safeSessionId, orchestrationGraphPath) });
     }
     // Bind every Loom-owned Pi native spawn identity to the exact issued
     // request before the harness can dispatch the batch. The durable run
@@ -305,11 +311,7 @@ export async function reservePiSpawnLifecycle(
     if (orchestrationRunBinding !== null &&
         spawnLifecycle.some(({ admission }) => hasStandaloneReviewContext(admission.item.task)) &&
         reviewWitnesses.touch(safeSessionId, orchestrationRunBinding) === "bound") {
-      const bound = orchestrationRunBinding;
-      claims = await claimOrReleaseUnclaimed(claimWitnessRun(claims, bound), {
-        label: `retract unclaimed review run ${bound.runId}`,
-        run: () => reviewWitnesses.retract(safeSessionId, bound),
-      });
+      await claim({ kind: "witness-run", binding: orchestrationRunBinding });
     }
     const unboundSpecChecks = orchestrationRunBinding === null
       ? spawnLifecycle.filter(({ admission }) => admission.item.agent === "spec-check-invoker")
@@ -382,13 +384,8 @@ export async function reservePiSpawnLifecycle(
       });
       // Claim the issued token for its slot before prompt injection can
       // fail. If immediate revocation also fails, the rollback retries this
-      // exact grant instead of orphaning a sibling's. A slot the ledger
-      // refuses (one already holding a grant) leaves this token unowed by
-      // the rollback, so it is revoked here before the refusal propagates.
-      claims = await claimOrReleaseUnclaimed(claimWriteGrant(claims, { slot, token: grant.token }), {
-        label: `revoke unclaimed write grant for spawn item ${slot + 1}`,
-        run: () => revokePiWriteGrant(grant.token),
-      });
+      // exact grant instead of orphaning a sibling's.
+      await claim({ kind: "write-grant", grant: { slot, token: grant.token } });
       const task = await injectPiWriteGrantWithRevocation(item.task, grant, slot);
       replaceLifecycleState(Object.freeze({ ...state, grantedTask: task }));
     }
@@ -399,9 +396,7 @@ export async function reservePiSpawnLifecycle(
     // its restore.
     for (const state of spawnLifecycle) {
       if (state.grantedTask === null) continue;
-      const claimed = claimGrantInjection(claims, { slot: state.slot, originalTask: state.admission.item.task });
-      if (!claimed.ok) throw new Error(claimed.error);
-      claims = claimed.value;
+      await claim({ kind: "grant-injection", rewrite: { slot: state.slot, originalTask: state.admission.item.task } });
       replacePiSpawnTask(event.input, state.slot, state.grantedTask);
     }
     spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => {
@@ -444,7 +439,7 @@ export async function reservePiSpawnLifecycle(
     if (launchExpectations.length > 0) {
       const staged = emissionLaunchBridge.stage(launchExpectations);
       if (!staged.ok) throw new Error(staged.reason);
-      claims = claimEmissionLaunches(claims);
+      await claim({ kind: "emission-launches" });
     }
   } catch (error) {
     const cleanupErrors = await rollbackLifecycle();
