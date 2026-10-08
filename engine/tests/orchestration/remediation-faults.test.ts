@@ -10,13 +10,14 @@ import {
   openGitRepository,
   readStagedPaths,
   readRepositoryBytes,
-  runGit,
+  runRemediationGit,
   snapshotRepositoryWitness,
   stageAuditedPaths,
   type GitRepository,
   type TemporaryIndex,
 } from "../../src/orchestration/git-remediation";
 import type { CurrentVerifiedIndexInstallation, FixedGitPathspecContract } from "../../src/core/remediation-machine";
+import type { GitSpawnOutcome } from "../../src/utils/git-execution-policy";
 import { git, pathspecContract, write } from "../fixtures/git-repository";
 import { verifiedRemediationInstallation } from "../fixtures/verified-remediation-installation";
 
@@ -318,62 +319,56 @@ describe("command construction", () => {
   });
 });
 
-describe("runGit process-level failure arms", () => {
+describe("runRemediationGit outcome arms", () => {
   const invocation = { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] };
+  const silent = Object.freeze({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
+  const refusal = (outcome: GitSpawnOutcome): string => {
+    const result = runRemediationGit("/repo", invocation, () => outcome);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.error).toMatchObject({ kind: "git-boundary-failed", operation: "rev-parse" });
+    return result.error.message;
+  };
 
-  it("reports a git binary that cannot be run", () => {
-    const result = runGit("/repo", invocation, () => ({
-      error: new Error("spawn git ENOENT"),
-      status: null,
-      signal: null,
-      stdout: Buffer.alloc(0),
-      stderr: Buffer.alloc(0),
-    }));
+  it("hands the spawn port the logical argv, the repository cwd and the bounds", () => {
+    const calls: unknown[] = [];
+    runRemediationGit("/repo", invocation, (args, run) => {
+      calls.push({ args, run });
+      return { kind: "exited", status: 0, ...silent };
+    });
+    expect(calls).toEqual([{
+      args: ["--literal-pathspecs", "rev-parse", "--show-toplevel"],
+      run: { cwd: "/repo", timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+    }]);
+  });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.message).toBe("git could not be run: spawn git ENOENT");
-    }
+  it("reports a git binary that cannot start", () => {
+    expect(refusal({ kind: "spawn-failed", code: "ENOENT", message: "spawn git ENOENT" }))
+      .toBe("git could not start: spawn git ENOENT");
   });
 
   it("reports a git process terminated by a signal", () => {
-    const result = runGit("/repo", invocation, () => ({
-      error: undefined,
-      status: null,
-      signal: "SIGKILL",
-      stdout: Buffer.alloc(0),
-      stderr: Buffer.alloc(0),
-    }));
+    expect(refusal({ kind: "signalled", signal: "SIGKILL", ...silent })).toBe("git terminated on signal SIGKILL");
+  });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.message).toBe("git terminated on signal SIGKILL");
-    }
+  it("reports a timed-out and an over-budget child with their bounds", () => {
+    expect(refusal({ kind: "timed-out", timeoutMs: 30_000, signal: "SIGTERM", ...silent })).toBe("git timed out after 30000 ms");
+    expect(refusal({ kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.from("warning: big\n") }))
+      .toBe("git exceeded its 1024-byte output budget: warning: big");
   });
 
   it("reports a non-zero exit with its stderr verbatim", () => {
-    const result = runGit("/repo", invocation, () => ({
-      error: undefined,
-      status: 1,
-      signal: null,
-      stdout: Buffer.alloc(0),
-      stderr: Buffer.from("fatal: not a git repository"),
-    }));
+    expect(refusal({ kind: "exited", status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("fatal: not a git repository") }))
+      .toBe("git exited 1: fatal: not a git repository");
+  });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.message).toBe("git exited 1: fatal: not a git repository");
-    }
+  it("names a fatal exit whose stderr arrived empty as a lost capture, never as Git's answer", () => {
+    expect(refusal({ kind: "exited", status: 128, ...silent })).toBe(
+      "git exited 128: stderr empty, stdout 0 bytes — Git writes a diagnostic for every fatal exit, so the child's stderr was lost before it reached the engine",
+    );
   });
 
   it("passes a zero exit's stdout through as the success value", () => {
-    const result = runGit("/repo", invocation, () => ({
-      error: undefined,
-      status: 0,
-      signal: null,
-      stdout: Buffer.from(".git\n"),
-      stderr: Buffer.alloc(0),
-    }));
+    const result = runRemediationGit("/repo", invocation, () => ({ kind: "exited", status: 0, stdout: Buffer.from(".git\n"), stderr: Buffer.alloc(0) }));
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.toString("utf-8")).toBe(".git\n");

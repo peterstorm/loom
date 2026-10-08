@@ -29,7 +29,20 @@ import {
   type RemediationCandidateCaptureInput,
 } from "../../src/orchestration/remediation-candidate";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../src/utils/declared-artifact-snapshot";
-import { runGit, spawnGit, type GitOutput } from "../../src/utils/git-execution-policy";
+import {
+  describeGitOutcome,
+  diagnoseGitOutcome,
+  gitCleanNegative,
+  gitDiagnosticLost,
+  gitExitedWith,
+  gitStdoutText,
+  parseGitSpawnResult,
+  runGit,
+  spawnGit,
+  type GitOutput,
+  type GitSpawnOutcome,
+  type RawGitSpawnResult,
+} from "../../src/utils/git-execution-policy";
 import {
   changedPaths,
   diffFilesAt,
@@ -54,6 +67,7 @@ const AMBIENT_ATTACK: Readonly<Record<string, string>> = Object.freeze({
   GIT_CONFIG_VALUE_1: "sh -c 'touch /tmp/owned'",
   GIT_EXTERNAL_DIFF: "sh",
   GIT_LITERAL_PATHSPECS: "1",
+  XDG_CONFIG_HOME: "/attacker/xdg",
   LOOM_UNRELATED: "leak",
 });
 const POLICY_ENVIRONMENT: Readonly<Record<string, string>> = Object.freeze({
@@ -62,6 +76,7 @@ const POLICY_ENVIRONMENT: Readonly<Record<string, string>> = Object.freeze({
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_ATTR_NOSYSTEM: "1",
   GIT_CONFIG_GLOBAL: "/dev/null",
+  XDG_CONFIG_HOME: "/dev/null",
   GIT_CONFIG_COUNT: "1",
   GIT_CONFIG_KEY_0: "core.fsmonitor",
   GIT_CONFIG_VALUE_0: "false",
@@ -70,6 +85,14 @@ const POLICY_ENVIRONMENT: Readonly<Record<string, string>> = Object.freeze({
   GIT_OPTIONAL_LOCKS: "0",
 });
 const FSMONITOR_PREFIX = Object.freeze(["-c", "core.fsmonitor=false"]);
+const DUBIOUS_OWNERSHIP = "fatal: detected dubious ownership in repository at '/srv/repo'";
+
+/** The Git subcommand of one recorded invocation: the first non-option word
+ *  after the policy prefix, skipping the directory a `-C` names. */
+function subcommandOf(argv: readonly string[]): string | undefined {
+  const logical = argv.slice(FSMONITOR_PREFIX.length);
+  return logical.find((arg, index) => !arg.startsWith("-") && logical[index - 1] !== "-C");
+}
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -82,9 +105,13 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-function withAmbient<T>(variables: Readonly<Record<string, string>>, run: () => T): T {
+/** Run with these ambient variables set — or, for an `undefined` value, unset. */
+function withAmbient<T>(variables: Readonly<Record<string, string | undefined>>, run: () => T): T {
   const previous = new Map(Object.keys(variables).map((key) => [key, process.env[key]]));
-  Object.assign(process.env, variables);
+  for (const [key, value] of Object.entries(variables)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   try {
     return run();
   } finally {
@@ -122,9 +149,11 @@ type Invocation = Readonly<{ argv: readonly string[]; env: Readonly<Record<strin
 /**
  * A `git` shim that appends each invocation's argv and environment to a log,
  * then either emulates a tiny Git (`emulate`: `fail` exits 1, `big` prints
- * 2 MiB, anything else prints `out`), runs the real Git, or runs the real Git
- * as an "old Git" that never sees the environment config form. With
- * `failOn`, an invocation carrying that argument fails before reaching Git.
+ * 2 MiB, `dubious` dies 128 with Git's dubious-ownership diagnostic, `silent`
+ * exits 128 writing nothing, anything else prints `out`), runs the real Git,
+ * or runs the real Git as an "old Git" that never sees the environment config
+ * form. With `failOn`, an invocation carrying that argument fails before
+ * reaching Git.
  */
 function recordingGit(mode: "emulate" | "real" | "old-git", failOn?: string): Readonly<{
   path: string;
@@ -139,6 +168,8 @@ function recordingGit(mode: "emulate" | "real" | "old-git", failOn?: string): Re
       "  case \"$arg\" in",
       "    fail) echo 'scripted failure' >&2; exit 1 ;;",
       "    big) head -c 2097152 /dev/zero; exit 0 ;;",
+      `    dubious) printf '%s\\n' "${DUBIOUS_OWNERSHIP}" >&2; exit 128 ;;`,
+      "    silent) exit 128 ;;",
       "  esac",
       "done",
       "printf 'out'",
@@ -190,6 +221,28 @@ function expectHardened(invocation: Invocation, ambientPath: string): void {
   }
 }
 
+/** The two places an operator's global ignore rules live: a file named by
+ *  `core.excludesFile` in the global config, and Git's implicit default
+ *  `$XDG_CONFIG_HOME/git/ignore` (`$HOME/.config/git/ignore`), which Git
+ *  reads even when no config names it. */
+const GLOBAL_IGNORE_SOURCES: readonly (readonly [string, (home: string, pattern: string) => void])[] = [
+  ["a global core.excludesFile", (home, pattern) => {
+    writeFileSync(join(home, "global-ignore"), pattern);
+    writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${join(home, "global-ignore")}\n`);
+  }],
+  ["Git's implicit XDG ignore file", (home, pattern) => {
+    mkdirSync(join(home, ".config", "git"), { recursive: true });
+    writeFileSync(join(home, ".config", "git", "ignore"), pattern);
+  }],
+];
+
+/** Run as an operator whose global Git config lives in `home`: the ambient
+ *  variables that would redirect it elsewhere are unset, so the real-Git
+ *  controls read exactly that operator's files. */
+function withOperatorHome<T>(home: string, run: () => T): T {
+  return withAmbient({ HOME: home, XDG_CONFIG_HOME: undefined, GIT_CONFIG_GLOBAL: undefined, GIT_CONFIG_NOSYSTEM: undefined }, run);
+}
+
 /** A repository whose own config names an fsmonitor hook that leaves a marker. */
 function fsmonitorRepository(): Readonly<{ root: string; marker: string }> {
   const root = tempDir("loom-git-policy-");
@@ -230,9 +283,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     const result = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () =>
       spawnGit(["check-ignore", "--quiet", "fail"], { maxBuffer: 1024 }));
 
-    expect(result.status).toBe(1);
-    expect(result.error).toBeUndefined();
-    expect(Buffer.isBuffer(result.stderr) && result.stderr.toString("utf-8")).toBe("scripted failure\n");
+    expect(result).toEqual({ kind: "exited", status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("scripted failure\n") });
     const [invocation] = shim.invocations();
     expect(invocation!.argv).toEqual([...FSMONITOR_PREFIX, "check-ignore", "--quiet", "fail"]);
     expectHardened(invocation!, shim.path);
@@ -267,16 +318,18 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     const { root } = fsmonitorRepository();
     const index = join(tempDir("loom-git-index-"), "index");
     withAmbient({ GIT_INDEX_FILE: "/attacker/index" }, () => {
-      expect(spawnGit(["read-tree", "HEAD"], { cwd: root, maxBuffer: 1024, location: { GIT_INDEX_FILE: index } }).status).toBe(0);
+      expect(spawnGit(["read-tree", "HEAD"], { cwd: root, maxBuffer: 1024, location: { GIT_INDEX_FILE: index } }))
+        .toMatchObject({ kind: "exited", status: 0 });
       expect(existsSync(index)).toBe(true);
       const hashed = spawnGit(["hash-object", "--stdin"], { cwd: root, maxBuffer: 1024, input: Buffer.from("tracked\n") });
-      expect(hashed.status).toBe(0);
       const listed = spawnGit(["ls-files", "-s", "--", "tracked.txt"], { cwd: root, maxBuffer: 1024, location: { GIT_INDEX_FILE: index } });
-      expect(listed.stdout.toString("utf-8")).toContain(hashed.stdout.toString("utf-8").trim());
+      if (!gitExitedWith(hashed, [0]) || !gitExitedWith(listed, [0])) throw new Error(`${describeGitOutcome(hashed)}; ${describeGitOutcome(listed)}`);
+      expect(gitStdoutText(listed)).toContain(gitStdoutText(hashed).trim());
     });
 
     const timedOut = spawnGit(["-c", "alias.hang=!sleep 2", "hang"], { cwd: root, maxBuffer: 1024, timeout: 100 });
-    expect(timedOut.signal).toBe("SIGTERM");
+    expect(timedOut).toMatchObject({ kind: "timed-out", timeoutMs: 100, signal: "SIGTERM" });
+    expect(describeGitOutcome(timedOut)).toBe("timed out after 100 ms");
   });
 
   it("gives a bytes capture the listing budget, a text capture Node's default, and honours an explicit budget", () => {
@@ -285,7 +338,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
       expect(runGit(["big"], { output: "bytes" }).byteLength).toBe(2 * 1024 * 1024);
       expect(() => runGit(["big"], { output: "text" })).toThrow(expect.objectContaining({ code: "ENOBUFS" }));
       expect(() => runGit(["big"], { output: "bytes", maxBuffer: 1024 })).toThrow(expect.objectContaining({ code: "ENOBUFS" }));
-      expect(spawnGit(["big"], { maxBuffer: 1024 }).error).toMatchObject({ code: "ENOBUFS" });
+      expect(spawnGit(["big"], { maxBuffer: 1024 })).toMatchObject({ kind: "over-budget", maxBuffer: 1024 });
     });
   });
 
@@ -296,8 +349,8 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     const oldGit = recordingGit("old-git");
     withAmbient({ PATH: oldGit.path }, () => {
       expect(runGit(["config", "--get", "core.fsmonitor"], { output: "text", cwd: root }).trim()).toBe("false");
-      expect(spawnGit(["config", "--get", "core.fsmonitor"], { cwd: root, maxBuffer: 1024 }).stdout.toString("utf-8").trim())
-        .toBe("false");
+      expect(spawnGit(["config", "--get", "core.fsmonitor"], { cwd: root, maxBuffer: 1024 }))
+        .toEqual({ kind: "exited", status: 0, stdout: Buffer.from("false\n"), stderr: Buffer.alloc(0) });
     });
   });
 
@@ -312,11 +365,116 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     const oldGit = recordingGit("old-git");
     withAmbient({ PATH: oldGit.path }, () => {
       runGit(["status", "--porcelain"], { output: "discard", cwd: root });
-      expect(spawnGit(["status", "--porcelain"], { cwd: root, maxBuffer: 1024 * 1024 }).status).toBe(0);
+      expect(spawnGit(["status", "--porcelain"], { cwd: root, maxBuffer: 1024 * 1024 })).toMatchObject({ kind: "exited", status: 0 });
     });
     expect(oldGit.invocations().map(({ env }) => env.GIT_CONFIG_COUNT)).toEqual([undefined, undefined]);
     runGit(["status", "--porcelain"], { output: "discard", cwd: root });
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("passes exactly the launch essentials the engine's own process has, and drops every other ambient variable", () => {
+    const shim = recordingGit("emulate");
+    const tmp = tempDir("loom-git-tmpdir-");
+    const home = tempDir("loom-git-home-");
+    // Variables a shell adds to the shim's own environment, not the policy's.
+    const shellAdded = new Set(["PWD", "OLDPWD", "SHLVL", "_"]);
+    const passed = (invocation: Invocation): readonly string[] =>
+      Object.keys(invocation.env).filter((key) => !shellAdded.has(key)).sort();
+    const policyKeys = Object.keys(POLICY_ENVIRONMENT);
+
+    withAmbient({
+      ...AMBIENT_ATTACK, PATH: shim.path, HOME: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp,
+      DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer", SDKROOT: "/sdk", USER: "operator",
+    }, () => spawnGit(["status"], { maxBuffer: 1024 }));
+    withAmbient({ PATH: shim.path, HOME: undefined, TMPDIR: undefined, TEMP: undefined, TMP: undefined }, () =>
+      spawnGit(["status"], { maxBuffer: 1024 }));
+
+    const [withEssentials, withoutEssentials] = shim.invocations();
+    expect(passed(withEssentials!)).toEqual([...policyKeys, "PATH", "HOME", "TMPDIR", "TEMP", "TMP"].sort());
+    expect(withEssentials!.env).toMatchObject({ ...POLICY_ENVIRONMENT, PATH: shim.path, HOME: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp });
+    expect(passed(withoutEssentials!)).toEqual([...policyKeys, "PATH"].sort());
+  });
+
+  it("hands back Git's own fatal diagnostic, and names a fatal exit with an empty stderr as a lost capture", () => {
+    const shim = recordingGit("emulate");
+    withAmbient({ PATH: shim.path }, () => {
+      const dubious = spawnGit(["rev-parse", "dubious"], { maxBuffer: 1024 });
+      expect(dubious).toEqual({ kind: "exited", status: 128, stdout: Buffer.alloc(0), stderr: Buffer.from(`${DUBIOUS_OWNERSHIP}\n`) });
+      expect(describeGitOutcome(dubious)).toBe(`exited 128: ${DUBIOUS_OWNERSHIP}`);
+      // The throwing runner carries the same diagnostic on its error.
+      expect(() => runGit(["rev-parse", "dubious"], { output: "text" })).toThrow(DUBIOUS_OWNERSHIP);
+
+      const silent = spawnGit(["rev-parse", "silent"], { maxBuffer: 1024 });
+      expect(silent).toEqual({ kind: "exited", status: 128, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
+      expect(diagnoseGitOutcome(silent)).toEqual({
+        head: "exited 128",
+        detail: "stderr empty, stdout 0 bytes — Git writes a diagnostic for every fatal exit, so the child's stderr was lost before it reached the engine",
+      });
+    });
+  });
+});
+
+describe("the closed spawn outcome", () => {
+  const error = (message: string, code?: string): Error => Object.assign(new Error(message), code === undefined ? {} : { code });
+  const run = { maxBuffer: 1024, timeout: 500 };
+
+  it.each<[string, RawGitSpawnResult, GitSpawnOutcome]>([
+    ["Node's missing executable", { error: error("spawnSync git ENOENT", "ENOENT"), status: null, signal: null, stdout: null, stderr: null },
+      { kind: "spawn-failed", code: "ENOENT", message: "spawnSync git ENOENT" }],
+    ["Bun's missing executable (no status, no streams)", { error: error('Executable not found in $PATH: "git"', "ENOENT"), signal: null },
+      { kind: "spawn-failed", code: "ENOENT", message: 'Executable not found in $PATH: "git"' }],
+    ["a code-less spawn error", { error: error("spawn boom"), status: null, signal: null },
+      { kind: "spawn-failed", code: null, message: "spawn boom" }],
+    ["a timeout, keeping what the child wrote", { error: error("spawnSync git ETIMEDOUT", "ETIMEDOUT"), status: null, signal: "SIGTERM", stdout: Buffer.from("partial"), stderr: Buffer.from("warning") },
+      { kind: "timed-out", timeoutMs: 500, signal: "SIGTERM", stdout: Buffer.from("partial"), stderr: Buffer.from("warning") }],
+    ["an over-budget capture", { error: error("spawnSync git ENOBUFS", "ENOBUFS"), status: 0, signal: null, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) },
+      { kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) }],
+    ["a signal", { status: null, signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.from("killed mid-write") },
+      { kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.from("killed mid-write") }],
+    ["an exit with string captures, as a scripted double hands them back", { error: null, status: 128, signal: null, stdout: "", stderr: "fatal: x\n" },
+      { kind: "exited", status: 128, stdout: Buffer.alloc(0), stderr: Buffer.from("fatal: x\n") }],
+    ["a result naming no ending at all", {},
+      { kind: "spawn-failed", code: null, message: "the spawn reported no exit status, no signal and no error" }],
+  ])("parses %s", (_label, raw, expected) => {
+    expect(parseGitSpawnResult(raw, run)).toEqual(expected);
+  });
+
+  it.each<[GitSpawnOutcome, string]>([
+    [{ kind: "spawn-failed", code: "ENOENT", message: "spawnSync git ENOENT" }, "could not start: spawnSync git ENOENT"],
+    [{ kind: "timed-out", timeoutMs: null, signal: "SIGTERM", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, "timed out"],
+    [{ kind: "timed-out", timeoutMs: 500, signal: "SIGTERM", stdout: Buffer.alloc(0), stderr: Buffer.from("warning\n") }, "timed out after 500 ms: warning"],
+    [{ kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) }, "exceeded its 1024-byte output budget"],
+    [{ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, "terminated on signal SIGKILL"],
+    [{ kind: "exited", status: 0, stdout: Buffer.from("out"), stderr: Buffer.alloc(0) }, "exited 0"],
+    [{ kind: "exited", status: 1, stdout: Buffer.from("ab"), stderr: Buffer.alloc(0) }, "exited 1: stderr empty, stdout 2 bytes"],
+    [{ kind: "exited", status: 129, stdout: Buffer.alloc(0), stderr: Buffer.from("usage: git rev-parse\n") }, "exited 129: usage: git rev-parse"],
+  ])("renders %j as %j", (outcome, expected) => {
+    expect(describeGitOutcome(outcome)).toBe(expected);
+  });
+
+  it("accepts an exit only when its caller's protocol names that status", () => {
+    const exited = (status: number): GitSpawnOutcome => ({ kind: "exited", status, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
+    expect([0, 1, 128].map((status) => gitExitedWith(exited(status), [0, 1]))).toEqual([true, true, false]);
+    expect(gitExitedWith({ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, [0, 1])).toBe(false);
+    expect(gitExitedWith({ kind: "spawn-failed", code: null, message: "boom" }, [0])).toBe(false);
+  });
+
+  it("reads only a silent exit 1 as a 0/1 protocol's clean negative answer", () => {
+    const exited = (status: number, stdout: string, stderr: string): GitSpawnOutcome =>
+      ({ kind: "exited", status, stdout: Buffer.from(stdout), stderr: Buffer.from(stderr) });
+    expect([
+      exited(1, "", ""), exited(1, "\n", " "), exited(1, "", "fatal: cannot read object"), exited(1, "abc", ""), exited(0, "", ""), exited(128, "", ""),
+    ].map(gitCleanNegative)).toEqual([true, true, false, false, false, false]);
+    expect(gitCleanNegative({ kind: "spawn-failed", code: "ENOENT", message: "spawn git ENOENT" })).toBe(false);
+  });
+
+  it("calls only a silent FATAL exit a lost diagnostic", () => {
+    const exited = (status: number, stderr: string): GitSpawnOutcome =>
+      ({ kind: "exited", status, stdout: Buffer.alloc(0), stderr: Buffer.from(stderr) });
+    expect([
+      exited(128, ""), exited(129, " \n"), exited(128, "fatal: x"), exited(1, ""), exited(0, ""),
+    ].map(gitDiagnosticLost)).toEqual([true, true, false, false, false]);
+    expect(gitDiagnosticLost({ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) })).toBe(false);
   });
 });
 
@@ -355,9 +513,7 @@ describe("every engine Git route runs under the policy", () => {
 
     const invocations = shim.invocations();
     for (const invocation of invocations) expectHardened(invocation, shim.path);
-    const subcommandOf = ({ argv }: Invocation) => argv.slice(2).find((arg, index, rest) =>
-      !arg.startsWith("-") && rest[index - 1] !== "-C");
-    expect(new Set(invocations.map(subcommandOf))).toEqual(new Set(["rev-parse", "ls-files", "diff", "check-ignore"]));
+    expect(new Set(invocations.map(({ argv }) => subcommandOf(argv)))).toEqual(new Set(["rev-parse", "ls-files", "diff", "check-ignore"]));
     // Content-hashing listings, diffs and the tracking probe run in the shadow
     // administration directory; leaf listings never do.
     const shadowRoutes = invocations.filter(({ argv }) => argv.includes("diff") || argv.includes("--error-unmatch"));
@@ -405,13 +561,12 @@ describe("every engine Git route runs under the policy", () => {
 
     const invocations = shim.invocations();
     for (const invocation of invocations) expectHardened(invocation, shim.path);
-    const subcommandOf = ({ argv }: Invocation) => argv.slice(2).find((arg) => !arg.startsWith("-"));
-    expect(new Set(invocations.map(subcommandOf))).toEqual(new Set([
+    expect(new Set(invocations.map(({ argv }) => subcommandOf(argv)))).toEqual(new Set([
       "rev-parse", "cat-file", "ls-tree", "show", "ls-files", "diff", "merge-base", "diff-tree", "read-tree", "add", "diff-index",
     ]));
     // Remediation staging relocates only the index, through the closed index
     // overlay, and pipes its NUL manifest as stdin.
-    const staging = invocations.filter(({ argv }) => ["read-tree", "add", "diff-index"].includes(subcommandOf({ argv, env: {} }) ?? ""));
+    const staging = invocations.filter(({ argv }) => ["read-tree", "add", "diff-index"].includes(subcommandOf(argv) ?? ""));
     expect(staging.length).toBe(3);
     for (const invocation of staging) {
       expect(invocation.env.GIT_INDEX_FILE).toBe(temporaryIndex);
@@ -420,20 +575,50 @@ describe("every engine Git route runs under the policy", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("gives the workspace digest roster the leaf enumerator's ignore rules, even with a global core.excludesFile", () => {
+  it.each(GLOBAL_IGNORE_SOURCES)("gives the workspace digest roster the leaf enumerator's ignore rules, even with %s", (_label, ignoreGlobally) => {
     const { root } = fsmonitorRepository();
     write(root, "globally-ignored.txt", "operator-local\n");
     const home = tempDir("loom-git-home-");
-    writeFileSync(join(home, "global-ignore"), "globally-ignored.txt\n");
-    writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${join(home, "global-ignore")}\n`);
+    ignoreGlobally(home, "globally-ignored.txt\n");
 
-    withAmbient({ HOME: home }, () => {
+    withOperatorHome(home, () => {
       // Control: an ambient-config Git honours the operator's global ignore file.
       expect(spawnSync(REAL_GIT, ["check-ignore", "--quiet", "globally-ignored.txt"], { cwd: root }).status).toBe(0);
       const digest = observeWorkspaceDigest(root);
       if (!digest.ok) throw new Error(JSON.stringify(digest.error));
       expect(digest.value.observedPaths).toEqual(worktreeVisibleLeafPaths(root, "."));
       expect(digest.value.observedPaths).toContain("globally-ignored.txt");
+    });
+  });
+
+  it.each(GLOBAL_IGNORE_SOURCES)("keeps the remediation candidate's tracking and ignore audits blind to %s", (_label, ignoreGlobally) => {
+    const { root } = fsmonitorRepository();
+    const repository = openGitRepository(root);
+    if (!repository.ok) throw new Error(repository.error.message);
+    const rawWitness = snapshotRepositoryWitness(repository.value);
+    if (!rawWitness.ok) throw new Error(rawWitness.error.message);
+    const witness = parseRepositorySnapshotWitness(rawWitness.value);
+    if (!witness.ok) throw new Error(witness.error.message);
+    const home = tempDir("loom-git-home-");
+    ignoreGlobally(home, "operator-runs/\n");
+    const runDirectory = join(root, "operator-runs", "run");
+    mkdirSync(runDirectory, { recursive: true });
+
+    withOperatorHome(home, () => {
+      // Control: an ambient-config Git calls the Run Directory ignored…
+      expect(spawnSync(REAL_GIT, ["check-ignore", "--quiet", "operator-runs/run"], { cwd: root }).status).toBe(0);
+      // …but the audit proves it untracked and then refuses it as Git-visible,
+      // because no operator-local ignore rule reaches the policy-bound probes.
+      const captured = captureRemediationCandidateWorkspace({
+        repositoryStartPath: root,
+        verification: { kind: "not-required" } as unknown as RemediationCandidateCaptureInput["verification"],
+        pathSources: { reviewedPaths: ["tracked.txt"], supportPaths: [], siblingPaths: [], inputSourcePaths: [] },
+        runDirectory,
+      }, witness.value);
+      expect(captured).toMatchObject({
+        ok: false,
+        error: { field: "runDirectory", message: "protected Run Directory is Git-visible: operator-runs/run; choose an already-ignored location or a location outside the repository" },
+      });
     });
   });
 });

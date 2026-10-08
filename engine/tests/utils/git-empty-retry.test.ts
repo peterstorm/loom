@@ -20,14 +20,11 @@ const scriptedResponses: { queue: string[]; calls: string[][] } = vi.hoisted(() 
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
+  const { logicalGitArgs } = await import("../fixtures/policy-bound-git-argv");
   return {
     ...actual,
     execFileSync: (file: string, args: readonly string[]) => {
-      // Every probe runs under the shared execution policy; the recorded
-      // argv is what follows its command-scope prefix.
-      const [flag, config, ...rest] = args;
-      if (flag !== "-c" || config !== "core.fsmonitor=false") throw new Error(`git spawned outside the execution policy: ${args.join(" ")}`);
-      scriptedResponses.calls.push([file, ...rest]);
+      scriptedResponses.calls.push([file, ...logicalGitArgs(args)]);
       const next = scriptedResponses.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;

@@ -23,7 +23,13 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/digest";
-import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../utils/git-execution-policy";
+import {
+  describeGitOutcome,
+  gitCleanNegative,
+  gitExitedWith,
+  GIT_PROBE_OUTPUT_LIMIT,
+  spawnGit,
+} from "../utils/git-execution-policy";
 import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {
@@ -145,14 +151,6 @@ function messageOf(cause: unknown): NonEmptyString {
   return (bounded.trim().length > 0 ? bounded : "completion check infrastructure failure") as NonEmptyString;
 }
 
-/** A Git stderr diagnostic as an attributed refusal suffix, or the empty
- *  string when the probe produced none — a refused guard names the Git cause,
- *  never a bare status number (silent-failure-hunter-1). */
-function gitDiagnostic(stderr: string | Buffer | undefined): string {
-  const text = (stderr?.toString() ?? "").trim();
-  return text === "" ? "" : `: ${text}`;
-}
-
 function boundedInteger(raw: number | undefined, fallback: number, maximum: number): number | null {
   const value = raw ?? fallback;
   return Number.isSafeInteger(value) && value >= 1 && value <= maximum ? value : null;
@@ -272,22 +270,19 @@ function preSpawnReportSnapshot(
  * Both probes run under the shared `git-execution-policy`, as the
  * remediation candidate's tracking and ignore audits do: an operator's global
  * `core.excludesFile` must not make a report "ignored" here that the audit
- * (and the workspace digest roster) treats as a visible candidate path. */
+ * (and the workspace digest roster) treats as a visible candidate path.
+ *
+ * A refused probe names its rendered outcome (`describeGitOutcome`): Git's
+ * own diagnostic, or why there is none — never a bare status number
+ * (silent-failure-hunter-1). */
 function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand): void {
   if (check.reportPolicy.kind !== "required-file") throw new Error("remediation requires a report path");
   const path = check.reportPolicy.path;
   const observed = observeGitProbe<Buffer, Error>(() => {
     const tracked = spawnGit(["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
-    if (tracked.error !== undefined) {
-      return Object.freeze({ ok: false as const, error: new Error(`git ls-files could not start: ${tracked.error.message}`) });
-    }
-    if (tracked.status !== 0) {
-      return Object.freeze({
-        ok: false as const,
-        error: new Error(`git ls-files exited ${String(tracked.status)} for ${path}${gitDiagnostic(tracked.stderr)}`),
-      });
-    }
-    return Object.freeze({ ok: true as const, value: tracked.stdout });
+    return gitExitedWith(tracked, [0])
+      ? Object.freeze({ ok: true as const, value: tracked.stdout })
+      : Object.freeze({ ok: false as const, error: new Error(`git ls-files ${describeGitOutcome(tracked)} for ${path}`) });
   }, (stdout) => stdout.length === 0);
   if (observed.kind === "failed") {
     throw new Error(`report reset could not observe tracked state of ${path}: ${observed.error.message}`);
@@ -300,14 +295,11 @@ function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerComm
   // diagnostic is a different state and refuses with its own attribution
   // instead of reading as a .gitignore policy violation (silent-failure-hunter-1).
   const ignored = spawnGit(["check-ignore", "-q", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
-  if (ignored.error !== undefined) {
-    throw new Error(`report reset could not run check-ignore for ${path}: ${ignored.error.message}`);
-  }
-  if (ignored.status !== 0) {
-    if (ignored.status === 1 && ignored.stdout.toString().trim() === "" && ignored.stderr.toString().trim() === "") {
+  if (!gitExitedWith(ignored, [0])) {
+    if (gitCleanNegative(ignored)) {
       throw new Error(`report reset requires a Git-ignored path: ${path}`);
     }
-    throw new Error(`report reset check-ignore exited ${String(ignored.status)} for ${path}${gitDiagnostic(ignored.stderr)}`);
+    throw new Error(`report reset check-ignore ${describeGitOutcome(ignored)} for ${path}`);
   }
   removeRunRegularFileNoFollow(absoluteRepositoryPath(root, path));
 }

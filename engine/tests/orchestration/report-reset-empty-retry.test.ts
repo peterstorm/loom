@@ -45,6 +45,7 @@ const answered = (stdout: string): SpawnAnswer => ({ status: 0, stdout, stderr: 
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
+  const { logicalGitArgs } = await import("../fixtures/policy-bound-git-argv");
   const realSpawnSync = actual.spawnSync;
   return {
     ...actual,
@@ -54,11 +55,7 @@ vi.mock("node:child_process", async (importOriginal) => {
       options: import("node:child_process").SpawnSyncOptions,
     ) => {
       if (scripted.passthrough) return realSpawnSync(file, args, options);
-      // The reset probes run under the shared execution policy; the recorded
-      // argv is what follows its command-scope prefix.
-      const [flag, config, ...rest] = args;
-      if (flag !== "-c" || config !== "core.fsmonitor=false") throw new Error(`git spawned outside the execution policy: ${args.join(" ")}`);
-      scripted.calls.push([file, ...rest]);
+      scripted.calls.push([file, ...logicalGitArgs(args)]);
       const next = scripted.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;
@@ -221,8 +218,8 @@ describe("remediation report reset agrees with the remediation candidate's ignor
       // Control: an ambient-config Git honours the operator's global ignore file…
       expect(spawnSync("git", ["check-ignore", "-q", "--", REPORT_PATH], { cwd: root }).status).toBe(0);
       // …but the candidate audit's policy-bound check-ignore (its exact argv) does not.
-      expect(spawnGit(["check-ignore", "--no-index", "--quiet", "--", REPORT_PATH], { cwd: root, maxBuffer: 1024 }).status)
-        .toBe(1);
+      expect(spawnGit(["check-ignore", "--no-index", "--quiet", "--", REPORT_PATH], { cwd: root, maxBuffer: 1024 }))
+        .toMatchObject({ kind: "exited", status: 1 });
       const result = await runRemediationCheck(remediationCheck(root, "global-ignore"), root);
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("a report the audit treats as a visible path was reset");

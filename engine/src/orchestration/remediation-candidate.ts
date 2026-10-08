@@ -12,7 +12,7 @@ import { compareStrings } from "../core/ordering";
 import { type ArtifactDigest, type DomainResult } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../core/verification-manifest";
-import { spawnGit } from "../utils/git-execution-policy";
+import { describeGitOutcome, gitExitedWith, spawnGit } from "../utils/git-execution-policy";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {
   observeWorkspaceDigest,
@@ -182,15 +182,10 @@ function gitQuery(
   literalPathspec = true,
 ): DomainResult<GitQuery, RemediationCandidateCaptureError> {
   const globalArgs = literalPathspec ? ["--literal-pathspecs"] : [];
-  const result = spawnGit([...globalArgs, ...args], { cwd: root, maxBuffer: MAX_GIT_OUTPUT_BYTES });
-  if (result.error !== undefined || (result.status !== 0 && result.status !== 1)) {
-    const stderr = Buffer.from(result.stderr ?? []).toString("utf-8").trim();
-    return failure(
-      operation,
-      `${operation} failed: ${result.error?.message ?? (stderr || `git exited ${String(result.status)}`)}`,
-    );
-  }
-  return success(Object.freeze({ status: result.status, stdout: Buffer.from(result.stdout ?? []) }));
+  const outcome = spawnGit([...globalArgs, ...args], { cwd: root, maxBuffer: MAX_GIT_OUTPUT_BYTES });
+  return gitExitedWith(outcome, [0, 1])
+    ? success(Object.freeze({ status: outcome.status, stdout: outcome.stdout }))
+    : failure(operation, `${operation} failed: git ${describeGitOutcome(outcome)}`);
 }
 
 function trackedPath(
