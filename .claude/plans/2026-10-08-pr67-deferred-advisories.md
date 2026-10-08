@@ -31,16 +31,23 @@
 - **Y4:** compensation-failure text uses the ledger's release labels; a reservation naming another session is refused at
   stop resolution instead of being settled under the owner's session.
 
+## Follow-ups found during implementation, fixed on this branch (operator instruction)
+
+| WS | Commit | Change |
+|---|---|---|
+| Z1 | 257e617b | Every engine Git spawn goes through `runGit` / `spawnGit`. The modules moved here are `utils/git.ts` (root, context, HEAD), `config.ts`, `completion-check-runner.ts`, `declared-artifact-snapshot.ts`, `review-packet.ts`, `changed-paths.ts`, `model-calibration.ts`, `populate-task-graph.ts`, `reconcile-implementation-proof.ts` and `git-remediation.ts`. A static guard test refuses any Git spawn outside the seam; its allowlist has 4 justified non-Git spawns. The report reset's `check-ignore` now agrees with the remediation ignore audit. |
+| Z2 | ce300348 | Session shutdown releases through the same `releaseHeldSpawnClaims` path as settlement, against the owned reservation, so a foreign reservation is left as debt. A failed compensating release is kept as an `OrphanedSpawnClaim` and retried at every settlement and shutdown. The witness-run compensation is tested through the lifecycle. |
+| Z3 | 3bf2ddf8 | The Ubuntu `Timeout calling "onTaskUpdate"` flake is fixed by a suite-wide `afterEach` event-loop turn. The cause: runs of back-to-back synchronous tests never let the worker read the RPC reply before its 60 s timer fired. It was reproduced locally, and a regression test pins it. The 15 s test timeout moves into `vitest.config.ts`, and workers are capped at the CPU count. The load-sensitive tests are made cheaper, or given justified budgets. 37 local unwrap helpers now use `tests/fixtures/parse-result.ts`. `hasExactPlainKeys` replaces two private strict predicates. |
+
+Further behaviour change from Z1: the operator's system and global Git config no longer applies to engine observations. That
+includes `core.excludesFile`, `safe.directory`, `includeIf`, `diff.renames`, `core.quotePath` and `core.autocrlf`. A
+repository owned by another uid now fails Git's ownership check loudly, rather than passing through a global
+`safe.directory`.
+
 ## Not in scope, reported
 
-- Other Git spawns still use the ambient environment: `resolveRepositoryRoot`, `repositoryContext`, `observeExactHead` in
-  `utils/git.ts`, `completion-check-runner.ts`, `declared-artifact-snapshot.ts`, `review-packet.ts`, `changed-paths.ts`,
-  `config.ts`, `model-calibration.ts`, `populate-task-graph.ts`, `reconcile-implementation-proof.ts`, `git-remediation`.
-- `pi/session-shutdown.ts` removes roster entries under `reservation.sessionId` rather than the owned reservation.
-- A failed compensating release is reported in the refusal text but not retained as cleanup debt.
-- The witness-run compensation is tested at the `claimOrCompensate` interface, not through the lifecycle.
-- Load-sensitive tests at the 5 s default: `reviewer-protocol-history` (seven-reviewers-retry), the unseeded
-  `persistent-panel-kernel.property`, and the `pi-extension-review-events` drift test.
+- AD-11 (the calibration release) still needs a qualified route that enforces constraints; it is not a code defect.
+- The Z3 flake fix is verified locally only; CI must confirm it.
 
 ## Validation
 
