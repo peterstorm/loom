@@ -45,7 +45,7 @@ import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standalo
 import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
-import { observedReviewerIssueRoute, renderReviewProgramSpawn } from './spawn-task';
+import { renderReviewProgramSpawn } from './spawn-task';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { type RegisteredStandaloneProgram } from './registration';
 
@@ -112,7 +112,7 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
     const prepared = prepareFreshStandaloneReview({ runId: destination.value.runId, explicitScope: input.files,
       changedPaths: changed.authority, successor: lineage.value.prepared, reviewerContexts: lineage.value.contexts,
       scopeSafety: lineage.value.prepared.snapshot.map(row => ({ path: row.path, status: row.kind === "absent" ? "absent" : "safe" })),
-      reviewMetadata: preparationMetadata(reviewMetadata), reviewerIssueRoute: observedReviewerIssueRoute() });
+      reviewMetadata: preparationMetadata(reviewMetadata) });
     if (!prepared.ok) return { ok: false as const, message: prepared.error.errors.join("; ") };
     const registration: RegisteredStandaloneSuccessorProgram = Object.freeze({ schemaVersion: 3, kind: "standalone-review",
       reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, input, currentSource: source.value.source,
@@ -185,7 +185,6 @@ export async function startStandaloneFacade(
       reviewMetadata: preparationMetadata(reviewMetadata),
       scopeSafety: safeScope(scope),
       reviewerContexts: packetSet.contexts,
-      reviewerIssueRoute: observedReviewerIssueRoute(),
     });
     if (!prepared.ok) return failed(prepared.error.errors.join("; "));
     const registration: RegisteredStandaloneProgram = Object.freeze({

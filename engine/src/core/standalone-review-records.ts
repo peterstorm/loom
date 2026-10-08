@@ -6,7 +6,7 @@
  */
 import { sha256Bytes } from "./digest";
 import { reviewFindingCounts } from "./findings";
-import { parseLlmProfileId } from "./model-profiles";
+import { parseRecordedLlmProfileId } from "./model-profiles";
 import {
   parseArtifactRef, parseRequestId, parseSlotId, type ArtifactRef, type DomainResult, type SemanticPayloadParseError,
 } from "./orchestration-contract";
@@ -101,7 +101,7 @@ export function parseReviewerEvidence(raw: unknown, runId: string, label: string
     // A closed-set id has to be parsed against the allowlist, not merely
     // shape-checked: aggregate.json is untrusted on-disk input, and a bare cast
     // would type an off-roster string as a member of LLM_PROFILE_IDS.
-    const modelProfile = requestBound ? parseLlmProfileId(entry.model_profile) : null;
+    const modelProfile = requestBound ? parseRecordedLlmProfileId(entry.model_profile) : null;
     if (modelProfile !== null && !modelProfile.ok) errors.push(`${path}.model_profile: ${modelProfile.error.message}`);
     if (!requestBound && entry.model_profile !== null) errors.push(`${path}.model_profile must be null for legacy evidence`);
     if (requestBound && (typeof entry.context_digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.context_digest))) errors.push(`${path}.context_digest must be a SHA-256 digest for request-bound evidence`);

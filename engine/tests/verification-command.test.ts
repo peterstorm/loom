@@ -136,7 +136,9 @@ describe("canonical verification command", () => {
     // fixed 60s timer and fail fully green runs.
     const test = vitestConfig.test!;
     expect(test.testTimeout).toBe(15_000);
-    expect(test.setupFiles).toEqual(["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"]);
+    expect(test.setupFiles).toEqual(["./tests/setup/scrub-parent-model.ts", "./tests/setup/task-update-yield.ts"]);
+    // The fake local Pi route lives in the main process: workers' spawnSync children could not reach a worker-local server.
+    expect(test.globalSetup).toEqual(["./tests/setup/fixture-pi-route.ts"]);
     // The budget policy itself is pinned with explicit inputs in vitest-worker-budget.test.ts.
     expect(test.maxWorkers).toBe(platformWorkerBudget(process.platform, availableParallelism()));
   });

@@ -70,12 +70,12 @@ export const digest = (n: number): string => n.toString(16).padStart(64, "0").sl
 const reviewerBindings = {
   "code-reviewer": {
     profile: "general-review",
-    pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+    pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
     claude: { harness: "claude-code", model: "sonnet" },
   },
   "type-design-analyzer": {
     profile: "focused-review",
-    pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
+    pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
     claude: { harness: "claude-code", model: "sonnet" },
   },
 } as const;
@@ -188,7 +188,7 @@ export function upholdStandaloneCriticals(
   const lenses = standaloneAuthority.schemaVersion === 3 ? ["reproduction", "intent", "blast-radius"] as const : ["reproduction", "intent"] as const;
   const binding = {
     profile: "refutation",
-    pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+    pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
     claude: { harness: "claude-code", model: "opus" },
   } as const;
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });

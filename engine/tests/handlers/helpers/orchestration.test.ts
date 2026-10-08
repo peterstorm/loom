@@ -33,6 +33,8 @@ import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-comple
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
+import { FIXTURE_PI_AGENT_DIR_ENV } from "../../setup/fixture-pi-route";
+import { DESKTOP_VLLM_ROUTE } from "../../../src/core/model-profiles";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
 import {
   replayStandaloneResultFromEvidence,
@@ -44,6 +46,7 @@ import { StateManager } from "../../../src/state-manager";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/issued-emission-capability";
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../src/core/reviewer-retry";
 import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { waveRequests, installWaveReviewRuns } from "../../../src/handlers/helpers/programs/wave-review-requests";
@@ -86,6 +89,22 @@ function currentWavePayload(
 ): string {
   return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: run.packet_id,
     generation: run.generation, prior_findings: priors, findings });
+}
+
+/**
+ * A reviewer retry issued under a Pi parent rides the emission route: its
+ * attempt-2 task closes with the issued tool's fresh one-call budget, rendered
+ * from the descriptor the task itself carries — never the extraction-only
+ * "unchanged reviewer-payload-schema" instruction.
+ */
+function expectEmissionRetryWording(task: string): void {
+  const descriptor = parseEmissionDescriptor(task);
+  expect(descriptor.kind, task).toBe("issued");
+  if (descriptor.kind !== "issued") return;
+  expect(task).toContain(reviewerRetryInstruction({
+    kind: "emission", binding: descriptor.binding, contextDigest: descriptor.contextDigest,
+  }));
+  expect(task).not.toContain(REVIEWER_EXTRACTION_RETRY_INSTRUCTION);
 }
 
 afterEach(() => {
@@ -1625,6 +1644,63 @@ describe("orchestration CLI", () => {
     expect(started.stderr).toContain("cannot publish Pi orchestration capture authority");
   });
 
+  it("refuses a Pi spawn batch whose local route is unreachable, then emits it on resume once the route answers", async () => {
+    const root = sourceProject();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.pi-route-down");
+    const bindingDir = join(root, "pi-session-bindings");
+    const sessionId = "019ff290-ffee-7e86-8ed0-c834c04b7f71";
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(bindingDir);
+    // A Pi agent dir whose models.json points the catalog's local route at a
+    // port nothing listens on (9, discard): the route is configured but down.
+    const downAgentDir = join(root, "pi-agent-route-down");
+    mkdirSync(downAgentDir);
+    writeFileSync(join(downAgentDir, "models.json"), JSON.stringify({
+      providers: {
+        [DESKTOP_VLLM_ROUTE.provider]: {
+          baseUrl: "http://127.0.0.1:9/v1",
+          api: "openai-completions",
+          models: [{ id: DESKTOP_VLLM_ROUTE.model }],
+        },
+      },
+    }));
+    const fixtureAgentDir = process.env[FIXTURE_PI_AGENT_DIR_ENV];
+    if (fixtureAgentDir === undefined) throw new Error(`${FIXTURE_PI_AGENT_DIR_ENV} is unset: tests/setup/fixture-pi-route.ts did not run`);
+    const piEnv = (agentDir: string) => ({
+      PI_CODING_AGENT: "true",
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_SESSION_ID: sessionId,
+      LOOM_SUBAGENT_DIR: bindingDir,
+    });
+
+    const refused = await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root, piEnv(downAgentDir));
+
+    expect(refused.status).not.toBe(0);
+    expect(refused.stdout).not.toContain('"kind": "spawn-batch"');
+    expect(refused.stderr).toContain(
+      `refusing to spawn: route ${DESKTOP_VLLM_ROUTE.provider}/${DESKTOP_VLLM_ROUTE.model} is unreachable`,
+    );
+    // Fail closed: no session spawn binding was registered for the refused batch.
+    expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toEqual({ ok: true, value: [] });
+
+    const resumed = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv(fixtureAgentDir));
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const action = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests.length).toBeGreaterThan(0);
+    expect(action.requests.every(({ authority }) =>
+      authority.harnessBinding.pi.provider === DESKTOP_VLLM_ROUTE.provider &&
+      authority.harnessBinding.pi.model === DESKTOP_VLLM_ROUTE.model)).toBe(true);
+    expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toMatchObject({ ok: true, value: [expect.objectContaining({
+      runId: "run.pi-route-down",
+      requestIds: action.requests.map(({ authority }) => authority.requestId).sort(),
+    })] });
+  }, 30_000);
+
   // Claude Code: CLAUDECODE=1 plus CLAUDE_CODE_SESSION_ID, as Claude Code
   // exposes them to the main agent's Bash commands, and no Pi announcement.
   const claudeCodeEnvironment = (sessionId: string | undefined, bindingDir: string) => ({
@@ -1817,11 +1893,15 @@ describe("orchestration CLI", () => {
     expect(panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
   }, 15_000);
 
-  it("keeps the refutation panel spawn tool-free under a qualified emission-capable parent (FR-001/AD-6)", async () => {
+  it("keeps the refutation panel spawn tool-free under an emission-capable Pi parent (FR-001/AD-6)", async () => {
     // runCli's envOverrides override (and undefined-delete) the fixture env,
-    // so each arm pins its own issue-route election explicitly.
-    const CATALOG_ROUTE_ENV = { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined } as const;
-    const QUALIFIED_ROUTE_ENV = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" } as const;
+    // so each arm pins its own parent harness explicitly: the fixture Pi
+    // session (every reviewer on the emission route) against a Claude Code
+    // parent (every reviewer extraction-only).
+    const PI_PARENT_ENV = {} as const;
+    const claudeBindings = canonicalTempDir("loom-panel-route-claude-bindings-");
+    cleanup.push(claudeBindings);
+    const CLAUDE_CODE_PARENT_ENV = claudeCodeEnvironment("8a510c9a-c1fb-4b89-b61f-08ef6a007c7a", join(claudeBindings, "bindings"));
     const runThroughPanel = async (routeEnv: Readonly<Record<string, string | undefined>>) => {
       const root = repository();
       writeFileSync(join(root, "README.md"), "fixture\npanel defect\n");
@@ -1844,32 +1924,35 @@ describe("orchestration CLI", () => {
       const panel = JSON.parse(resumedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
       return { root, started, panel };
     };
-    const catalog = await runThroughPanel(CATALOG_ROUTE_ENV);
-    const qualified = await runThroughPanel(QUALIFIED_ROUTE_ENV);
+    const extraction = await runThroughPanel(CLAUDE_CODE_PARENT_ENV);
+    const emission = await runThroughPanel(PI_PARENT_ENV);
 
-    // The parent route is genuinely emission-capable: the reviewer slots of
-    // the qualified run issue descriptors, the catalog run's do not.
-    for (const { task } of qualified.started.requests) {
+    // The Pi parent is genuinely emission-capable: its reviewer slots issue
+    // descriptors, the Claude Code parent's do not.
+    for (const { authority, task } of emission.started.requests) {
+      expect(authority.role).not.toBe("review-verifier-agent");
       expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
       expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
     }
-    for (const { task } of catalog.started.requests) {
+    for (const { task } of extraction.started.requests) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     }
 
     // AD-6: the panel verdict slots are not this feature's emission route —
     // every panel task advertises no tool and is byte-identical across the
-    // two parent routes (modulo the project-local run-directory path).
+    // two parents (modulo the project-local run-directory path).
     const normalize = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
-    expect(qualified.panel.requests.map(({ authority }) => authority.role))
-      .toEqual(catalog.panel.requests.map(({ authority }) => authority.role));
-    for (const [catalogRequest, qualifiedRequest] of catalog.panel.requests.map((request, index) => [request, qualified.panel.requests[index]!] as const)) {
-      for (const task of [catalogRequest.task, qualifiedRequest.task]) {
+    expect(emission.panel.requests.length).toBeGreaterThan(0);
+    expect(emission.panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
+    expect(emission.panel.requests.map(({ authority }) => authority.role))
+      .toEqual(extraction.panel.requests.map(({ authority }) => authority.role));
+    for (const [extractionRequest, emissionRequest] of extraction.panel.requests.map((request, index) => [request, emission.panel.requests[index]!] as const)) {
+      for (const task of [extractionRequest.task, emissionRequest.task]) {
         expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
         expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
         expect(parseEmissionDescriptor(task).kind).toBe("absent");
       }
-      expect(normalize(qualifiedRequest.task, qualified.root)).toBe(normalize(catalogRequest.task, catalog.root));
+      expect(normalize(emissionRequest.task, emission.root)).toBe(normalize(extractionRequest.task, extraction.root));
     }
   }, 60_000);
 
@@ -2238,8 +2321,9 @@ describe("orchestration CLI", () => {
         candidate.requestId === authority.requestId)?.task ?? "";
       expect(requestTask).toContain("YOUR PREVIOUS ATTEMPT WAS REJECTED");
       expect(requestTask).toContain("Reviewer payload must be exactly one strict JSON object.");
-      expect(requestTask).toContain("unchanged reviewer-payload-schema");
-      expect(requestTask).toContain("reviewer-impact-rubric");
+      // The schema/rubric restatement rides the packet diagnostic above; the
+      // task's final action is the Pi parent's emission route.
+      expectEmissionRetryWording(requestTask);
     }
     const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: { slot_authority?: readonly { attempted: number }[] } }[] };
     expect(protectedGraph.tasks[0]?.review_run?.slot_authority?.every(({ attempted }) => attempted === 2)).toBe(true);
@@ -2723,7 +2807,7 @@ describe("orchestration CLI", () => {
       attempt: 2,
     });
     expect(retry.requests[0]?.task).toContain("model exited without a final payload");
-    expect(retry.requests[0]?.task).toContain("unchanged reviewer-payload-schema");
+    expectEmissionRetryWording(retry.requests[0]?.task ?? "");
     const lateAttemptOne = await captureReviewedTranscript(opened.value, rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
@@ -4053,7 +4137,7 @@ describe("orchestration CLI", () => {
       attempt: 2,
     });
     expect(retry.requests[0]?.task).toContain("no-final-payload: result carried no final text payload");
-    expect(retry.requests[0]?.task).toContain("unchanged reviewer-payload-schema");
+    expectEmissionRetryWording(retry.requests[0]?.task ?? "");
 
     // A later resume has no fresh rejection in its per-pass set. It must read
     // the durable diagnostic from LC-2 state when reissuing the exact retry.

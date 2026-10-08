@@ -49,7 +49,7 @@ import { value } from "./parse-result";
 const hexDigest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
 
 export const PANEL_HARNESS_BINDINGS = {
-  pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+  pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
   claude: { harness: "claude-code", model: "opus" },
 } as const;
 

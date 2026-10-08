@@ -13,23 +13,21 @@
  * model for every child. That override is a policy decision at the spawn
  * boundary — this module never infers one.
  *
- * Scope: the profile catalog, the Agent Catalog record, catalog resolution,
- * reviewer-profile issuance and its one eligibility rule, harness lowering,
- * and frontmatter validation. Projections DERIVED from the catalog (agent
+ * Scope: the profile catalog and the bindings each profile has recorded, the
+ * Agent Catalog record, catalog resolution, harness lowering, and frontmatter
+ * validation. Projections DERIVED from the catalog (agent
  * sets, the phase map, classification predicates, producer kinds) live in
  * `agent-catalog-projections.ts`; parsing the Pi `subagent` tool input
  * lives in `pi-spawn-input.ts`. Each changes for its own reason.
  */
 
 import type { Phase } from "./phases";
-import type { OrchestrationProgram } from "./orchestration-contract/programs";
 
 export const LLM_PROFILE_IDS = [
   "implementation",
   "architecture-finalize",
   "general-review",
   "focused-review",
-  "qualified-local-review",
   "panel-design",
   "panel-judge",
   "refutation",
@@ -38,10 +36,19 @@ export const LLM_PROFILE_IDS = [
 ] as const;
 
 export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
+
+/**
+ * Profile ids the catalog no longer issues. A stored request authority is
+ * history ("issued under profile X"), so the ids it may carry outlive their
+ * catalog entry: `qualified-local-review` was the local reviewer election,
+ * retired when every Pi profile moved to the local route (2026-10-08).
+ */
+export const RETIRED_LLM_PROFILE_IDS = ["qualified-local-review"] as const;
+export type RetiredLlmProfileId = (typeof RETIRED_LLM_PROFILE_IDS)[number];
+/** Every profile id a stored request authority may record. */
+export type RecordedLlmProfileId = LlmProfileId | RetiredLlmProfileId;
+
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
-export type PiOpenAiModel = "gpt-5.6-sol" | "gpt-5.5" | "gpt-5.4-mini";
-export type PiCopilotModel = "gpt-5.6-terra";
-export type PiThinkingLevel = "medium" | "high";
 export type Harness = "claude-code" | "pi";
 
 /**
@@ -56,16 +63,28 @@ export const DESKTOP_VLLM_ROUTE = Object.freeze({
 } as const);
 
 export type ClaudeCodeTarget = Readonly<{ model: ClaudeCodeModel }>;
-export type PiTarget =
-  | Readonly<{ provider: "openai-codex"; model: PiOpenAiModel; thinking: PiThinkingLevel }>
-  | Readonly<typeof DESKTOP_VLLM_ROUTE & { thinking: "high" }>
-  | Readonly<{ provider: "github-copilot"; model: PiCopilotModel; thinking: PiThinkingLevel }>;
+
+/** The Pi target every catalog profile lowers to: Pi runs local models only. */
+export type LocalPiTarget = Readonly<typeof DESKTOP_VLLM_ROUTE & { thinking: "high" }>;
+
+/**
+ * Cloud targets the catalog bound before 2026-10-08. They are never issued
+ * again; they stay in the vocabulary only so a stored request authority
+ * issued under one still parses as the history it is.
+ */
+export type RetiredPiTarget =
+  | Readonly<{ provider: "openai-codex"; model: "gpt-5.6-sol" | "gpt-5.5"; thinking: "high" }>
+  | Readonly<{ provider: "openai-codex"; model: "gpt-5.4-mini"; thinking: "medium" }>
+  | Readonly<{ provider: "github-copilot"; model: "gpt-5.6-terra"; thinking: "high" }>;
+
+/** Every Pi target a request authority may record: the catalog's, or a retired one. */
+export type PiTarget = LocalPiTarget | RetiredPiTarget;
 export type PiProvider = PiTarget["provider"];
 
 export type LlmProfile = Readonly<{
   id: LlmProfileId;
   claudeCode: ClaudeCodeTarget;
-  pi: PiTarget;
+  pi: LocalPiTarget;
 }>;
 
 export type ClaudeCodeBinding = Readonly<{
@@ -106,41 +125,79 @@ const invalid = (errors: readonly string[]): PolicyValidation =>
   Object.freeze({ ok: false, errors: Object.freeze([...errors]) });
 
 const claudeTarget = (model: ClaudeCodeModel): ClaudeCodeTarget => Object.freeze({ model });
-const piTarget = (
-  model: PiOpenAiModel,
-  thinking: PiThinkingLevel,
-): PiTarget => Object.freeze({ provider: "openai-codex", model, thinking });
-const copilotTarget = (
-  model: PiCopilotModel,
-  thinking: PiThinkingLevel,
-): PiTarget => Object.freeze({ provider: "github-copilot", model, thinking });
-const desktopVllmTarget: PiTarget = Object.freeze({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
-/** The Pi target of the `qualified-local-review` profile: a value, so the
- *  parent-route election below compares against it without a catalog lookup. */
-const QUALIFIED_LOCAL_REVIEW_TARGET: PiTarget = desktopVllmTarget;
-const profile = (
-  id: LlmProfileId,
-  claudeCode: ClaudeCodeModel,
-  piModel: PiTarget,
-): LlmProfile => Object.freeze({
+const LOCAL_PI_TARGET: LocalPiTarget = Object.freeze({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+const profile = (id: LlmProfileId, claudeCode: ClaudeCodeModel): LlmProfile => Object.freeze({
   id,
   claudeCode: claudeTarget(claudeCode),
-  pi: piModel,
+  pi: LOCAL_PI_TARGET,
 });
 
-/** Exact, calibrated-by-policy targets. None is an alias for a parent model. */
+/**
+ * Exact targets per harness; none is an alias for a parent model. Claude
+ * Code runs Claude models. Pi runs the one local route, so every profile
+ * shares it and the profiles differ only in their Claude model.
+ */
 export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
-  profile("implementation", "opus", desktopVllmTarget),
-  profile("architecture-finalize", "opus", piTarget("gpt-5.6-sol", "high")),
-  profile("general-review", "sonnet", piTarget("gpt-5.6-sol", "high")),
-  profile("focused-review", "sonnet", piTarget("gpt-5.5", "high")),
-  profile("qualified-local-review", "sonnet", QUALIFIED_LOCAL_REVIEW_TARGET),
-  profile("panel-design", "opus", piTarget("gpt-5.6-sol", "high")),
-  profile("panel-judge", "opus", piTarget("gpt-5.6-sol", "high")),
-  profile("refutation", "opus", piTarget("gpt-5.6-sol", "high")),
-  profile("mechanical", "haiku", piTarget("gpt-5.4-mini", "medium")),
-  profile("spec-check-review", "sonnet", copilotTarget("gpt-5.6-terra", "high")),
+  profile("implementation", "opus"),
+  profile("architecture-finalize", "opus"),
+  profile("general-review", "sonnet"),
+  profile("focused-review", "sonnet"),
+  profile("panel-design", "opus"),
+  profile("panel-judge", "opus"),
+  profile("refutation", "opus"),
+  profile("mechanical", "haiku"),
+  profile("spec-check-review", "sonnet"),
 ]);
+
+const RETIRED_SOL: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
+
+/**
+ * The bindings a stored request authority issued under each recorded profile
+ * may carry: the Claude model (unchanged since issuance) and every Pi target
+ * the profile has lowered to, current first. Reconstructed from the catalog's
+ * Git history; a target absent from a row was never that profile's binding.
+ */
+const RECORDED_PROFILE_BINDINGS: Readonly<Record<RecordedLlmProfileId, Readonly<{
+  claudeCode: ClaudeCodeModel;
+  pi: readonly [LocalPiTarget, ...RetiredPiTarget[]];
+}>>> = Object.freeze({
+  "implementation": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
+  "architecture-finalize": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
+  "general-review": { claudeCode: "sonnet", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
+  "focused-review": {
+    claudeCode: "sonnet",
+    pi: [LOCAL_PI_TARGET, Object.freeze({ provider: "openai-codex", model: "gpt-5.5", thinking: "high" })],
+  },
+  "qualified-local-review": { claudeCode: "sonnet", pi: [LOCAL_PI_TARGET] },
+  "panel-design": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
+  "panel-judge": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
+  "refutation": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
+  "mechanical": {
+    claudeCode: "haiku",
+    pi: [LOCAL_PI_TARGET, Object.freeze({ provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" })],
+  },
+  "spec-check-review": {
+    claudeCode: "sonnet",
+    pi: [LOCAL_PI_TARGET, Object.freeze({ provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" })],
+  },
+});
+
+/** The exact bindings a request issued under one recorded profile may carry. */
+export type RecordedProfileBindings = Readonly<{
+  claude: ClaudeCodeBinding;
+  pi: readonly [PiBinding, ...PiBinding[]];
+}>;
+
+/** The Claude binding and every Pi binding `profileId` has issued, current first. */
+export function recordedProfileBindings(profileId: RecordedLlmProfileId): RecordedProfileBindings {
+  const row = RECORDED_PROFILE_BINDINGS[profileId];
+  const lower = (target: PiTarget): PiBinding => Object.freeze({ harness: "pi", ...target });
+  const [current, ...retired] = row.pi;
+  return Object.freeze({
+    claude: Object.freeze({ harness: "claude-code", model: row.claudeCode }),
+    pi: Object.freeze([lower(current), ...retired.map(lower)] as const),
+  });
+}
 
 /**
  * One Agent's dispatch classification — an ADT, so exactly one kind per Agent
@@ -257,6 +314,17 @@ export function parseLlmProfileId(raw: unknown): PolicyResult<LlmProfileId> {
       });
 }
 
+/** Parse the profile id a stored request authority recorded: current or retired. */
+export function parseRecordedLlmProfileId(raw: unknown): PolicyResult<RecordedLlmProfileId> {
+  if (typeof raw === "string" && includes(RETIRED_LLM_PROFILE_IDS, raw)) return success(raw);
+  return typeof raw === "string" && includes(LLM_PROFILE_IDS, raw)
+    ? success(raw)
+    : failure({
+        kind: "invalid-profile",
+        message: `recorded model profile must be one of: ${[...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].join(", ")}; received ${JSON.stringify(raw)}`,
+      });
+}
+
 /** Parse a complete profile object and prove all exact harness fields. */
 export function parseLlmProfile(raw: unknown): PolicyResult<LlmProfile> {
   if (!isRecord(raw)) {
@@ -329,69 +397,6 @@ export function resolveAgentPolicy(raw: unknown): PolicyResult<AgentPolicy<LoomA
 export function resolveAgentProfile(raw: unknown): PolicyResult<LlmProfile> {
   const policy = resolveAgentPolicy(raw);
   return policy.ok ? resolveModelProfile(policy.value.profile) : policy;
-}
-
-/** Explicit issuance choice. Role and Skill remain catalog-owned. */
-export type ReviewerIssueRoute = "catalog" | "qualified-local";
-
-/** The orchestration programs whose reviewer rosters may elect the
- *  `qualified-local-review` profile. The refutation and architecture panels
- *  never do: their roles are not reviewers and their profiles are fixed. */
-export const QUALIFIED_LOCAL_REVIEW_PROGRAMS = Object.freeze(
-  ["wave-gate", "standalone-review"] as const satisfies readonly OrchestrationProgram[],
-);
-export type QualifiedLocalReviewProgram = (typeof QUALIFIED_LOCAL_REVIEW_PROGRAMS)[number];
-
-/**
- * The ONE profile-eligibility rule for an issued Agent request: a role may run
- * under its catalog profile, and a reviewer-kind role in a Wave Gate or
- * Standalone Review program may instead run under `qualified-local-review`.
- *
- * Issuance (`issuedReviewerProfile`) elects through this predicate and the
- * issue-mode request parser (`orchestration-contract/roster.ts`) validates
- * through it, so what the engine issues and what it accepts cannot drift.
- * `program` is the parsed Orchestration Program, or `null` when the request's
- * program did not parse: an unparsed program elects nothing, so only the
- * catalog profile is issuable there.
- */
-export function isIssuableProfile(
-  policy: AgentPolicy,
-  program: OrchestrationProgram | null,
-  profileId: LlmProfileId,
-): boolean {
-  return profileId === policy.profile || (
-    profileId === "qualified-local-review" && policy.kind.kind === "reviewer" &&
-    program !== null && includes(QUALIFIED_LOCAL_REVIEW_PROGRAMS, program)
-  );
-}
-
-/** The shell supplies the actual parent session observation, never a prompt or
- * caller-authored profile. A different provider, model or thinking setting
- * preserves the catalog/cloud route; no wildcard local inheritance is issued. */
-export function reviewerIssueRouteForParent(parent: Readonly<{
-  pi: boolean;
-  provider: string | undefined;
-  model: string | undefined;
-  thinking: string | undefined;
-}>): ReviewerIssueRoute {
-  const qualified = QUALIFIED_LOCAL_REVIEW_TARGET;
-  return parent.pi && parent.provider === qualified.provider && parent.model === qualified.model &&
-    parent.thinking === qualified.thinking ? "qualified-local" : "catalog";
-}
-
-/** The profile one roster role is issued under. The qualified-local route
- *  elects `qualified-local-review` exactly where `isIssuableProfile` admits
- *  it; every other role keeps its catalog profile on either route. */
-export function issuedReviewerProfile(
-  agent: unknown,
-  program: QualifiedLocalReviewProgram,
-  route: ReviewerIssueRoute,
-): PolicyResult<LlmProfile> {
-  const policy = resolveAgentPolicy(agent);
-  if (!policy.ok) return policy;
-  return resolveModelProfile(route === "qualified-local" &&
-    isIssuableProfile(policy.value, program, "qualified-local-review")
-    ? "qualified-local-review" : policy.value.profile);
 }
 
 export function parseHarness(raw: unknown): PolicyResult<Harness> {

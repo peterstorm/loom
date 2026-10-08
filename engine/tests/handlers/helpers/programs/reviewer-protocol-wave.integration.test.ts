@@ -9,6 +9,8 @@ import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
+import { resolveAgentPolicy } from "../../../../src/core/model-profiles";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
@@ -26,12 +28,7 @@ import type { Finding, TaskGraph } from "../../../../src/types";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
-import {
-  CATALOG_ROUTE_ENV,
-  QUALIFIED_ROUTE_ENV,
-  withEnvOverlay,
-  type EnvironmentOverlay,
-} from "../../../fixtures/issue-route-env";
+import { claudeCodeParentEnvironment } from "../../../fixtures/issue-route-env";
 import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
 
@@ -102,10 +99,13 @@ function project(priors: readonly Finding[] = []) {
 }
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[];
   diagnostic?: { message: string }; request?: { requestId: string }; outcome?: unknown }>;
-async function cliResult(p: ReturnType<typeof project>, args: readonly string[], stdin = "") {
+/** The harness that parents the facade CLI child: a Pi parent issues reviewers
+ *  the emission route; a Claude Code parent keeps them extraction-only. */
+type FacadeParent = "pi" | "claude-code";
+async function cliResult(p: ReturnType<typeof project>, args: readonly string[], stdin = "", parent: FacadeParent = "pi") {
   const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root,
-      env: fixturePiEnvironment(p.root),
+      env: parent === "pi" ? fixturePiEnvironment(p.root) : claudeCodeParentEnvironment(p.root),
     });
     let stdout = "";
     let stderr = "";
@@ -117,14 +117,14 @@ async function cliResult(p: ReturnType<typeof project>, args: readonly string[],
   });
   return result;
 }
-async function runCli(p: ReturnType<typeof project>, args: readonly string[], stdin = ""): Promise<Action> {
-  const result = await cliResult(p, args, stdin);
+async function runCli(p: ReturnType<typeof project>, args: readonly string[], stdin = "", parent: FacadeParent = "pi"): Promise<Action> {
+  const result = await cliResult(p, args, stdin, parent);
   expect(result.status, result.stderr).toBe(0);
   if (result.status !== 0) throw new Error(result.stderr);
   return JSON.parse(result.stdout) as Action;
 }
-async function start(p: ReturnType<typeof project>, runId = "run.current") {
-  const action = await runCli(p, ["start", "wave-gate", "--runs-root", p.runsRoot, "--run", runId], JSON.stringify({ wave: 1 }));
+async function start(p: ReturnType<typeof project>, runId = "run.current", parent: FacadeParent = "pi") {
+  const action = await runCli(p, ["start", "wave-gate", "--runs-root", p.runsRoot, "--run", runId], JSON.stringify({ wave: 1 }), parent);
   expect(action.kind, JSON.stringify(action)).toBe("spawn-batch");
   return { action, handle: value(openRunDirectory(p.runsRoot, runId)) };
 }
@@ -244,7 +244,17 @@ describe("registered Wave reviewer protocol", () => {
     expect(retried.requests).toHaveLength(1);
     const retry = retried.requests![0]!;
     expect(retry.authority.attempt).toBe(2);
-    expect(retry.task).toContain("unchanged reviewer-payload-schema");
+    // Under the Pi parent the retry keeps the emission route: after the
+    // parser's rejection reason it closes with the fresh-budget tool-primary
+    // instruction its own descriptor names — never the extraction wording or
+    // the archived v1 lifecycle schema.
+    const retryDescriptor = parseEmissionDescriptor(retry.task);
+    if (retryDescriptor.kind !== "issued") throw new Error("a Pi-parented current Wave retry must carry an issued descriptor");
+    expect(retryDescriptor).toMatchObject({ contextDigest: retry.authority.contextDigest,
+      binding: { requestId: retry.authority.requestId, version: "v2" } });
+    expect(retry.task).toContain("Parser rejection reason: ");
+    expect(retry.task).toContain(reviewerRetryInstruction({ kind: "emission", binding: retryDescriptor.binding, contextDigest: retryDescriptor.contextDigest }));
+    expect(retry.task).not.toContain(REVIEWER_EXTRACTION_RETRY_INSTRUCTION);
     expect(retry.task).not.toContain("review_lifecycle block");
     const task = graph(p).tasks[0]!;
     expect(task.findings).toEqual([]);
@@ -469,24 +479,24 @@ function executePacketCommand(task: string) {
 
 describe("the issued emission route on the Wave program path (T6)", () => {
   it("retains every issuance join across the extraction and emission routes and changes only reviewer task text (FR-012)", async () => {
-    const startRun = async (environment: EnvironmentOverlay) => withEnvOverlay(environment, async () => {
+    const startRun = async (parent: FacadeParent) => {
       const p = project();
-      const { action, handle } = await start(p, "run.route");
+      const { action, handle } = await start(p, "run.route", parent);
       return { p, handle, requests: action.requests! };
-    });
-    const extraction = await startRun(CATALOG_ROUTE_ENV);
-    const emission = await startRun(QUALIFIED_ROUTE_ENV);
+    };
+    // The route is decided by the parent harness alone: the same Wave started
+    // from Claude Code (extraction-only) and from Pi (emission).
+    const extraction = await startRun("claude-code");
+    const emission = await startRun("pi");
 
-    // The route election is genuinely exercised: reviewers bind the
-    // qualified-local profile on the emission route and the catalog profile
-    // on the extraction route; the spec-check slot never does (AD-6).
-    const reviewer = (request: { authority: AgentRequestAuthority }) => request.authority.role !== "spec-check-invoker";
-    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
-      .toEqual(emission.requests.filter(reviewer).map(() => "qualified-local-review"));
-    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
-      .not.toEqual(extraction.requests.filter(reviewer).map(({ authority }) => authority.modelProfile));
-    expect(emission.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile)
-      .toBe(extraction.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile);
+    // Issuance is parent-independent: every slot carries its catalog profile
+    // and the identical frozen binding on both routes (AD-6).
+    const issuance = ({ authority }: { authority: AgentRequestAuthority }) => ({ role: authority.role,
+      modelProfile: authority.modelProfile, harnessBinding: authority.harnessBinding, requiredSkill: authority.requiredSkill });
+    expect(emission.requests.map(issuance)).toEqual(extraction.requests.map(issuance));
+    for (const { authority } of emission.requests) {
+      expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
+    }
 
     // FR-012 on the emission route: the issuance joins survive — the packet
     // read command still resolves the exact issued v2 packet for every slot,
@@ -514,16 +524,24 @@ describe("the issued emission route on the Wave program path (T6)", () => {
       const descriptor = parseEmissionDescriptor(task);
       expect(descriptor).toMatchObject({ kind: "issued", contextDigest: authority.contextDigest,
         binding: { requestId: authority.requestId, version: "v2" } });
-      if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+      if (descriptor.kind !== "issued") throw new Error("a Pi-parented reviewer must mint an issued descriptor");
       expect(withoutEmissionRouteDelta(emissionRender, descriptor.binding, descriptor.contextDigest)).toBe(extractionRender);
     }
 
     // The extraction route keeps its exact baseline: no descriptor, verbatim
-    // instruction, and a parent-state-independent durable render.
+    // instruction, and the durable render a non-Pi parent reproduces. Its
+    // durable state is route-agnostic: rendered under a Pi parent, the same
+    // run's reviewer task differs from it by exactly the emission delta.
     for (const { authority, task } of extraction.requests) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
       expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
-      expect(undecorated(task)).toBe(await withPiParent(true, () => renderSpawnTask(extraction.handle, authority, base)));
+      const extractionRender = await withPiParent(false, () => renderSpawnTask(extraction.handle, authority, base));
+      expect(undecorated(task)).toBe(extractionRender);
+      if (authority.role === "spec-check-invoker") continue;
+      const piRender = await withPiParent(true, () => renderSpawnTask(extraction.handle, authority, base));
+      const descriptor = parseEmissionDescriptor(piRender);
+      if (descriptor.kind !== "issued") throw new Error("a Pi-parent render of a current Wave reviewer must mint an issued descriptor");
+      expect(withoutEmissionRouteDelta(piRender, descriptor.binding, descriptor.contextDigest)).toBe(extractionRender);
     }
   }, 120_000);
 });

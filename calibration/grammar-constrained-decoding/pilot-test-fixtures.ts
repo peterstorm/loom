@@ -43,6 +43,9 @@ export const READY: PreflightDecision = {
 };
 
 export const preregBytes = readFileSync(join(HERE, "preregistration.json"));
+/** The pilot-2 preregistration: pilot-1's workload under the per-route release policy. */
+export const PILOT_2_PREREGISTRATION = "preregistration-gcd-ad11-pilot-2.json";
+export const pilot2PreregBytes = readFileSync(join(HERE, PILOT_2_PREREGISTRATION));
 export const fixtureBytes = readFileSync(join(HERE, "workload-fixtures.json"));
 
 function retainedWorkload(): Readonly<{ prereg: Preregistration; fixtures: WorkloadFixtures; cases: readonly CalibrationCase[] }> {
@@ -84,11 +87,16 @@ export function filedInputs(entries: Iterable<CaseInput>): WindowInputs {
 export const inputsWithout = (cell: CellKey, caseId: string): WindowInputs =>
   filedInputs(inputs.values().filter((input) => !(input.cell === cell && input.caseId === caseId)));
 
-/** A test preregistration: the retained one, optionally with every cell (but
- *  `unconstrained`, which keeps the retained unconstrained qualification)
- *  qualified as a capable (constrained) route and a cheaper bootstrap. */
-export function testPreregistration(options: Readonly<{ constrained?: boolean; extractionOnly?: CellKey; unconstrained?: CellKey }> = {}): Preregistration {
-  const raw = JSON.parse(preregBytes.toString("utf-8")) as { guardrails: { bootstrapResamples: number }; cells: Array<{ cell: string; qualification: unknown }> };
+/** A test preregistration: the retained pilot-1 one (or, with `perRoute`, the
+ *  pilot-2 one under the per-route release policy), optionally with every
+ *  cell (but `unconstrained`, which keeps the retained unconstrained
+ *  qualification) qualified as a capable (constrained) route and a cheaper
+ *  bootstrap. */
+export function testPreregistration(
+  options: Readonly<{ constrained?: boolean; extractionOnly?: CellKey; unconstrained?: CellKey; perRoute?: boolean }> = {},
+): Preregistration {
+  const bytes = options.perRoute ? pilot2PreregBytes : preregBytes;
+  const raw = JSON.parse(bytes.toString("utf-8")) as { guardrails: { bootstrapResamples: number }; cells: Array<{ cell: string; qualification: unknown }> };
   raw.guardrails.bootstrapResamples = 200;
   for (const cell of raw.cells) {
     if (options.constrained && options.unconstrained !== cell.cell) {

@@ -11,9 +11,9 @@ import { platformWorkerBudget } from "./vitest-worker-budget";
  * code: `npm run verify` must run their tests.
  *
  * Setup files, before every test file:
- * - `catalog-issue-route` pins the ambient reviewer issue route to the catalog
- *   route, so no suite's route election depends on which fixture it happens to
- *   import first.
+ * - `scrub-parent-model` clears the ambient Pi parent model (PI_PROVIDER,
+ *   PI_MODEL, PI_REASONING_LEVEL) that spawn-time routing reads, so a wrapper
+ *   Pi session running the suite never leaks its model into a fixture child.
  * - `task-update-yield` turns the worker's event loop after every test. Without
  *   it, a file of back-to-back synchronous tests (`spawnSync` CLI children,
  *   closure scans, gzip fixtures) never reads the main thread's reply to its
@@ -27,11 +27,16 @@ import { platformWorkerBudget } from "./vitest-worker-budget";
  *
  * `maxWorkers` is this host's `platformWorkerBudget`; that module documents
  * the per-platform caps.
+ *
+ * `globalSetup` (`tests/setup/fixture-pi-route.ts`) serves the one fake local
+ * Pi route every fixture Pi session spawns onto, so the route-reachability
+ * gate never consults the operator's real models.json.
  */
 export default defineConfig({
   test: {
     include: [...configDefaults.include, "../calibration/**/*.test.ts", "../probes/**/*.test.{ts,mjs}"],
-    setupFiles: ["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"],
+    globalSetup: ["./tests/setup/fixture-pi-route.ts"],
+    setupFiles: ["./tests/setup/scrub-parent-model.ts", "./tests/setup/task-update-yield.ts"],
     testTimeout: 15_000,
     maxWorkers: platformWorkerBudget(process.platform, availableParallelism()),
   },

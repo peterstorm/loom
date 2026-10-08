@@ -3,8 +3,13 @@ import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, scrubAmbientIssueRoute, withEnvOverlay } from "./issue-route-env";
+import {
+  claudeCodeParentEnvironment, FIXTURE_CLAUDE_CODE_SESSION_ID, NO_PARENT_MODEL_ENV, scrubAmbientParentModel, withEnvOverlay,
+} from "./issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "./pi-session";
+
+/** A parent model a wrapper Pi session would announce. */
+const PARENT_MODEL_ENV = Object.freeze({ PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" });
 
 const roots: string[] = [];
 const directory = () => { const root = canonicalTempDir("loom-session-test-"); roots.push(root); return root; };
@@ -81,25 +86,43 @@ describe("fixture-owned Pi session scopes", () => {
     expect(process.cwd()).toBe(cwd);
   });
 
-  it("starts every test file on the catalog route, so a CLI child sees only an explicitly chosen route", async () => {
-    // The setup file ran before this file's imports: the ambient route is
-    // already pinned, with no dependence on which fixture loaded first.
-    for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(process.env[key], key).toBeUndefined();
+  it("starts every test file with no parent model, so a CLI child sees only an explicitly chosen one", async () => {
+    // The setup file ran before this file's imports: the ambient parent model
+    // is already cleared, with no dependence on which fixture loaded first.
+    for (const key of Object.keys(NO_PARENT_MODEL_ENV)) expect(process.env[key], key).toBeUndefined();
     const root = directory();
     const ambient = fixturePiEnvironment(root);
-    for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(ambient[key], key).toBeUndefined();
-    await withEnvOverlay(QUALIFIED_ROUTE_ENV, async () => {
-      expect(fixturePiEnvironment(root).PI_MODEL).toBe(QUALIFIED_ROUTE_ENV.PI_MODEL);
+    for (const key of Object.keys(NO_PARENT_MODEL_ENV)) expect(ambient[key], key).toBeUndefined();
+    await withEnvOverlay(PARENT_MODEL_ENV, async () => {
+      expect(fixturePiEnvironment(root).PI_MODEL).toBe(PARENT_MODEL_ENV.PI_MODEL);
     });
-    for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(process.env[key], key).toBeUndefined();
+    for (const key of Object.keys(NO_PARENT_MODEL_ENV)) expect(process.env[key], key).toBeUndefined();
   });
 
-  it("the setup's scrub pins a leaked ambient route back to the catalog route", () => {
+  it("the setup's scrub clears a leaked ambient parent model", () => {
     const previous = { ...process.env };
     try {
-      Object.assign(process.env, QUALIFIED_ROUTE_ENV);
-      scrubAmbientIssueRoute();
-      for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(process.env[key], key).toBeUndefined();
+      Object.assign(process.env, PARENT_MODEL_ENV);
+      scrubAmbientParentModel();
+      for (const key of Object.keys(NO_PARENT_MODEL_ENV)) expect(process.env[key], key).toBeUndefined();
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+  });
+
+  it("a Claude Code parent environment carries the Claude session and no Pi announcement, without touching the process environment", () => {
+    const previous = { ...process.env };
+    try {
+      Object.assign(process.env, { PI_CODING_AGENT: "true", PI_SESSION_ID: "ambient-pi", PI_SESSION_FILE: "/ambient/session.jsonl" });
+      const before = { ...process.env };
+      const root = directory();
+      const env = claudeCodeParentEnvironment(root);
+      expect(process.env).toEqual(before);
+      expect(env).toMatchObject({ CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: FIXTURE_CLAUDE_CODE_SESSION_ID,
+        LOOM_SUBAGENT_DIR: join(root, ".git", "loom-claude-session-bindings"),
+        LOOM_STATE_PATH: join(root, ".claude", "state", "active_task_graph.json") });
+      for (const key of ["PI_CODING_AGENT", "PI_SESSION_ID", "PI_SESSION_FILE"]) expect(env[key], key).toBeUndefined();
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);
@@ -109,7 +132,7 @@ describe("fixture-owned Pi session scopes", () => {
   it("importing the session fixture has no side effect on the process environment", async () => {
     const previous = { ...process.env };
     try {
-      Object.assign(process.env, QUALIFIED_ROUTE_ENV);
+      Object.assign(process.env, PARENT_MODEL_ENV);
       const before = { ...process.env };
       vi.resetModules();
       await import("./pi-session");

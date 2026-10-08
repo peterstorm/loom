@@ -7,14 +7,14 @@ import {
   AGENT_POLICIES,
   LLM_PROFILE_IDS,
   LLM_PROFILES,
-  QUALIFIED_LOCAL_REVIEW_PROGRAMS,
-  isIssuableProfile,
+  RETIRED_LLM_PROFILE_IDS,
   lowerModelProfile,
-  issuedReviewerProfile,
-  reviewerIssueRouteForParent,
+  recordedProfileBindings,
   parseAgentFrontmatter,
   parseLlmProfile,
   parseLlmProfileId,
+  parseRecordedLlmProfileId,
+  piModelPattern,
   resolveAgentPolicy,
   resolveAgentProfile,
   resolveHarnessBinding,
@@ -33,49 +33,19 @@ import {
   panelJudgeProfileCarriers,
 } from "../../src/core/agent-catalog-projections";
 import { classifyPiSpawnItems, parsePiSpawnItems } from "../../src/core/pi-spawn-input";
-import { ORCHESTRATION_PROGRAMS } from "../../src/core/orchestration-contract/programs";
+
+const LOCAL = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" } as const;
 
 const EXPECTED_PROFILES = {
-  implementation: {
-    claudeCode: { model: "opus" },
-    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
-  },
-  "architecture-finalize": {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  "general-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  "focused-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
-  },
-  "qualified-local-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
-  },
-  "panel-design": {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  "panel-judge": {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  refutation: {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  mechanical: {
-    claudeCode: { model: "haiku" },
-    pi: { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
-  },
-  "spec-check-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" },
-  },
+  implementation: { claudeCode: { model: "opus" }, pi: LOCAL },
+  "architecture-finalize": { claudeCode: { model: "opus" }, pi: LOCAL },
+  "general-review": { claudeCode: { model: "sonnet" }, pi: LOCAL },
+  "focused-review": { claudeCode: { model: "sonnet" }, pi: LOCAL },
+  "panel-design": { claudeCode: { model: "opus" }, pi: LOCAL },
+  "panel-judge": { claudeCode: { model: "opus" }, pi: LOCAL },
+  refutation: { claudeCode: { model: "opus" }, pi: LOCAL },
+  mechanical: { claudeCode: { model: "haiku" }, pi: LOCAL },
+  "spec-check-review": { claudeCode: { model: "sonnet" }, pi: LOCAL },
 } as const satisfies Record<LlmProfileId, unknown>;
 
 function errorsOf(result: { readonly ok: true } | { readonly ok: false; readonly errors: readonly string[] }): readonly string[] {
@@ -89,26 +59,13 @@ describe("semantic model profiles", () => {
       .toEqual(EXPECTED_PROFILES);
   });
 
-  it("keeps all default profiles on exact cloud targets and the alternative on one qualified local target", () => {
-    const defaults = LLM_PROFILES.filter(({ id }) => id !== "qualified-local-review");
-    // implementation rides the same local qualified route as the reviewer
-    // election; every other default stays on an exact cloud target.
-    const cloudDefaults = defaults.filter(({ id }) => id !== "implementation");
-    expect(new Set(cloudDefaults.map(({ pi }) => pi.provider))).toEqual(new Set(["github-copilot", "openai-codex"]));
-    expect(new Set(cloudDefaults.map(({ pi }) => pi.model))).toEqual(
-      new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.6-terra"]),
-    );
-    expect(defaults.find(({ id }) => id === "implementation")?.pi).toEqual(EXPECTED_PROFILES.implementation.pi);
-    expect(LLM_PROFILES.find(({ id }) => id === "qualified-local-review")?.pi).toEqual(EXPECTED_PROFILES["qualified-local-review"].pi);
-    expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
+  it("runs every Pi profile on the one local route; profiles differ only in their Claude model", () => {
+    expect(new Set(LLM_PROFILES.map(({ pi }) => piModelPattern(pi)))).toEqual(new Set([piModelPattern(LOCAL)]));
   });
 
-  it("keeps all architecture/discovery panel work on the strongest available harness models", () => {
+  it("keeps all architecture/discovery panel work on the strongest Claude model", () => {
     for (const id of ["panel-design", "panel-judge"] as const) {
-      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({
-        claudeCode: { model: "opus" },
-        pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-      });
+      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({ claudeCode: { model: "opus" }, pi: LOCAL });
     }
   });
 
@@ -143,71 +100,40 @@ describe("semantic model profiles", () => {
   });
 });
 
-describe("qualified-local reviewer issuance", () => {
-  const qualified = { pi: true, provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
-
-  it("elects the local profile only from the exact parent session route", () => {
-    expect(reviewerIssueRouteForParent(qualified)).toBe("qualified-local");
-    for (const changed of [
-      { pi: false }, { provider: "openai-codex" }, { model: "glm-5.3-flash-spark-tp2-v15" },
-      { thinking: "medium" },
-    ]) expect(reviewerIssueRouteForParent({ ...qualified, ...changed })).toBe("catalog");
+describe("recorded profile bindings", () => {
+  it("records each current profile's catalog lowering first, with its unchanged Claude model", () => {
+    for (const profile of LLM_PROFILES) {
+      const recorded = recordedProfileBindings(profile.id);
+      expect(recorded.pi[0]).toEqual(lowerModelProfile(profile, "pi"));
+      expect(recorded.claude).toEqual(lowerModelProfile(profile, "claude-code"));
+    }
   });
 
-  it.each(QUALIFIED_LOCAL_REVIEW_PROGRAMS)("preserves the catalog for all non-reviewers and the cloud default in %s", (program) => {
-    expect(issuedReviewerProfile("code-reviewer", program, "qualified-local")).toMatchObject({
-      ok: true, value: { id: "qualified-local-review", pi: qualifiedRoute },
+  it("keeps the cloud targets each profile issued before 2026-10-08, and nothing it never issued", () => {
+    const history = Object.fromEntries([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].map((id) =>
+      [id, recordedProfileBindings(id).pi.slice(1).map(piModelPattern)]));
+    expect(history).toEqual({
+      implementation: ["openai-codex/gpt-5.6-sol:high"],
+      "architecture-finalize": ["openai-codex/gpt-5.6-sol:high"],
+      "general-review": ["openai-codex/gpt-5.6-sol:high"],
+      "focused-review": ["openai-codex/gpt-5.5:high"],
+      "qualified-local-review": [],
+      "panel-design": ["openai-codex/gpt-5.6-sol:high"],
+      "panel-judge": ["openai-codex/gpt-5.6-sol:high"],
+      refutation: ["openai-codex/gpt-5.6-sol:high"],
+      mechanical: ["openai-codex/gpt-5.4-mini:medium"],
+      "spec-check-review": ["github-copilot/gpt-5.6-terra:high"],
     });
-    expect(issuedReviewerProfile("code-reviewer", program, "catalog")).toEqual(resolveModelProfile("general-review"));
-    expect(issuedReviewerProfile("spec-check-invoker", program, "qualified-local")).toEqual(resolveModelProfile("spec-check-review"));
-    expect(issuedReviewerProfile("review-verifier-agent", program, "qualified-local")).toEqual(resolveModelProfile("refutation"));
   });
 
-  it("names exactly the Wave Gate and Standalone Review programs as electing", () => {
-    expect(QUALIFIED_LOCAL_REVIEW_PROGRAMS).toEqual(["wave-gate", "standalone-review"]);
-    expect(Object.isFrozen(QUALIFIED_LOCAL_REVIEW_PROGRAMS)).toBe(true);
-  });
-});
-
-describe("the one profile-eligibility rule", () => {
-  // `null` is a program that did not parse: it elects nothing.
-  const programs = [...ORCHESTRATION_PROGRAMS, null];
-
-  it("admits a role's catalog profile in every program, and only qualified-local-review besides", () => {
-    for (const policy of AGENT_POLICIES) for (const program of programs) for (const id of LLM_PROFILE_IDS) {
-      const electsLocal = id === "qualified-local-review" && policy.kind.kind === "reviewer" &&
-        (program === "wave-gate" || program === "standalone-review");
-      expect(isIssuableProfile(policy, program, id), `${policy.agent}/${String(program)}/${id}`)
-        .toBe(id === policy.profile || electsLocal);
-    }
-  });
-
-  it("issuance only ever elects a profile the rule admits", () => {
-    fc.assert(fc.property(
-      fc.constantFrom(...AGENT_POLICIES),
-      fc.constantFrom(...QUALIFIED_LOCAL_REVIEW_PROGRAMS),
-      fc.constantFrom("catalog" as const, "qualified-local" as const),
-      (policy, program, route) => {
-        const issued = issuedReviewerProfile(policy.agent, program, route);
-        expect(issued.ok).toBe(true);
-        if (!issued.ok) return;
-        expect(isIssuableProfile(policy, program, issued.value.id)).toBe(true);
-        // The catalog route never leaves the role's catalog profile.
-        if (route === "catalog") expect(issued.value.id).toBe(policy.profile);
-      },
-    ));
-  });
-
-  it("issuance elects the local profile for every reviewer the rule admits it for", () => {
-    for (const policy of AGENT_POLICIES) for (const program of QUALIFIED_LOCAL_REVIEW_PROGRAMS) {
-      const issued = issuedReviewerProfile(policy.agent, program, "qualified-local");
-      expect(issued.ok && issued.value.id === "qualified-local-review", policy.agent)
-        .toBe(isIssuableProfile(policy, program, "qualified-local-review"));
-    }
+  it("parses a retired profile id only as a recorded one", () => {
+    expect(parseRecordedLlmProfileId("qualified-local-review")).toEqual({ ok: true, value: "qualified-local-review" });
+    expect(parseRecordedLlmProfileId("general-review")).toEqual({ ok: true, value: "general-review" });
+    expect(parseLlmProfileId("qualified-local-review").ok).toBe(false);
+    expect(resolveModelProfile("qualified-local-review").ok).toBe(false);
+    expect(parseRecordedLlmProfileId("current").ok).toBe(false);
   });
 });
-
-const qualifiedRoute = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
 
 describe("Pi spawn input parsing", () => {
   it("parses each single, parallel, and chain mode in order", () => {
@@ -402,7 +328,7 @@ describe("exhaustive Loom agent policy", () => {
 describe("typed harness lowering", () => {
   it.each([
     ["claude-code", "sonnet", "opus"],
-    ["pi", "openai-codex/gpt-5.6-sol:high", "openai-codex/gpt-5.5:high"],
+    ["pi", "desktop-vllm/glm-5.3-flash-spark-tp2-v14:high", "openai-codex/gpt-5.6-sol:high"],
   ] as const)("requires the exact explicit %s model", (harness, expected, wrong) => {
     expect(validateExplicitSpawnModel("code-reviewer", harness, expected)).toEqual({ ok: true });
     const mismatch = validateExplicitSpawnModel("code-reviewer", harness, wrong);
@@ -422,24 +348,9 @@ describe("typed harness lowering", () => {
   });
 
   it("lowers Pi to exact provider/model/thinking fields", () => {
-    expect(resolveHarnessBinding("review-verifier-agent", "pi")).toEqual({
-      ok: true,
-      value: {
-        harness: "pi",
-        provider: "openai-codex",
-        model: "gpt-5.6-sol",
-        thinking: "high",
-      },
-    });
-    expect(resolveHarnessBinding("comment-analyzer", "pi")).toEqual({
-      ok: true,
-      value: {
-        harness: "pi",
-        provider: "openai-codex",
-        model: "gpt-5.5",
-        thinking: "high",
-      },
-    });
+    for (const agent of ["review-verifier-agent", "comment-analyzer", "spec-check-invoker"]) {
+      expect(resolveHarnessBinding(agent, "pi")).toEqual({ ok: true, value: { harness: "pi", ...LOCAL } });
+    }
   });
 
   it("rejects an unknown harness rather than returning a partial binding", () => {

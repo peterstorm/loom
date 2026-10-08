@@ -1,6 +1,7 @@
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { EMISSION_TOOL_SPECS } from "../../engine/src/core/emission-tool";
-import { decidePreflight, parsePreflightFacts, stagedRegistryFacts, type PreflightDecision, type PreflightFacts } from "./pilot-preflight";
+import { decidePreflight, parsePreflightFacts, preflightRouteProbe, stagedRegistryFacts, type PreflightDecision, type PreflightFacts, type RouteProbe } from "./pilot-preflight";
 import { prereg as retainedPrereg } from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest, PILOT_CELLS } from "./pilot-vocabulary";
 
@@ -71,5 +72,65 @@ describe("preflight (content-addressed frozen runtime + live route)", () => {
     expect(parsePreflightFacts({ ...retained, registry: missingOne }).ok).toBe(false);
     expect(parsePreflightFacts({ ...retained, registry: { ...retained.registry, "judge-verdict/v2": null } }).ok).toBe(false);
     expect(parsePreflightFacts({ ...retained, registry: { ...retained.registry, "judge-verdict/v1": null } }).ok).toBe(true);
+  });
+});
+
+describe("route probe (the engine's probe, mapped into the preflight's route fact)", () => {
+  const route = retainedPrereg.route;
+  const url = `${route.baseUrl}/models`;
+  const answered = (status: number, servedModels: readonly string[] | null = null) => ({ kind: "answered" as const, status, servedModels });
+  const ready = (probe: RouteProbe): PreflightFacts => ({
+    registry: stagedRegistryFacts(),
+    workloadFixturesDigest: retainedPrereg.workloadFixturesDigest,
+    piVersion: retainedPrereg.route.piVersion,
+    stagedRuntimeRevision: "sha256:staged",
+    loadedRuntimeRevision: null,
+    route: probe,
+  });
+
+  it("maps a 2xx listing to reachable with the served models, leaving the served-model check to the preflight", () => {
+    expect(preflightRouteProbe(route, answered(200, [route.model, "other"]))).toEqual({ kind: "reachable", servedModels: [route.model, "other"] });
+    const absent = preflightRouteProbe(route, answered(200, ["other"]));
+    expect(absent).toEqual({ kind: "reachable", servedModels: ["other"] });
+    const decision = decidePreflight(retainedPrereg, ready(absent));
+    expect(decision.kind === "blocked" && decision.blocks).toEqual([{ kind: "served-model-absent", model: route.model, served: ["other"] }]);
+  });
+
+  it("maps an authentication refusal (401/403) to reachable with an unobservable served list, which blocks nothing", () => {
+    for (const status of [401, 403]) {
+      const probe = preflightRouteProbe(route, answered(status));
+      expect(probe).toEqual({ kind: "reachable", servedModels: null });
+      expect(decidePreflight(retainedPrereg, ready(probe)).kind).toBe("ready");
+    }
+  });
+
+  it("maps everything else to unreachable, naming the URL and the reason", () => {
+    expect(preflightRouteProbe(route, { kind: "refused", reason: "ECONNREFUSED" })).toEqual({ kind: "unreachable", reason: `GET ${url}: ECONNREFUSED` });
+    expect(preflightRouteProbe(route, answered(500))).toEqual({ kind: "unreachable", reason: `GET ${url}: GET /models answered HTTP 500` });
+    expect(preflightRouteProbe(route, answered(200))).toEqual({ kind: "unreachable", reason: `GET ${url} answered without a readable model list` });
+  });
+
+  it("is reachable exactly for a 2xx listing or an auth refusal (property)", () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 100, max: 599 }),
+      fc.option(fc.array(fc.constantFrom(route.model, "other", "third")), { nil: null }),
+      (status, servedModels) => {
+        const probe = preflightRouteProbe(route, answered(status, servedModels));
+        const listed = status >= 200 && status <= 299 && servedModels !== null;
+        const auth = status === 401 || status === 403;
+        expect(probe.kind).toBe(listed || auth ? "reachable" : "unreachable");
+        if (probe.kind === "reachable") expect(probe.servedModels).toEqual(listed ? servedModels : null);
+      },
+    ), { numRuns: 200 });
+  });
+
+  it("round-trips an unobservable served list through the retained-facts parser; retained arrays parse unchanged", () => {
+    const retained = JSON.parse(JSON.stringify(ready({ kind: "reachable", servedModels: null })));
+    const parsed = parsePreflightFacts(retained);
+    expect(parsed.ok && parsed.value.route).toEqual({ kind: "reachable", servedModels: null });
+    expect(parsed.ok && decidePreflight(retainedPrereg, parsed.value).kind).toBe("ready");
+    const listed = parsePreflightFacts({ ...retained, route: { kind: "reachable", servedModels: [route.model] } });
+    expect(listed.ok && listed.value.route).toEqual({ kind: "reachable", servedModels: [route.model] });
+    expect(parsePreflightFacts({ ...retained, route: { kind: "reachable" } }).ok).toBe(false);
   });
 });

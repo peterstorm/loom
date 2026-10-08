@@ -2258,9 +2258,10 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
         claude: lowerModelProfile(verifierProfile, "claude-code"),
       });
       // Golden bytes: the serialized authority is unchanged by resolving the
-      // binding through the catalog instead of a literal.
+      // binding through the catalog instead of a literal. Pi runs the one local
+      // route, so the verifier's Pi lowering is the local binding.
       expect(JSON.stringify(request.harnessBinding)).toBe(
-        '{"pi":{"harness":"pi","provider":"openai-codex","model":"gpt-5.6-sol","thinking":"high"},' +
+        '{"pi":{"harness":"pi","provider":"desktop-vllm","model":"glm-5.3-flash-spark-tp2-v14","thinking":"high"},' +
         '"claude":{"harness":"claude-code","model":"opus"}}',
       );
       expect(request.modelProfile).toBe("refutation");

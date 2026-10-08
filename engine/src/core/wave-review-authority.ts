@@ -18,7 +18,7 @@ import {
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
-import { DECISION_RECORD_AGENT, issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, type ReviewerIssueRoute } from "./model-profiles";
+import { DECISION_RECORD_AGENT, lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "./model-profiles";
 import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import {
   canonicalRecord,
@@ -749,9 +749,7 @@ export function prepareWaveReviewBatch(
   attempt: 1 | 2,
   workspace: readonly ReviewedWorkspaceObservation[],
   specCheckObservation: WaveSpecCheckObservation,
-  issueRoute: ReviewerIssueRoute = "catalog",
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
-  const reviewerRoute = registration.schemaVersion === 2 ? issueRoute : "catalog";
   if (registration.schemaVersion === 2) {
     const protocol = parseReviewerProtocolDescriptor(registration.reviewerProtocol);
     if (!protocol.ok) return failure(protocol.error.message);
@@ -810,7 +808,6 @@ export function prepareWaveReviewBatch(
   );
   const batchEpoch = parseArtifactDigest(sha256Hex(JSON.stringify({
     runId,
-    ...(reviewerRoute === "qualified-local" ? { reviewerRoute } : {}),
     wave: registration.input.wave,
     authorityDigest: registration.authorityDigest,
     tasks: tasks.map((task) => ({
@@ -890,7 +887,7 @@ export function prepareWaveReviewBatch(
     if (!requestId.ok) return failure(requestId.error.message);
     const policy = resolveAgentPolicy(subject.role);
     if (!policy.ok) return failure(policy.error.message);
-    const profile = issuedReviewerProfile(subject.role, "wave-gate", reviewerRoute);
+    const profile = resolveModelProfile(policy.value.profile);
     if (!profile.ok) return failure(profile.error.message);
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
     const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({

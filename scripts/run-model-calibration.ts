@@ -33,10 +33,12 @@ import { parseCalibrationCorpus } from "../engine/src/core/model-calibration";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBinding } from "../engine/src/core/model-profiles";
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
+import { httpRouteProbe } from "../engine/src/utils/route-endpoint";
 import { corpusCaseResult, type CorpusRun } from "../calibration/corpus-calibration";
 import { ok, type Result } from "../calibration/kernel";
 import {
   decidePreflight,
+  preflightRouteProbe,
   stagedRegistryFacts,
   type PreflightFacts,
   type RouteProbe,
@@ -174,22 +176,12 @@ function loadFixtures(path: string): Readonly<{ digest: string; fixtures: Worklo
 const externalAssessments = (): readonly ExternalAssessment[] =>
   values("--assessment").map((path) => ({ path, text: readFileSync(path, "utf-8") }));
 
-async function probeRoute(baseUrl: string): Promise<RouteProbe> {
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, { signal: AbortSignal.timeout(ROUTE_PROBE_TIMEOUT_MS) });
-    if (!response.ok) return { kind: "unreachable", reason: `GET /models answered HTTP ${response.status}` };
-    const body: unknown = await response.json();
-    const data = typeof body === "object" && body !== null && Array.isArray((body as { data?: unknown }).data)
-      ? (body as { data: unknown[] }).data : [];
-    return {
-      kind: "reachable",
-      servedModels: data.flatMap((entry) =>
-        typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" ? [(entry as { id: string }).id] : []),
-    };
-  } catch (error) {
-    const cause = error instanceof Error && error.cause instanceof Error ? ` (${error.cause.message})` : "";
-    return { kind: "unreachable", reason: `GET ${baseUrl}/models failed: ${error instanceof Error ? error.message : String(error)}${cause}` };
-  }
+/** The engine's one route probe (an unauthenticated `GET {baseUrl}/models`;
+ *  no credential is resolved, sent or recorded), mapped by the pure core into
+ *  the preflight's route fact. */
+async function probeRoute(route: Preregistration["route"]): Promise<RouteProbe> {
+  const observed = await httpRouteProbe(ROUTE_PROBE_TIMEOUT_MS)({ provider: route.provider, baseUrl: route.baseUrl });
+  return preflightRouteProbe(route, observed);
 }
 
 function observedPiVersion(): string | null {
@@ -204,7 +196,7 @@ async function gatherPreflightFacts(prereg: Preregistration, fixturesDigest: str
     piVersion: observedPiVersion(),
     stagedRuntimeRevision: stagedRevision,
     loadedRuntimeRevision: process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] ?? null,
-    route: await probeRoute(prereg.route.baseUrl),
+    route: await probeRoute(prereg.route),
   });
 }
 

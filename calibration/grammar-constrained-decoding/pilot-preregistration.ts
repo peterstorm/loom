@@ -3,6 +3,20 @@
  * BEFORE any window (content-addressed by the retention layer), parsed into a
  * value that already satisfies the spec's minimums, and the deterministic
  * paired schedule it commits to (matched requests, counterbalanced order).
+ *
+ * The preregistration also fixes the RELEASE POLICY its windows are decided
+ * under, before any of them runs:
+ *
+ * - `capable-route-required` — AD-11 as first recorded: without a qualified
+ *   capable (constrained) route the feature cannot be declared done. A
+ *   schemaVersion 1 preregistration carries no policy field and parses to
+ *   this, so every window retained under one re-decides exactly as before.
+ * - `per-route-engine-authoritative` — the operator's per-route decision
+ *   (2026-10-08): a route qualified unconstrained emission may be released as
+ *   "unconstrained emission, engine-authoritative" when its window is
+ *   complete and every guardrail holds. Only a schemaVersion 2
+ *   preregistration can carry it, and a v2 one must state its policy: there
+ *   is no default.
  */
 
 import { z } from "zod";
@@ -71,8 +85,19 @@ const cellSchema = z.object({
   }).strict(),
 }).strict();
 
-const preregistrationSchema = z.object({
-  schemaVersion: z.literal(1),
+const releasePolicySchema = z.discriminatedUnion("kind", [
+  /** AD-11 as first recorded: done needs every measured cell on a qualified capable route. */
+  z.object({ kind: z.literal("capable-route-required") }).strict(),
+  /** Each route is released on its own window: a constrained cell as constrained (AS-004
+   *  applies), an unconstrained cell as engine-authoritative (AS-004 not applicable). */
+  z.object({ kind: z.literal("per-route-engine-authoritative") }).strict(),
+]);
+export type ReleasePolicy = DeepReadonly<z.infer<typeof releasePolicySchema>>;
+
+/** The policy a schemaVersion 1 preregistration (which predates the field) is decided under. */
+const CAPABLE_ROUTE_REQUIRED: ReleasePolicy = Object.freeze({ kind: "capable-route-required" as const });
+
+const preregistrationFields = {
   id: text,
   recordedAt: z.iso.datetime({ offset: true }),
   route: z.object({
@@ -100,7 +125,14 @@ const preregistrationSchema = z.object({
     requiredIndependentAssessors: z.number().int().min(2),
   }).strict(),
   cells: z.array(cellSchema),
-}).strict().superRefine((prereg, ctx) => {
+};
+
+const preregistrationSchema = z.discriminatedUnion("schemaVersion", [
+  /** Predates the release policy: it never carries the field. */
+  z.object({ schemaVersion: z.literal(1), ...preregistrationFields }).strict(),
+  /** States its release policy explicitly; there is no default. */
+  z.object({ schemaVersion: z.literal(2), releasePolicy: releasePolicySchema, ...preregistrationFields }).strict(),
+]).superRefine((prereg, ctx) => {
   for (const key of CELL_KEYS) {
     const count = prereg.cells.filter((cell) => cell.cell === key).length;
     if (count !== 1) ctx.addIssue({ code: "custom", message: `required cell ${key} must be preregistered exactly once (found ${count})`, path: ["cells"] });
@@ -123,7 +155,7 @@ const preregistrationSchema = z.object({
       ctx.addIssue({ code: "custom", message: `${cell.cell}: workload needs at least one held-out known-defect case`, path });
     }
   });
-});
+}).transform((prereg) => (prereg.schemaVersion === 1 ? { ...prereg, releasePolicy: CAPABLE_ROUTE_REQUIRED } : prereg));
 
 export type Preregistration = DeepReadonly<z.infer<typeof preregistrationSchema>>;
 export type CellPreregistration = Preregistration["cells"][number];

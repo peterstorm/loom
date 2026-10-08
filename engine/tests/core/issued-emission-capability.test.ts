@@ -32,8 +32,8 @@ import {
   type SpawnEmissionAdmission,
   type SpawnEmissionRefusal,
 } from "../../src/core/issued-emission-capability";
-import { DESKTOP_VLLM_ROUTE, lowerModelProfile, resolveModelProfile, type LoomAgentName } from "../../src/core/model-profiles";
-import { LOOM_OWNED_AGENTS } from "../../src/core/agent-catalog-projections";
+import { DESKTOP_VLLM_ROUTE, lowerModelProfile, resolveAgentProfile, type LoomAgentName } from "../../src/core/model-profiles";
+import { LOOM_OWNED_AGENTS, producerKindsOfAgent } from "../../src/core/agent-catalog-projections";
 import type { PiSpawnItem } from "../../src/core/pi-spawn-input";
 import {
   canonicalStructuralEquals,
@@ -667,14 +667,19 @@ describe("request emission routes", () => {
   it.each([
     ["the current v2", REVIEWER_V2],
     ["the successor v3", REVIEWER_V3],
-  ] as const)("pins the qualified emission route to the catalog's qualified-local-review profile for %s claim (requalification drift guard)", (_label, binding) => {
-    const pi = lowerModelProfile(value(resolveModelProfile("qualified-local-review")), "pi");
-    // The emission capability trusts exactly the catalog profile the issue
-    // route election derives from the qualified-local parent handshake. Both
-    // name the catalog's single route owner, so they cannot drift apart.
-    expect({ provider: pi.provider, model: pi.model }).toEqual(DESKTOP_VLLM_ROUTE);
-    expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(pi.provider, pi.model), true))
-      .toMatchObject({ kind: "emission" });
+  ] as const)("pins the qualified emission route to the catalog Pi route of every emitting Agent's profile for %s claim (requalification drift guard)", (_label, binding) => {
+    // A catalog request is issued on its profile's current Pi lowering, so an
+    // emitting Agent reaches the emission tool only if that lowering IS the
+    // qualified route. Retargeting any emitting profile's Pi route (or the
+    // qualified route) without the other silently degrades it to extraction.
+    const emittingAgents = LOOM_OWNED_AGENTS.filter((agent) => producerKindsOfAgent(agent).length > 0);
+    expect(emittingAgents.length).toBeGreaterThan(0);
+    for (const agent of emittingAgents) {
+      const pi = lowerModelProfile(value(resolveAgentProfile(agent)), "pi");
+      expect({ provider: pi.provider, model: pi.model }, agent).toEqual(DESKTOP_VLLM_ROUTE);
+      expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(pi.provider, pi.model), true), agent)
+        .toMatchObject({ kind: "emission" });
+    }
     expect(qualifyIssuedSpawnEmissionRoute(claimOf(binding), issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, "some-other-local-model"), true))
       .toMatchObject({ kind: "extraction-only" });
   });

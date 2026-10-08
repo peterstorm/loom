@@ -65,6 +65,7 @@ import {
   type SlotId,
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
+import { lowerModelProfile, resolveModelProfile, type LlmProfileId } from "../../src/core/model-profiles";
 import { value } from "../fixtures/parse-result";
 
 type Result<T, E = unknown> =
@@ -226,7 +227,19 @@ const implementationBindings = {
   claude: { harness: "claude-code", model: "opus" },
 } as const;
 
-const focusedBindings = {
+/** The binding the catalog issues `profileId` under today. */
+const catalogBindings = (profileId: LlmProfileId) => {
+  const profile = value(resolveModelProfile(profileId));
+  return { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") };
+};
+
+const focusedBindings = catalogBindings("focused-review");
+const generalReviewBindings = catalogBindings("general-review");
+
+/** History: the cloud binding focused-review lowered to before every Pi
+ *  profile moved to the local route. Stored authorities may carry it; a
+ *  request minted today may not. */
+const retiredFocusedBindings = {
   pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
   claude: { harness: "claude-code", model: "sonnet" },
 } as const;
@@ -494,7 +507,7 @@ describe("orchestration authority parsers", () => {
     // exactly that to 5 wave-gate runs).
     const drifted = rawAuthority(1, 1, {
       modelProfile: "focused-review",
-      harnessBinding: focusedBindings,
+      harnessBinding: retiredFocusedBindings,
       requiredSkill: "code-implementer",
     });
 
@@ -523,6 +536,12 @@ describe("orchestration authority parsers", () => {
     expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, {
       harnessBinding: { ...implementationBindings, claude: { harness: "claude-code", model: "haiku" } },
     })).ok).toBe(false);
+    // A retired cloud binding is history only for the profile that issued it:
+    // focused-review never lowered to gpt-5.6-sol.
+    expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, {
+      modelProfile: "focused-review",
+      harnessBinding: { ...retiredFocusedBindings, pi: { ...retiredFocusedBindings.pi, model: "gpt-5.6-sol" } },
+    })).ok).toBe(false);
 
     // Structural parsing is not relaxed either.
     expect(parseStoredAgentRequestAuthority(rawAuthority(1, 1, { attempt: 3 })).ok).toBe(false);
@@ -545,14 +564,16 @@ describe("orchestration authority parsers", () => {
     const noSkillReviewer = rawAuthority(1, 1, {
       role: "code-reviewer",
       modelProfile: "general-review",
-      harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-        claude: { harness: "claude-code", model: "sonnet" },
-      },
+      harnessBinding: generalReviewBindings,
       requiredSkill: null,
     });
     expect(parseAgentRequestAuthority(noSkillReviewer).ok).toBe(true);
     expect(parseAgentRequestAuthority({ ...noSkillReviewer, requiredSkill: "review-and-fix" }).ok).toBe(false);
+    // The profile's retired cloud binding is history, never mintable today.
+    expect(parseAgentRequestAuthority({
+      ...noSkillReviewer,
+      harnessBinding: { ...generalReviewBindings, pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" } },
+    }).ok).toBe(false);
 
     const security = rawAuthority(1, 1, {
       role: "security-agent",
@@ -931,8 +952,10 @@ describe("ExactRoster and CompleteRoster conservation", () => {
   });
 
   it("preserves nested authority violations in roster diagnostics", () => {
+    // Both are refused when a roster is read back: a non-canonical Skill name
+    // is malformed shape, and an extra binding field is an unknown field.
     const result = parseAgentRosterSlot(
-      rawAuthority(1, 1, { requiredSkill: "wrong", harnessBinding: { ...implementationBindings, pi: { ...implementationBindings.pi, extra: true } } }),
+      rawAuthority(1, 1, { requiredSkill: "Not A Skill", harnessBinding: { ...implementationBindings, pi: { ...implementationBindings.pi, extra: true } } }),
       rawAuthority(1, 2),
     );
     expect(result.ok).toBe(false);
@@ -945,6 +968,67 @@ describe("ExactRoster and CompleteRoster conservation", () => {
         expect(Object.isFrozen(malformed.authorityViolations)).toBe(true);
       }
     }
+  });
+
+  // A roster is re-read from checkpoints and registrations: history. The check
+  // against today's catalog (role -> profile, profile -> current binding,
+  // role -> Skill) happens once, where each request is minted.
+  const recordedDrifts: readonly Readonly<Record<string, unknown>>[] = [
+    { requiredSkill: "review-and-fix" },
+    { modelProfile: "focused-review", harnessBinding: retiredFocusedBindings },
+    { modelProfile: "focused-review", harnessBinding: focusedBindings },
+    { harnessBinding: { ...implementationBindings, pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" } } },
+    { role: "code-reviewer", modelProfile: "qualified-local-review", harnessBinding: generalReviewBindings, requiredSkill: null },
+  ];
+
+  it("reads every attempt as recorded: catalog drift is refused at the mint, never on roster re-read", () => {
+    fc.assert(fc.property(fc.constantFrom(...recordedDrifts), fc.integer({ min: 1, max: 50 }), (drift, slot) => {
+      const first = rawAuthority(slot, 1, drift);
+      const retry = rawAuthority(slot, 2, drift);
+      expect(parseAgentRequestAuthority(first).ok).toBe(false);
+      expect(parseAgentRequestAuthority(retry).ok).toBe(false);
+      const parsed = value(parseAgentRosterSlot(first, retry));
+      for (const [attempt, raw] of [[parsed.attempts[0], first], [parsed.attempts[1], retry]] as const) {
+        expect(attempt.role).toBe(raw.role);
+        expect(attempt.modelProfile).toBe(raw.modelProfile);
+        expect(attempt.requiredSkill).toBe(raw.requiredSkill);
+        expect(attempt.harnessBinding).toEqual(raw.harnessBinding);
+      }
+      expect(parseExactRoster([parsed]).ok).toBe(true);
+    }));
+  });
+
+  it("still refuses on roster re-read a binding its recorded profile never issued, unknown fields, and pair drift", () => {
+    const tampers: readonly Readonly<{ change: Readonly<Record<string, unknown>>; field: string }>[] = [
+      // focused-review never lowered to gpt-5.6-sol.
+      { change: { modelProfile: "focused-review", harnessBinding: { ...retiredFocusedBindings, pi: { ...retiredFocusedBindings.pi, model: "gpt-5.6-sol" } } }, field: "harnessBinding.pi" },
+      // qualified-local-review only ever issued the local route.
+      { change: { role: "code-reviewer", modelProfile: "qualified-local-review", harnessBinding: { ...generalReviewBindings, pi: retiredFocusedBindings.pi }, requiredSkill: null }, field: "harnessBinding.pi.provider" },
+      { change: { harnessBinding: { ...implementationBindings, claude: { harness: "claude-code", model: "haiku" } } }, field: "harnessBinding.claude.model" },
+      { change: { modelProfile: "no-such-profile" }, field: "modelProfile" },
+      { change: { extra: true }, field: "request.extra" },
+    ];
+    fc.assert(fc.property(fc.constantFrom(...tampers), fc.constantFrom(1 as const, 2 as const), ({ change, field }, tampered) => {
+      const result = parseAgentRosterSlot(
+        rawAuthority(1, 1, tampered === 1 ? change : {}),
+        rawAuthority(1, 2, tampered === 2 ? change : {}),
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const malformed = result.error.violations.find((entry) => entry.kind === "malformed-attempt-authority");
+      expect(malformed).toMatchObject({ kind: "malformed-attempt-authority", attempt: tampered });
+      if (malformed?.kind === "malformed-attempt-authority") {
+        expect(malformed.authorityViolations.map((entry) => entry.field)).toContain(field);
+      }
+    }));
+
+    // History is self-consistent per slot: a drift recorded on only one attempt
+    // is a pair mismatch, not history.
+    fc.assert(fc.property(fc.constantFrom(...recordedDrifts), (drift) => {
+      const result = parseAgentRosterSlot(rawAuthority(1, 1), rawAuthority(1, 2, drift));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.violations.some((entry) => entry.kind === "attempt-pair-mismatch")).toBe(true);
+    }));
   });
 
   it("rejects duplicate and cross-slot request/context identities", () => {
@@ -2914,26 +2998,36 @@ describe("retry diagnostics", () => {
   });
 
   it("cannot derive recovery from a mutated retry-request authority", () => {
-    const retryRequest = { ...rawAuthority(1, 2) };
-    retryRequest.requiredSkill = "wrong";
-
-    const rejected = semanticRetryDiagnostic({
+    const diagnose = (requiredSkill: string) => semanticRetryDiagnostic({
       category: "malformed-result",
       failedRequest: rawAuthority(1, 1) as unknown as AgentRequestAuthority<1>,
-      retryRequest: retryRequest as unknown as AgentRequestAuthority<2>,
+      retryRequest: { ...rawAuthority(1, 2), requiredSkill } as unknown as AgentRequestAuthority<2>,
       message: "result violates the output contract",
     });
 
-    expect(rejected.ok).toBe(false);
-    if (!rejected.ok) {
-      expect(rejected.error.field).toBe("requests");
-      const malformedRetry = rejected.error.rosterViolations?.find(
+    // A malformed Skill is refused on the retry attempt itself.
+    const malformed = diagnose("Not A Skill");
+    expect(malformed.ok).toBe(false);
+    if (!malformed.ok) {
+      expect(malformed.error.field).toBe("requests");
+      const malformedRetry = malformed.error.rosterViolations?.find(
         (violation) => violation.kind === "malformed-attempt-authority" && violation.attempt === 2,
       );
       expect(malformedRetry?.kind).toBe("malformed-attempt-authority");
       if (malformedRetry?.kind === "malformed-attempt-authority") {
         expect(malformedRetry.authorityViolations.some(({ field }) => field === "requiredSkill")).toBe(true);
       }
+    }
+
+    // A well-formed but different Skill is read as recorded, so it no longer
+    // agrees with attempt 1: the pair, not the attempt, refuses it.
+    const drifted = diagnose("review-and-fix");
+    expect(drifted.ok).toBe(false);
+    if (!drifted.ok) {
+      expect(drifted.error.field).toBe("requests");
+      expect(drifted.error.rosterViolations).toContainEqual(
+        { kind: "attempt-pair-mismatch", slotId: slotId("1"), field: "requiredSkill" },
+      );
     }
   });
 
@@ -2973,7 +3067,7 @@ describe("retry diagnostics", () => {
 
     const invalid = semanticRetryDiagnostic({
       category: "malformed-result",
-      failedRequest: rawAuthority(1, 1, { requiredSkill: "wrong" }) as unknown as AgentRequestAuthority<1>,
+      failedRequest: rawAuthority(1, 1, { requiredSkill: "Not A Skill" }) as unknown as AgentRequestAuthority<1>,
       retryRequest: rawAuthority(1, 2) as unknown as AgentRequestAuthority<2>,
       message: "result violates the output contract",
     });
@@ -3102,6 +3196,25 @@ describe("retry diagnostics", () => {
     });
     expect(initialAttempt.ok).toBe(false);
     if (!initialAttempt.ok) expect(initialAttempt.error.field).toBe("failedRequest");
+  });
+
+  it("terminally blocks an exhausted attempt-2 request read as recorded, but not one its profile never issued", () => {
+    // The failed request was issued earlier; today's catalog no longer mints it.
+    const historical = rawAuthority(3, 2, { modelProfile: "focused-review", harnessBinding: retiredFocusedBindings });
+    expect(parseAgentRequestAuthority(historical).ok).toBe(false);
+    expect(value(terminalBlockedDiagnostic({
+      category: "missing-result",
+      failedRequest: historical as unknown as AgentRequestAuthority<2>,
+      message: "attempt 2 result was not captured",
+    }))).toMatchObject({ kind: "terminal-blocked", requestId: requestId("3:2"), slotId: slotId("3"), attempt: 2 });
+
+    const neverIssued = terminalBlockedDiagnostic({
+      category: "missing-result",
+      failedRequest: { ...historical, harnessBinding: implementationBindings } as unknown as AgentRequestAuthority<2>,
+      message: "attempt 2 result was not captured",
+    });
+    expect(neverIssued.ok).toBe(false);
+    if (!neverIssued.ok) expect(neverIssued.error.field).toBe("failedRequest");
   });
 
   it("deterministically bounds hostile multi-megabyte diagnostic and Error messages", () => {

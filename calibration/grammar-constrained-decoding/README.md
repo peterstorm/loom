@@ -15,30 +15,45 @@
 | `windows/gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z/` | 2026-10-03 09:23:39Z (baseline `71827878`) | **blocked: `route-unreachable`** (`GET http://192.168.0.80:8000/v1/models` refused) | 0 dispatched, 0 fabricated | `incomplete-missing-measurement` |
 | `windows/gcd-ad11-pilot-1--2026-10-03T17-12-24-293Z/` | 2026-10-03 17:12:24Z (baseline `5cfda5a1`; runtime identity superseded by later `engine/src` commits, see below) | **blocked: `route-unreachable`** (same refusal; registry digests, fixtures and Pi version still match the preregistration) | 0 dispatched, 0 fabricated | `incomplete-missing-measurement` |
 
-Two independent reasons block a done claim:
+Both retained windows belong to **pilot-1** (`preregistration.json`, release policy `capable-route-required`). Two independent reasons block a done claim for them:
 
 1. **The pilot could not run.** The live route `desktop-vllm` refused connections in both windows and on every manual check in between (`curl` exit 7). No sample was dispatched or invented. Every cell is retained as `not-measured`, with its preregistered pair count. The second window is not a re-run looking for a better result. It re-checks the route and records the delivered runtime identity, and it is blocked for the same reason as the first.
-2. **The intended deployment has no qualified *capable* route.** In the spec glossary, a capable route accepts **and enforces** the declared constraints. The only qualified route, `(desktop-vllm, glm-5.3-flash-spark-tp2-v14, <digest>)`, is classified **unconstrained emission** (`probes/emission-qualification/`). AD-11 says: *"If the intended deployment has no qualified capable route, the constrained feature cannot be declared measured/done."* The decision core encodes this as the missing measurement `no-qualified-capable-route`. So even a complete, all-passing window on this route stays `incomplete`.
+2. **Under pilot-1's policy the intended deployment has no qualified *capable* route.** In the spec glossary, a capable route accepts **and enforces** the declared constraints. The only qualified route, `(desktop-vllm, glm-5.3-flash-spark-tp2-v14, <digest>)`, is classified **unconstrained emission** (`probes/emission-qualification/`). AD-11 as first recorded says: *"If the intended deployment has no qualified capable route, the constrained feature cannot be declared measured/done."* The decision core encodes this as the missing measurement `no-qualified-capable-route`, so even a complete, all-passing pilot-1 window on this route stays `incomplete`. The retained pilot-1 windows keep that decision. They re-decide to exactly their retained bytes, and the re-decision tests pin this.
 
-To reach `done-allowed`, one of these must happen:
-
-- (a) a route qualifies as **constrained emission**, for example pi-ai's resolver gaining vLLM `structured_outputs`/`guided_json` for tools, or a cloud route passing qualification. That requires requalification, a new preregistration with a new `id`, and a new window.
-- (b) the spec owner explicitly amends AS-004/AD-11 to accept unconstrained emission as the measured mode. That is a user decision. This record does not make it.
+**No pilot-2 window exists yet**, so nothing is measured under the per-route policy. Its preregistration is recorded below. The release decision stays incomplete until a pilot-2 window completes with every guardrail holding.
 
 A violated guardrail in any future window blocks done and triggers design reconsideration. A window is never re-run to obtain a more favourable result.
+
+### Release policy (fixed by each preregistration, before its windows)
+
+On 2026-10-08 the operator decided that Pi runs local models only and that release is decided **per route**. Before that, the only ways to `done-allowed` were (a) a route qualifying as constrained emission, or (b) the spec owner accepting unconstrained emission as the measured mode. The operator's decision is (b), and it is recorded as a preregistered policy, not a re-reading of pilot-1:
+
+| Policy | Preregistration | Rule |
+|---|---|---|
+| `capable-route-required` | `preregistration.json` (gcd-ad11-pilot-1, `schemaVersion` 1, no `releasePolicy` field; a v1 record parses to this and may not carry the field) | Done only when every measured cell is on a qualified constrained route. Any unconstrained cell leaves the claim `incomplete` (`no-qualified-capable-route`). |
+| `per-route-engine-authoritative` | `preregistration-gcd-ad11-pilot-2.json` (gcd-ad11-pilot-2, `schemaVersion` 2; a v2 record must state `releasePolicy`, with no default) | Each cell is released on its own complete window when every guardrail holds. A constrained cell is released as **`constrained`** and AS-004 applies (provider-structural retries = 0). An unconstrained cell is released as **`unconstrained-engine-authoritative`**. On such a cell AS-004 is `not-applicable`, because the route enforces nothing and the engine validates every payload. AS-015 (latency p95, terminal-failure non-increase) and AS-016 (escaped-defect severity, at least 2 blinded assessors) still apply. |
+
+Under either policy a violation gives `blocked-guardrail-violated`, and a missing, not-measured or inconclusive result gives `incomplete-missing-measurement`. A `done-allowed` decision names each released cell's `releaseClass`. The types make a released cell carrying a non-passing guardrail unrepresentable, and an engine-authoritative release carrying an AS-004 `pass` unrepresentable too. Under the per-route policy a preregistration with no emission cell at all releases nothing (`no-released-cell`).
 
 ### Requirement status
 
 | Requirement | Guardrail (per cell) | Status |
 |---|---|---|
-| AS-004 provider-structural retries = 0 on a capable route | `provider-structural-retries` | **Not measured.** No capable route. On the unconstrained route the guardrail is `not-applicable`, and schema violations are reported as `unenforced-schema-violation`, never as a provider guarantee. |
+| AS-004 provider-structural retries = 0 on a capable route | `provider-structural-retries` | **Not measured.** No capable route. On the unconstrained route the guardrail is `not-applicable`, and schema violations are reported as `unenforced-schema-violation`, never as a provider guarantee. Under pilot-2's per-route policy, `not-applicable` is the guardrail's passing verdict for an `unconstrained-engine-authoritative` release. |
 | AS-015 p95 ≤ +25% vs extraction-only; terminal failures not increased | `latency-p95`, `terminal-failure-non-increase` | **Not measured** (window blocked). |
 | AS-016 escaped-defect severity not worse than the PR #52-only baseline | `escaped-defect-severity` | **Not measured** (no payloads; independent blinded assessor still required). |
 | AS-017 retention; a missing measurement blocks done | `measurement-complete` and the decision union | **Mechanism in force.** Preregistration, matrix, workload and blocked window are retained. The decision is `incomplete`. |
 
 ## Preregistration (recorded before any window)
 
-The **binding** preregistration is `preregistration.json`, recorded `2026-10-03T09:17:26Z`, before the first window at 09:23:39Z. Its SHA-256 is `4f00b74ff732f779da9e4421a034ce1f8fc4045aee51dd8c249293447458f7b9`, and every window records that digest. `--decide` refuses to re-evaluate a window if the preregistration has changed since. The workload fixtures, `workload-fixtures.json`, are pinned by `workloadFixturesDigest` = `b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201`. The preflight blocks if they change. Any change needs a new preregistration `id`. Earlier windows stay retained.
+| Preregistration | Id | Recorded | Release policy | `scheduleSeed` | SHA-256 | Windows |
+|---|---|---|---|---|---|---|
+| `preregistration.json` | `gcd-ad11-pilot-1` (`schemaVersion` 1) | `2026-10-03T09:17:26Z`, before the first window at 09:23:39Z | `capable-route-required` (implicit) | 20261003 | `4f00b74ff732f779da9e4421a034ce1f8fc4045aee51dd8c249293447458f7b9` | the two retained, both blocked |
+| `preregistration-gcd-ad11-pilot-2.json` | `gcd-ad11-pilot-2` (`schemaVersion` 2) | `2026-10-08T21:27:58Z` | `per-route-engine-authoritative` (explicit) | 20261008 | `3448a9f34eb21d43e3c8a632788350fa788e3eadb1c8da70b23b620e382ef75e` | none yet |
+
+Pilot-2 carries pilot-1's route, cells, schema digests, qualifications, workload, minimum pairs, timeout and guardrails unchanged. Only the release policy and the schedule seed differ. The workload is unchanged; only the decision rule changed, and it changed before any pilot-2 window. Pilot-1 stays byte-identical, and so do its windows and their decisions.
+
+Every window records the digest of its preregistration. `--decide` refuses to re-evaluate a window if the preregistration has changed since. The workload fixtures, `workload-fixtures.json`, are pinned by `workloadFixturesDigest` = `b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201` in both preregistrations. The preflight blocks if they change. Any change needs a new preregistration `id`. Earlier windows stay retained.
 
 ### Route / schema matrix (intended deployment)
 
@@ -68,7 +83,7 @@ The preflight recomputes each digest from the staged frozen registry, and a mism
 - Both arms run on **one frozen runtime**: children load the staged checkout's extension (`-ne -e <checkout>/pi/extension.ts`), whose content-addressed Runtime Revision is recorded per window. They share the same model, provider, thinking level, tool set (`read,grep,find,ls,bash`) and source snapshot.
 - **Task bodies are byte-identical** across arms. Only the wire section differs. The emission arm gets the frozen tool-primary wording naming the issued tool. The extraction arm gets the retained final-message contract. Each child is launched exactly as production launches it: the emission arm goes through the installed launcher's `runRpcAgent` readiness barrier with `LOOM_EMISSION_BINDING`, and the extraction arm runs in print-mode JSON.
 - **Seeds:** Pi exposes no sampling-seed or max-token flag for this route. Both arms therefore inherit the same catalog defaults, and repeats are independent samples, not seeded replays. Inputs, not sampling, are fixed.
-- **Order:** a seeded global shuffle (`scheduleSeed` 20261003) with ABBA counterbalancing of arm order within each cell.
+- **Order:** a seeded global shuffle (`scheduleSeed` 20261003 for pilot-1, 20261008 for pilot-2) with ABBA counterbalancing of arm order within each cell.
 
 ### Measurement definitions
 
@@ -103,7 +118,10 @@ Supporting parameters:
 - Effect sizes and uncertainty: p95 ratio with interval, median paired latency difference with interval, terminal-rate difference with interval, and mean paired severity difference with interval. All use a percentile bootstrap with 2000 resamples (`bootstrapResamples`) and base seed 52 (`bootstrapSeed`) plus a per-statistic offset, so each interval draws its own resample stream: p95 ratio seed 52 (+0), median paired latency difference seed 53 (+1), terminal-rate difference seed 54 (+2), mean paired severity difference seed 55 (+3).
 - Severity rubric: minor = 1, major = 2, critical = 3. The score is the sum over escaped known defects, and a request with no accepted payload lets every known defect escape.
 - At least **2 blinded assessors**: `rubric-v1`, which is deterministic and blind by construction, plus one independent assessor scoring `blinded-assessment-packet.json`. Disagreements are retained, and adjudication takes the maximum severity, identically for both arms. `rubric-v1` reads every accepted payload through its cell's frozen parser (the reviewer v2 and standalone-successor v3 payload parsers, the judge and refutation verdict schemas), so it reads typed fields only; a v3 payload's findings are read through their drafts. It fails closed. If a blinded entry's case is not preregistered, its input is unresolved, its payload is refused by its cell's parser, or an escaped defect id is not declared by its case, the whole assessment is an error that names every such entry, and the `--pilot` run stops after retaining the key and packet without writing `rubric-v1.json`. `window.json` is closed (`endedAt`, `observations`) before the packet is derived, so such a window still records how it ended. A later decision then counts one assessor fewer, so escaped-defect severity reads as not measured. An unresolvable entry never counts as zero escapes.
-- Release precedence: any violation gives `blocked-guardrail-violated` (with design reconsideration). Otherwise any missing, not-measured or inconclusive result gives `incomplete-missing-measurement`. Only a complete, all-pass record with every measured cell on a capable route gives `done-allowed`; one capable cell never carries an unconstrained cell to done. The types make a "done" decision carrying a non-passing guardrail unrepresentable.
+- Release precedence: any violation gives `blocked-guardrail-violated` (with design reconsideration). Otherwise any missing, not-measured or inconclusive result gives `incomplete-missing-measurement`. Only a complete, all-pass record whose every measured cell the preregistered release policy releases gives `done-allowed`:
+  - Under `capable-route-required`, every measured cell must be on a capable route. One capable cell never carries an unconstrained cell to done.
+  - Under `per-route-engine-authoritative`, each cell is released on its own as `constrained` or `unconstrained-engine-authoritative`.
+  - The types make a "done" decision carrying a non-passing guardrail unrepresentable.
 
 This is a minimum operational pilot, not a statistical proof of universal non-regression.
 
@@ -124,10 +142,18 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 2. **Activate it through the normal path.** In Pi, run `/reload`, or fully restart Pi while preserving the session, so the loaded extension publishes the new content-addressed Runtime Revision handshake. Do not bypass the handshake: the mutating CLI refuses on skew, as described in `docs/operations.md` § "Pi reports runtime version skew".
 3. **Confirm loaded = staged.** Run the pilot from a shell inside that Pi session, where `LOOM_PI_EXTENSION_RUNTIME_REVISION` is published. The preflight then records `loadedRuntime: matches-staged`, and a mismatch blocks the window.
 4. **Confirm the launcher barrier.** `~/.pi/agent/extensions/subagent/rpc-launcher.ts` must export `runRpcAgent`. It is the dotfiles-owned launcher; override it with `--launcher <module>`.
-5. **Bring the route up** and check that `curl http://192.168.0.80:8000/v1/models` lists `glm-5.3-flash-spark-tp2-v14`.
-6. **Run the window** (hours; 816 child dispatches minimum):
-   `LOOM_RUN_MODEL_CALIBRATION=1 bun scripts/run-model-calibration.ts --pilot calibration/grammar-constrained-decoding/preregistration.json`
-   Observations are appended per sample to `observations.jsonl`, so an interrupted window keeps everything observed. `--preflight-only` records identity and reachability without dispatching.
+5. **Bring the route up.** The preflight probes it with the engine's own route probe: `httpRouteProbe` (`engine/src/utils/route-endpoint.ts`) observes an unauthenticated `GET {baseUrl}/models`, the pure `decideRouteReachability` (`engine/src/core/route-reachability.ts`) judges it, and `preflightRouteProbe` (`pilot-preflight.ts`) maps the result into the window's route fact:
+   - A 2xx model listing is recorded as `reachable` with `servedModels`. A listing without `glm-5.3-flash-spark-tp2-v14` blocks the window as `served-model-absent`.
+   - An authentication refusal (HTTP 401/403) is recorded as `reachable` with `servedModels: null`. The server answers, but its model list cannot be observed without credentials. Loom never resolves, sends or records a credential; Pi authenticates the inference itself. A null list records no `served-model-absent` block.
+   - Anything else is recorded as `unreachable` and blocks the window: a refused connection, a timeout, any other status, or a 2xx without a readable list.
+
+   The live vLLM currently answers `GET /models` with **HTTP 401**, so an unauthenticated `curl http://192.168.0.80:8000/v1/models` printing a 401 means the route is up. Confirm the served model with your own credentials outside Loom if needed.
+6. **Run the pilot-2 window** (hours; 816 child dispatches minimum):
+   `LOOM_RUN_MODEL_CALIBRATION=1 bun scripts/run-model-calibration.ts --pilot calibration/grammar-constrained-decoding/preregistration-gcd-ad11-pilot-2.json`
+   - Its windows land in `windows/gcd-ad11-pilot-2--<start>/` and are decided under `per-route-engine-authoritative`.
+   - Do not start a new window against `preregistration.json`. Pilot-1 is retained for its two windows under its original policy.
+   - Observations are appended per sample to `observations.jsonl`, so an interrupted window keeps everything observed.
+   - `--preflight-only` records identity and reachability without dispatching.
 7. **Blinded assessment.** An independent assessor scores `blinded-assessment-packet.json`, which shows blind ids only, and produces an assessment (`schemaVersion: 1`, `blinded: true`, a path-safe `assessorId`). Then run `bun scripts/run-model-calibration.ts --decide <window-dir> [--assessment <file>]`, which is offline and needs no opt-in.
    - Every assessment a decision reads is retained in the window. An `--assessment` file is copied to `assessments/<assessorId>.json` first. Re-submitting identical bytes does nothing, and a different assessment for an assessor already retained is refused, never overwritten.
    - `release-decision.json` is the current decision. Every decision, including the first, is also appended to `decision-log.jsonl`, so a re-decision can never erase an earlier verdict.
@@ -137,15 +163,16 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 
 | File | Role |
 |---|---|
-| `preregistration.json` | binding preregistration (content-addressed) |
+| `preregistration.json` | pilot-1 preregistration (content-addressed), release policy `capable-route-required`; binds the two retained windows |
+| `preregistration-gcd-ad11-pilot-2.json` | pilot-2 preregistration (content-addressed): pilot-1's workload under release policy `per-route-engine-authoritative`; binds every new window |
 | `workload-fixtures.json` | judge/refutation fixtures, v3 context, corpus pointer (content-addressed) |
 | `pilot-vocabulary.ts` | pure: the required cells, each read from the frozen emission-tool registry (key, kind, version and registry membership compile-checked), arms, severities, spec-fixed bounds, guardrails, schema primitives |
 | `pilot-statistics.ts` | pure: seeded PRNG, nearest-rank quantiles over +∞ samples, percentile bootstrap, JSON-safe quantile and interval records |
-| `pilot-preregistration.ts` | pure: preregistration parsing and the seeded ABBA paired schedule |
+| `pilot-preregistration.ts` | pure: preregistration parsing (including the release policy: v1 parses to `capable-route-required`, v2 states it explicitly) and the seeded ABBA paired schedule |
 | `pilot-observation.ts` | pure: per-arm attempt and sample parsing, sample terminals, retry attribution |
-| `pilot-preflight.ts` | pure: preflight facts parsing, the staged registry facts, the preflight decision |
+| `pilot-preflight.ts` | pure: preflight facts parsing, the staged registry facts, the engine route probe mapped into the route fact (`preflightRouteProbe`), the preflight decision |
 | `pilot-quality.ts` | pure: blinding key and assessment parsing, the paired escaped-defect comparison (AS-016) |
-| `pilot-core.ts` | pure: `evaluatePilot` — cell measurements, guardrails and the release decision |
+| `pilot-core.ts` | pure: `evaluatePilot` — cell measurements, guardrails and the release decision under the preregistered release policy |
 | `pilot-workload.ts` | pure: fixtures, case-input resolution (cell-indexed, each input carrying its case, refused before a window opens), the opaque `WindowInputs` (one builder that files each input under its own cell and case, so its `caseInput` lookup needs no re-check), matched prompt rendering |
 | `pilot-binding.ts` | pure: per-attempt request identity and the issued binding minted for it through the engine's one mint, its ingestion-path tag derived from the same producer kind as its refinement |
 | `pilot-corpus-loader.ts` | shell: the filesystem adapter of the window's lazy corpus port (`workloadCorpusLoader`); an unreadable or invalid corpus is a refusal naming the checkout-relative path |
@@ -159,7 +186,7 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 | `pilot-retention.test.ts` | retention rules and `recordWindow`'s wiring at the `WindowStore` and `ArmDispatch` ports (including the lazy corpus load), and re-decision of every retained window to its retained bytes |
 | `pilot-dispatch.test.ts` | transcript classification, and the live Pi adapter against a fake launcher, readiness client and `pi` executable |
 | `pilot-corpus-loader.test.ts` | the corpus adapter over a real directory: the retained corpus loads; a missing, non-JSON or invalid corpus is a refusal; nothing is read until the port is invoked |
-| `runner.test.ts` | CLI subprocess runs against an unreachable route (including an unreadable workload corpus, which a non-dispatching window never loads) |
+| `runner.test.ts` | CLI subprocess runs against an unreachable route (including an unreadable workload corpus, which a non-dispatching window never loads), and a pilot-2 `--preflight-only` run against a loopback server that answers 401 in its own process: the route is recorded as reachable with an unobservable served list |
 | `pilot-test-fixtures.ts` | the retained workload resolved by the production resolver, the `inputOf` lookup, sample builders and the fake route |
 | `../kernel.ts`, `../pi-json-stream.ts` | the Result kernel (plus the pilot's NonEmpty helper) and Pi's JSON event stream, shared with the corpus core |
 | `../corpus-calibration.ts` | pure core of the script's default (historical corpus) mode, tested in `../corpus-calibration.test.ts` |

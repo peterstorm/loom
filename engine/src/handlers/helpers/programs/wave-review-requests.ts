@@ -24,7 +24,6 @@ import {
 import { durableRefutationRequests, publicationResolver } from './durable-requests';
 import { failed } from './program-result';
 import { publishReviewInitialBatch } from './request-publication';
-import { observedReviewerIssueRoute } from './spawn-task';
 import { proceed, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 import { readWaveRequestContext, waveReviewContextTaskId } from './wave-review-context';
 
@@ -58,7 +57,6 @@ export function waveRequests(
       planFile: graph.plan_file,
       projectBoundary,
     }),
-    observedReviewerIssueRoute(),
   );
   if (!prepared.ok) throw new Error(prepared.error.message);
   return prepared.value;
@@ -83,9 +81,8 @@ export async function installWaveReviewRuns(
     planFile: batch.specCheckDocuments.plan.path,
     projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
   });
-  const issueRoute = observedReviewerIssueRoute();
   await manager.update((locked) => {
-    const next = installWaveReviewRunsTransition(locked, { registration, batch, workspaces, specCheckObservation, issueRoute });
+    const next = installWaveReviewRunsTransition(locked, { registration, batch, workspaces, specCheckObservation });
     if (!next.ok) throw new Error(next.error.message);
     return next.value;
   });

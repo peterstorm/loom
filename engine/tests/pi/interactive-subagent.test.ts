@@ -13,6 +13,8 @@ import {
 } from "../../../pi/interactive-subagent";
 
 const ROOT = join(import.meta.dirname, "../../..");
+/** The binding the catalog declares for every Pi Agent: Pi runs the one local route. */
+const DECLARED_LOCAL_BINDING = "desktop-vllm/glm-5.3-flash-spark-tp2-v14:high";
 const temporaries: string[] = [];
 
 afterEach(() => {
@@ -114,7 +116,7 @@ describe("interactive Pi subagent shell", () => {
       "--no-extensions",
       "--extension", join(ROOT, "pi", "extension.ts"),
       "--extension", join(ROOT, "pi", "ask-user-question.ts"),
-      "--model", "openai-codex/gpt-5.6-sol:high",
+      "--model", DECLARED_LOCAL_BINDING,
     ]));
     const toolFlag = invocation?.args.indexOf("--tools") ?? -1;
     expect(toolFlag).toBeGreaterThanOrEqual(0);
@@ -191,7 +193,7 @@ describe("interactive Pi subagent shell", () => {
       requestedModel: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
       routing: {
         decision: "override",
-        declared: "openai-codex/gpt-5.6-sol:high",
+        declared: DECLARED_LOCAL_BINDING,
         effective: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
       },
     });

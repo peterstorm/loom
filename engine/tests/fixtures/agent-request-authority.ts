@@ -22,7 +22,7 @@ export function agentRequestAuthority(
     attempt: 1,
     modelProfile: "general-review",
     harnessBinding: {
-      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+      pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
       claude: { harness: "claude-code", model: "sonnet" },
     },
     requiredSkill: null,

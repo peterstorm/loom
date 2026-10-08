@@ -4,7 +4,7 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { isIssuableProfile, lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolicy, resolveModelProfile, type ClaudeCodeBinding, type LlmProfile, type LlmProfileId, type LoomAgentName, type PiBinding } from '../model-profiles';
+import { parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type LoomAgentName, type PiBinding, type RecordedLlmProfileId } from '../model-profiles';
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
@@ -18,7 +18,8 @@ export type AgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAtte
   program: OrchestrationProgram;
   role: LoomAgentName;
   attempt: Attempt;
-  modelProfile: LlmProfileId;
+  /** The profile the request was issued under; a stored request may name a retired one. */
+  modelProfile: RecordedLlmProfileId;
   harnessBinding: ExactHarnessBinding;
   requiredSkill: string | null;
   contextDigest: ContextDigest;
@@ -102,6 +103,27 @@ export function exactBindingViolations(
   return violations;
 }
 
+/**
+ * Why a recorded Pi binding is none of the bindings its profile admits. With
+ * one admissible binding the per-field exactness violations name the field;
+ * with several, a well-formed binding is reported once against the whole set.
+ */
+function recordedPiBindingViolations(
+  raw: unknown,
+  profileId: RecordedLlmProfileId,
+  allowed: readonly [PiBinding, ...PiBinding[]],
+): readonly AgentRequestAuthorityViolation[] {
+  if (allowed.length === 1) return exactBindingViolations(raw, "harnessBinding.pi", allowed[0]);
+  const parsed = readExactDataRecord(raw, PI_BINDING_KEYS, "harnessBinding.pi");
+  if (!parsed.ok) return [authorityBoundaryViolation(parsed.error, "harnessBinding.pi", "model-binding-mismatch")];
+  return [violation(
+    "model-binding-mismatch",
+    "harnessBinding.pi",
+    `harnessBinding.pi must be a binding profile '${profileId}' has issued: ${allowed.map(piModelPattern).join(", ")}`,
+  )];
+}
+
+
 export function samePiBinding(raw: unknown, expected: PiBinding): boolean {
   const parsed = readExactDataRecord(raw, PI_BINDING_KEYS, "Pi binding");
   return parsed.ok && parsed.value.harness === expected.harness &&
@@ -165,15 +187,15 @@ export const AGENT_REQUEST_KEYS = [
  * How a request authority reached this parser.
  *
  * "issue"  — the authority is being CONSTRUCTED now from the live catalog.
- *            The profile must satisfy the catalog's one eligibility rule
- *            (`isIssuableProfile`): only reviewer roles in Wave/standalone
- *            review may elect the qualified-local alternative; all other
- *            roles must use their assigned default profile.
+ *            The role must carry its catalog profile, and the binding must be
+ *            that profile's current lowering.
  * "stored" — the authority is being READ BACK from an immutable run artifact,
  *            event, receipt, or publication record. It is HISTORY: "issued
  *            under profile X, ran on model Y." Re-checking history against
  *            today's policy is a category error — promoting an agent to a new
- *            profile would otherwise strand every run already on disk.
+ *            profile, retiring a profile, or retargeting one would otherwise
+ *            strand every run already on disk. The binding must still be one
+ *            the recorded profile has issued (`recordedProfileBindings`).
  */
 export type AgentRequestAuthorityOrigin = "issue" | "stored";
 
@@ -203,8 +225,10 @@ function parseAgentRequestAuthorityInMode(
   const role: DomainResult<LoomAgentName, Readonly<{ message: string }>> = typeof fields.role === "string"
     ? parseAgentName(fields.role)
     : failure(canonicalRecord({ message: `agent role must be a string; received ${describeUnknown(fields.role)}` }));
-  const profileId: DomainResult<LlmProfileId, Readonly<{ message: string }>> = typeof fields.modelProfile === "string"
-    ? parseLlmProfileId(fields.modelProfile)
+  // An issued authority names a profile the catalog issues today; a stored one
+  // may name a profile the catalog has since retired.
+  const profileId: DomainResult<RecordedLlmProfileId, Readonly<{ message: string }>> = typeof fields.modelProfile === "string"
+    ? (origin === "issue" ? parseLlmProfileId : parseRecordedLlmProfileId)(fields.modelProfile)
     : failure(canonicalRecord({ message: `model profile must be a string; received ${describeUnknown(fields.modelProfile)}` }));
 
   if (!runId.ok) violations.push(violation("invalid-agent-request-field", "runId", runId.error.message));
@@ -227,9 +251,6 @@ function parseAgentRequestAuthorityInMode(
 
   // A stored authority carries its own profile and Skill as recorded facts, so
   // neither role -> profile nor role -> Skill is re-derived from today's tables.
-  // The profile -> harnessBinding exactness check below still runs: it resolves
-  // the STORED profile id, so it stays a self-consistency (tamper) check rather
-  // than a drift check.
   let policyResolved = origin === "stored";
   if (origin === "issue" && role.ok) {
     const policy = resolveAgentPolicy(role.value);
@@ -241,11 +262,11 @@ function parseAgentRequestAuthorityInMode(
       ));
     } else {
       policyResolved = true;
-      if (profileId.ok && !isIssuableProfile(policy.value, program, profileId.value)) {
+      if (profileId.ok && profileId.value !== policy.value.profile) {
         violations.push(violation(
           "model-policy-mismatch",
           "modelProfile",
-          `role '${role.value}' requires profile '${policy.value.profile}' (or its qualified-local reviewer alternative), received '${profileId.value}'`,
+          `role '${role.value}' requires profile '${policy.value.profile}', received '${profileId.value}'`,
         ));
       }
       if (skill.ok) {
@@ -261,32 +282,28 @@ function parseAgentRequestAuthorityInMode(
     }
   }
 
-  let resolvedProfile: LlmProfile | null = null;
-  if (profileId.ok) {
-    const profile = resolveModelProfile(profileId.value);
-    if (!profile.ok) {
-      violations.push(violation(
-        "policy-resolution-failed",
-        "modelProfile",
-        `cannot resolve parsed model profile '${profileId.value}': ${profile.error.message}`,
-      ));
-    } else {
-      resolvedProfile = profile.value;
-    }
-  }
-
   const binding = readExactDataRecord(fields.harnessBinding, ["pi", "claude"], "harnessBinding");
   if (!binding.ok) {
     violations.push(authorityBoundaryViolation(binding.error, "harnessBinding", "model-binding-mismatch"));
   }
 
-  let expectedPi: PiBinding | null = null;
-  let expectedClaude: ClaudeCodeBinding | null = null;
-  if (resolvedProfile !== null) {
-    expectedPi = lowerModelProfile(resolvedProfile, "pi");
-    expectedClaude = lowerModelProfile(resolvedProfile, "claude-code");
-    violations.push(...exactBindingViolations(binding.ok ? binding.value.pi : undefined, "harnessBinding.pi", expectedPi));
-    violations.push(...exactBindingViolations(binding.ok ? binding.value.claude : undefined, "harnessBinding.claude", expectedClaude));
+  // The profile -> harnessBinding check resolves the RECORDED profile id, so it
+  // is a self-consistency (tamper) check, never a drift check: an issued
+  // authority must carry the profile's current binding, a stored one any
+  // binding that profile has issued.
+  let resolvedBinding: ExactHarnessBinding | null = null;
+  if (profileId.ok) {
+    const recorded = recordedProfileBindings(profileId.value);
+    const allowedPi = origin === "issue" ? [recorded.pi[0]] as const : recorded.pi;
+    const rawPi = binding.ok ? binding.value.pi : undefined;
+    const rawClaude = binding.ok ? binding.value.claude : undefined;
+    const matchedPi = allowedPi.find((candidate) => samePiBinding(rawPi, candidate));
+    const piViolations = matchedPi === undefined ? recordedPiBindingViolations(rawPi, profileId.value, allowedPi) : [];
+    const claudeViolations = exactBindingViolations(rawClaude, "harnessBinding.claude", recorded.claude);
+    violations.push(...piViolations, ...claudeViolations);
+    if (matchedPi !== undefined && claudeViolations.length === 0) {
+      resolvedBinding = canonicalHarnessBinding(matchedPi, recorded.claude);
+    }
   }
 
   const head = violations[0];
@@ -299,8 +316,8 @@ function parseAgentRequestAuthorityInMode(
 
   if (
     !runId.ok || !requestId.ok || !slotId.ok || !contextDigest.ok || !outputSlot.ok ||
-    !attempt.ok || !skill.ok || !role.ok || !profileId.ok || !policyResolved || resolvedProfile === null ||
-    program === null || expectedPi === null || expectedClaude === null
+    !attempt.ok || !skill.ok || !role.ok || !profileId.ok || !policyResolved ||
+    program === null || resolvedBinding === null
   ) {
     return failure(canonicalRecord({
       kind: "invalid-agent-request-authority",
@@ -318,7 +335,7 @@ function parseAgentRequestAuthorityInMode(
     role: role.value,
     attempt: attempt.value,
     modelProfile: profileId.value,
-    harnessBinding: canonicalHarnessBinding(expectedPi, expectedClaude),
+    harnessBinding: resolvedBinding,
     requiredSkill: origin === "stored" ? skill.value : AGENT_REQUIRED_SKILLS[role.value],
     contextDigest: contextDigest.value,
     outputSlot: outputSlot.value,
@@ -460,12 +477,19 @@ export function authorityPairMismatches(
   return mismatches;
 }
 
+/**
+ * Parse one roster slot's attempt pair. A roster is read as RECORDED: each
+ * attempt parses in "stored" mode, so a roster issued under a since-retired
+ * profile or binding still parses. The check against today's catalog happens
+ * once, where each request is minted (`parseAgentRequestAuthority`), never
+ * again when a roster is re-read from a checkpoint or registration.
+ */
 export function parseAgentRosterSlot(
   rawFirst: unknown,
   rawRetry: unknown,
 ): DomainResult<AgentRosterSlot, AgentRosterSlotError> {
-  const first = parseAgentRequestAuthorityForAttempt(rawFirst, 1);
-  const retry = parseAgentRequestAuthorityForAttempt(rawRetry, 2);
+  const first = parseAgentRequestAuthorityForAttempt(rawFirst, 1, "stored");
+  const retry = parseAgentRequestAuthorityForAttempt(rawRetry, 2, "stored");
   const violations: RosterViolation[] = [];
   if (!first.ok) {
     violations.push(canonicalRecord({

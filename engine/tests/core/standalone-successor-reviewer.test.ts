@@ -51,13 +51,13 @@ function fixture(role = "code-reviewer", attempt: 1 | 2 = 1) {
 
 /** The successor's issued v3 binding, derived exactly as production derives
  *  it: the durable v3 registration's protocol projection through the core
- *  reviewer-route derivation, on the qualified Pi route with a Pi parent. */
+ *  reviewer-route derivation, with a Pi parent. The request is issued under
+ *  its catalog profile, whose Pi route IS the qualified emission route, so no
+ *  binding override is needed to reach the emission arm. */
 function successorBinding(authority: AgentRequestAuthority): IssuedEmissionBindingOf<"reviewer-payload"> {
   const protocol = value(projectRegisteredReviewerProtocol({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3 }));
   if (protocol === null) throw new Error("fixture registration must project a reviewer protocol");
-  const qualified = { ...authority, harnessBinding: { ...authority.harnessBinding,
-    pi: lowerModelProfile(value(resolveModelProfile("qualified-local-review")), "pi") } } as AgentRequestAuthority;
-  const route = issuedReviewerEmissionRoute(protocol, qualified, true);
+  const route = issuedReviewerEmissionRoute(protocol, authority, true);
   if (route.kind !== "emission") throw new Error(`fixture successor route must be emission, got ${route.kind}`);
   return route.binding;
 }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withEnvOverlay, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
+import { claudeCodeParentEnvironment } from "../../../fixtures/issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
 import { standaloneOriginReference } from "../../../../src/core/standalone-finding-origin";
 import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-review";
@@ -51,8 +51,11 @@ function project() {
   writeFileSync(join(root, "README.md"), "# Reviewed\n");
   return root;
 }
-async function invoke(root: string, args: readonly string[], input = "", skew = false) {
-  const env = fixturePiEnvironment(root);
+/** The harness that parents the facade CLI child: a Pi parent issues reviewers
+ *  the emission route; a Claude Code parent keeps them extraction-only. */
+type FacadeParent = "pi" | "claude-code";
+async function invoke(root: string, args: readonly string[], input = "", skew = false, parent: FacadeParent = "pi") {
+  const env = parent === "pi" ? fixturePiEnvironment(root) : claudeCodeParentEnvironment(root);
   if (skew) env.LOOM_PI_EXTENSION_RUNTIME_REVISION = `sha256:${"0".repeat(64)}`;
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: root, env });
@@ -66,19 +69,18 @@ async function invoke(root: string, args: readonly string[], input = "", skew = 
     child.stdin.end(input);
   });
 }
-async function command(root: string, args: readonly string[], raw = "") {
-  const result = await invoke(root, args, raw);
+async function command(root: string, args: readonly string[], raw = "", parent: FacadeParent = "pi") {
+  const result = await invoke(root, args, raw, false, parent);
   expect(result.code, result.stderr).toBe(0);
   return JSON.parse(result.stdout) as Action;
 }
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];
-/** Route-election pinning for the source run's issuing CLI child: the arms of the
- *  route-agnostic disposition control pin explicit routes, and the ambient
- *  session's qualified-local handshake must not leak into either. */
-const sourceFixture = (root: string, environment: EnvironmentOverlay = {}) => withEnvOverlay(environment, () => sourceFixturePinned(root));
-
-async function sourceFixturePinned(root: string) {
-  const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")], JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
+/** The source standalone review, issued and submitted by CLI children under
+ *  `parent`: the route-agnostic disposition control runs one source from each
+ *  parent harness, so one is extraction-only and the other emits. */
+async function sourceFixture(root: string, parent: FacadeParent = "pi") {
+  const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")],
+    JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }), parent);
   const requests: readonly { authority: AgentRequestAuthority; task?: string }[] = initial.requests;
   for (const [index, { authority }] of requests.entries()) {
     await command(root, ["submit", ...flags(root, "source"), "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "1",
@@ -86,7 +88,7 @@ async function sourceFixturePinned(root: string) {
       JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: index === 0 ? [
         { severity: "advisory", file: "README.md", line: 1, claim: "First advisory", reason: "Nonblocking clarity" },
         { severity: "advisory", file: "README.md", line: 1, claim: "Second advisory", reason: "Nonblocking organization" },
-      ] : [] }));
+      ] : [] }), parent);
   }
   const locator = join(root, "runs", "source");
   const source = { locator, runId: "source", resultDigest: hash(readFileSync(join(locator, "result.json"))) };
@@ -438,23 +440,22 @@ describe.sequential("admitted standalone advisory publication, correction and re
   });
 
   it("keeps the disposition publication route-agnostic: finding inventory and policy entries are identical regardless of the source run's emission route (FR-012)", async () => {
-    // The outer Loom session may run under the qualified-local model, so both
-    // arms pin their route explicitly: the catalog arm DELETES the election
-    // variables, the emission arm pins the qualified local route.
-    const catalogRoot = project();
-    const qualifiedRoot = project();
-    const catalog = await sourceFixture(catalogRoot, CATALOG_ROUTE_ENV);
-    const qualified = await sourceFixture(qualifiedRoot, QUALIFIED_ROUTE_ENV);
+    // The route is decided by the parent harness alone: one source run is
+    // issued from Claude Code (extraction-only), the other from Pi (emission).
+    const extractionRoot = project();
+    const emissionRoot = project();
+    const extraction = await sourceFixture(extractionRoot, "claude-code");
+    const emission = await sourceFixture(emissionRoot, "pi");
 
-    // The control is genuinely exercised: the qualified source run issues
-    // descriptors and tool-primary instructions, the catalog run does not.
+    // The control is genuinely exercised: the Pi-parented source run issues
+    // descriptors and tool-primary instructions, the Claude Code run does not.
     const tasksOf = (fixture: Awaited<ReturnType<typeof sourceFixture>>) =>
       (fixture.initial.requests as readonly { authority: AgentRequestAuthority; task: string }[]).map(({ task }) => task);
-    for (const task of tasksOf(qualified)) {
+    for (const task of tasksOf(emission)) {
       expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
       expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
     }
-    for (const task of tasksOf(catalog)) {
+    for (const task of tasksOf(extraction)) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
       expect(parseEmissionDescriptor(task).kind).toBe("absent");
     }
@@ -470,16 +471,16 @@ describe.sequential("admitted standalone advisory publication, correction and re
       JSON.stringify(value).split(fixture.source.locator).join("<SOURCE>").split(fixture.source.resultDigest).join("<RESULT>");
     const policyDecisions = (record: { entries: readonly { origin: unknown; decision: unknown; reason: unknown }[] }) =>
       JSON.stringify(record.entries.map(({ origin: _origin, ...decision }) => decision));
-    expect(normalizeSource(qualified.lineage.inventory, qualified)).toBe(normalizeSource(catalog.lineage.inventory, catalog));
-    expect(policyDecisions(qualified.input.record)).toBe(policyDecisions(catalog.input.record));
-    expect(qualified.input.record.revision).toEqual(catalog.input.record.revision);
-    expect(qualified.input.record.provenance).toBe(catalog.input.record.provenance);
-    const catalogDone = await command(catalogRoot, ["start", "standalone-disposition", ...flags(catalogRoot, "policy")], JSON.stringify(catalog.input));
-    const qualifiedDone = await command(qualifiedRoot, ["start", "standalone-disposition", ...flags(qualifiedRoot, "policy")], JSON.stringify(qualified.input));
-    for (const done of [catalogDone, qualifiedDone]) {
+    expect(normalizeSource(emission.lineage.inventory, emission)).toBe(normalizeSource(extraction.lineage.inventory, extraction));
+    expect(policyDecisions(emission.input.record)).toBe(policyDecisions(extraction.input.record));
+    expect(emission.input.record.revision).toEqual(extraction.input.record.revision);
+    expect(emission.input.record.provenance).toBe(extraction.input.record.provenance);
+    const extractionDone = await command(extractionRoot, ["start", "standalone-disposition", ...flags(extractionRoot, "policy")], JSON.stringify(extraction.input));
+    const emissionDone = await command(emissionRoot, ["start", "standalone-disposition", ...flags(emissionRoot, "policy")], JSON.stringify(emission.input));
+    for (const done of [extractionDone, emissionDone]) {
       expect(done).toMatchObject({ kind: "done", outcome: { kind: "standalone-disposition-published", provenance: "DECLARED" } });
     }
-    expect(policyDecisions(qualifiedDone.outcome.record)).toBe(policyDecisions(catalogDone.outcome.record));
-    expect(qualifiedDone.outcome.record.revision).toEqual(catalogDone.outcome.record.revision);
+    expect(policyDecisions(emissionDone.outcome.record)).toBe(policyDecisions(extractionDone.outcome.record));
+    expect(emissionDone.outcome.record.revision).toEqual(extractionDone.outcome.record.revision);
   });
 });

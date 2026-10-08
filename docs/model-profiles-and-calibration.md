@@ -17,11 +17,13 @@ Current profile ids:
 - `architecture-finalize`
 - `general-review`
 - `focused-review`
-- `qualified-local-review` (issue-time alternative for Wave/standalone reviewer payloads only)
 - `panel-design`
 - `panel-judge`
 - `refutation`
 - `mechanical`
+- `spec-check-review`
+
+Pi runs local models only: every profile lowers its Pi binding to the one local route (`DESKTOP_VLLM_ROUTE`, `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high`), so profiles differ only in their Claude Code model. The retired profile `qualified-local-review` and the retired cloud Pi targets (`openai-codex`, `github-copilot`) survive only as history: a stored request authority issued under them still parses, against exactly the bindings each profile has issued (`recordedProfileBindings`). See [ADR-0023](adr/ADR-0023-pi-runs-local-only-and-releases-per-route.md).
 
 Concrete targets are intentionally source-controlled in `LLM_PROFILES`; consult that catalog rather than copying a table into long-lived docs.
 
@@ -40,13 +42,21 @@ There is no implicit profile fallback. Missing Agent, profile, harness, or front
 
 ### Pi launcher routing
 
-The catalog defines the requested Pi binding. New Wave/standalone reviewer issuance explicitly selects `qualified-local-review` only when the Pi parent is the exact `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high` route; a cloud, different local, or non-Pi parent uses the Agent's default catalog profile. Spec-check, Refutation Panel, and implementation roles never elect this alternative. That eligibility rule has one owner, `isIssuableProfile` in `engine/src/core/model-profiles.ts`: the reviewer issuer elects through it and the issue-mode request parser validates through it, so what is issued and what is accepted cannot drift. Refutation verifier requests resolve their profile and both bindings from the catalog entry of `review-verifier-agent`. A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents, but cannot promote an already issued cloud request or reinterpret its frozen profile. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
+The catalog defines the requested Pi binding, and every role is issued under its catalog profile; the parent's model never changes issuance. A request is checked against today's catalog once, where it is minted (`parseAgentRequestAuthority`); rosters re-read from checkpoints and registrations parse their attempts as recorded history. Refutation verifier requests resolve their profile and both bindings from the catalog entry of `review-verifier-agent`. A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents, but cannot reinterpret an issued request's frozen profile or binding. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
 
 ### Emission routes and qualification
 
-The frozen emission tools are issued only on an explicitly qualified route. The engine freezes the qualified route as module-local policy data (`QUALIFIED_EMISSION_ROUTE` in `engine/src/core/issued-emission-capability.ts`, naming the catalog's single route owner `DESKTOP_VLLM_ROUTE`): provider `desktop-vllm`, served model `glm-5.3-flash-spark-tp2-v14`. A request issued on that exact Pi route, for a producer kind/version the frozen registry carries, is emission-enabled; every other route — cloud, a different local model, or a non-Pi parent — is issued extraction-only, with the reason recorded on the issued capability. Neither callers nor ambient parent state can choose an enabled route. Once a request is issued emission-enabled, a launcher or child that cannot honor it is refused before any model request, never silently degraded to an ordinary child (see [Pi usage](pi-usage.md#emission-activation-readiness-errors-and-retry-budget)).
+The frozen emission tools are issued only on an explicitly qualified route. The engine freezes the qualified route as module-local policy data (`QUALIFIED_EMISSION_ROUTE` in `engine/src/core/issued-emission-capability.ts`, naming the catalog's single route owner `DESKTOP_VLLM_ROUTE`): provider `desktop-vllm`, served model `glm-5.3-flash-spark-tp2-v14`. Since every catalog profile lowers to that route, a request issued under a Pi parent, for a producer kind/version the frozen registry carries, is emission-enabled; a Claude Code parent, a stored request on a retired route, or a launcher-routed different local model is extraction-only, with the reason recorded on the issued capability. Neither callers nor ambient parent state can choose an enabled route. Once a request is issued emission-enabled, a launcher or child that cannot honor it is refused before any model request, never silently degraded to an ordinary child (see [Pi usage](pi-usage.md#emission-activation-readiness-errors-and-retry-budget)).
 
 Activation is conjunctive and each condition is checked in its own layer: the issued request must name a producer kind the Agent Catalog authorizes for that Agent, its Pi binding must be the exact qualified route, the installed launcher must expose the `loom:subagent-launch:v2` port, and the child must pass its readiness barrier. Qualification alone enables nothing — it only makes issuance on that route possible.
+
+### Route reachability (fail closed)
+
+Before a Pi parent's facade CLI emits a spawn batch, each distinct route named by the batch's frozen Pi bindings must answer `GET {baseUrl}/models`, where `baseUrl` comes from Pi's `models.json` in the active agent directory. A refused connection, timeout, error status or a listing without the model refuses the spawn with the route, URL and reason; a provider without an endpoint is `unconfigured`. There is no fallback route. Nothing is published to the session, so `helper orchestration resume` re-emits the same batch once the route answers. An authentication refusal (HTTP 401/403) counts as reachable: Loom reads only `baseUrl` and never resolves or sends credentials; Pi authenticates the inference itself.
+
+### Release decision (AD-11, per route)
+
+The local route is qualified *unconstrained emission*: vLLM accepts the frozen schemas but does not enforce them, so the engine validates every payload. Under the `per-route-engine-authoritative` release policy (preregistration `gcd-ad11-pilot-2`), a cell on that route is released as *unconstrained emission, engine-authoritative* once its calibration window is complete and the latency (AS-015) and escaped-defect (AS-016) guardrails pass; AS-004 does not apply. See `calibration/grammar-constrained-decoding/README.md`.
 
 Route classes (exact vocabulary):
 

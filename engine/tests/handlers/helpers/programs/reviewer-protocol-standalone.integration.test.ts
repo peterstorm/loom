@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildContextPacket, encodeByteSection } from "../../../../src/core/context-packets";
 import { captureKey } from "../../../../src/core/harness-capture";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
+import { DESKTOP_VLLM_ROUTE, lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
 import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
@@ -29,12 +29,8 @@ import { startNativeLegacyReview } from "../../../fixtures/standalone-native-his
 import { readSessionRunBindings } from "../../../../src/orchestration/session-run-bindings";
 import { frozenDiffReaderPages } from "../../../fixtures/read-coverage";
 import { gitResult, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
-import {
-  CATALOG_ROUTE_ENV,
-  QUALIFIED_ROUTE_ENV,
-  withEnvOverlay,
-  type EnvironmentOverlay,
-} from "../../../fixtures/issue-route-env";
+import { claudeCodeParentEnvironment, withEnvOverlay } from "../../../fixtures/issue-route-env";
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
 import { normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
 
@@ -67,12 +63,15 @@ function project() {
 }
 
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[] }>;
+/** The harness that parents the facade CLI child: a Pi parent issues reviewers
+ *  the emission route; a Claude Code parent keeps them extraction-only. */
+type FacadeParent = "pi" | "claude-code";
 /** Child-only real runtime admission. No parent environment or live worktree mutation. */
-async function runCli(root: string, args: readonly string[], stdin = ""): Promise<Action> {
+async function runCli(root: string, args: readonly string[], stdin = "", parent: FacadeParent = "pi"): Promise<Action> {
   const result = await new Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>>((resolve, reject) => {
     const child = spawn("bun", [cli, "helper", "orchestration", ...args], {
       cwd: root,
-      env: fixturePiEnvironment(root),
+      env: parent === "pi" ? fixturePiEnvironment(root) : claudeCodeParentEnvironment(root),
     });
     let stdout = "";
     let stderr = "";
@@ -209,7 +208,17 @@ describe("standalone registered protocol delivery and publication", () => {
     const rejected = (await submit(p.root, handle, requests[0]!.authority, "CRITICAL_COUNT: 0\nADVISORY_COUNT: 0"));
     const retry = rejected.requests![0]!;
     expect(retry.authority.attempt).toBe(2);
-    expect(retry.task).toContain("unchanged reviewer-payload-schema");
+    // Under the Pi parent the retry keeps the emission route: its final
+    // attempt closes with the fresh-budget tool-primary instruction its own
+    // descriptor names — never the extraction wording or the archived v1 rules.
+    const retryDescriptor = parseEmissionDescriptor(retry.task);
+    if (retryDescriptor.kind !== "issued") throw new Error("a Pi-parented current standalone retry must carry an issued descriptor");
+    expect(retryDescriptor).toMatchObject({ contextDigest: retry.authority.contextDigest,
+      binding: { requestId: retry.authority.requestId, version: "v2" } });
+    expect(retry.task).toContain("Your previous attempt was rejected by the engine's admission check.");
+    expect(retry.task).toContain(`This is your final attempt. ${reviewerRetryInstruction({ kind: "emission",
+      binding: retryDescriptor.binding, contextDigest: retryDescriptor.contextDigest })}`);
+    expect(retry.task).not.toContain(REVIEWER_EXTRACTION_RETRY_INSTRUCTION);
     expect(retry.task).not.toContain("End with a `### Machine Summary`");
     expect((await resume(p.root, handle)).requests).toEqual(rejected.requests);
     expect((await submit(p.root, handle, retry.authority, currentEmpty)).kind).toBe("done");
@@ -332,7 +341,7 @@ describe("standalone registered protocol delivery and publication", () => {
 // ---------------------------------------------------------------------------
 // Issued emission route controls on the real standalone program path (T6):
 // FR-012 issuance joins retained regardless of emission-tool availability,
-// and the archived v1 contract stays extraction-only under a qualified parent.
+// and the archived v1 contract stays extraction-only under a Pi parent.
 // ---------------------------------------------------------------------------
 
 describe("the issued emission route on the standalone program path (T6)", () => {
@@ -341,16 +350,25 @@ describe("the issued emission route on the standalone program path (T6)", () => 
     // standalone-frozen-source section embeds it, so the packet digests are
     // byte-comparable across routes only when the fixture commits are
     // content-identical (fixed author/committer timestamps, identical trees).
-    const startRun = async (environment: EnvironmentOverlay) => withEnvOverlay({ ...PINNED_COMMIT_DATES, ...environment }, async () => {
+    // The route is decided by the parent harness alone: the same review
+    // started from Claude Code (extraction-only) and from Pi (emission).
+    const startRun = async (parent: FacadeParent) => withEnvOverlay(PINNED_COMMIT_DATES, async () => {
       const p = project();
       const initial = await runCli(p.root, ["start", "standalone-review", "--runs-root", p.runsRoot, "--run", "run.route"],
-        JSON.stringify({ kind: "all", files: p.scope, dryRun: false }));
+        JSON.stringify({ kind: "all", files: p.scope, dryRun: false }), parent);
       return { p, requests: initial.requests! };
     });
-    const extraction = await startRun(CATALOG_ROUTE_ENV);
-    const emission = await startRun(QUALIFIED_ROUTE_ENV);
-    expect(extraction.requests.map(({ authority }) => authority.modelProfile))
-      .not.toEqual(emission.requests.map(({ authority }) => authority.modelProfile));
+    const extraction = await startRun("claude-code");
+    const emission = await startRun("pi");
+
+    // Issuance is parent-independent: every reviewer carries its catalog
+    // profile and the identical frozen binding on both routes.
+    const issuance = ({ authority }: { authority: AgentRequestAuthority }) => ({ role: authority.role,
+      modelProfile: authority.modelProfile, harnessBinding: authority.harnessBinding, requiredSkill: authority.requiredSkill });
+    expect(emission.requests.map(issuance)).toEqual(extraction.requests.map(issuance));
+    for (const { authority } of emission.requests) {
+      expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
+    }
 
     // The reserved request structure and frozen packets are route-independent.
     expect(emission.requests.map(({ authority }) => [authority.requestId, authority.slotId, authority.role, authority.attempt,
@@ -374,7 +392,7 @@ describe("the issued emission route on the standalone program path (T6)", () => 
       const descriptor = parseEmissionDescriptor(emissionTask);
       expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
         binding: { requestId: emissionRequest.authority.requestId, version: "v2" } });
-      if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+      if (descriptor.kind !== "issued") throw new Error("a Pi-parented reviewer must mint an issued descriptor");
       expect(withoutEmissionRouteDelta(emissionTask, descriptor.binding, descriptor.contextDigest)).toBe(extractionTask);
       expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
 
@@ -385,7 +403,7 @@ describe("the issued emission route on the standalone program path (T6)", () => 
     }
   }, 120_000);
 
-  it("keeps the archived v1 contract extraction-only and byte-identical under a qualified emission-capable parent (AD-7)", async () => {
+  it("keeps the archived v1 contract extraction-only under a Pi parent on the emission-qualified route (AD-7)", async () => {
     const legacyProject = () => {
       const p = project();
       mkdirSync(join(p.root, "src"), { recursive: true });
@@ -395,40 +413,26 @@ describe("the issued emission route on the standalone program path (T6)", () => 
       git(p.root, ["commit", "-qm", "fixture legacy scope"]);
       return p;
     };
-    const runLegacy = async (issueRoute: "catalog" | "qualified-local") => {
-      const p = legacyProject();
-      return withFixturePiSession(p.root, async () => {
-        const handle = value(createRunDirectory(p.runsRoot, "run.legacy"));
-        const started = await startNativeLegacyReview(handle, issueRoute);
-        if (!started.ok) throw new Error("fixture legacy issuance failed");
-        const action = started.action as Action;
-        return { p, handle, requests: action.requests! };
-      });
-    };
-    const catalog = await runLegacy("catalog");
-    const qualified = await runLegacy("qualified-local");
+    const p = legacyProject();
+    const legacy = await withFixturePiSession(p.root, async () => {
+      const handle = value(createRunDirectory(p.runsRoot, "run.legacy"));
+      const started = await startNativeLegacyReview(handle);
+      if (!started.ok) throw new Error("fixture legacy issuance failed");
+      return (started.action as Action).requests!;
+    });
 
-    // The control is genuinely exercised: the qualified route elects the
-    // qualified-local reviewer profile, the catalog route does not.
-    expect(qualified.requests.map(({ authority }) => authority.modelProfile))
-      .toEqual(catalog.requests.map(() => "qualified-local-review"));
-    expect(catalog.requests.map(({ authority }) => authority.modelProfile))
-      .not.toEqual(qualified.requests.map(({ authority }) => authority.modelProfile));
+    // The control is genuinely exercised: every archived v1 request is issued
+    // on the emission-qualified local route under a Pi parent.
+    const qualifiedRoute = { harness: "pi", ...DESKTOP_VLLM_ROUTE, thinking: "high" };
+    expect(legacy.map(({ authority }) => authority.harnessBinding.pi)).toEqual(legacy.map(() => qualifiedRoute));
 
-    for (const [catalogRequest, qualifiedRequest] of catalog.requests.map((request, index) => [request, qualified.requests[index]!] as const)) {
-      // AD-7: extraction-only and archived issued contracts keep their exact
-      // final-message delivery; no tool is advertised on either route.
-      expectLegacyDelivery(Object.freeze({ kind: "spawn-batch", requests: Object.freeze([catalogRequest]) }));
-      expectLegacyDelivery(Object.freeze({ kind: "spawn-batch", requests: Object.freeze([qualifiedRequest]) }));
-      expect(catalogRequest.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-      expect(qualifiedRequest.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-      expect(qualifiedRequest.task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
-      expect(parseEmissionDescriptor(qualifiedRequest.task).kind).toBe("absent");
-      // The archived v1 route is extraction-only BY ISSUANCE, so even a
-      // qualified parent renders byte-identical tasks and packet bytes.
-      expect(normalizeRunRoot(qualifiedRequest.task, qualified.p.root)).toBe(normalizeRunRoot(catalogRequest.task, catalog.p.root));
-      expect(readFileSync(join(qualified.handle.runDirectory, "contexts", `${qualifiedRequest.authority.contextDigest}.json`)))
-        .toEqual(readFileSync(join(catalog.handle.runDirectory, "contexts", `${catalogRequest.authority.contextDigest}.json`)));
+    for (const request of legacy) {
+      // AD-7: the archived issued contract keeps its exact final-message
+      // delivery; no tool is advertised although the route could emit.
+      expectLegacyDelivery(Object.freeze({ kind: "spawn-batch", requests: Object.freeze([request]) }));
+      expect(request.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      expect(request.task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+      expect(parseEmissionDescriptor(request.task).kind).toBe("absent");
     }
   }, 120_000);
 });

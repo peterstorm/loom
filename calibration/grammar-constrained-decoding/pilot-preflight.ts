@@ -10,15 +10,58 @@
 import { z } from "zod";
 import { match } from "ts-pattern";
 import { sha256Hex } from "../../engine/src/core/digest";
+import { decideRouteReachability, type RouteProbe as RouteObservation } from "../../engine/src/core/route-reachability";
 import { nonEmpty, type NonEmpty, type Result } from "../kernel";
 import type { Preregistration } from "./pilot-preregistration";
 import { CELL_KEYS, hex64, parserOf, PILOT_CELLS, text, type CellKey, type DeepReadonly } from "./pilot-vocabulary";
 
 const routeProbeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("reachable"), servedModels: z.array(z.string()) }).strict(),
+  /** `servedModels` null: the server answered but its model list is unobservable
+   *  (listing needs credentials Loom never sends; Pi authenticates inference). */
+  z.object({ kind: z.literal("reachable"), servedModels: z.array(z.string()).nullable() }).strict(),
   z.object({ kind: z.literal("unreachable"), reason: z.string() }).strict(),
 ]);
 export type RouteProbe = DeepReadonly<z.infer<typeof routeProbeSchema>>;
+
+const reachable = (servedModels: readonly string[] | null): RouteProbe => Object.freeze({ kind: "reachable" as const, servedModels });
+const unreachable = (reason: string): RouteProbe => Object.freeze({ kind: "unreachable" as const, reason });
+
+/** The served model list a 2xx answer carried, or null when it carried none. */
+const listing = (probe: RouteObservation): readonly string[] | null =>
+  probe.kind === "answered" && probe.status >= 200 && probe.status <= 299 ? probe.servedModels : null;
+
+const authRefused = (probe: RouteObservation): boolean =>
+  probe.kind === "answered" && (probe.status === 401 || probe.status === 403);
+
+/**
+ * The preflight's route fact from the engine's one route probe
+ * (`httpRouteProbe` observes `GET {baseUrl}/models`; the pure
+ * `decideRouteReachability` judges it):
+ *
+ * - a 2xx model listing → `reachable` with the served models — whether the
+ *   preregistered model is among them is `decidePreflight`'s check, so an
+ *   absent model is recorded as `served-model-absent` with what is served;
+ * - an authentication refusal (401/403) → `reachable` with `servedModels:
+ *   null`: the server answers, its list is unobservable without credentials
+ *   Loom never resolves or sends, and Pi authenticates the inference itself;
+ * - anything else (refused connection, timeout, any other status, a 2xx
+ *   without a readable list) → `unreachable`, with the reason.
+ */
+export function preflightRouteProbe(route: Preregistration["route"], probe: RouteObservation): RouteProbe {
+  const listed = listing(probe);
+  if (listed !== null) return reachable(listed);
+  return match(decideRouteReachability(
+    { provider: route.provider, model: route.model },
+    { provider: route.provider, baseUrl: route.baseUrl },
+    probe,
+  ))
+    .with({ kind: "reachable" }, ({ url }) => (authRefused(probe)
+      ? reachable(null)
+      : unreachable(`GET ${url} answered without a readable model list`)))
+    .with({ kind: "unreachable" }, ({ url, reason }) => unreachable(`GET ${url}: ${reason}`))
+    .with({ kind: "unconfigured" }, ({ reason }) => unreachable(reason))
+    .exhaustive();
+}
 
 /** Retained digests parse as strictly as the preregistered digests they are compared with. */
 const registryCellSchema = z.object({ toolName: z.string(), schemaDigest: hex64 }).strict().nullable();
@@ -102,9 +145,10 @@ export function decidePreflight(prereg: Preregistration, facts: PreflightFacts):
   }
   match(facts.route)
     .with({ kind: "unreachable" }, (route) => { blocks.push({ kind: "route-unreachable", reason: route.reason }); })
-    .with({ kind: "reachable" }, (route) => {
-      if (!route.servedModels.includes(prereg.route.model)) {
-        blocks.push({ kind: "served-model-absent", model: prereg.route.model, served: route.servedModels });
+    .with({ kind: "reachable" }, ({ servedModels }) => {
+      // An unobservable list (null) records no block: it proves nothing absent.
+      if (servedModels !== null && !servedModels.includes(prereg.route.model)) {
+        blocks.push({ kind: "served-model-absent", model: prereg.route.model, served: servedModels });
       }
     })
     .exhaustive();

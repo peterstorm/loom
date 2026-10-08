@@ -330,7 +330,8 @@ export function terminalBlockedDiagnostic(
   const recovery = canonicalRecord({ kind: "inspect-run-and-stop" as const });
 
   if (exhaustedResult) {
-    const failedRequest = parseAgentRequestAuthorityForAttempt(exactInput.value.failedRequest, 2);
+    // A terminal diagnostic names an already-issued request, read as recorded.
+    const failedRequest = parseAgentRequestAuthorityForAttempt(exactInput.value.failedRequest, 2, "stored");
     if (!failedRequest.ok) {
       return diagnosticFailure(
         "failedRequest",

@@ -78,6 +78,9 @@ import { dirname, join, resolve } from "node:path";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { activeAgentDir } from "../../utils/model-routing-context";
+import { httpRouteProbe, observeRouteReachability } from "../../utils/route-endpoint";
+import { reachabilityRefusal } from "../../core/route-reachability";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -1041,8 +1044,30 @@ async function publishCompletionBinding(
     : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
 }
 
+/**
+ * Fail closed before a Pi parent spawns a batch: every distinct route the
+ * batch's frozen Pi bindings name must answer. Nothing is published to the
+ * session when a route is down, so a later `resume` re-emits the same batch.
+ * A request whose authority does not parse is left to the binding
+ * publication below, which reports it.
+ */
+async function spawnRouteRefusal(action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>): Promise<HookResult | null> {
+  const bindings = action.requests.flatMap(({ authority }) => {
+    const parsed = parseStoredAgentRequestAuthority(authority);
+    return parsed.ok ? [parsed.value.harnessBinding.pi] : [];
+  });
+  const observed = await observeRouteReachability(bindings, activeAgentDir(), httpRouteProbe());
+  if (!observed.ok) return { kind: "error", message: `cannot check Pi route reachability: ${observed.error}` };
+  const refusal = reachabilityRefusal(observed.decisions);
+  return refusal === null ? null : { kind: "error", message: refusal };
+}
+
 async function emitRunAction(handle: RunDirHandle, action: FacadeAction): Promise<HookResult> {
   const session = bindingSessionOf(process.env);
+  if (session?.harness === "pi" && action.kind === "spawn-batch") {
+    const refusal = await spawnRouteRefusal(action);
+    if (refusal !== null) return refusal;
+  }
   if (session !== null) {
     const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(session, handle, action)
       : action.kind === "done" ? await publishCompletionBinding(session, handle, action)

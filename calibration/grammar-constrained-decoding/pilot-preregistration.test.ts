@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { buildPairSchedule, parsePreregistration } from "./pilot-preregistration";
-import { fixtureBytes, preregBytes, prereg as retainedPrereg, testPreregistration } from "./pilot-test-fixtures";
+import { buildPairSchedule, parsePreregistration, type Preregistration } from "./pilot-preregistration";
+import { fixtureBytes, pilot2PreregBytes, preregBytes, prereg as retainedPrereg, testPreregistration } from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest } from "./pilot-vocabulary";
 
 describe("preregistration (retained before any window)", () => {
@@ -74,5 +74,63 @@ describe("paired schedule", () => {
       const reseeded = buildPairSchedule({ ...prereg, scheduleSeed: seed });
       expect(reseeded.map((pair) => pair.pairId).sort()).toEqual(canonical);
     }), { numRuns: 20 });
+  });
+});
+
+describe("release policy (fixed by the preregistration, before any window)", () => {
+  type RawPrereg = Record<string, unknown>;
+  const pilot1 = (): RawPrereg => JSON.parse(preregBytes.toString("utf-8")) as RawPrereg;
+  const pilot2 = (): RawPrereg => JSON.parse(pilot2PreregBytes.toString("utf-8")) as RawPrereg;
+  const parsedPolicy = (raw: RawPrereg) => {
+    const parsed = parsePreregistration(raw);
+    return parsed.ok ? parsed.value.releasePolicy : null;
+  };
+
+  it("parses the retained pilot-1 preregistration (schemaVersion 1, no field) to capable-route-required", () => {
+    expect(retainedPrereg.schemaVersion).toBe(1);
+    expect(retainedPrereg.releasePolicy).toEqual({ kind: "capable-route-required" });
+  });
+
+  it("parses pilot-2 to per-route-engine-authoritative over exactly pilot-1's route, workload, cells and guardrails", () => {
+    const parsed = parsePreregistration(pilot2());
+    if (!parsed.ok) throw new Error(parsed.error.join("\n"));
+    const prereg2 = parsed.value;
+    expect(prereg2).toMatchObject({ schemaVersion: 2, id: "gcd-ad11-pilot-2", scheduleSeed: 20261008, releasePolicy: { kind: "per-route-engine-authoritative" } });
+    const workloadOf = ({ route, workloadFixturesDigest, minimumPairsPerCell, semanticAttemptBudget, perAttemptTimeoutMs, guardrails, cells }: Preregistration) =>
+      ({ route, workloadFixturesDigest, minimumPairsPerCell, semanticAttemptBudget, perAttemptTimeoutMs, guardrails, cells });
+    expect(workloadOf(prereg2)).toEqual(workloadOf(retainedPrereg));
+    expect(Date.parse(prereg2.recordedAt)).toBeGreaterThan(Date.parse(retainedPrereg.recordedAt));
+  });
+
+  it("requires a schemaVersion 2 preregistration to state its policy (no default) and refuses an unknown kind", () => {
+    const { releasePolicy: _omitted, ...withoutPolicy } = pilot2();
+    expect(parsedPolicy(withoutPolicy)).toBeNull();
+    expect(parsedPolicy({ ...pilot2(), releasePolicy: { kind: "release-whatever-passes" } })).toBeNull();
+    expect(parsedPolicy({ ...pilot2(), releasePolicy: { kind: "per-route-engine-authoritative", default: true } })).toBeNull();
+    expect(parsedPolicy({ ...pilot2(), releasePolicy: "per-route-engine-authoritative" })).toBeNull();
+    expect(parsedPolicy({ ...pilot2(), releasePolicy: { kind: "capable-route-required" } })).toEqual({ kind: "capable-route-required" });
+  });
+
+  it("never admits a policy field on schemaVersion 1, so a retained v1 record cannot be re-read under another rule", () => {
+    expect(parsedPolicy({ ...pilot1(), releasePolicy: { kind: "per-route-engine-authoritative" } })).toBeNull();
+    expect(parsedPolicy({ ...pilot1(), releasePolicy: { kind: "capable-route-required" } })).toBeNull();
+    expect(parsedPolicy({ ...pilot1(), schemaVersion: 3 })).toBeNull();
+  });
+
+  it("admits a policy exactly when the version allows it (property)", () => {
+    const POLICY_KINDS = ["capable-route-required", "per-route-engine-authoritative"] as const;
+    fc.assert(fc.property(
+      fc.constantFrom(1, 2, 3),
+      fc.option(fc.oneof(fc.constantFrom(...POLICY_KINDS), fc.string()), { nil: undefined }),
+      (schemaVersion, kind) => {
+        const { releasePolicy: _omitted, ...base } = pilot2();
+        const raw = kind === undefined ? { ...base, schemaVersion } : { ...base, schemaVersion, releasePolicy: { kind } };
+        const known = kind !== undefined && (POLICY_KINDS as readonly string[]).includes(kind);
+        const expected = schemaVersion === 1 && kind === undefined ? { kind: "capable-route-required" }
+          : schemaVersion === 2 && known ? { kind }
+          : null;
+        expect(parsedPolicy(raw)).toEqual(expected);
+      },
+    ), { numRuns: 60 });
   });
 });

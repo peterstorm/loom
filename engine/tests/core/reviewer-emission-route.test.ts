@@ -17,20 +17,25 @@ import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../src/core/standalone-lineage-contract";
 import { STANDALONE_REVIEWER_ROLES } from "../../src/core/standalone-review-scope";
-import { lowerModelProfile, resolveModelProfile } from "../../src/core/model-profiles";
+import { lowerModelProfile, recordedProfileBindings, resolveModelProfile, type PiBinding } from "../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 
-const qualifiedProfile = resolveModelProfile("qualified-local-review");
-if (!qualifiedProfile.ok) throw new Error("fixture profile must resolve");
-const QUALIFIED_PI = lowerModelProfile(qualifiedProfile.value, "pi");
+// The fixture request is a code-reviewer issued under its catalog profile. The
+// catalog's Pi route IS the qualified emission route, so a catalog-issued
+// reviewer is on it; the only off-route reviewer requests are history: stored
+// requests carrying a cloud binding the profile issued before it was retired.
+const reviewerProfile = resolveModelProfile("general-review");
+if (!reviewerProfile.ok) throw new Error("the fixture reviewer's catalog profile must resolve");
+const CATALOG_PI = lowerModelProfile(reviewerProfile.value, "pi");
+const RETIRED_PI: readonly PiBinding[] = recordedProfileBindings("general-review").pi.slice(1);
+if (RETIRED_PI.length === 0) throw new Error("general-review must record a retired cloud binding");
 
-const request = (overrides: Record<string, unknown> = {}): AgentRequestAuthority =>
-  agentRequestAuthority("run.reviewer-route", overrides);
-const qualified = (overrides: Record<string, unknown> = {}): AgentRequestAuthority => {
-  const base = request(overrides);
-  return { ...base, harnessBinding: { ...base.harnessBinding, pi: QUALIFIED_PI } } as AgentRequestAuthority;
+const request = (pi: PiBinding, overrides: Record<string, unknown> = {}): AgentRequestAuthority => {
+  const base = agentRequestAuthority("run.reviewer-route", overrides);
+  return { ...base, harnessBinding: { ...base.harnessBinding, pi } } as AgentRequestAuthority;
 };
+const qualified = (overrides: Record<string, unknown> = {}): AgentRequestAuthority => request(CATALOG_PI, overrides);
 
 const V1: IssuedReviewerProtocol = { schemaVersion: 1 };
 const V2: IssuedReviewerProtocol = { schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
@@ -97,13 +102,14 @@ describe("issuedReviewerEmissionRoute", () => {
     expect(issuedReviewerEmissionRoute(V1, qualified(), true).kind).toBe("extraction-only");
   });
 
-  it("never routes to emission without a Pi parent or off the qualified route, for any issued protocol", () => {
+  it("never routes to emission without a Pi parent or off the qualified route (a retired binding), for any issued protocol", () => {
     fc.assert(fc.property(
       fc.constantFrom(V1, V2, V3),
       fc.boolean(),
       fc.boolean(),
-      (protocol, piParent, onQualifiedRoute) => {
-        const authority = onQualifiedRoute ? qualified() : request();
+      fc.constantFrom(...RETIRED_PI),
+      (protocol, piParent, onQualifiedRoute, retired) => {
+        const authority = onQualifiedRoute ? qualified() : request(retired);
         const route = issuedReviewerEmissionRoute(protocol, authority, piParent);
         const emission = route.kind === "emission";
         // Emission requires BOTH a Pi parent and the qualified route, and a

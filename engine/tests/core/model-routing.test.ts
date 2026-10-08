@@ -20,10 +20,10 @@ const declared: PiBinding = Object.freeze({
   thinking: "high",
 });
 
-const declared55: PiBinding = Object.freeze({
+const declaredMini: PiBinding = Object.freeze({
   harness: "pi",
   provider: "openai-codex",
-  model: "gpt-5.5",
+  model: "gpt-5.4-mini",
   thinking: "medium",
 });
 
@@ -209,7 +209,7 @@ describe("resolveEffectivePiBinding", () => {
   });
 
   it("keeps the declared thinking level when only a parent model ref is available", () => {
-    expect(resolveEffectivePiBinding(declared55, qwenRef, localConfig).thinking).toBe("medium");
+    expect(resolveEffectivePiBinding(declaredMini, qwenRef, localConfig).thinking).toBe("medium");
   });
 
   it("inherits the active parent's complete binding when its thinking level is available", () => {
@@ -315,7 +315,7 @@ describe("model-routing property tests", () => {
 
   it("resolveEffectivePiBinding is total and always preserves the declared thinking level", () => {
     fc.assert(
-      fc.property(modelRefArb, fc.constantFrom(null, localConfig), fc.constantFrom(declared, declared55), (parentRef, config, declaredBinding) => {
+      fc.property(modelRefArb, fc.constantFrom(null, localConfig), fc.constantFrom(declared, declaredMini), (parentRef, config, declaredBinding) => {
         const result: EffectivePiBinding = resolveEffectivePiBinding(declaredBinding, parentRef, config);
         expect(result.thinking).toBe(declaredBinding.thinking);
         expect(typeof result.provider).toBe("string");
@@ -327,7 +327,7 @@ describe("model-routing property tests", () => {
 
   it("resolves to the declared binding whenever the parent is not local or the config/parent is absent", () => {
     fc.assert(
-      fc.property(modelRefArb, fc.constantFrom(declared, declared55), (parentRef, declaredBinding) => {
+      fc.property(modelRefArb, fc.constantFrom(declared, declaredMini), (parentRef, declaredBinding) => {
         const parentClass = classifyModelRef(parentRef, localConfig);
         if (parentClass === "local") return; // the inherit case is covered separately
         const result = resolveEffectivePiBinding(declaredBinding, parentRef, localConfig);
@@ -340,7 +340,7 @@ describe("model-routing property tests", () => {
 
   it("inherits exactly the parent provider/model for a local parent under the local-parent rule", () => {
     fc.assert(
-      fc.property(fc.string({ minLength: 1, maxLength: 8 }).filter((s) => !s.includes("/") && !/\s/.test(s)), fc.constantFrom(declared, declared55), (model, declaredBinding) => {
+      fc.property(fc.string({ minLength: 1, maxLength: 8 }).filter((s) => !s.includes("/") && !/\s/.test(s)), fc.constantFrom(declared, declaredMini), (model, declaredBinding) => {
         const parentRef: ModelRef = Object.freeze({ provider: "desktop-vllm", model });
         const result = resolveEffectivePiBinding(declaredBinding, parentRef, localConfig);
         expect(result.provider).toBe("desktop-vllm");
