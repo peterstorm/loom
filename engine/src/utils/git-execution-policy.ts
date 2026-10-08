@@ -1,20 +1,26 @@
 /**
- * The ONE execution policy every engine-observation Git child runs under —
- * chosen here, applied by `utils/git.ts` (HEAD/authority probes and, wrapped
- * in its shadow administration directory, every diff and tracking probe) and
- * by `utils/git-leaves.ts` (`gitOutput`: the single leaf enumerator and every
- * revision read that the snapshot hasher, reviewed workspace, Review Packet,
- * Wave lint and task-local diff share).
+ * The ONE execution policy every engine-observation Git child runs under, and
+ * the ONE place such a child is spawned: `runGit` (throwing) and `spawnGit`
+ * (status-returning). Callers are `utils/git.ts` (HEAD/authority probes and,
+ * through its shadow administration directory, every diff, content-hashing
+ * listing and tracking probe), `utils/git-leaves.ts` (`gitOutput`: the single
+ * leaf enumerator and every revision read that the snapshot hasher, reviewed
+ * workspace, Review Packet, Wave lint and task-local diff share),
+ * `utils/workspace-digest.ts` (the workspace roster and root) and
+ * `orchestration/remediation-candidate.ts` (tracking and ignore audits).
  *
- * The policy is one invocation — argv and environment together, so no caller
- * can apply half of it:
+ * The policy is one invocation — argv and environment together — and it is
+ * private to this module, so no caller can apply half of it or hand-roll the
+ * spawn options around it:
  *
  * - A Git child receives only process-launch essentials, never ambient
  *   authority such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
  *   GIT_LITERAL_PATHSPECS/GIT_GLOB_PATHSPECS, GIT_CONFIG_COUNT/KEY/VALUE
  *   config injection, or executable diff overrides.
  * - System and global config are excluded, so no config authored outside the
- *   repository reaches the observation.
+ *   repository reaches the observation — and every observer agrees on one
+ *   ignore rule set (an operator's global `core.excludesFile` is invisible to
+ *   all of them alike).
  * - `core.fsmonitor` is disabled as command-scope config, which outranks every
  *   config file: it is the one repository-configured executable hook a
  *   read-only metadata command (`rev-parse`, `ls-files`, `ls-tree`,
@@ -32,6 +38,7 @@
  * `core.excludesFile`, which the enumerator's ignore rules must honour, and
  * `ls-files`/`ls-tree` run no filter or diff driver.
  */
+import { execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 const INHERITED_LAUNCH_ESSENTIALS = [
   "PATH", "HOME", "TMPDIR", "TEMP", "TMP",
@@ -42,6 +49,10 @@ const INHERITED_LAUNCH_ESSENTIALS = [
 const COMMAND_SCOPE_CONFIG: readonly (readonly [key: string, value: string])[] = Object.freeze([
   Object.freeze(["core.fsmonitor", "false"] as const),
 ]);
+
+/** The stdout budget of one `bytes` capture — a path or revision listing, in
+ *  the repository or the shadow directory alike — unless the run names its own. */
+const GIT_OUTPUT_LIMIT = 100 * 1024 * 1024;
 
 /** Where a policy-bound Git child finds its repository when it is not the
  *  working directory's own: the shadow administration directory's overrides.
@@ -54,15 +65,14 @@ export type GitRepositoryLocation = Readonly<{
   GIT_OBJECT_DIRECTORY: string;
 }>;
 
-/** One policy-bound Git child: the argv to pass after `git`, and its environment. */
-export type HardenedGitInvocation = Readonly<{
+type HardenedGitInvocation = Readonly<{
   argv: readonly string[];
   env: NodeJS.ProcessEnv;
 }>;
 
 /** The policy applied to one Git command: `args` behind the command-scope
  *  `-c` prefix, and the allow-listed environment read fresh from the process. */
-export function hardenedGitInvocation(
+function hardenedGitInvocation(
   args: readonly string[],
   location?: GitRepositoryLocation,
 ): HardenedGitInvocation {
@@ -91,5 +101,71 @@ export function hardenedGitInvocation(
       GIT_OPTIONAL_LOCKS: "0",
       ...location,
     }),
+  });
+}
+
+/** What a `runGit` child's stdout becomes: raw bytes, UTF-8 text, or nothing
+ *  (stdout is not even piped — only the exit status and stderr matter). */
+export type GitOutput = "bytes" | "text" | "discard";
+
+export type GitOutputValue = Readonly<{ bytes: Buffer; text: string; discard: void }>;
+
+/** One policy-bound run. `stdin` defaults to `"ignore"`; `maxBuffer` defaults
+ *  to the listing budget for `bytes` and to Node's own default otherwise. */
+export type GitRun<K extends GitOutput> = Readonly<{
+  output: K;
+  cwd?: string;
+  location?: GitRepositoryLocation;
+  stdin?: "ignore" | "pipe";
+  maxBuffer?: number;
+}>;
+
+type SpawnBase = Readonly<{ cwd?: string; env: NodeJS.ProcessEnv; maxBuffer?: number }>;
+
+type GitRunner<K extends GitOutput> = (argv: readonly string[], base: SpawnBase, stdin: "ignore" | "pipe") => GitOutputValue[K];
+
+const RUNNERS: { readonly [K in GitOutput]: GitRunner<K> } = {
+  bytes: (argv, base, stdin) => execFileSync("git", argv, { ...base, encoding: "buffer", stdio: [stdin, "pipe", "pipe"] }),
+  text: (argv, base, stdin) => execFileSync("git", argv, { ...base, encoding: "utf-8", stdio: [stdin, "pipe", "pipe"] }),
+  discard: (argv, base, stdin) => {
+    execFileSync("git", argv, { ...base, stdio: [stdin, "ignore", "pipe"] });
+  },
+};
+
+/**
+ * Run one Git command under the policy and return its stdout as `run.output`
+ * names. THROWS exactly as `execFileSync` does — a non-zero exit carries
+ * `status`, `stdout` and `stderr`, an over-budget capture `code: "ENOBUFS"` —
+ * so each caller keeps its own failure contract.
+ */
+export function runGit<K extends GitOutput>(args: readonly string[], run: GitRun<K>): GitOutputValue[K] {
+  const { argv, env } = hardenedGitInvocation(args, run.location);
+  const maxBuffer = run.maxBuffer ?? (run.output === "bytes" ? GIT_OUTPUT_LIMIT : undefined);
+  const base: SpawnBase = {
+    ...(run.cwd === undefined ? {} : { cwd: run.cwd }),
+    env,
+    ...(maxBuffer === undefined ? {} : { maxBuffer }),
+  };
+  return RUNNERS[run.output](argv, base, run.stdin ?? "ignore");
+}
+
+/**
+ * Run one Git command under the policy without throwing on its exit status:
+ * for callers whose protocol reads `status` itself (`check-ignore`'s 0/1,
+ * `ls-files --error-unmatch`). stdout and stderr are captured as bytes; a
+ * spawn failure or an over-budget capture arrives as `error`.
+ */
+export function spawnGit(
+  args: readonly string[],
+  run: Readonly<{ cwd?: string; maxBuffer: number }>,
+): SpawnSyncReturns<Buffer> {
+  const { argv, env } = hardenedGitInvocation(args);
+  return spawnSync("git", argv, {
+    ...(run.cwd === undefined ? {} : { cwd: run.cwd }),
+    env,
+    encoding: "buffer",
+    maxBuffer: run.maxBuffer,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
 }
