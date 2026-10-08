@@ -11,19 +11,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { value } from "../fixtures/parse-result";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
+import { inertEmissionLaunchBridge, settleEmptyBatch } from "../fixtures/held-spawn-batch";
 import { createRunDirectory } from "../../src/orchestration/run-directory-handle";
 import type { SessionRunBinding } from "../../src/orchestration/session-run-bindings";
 import { shutdownPiSession } from "../../../pi/session-shutdown";
-import { dispatchPiSubagentStop } from "../../../pi/subagent-stop";
 import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
 import { fsSessionRegistry, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AdmittedSpawnItem, SpawnAdmission } from "../../src/core/spawn-admission";
 import type { SpawnEmissionExpectation } from "../../src/core/issued-emission-capability";
-import { reservePiSpawnLifecycle, type PiSpawnLifecyclePorts } from "../../../pi/spawn-lifecycle";
+import {
+  reservePiSpawnLifecycle,
+  reservePiSpawnLifecycleHoldingForTesting,
+  type PiSpawnLifecyclePorts,
+} from "../../../pi/spawn-lifecycle";
 import {
   claimPointerLease,
   claimRosterEntry,
@@ -120,10 +123,9 @@ const fakePorts = (
   const ports: PiSpawnLifecyclePorts = {
     parentSessions,
     emissionLaunchBridge: {
-      probe: () => ({ kind: "available" }),
+      ...inertEmissionLaunchBridge,
       stage,
       removeToolCall: (_session, call) => { removedToolCalls.push(call); },
-      removeSession: () => undefined,
     },
     reviewWitnesses: options.reviewWitnesses ?? createTrustedReviewWitnesses(),
     durableClaimReleases: releases.durableClaimReleases,
@@ -134,17 +136,23 @@ const fakePorts = (
   return { ports, parentSessions, removedToolCalls, releaseCalls: releases.calls };
 };
 
+/** `held` names claims the batch's ledger already holds: the lifecycle's test
+ *  seam, the only way a refusal is reached through admission. */
 type ReserveOptions = Readonly<{ graphActive?: boolean; held?: SpawnClaims }>;
 
-const reserve = (input: unknown, admission: Admission, ports: PiSpawnLifecyclePorts, options: ReserveOptions = {}) =>
-  reservePiSpawnLifecycle({
+const reserve = (input: unknown, admission: Admission, ports: PiSpawnLifecyclePorts, options: ReserveOptions = {}) => {
+  const request = {
     event: { toolName: "subagent", input, toolCallId },
     cwd: root,
     sessionId: rawSessionId,
     safeSessionId: sessionId,
     admission,
     graph: { active: options.graphActive ?? false, path: graphPath(), spawnGraphPath: null },
-  }, ports, options.held);
+  };
+  return options.held === undefined
+    ? reservePiSpawnLifecycle(request, ports)
+    : reservePiSpawnLifecycleHoldingForTesting(options.held, request, ports);
+};
 
 const graphPath = () => join(root, "graph.json");
 const writeGraph = () => writeFileSync(graphPath(), "{}\n", "utf8");
@@ -154,6 +162,32 @@ const lifecycleRefusal = (cause: string) => ({
 });
 
 const roster = () => fsSessionRegistry.readActiveRoster(sessionId);
+
+const reviewInput = { agent: "code-reviewer", task: "Review A" };
+const implementInput = { agent: "code-implementer-agent", task: "Task ID: T1\nImplement it" };
+const grantFiles = () => {
+  const directory = join(root, "subagents", "pi-write-grants");
+  return existsSync(directory) ? readdirSync(directory) : [];
+};
+
+/**
+ * Refuse an implementation spawn whose slot already holds the grant `held`:
+ * admission issues a second grant for the slot, the ledger refuses it, and
+ * its compensation revokes the issued one — failing while
+ * `issuedRevocationFails()` holds.
+ */
+const refuseHeldWriteGrant = async (issuedRevocationFails: () => boolean = () => false) => {
+  writeGraph();
+  const fake = fakePorts(undefined, {
+    failsRelease: (call) => issuedRevocationFails() && call.startsWith("revokeGrant:") && call !== "revokeGrant:held",
+  });
+  const held = value(claimWriteGrant(NO_SPAWN_CLAIMS, { slot: 0, token: "held" }));
+  const refusal = await reserve(implementInput, admissionOf([admittedImplementation(implementInput.task)]), fake.ports, {
+    graphActive: true,
+    held,
+  });
+  return { ...fake, refusal };
+};
 
 describe("reservePiSpawnLifecycle", () => {
   it("reserves and records every roster entry of an admitted batch", async () => {
@@ -199,12 +233,6 @@ describe("reservePiSpawnLifecycle", () => {
 describe("a claim the ledger refuses during admission", () => {
   const rosterId = piSpawnRosterId(toolCallId, 0, "code-reviewer");
   const implementerRosterId = piSpawnRosterId(toolCallId, 0, "code-implementer-agent");
-  const reviewInput = { agent: "code-reviewer", task: "Review A" };
-  const implementInput = { agent: "code-implementer-agent", task: "Task ID: T1\nImplement it" };
-  const grantFiles = () => {
-    const directory = join(root, "subagents", "pi-write-grants");
-    return existsSync(directory) ? readdirSync(directory) : [];
-  };
   it("refuses a roster entry already claimed before marking it, releasing only the held entry", async () => {
     const { ports, parentSessions, releaseCalls } = fakePorts();
     const held = value(claimRosterEntry(NO_SPAWN_CLAIMS, legacyReservationItem(
@@ -254,13 +282,7 @@ describe("a claim the ledger refuses during admission", () => {
   });
 
   it("revokes the write grant it just issued when the slot already holds one", async () => {
-    writeGraph();
-    const { ports, parentSessions, releaseCalls } = fakePorts();
-    const held = value(claimWriteGrant(NO_SPAWN_CLAIMS, { slot: 0, token: "held" }));
-    const refusal = await reserve(implementInput, admissionOf([admittedImplementation(implementInput.task)]), ports, {
-      graphActive: true,
-      held,
-    });
+    const { refusal, parentSessions, releaseCalls } = await refuseHeldWriteGrant();
     expect(refusal).toEqual(lifecycleRefusal("spawn item 1 already holds a claimed write grant"));
     expect(releaseCalls).toEqual([
       expect.stringMatching(/^revokeGrant:[0-9a-f]{64}$/),
@@ -274,15 +296,7 @@ describe("a claim the ledger refuses during admission", () => {
   });
 
   it("carries the issued grant's failed direct revocation in its refusal", async () => {
-    writeGraph();
-    const { ports, releaseCalls } = fakePorts(undefined, {
-      failsRelease: (call) => call.startsWith("revokeGrant:") && call !== "revokeGrant:held",
-    });
-    const held = value(claimWriteGrant(NO_SPAWN_CLAIMS, { slot: 0, token: "held" }));
-    const refusal = await reserve(implementInput, admissionOf([admittedImplementation(implementInput.task)]), ports, {
-      graphActive: true,
-      held,
-    });
+    const { refusal, releaseCalls } = await refuseHeldWriteGrant(() => true);
     expect(refusal).toEqual(lifecycleRefusal(
       "spawn item 1 already holds a claimed write grant " +
         "Cleanup failures: revoke write grant for spawn item 1: revokeGrant unavailable",
@@ -294,12 +308,6 @@ describe("a claim the ledger refuses during admission", () => {
 });
 
 describe("a capability a failed compensation orphans", () => {
-  const reviewInput = { agent: "code-reviewer", task: "Review A" };
-  const implementInput = { agent: "code-implementer-agent", task: "Task ID: T1\nImplement it" };
-  const grantFiles = () => {
-    const directory = join(root, "subagents", "pi-write-grants");
-    return existsSync(directory) ? readdirSync(directory) : [];
-  };
   const shutdown = (ports: PiSpawnLifecyclePorts) =>
     shutdownPiSession(rawSessionId, {
       parentSessions: ports.parentSessions,
@@ -314,18 +322,10 @@ describe("a capability a failed compensation orphans", () => {
   /** Refuse an implementation spawn whose slot already holds a grant while
    *  every revocation of the issued one fails until `heal` is called. */
   const refusedGrantCompensation = async () => {
-    writeGraph();
     let failing = true;
-    const fake = fakePorts(undefined, {
-      failsRelease: (call) => failing && call.startsWith("revokeGrant:") && call !== "revokeGrant:held",
-    });
-    const held = value(claimWriteGrant(NO_SPAWN_CLAIMS, { slot: 0, token: "held" }));
-    const refusal = await reserve(implementInput, admissionOf([admittedImplementation(implementInput.task)]), fake.ports, {
-      graphActive: true,
-      held,
-    });
-    expect(refusal?.reason).toContain("Cleanup failures: revoke write grant for spawn item 1: revokeGrant unavailable");
-    return { ...fake, heal: () => { failing = false; } };
+    const refused = await refuseHeldWriteGrant(() => failing);
+    expect(refused.refusal?.reason).toContain("Cleanup failures: revoke write grant for spawn item 1: revokeGrant unavailable");
+    return { ...refused, heal: () => { failing = false; } };
   };
 
   it("keeps a write grant whose compensating revocation failed as session debt, then shutdown revokes it", async () => {
@@ -345,17 +345,12 @@ describe("a capability a failed compensation orphans", () => {
     const { ports, parentSessions, releaseCalls, heal } = await refusedGrantCompensation();
     const issuedToken = releaseCalls[0]!.slice("revokeGrant:".length);
     heal();
-    const response = await dispatchPiSubagentStop(
-      { toolName: "subagent", toolCallId: "call-unrelated", input: {}, content: [], details: { results: [] }, isError: false } as
-        unknown as ToolResultEvent,
-      { sessionManager: { getSessionId: () => rawSessionId } },
-      {
-        parentSessions,
-        emissionLaunchBridge: ports.emissionLaunchBridge,
-        reviewWitnesses: ports.reviewWitnesses,
-        durableClaimReleases: ports.durableClaimReleases,
-      },
-    );
+    const response = await settleEmptyBatch(rawSessionId, "call-unrelated", {
+      parentSessions,
+      emissionLaunchBridge: ports.emissionLaunchBridge,
+      reviewWitnesses: ports.reviewWitnesses,
+      durableClaimReleases: ports.durableClaimReleases,
+    });
     expect(response).toBeUndefined();
     expect(releaseCalls.at(-1)).toBe(`revokeGrant:${issuedToken}`);
     expect(grantFiles()).toEqual([]);

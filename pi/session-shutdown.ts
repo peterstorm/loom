@@ -6,31 +6,39 @@
  * roster/pointer housekeeping, and every release runs regardless of earlier
  * failures. Each tool call's grants, roster entries and pointer lease are
  * released through the claims ledger's one settlement path
- * (`releaseHeldSpawnClaims`, `pi/spawn-claims.ts`) — the plan, release order,
- * ports and remaining-debt rule `tool_result` settlement uses — with every
- * stored reservation parsed against the shutting-down session first: one
- * naming another session is left as debt and reported, never released under
- * the wrong session. Capabilities failed admission compensations orphaned are
- * retried the same way. Each successfully released capability retires
- * independently; whatever failed stays as cleanup debt, and other sessions
- * are untouched.
+ * (`releaseHeldSpawnClaims`, `pi/spawn-claim-shell.ts`) — the plan, release
+ * order, ports and remaining-debt rule `tool_result` settlement uses — with
+ * every stored reservation parsed against the shutting-down session first:
+ * one naming another session is left as debt and reported, never released
+ * under the wrong session. Capabilities failed admission compensations
+ * orphaned are retried the same way, and the session's child write-grant
+ * binding is released as a durable ledger of its own (`childBindingClaims`),
+ * so what it still owes follows the same remaining-debt rule. Each
+ * successfully released capability retires independently; whatever failed
+ * stays as cleanup debt, and other sessions are untouched.
  */
 
-import { parseSessionId, type SessionTaskGraphPointerBinding } from "../engine/src/machine";
-import type { AgentId } from "../engine/src/machine/evidence";
-import { runPiCleanupActions, type PiCleanupAction } from "./cleanup-actions";
+import { parseSessionId } from "../engine/src/machine";
+import { runPiCleanupActions } from "./cleanup-actions";
 import type { PiParentSessions, PiSessionId } from "./spawn-reservation";
 import {
   grantsOnly,
-  releaseExactPointerLease,
-  releaseHeldSpawnClaims,
-  releaseOrphanedSpawnClaims,
-  spawnShutdownStepLabel,
+  releaseDurableSpawnClaims,
+  remainingDurableClaims,
+  shutdownReleasePhrasing,
   withoutGrants,
   type DurableClaimReleasePorts,
+  type DurableReleasePhrasing,
   type DurableSpawnClaims,
+  type RosterClaim,
 } from "./spawn-claims";
-import { retainedChildWriteGrant, type ActiveChildWriteGrant, type PiChildWriteGrants } from "./child-write-grant";
+import { releaseHeldSpawnClaims, releaseOrphanedSpawnClaims } from "./spawn-claim-shell";
+import {
+  childBindingClaims,
+  retainedChildWriteGrant,
+  type ActiveChildWriteGrant,
+  type PiChildWriteGrants,
+} from "./child-write-grant";
 import type { TrustedReviewWitnesses } from "./trusted-review-witness";
 import type { PiEmissionLaunchBridge } from "./emission-launch-bridge";
 
@@ -63,13 +71,7 @@ async function releaseEveryHeldClaim(
   const foreignReservations: string[] = [];
   for (const toolCallId of toolCallIds) {
     const holder = Object.freeze({ sessionId, toolCallId });
-    const released = await releaseHeldSpawnClaims(
-      holder,
-      parentSessions,
-      select,
-      (step) => spawnShutdownStepLabel(step, holder),
-      ports,
-    );
+    const released = await releaseHeldSpawnClaims(holder, parentSessions, select, shutdownReleasePhrasing(holder), ports);
     errors.push(...released.errors);
     if (released.foreignReservation !== null) {
       foreignReservations.push(`leave spawn reservation ${toolCallId} as cleanup debt: ${released.foreignReservation}`);
@@ -78,34 +80,26 @@ async function releaseEveryHeldClaim(
   return Object.freeze({ errors, foreignReservations });
 }
 
-/** Release the child binding's roster entry and pointer lease through the
- *  durable ports; the binding still owed, or `null` once it owes nothing. */
+/** How shutdown names a failed step of a child binding's release. A child
+ *  binding holds no grant (`childBindingClaims`), so no revocation is ever
+ *  planned under it. */
+const childBindingReleasePhrasing = (sessionId: PiSessionId): DurableReleasePhrasing<RosterClaim> =>
+  Object.freeze({
+    revokeGrant: (item: number) => `revoke child write grant for spawn item ${item}`,
+    removeRosterEntry: ({ rosterId }: RosterClaim) => `remove child roster entry ${rosterId}`,
+    releasePointer: `roll back child task-graph pointer for ${sessionId}`,
+  });
+
+/** Release the child binding's roster entry and pointer lease as a durable
+ *  ledger; the binding still owed, or `null` once it owes nothing. */
 async function releaseChildBinding(
   sessionId: PiSessionId,
   binding: ActiveChildWriteGrant,
   ports: DurableClaimReleasePorts,
 ): Promise<Readonly<{ errors: readonly string[]; retained: ActiveChildWriteGrant | null }>> {
-  const removedRosterIds = new Set<AgentId>();
-  const releasedPointers = new Set<SessionTaskGraphPointerBinding>();
-  const { agentId, pointerBinding } = binding;
-  const actions: PiCleanupAction[] = [
-    ...(agentId === null ? [] : [{
-      label: `remove child roster entry ${agentId}`,
-      run: async () => {
-        await ports.removeRosterEntry(agentId);
-        removedRosterIds.add(agentId);
-      },
-    }]),
-    ...(pointerBinding === null ? [] : [{
-      label: `roll back child task-graph pointer for ${sessionId}`,
-      run: async () => {
-        await releaseExactPointerLease(ports.releasePointer, pointerBinding);
-        releasedPointers.add(pointerBinding);
-      },
-    }]),
-  ];
-  const errors = await runPiCleanupActions(actions);
-  return Object.freeze({ errors, retained: retainedChildWriteGrant(binding, removedRosterIds, releasedPointers) });
+  const claims = childBindingClaims(binding);
+  const { errors, releases } = await releaseDurableSpawnClaims(claims, childBindingReleasePhrasing(sessionId), ports);
+  return Object.freeze({ errors, retained: retainedChildWriteGrant(binding, remainingDurableClaims(claims, releases)) });
 }
 
 /** Release the session's capabilities; throws one aggregate naming every

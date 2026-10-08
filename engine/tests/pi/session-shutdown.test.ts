@@ -4,22 +4,27 @@
  * write-grant revocations, never a step whose throw skips them. Each tool
  * call's held claims are released through the settlement path — one order,
  * one set of durable ports, one remaining-debt rule — and a reservation
- * naming another session is left as reported debt, never released.
+ * naming another session is left as reported debt, never released. The
+ * session's child write-grant binding is released by the same ledger.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { recordingDurableReleases } from "../fixtures/recording-durable-releases";
+import {
+  HELD_GRANT,
+  inertEmissionLaunchBridge,
+  parentSessionsHoldingActive,
+  reviewerReservationNaming,
+  settleEmptyBatch,
+} from "../fixtures/held-spawn-batch";
 import { fsSessionRegistry, parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import { shutdownPiSession, type PiSessionShutdownPorts } from "../../../pi/session-shutdown";
-import { dispatchPiSubagentStop } from "../../../pi/subagent-stop";
-import { piDurableClaimReleasePorts } from "../../../pi/spawn-claims";
+import { piDurableClaimReleasePorts } from "../../../pi/spawn-claim-shell";
 import {
   createPiParentSessions,
-  legacyReservationItem,
   type PiParentSessions,
   type PiSessionId,
   type PiSpawnReservation,
@@ -132,34 +137,22 @@ describe("shutdownPiSession releases through the settlement path", () => {
   }) as unknown as SessionTaskGraphPointerBinding;
 
   /** An ad-hoc two-reviewer reservation naming `sessionId`, holding `LEASE`. */
-  const reservationNaming = (sessionId: PiSessionId): PiSpawnReservation => Object.freeze({
-    sessionId,
-    needsTaskGraphLifecycle: false,
-    graphActiveAtSpawn: false,
-    orchestrationRunBinding: null,
-    pointerBinding: LEASE,
-    items: Object.freeze(rosterIds.map((rosterId) =>
-      legacyReservationItem({ rosterId, emissionLaunch: null, kind: "non-implementation" }, "code-reviewer", null))),
-  });
+  const reservationNaming = (sessionId: PiSessionId): PiSpawnReservation =>
+    reviewerReservationNaming(sessionId, rosterIds, LEASE);
 
   /** The owner session holding `reservation` and one grant for the tool call,
    *  with both roster entries marked active under the owner. */
-  const ownerHolding = async (reservation: PiSpawnReservation) => {
-    const parentSessions = createPiParentSessions();
-    const runtime = parentSessions.runtimeFor(owner);
-    runtime.spawnReservations.set(toolCallId, reservation);
-    runtime.issuedWriteGrants.set(toolCallId, Object.freeze([Object.freeze({ slot: 0, token: "unissued-token" })]));
-    for (const rosterId of rosterIds) await fsSessionRegistry.markActive(owner, rosterId);
-    return parentSessions;
-  };
+  const ownerHolding = (reservation: PiSpawnReservation) => parentSessionsHoldingActive(owner, toolCallId, reservation);
 
-  const bridge: PiEmissionLaunchBridge = { ...failingBridge([]), removeSession: () => undefined, removeToolCall: () => undefined };
-
-  const shutdown = (parentSessions: PiParentSessions, durableClaimReleases: PiSessionShutdownPorts["durableClaimReleases"]) =>
+  const shutdown = (
+    parentSessions: PiParentSessions,
+    durableClaimReleases: PiSessionShutdownPorts["durableClaimReleases"],
+    childWriteGrants = createPiChildWriteGrants(),
+  ) =>
     shutdownPiSession(owner, {
       parentSessions,
-      childWriteGrants: createPiChildWriteGrants(),
-      emissionLaunchBridge: bridge,
+      childWriteGrants,
+      emissionLaunchBridge: inertEmissionLaunchBridge,
       reviewWitnesses: createTrustedReviewWitnesses(),
       durableClaimReleases,
     });
@@ -169,7 +162,7 @@ describe("shutdownPiSession releases through the settlement path", () => {
     const releases = recordingDurableReleases(undefined, new Set([LEASE]));
     await shutdown(parentSessions, releases.durableClaimReleases);
     expect(releases.calls).toEqual([
-      "revokeGrant:unissued-token",
+      `revokeGrant:${HELD_GRANT.token}`,
       `removeRosterEntry:${rosterIds[1]}`,
       `removeRosterEntry:${rosterIds[0]}`,
       "releasePointer:off-disk-lease",
@@ -189,7 +182,7 @@ describe("shutdownPiSession releases through the settlement path", () => {
     await expect(shutdown(parentSessions, releases.durableClaimReleases))
       .rejects.toThrow(`Loom Pi session shutdown cleanup failed: ${refusal}`);
     // Only the grant, which the session owns whatever the reservation says.
-    expect(releases.calls).toEqual(["revokeGrant:unissued-token"]);
+    expect(releases.calls).toEqual([`revokeGrant:${HELD_GRANT.token}`]);
     expect(fsSessionRegistry.readActiveRoster(owner)).toEqual(rosterIds);
     expect(fsSessionRegistry.readActiveRoster(otherSession)).toEqual([rosterIds[0]]);
     expect(parentSessions.get(owner)?.spawnReservations.get(toolCallId)).toBe(foreign);
@@ -200,17 +193,12 @@ describe("shutdownPiSession releases through the settlement path", () => {
   it("releases a held batch in exactly the order, through exactly the ports, settlement does", async () => {
     const settled = recordingDurableReleases(undefined, new Set([LEASE]));
     const settledSessions = await ownerHolding(reservationNaming(owner));
-    expect(await dispatchPiSubagentStop(
-      { toolName: "subagent", toolCallId, input: {}, content: [], details: { results: [] }, isError: false } as
-        unknown as ToolResultEvent,
-      { sessionManager: { getSessionId: () => owner } },
-      {
-        parentSessions: settledSessions,
-        emissionLaunchBridge: bridge,
-        reviewWitnesses: createTrustedReviewWitnesses(),
-        durableClaimReleases: settled.durableClaimReleases,
-      },
-    )).toBeUndefined();
+    expect(await settleEmptyBatch(owner, toolCallId, {
+      parentSessions: settledSessions,
+      emissionLaunchBridge: inertEmissionLaunchBridge,
+      reviewWitnesses: createTrustedReviewWitnesses(),
+      durableClaimReleases: settled.durableClaimReleases,
+    })).toBeUndefined();
 
     const shut = recordingDurableReleases(undefined, new Set([LEASE]));
     await shutdown(await ownerHolding(reservationNaming(owner)), shut.durableClaimReleases);
@@ -238,5 +226,41 @@ describe("shutdownPiSession releases through the settlement path", () => {
     await shutdown(parentSessions, healed.durableClaimReleases);
     expect(healed.calls).toEqual([`removeRosterEntry:${rosterIds[1]}`, "releasePointer:off-disk-lease"]);
     expect(parentSessions.get(owner)).toBeUndefined();
+  });
+
+  describe("the session's child write-grant binding, released as a durable ledger", () => {
+    const childId = parseAgentId("pi-shutdown-child")!;
+    const boundChild = async () => {
+      await fsSessionRegistry.markActive(owner, childId);
+      const childWriteGrants = createPiChildWriteGrants();
+      childWriteGrants.active.set(owner, { kind: "active", agentId: childId, pointerBinding: LEASE, scopeDirs: ["specs/"] });
+      return childWriteGrants;
+    };
+
+    it("removes its roster entry, then releases its lease, and retires the binding", async () => {
+      const childWriteGrants = await boundChild();
+      const releases = recordingDurableReleases(undefined, new Set([LEASE]));
+      await shutdown(createPiParentSessions(), releases.durableClaimReleases, childWriteGrants);
+      expect(releases.calls).toEqual([`removeRosterEntry:${childId}`, "releasePointer:off-disk-lease"]);
+      expect(fsSessionRegistry.readActiveRoster(owner)).toEqual([]);
+      expect(childWriteGrants.active.has(owner)).toBe(false);
+    });
+
+    it("keeps exactly the failed release as the binding's pending authority and retries only it", async () => {
+      const childWriteGrants = await boundChild();
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const failing = recordingDurableReleases((call) => call.startsWith("releasePointer:"), new Set([LEASE]));
+      await expect(shutdown(createPiParentSessions(), failing.durableClaimReleases, childWriteGrants)).rejects.toThrow(
+        `Loom Pi session shutdown cleanup failed: roll back child task-graph pointer for ${owner}: releasePointer unavailable`,
+      );
+      expect(childWriteGrants.active.get(owner)).toEqual({
+        kind: "pointer-cleanup-pending", agentId: null, pointerBinding: LEASE, scopeDirs: ["specs/"],
+      });
+
+      const healed = recordingDurableReleases(undefined, new Set([LEASE]));
+      await shutdown(createPiParentSessions(), healed.durableClaimReleases, childWriteGrants);
+      expect(healed.calls).toEqual(["releasePointer:off-disk-lease"]);
+      expect(childWriteGrants.active.has(owner)).toBe(false);
+    });
   });
 });

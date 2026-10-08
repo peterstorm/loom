@@ -10,8 +10,9 @@
  * hands each remaining result to its named applier in `pi/subagent-result`,
  * and releases the pointer lease last — the equivalent of Claude Code's
  * SubagentStop hooks. Both releases run the batch's claims ledger
- * (`pi/spawn-claims.ts`) through `releaseHeldSpawnClaims` — the release path
- * session shutdown shares — with the same plan and remaining-debt rule as an
+ * (`pi/spawn-claims.ts`) through `releaseHeldSpawnClaims`
+ * (`pi/spawn-claim-shell.ts`) — the release path session shutdown shares —
+ * with the same plan and remaining-debt rule as an
  * admission rollback; settlement also retries the capabilities failed
  * admission compensations orphaned on the owner's session.
  *
@@ -89,14 +90,13 @@ import { capturePiSubagentResult, classifyPiEmissionStartupRefusal } from "./rev
 import { describeCause } from "./cleanup-actions";
 import {
   pointerLeaseOnly,
-  releaseHeldSpawnClaims,
-  releaseOrphanedSpawnClaims,
-  spawnSettlementStepLabel,
+  settlementReleasePhrasing,
   withoutPointerLease,
   type DurableClaimReleasePorts,
   type DurableSpawnClaims,
   type SpawnClaimHolder,
 } from "./spawn-claims";
+import { releaseHeldSpawnClaims, releaseOrphanedSpawnClaims } from "./spawn-claim-shell";
 import {
   missingResultMarkersProblem,
   missingTaskGraphNotice,
@@ -261,7 +261,7 @@ async function releaseSettledClaims(
     owner,
     parentSessions,
     select,
-    (step) => spawnSettlementStepLabel(step, owner),
+    settlementReleasePhrasing(owner),
     durableClaimReleases(owner.sessionId),
   );
   for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);

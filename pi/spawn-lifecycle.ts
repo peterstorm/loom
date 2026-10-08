@@ -118,8 +118,9 @@ export type PiSpawnLifecyclePorts = Readonly<{
   emissionLaunchBridge: PiEmissionLaunchBridge;
   /** The witness aggregate a standalone review's first exact spawn binds. */
   reviewWitnesses: TrustedReviewWitnesses;
-  /** The durable release ports (`piDurableClaimReleasePorts` in production)
-   *  a refusal releases the session's grants, roster entries and lease by. */
+  /** The durable release ports (`piDurableClaimReleasePorts`,
+   *  `pi/spawn-claim-shell.ts`, in production) a refusal releases the
+   *  session's grants, roster entries and lease by. */
   durableClaimReleases: (sessionId: PiSessionId) => DurableClaimReleasePorts;
   /** The content-addressed runtime revision staged emission launches carry. */
   runtimeRevision: string;
@@ -132,16 +133,32 @@ export type PiSpawnLifecyclePorts = Readonly<{
 /**
  * Reserve one admitted batch's lifecycle, or refuse it with every claim it
  * made rolled back (or retained as cleanup debt). Resolves `undefined` when
- * the batch may dispatch.
- *
- * Every Pi tool call starts from an empty ledger. `held` names claims the
- * batch already holds; the ledger refuses a claim only when one like it is
- * held, so passing one is how a test reaches each refusal through admission.
+ * the batch may dispatch. Every Pi tool call starts from an empty ledger.
  */
-export async function reservePiSpawnLifecycle(
+export function reservePiSpawnLifecycle(
   request: PiSpawnLifecycleRequest,
   ports: PiSpawnLifecyclePorts,
-  held: SpawnClaims = NO_SPAWN_CLAIMS,
+): Promise<PiSpawnRefusal | undefined> {
+  return reserveFromLedger(NO_SPAWN_CLAIMS, request, ports);
+}
+
+/**
+ * Test seam, never a production entry point: the same lifecycle as
+ * `reservePiSpawnLifecycle`, from a ledger that already holds `held`. The
+ * ledger refuses a claim only when one like it is held, so this is how a test
+ * drives each refusal — and its real compensation and rollback — through
+ * admission.
+ */
+export const reservePiSpawnLifecycleHoldingForTesting = (
+  held: SpawnClaims,
+  request: PiSpawnLifecycleRequest,
+  ports: PiSpawnLifecyclePorts,
+): Promise<PiSpawnRefusal | undefined> => reserveFromLedger(held, request, ports);
+
+async function reserveFromLedger(
+  held: SpawnClaims,
+  request: PiSpawnLifecycleRequest,
+  ports: PiSpawnLifecyclePorts,
 ): Promise<PiSpawnRefusal | undefined> {
   const { event, cwd, sessionId, safeSessionId, admission } = request;
   const {
