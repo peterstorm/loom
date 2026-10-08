@@ -101,9 +101,10 @@ const caseKey = (cell: CellKey, caseId: string): string => JSON.stringify([cell,
 
 /**
  * Every preregistered case's resolved input, as `resolveWindowInputs` returns
- * it. Opaque, with one builder (`WindowInputs.of`) that derives each key from
- * the cell and case the input itself carries: no entry can sit under another
- * case's key, so a lookup needs no re-check.
+ * it. Opaque, with one builder (`WindowInputs.of`; `WindowInputs.EMPTY` files
+ * nothing) that derives each key from the cell and case the input itself
+ * carries: no entry can sit under another case's key, so a lookup needs no
+ * re-check.
  */
 export class WindowInputs {
   readonly #byCase: ReadonlyMap<string, CaseInput>;
@@ -113,17 +114,20 @@ export class WindowInputs {
     Object.freeze(this);
   }
 
-  /** The inputs, each filed under its own (cell, case). Two inputs for one
-   *  case break a construction invariant (the preregistration parse refuses
-   *  duplicate case ids within a cell) and are thrown as such. */
-  static of(inputs: Iterable<CaseInput>): WindowInputs {
+  /** A window with no inputs: the inputs of a window that never dispatches. */
+  static readonly EMPTY: WindowInputs = new WindowInputs(new Map());
+
+  /** The inputs, each filed under its own (cell, case), or every (cell, case)
+   *  given more than one input — refused, never filed twice. */
+  static of(inputs: Iterable<CaseInput>): Result<WindowInputs, readonly string[]> {
     const byCase = new Map<string, CaseInput>();
+    const duplicated = new Map<string, string>();
     for (const input of inputs) {
       const key = caseKey(input.cell, input.caseId);
-      if (byCase.has(key)) throw new Error(`two resolved inputs for ${input.cell} case ${input.caseId}`);
-      byCase.set(key, input);
+      if (byCase.has(key)) duplicated.set(key, `${input.cell} case ${input.caseId}: two resolved inputs`);
+      else byCase.set(key, input);
     }
-    return new WindowInputs(byCase);
+    return duplicated.size > 0 ? err(Object.freeze([...duplicated.values()])) : ok(new WindowInputs(byCase));
   }
 
   get size(): number {
@@ -194,8 +198,8 @@ export function resolveCaseInput(
     .exhaustive();
 }
 
-/** Every preregistered case's input, or every case that cannot be resolved —
- *  refused before any window opens. */
+/** Every preregistered case's input, or every case that cannot be resolved or
+ *  is resolved twice — refused before any window opens. */
 export function resolveWindowInputs(
   prereg: Preregistration,
   fixtures: WorkloadFixtures,
@@ -212,7 +216,9 @@ export function resolveWindowInputs(
       else problems.push(`${cell.cell} case ${entry.caseId}: ${resolved.error}`);
     }
   }
-  return problems.length > 0 ? err(Object.freeze(problems)) : ok(WindowInputs.of(inputs));
+  const filed = WindowInputs.of(inputs);
+  if (!filed.ok) problems.push(...filed.error);
+  return problems.length > 0 ? err(Object.freeze(problems)) : filed;
 }
 
 // ---------------------------------------------------------------------------

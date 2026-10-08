@@ -366,7 +366,7 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
   const open = (): void => store.write(WINDOW_FILES.window, jsonText(record));
   if (record.dispatch.kind !== "dispatched") {
     open();
-    return ok(Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.of([]) }));
+    return ok(Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.EMPTY }));
   }
   const inputs = resolveDispatchInputs(run);
   if (!inputs.ok) return inputs;
