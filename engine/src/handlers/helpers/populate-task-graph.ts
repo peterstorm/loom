@@ -7,7 +7,6 @@
  * already left pending; without it both the pre-lock and locked guards refuse.
  */
 
-import { execFileSync } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { HookHandler, TaskGraph } from "../../types";
@@ -29,6 +28,7 @@ import { observeSpecIndex } from "../../orchestration/spec-index-observation";
 import { specIndexUnavailableMessage } from "../../core/requirement-coverage";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-artifact-snapshot";
 import { observeExactHead } from "../../utils/git";
+import { runGit } from "../../utils/git-execution-policy";
 import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import {
   parseAuthoredTaskRoster,
@@ -153,11 +153,7 @@ function gitFailureCause(error: unknown): string {
 function canonicalGitRoot(): CanonicalGitRootObservation {
   const candidate = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   try {
-    const output = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: candidate,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    const output = runGit(["rev-parse", "--show-toplevel"], { output: "text", cwd: candidate }).trim();
     return output !== "" && isAbsolute(output) && resolve(output) === output
       ? { kind: "repository", root: output }
       : {

@@ -37,7 +37,11 @@ vi.mock("node:child_process", async (importOriginal) => {
   return {
     ...actual,
     spawnSync: (file: string, args: readonly string[]) => {
-      scriptedResponses.calls.push([file, ...args]);
+      // Every probe runs under the shared execution policy; the recorded
+      // argv is what follows its command-scope prefix.
+      const [flag, config, ...rest] = args;
+      if (flag !== "-c" || config !== "core.fsmonitor=false") throw new Error(`git spawned outside the execution policy: ${args.join(" ")}`);
+      scriptedResponses.calls.push([file, ...rest]);
       const next = scriptedResponses.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;

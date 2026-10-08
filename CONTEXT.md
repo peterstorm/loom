@@ -397,7 +397,7 @@ A plan invariant (`INV-N`, tier `checkable`) expressed as a lint rule enforced f
 _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory rules are never enforced)
 
 **Git-Visible Leaf**:
-A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it, under the one Git execution policy (`utils/git-execution-policy.ts`: allow-listed environment, no ambient `GIT_*`, fsmonitor disabled).
+A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it, under the one Git execution policy (`utils/git-execution-policy.ts`: allow-listed environment, no ambient `GIT_*`, no system or global config, fsmonitor disabled). Every engine Git child runs under that policy, so no observer's ignore rules can depend on an operator's global `core.excludesFile`.
 _Avoid_: Directory listing, file walk, pathspec match
 
 **Reviewed Workspace Observation**:

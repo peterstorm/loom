@@ -1,13 +1,30 @@
 /**
- * The ONE execution policy every engine-observation Git child runs under, and
- * the ONE place such a child is spawned: `runGit` (throwing) and `spawnGit`
- * (status-returning). Callers are `utils/git.ts` (HEAD/authority probes and,
- * through its shadow administration directory, every diff, content-hashing
- * listing and tracking probe), `utils/git-leaves.ts` (`gitOutput`: the single
- * leaf enumerator and every revision read that the snapshot hasher, reviewed
- * workspace, Review Packet, Wave lint and task-local diff share),
- * `utils/workspace-digest.ts` (the workspace roster and root) and
- * `orchestration/remediation-candidate.ts` (tracking and ignore audits).
+ * The ONE execution policy every engine Git child runs under, and the ONE
+ * place in the engine and Pi sources where `git` is spawned: `runGit`
+ * (throwing) and `spawnGit` (status-returning).
+ * `tests/utils/git-spawn-seam-guard.test.ts` fails on any other spawn. Callers
+ * are `utils/git.ts` (root/HEAD/authority probes and, through its shadow
+ * administration directory, every diff, content-hashing listing and tracking
+ * probe), `utils/git-leaves.ts` (`gitOutput`: the single leaf enumerator and
+ * every revision read that the snapshot hasher, reviewed workspace, Review
+ * Packet, Wave lint and task-local diff share), `utils/workspace-digest.ts`
+ * (the workspace roster and root), `utils/declared-artifact-snapshot.ts`
+ * (commit existence), `config.ts` (the task-graph boundary root),
+ * `orchestration/remediation-candidate.ts` (tracking and ignore audits),
+ * `orchestration/completion-check-runner.ts` (the report reset's tracking and
+ * ignore probes, which must agree with those audits),
+ * `orchestration/git-remediation.ts` (witness, temporary-index staging), and
+ * the helper shells: review scope (`programs/changed-paths.ts`), Review
+ * Packet, model calibration, task-graph population and implementation-proof
+ * reconciliation.
+ *
+ * Moving a caller here intentionally drops the operator's system and global
+ * config for it: `core.excludesFile`, `safe.directory`, `core.quotePath`,
+ * `diff.renames`, `core.autocrlf`, `includeIf` and any user identity. Engine
+ * observations must not depend on operator-local config, and no caller writes
+ * a commit. A repository owned by another uid therefore fails every route
+ * alike with Git's dubious-ownership diagnostic instead of passing some routes
+ * and failing others.
  *
  * The policy is one invocation — argv and environment together — and it is
  * private to this module, so no caller can apply half of it or hand-roll the
@@ -54,6 +71,12 @@ const COMMAND_SCOPE_CONFIG: readonly (readonly [key: string, value: string])[] =
  *  the repository or the shadow directory alike — unless the run names its own. */
 const GIT_OUTPUT_LIMIT = 100 * 1024 * 1024;
 
+/** Node's own `spawnSync` stdout budget (1 MiB): what a status probe that
+ *  never named a budget — a root, HEAD, ref or single-path answer — ran
+ *  under before it reached this seam, kept so routing it here changes no
+ *  over-budget outcome. */
+export const GIT_PROBE_OUTPUT_LIMIT = 1024 * 1024;
+
 /** Where a policy-bound Git child finds its repository when it is not the
  *  working directory's own: the shadow administration directory's overrides.
  *  Closed to these names, so a caller can relocate the repository but never
@@ -65,6 +88,10 @@ export type GitRepositoryLocation = Readonly<{
   GIT_OBJECT_DIRECTORY: string;
 }>;
 
+/** A throwaway index for the working directory's own repository: remediation
+ *  stages into one so the real index is untouched until a verified install. */
+export type GitIndexLocation = Readonly<{ GIT_INDEX_FILE: string }>;
+
 type HardenedGitInvocation = Readonly<{
   argv: readonly string[];
   env: NodeJS.ProcessEnv;
@@ -74,7 +101,7 @@ type HardenedGitInvocation = Readonly<{
  *  `-c` prefix, and the allow-listed environment read fresh from the process. */
 function hardenedGitInvocation(
   args: readonly string[],
-  location?: GitRepositoryLocation,
+  location?: GitRepositoryLocation | GitIndexLocation,
 ): HardenedGitInvocation {
   const env: NodeJS.ProcessEnv = {};
   for (const name of INHERITED_LAUNCH_ESSENTIALS) {
@@ -149,23 +176,34 @@ export function runGit<K extends GitOutput>(args: readonly string[], run: GitRun
   return RUNNERS[run.output](argv, base, run.stdin ?? "ignore");
 }
 
+/** One status-returning run. `input`, when present, is piped as the child's
+ *  whole stdin (otherwise stdin is ignored); `timeout` bounds the child's wall
+ *  time, a timed-out child arriving as `signal`/`error`; `location` relocates
+ *  only through the closed overlays above. */
+export type SpawnGitRun = Readonly<{
+  cwd?: string;
+  maxBuffer: number;
+  input?: Uint8Array;
+  timeout?: number;
+  location?: GitRepositoryLocation | GitIndexLocation;
+}>;
+
 /**
  * Run one Git command under the policy without throwing on its exit status:
  * for callers whose protocol reads `status` itself (`check-ignore`'s 0/1,
- * `ls-files --error-unmatch`). stdout and stderr are captured as bytes; a
- * spawn failure or an over-budget capture arrives as `error`.
+ * `ls-files --error-unmatch`, `merge-base`'s 0/1). stdout and stderr are
+ * captured as bytes; a spawn failure or an over-budget capture arrives as
+ * `error`.
  */
-export function spawnGit(
-  args: readonly string[],
-  run: Readonly<{ cwd?: string; maxBuffer: number }>,
-): SpawnSyncReturns<Buffer> {
-  const { argv, env } = hardenedGitInvocation(args);
+export function spawnGit(args: readonly string[], run: SpawnGitRun): SpawnSyncReturns<Buffer> {
+  const { argv, env } = hardenedGitInvocation(args, run.location);
   return spawnSync("git", argv, {
     ...(run.cwd === undefined ? {} : { cwd: run.cwd }),
     env,
     encoding: "buffer",
     maxBuffer: run.maxBuffer,
-    stdio: ["ignore", "pipe", "pipe"],
+    ...(run.timeout === undefined ? {} : { timeout: run.timeout }),
+    ...(run.input === undefined ? { stdio: ["ignore", "pipe", "pipe"] } : { input: run.input, stdio: ["pipe", "pipe", "pipe"] }),
     windowsHide: true,
   });
 }

@@ -15,8 +15,11 @@
  *   quote is data on stdin rather than a selector Git interprets;
  * - a canonical cwd (the repository root) resolved once, so a relative path
  *   cannot mean different files at different moments;
- * - an allowlisted environment, so ambient `GIT_*` settings from the caller's
- *   shell cannot redirect the index, the work tree, or the object store;
+ * - the shared `git-execution-policy` (allow-listed environment, no system or
+ *   global config, `core.fsmonitor` disabled), so ambient `GIT_*` settings
+ *   from the caller's shell cannot redirect the index, the work tree, or the
+ *   object store, and the witness and staging observe the same ignore rules
+ *   as the remediation candidate's audits and the workspace digest;
  * - bounded output and time, so a hung or runaway Git cannot wedge a run.
  *
  * Agent prose never enters command text. The only caller-derived values that
@@ -29,7 +32,6 @@
  * and the work tree byte-for-byte unchanged.
  */
 
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -64,32 +66,14 @@ import {
 import { compareCandidateRepositoryWitnesses } from "../core/defect-family-accounting";
 import { recaptureRemediationCandidateWorkspace } from "./remediation-candidate";
 import { confirmedEmptyPassthrough, observeGitProbe } from "../utils/git-probe";
+import { spawnGit, type SpawnGitRun } from "../utils/git-execution-policy";
 
-/** Fixed argument templates. Nothing here is ever built from caller input. */
-const GIT_EXECUTABLE = "git";
+/** Fixed argument template. Nothing here is ever built from caller input. */
 const LITERAL_PATHSPECS = "--literal-pathspecs";
 
 /** Bounds. A remediation staging is small; these are generous, not tight. */
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-
-/**
- * The only environment Git receives. `PATH` locates the executable and `HOME`
- * lets Git read the user's config; everything else — and in particular every
- * ambient `GIT_INDEX_FILE`, `GIT_DIR`, `GIT_WORK_TREE`, or `GIT_CONFIG` — is
- * dropped, so the caller's shell cannot silently redirect an operation. The
- * temporary index is passed explicitly per-invocation instead.
- */
-function allowlistedEnvironment(overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
-  return {
-    PATH: process.env["PATH"] ?? "/usr/bin:/bin",
-    HOME: process.env["HOME"] ?? "",
-    // Deterministic, locale-independent output.
-    LC_ALL: "C",
-    GIT_OPTIONAL_LOCKS: "0",
-    ...overrides,
-  };
-}
 
 export type GitBoundaryError = Readonly<{
   kind: "git-boundary-failed";
@@ -123,16 +107,18 @@ export type GitSpawnResult = Readonly<{
   stderr: Buffer;
 }>;
 
-export type GitSpawn = (
-  command: string,
-  args: readonly string[],
-  options: Record<string, unknown>,
-) => GitSpawnResult;
+export type GitSpawn = (args: readonly string[], run: SpawnGitRun) => GitSpawnResult;
 
 /**
- * Run one Git command. Every invocation goes through here so the fixed
- * executable, argument array, cwd, environment, and bounds cannot be bypassed
- * by an individual operation.
+ * Run one Git command. Every invocation goes through here so the argument
+ * array, cwd, temporary index, and bounds cannot be bypassed by an individual
+ * operation; the executable and environment are the shared execution
+ * policy's, applied by `spawnGit`. The temporary index is the one location
+ * override, passed explicitly per invocation.
+ *
+ * Dropping the operator's global config is deliberate: staging and the
+ * witness must observe what the candidate audits observe. No operation here
+ * writes a commit, so no user identity is needed.
  *
  * `--literal-pathspecs` is a GLOBAL option: Git only accepts it before the
  * subcommand, and a subcommand that receives it as its own flag exits 129.
@@ -146,17 +132,14 @@ export type GitSpawn = (
 export function runGit(
   repositoryRoot: string,
   invocation: GitInvocation,
-  spawn: GitSpawn = spawnSync,
+  spawn: GitSpawn = spawnGit,
 ): DomainResult<Buffer, GitBoundaryError> {
-  const result = spawn(GIT_EXECUTABLE, [LITERAL_PATHSPECS, ...invocation.args], {
+  const result = spawn([LITERAL_PATHSPECS, ...invocation.args], {
     cwd: repositoryRoot,
-    env: allowlistedEnvironment(
-      invocation.indexFile === undefined ? {} : { GIT_INDEX_FILE: invocation.indexFile },
-    ),
     timeout: DEFAULT_TIMEOUT_MS,
     maxBuffer: DEFAULT_MAX_OUTPUT_BYTES,
+    ...(invocation.indexFile === undefined ? {} : { location: { GIT_INDEX_FILE: invocation.indexFile } }),
     ...(invocation.stdin === undefined ? {} : { input: invocation.stdin }),
-    windowsHide: true,
   });
 
   if (result.error !== undefined && result.error !== null) {

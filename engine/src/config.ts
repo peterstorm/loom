@@ -4,7 +4,6 @@
  * update the docs if changed.
  */
 
-import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +28,7 @@ import { frozenSet } from "./core/frozen";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe } from "./utils/git-probe";
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "./utils/git-execution-policy";
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
@@ -512,25 +512,25 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
  *  the explicit cwd, so the governing graph lives in the repository the caller
  *  declares — the bounded empty-stdout retry here discharges the transient
  *  documented at `observeGitProbe`; a confirmed anomaly throws with the full
- *  probe evidence. */
+ *  probe evidence. The probe runs under the shared `git-execution-policy`,
+ *  whose `LANG=C`/`LC_ALL=C` keeps the English diagnostic the
+ *  not-a-repository match below reads. */
 function gitRepositoryRootFrom(cwd: string): string | null {
   type RootProbe =
     | Readonly<{ kind: "root"; root: string; status: number; stdoutLength: number; signal: NodeJS.Signals | null; stderr: string }>
     | Readonly<{ kind: "not-repository" }>;
   const observed = observeGitProbe<RootProbe, Error>(() => {
-    const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-      encoding: "utf-8",
-      cwd,
-      env: { ...process.env, LANG: "C", LC_ALL: "C" },
-    });
+    const probe = spawnGit(["rev-parse", "--show-toplevel"], { cwd, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
     if (probe.error !== undefined) {
       return { ok: false, error: new Error(`git rev-parse could not start: ${probe.error.message}`) };
     }
+    const stdout = probe.stdout.toString("utf-8");
+    const stderr = probe.stderr.toString("utf-8");
     if (probe.status === 0) {
-      return { ok: true, value: Object.freeze({ kind: "root", root: probe.stdout.trim(), status: probe.status,
-        stdoutLength: probe.stdout.length, signal: probe.signal, stderr: probe.stderr.trim() }) };
+      return { ok: true, value: Object.freeze({ kind: "root", root: stdout.trim(), status: probe.status,
+        stdoutLength: stdout.length, signal: probe.signal, stderr: stderr.trim() }) };
     }
-    if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
+    if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(stderr)) {
       try {
         proveNoGitMetadataInAncestorsFrom(cwd);
         return { ok: true, value: Object.freeze({ kind: "not-repository" }) };
@@ -539,7 +539,7 @@ function gitRepositoryRootFrom(cwd: string): string | null {
       }
     }
     const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
-    return { ok: false, error: new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`) };
+    return { ok: false, error: new Error(`git rev-parse failed (${outcome}): ${stderr.trim() || "no diagnostic"}`) };
   }, (value) => value.kind === "root" && value.root === "");
   if (observed.kind === "failed") throw observed.error;
   if (observed.kind === "confirmed-empty") {

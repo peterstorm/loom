@@ -6,7 +6,8 @@
  * Imperative shell — every classification rule lives in core/scope-classification.
  */
 import { devNull } from 'node:os';
-import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from 'node:child_process';
+import type { SpawnSyncReturns } from 'node:child_process';
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from '../../../utils/git-execution-policy';
 import { observeGitProbe, type GitProbeObservation, type GitProbeStep } from '../../../utils/git-probe';
 import type { StandaloneReviewKind, StandaloneReviewMetadata } from '../../../core/standalone-review-scope';
 import { classifyScope, parseNumstatAdditions, reviewablePath } from '../../../core/scope-classification';
@@ -29,6 +30,12 @@ import { classifyScope, parseNumstatAdditions, reviewablePath } from '../../../c
 type GitEmptyDecision = "refuse" | "legitimate";
 type CandidateReference = Readonly<{ kind: "missing" }> | Readonly<{ kind: "present"; revision: string }>;
 type MergeBaseCandidate = Readonly<{ kind: "no-base" }> | Readonly<{ kind: "base"; revision: string }>;
+
+/** stdout budgets: a scope path listing or text answer, and one baseline blob.
+ *  Every other probe answers a ref, a base or a numstat row and keeps
+ *  `GIT_PROBE_OUTPUT_LIMIT`. */
+const SCOPE_LISTING_LIMIT = 16 * 1024 * 1024;
+const BASELINE_BLOB_LIMIT = 64 * 1024 * 1024;
 
 /** Spawn stdout/stderr text with Buffer's default UTF-8 decoding and an empty fallback. */
 function spawnText(stream: string | Buffer | undefined): string {
@@ -91,21 +98,22 @@ function resolveObservation<T, R>(
   return observedValue(observed.value);
 }
 
-/** One file-local shape for the module's eight spawnSync→probe wraps
+/** One file-local shape for the module's eight spawn→probe wraps
  *  (gitPaths, gitText, candidateReference, candidateMergeBase,
  *  trackedAdditions, untrackedAdditions, and baselineBlob's two): the adapter states the shared
- *  spawn-failure refusal once, and each call site passes only its own spawn
- *  options, value decode, and refusal labels — the real per-site differences
- *  (buffer vs utf8 stderr decoding, the no-index probe's status-1 acceptance,
- *  message labels) stay visible as parameters instead of a diff across eight
- *  near-identical blocks. */
+ *  spawn-failure refusal once, and each call site passes only its own output
+ *  budget, value decode, and refusal labels — the real per-site differences
+ *  (the no-index probe's status-1 acceptance, message labels) stay visible as
+ *  parameters instead of a diff across eight near-identical blocks. Every
+ *  probe runs under the shared `git-execution-policy`, so review scope is
+ *  derived under the same ignore rules and config as every other observer. */
 function gitSpawnProbe<T>(
   args: readonly string[],
-  options: SpawnSyncOptions,
-  classify: (result: SpawnSyncReturns<string | Buffer>) => GitProbeStep<T, Error>,
+  maxBuffer: number,
+  classify: (result: SpawnSyncReturns<Buffer>) => GitProbeStep<T, Error>,
 ): () => GitProbeStep<T, Error> {
   return () => {
-    const result = spawnSync("git", [...args], options);
+    const result = spawnGit(args, { maxBuffer });
     if (result.error) {
       return { ok: false as const, error: new Error(`git ${args[0]} could not be spawned: ${result.error.message}`) };
     }
@@ -117,7 +125,7 @@ function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly st
   const frozenPaths = (paths: readonly string[]): readonly string[] => Object.freeze([...paths]);
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 }, (result) =>
+      gitSpawnProbe(args, SCOPE_LISTING_LIMIT, (result) =>
         result.status !== 0
           ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
           : decodeListedPaths(result.stdout)),
@@ -140,7 +148,7 @@ function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly st
 export function gitText(args: readonly string[], empty: GitEmptyDecision): string {
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (result) =>
+      gitSpawnProbe(args, SCOPE_LISTING_LIMIT, (result) =>
         result.status !== 0
           ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
           : { ok: true as const, value: spawnText(result.stdout).trim() }),
@@ -179,7 +187,7 @@ function candidateReference(candidate: string): CandidateReference {
   return resolveObservation(
     observeGitProbe(
       gitSpawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
-        { encoding: "utf8" }, (result) => {
+        GIT_PROBE_OUTPUT_LIMIT, (result) => {
           if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
             return { ok: true, value: { kind: "missing" } };
           }
@@ -196,7 +204,7 @@ function candidateReference(candidate: string): CandidateReference {
 function candidateMergeBase(candidate: string, head: string): MergeBaseCandidate {
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], { encoding: "utf8" }, (result) => {
+      gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], GIT_PROBE_OUTPUT_LIMIT, (result) => {
         if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
           return { ok: true, value: { kind: "no-base" } };
         }
@@ -247,7 +255,7 @@ function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" }, (result) =>
+      gitSpawnProbe(["diff", "--numstat", baseline, "--", ...paths], GIT_PROBE_OUTPUT_LIMIT, (result) =>
         result.status !== 0
           ? stderrRefusal(result.stderr, "git diff --numstat failed")
           : { ok: true as const, value: spawnText(result.stdout) }),
@@ -265,7 +273,7 @@ function untrackedAdditions(paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
     return sum + resolveObservation(
       observeGitProbe(
-        gitSpawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" }, (result) => {
+        gitSpawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], GIT_PROBE_OUTPUT_LIMIT, (result) => {
           const diagnostic = spawnText(result.stderr).trim();
           if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
             return { ok: false as const, error: new Error(diagnostic || `cannot measure untracked additions for ${path}`) };
@@ -306,7 +314,7 @@ export function baselineBlob(revision: string, path: string): Uint8Array | null 
   const object = `${revision}:${path}`;
   const listing = resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], { encoding: "buffer" }, (result) =>
+      gitSpawnProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT, (result) =>
         result.status !== 0
           ? stderrRefusal(result.stderr, `git ls-tree failed for ${object}`)
           : { ok: true as const, value: spawnText(result.stdout) }),
@@ -323,10 +331,10 @@ export function baselineBlob(revision: string, path: string): Uint8Array | null 
   if (type !== "blob") throw new Error(`${object} is a ${type}, not a file`);
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(["cat-file", "blob", blobId], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 }, (result) =>
+      gitSpawnProbe(["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, (result) =>
         result.status !== 0
           ? stderrRefusal(result.stderr, `git cat-file blob failed for ${object}`)
-          : { ok: true as const, value: new Uint8Array(Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout)) }),
+          : { ok: true as const, value: new Uint8Array(result.stdout) }),
       (bytes) => bytes.length === 0,
     ),
     // An empty file is a real blob: confirmed-empty bytes are its content.

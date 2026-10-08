@@ -15,6 +15,10 @@
  * status-0/empty-stdout transient is reproduced deterministically — a real
  * repository cannot produce it on demand. The spawned check process itself
  * stays real, so the containment and report machinery is exercised unchanged.
+ *
+ * It also pins that the reset's ignore decision runs under the shared Git
+ * execution policy, so it agrees with the remediation candidate's ignore
+ * audit even when the operator's global config ignores the report.
  */
 
 import { spawnSync } from "node:child_process";
@@ -49,7 +53,11 @@ vi.mock("node:child_process", async (importOriginal) => {
       options: import("node:child_process").SpawnSyncOptions,
     ) => {
       if (scripted.passthrough) return realSpawnSync(file, args, options);
-      scripted.calls.push([file, ...args]);
+      // The reset probes run under the shared execution policy; the recorded
+      // argv is what follows its command-scope prefix.
+      const [flag, config, ...rest] = args;
+      if (flag !== "-c" || config !== "core.fsmonitor=false") throw new Error(`git spawned outside the execution policy: ${args.join(" ")}`);
+      scripted.calls.push([file, ...rest]);
       const next = scripted.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;
@@ -72,6 +80,7 @@ import {
 import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import { VERIFICATION_MANIFEST_KIND, freezeVerificationManifest } from "../../src/core/verification-manifest";
 import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
+import { spawnGit } from "../../src/utils/git-execution-policy";
 import {
   parseCanonicalRepositoryRoot,
   type CanonicalRepositoryRoot,
@@ -197,6 +206,38 @@ afterEach(() => {
 beforeEach(() => {
   scripted.calls.length = 0;
   scripted.queue.length = 0;
+});
+
+describe("remediation report reset agrees with the remediation candidate's ignore audit", () => {
+  it("refuses a report that only the operator's global core.excludesFile ignores, as the policy-bound audit does", async () => {
+    const root = fixtureRoot();
+    // The repository itself does not ignore the report directory; only the
+    // operator's global excludes file does.
+    writeFileSync(join(root, ".gitignore"), "");
+    const report = writeStaleReport(root, "stale, globally ignored only");
+    const home = canonicalTempDir("loom-report-reset-home-");
+    roots.push(home);
+    writeFileSync(join(home, "global-ignore"), ".loom/\n");
+    writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${join(home, "global-ignore")}\n`);
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      // Control: an ambient-config Git honours the operator's global ignore file…
+      expect(spawnSync("git", ["check-ignore", "-q", "--", REPORT_PATH], { cwd: root }).status).toBe(0);
+      // …but the candidate audit's policy-bound check-ignore (its exact argv) does not.
+      expect(spawnGit(["check-ignore", "--no-index", "--quiet", "--", REPORT_PATH], { cwd: root, maxBuffer: 1024 }).status)
+        .toBe(1);
+      const result = await runRemediationCheck(remediationCheck(root, "global-ignore"), root);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("a report the audit treats as a visible path was reset");
+      expect(result.error.kind).toBe("report-reset-failed");
+      expect(result.error.message).toContain("requires a Git-ignored path");
+      expect(readFileSync(report, "utf8")).toBe("stale, globally ignored only");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
 });
 
 describe("remediation report reset survives the transient empty tracked-state observation", () => {
