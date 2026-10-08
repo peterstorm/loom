@@ -80,7 +80,7 @@ async function corruptVerdictSource(handle: RunDirHandle, request: AgentRequestA
 }
 
 /** The refusal message of a drive result that must have failed. */
-function refusal(result: FacadeDriveResult): string {
+function refusalMessage(result: FacadeDriveResult): string {
   if (result.ok) throw new Error(`expected a refusal, got ${result.action.kind}`);
   return result.message;
 }
@@ -124,7 +124,7 @@ describe("submitRegisteredPanelAttempt", () => {
     const [request] = spawned(await driveRegisteredPanel(handle, program));
     await capture(handle, request!, verdict);
     await corruptVerdictSource(handle, request!);
-    expect(refusal(await submitRegisteredPanelAttempt(handle, program, request!, verdict)))
+    expect(refusalMessage(await submitRegisteredPanelAttempt(handle, program, request!, verdict)))
       .toContain(`the durable panel verdict source for request ${request!.requestId} is not valid JSON`);
     expect(await spawnOutcomes(handle)).toEqual([]);
   });
@@ -152,8 +152,8 @@ describe("resumeRegisteredPanel", () => {
     const [request] = spawned(await driveRegisteredPanel(handle, program));
     await capture(handle, request!, verdict);
     await corruptVerdictSource(handle, request!);
-    const submitted = refusal(await submitRegisteredPanelAttempt(handle, program, request!, verdict));
-    expect(refusal(await resumeRegisteredPanel(handle, program))).toBe(submitted);
+    const submitted = refusalMessage(await submitRegisteredPanelAttempt(handle, program, request!, verdict));
+    expect(refusalMessage(await resumeRegisteredPanel(handle, program))).toBe(submitted);
     expect(await spawnOutcomes(handle)).toEqual([]);
   });
 });

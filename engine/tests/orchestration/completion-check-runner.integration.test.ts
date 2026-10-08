@@ -13,22 +13,12 @@ import {
   type CompletionCheckRunnerResult,
   type RemediationCheckRunnerResult,
 } from "../../src/orchestration/completion-check-runner";
-import {
-  authorizeRemediationChecks,
-  createCandidateRepositoryWitness,
-  createRemediationCheckScope,
-  prepareDefectFamilyAccounting,
-  prepareDefectFamilyVerification,
-  type AuthorizedRemediationCheck,
-} from "../../src/core/defect-family-accounting";
-import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
-import { VERIFICATION_MANIFEST_KIND, freezeVerificationManifest } from "../../src/core/verification-manifest";
-import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
+import type { AuthorizedRemediationCheck } from "../../src/core/defect-family-accounting";
+import { authorizedRemediationCheck } from "../fixtures/authorized-remediation-check";
 import {
   parseCanonicalRepositoryRoot,
   type CanonicalRepositoryRoot,
 } from "../../src/utils/workspace-digest";
-import { value } from "../fixtures/parse-result";
 
 type ProjectCommandCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 
@@ -93,7 +83,6 @@ function refusalText(result: { readonly ok: false; readonly error: unknown }): s
   return JSON.stringify(rest);
 }
 
-const digest = (character: string): string => character.repeat(64);
 const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
 
 function remediationCheck(
@@ -104,68 +93,7 @@ function remediationCheck(
   executable = "node",
   timeoutMs = 2_000,
 ): AuthorizedRemediationCheck {
-  const source = standaloneFixture(["src/main.ts"], true).input.standaloneResult;
-  const findingId = source.survivingCriticals[0]!.id;
-  const accounting = value(prepareDefectFamilyAccounting(source, {
-    kind: "declared-defect-family-accounting",
-    provenance: "DECLARED",
-    dispositions: [{ findingId, status: "repaired", repairGroupId: `family:${name}` }],
-    groups: [{
-      kind: "declared-repair-group",
-      provenance: "DECLARED",
-      repairGroupId: `family:${name}`,
-      findingIds: [findingId],
-      rootCause: { provenance: "DECLARED", statement: "The tested behavior regressed." },
-      invariant: { provenance: "DECLARED", statement: "The tested behavior remains fixed." },
-      siblings: { kind: "none-declared", provenance: "DECLARED", reason: "No siblings declared." },
-      checks: [{
-        checkId: `project:${name}`,
-        historicalRed: {
-          kind: "historical-red",
-          provenance: "DECLARED",
-          statement: "The check distinguishes the historical defect.",
-          reference: null,
-        },
-      }],
-    }],
-  }));
-  const manifest = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    schemaVersion: 1,
-    kind: VERIFICATION_MANIFEST_KIND,
-    checks: [{
-      id: `project:${name}`,
-      scope: "wave",
-      executable,
-      args,
-      cwd: ".",
-      timeoutMs,
-      report: { kind: "required-file", path: reportPath },
-    }],
-  }))));
-  const plan = value(prepareDefectFamilyVerification(accounting, manifest));
-  if (plan.kind !== "selected-operator-checks") throw new Error("selected remediation plan required");
-  const gitWitness = value(parseRepositorySnapshotWitness({
-    baseTreeDigest: digest("1"),
-    indexDigest: digest("2"),
-    worktreeDigest: digest("3"),
-  }));
-  const candidate = value(createCandidateRepositoryWitness({
-    kind: "candidate-repository-witness",
-    repositoryRoot: root,
-    workspaceDigest: digest("4"),
-    pathCount: 1,
-    observedPaths: ["src/candidate.ts"],
-    gitWitness,
-    generatedReportExclusions: [reportPath],
-  }));
-  const scope = value(createRemediationCheckScope(plan.source, candidate, {
-    kind: "standalone-remediation",
-    remediationRunId: `run.runner-${name}`,
-    sourceRunId: plan.source.sourceRunId,
-    registrationDigest: digest("a"),
-    candidateWitnessDigest: candidate.digest,
-  }));
-  return value(authorizeRemediationChecks(plan, scope))[0];
+  return authorizedRemediationCheck(root, { name, runIdPrefix: "run.runner", reportPath, args, executable, timeoutMs });
 }
 
 afterEach(() => {

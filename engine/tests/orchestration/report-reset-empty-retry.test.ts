@@ -26,7 +26,6 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { value } from "../fixtures/parse-result";
 
 const scripted = vi.hoisted(() => ({
   queue: [] as SpawnAnswer[],
@@ -70,17 +69,8 @@ import {
   runRemediationCheck,
   type RemediationCheckRunnerResult,
 } from "../../src/orchestration/completion-check-runner";
-import {
-  authorizeRemediationChecks,
-  createCandidateRepositoryWitness,
-  createRemediationCheckScope,
-  prepareDefectFamilyAccounting,
-  prepareDefectFamilyVerification,
-  type AuthorizedRemediationCheck,
-} from "../../src/core/defect-family-accounting";
-import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
-import { VERIFICATION_MANIFEST_KIND, freezeVerificationManifest } from "../../src/core/verification-manifest";
-import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
+import type { AuthorizedRemediationCheck } from "../../src/core/defect-family-accounting";
+import { authorizedRemediationCheck } from "../fixtures/authorized-remediation-check";
 import { spawnGit } from "../../src/utils/git-execution-policy";
 import {
   parseCanonicalRepositoryRoot,
@@ -88,7 +78,6 @@ import {
 } from "../../src/utils/workspace-digest";
 
 const roots: string[] = [];
-const digest = (character: string): string => character.repeat(64);
 const REPORT_PATH = ".loom/completion-reports/reset.xml";
 
 function fixtureRoot(): CanonicalRepositoryRoot {
@@ -120,68 +109,12 @@ function writeStaleReport(root: CanonicalRepositoryRoot, contents: string): stri
 }
 
 function remediationCheck(root: CanonicalRepositoryRoot, name: string): AuthorizedRemediationCheck {
-  const source = standaloneFixture(["src/main.ts"], true).input.standaloneResult;
-  const findingId = source.survivingCriticals[0]!.id;
-  const accounting = value(prepareDefectFamilyAccounting(source, {
-    kind: "declared-defect-family-accounting",
-    provenance: "DECLARED",
-    dispositions: [{ findingId, status: "repaired", repairGroupId: `family:${name}` }],
-    groups: [{
-      kind: "declared-repair-group",
-      provenance: "DECLARED",
-      repairGroupId: `family:${name}`,
-      findingIds: [findingId],
-      rootCause: { provenance: "DECLARED", statement: "The tested behavior regressed." },
-      invariant: { provenance: "DECLARED", statement: "The tested behavior remains fixed." },
-      siblings: { kind: "none-declared", provenance: "DECLARED", reason: "No siblings declared." },
-      checks: [{
-        checkId: `project:${name}`,
-        historicalRed: {
-          kind: "historical-red",
-          provenance: "DECLARED",
-          statement: "The check distinguishes the historical defect.",
-          reference: null,
-        },
-      }],
-    }],
-  }));
-  const manifest = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    schemaVersion: 1,
-    kind: VERIFICATION_MANIFEST_KIND,
-    checks: [{
-      id: `project:${name}`,
-      scope: "wave",
-      executable: "node",
-      args: ["reset-report.mjs", REPORT_PATH],
-      cwd: ".",
-      timeoutMs: 2_000,
-      report: { kind: "required-file", path: REPORT_PATH },
-    }],
-  }))));
-  const plan = value(prepareDefectFamilyVerification(accounting, manifest));
-  if (plan.kind !== "selected-operator-checks") throw new Error("selected remediation plan required");
-  const gitWitness = value(parseRepositorySnapshotWitness({
-    baseTreeDigest: digest("1"),
-    indexDigest: digest("2"),
-    worktreeDigest: digest("3"),
-  }));
-  const candidate = value(createCandidateRepositoryWitness({
-    kind: "candidate-repository-witness",
-    repositoryRoot: root,
-    workspaceDigest: digest("4"),
-    pathCount: 1,
-    observedPaths: ["src/candidate.ts"],
-    gitWitness,
-    generatedReportExclusions: [REPORT_PATH],
-  }));
-  const scope = value(createRemediationCheckScope(plan.source, candidate, {
-    kind: "standalone-remediation",
-    remediationRunId: `run.reset-${name}`,
-    sourceRunId: plan.source.sourceRunId,
-    registrationDigest: digest("a"),
-    candidateWitnessDigest: candidate.digest,
-  }));
-  return value(authorizeRemediationChecks(plan, scope))[0];
+  return authorizedRemediationCheck(root, {
+    name,
+    runIdPrefix: "run.reset",
+    reportPath: REPORT_PATH,
+    args: ["reset-report.mjs", REPORT_PATH],
+  });
 }
 
 function refusalText(result: { readonly ok: false; readonly error: unknown }): string {

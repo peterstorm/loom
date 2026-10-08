@@ -1056,16 +1056,33 @@ export type PanelAuthorityRosterFields<Authority> = [PanelAuthorityRosterField<A
   ? never
   : Readonly<Record<PanelAuthorityRosterField<Authority>, true>>;
 
+/** The default `Authority` of `canonicalPanelStateJson`, and its parameter type
+ *  while that default stands: the `never`-valued property admits no value, and
+ *  its name is the diagnostic a caller who omitted the type argument reads. */
+type AuthorityTypeArgumentRequired = Readonly<{
+  "canonicalPanelStateJson requires an explicit Authority type argument": never;
+}>;
+
 /**
  * The canonical form of one panel's state (live, or JSON read back from a
  * checkpoint): the issued rosters of its authority — the only place either
  * panel's state carries a derived view — each taken to the roster's own
  * canonical form (`canonicalExactRosterJson`), and every other field, key
  * order included, untouched. Positional, never by key name: a `byId` anywhere
- * else in the state stays part of the comparison. The authority is named, never
- * inferred from the set: an unnamed one has no roster fields to list.
+ * else in the state stays part of the comparison.
+ *
+ * Callers must pass the authority type explicitly, e.g.
+ * `canonicalPanelStateJson<RefutationPanelAuthority>({ verifierRoster: true })`.
+ * The roster-field set is checked against that type, so the type cannot be
+ * inferred from the set. Without it, the parameter becomes
+ * `AuthorityTypeArgumentRequired`, which no value satisfies and whose one
+ * property names the omission in the compiler error.
  */
-export const canonicalPanelStateJson = <Authority = never>(rosterFields: PanelAuthorityRosterFields<NoInfer<Authority>>) => (state: unknown): unknown => {
+export const canonicalPanelStateJson = <Authority = AuthorityTypeArgumentRequired>(
+  rosterFields: [Authority] extends [AuthorityTypeArgumentRequired]
+    ? AuthorityTypeArgumentRequired
+    : PanelAuthorityRosterFields<NoInfer<Authority>>,
+) => (state: unknown): unknown => {
   if (!isRecord(state) || !isRecord(state.authority)) return state;
   const authority = Object.fromEntries(Object.entries(state.authority).map(([field, value]) =>
     [field, Object.hasOwn(rosterFields, field) ? canonicalExactRosterJson(value) : value] as const));

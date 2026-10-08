@@ -28,9 +28,13 @@ describe("panel authority roster fields are derived from the authority type", ()
     const foreign: PanelAuthorityRosterFields<RefutationPanelAuthority> = { verifierRoster: true, findings: true };
     // @ts-expect-error an optional roster is still a roster field.
     const optional: PanelAuthorityRosterFields<OptionalRosterAuthority> = { primary: true };
-    // @ts-expect-error without the authority type no field is a roster field.
+    // @ts-expect-error omitting the Authority type argument leaves a parameter no value satisfies.
     const unnamed = canonicalPanelStateJson({ verifierRoster: true });
-    void [missing, foreign, optional, unnamed];
+    // @ts-expect-error naming `never` is the omission spelled out, refused the same way.
+    const nothing = canonicalPanelStateJson<never>({ verifierRoster: true });
+    // @ts-expect-error an authority with no roster field has no roster set to name.
+    const rosterless = canonicalPanelStateJson<Readonly<{ runId: string }>>({ runId: true });
+    void [missing, foreign, optional, unnamed, nothing, rosterless];
   });
 });
 
