@@ -113,7 +113,8 @@ describe("a digest-scheme claim is unforgeable outside the baseline module", () 
       expect(Object.keys(scheme)).toEqual([]);
       expect(Object.getOwnPropertyNames(Object.getPrototypeOf(scheme)).sort()).toEqual(["capture", "constructor", "fromEntries", "parse"]);
     }
-    expect(new Set([DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE]).size).toBe(3);
+    // Stateless entry points: every issued scheme is one shared runtime object.
+    expect(new Set([DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE]).size).toBe(1);
   });
 });
 

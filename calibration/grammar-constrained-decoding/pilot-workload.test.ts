@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REVIEWER_OUTPUT_CONTRACT } from "../../engine/src/core/reviewer-contract";
 import { mintCellBinding, pilotRequestId, type CellBinding } from "./pilot-binding";
-import { corpusCases, fixtures, inputOf, inputs, prereg } from "./pilot-test-fixtures";
+import { corpusCases, filedInputs, fixtures, inputOf, inputs, prereg } from "./pilot-test-fixtures";
 import { PILOT_CELLS, type CellKey } from "./pilot-vocabulary";
 import {
   parseCaseSource,
@@ -80,22 +80,45 @@ describe("case-input resolution (the one resolver the window and the tests share
 
   it("files every input under the cell and case it carries — the one builder derives the key", () => {
     const all = inputs.values();
-    const rebuilt = WindowInputs.of([...all].reverse());
+    const rebuilt = filedInputs([...all].reverse());
     expect(rebuilt.size).toBe(all.length);
     for (const input of all) expect(rebuilt.caseInput(input.cell, input.caseId)).toBe(input);
     // A case id spelled like another key's separator cannot collide with a different (cell, case).
     const [first] = all;
     if (first === undefined) throw new Error("the window resolved no input");
-    const tricky = WindowInputs.of([{ ...first, caseId: `${first.caseId}|x` }]);
+    const tricky = filedInputs([{ ...first, caseId: `${first.caseId}|x` }]);
     expect(tricky.caseInput(first.cell, first.caseId)).toBeUndefined();
     expect(tricky.caseInput(first.cell, `${first.caseId}|x`)?.caseId).toBe(`${first.caseId}|x`);
     expect(Object.isFrozen(inputs) && Object.isFrozen(all)).toBe(true);
+    expect(WindowInputs.EMPTY.size).toBe(0);
+    expect(WindowInputs.EMPTY.caseInput(first.cell, first.caseId)).toBeUndefined();
   });
 
-  it("refuses two inputs for one case as a broken construction invariant", () => {
-    const [first] = inputs.values();
-    if (first === undefined) throw new Error("the window resolved no input");
-    expect(() => WindowInputs.of([first, first])).toThrow(`two resolved inputs for ${first.cell} case ${first.caseId}`);
+  it("refuses two inputs for one case, naming each such case once", () => {
+    const [first, second] = inputs.values();
+    if (first === undefined || second === undefined) throw new Error("the window resolved fewer than two inputs");
+    expect(WindowInputs.of([first, second, first, first])).toEqual({
+      ok: false,
+      error: [`${first.cell} case ${first.caseId}: two resolved inputs`],
+    });
+  });
+
+  it("refuses a window's inputs that resolve one case twice, alongside every unresolvable case", () => {
+    const [first, ...rest] = prereg.cells;
+    if (first === undefined) throw new Error("the preregistration has no cell");
+    const [case0, case1, ...others] = first.workload.cases;
+    if (case0 === undefined || case1 === undefined) throw new Error(`${first.cell} has fewer than two cases`);
+    const duplicated = {
+      ...prereg,
+      cells: [{ ...first, workload: { ...first.workload, cases: [case0, case0, { ...case1, source: "corpus:gone" }, ...others] } }, ...rest],
+    };
+    expect(resolveWindowInputs(duplicated, fixtures, corpusCases, NO_PATHS)).toEqual({
+      ok: false,
+      error: [
+        `${first.cell} case ${case1.caseId}: corpus case gone is not in the corpus`,
+        `${first.cell} case ${case0.caseId}: two resolved inputs`,
+      ],
+    });
   });
 
   it("refuses a window's inputs naming every unresolvable case", () => {

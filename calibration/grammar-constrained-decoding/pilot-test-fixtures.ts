@@ -73,9 +73,16 @@ export function inputOf(cell: CellKey, caseId: string): CaseInput {
   return input;
 }
 
+/** Inputs filed through the production builder; a refused set throws. */
+export function filedInputs(entries: Iterable<CaseInput>): WindowInputs {
+  const filed = WindowInputs.of(entries);
+  if (!filed.ok) throw new Error(filed.error.join("\n"));
+  return filed.value;
+}
+
 /** The resolved inputs without one case's: a window whose lookup for it fails. */
 export const inputsWithout = (cell: CellKey, caseId: string): WindowInputs =>
-  WindowInputs.of(inputs.values().filter((input) => !(input.cell === cell && input.caseId === caseId)));
+  filedInputs(inputs.values().filter((input) => !(input.cell === cell && input.caseId === caseId)));
 
 /** A test preregistration: the retained one, optionally with every cell (but
  *  `unconstrained`, which keeps the retained unconstrained qualification)

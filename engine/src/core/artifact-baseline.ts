@@ -119,14 +119,11 @@ declare class ArtifactBaselineSchemeMint<Scheme extends SnapshotScheme> {
  * so the choice is visible (and reviewable) at every capture and parse site.
  *
  * Exported as a type only (`ArtifactBaselineScheme`, branded by
- * `ArtifactBaselineSchemeMint`). The three constants below are its only
- * instances, so every `ArtifactBaseline<Scheme>` traces back to one of them.
+ * `ArtifactBaselineSchemeMint`). Stateless, so the three constants below name
+ * ONE shared instance and differ only in type; they are its only names, so
+ * every `ArtifactBaseline<Scheme>` traces back to one of them.
  */
 class ArtifactBaselineEntryPoints<Scheme extends SnapshotScheme> {
-  constructor() {
-    Object.freeze(this);
-  }
-
   /** Prove already-typed entries (one entry per artifact). */
   fromEntries(entries: readonly ArtifactBaselineEntry[], path = "artifact_baseline"): ParseResult<ArtifactBaseline<Scheme>> {
     return provenArtifactBaseline<Scheme>(entries, path);
@@ -184,10 +181,12 @@ class ArtifactBaselineEntryPoints<Scheme extends SnapshotScheme> {
 export type ArtifactBaselineScheme<Scheme extends SnapshotScheme> =
   ArtifactBaselineEntryPoints<Scheme> & ArtifactBaselineSchemeMint<Scheme>;
 
-/** The ONE mint of an issued scheme: its entry points, branded. The brand is
- *  type-only, so this is the one justified cast that applies it. */
+const ENTRY_POINTS = Object.freeze(new ArtifactBaselineEntryPoints<SnapshotScheme>());
+
+/** The ONE mint of an issued scheme: the shared entry points, branded. The
+ *  brand is type-only, so this is the one justified cast that applies it. */
 const issueScheme = <Scheme extends SnapshotScheme>(): ArtifactBaselineScheme<Scheme> =>
-  new ArtifactBaselineEntryPoints<Scheme>() as ArtifactBaselineScheme<Scheme>;
+  ENTRY_POINTS as ArtifactBaselineScheme<Scheme>;
 
 /** `artifact_baseline` / `attempt_artifact_baseline`: raw file bytes or a directory tree digest. */
 export const DECLARED_ARTIFACT_BASELINE = issueScheme<"declared-artifact">();

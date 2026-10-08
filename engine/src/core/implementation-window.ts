@@ -60,15 +60,6 @@ const notInWindow: ImplementationWindow = Object.freeze({ kind: "not-in-window" 
 const contradiction = (message: string, taskId: string | null = null): ImplementationWindow =>
   canonicalRecord({ kind: "contradiction", reason: statusReason("authority-contradiction", message, taskId) });
 
-type TaskDerivation = Readonly<{ task: TaskGraph["tasks"][number]; derivation: ReturnType<typeof deriveTaskImplementationDispatch> }>;
-
-/** The first entry, in graph order, whose derivation is of `kind` — narrowed to it. */
-const firstDerivationOfKind = <Kind extends TaskDerivation["derivation"]["kind"]>(
-  derivations: readonly TaskDerivation[],
-  kind: Kind,
-) => derivations.find((entry): entry is TaskDerivation & Readonly<{ derivation: Extract<TaskDerivation["derivation"], Readonly<{ kind: Kind }>> }> =>
-  entry.derivation.kind === kind);
-
 /**
  * Classify a parsed protected graph against the implementation window.
  *
@@ -132,7 +123,10 @@ export function classifyImplementationWindow(
   const activeIds = Object.freeze(active.map((task) => task.id));
   const activeTaskIds = new Set(activeIds);
   const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task) }));
-  const invalidRetry = firstDerivationOfKind(derivations, "invalid-retry");
+  // `flatMap` narrows the derivation in the arm that keeps it, so each kind's
+  // matches arrive already typed — graph order, the first one wins.
+  const invalidRetry = derivations.flatMap(({ task, derivation }) =>
+    derivation.kind === "invalid-retry" ? [{ task, derivation }] : []).at(0);
   if (invalidRetry !== undefined) {
     return contradiction(
       `${invalidRetry.task.id} has invalid implementation retry authority: ${invalidRetry.derivation.errors.join("; ")}`,
@@ -143,7 +137,8 @@ export function classifyImplementationWindow(
     derivation.kind === "escalated"
       ? [canonicalRecord({ taskId: task.id, receiptId: derivation.receiptId, failureKinds: derivation.failureKinds })]
       : []);
-  const invalidAttestation = firstDerivationOfKind(derivations, "invalid-attestation");
+  const invalidAttestation = derivations.flatMap(({ task, derivation }) =>
+    derivation.kind === "invalid-attestation" ? [{ task, derivation }] : []).at(0);
   if (invalidAttestation !== undefined) {
     return contradiction(
       `${invalidAttestation.task.id} attestation mode could not derive its attestation context: ${invalidAttestation.derivation.error}`,
