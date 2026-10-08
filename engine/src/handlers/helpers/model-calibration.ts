@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
 import { argumentValue } from "./cli-args";
+import { runGit } from "../../utils/git-execution-policy";
 import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
 import {
@@ -42,9 +42,7 @@ export function classifyCalibrationRevisionProbeError(
 
 function probeCalibrationRevision(revision: string): CalibrationRevisionProbe {
   try {
-    execFileSync("git", ["cat-file", "-e", `${revision}^{commit}`], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
+    runGit(["cat-file", "-e", `${revision}^{commit}`], { output: "discard" });
     return { kind: "present" };
   } catch (error) {
     return classifyCalibrationRevisionProbeError(error, revision);
@@ -53,11 +51,7 @@ function probeCalibrationRevision(revision: string): CalibrationRevisionProbe {
 
 /** Label-blind review scope derived only from the historical revision itself. */
 export function calibrationRevisionPaths(revision: string): readonly string[] {
-  const output = execFileSync(
-    "git",
-    ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", revision],
-    { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const output = runGit(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", revision], { output: "text" });
   return [...new Set(output.split("\n").map((path) => path.trim()).filter(Boolean))].sort();
 }
 

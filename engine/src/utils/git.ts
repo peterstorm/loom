@@ -1,9 +1,9 @@
 /**
- * Git utilities — pure functions for test counting, thin wrappers for I/O
- * Uses node:child_process (bun-compatible) — execFileSync for every spawned Git command
+ * Git utilities — pure functions for test counting, thin wrappers for I/O.
+ * Every Git command here runs through the shared `git-execution-policy` run
+ * seam; this module never spawns Git itself.
  */
 
-import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -27,10 +27,9 @@ import { runGit, type GitOutput, type GitOutputValue, type GitRun } from "./git-
  * there silently drops repository-relative agent-definition candidates. One
  * implementation, one diagnostic.
  *
- * It is deliberately NOT the only path to `git` in the engine, and claiming
- * otherwise would be false: `utils/git-leaves.ts` (through the shared
- * `git-execution-policy` run seam, as this module's own hardened commands
- * are) and several handlers/orchestration modules run Git themselves because
+ * It is deliberately NOT the only path to `git` in the engine: `utils/git-leaves.ts`
+ * and several handlers/orchestration modules run their own Git commands —
+ * through the same `git-execution-policy` run seam this module uses — because
  * they need failures to THROW, where this module's helpers warn and return
  * `undefined`. Two failure contracts, chosen per call site; a caller that wants the warning
  * contract uses this module.
@@ -41,10 +40,7 @@ import { runGit, type GitOutput, type GitOutputValue, type GitRun } from "./git-
 export function resolveRepositoryRoot(context = "repository root"): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
-    return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], { stdin: "pipe" });
   } catch (error) {
     // Never silent, and never falsely reassuring: an unresolved root leaves
     // this module's helpers refusing with typed errors (never spawning Git
@@ -104,16 +100,11 @@ function commandFailure(error: unknown): string {
  *  caller's existing guards refuse loudly instead of ingesting a fabrication. */
 function probeGitWithEmptyRetry(
   args: readonly string[],
-  options: ExecFileSyncOptionsWithStringEncoding,
+  run: Omit<GitRun<"text">, "output"> = {},
 ): string {
-  return nonEmptyGitProbe(args, () => execFileSync("git", args, options));
-}
-
-/** The bounded empty-stdout retry over one probe `run`; `args` names it in the refusal. */
-function nonEmptyGitProbe(args: readonly string[], run: () => string): string {
   const observed = observeGitProbe(() => {
     try {
-      return { ok: true as const, value: run().trim() };
+      return { ok: true as const, value: runGit(args, { ...run, output: "text" }).trim() };
     } catch (error) {
       return { ok: false as const, error };
     }
@@ -133,16 +124,8 @@ function nonEmptyGitProbe(args: readonly string[], run: () => string): string {
 export function repositoryContext(cwd?: string): GitRepositoryContext {
   const base = cwd ?? (process.env.CLAUDE_PROJECT_DIR || process.cwd());
   try {
-    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
-      cwd: base,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
-      cwd: root,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], { cwd: base });
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], { cwd: root });
     if (!isExactGitSha(headSha)) {
       return { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
     }
@@ -173,11 +156,7 @@ export type GitHeadObservation =
 /** Fixed-argv exact HEAD observation for implementation authority checks. */
 export function observeExactHead(root: string): GitHeadObservation {
   try {
-    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
-      cwd: root,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], { cwd: root });
     return isExactGitSha(headSha)
       ? { ok: true, headSha }
       : { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
@@ -224,7 +203,7 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  return nonEmptyGitProbe(args, () => runGit(args, { output: "text", cwd: root }));
+  return probeGitWithEmptyRetry(args, { cwd: root });
 }
 
 function absoluteGitPath(root: string, observed: string, label: string): string {

@@ -13,18 +13,36 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { observeTaskGraphProjectBoundary } from "../../src/config";
 import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
-import { openGitRepository, snapshotRepositoryWitness } from "../../src/orchestration/git-remediation";
+import { baselineBlob, deriveChangedPaths } from "../../src/handlers/helpers/programs/changed-paths";
+import { calibrationRevisionPaths } from "../../src/handlers/helpers/model-calibration";
+import {
+  createTemporaryIndex,
+  discardTemporaryIndex,
+  openGitRepository,
+  snapshotRepositoryWitness,
+  stageAuditedPaths,
+} from "../../src/orchestration/git-remediation";
 import {
   captureRemediationCandidateWorkspace,
   type RemediationCandidateCaptureInput,
 } from "../../src/orchestration/remediation-candidate";
+import { captureDeclaredArtifactBaselineAtRevision } from "../../src/utils/declared-artifact-snapshot";
 import { runGit, spawnGit, type GitOutput } from "../../src/utils/git-execution-policy";
-import { changedPaths, diffFilesAt, diffFilesSinceAt, isTrackedAt } from "../../src/utils/git";
+import {
+  changedPaths,
+  diffFilesAt,
+  diffFilesSinceAt,
+  isTrackedAt,
+  observeExactHead,
+  repositoryContext,
+  resolveRepositoryRoot,
+} from "../../src/utils/git";
 import { gitOutput, worktreeVisibleLeafPaths } from "../../src/utils/git-leaves";
 import { observeWorkspaceDigest } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { git, write } from "../fixtures/git-repository";
+import { git, pathspecContract, write } from "../fixtures/git-repository";
 
 const REAL_GIT = execFileSync("which", ["git"], { encoding: "utf-8" }).trim();
 const AMBIENT_ATTACK: Readonly<Record<string, string>> = Object.freeze({
@@ -74,6 +92,28 @@ function withAmbient<T>(variables: Readonly<Record<string, string>>, run: () => 
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+  }
+}
+
+/** Routes that resolve their repository from the process cwd run there. */
+function withCwd<T>(directory: string, run: () => T): T {
+  const previous = process.cwd();
+  process.chdir(directory);
+  try {
+    return run();
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+/** Root resolution answers CLAUDE_PROJECT_DIR before Git; unset it so Git answers. */
+function withoutProjectDirectory<T>(run: () => T): T {
+  const previous = process.env.CLAUDE_PROJECT_DIR;
+  delete process.env.CLAUDE_PROJECT_DIR;
+  try {
+    return run();
+  } finally {
+    if (previous !== undefined) process.env.CLAUDE_PROJECT_DIR = previous;
   }
 }
 
@@ -223,6 +263,22 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     expect(shim.invocations()[0]!.env).toMatchObject({ ...location, ...POLICY_ENVIRONMENT });
   });
 
+  it("pipes a status-returning run's input, relocates only its index, and bounds its wall time", () => {
+    const { root } = fsmonitorRepository();
+    const index = join(tempDir("loom-git-index-"), "index");
+    withAmbient({ GIT_INDEX_FILE: "/attacker/index" }, () => {
+      expect(spawnGit(["read-tree", "HEAD"], { cwd: root, maxBuffer: 1024, location: { GIT_INDEX_FILE: index } }).status).toBe(0);
+      expect(existsSync(index)).toBe(true);
+      const hashed = spawnGit(["hash-object", "--stdin"], { cwd: root, maxBuffer: 1024, input: Buffer.from("tracked\n") });
+      expect(hashed.status).toBe(0);
+      const listed = spawnGit(["ls-files", "-s", "--", "tracked.txt"], { cwd: root, maxBuffer: 1024, location: { GIT_INDEX_FILE: index } });
+      expect(listed.stdout.toString("utf-8")).toContain(hashed.stdout.toString("utf-8").trim());
+    });
+
+    const timedOut = spawnGit(["-c", "alias.hang=!sleep 2", "hang"], { cwd: root, maxBuffer: 1024, timeout: 100 });
+    expect(timedOut.signal).toBe("SIGTERM");
+  });
+
   it("gives a bytes capture the listing budget, a text capture Node's default, and honours an explicit budget", () => {
     const shim = recordingGit("emulate");
     withAmbient({ PATH: shim.path }, () => {
@@ -309,6 +365,57 @@ describe("every engine Git route runs under the policy", () => {
     for (const invocation of invocations) {
       if (shadowRoutes.includes(invocation)) expect(invocation.env.GIT_DIR).toMatch(/loom-git-shadow-/);
       else expect(invocation.env.GIT_DIR).toBeUndefined();
+    }
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("root, HEAD and boundary probes, revision reads, review scope, calibration paths and remediation staging", () => {
+    const { root, marker } = fsmonitorRepository();
+    write(root, "tracked.txt", "dirty\n");
+    write(root, "staged.txt", "stage me\n");
+    const head = runGit(["rev-parse", "HEAD"], { output: "text", cwd: root }).trim();
+    const stateDirectory = join(root, ".claude", "state");
+    mkdirSync(stateDirectory, { recursive: true });
+    const repository = openGitRepository(root);
+    if (!repository.ok) throw new Error(repository.error.message);
+    rmSync(marker, { force: true });
+
+    const shim = recordingGit("real");
+    let temporaryIndex: string | null = null;
+    withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => withCwd(root, () => withoutProjectDirectory(() => {
+      expect(resolveRepositoryRoot("policy route test")).toBe(root);
+      expect(repositoryContext(root)).toEqual({ ok: true, root, headSha: head });
+      expect(observeExactHead(root)).toEqual({ ok: true, headSha: head });
+      expect(observeTaskGraphProjectBoundary(join(stateDirectory, "active_task_graph.json")))
+        .toEqual({ kind: "git-repository", root });
+      expect(captureDeclaredArtifactBaselineAtRevision(root, head, ["tracked.txt"])).toHaveLength(1);
+      expect(deriveChangedPaths().authority).toMatchObject({ head_revision: head, unstaged: expect.arrayContaining(["tracked.txt"]) });
+      expect(Buffer.from(baselineBlob(head, "tracked.txt") ?? []).toString("utf-8")).toBe("tracked\n");
+      expect(calibrationRevisionPaths(head)).toEqual([".gitignore", "tracked.txt"]);
+      const temporary = createTemporaryIndex(repository.value);
+      if (!temporary.ok) throw new Error(temporary.error.message);
+      temporaryIndex = temporary.value.path;
+      try {
+        expect(stageAuditedPaths(repository.value, temporary.value, pathspecContract(["staged.txt"])))
+          .toEqual({ ok: true, value: ["staged.txt"] });
+      } finally {
+        discardTemporaryIndex(temporary.value);
+      }
+    })));
+
+    const invocations = shim.invocations();
+    for (const invocation of invocations) expectHardened(invocation, shim.path);
+    const subcommandOf = ({ argv }: Invocation) => argv.slice(2).find((arg) => !arg.startsWith("-"));
+    expect(new Set(invocations.map(subcommandOf))).toEqual(new Set([
+      "rev-parse", "cat-file", "ls-tree", "show", "ls-files", "diff", "merge-base", "diff-tree", "read-tree", "add", "diff-index",
+    ]));
+    // Remediation staging relocates only the index, through the closed index
+    // overlay, and pipes its NUL manifest as stdin.
+    const staging = invocations.filter(({ argv }) => ["read-tree", "add", "diff-index"].includes(subcommandOf({ argv, env: {} }) ?? ""));
+    expect(staging.length).toBe(3);
+    for (const invocation of staging) {
+      expect(invocation.env.GIT_INDEX_FILE).toBe(temporaryIndex);
+      expect(invocation.env.GIT_DIR).toBeUndefined();
     }
     expect(existsSync(marker)).toBe(false);
   });

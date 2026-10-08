@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   storedNewTestEvidence,
@@ -27,6 +26,7 @@ import {
   changedDeclaredArtifactsSinceRevision,
 } from "../../utils/declared-artifact-snapshot";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
+import { runGit } from "../../utils/git-execution-policy";
 import {
   isWaveComplete,
   type NewTestEvidence,
@@ -109,16 +109,15 @@ function verifyIssuedPacketRegistration(
   }
 }
 
+/** A status-only Git assertion at the repository root: a non-zero exit throws. */
+function assertGit(root: string, args: readonly string[]): void {
+  runGit(args, { output: "discard", cwd: root });
+}
+
 function verifyPacketCommitRange(root: string, packet: VerifiedReviewPacketRecovery): void {
-  execFileSync("git", ["cat-file", "-e", `${packet.headSha}^{commit}`], {
-    cwd: root, stdio: ["ignore", "ignore", "pipe"],
-  });
-  execFileSync("git", ["merge-base", "--is-ancestor", packet.baseSha, packet.headSha], {
-    cwd: root, stdio: ["ignore", "ignore", "pipe"],
-  });
-  execFileSync("git", ["merge-base", "--is-ancestor", packet.headSha, "HEAD"], {
-    cwd: root, stdio: ["ignore", "ignore", "pipe"],
-  });
+  assertGit(root, ["cat-file", "-e", `${packet.headSha}^{commit}`]);
+  assertGit(root, ["merge-base", "--is-ancestor", packet.baseSha, packet.headSha]);
+  assertGit(root, ["merge-base", "--is-ancestor", packet.headSha, "HEAD"]);
 }
 
 function recoverPacketEvidence(
@@ -326,12 +325,8 @@ const handler: HookHandler = async (_stdin, args) => {
   const diffDeps = realDiffDepsAt(root);
   if (recoveredBaselineSha !== null) {
     try {
-      execFileSync("git", ["cat-file", "-e", `${recoveredBaselineSha}^{commit}`], {
-        cwd: root, stdio: ["ignore", "ignore", "pipe"],
-      });
-      execFileSync("git", ["merge-base", "--is-ancestor", recoveredBaselineSha, "HEAD"], {
-        cwd: root, stdio: ["ignore", "ignore", "pipe"],
-      });
+      assertGit(root, ["cat-file", "-e", `${recoveredBaselineSha}^{commit}`]);
+      assertGit(root, ["merge-base", "--is-ancestor", recoveredBaselineSha, "HEAD"]);
     } catch (error) {
       // The three failures this conflates are operator-distinguishable: an
       // unknown revision (typo), a real but unrelated commit (not an ancestor),

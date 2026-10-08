@@ -33,9 +33,13 @@ vi.mock("node:child_process", async (importOriginal) => {
     args: readonly string[],
     options?: { cwd?: string },
   ) => {
-    scripted.calls.push({ file, args, cwd: options?.cwd });
     const next = scripted.queue.shift();
     if (next === undefined) return actual.spawnSync(file, args, options ?? {});
+    // The root probe runs under the shared execution policy; the recorded
+    // argv is what follows its command-scope prefix.
+    const [flag, config, ...rest] = args;
+    if (flag !== "-c" || config !== "core.fsmonitor=false") throw new Error(`git spawned outside the execution policy: ${args.join(" ")}`);
+    scripted.calls.push({ file, args: rest, cwd: options?.cwd });
     return {
       status: next.status,
       stdout: next.stdout,
