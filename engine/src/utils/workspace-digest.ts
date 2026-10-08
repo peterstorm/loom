@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import {
   lstatSync,
   readFileSync,
@@ -12,6 +11,7 @@ import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
+import { spawnGit } from "./git-execution-policy";
 import { confirmedEmptyPassthrough, observeGitProbe } from "./git-probe";
 import { inspectRepositoryPath } from "./repository-path";
 
@@ -93,25 +93,10 @@ export function parseCanonicalRepositoryRoot(raw: unknown): WorkspaceDigestResul
 
 type GitOutput = WorkspaceDigestResult<Buffer>;
 
-function gitEnvironment(): NodeJS.ProcessEnv {
-  return {
-    PATH: process.env["PATH"] ?? "/usr/bin:/bin",
-    HOME: process.env["HOME"] ?? "",
-    LANG: "C",
-    LC_ALL: "C",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_TERMINAL_PROMPT: "0",
-  };
-}
-
+/** Runs under the shared `git-execution-policy`, as the leaf enumerator does,
+ *  so the digest roster and every other observer share one ignore rule set. */
 function runGitOnce(cwd: string, operation: "resolve-root" | "list-paths", args: readonly string[]): GitOutput {
-  const executed = spawnSync("git", ["-C", cwd, "--literal-pathspecs", "-c", "core.fsmonitor=false", ...args], {
-    encoding: "buffer",
-    env: gitEnvironment(),
-    maxBuffer: MAX_GIT_OUTPUT_BYTES,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const executed = spawnGit(["-C", cwd, "--literal-pathspecs", ...args], { maxBuffer: MAX_GIT_OUTPUT_BYTES });
   if (executed.error !== undefined || executed.status !== 0) {
     const stderr = Buffer.from(executed.stderr ?? []).toString("utf-8").trim();
     const detail = executed.error?.message ?? (stderr || `git exited with ${String(executed.status)}`);
