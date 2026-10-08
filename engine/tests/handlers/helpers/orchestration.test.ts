@@ -88,13 +88,9 @@ function currentWavePayload(
     generation: run.generation, prior_findings: priors, findings });
 }
 
-afterEach(async () => {
+afterEach(() => {
   disposeFixturePiSessions();
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
-  // This file intentionally drives many synchronous child CLIs. Yield between
-  // cases so Vitest can acknowledge task-update RPCs instead of timing out
-  // while the worker remains continuously occupied by spawnSync calls.
-  await new Promise<void>((resolve) => setImmediate(resolve));
 });
 
 const deps: GateDeps = {

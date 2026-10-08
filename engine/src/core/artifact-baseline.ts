@@ -103,28 +103,39 @@ export function restrictedArtifactBaseline<Scheme extends SnapshotScheme>(
 }
 
 /**
- * The nominal brand only this module's issued schemes carry. A class-private
- * name cannot be written by an object literal, copied by a spread, or declared
- * by a class outside this module, so nothing inhabits the brand without a
- * cast. Type-only: no class exists at runtime and no instance holds a value
- * for it — the scheme lives in the type argument, never in a runtime string.
+ * The runtime tag of an issued scheme: its concrete digest scheme, or
+ * `"unknown"` for the wide scheme a digest-only read cannot name. Derived from
+ * the type argument, so an instance's tag can never disagree with its type.
  */
-declare class ArtifactBaselineSchemeMint<Scheme extends SnapshotScheme> {
-  #scheme: Scheme;
-}
+type IssuedSchemeTag<Scheme extends SnapshotScheme> =
+  [SnapshotScheme] extends [Scheme] ? "unknown" : Scheme;
 
 /**
  * The construction entry points of ONE digest scheme. The scheme is fixed by
  * which issued instance a caller names, never by a type argument it supplies,
  * so the choice is visible (and reviewable) at every capture and parse site.
  *
- * Exported as a type only (`ArtifactBaselineScheme`, branded by
- * `ArtifactBaselineSchemeMint`). The three constants below are its only
- * instances, so every `ArtifactBaseline<Scheme>` traces back to one of them.
+ * Exported as a type only (`ArtifactBaselineScheme`): the three constants
+ * below are the only instances, so every `ArtifactBaseline<Scheme>` traces
+ * back to one of them. Each is frozen at construction and carries its own tag.
  */
 class ArtifactBaselineEntryPoints<Scheme extends SnapshotScheme> {
-  constructor() {
+  /**
+   * The runtime discriminant and the nominal brand in one field. A
+   * class-private name cannot be written by an object literal, copied by a
+   * spread, or declared by a class outside this module, so nothing inhabits
+   * an issued scheme's type without this module's constructor.
+   */
+  readonly #scheme: IssuedSchemeTag<Scheme>;
+
+  constructor(scheme: IssuedSchemeTag<Scheme>) {
+    this.#scheme = scheme;
     Object.freeze(this);
+  }
+
+  /** Which digest scheme this instance issues: the tag a runtime guard checks. */
+  get scheme(): IssuedSchemeTag<Scheme> {
+    return this.#scheme;
   }
 
   /** Prove already-typed entries (one entry per artifact). */
@@ -181,20 +192,17 @@ class ArtifactBaselineEntryPoints<Scheme extends SnapshotScheme> {
 
 /** One issued scheme's entry points. Type-only: callers name the issued
  *  instances; none can construct, extend or forge one. */
-export type ArtifactBaselineScheme<Scheme extends SnapshotScheme> =
-  ArtifactBaselineEntryPoints<Scheme> & ArtifactBaselineSchemeMint<Scheme>;
-
-/** The ONE mint of an issued scheme: its entry points, branded. The brand is
- *  type-only, so this is the one justified cast that applies it. */
-const issueScheme = <Scheme extends SnapshotScheme>(): ArtifactBaselineScheme<Scheme> =>
-  new ArtifactBaselineEntryPoints<Scheme>() as ArtifactBaselineScheme<Scheme>;
+export type ArtifactBaselineScheme<Scheme extends SnapshotScheme> = ArtifactBaselineEntryPoints<Scheme>;
 
 /** `artifact_baseline` / `attempt_artifact_baseline`: raw file bytes or a directory tree digest. */
-export const DECLARED_ARTIFACT_BASELINE = issueScheme<"declared-artifact">();
+export const DECLARED_ARTIFACT_BASELINE: ArtifactBaselineScheme<"declared-artifact"> =
+  new ArtifactBaselineEntryPoints<"declared-artifact">("declared-artifact");
 /** `repository_baseline` / `attempt_repository_baseline`: `file\0<mode>\0<bytes>` or `symlink\0<target>`. */
-export const REPOSITORY_CHANGE_BASELINE = issueScheme<"repository-change">();
+export const REPOSITORY_CHANGE_BASELINE: ArtifactBaselineScheme<"repository-change"> =
+  new ArtifactBaselineEntryPoints<"repository-change">("repository-change");
 /** A digest-only read whose scheme its site cannot know; the result can never reach a comparison. */
-export const UNKNOWN_SCHEME_BASELINE = issueScheme<SnapshotScheme>();
+export const UNKNOWN_SCHEME_BASELINE: ArtifactBaselineScheme<SnapshotScheme> =
+  new ArtifactBaselineEntryPoints<SnapshotScheme>("unknown");
 
 /** The Task State File fields that persist a baseline, and the digest scheme
  *  each one is captured under. */

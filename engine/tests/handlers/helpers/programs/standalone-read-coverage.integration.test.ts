@@ -19,6 +19,7 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { git } from "../../../fixtures/git-repository";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
 import { captureReviewedTranscript, frozenDiffReaderPages } from "../../../fixtures/read-coverage";
+import { value } from "../../../fixtures/parse-result";
 
 /**
  * The shell half of the read obligation (ADR-0022): what a fresh standalone
@@ -159,8 +160,3 @@ describe("standalone read obligation", () => {
     expect(value(readRecordedObservation(handle, request))).toBeNull();
   });
 });
-
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error?: unknown }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}

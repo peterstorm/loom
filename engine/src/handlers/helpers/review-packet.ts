@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { argumentValue } from "./cli-args";
 import {
   lstatSync,
@@ -34,6 +33,7 @@ import {
   type GitDiffResult,
 } from "../../utils/git";
 import { reviewedDirectoryLeafPaths } from "../../utils/git-leaves";
+import { runGit } from "../../utils/git-execution-policy";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
 
@@ -88,11 +88,7 @@ const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id>
 
 
 function git(args: readonly string[], cwd: string): string {
-  return execFileSync("git", [...args], {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  return runGit(args, { output: "text", cwd });
 }
 
 function requiredDiff(result: GitDiffResult): string {

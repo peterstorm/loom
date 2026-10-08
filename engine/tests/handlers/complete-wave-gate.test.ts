@@ -106,6 +106,7 @@ import {
   StateManager,
 } from "../../src/state-manager";
 import { findingId } from "../fixtures/finding-id";
+import { value } from "../fixtures/parse-result";
 
 const satisfiedProof = evaluateTaskProof(
   { newTestsRequired: true, declaredArtifacts: [] },
@@ -723,9 +724,9 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
     active_wave_gate: {
       schemaVersion: 1,
       kind: "active-wave-gate",
-      runId: authorityValue(parseOrchestrationRunId("evaluate-wave-run")),
+      runId: value(parseOrchestrationRunId("evaluate-wave-run")),
       wave: 1,
-      authorityDigest: authorityValue(parseArtifactDigest("e".repeat(64))),
+      authorityDigest: value(parseArtifactDigest("e".repeat(64))),
       revision: 0,
       terminalOutcome: null,
     },
@@ -995,14 +996,9 @@ describe("parseWaveArg — an unvalidated Number() would gate wave NaN vacuously
   });
 });
 
-const authorityValue = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
-  if (!result.ok) throw new Error(`invalid test authority: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
-
-const lifecycleRunId = authorityValue(parseOrchestrationRunId("wave-gate-lifecycle-test"));
-const lifecycleEffectId = authorityValue(parseEffectId("wave-gate-effect-test"));
-const infrastructureDiagnostic = authorityValue(infrastructureRetryDiagnostic({
+const lifecycleRunId = value(parseOrchestrationRunId("wave-gate-lifecycle-test"));
+const lifecycleEffectId = value(parseEffectId("wave-gate-effect-test"));
+const infrastructureDiagnostic = value(infrastructureRetryDiagnostic({
   category: "infrastructure-failure",
   runId: lifecycleRunId,
   effectId: lifecycleEffectId,
@@ -1013,20 +1009,20 @@ const recoveryIntent: CommitProtectedWaveState = {
   effectId: lifecycleEffectId,
   runId: lifecycleRunId,
   expectedRevision: 0,
-  stateDigest: authorityValue(parseArtifactDigest("a".repeat(64))),
+  stateDigest: value(parseArtifactDigest("a".repeat(64))),
 };
 const recoveryReceipt = {
   kind: "protected-wave-state-committed",
   effectId: lifecycleEffectId,
   runId: lifecycleRunId,
   committedRevision: 1,
-  stateDigest: authorityValue(parseArtifactDigest("a".repeat(64))),
+  stateDigest: value(parseArtifactDigest("a".repeat(64))),
 } as EffectReceipt;
 
 function lifecycleCompletionReadiness() {
   const graph = registeredGraph();
   const registration = graph.active_wave_gate!;
-  return authorityValue(deriveWaveReadiness({
+  return value(deriveWaveReadiness({
     ...graph,
     active_wave_gate: { ...registration, runId: lifecycleRunId },
   }, statusDeps));
@@ -1034,23 +1030,23 @@ function lifecycleCompletionReadiness() {
 
 function lifecycleCompletionEvent(): Extract<WaveGateEvent, { kind: "completion-committed" }> {
   const readiness = lifecycleCompletionReadiness();
-  const committed = authorityValue(commitWaveGateCompletion(readiness));
+  const committed = value(commitWaveGateCompletion(readiness));
   return { kind: "completion-committed", readiness, receipt: committed.receipt };
 }
 
 function lifecycleInitialState() {
-  return authorityValue(createWaveGateState(lifecycleCompletionReadiness()));
+  return value(createWaveGateState(lifecycleCompletionReadiness()));
 }
 
 function lifecycleStates(): readonly WaveGateState[] {
   const preparing = lifecycleInitialState();
-  const awaitingReview = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
-  const awaitingRefutation = authorityValue(reduceWaveGate(awaitingReview, { kind: "complete-roster-with-criticals" }));
-  const awaitingAdvisory = authorityValue(reduceWaveGate(awaitingRefutation, { kind: "complete-roster-with-advisories" }));
-  const ready = authorityValue(reduceWaveGate(awaitingAdvisory, { kind: "advisory-decision-accepted" }));
-  const done = authorityValue(reduceWaveGate(ready, lifecycleCompletionEvent()));
-  const terminal = authorityValue(reduceWaveGate(awaitingReview, { kind: "result-rejected", attempt: 2 }));
-  const recoverable = authorityValue(reduceWaveGate(awaitingRefutation, {
+  const awaitingReview = value(reduceWaveGate(preparing, { kind: "preparation-published" }));
+  const awaitingRefutation = value(reduceWaveGate(awaitingReview, { kind: "complete-roster-with-criticals" }));
+  const awaitingAdvisory = value(reduceWaveGate(awaitingRefutation, { kind: "complete-roster-with-advisories" }));
+  const ready = value(reduceWaveGate(awaitingAdvisory, { kind: "advisory-decision-accepted" }));
+  const done = value(reduceWaveGate(ready, lifecycleCompletionEvent()));
+  const terminal = value(reduceWaveGate(awaitingReview, { kind: "result-rejected", attempt: 2 }));
+  const recoverable = value(reduceWaveGate(awaitingRefutation, {
     kind: "recoverable-effect-failed",
     diagnostic: infrastructureDiagnostic,
     intent: recoveryIntent,
@@ -1132,7 +1128,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 
   it("implements the exact declared transitions, including terminal attempt 2", () => {
     const preparing = lifecycleInitialState();
-    const awaiting = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
+    const awaiting = value(reduceWaveGate(preparing, { kind: "preparation-published" }));
     expect(reduceWaveGate(awaiting, { kind: "result-rejected", attempt: 1 })).toMatchObject({
       ok: true,
       value: { kind: "awaiting-review-results" },
@@ -1145,19 +1141,19 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 
   it("records and restores the exact recoverable predecessor only for a matching receipt", () => {
     const awaiting = lifecycleStates().find((state) => state.kind === "awaiting-refutation")!;
-    const blocked = authorityValue(reduceWaveGate(awaiting, {
+    const blocked = value(reduceWaveGate(awaiting, {
       kind: "recoverable-effect-failed",
       diagnostic: infrastructureDiagnostic,
       intent: recoveryIntent,
     }));
     expect(blocked).toMatchObject({ kind: "recoverable-blocked", predecessor: { kind: "awaiting-refutation" } });
-    expect(authorityValue(reduceWaveGate(blocked, { kind: "recovery-receipt-accepted", receipt: recoveryReceipt }))).toMatchObject({
+    expect(value(reduceWaveGate(blocked, { kind: "recovery-receipt-accepted", receipt: recoveryReceipt }))).toMatchObject({
       kind: "awaiting-refutation",
       runId: lifecycleRunId,
     });
     expect(reduceWaveGate(blocked, {
       kind: "recovery-receipt-accepted",
-      receipt: { ...recoveryReceipt, effectId: authorityValue(parseEffectId("wrong-effect")) } as EffectReceipt,
+      receipt: { ...recoveryReceipt, effectId: value(parseEffectId("wrong-effect")) } as EffectReceipt,
     })).toMatchObject({ ok: false, error: { reason: "recovery-receipt-mismatch" } });
   });
 
@@ -1184,7 +1180,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
   });
 
   it("recognises only the readiness snapshot deriveWaveReadiness minted, through read-only predicates", () => {
-    const minted = authorityValue(deriveWaveReadiness(registeredGraph(), statusDeps));
+    const minted = value(deriveWaveReadiness(registeredGraph(), statusDeps));
     expect(isCanonicalWaveReadiness(minted)).toBe(true);
     expect(isCanonicalWaveReadiness({ ...minted })).toBe(false);
     // An unproven snapshot carries neither half of the lifecycle proof pair.
@@ -1194,8 +1190,8 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 
   it("rejects forged readiness, wrong-run/revision/digest receipts, and ineligible completion", () => {
     const preparing = lifecycleInitialState();
-    const awaiting = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
-    const ready = authorityValue(reduceWaveGate(awaiting, { kind: "complete-roster-clean" }));
+    const awaiting = value(reduceWaveGate(preparing, { kind: "preparation-published" }));
+    const ready = value(reduceWaveGate(awaiting, { kind: "complete-roster-clean" }));
     const valid = lifecycleCompletionEvent();
 
     expect(reduceWaveGateAtRuntime(ready, {
@@ -1203,16 +1199,16 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
       readiness: { ...valid.readiness },
     } as WaveGateEvent)).toMatchObject({ ok: false, error: { reason: "authority-mismatch" } });
     for (const receipt of [
-      { ...valid.receipt, runId: authorityValue(parseOrchestrationRunId("foreign-wave-run")) },
+      { ...valid.receipt, runId: value(parseOrchestrationRunId("foreign-wave-run")) },
       { ...valid.receipt, committedRevision: valid.receipt.committedRevision + 1 },
-      { ...valid.receipt, stateDigest: authorityValue(parseArtifactDigest("f".repeat(64))) },
+      { ...valid.receipt, stateDigest: value(parseArtifactDigest("f".repeat(64))) },
     ]) {
       expect(reduceWaveGateAtRuntime(ready, { ...valid, receipt } as WaveGateEvent))
         .toMatchObject({ ok: false, error: { reason: "authority-mismatch" } });
     }
 
     const graph = registeredGraph({ tasks: [{ ...baseTask, test_result: { verdict: "trusted-fail" } }] });
-    const ineligible = authorityValue(deriveWaveReadiness(graph, statusDeps));
+    const ineligible = value(deriveWaveReadiness(graph, statusDeps));
     const ineligibleReceipt = {
       kind: "protected-wave-state-committed" as const,
       effectId: ineligible.completionIntent.effectId,
@@ -1220,9 +1216,9 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
       committedRevision: ineligible.registration.revision + 1,
       stateDigest: ineligible.readinessDigest,
     };
-    const ineligibleReady = authorityValue(createWaveGateState(ineligible));
-    const ineligibleAwaiting = authorityValue(reduceWaveGate(ineligibleReady, { kind: "preparation-published" }));
-    const ineligibleCompletionState = authorityValue(reduceWaveGate(ineligibleAwaiting, { kind: "complete-roster-clean" }));
+    const ineligibleReady = value(createWaveGateState(ineligible));
+    const ineligibleAwaiting = value(reduceWaveGate(ineligibleReady, { kind: "preparation-published" }));
+    const ineligibleCompletionState = value(reduceWaveGate(ineligibleAwaiting, { kind: "complete-roster-clean" }));
     expect(reduceWaveGate(ineligibleCompletionState, {
       kind: "completion-committed",
       readiness: ineligible,
@@ -1232,8 +1228,8 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
 
   it("rejects a recoverable failure diagnostic for another run and a matching-id receipt of the wrong kind", () => {
     const preparing = lifecycleInitialState();
-    const foreignRun = authorityValue(parseOrchestrationRunId("foreign-recovery-run"));
-    const foreignDiagnostic = authorityValue(infrastructureRetryDiagnostic({
+    const foreignRun = value(parseOrchestrationRunId("foreign-recovery-run"));
+    const foreignDiagnostic = value(infrastructureRetryDiagnostic({
       category: "infrastructure-failure",
       runId: foreignRun,
       effectId: lifecycleEffectId,
@@ -1245,7 +1241,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
       intent: recoveryIntent,
     })).toMatchObject({ ok: false, error: { reason: "authority-mismatch" } });
 
-    const blocked = authorityValue(reduceWaveGate(preparing, {
+    const blocked = value(reduceWaveGate(preparing, {
       kind: "recoverable-effect-failed",
       diagnostic: infrastructureDiagnostic,
       intent: recoveryIntent,
@@ -1256,7 +1252,7 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
         kind: "agent-requests-reserved",
         runId: lifecycleRunId,
         effectId: lifecycleEffectId,
-        requestIds: [authorityValue(parseRequestId("wrong-kind-request"))],
+        requestIds: [value(parseRequestId("wrong-kind-request"))],
       },
     })).toMatchObject({ ok: false, error: { reason: "recovery-receipt-mismatch" } });
   });
@@ -1403,7 +1399,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         { ...baseTask, id: "T2", findings: [shared], critical_findings: [shared.claim], advisory_findings: [] },
       ],
     });
-    const snapshot = authorityValue(deriveWaveReadiness(graph, statusDeps));
+    const snapshot = value(deriveWaveReadiness(graph, statusDeps));
     expect(snapshot.facts.refutationPanelNeed).toEqual({
       kind: "known",
       value: {
@@ -1413,7 +1409,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       },
     });
     expect(new Set((snapshot.facts.refutationPanelNeed as { value: { findingIds: readonly string[] } }).value.findingIds).size).toBe(2);
-    expect(authorityValue(deriveWaveRefutationPlan(snapshot)).findings.map(({ id }) => id)).toEqual([
+    expect(value(deriveWaveRefutationPlan(snapshot)).findings.map(({ id }) => id)).toEqual([
       "T1:code-reviewer-1",
       "T2:code-reviewer-1",
     ]);
@@ -1459,16 +1455,16 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     const terminalHistoryEntry = {
       schemaVersion: 1 as const,
       kind: "completed-wave-gate" as const,
-      runId: authorityValue(parseOrchestrationRunId("contradictory-history-run")),
+      runId: value(parseOrchestrationRunId("contradictory-history-run")),
       wave: 1,
-      authorityDigest: authorityValue(parseArtifactDigest("f".repeat(64))),
+      authorityDigest: value(parseArtifactDigest("f".repeat(64))),
       revision: 1,
       completionReceipt: {
         kind: "protected-wave-state-committed" as const,
-        effectId: authorityValue(parseEffectId("contradictory-history-effect")),
-        runId: authorityValue(parseOrchestrationRunId("contradictory-history-run")),
+        effectId: value(parseEffectId("contradictory-history-effect")),
+        runId: value(parseOrchestrationRunId("contradictory-history-run")),
         committedRevision: 1,
-        stateDigest: authorityValue(parseArtifactDigest("e".repeat(64))),
+        stateDigest: value(parseArtifactDigest("e".repeat(64))),
       },
     };
     const withoutRegistration = (graph: TaskGraph): TaskGraph => {
@@ -1558,7 +1554,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     });
 
     it("dispatches only inactive Tasks and waits when every outstanding Task is active", () => {
-      const activeAuthority = authorityValue(createImplementationAttemptAuthority({
+      const activeAuthority = value(createImplementationAttemptAuthority({
         taskId: "T3",
         wave: 1,
         semanticAttempt: 1,
@@ -1648,7 +1644,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     });
 
     it("re-dispatches only policy-expired reservations when roster observation proves no active Agent", () => {
-      const activeAuthority = authorityValue(createImplementationAttemptAuthority({
+      const activeAuthority = value(createImplementationAttemptAuthority({
         taskId: "T1",
         wave: 1,
         semanticAttempt: 1,
@@ -1780,7 +1776,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         } },
         { ...registered.active_wave_gate!, terminalOutcome: {
           kind: "terminal-abandoned" as const, reason: "successor selected",
-          supersededBy: authorityValue(parseOrchestrationRunId("next-run")),
+          supersededBy: value(parseOrchestrationRunId("next-run")),
         } },
       ]) {
         const graph = registeredGraph({ active_wave_gate: terminal });
@@ -1973,7 +1969,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("reports terminal blocked from persisted terminal authority", () => {
     const base = registeredGraph();
-    const diagnostic = authorityValue(terminalBlockedDiagnostic({
+    const diagnostic = value(terminalBlockedDiagnostic({
       category: "invalid-authority",
       runId: base.active_wave_gate!.runId,
       message: "persisted terminal",
@@ -1989,7 +1985,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("preserves terminal-blocked action construction failure as unavailable", () => {
     const base = registeredGraph();
-    const diagnostic = authorityValue(terminalBlockedDiagnostic({
+    const diagnostic = value(terminalBlockedDiagnostic({
       category: "invalid-authority",
       runId: base.active_wave_gate!.runId,
       message: "persisted terminal",
@@ -2015,8 +2011,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("preserves committed done-action construction failure as unavailable", () => {
     const base = registeredGraph();
-    const runId = authorityValue(parseOrchestrationRunId("completed-status-run"));
-    const effectId = authorityValue(parseEffectId("completed-status-effect"));
+    const runId = value(parseOrchestrationRunId("completed-status-run"));
+    const effectId = value(parseEffectId("completed-status-effect"));
     const { active_wave_gate: _active, ...withoutActive } = base;
     const malformed: TaskGraph = {
       ...withoutActive,
@@ -2029,14 +2025,14 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         kind: "completed-wave-gate",
         runId: "not a run id" as never,
         wave: 1,
-        authorityDigest: authorityValue(parseArtifactDigest("f".repeat(64))),
+        authorityDigest: value(parseArtifactDigest("f".repeat(64))),
         revision: 1,
         completionReceipt: {
           kind: "protected-wave-state-committed",
           effectId,
           runId,
           committedRevision: 1,
-          stateDigest: authorityValue(parseArtifactDigest("e".repeat(64))),
+          stateDigest: value(parseArtifactDigest("e".repeat(64))),
         },
       }],
     };
@@ -2051,23 +2047,23 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("directly rejects lifecycle-proven next-action authority from a foreign run", () => {
     const graph = registeredGraph();
-    const foreignRun = authorityValue(parseOrchestrationRunId("foreign-status-run"));
+    const foreignRun = value(parseOrchestrationRunId("foreign-status-run"));
     const foreignGraph = registeredGraph({
       active_wave_gate: { ...graph.active_wave_gate!, runId: foreignRun },
     });
-    const foreignSnapshot = authorityValue(deriveWaveReadiness(foreignGraph, statusDeps));
-    const foreignState = authorityValue(createWaveGateState(foreignSnapshot));
-    const foreignTerminal = authorityValue(reduceWaveGate(
-      authorityValue(reduceWaveGate(foreignState, { kind: "preparation-published" })),
+    const foreignSnapshot = value(deriveWaveReadiness(foreignGraph, statusDeps));
+    const foreignState = value(createWaveGateState(foreignSnapshot));
+    const foreignTerminal = value(reduceWaveGate(
+      value(reduceWaveGate(foreignState, { kind: "preparation-published" })),
       { kind: "result-rejected", attempt: 2 },
     ));
-    const diagnostic = authorityValue(terminalBlockedDiagnostic({
+    const diagnostic = value(terminalBlockedDiagnostic({
       category: "invalid-authority",
       runId: foreignRun,
       message: "foreign terminal",
     }));
-    const action = authorityValue(blockedAction(diagnostic));
-    const proven = authorityValue(proveWaveGateNextAction(foreignSnapshot, foreignTerminal, action));
+    const action = value(blockedAction(diagnostic));
+    const proven = value(proveWaveGateNextAction(foreignSnapshot, foreignTerminal, action));
     const readiness = deriveWaveReadiness(graph, statusDeps, { nextActionAuthority: proven, lifecycleCheckpoint: foreignTerminal });
     expect(readiness).toMatchObject({
       ok: false,
@@ -2090,25 +2086,25 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   it("rejects pre-commit done proof but accepts terminal blocked only at its exact lifecycle checkpoint", () => {
     const snapshot = lifecycleCompletionReadiness();
     const doneState = lifecycleStates().find((state) => state.kind === "done")!;
-    const done = authorityValue(doneAction(doneState.runId, {
+    const done = value(doneAction(doneState.runId, {
       runId: doneState.runId,
       slot: "artifacts/wave-result.json",
       digest: "9".repeat(64),
       byteLength: 12,
     }));
-    const provenDone = authorityValue(proveWaveGateNextAction(snapshot, doneState, done));
+    const provenDone = value(proveWaveGateNextAction(snapshot, doneState, done));
     expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: provenDone, lifecycleCheckpoint: doneState })).toMatchObject({
       ok: false,
       error: { reasons: [{ message: expect.stringContaining("committed terminal") }] },
     });
 
     const terminal = lifecycleStates().find((state) => state.kind === "terminal-blocked")!;
-    const diagnostic = authorityValue(terminalBlockedDiagnostic({
+    const diagnostic = value(terminalBlockedDiagnostic({
       category: "invalid-authority", runId: terminal.runId, message: "stop",
     }));
-    const blocked = authorityValue(blockedAction(diagnostic));
-    const provenBlocked = authorityValue(proveWaveGateNextAction(snapshot, terminal, blocked));
-    const blockedReadiness = authorityValue(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: provenBlocked, lifecycleCheckpoint: terminal }));
+    const blocked = value(blockedAction(diagnostic));
+    const provenBlocked = value(proveWaveGateNextAction(snapshot, terminal, blocked));
+    const blockedReadiness = value(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: provenBlocked, lifecycleCheckpoint: terminal }));
     expect(deriveNextAction(blockedReadiness).action).toMatchObject({
       kind: "blocked",
       diagnostic: { kind: "terminal-blocked", retry: { eligible: false } },
@@ -2167,7 +2163,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
   });
 
   it("refuses refutation while a current Review Packet still owns the finding snapshot", () => {
-    const collecting = authorityValue(deriveWaveReadiness(registeredGraph({
+    const collecting = value(deriveWaveReadiness(registeredGraph({
       tasks: [{
         ...baseTask,
         review_run: {
@@ -2192,7 +2188,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
       id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "stale until current review completes",
     };
-    const pending = authorityValue(deriveWaveReadiness(registeredGraph({
+    const pending = value(deriveWaveReadiness(registeredGraph({
       tasks: [{
         ...baseTask,
         review_status: "pending",
@@ -2215,20 +2211,20 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
       id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "completion can advance without authority",
     };
-    const first = authorityValue(deriveWaveReadiness(registeredGraph({
+    const first = value(deriveWaveReadiness(registeredGraph({
       tasks: [{ ...baseTask, findings: [finding], critical_findings: [finding.claim], advisory_findings: [] }],
     }), statusDeps));
-    const second = authorityValue(deriveWaveReadiness({
+    const second = value(deriveWaveReadiness({
       ...first.graph,
       tasks: first.graph.tasks.map((task) => ({ ...task, test_evidence: `${task.test_evidence} (re-observed)` })),
     }, statusDeps));
 
-    expect(authorityValue(deriveWaveRefutationPlan(first)).runId)
-      .not.toBe(authorityValue(deriveWaveRefutationPlan(second)).runId);
+    expect(value(deriveWaveRefutationPlan(first)).runId)
+      .not.toBe(value(deriveWaveRefutationPlan(second)).runId);
   });
 
   it("refuses an empty panel and derives non-empty idempotent panel authority only from canonical Findings", () => {
-    const clean = authorityValue(deriveWaveReadiness(registeredGraph(), statusDeps));
+    const clean = value(deriveWaveReadiness(registeredGraph(), statusDeps));
     expect(deriveWaveRefutationPlan(clean)).toMatchObject({ ok: false });
 
     const finding = {
@@ -2239,21 +2235,21 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
       line: 1,
       claim: "completion can advance without authority",
     };
-    const snapshot = authorityValue(deriveWaveReadiness(registeredGraph({
+    const snapshot = value(deriveWaveReadiness(registeredGraph({
       tasks: [{ ...baseTask, findings: [finding], critical_findings: [finding.claim], advisory_findings: [] }],
     }), statusDeps));
-    const plan = authorityValue(deriveWaveRefutationPlan(snapshot));
-    const replay = authorityValue(deriveWaveRefutationPlan(snapshot));
+    const plan = value(deriveWaveRefutationPlan(snapshot));
+    const replay = value(deriveWaveRefutationPlan(snapshot));
     expect(replay).toEqual(plan);
     expect(plan.findings.map(({ id }) => id)).toEqual(["T1:code-reviewer-1"]);
-    const panel = authorityValue(prepareWaveRefutationPanel(snapshot));
+    const panel = value(prepareWaveRefutationPanel(snapshot));
     expect(panel.authority.findings).toEqual(plan.findings);
     expect(panel.authority.lenses).toEqual(plan.lenses);
     expect(panel.authority.verifierRoster.orderedSlots).toHaveLength(plan.lenses.length);
     // Verifier routing comes from the catalog: the verifier role's own profile
     // and its exact lowering, never a binding spelled in the Wave Gate core.
-    const verifierPolicy = authorityValue(resolveAgentPolicy("review-verifier-agent"));
-    const verifierProfile = authorityValue(resolveAgentProfile("review-verifier-agent"));
+    const verifierPolicy = value(resolveAgentPolicy("review-verifier-agent"));
+    const verifierProfile = value(resolveAgentProfile("review-verifier-agent"));
     for (const request of panel.authority.verifierRoster.orderedSlots.flatMap(({ attempts }) => attempts)) {
       expect(request.role).toBe("review-verifier-agent");
       expect(request.modelProfile).toBe(verifierPolicy.profile);
@@ -2269,7 +2265,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
       );
       expect(request.modelProfile).toBe("refutation");
     }
-    const claimedReplay = authorityValue(prepareWaveRefutationPanel(snapshot, {
+    const claimedReplay = value(prepareWaveRefutationPanel(snapshot, {
       verifierSlots: panel.authority.verifierRoster.orderedSlots,
     }));
     expect(claimedReplay.runId).toBe(panel.runId);
@@ -2296,12 +2292,12 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     const graph = registeredGraph({
       tasks: [{ ...baseTask, findings: [advisory], critical_findings: [], advisory_findings: [advisory.claim] }],
     });
-    const snapshot = authorityValue(deriveWaveReadiness(graph, statusDeps));
-    const preparing = authorityValue(createWaveGateState(snapshot));
-    const reviewing = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
-    const advisoryState = authorityValue(reduceWaveGate(reviewing, { kind: "complete-roster-with-advisories" }));
-    const proven = authorityValue(deriveWaveAdvisoryNextAction(snapshot, advisoryState));
-    const advisoryReadiness = authorityValue(deriveWaveReadiness(graph, statusDeps, { nextActionAuthority: proven, lifecycleCheckpoint: advisoryState }));
+    const snapshot = value(deriveWaveReadiness(graph, statusDeps));
+    const preparing = value(createWaveGateState(snapshot));
+    const reviewing = value(reduceWaveGate(preparing, { kind: "preparation-published" }));
+    const advisoryState = value(reduceWaveGate(reviewing, { kind: "complete-roster-with-advisories" }));
+    const proven = value(deriveWaveAdvisoryNextAction(snapshot, advisoryState));
+    const advisoryReadiness = value(deriveWaveReadiness(graph, statusDeps, { nextActionAuthority: proven, lifecycleCheckpoint: advisoryState }));
     expect(deriveNextAction(advisoryReadiness).action.kind).toBe("await-user");
     const status = deriveLoomStatus(advisoryReadiness);
     expect(status.next.action.kind).toBe("await-user");
@@ -2536,7 +2532,7 @@ describe("protected active Wave Gate registration", () => {
           ? commitWaveGateCompletion(readiness.value)
           : { ok: false, error: { kind: "wave-completion-commit-rejected" as const, message: "unavailable" } };
       });
-      const replay = authorityValue(findRegisteredWaveGateCompletionReplay(manager.load(), {
+      const replay = value(findRegisteredWaveGateCompletionReplay(manager.load(), {
         schemaVersion: 1,
         kind: "active-wave-gate",
         runId: committed.completedRegistration.runId,
@@ -2618,7 +2614,7 @@ describe("protected active Wave Gate registration", () => {
 
   it("rejects completion when snapshot.graph.active_wave_gate is replaced after readiness derivation", () => {
     const graph = registeredGraph();
-    const readiness = authorityValue(deriveWaveReadiness(graph, statusDeps));
+    const readiness = value(deriveWaveReadiness(graph, statusDeps));
     Object.assign(graph, { active_wave_gate: { ...graph.active_wave_gate! } });
     expect(commitWaveGateCompletion(readiness)).toMatchObject({
       ok: false,
@@ -2628,15 +2624,15 @@ describe("protected active Wave Gate registration", () => {
 
   it("rejects completion when the active run is already terminal in history", () => {
     const graph = registeredGraph();
-    const readiness = authorityValue(deriveWaveReadiness(graph, statusDeps));
-    const committed = authorityValue(commitWaveGateCompletion(readiness));
+    const readiness = value(deriveWaveReadiness(graph, statusDeps));
+    const committed = value(commitWaveGateCompletion(readiness));
 
     // The same run re-enters the graph as the active gate with its own
     // completed registration already archived — the duplicate-terminal shape
     // the parse boundary refuses at load and the commit machine must also
     // refuse in memory.
     const rerun = registeredGraph({ wave_gate_history: [committed.completedRegistration] });
-    const rerunReadiness = authorityValue(deriveWaveReadiness(rerun, statusDeps));
+    const rerunReadiness = value(deriveWaveReadiness(rerun, statusDeps));
     expect(commitWaveGateCompletion(rerunReadiness)).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("already terminal in history") },
@@ -2649,8 +2645,8 @@ describe("protected active Wave Gate registration", () => {
     // contradiction handling has to clean up.
     const snapshot = lifecycleCompletionReadiness();
     const state = lifecycleStates().find((candidate) => candidate.kind === "done")!;
-    const foreignRun = authorityValue(parseOrchestrationRunId("foreign-next-action-run"));
-    const done = authorityValue(doneAction(state.runId, {
+    const foreignRun = value(parseOrchestrationRunId("foreign-next-action-run"));
+    const done = value(doneAction(state.runId, {
       runId: state.runId,
       slot: "artifacts/wave-result.json",
       digest: "9".repeat(64),
@@ -2688,7 +2684,7 @@ describe("protected active Wave Gate registration", () => {
       expect(stored.wave_gate_history).toEqual([committed.completedRegistration]);
       expect(stored.wave_gate_history?.[0]?.completionReceipt).toEqual(committed.receipt);
 
-      const nextAuthority = authorityValue(deriveLegacyWaveGateCompatibilityAuthority(stored, null));
+      const nextAuthority = value(deriveLegacyWaveGateCompatibilityAuthority(stored, null));
       expect(nextAuthority.wave).toBe(2);
       const next = await manager.migrateLegacyWaveGateRegistration(nextAuthority);
       expect(manager.load().active_wave_gate).toEqual(next);
@@ -2770,8 +2766,8 @@ describe("final-Wave compatibility completion replay", () => {
       expect(committedStatus.next.reasons).toEqual([
         expect.objectContaining({ kind: "run-complete" }),
       ]);
-      const authority = authorityValue(deriveLegacyWaveGateCompatibilityAuthority(completed, null));
-      const replay = authorityValue(findLegacyWaveGateCompletionReplay(completed, authority));
+      const authority = value(deriveLegacyWaveGateCompatibilityAuthority(completed, null));
+      const replay = value(findLegacyWaveGateCompletionReplay(completed, authority));
       expect(replay).toEqual(completed.wave_gate_history?.[0]);
 
       for (let replayIndex = 0; replayIndex < 3; replayIndex++) {
@@ -2853,7 +2849,7 @@ describe("final-Wave compatibility completion replay", () => {
         authorityDigest: before.authorityDigest,
         revision: before.revision + 1,
       });
-      expect(authorityValue(findRegisteredWaveGateCompletionReplay(completed, before)))
+      expect(value(findRegisteredWaveGateCompletionReplay(completed, before)))
         .toEqual(terminal);
     }, registeredGraph());
   });
@@ -2873,7 +2869,7 @@ describe("final-Wave compatibility completion replay", () => {
 
   it("fails conflicting or older terminal history instead of treating it as replay", async () => {
     const graph = legacyFinalGraph();
-    const authority = authorityValue(deriveLegacyWaveGateCompatibilityAuthority(graph, null));
+    const authority = value(deriveLegacyWaveGateCompatibilityAuthority(graph, null));
     const conflict = registeredGraph({
       active_wave_gate: undefined,
       tasks: [taskState({ status: "completed" })],
@@ -2883,16 +2879,16 @@ describe("final-Wave compatibility completion replay", () => {
       wave_gate_history: [{
         schemaVersion: 1,
         kind: "completed-wave-gate",
-        runId: authorityValue(parseOrchestrationRunId("conflicting-final-run")),
+        runId: value(parseOrchestrationRunId("conflicting-final-run")),
         wave: 1,
-        authorityDigest: authorityValue(parseArtifactDigest("f".repeat(64))),
+        authorityDigest: value(parseArtifactDigest("f".repeat(64))),
         revision: 1,
         completionReceipt: {
           kind: "protected-wave-state-committed",
-          effectId: authorityValue(parseEffectId("conflicting-final-effect")),
-          runId: authorityValue(parseOrchestrationRunId("conflicting-final-run")),
+          effectId: value(parseEffectId("conflicting-final-effect")),
+          runId: value(parseOrchestrationRunId("conflicting-final-run")),
           committedRevision: 1,
-          stateDigest: authorityValue(parseArtifactDigest("e".repeat(64))),
+          stateDigest: value(parseArtifactDigest("e".repeat(64))),
         },
       }],
     });

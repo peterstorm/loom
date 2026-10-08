@@ -24,7 +24,7 @@ import {
   type DefectFamilyVerificationPlan,
   type PreparedDefectFamilyAccounting,
 } from "../../../../src/core/defect-family-accounting";
-import { canonicalStructuralEquals, type DomainResult, type OrchestrationRunId } from "../../../../src/core/orchestration-contract";
+import { canonicalStructuralEquals, type OrchestrationRunId } from "../../../../src/core/orchestration-contract";
 import { parseRepositorySnapshotWitness } from "../../../../src/core/remediation-machine";
 import { sha256Hex } from "../../../../src/core/digest";
 import {
@@ -34,7 +34,7 @@ import {
 } from "../../../../src/core/verification-manifest";
 import type { AuthoritativeStandaloneReviewResult } from "../../../../src/core/standalone-review";
 import { standaloneFixture } from "../../../fixtures/standalone-remediation-authority";
-import { value } from "../../../fixtures/parse-result";
+import { refusal, value } from "../../../fixtures/parse-result";
 
 // ---------------------------------------------------------------------------
 // Fixtures — built only through the production parsers (no forged authority).
@@ -187,13 +187,7 @@ const registered = (request: CreateRemediationRegistrationInput): RegisteredReme
   value(createRegisteredRemediationProgramV2(request));
 
 /** The stored form: exactly what JSON persistence hands back to the parser. */
-const stored = (value: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
-
-function refusal<T>(result: DomainResult<T, RemediationRegistrationError>): RemediationRegistrationError {
-  expect(result.ok, `expected refusal, got ${JSON.stringify(result)}`).toBe(false);
-  if (result.ok) throw new Error("expected refusal");
-  return result.error;
-}
+const stored = (record: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
 
 const refusedWith = (message: string): RemediationRegistrationError =>
   ({ kind: "invalid-remediation-registration", message });
@@ -336,9 +330,9 @@ describe("parseRemediationStartInputV2", () => {
   it("property: any surplus string key is refused", () => {
     const surplusKey = fc.string({ minLength: 1 }).filter((key) =>
       !["sourceRunsRoot", "sourceRun", "supportPaths", "defectFamily", "__proto__"].includes(key));
-    fc.assert(fc.property(surplusKey, fc.anything(), (key, value) => {
+    fc.assert(fc.property(surplusKey, fc.anything(), (key, surplus) => {
       const raw = { ...rawStart() };
-      Object.defineProperty(raw, key, { value, enumerable: true });
+      Object.defineProperty(raw, key, { value: surplus, enumerable: true });
       expect(refusal(parseRemediationStartInputV2(raw))).toEqual(refusedWith(`remediation input must contain exactly ${INPUT_FIELDS}`));
     }));
   });
@@ -493,11 +487,11 @@ const storedV1 = (): Record<string, unknown> => ({
 const storedSelected = (): Record<string, unknown> => stored(registered(selectedRequest()));
 const storedNotRequired = (): Record<string, unknown> => stored(registered(notRequiredRequest()));
 
-function tamper(record: Record<string, unknown>, path: readonly string[], value: unknown): Record<string, unknown> {
+function tamper(record: Record<string, unknown>, path: readonly string[], replacement: unknown): Record<string, unknown> {
   const copy = stored(record);
   let cursor = copy;
   for (const key of path.slice(0, -1)) cursor = cursor[key] as Record<string, unknown>;
-  cursor[path[path.length - 1]!] = value;
+  cursor[path[path.length - 1]!] = replacement;
   return copy;
 }
 

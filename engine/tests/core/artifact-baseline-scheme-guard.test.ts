@@ -107,13 +107,29 @@ describe("a digest-scheme claim is unforgeable outside the baseline module", () 
     expect([swapped, widened]).toHaveLength(2);
   });
 
-  it("carries the scheme in the type alone: an issued instance exposes only its entry points", () => {
-    for (const scheme of [DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE]) {
+  it("carries its scheme at runtime too: each issued instance is distinct, frozen and tagged", () => {
+    const issued = [DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE] as const;
+    expect(issued.map((scheme) => scheme.scheme)).toEqual(["declared-artifact", "repository-change", "unknown"]);
+    expect(new Set(issued).size).toBe(3);
+    for (const scheme of issued) {
       expect(Object.isFrozen(scheme)).toBe(true);
+      // The tag lives in the class-private brand, so a spread or key walk sees no state.
       expect(Object.keys(scheme)).toEqual([]);
-      expect(Object.getOwnPropertyNames(Object.getPrototypeOf(scheme)).sort()).toEqual(["capture", "constructor", "fromEntries", "parse"]);
+      expect(Object.getOwnPropertyNames(Object.getPrototypeOf(scheme)).sort())
+        .toEqual(["capture", "constructor", "fromEntries", "parse", "scheme"]);
     }
-    expect(new Set([DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE]).size).toBe(3);
+  });
+
+  it("types each tag exactly and refuses to rewrite it", () => {
+    const declared: "declared-artifact" = DECLARED_ARTIFACT_BASELINE.scheme;
+    const repository: "repository-change" = REPOSITORY_CHANGE_BASELINE.scheme;
+    const unknown: "unknown" = UNKNOWN_SCHEME_BASELINE.scheme;
+    expect([declared, repository, unknown]).toEqual(["declared-artifact", "repository-change", "unknown"]);
+    expect(() => {
+      // @ts-expect-error the tag is read-only.
+      DECLARED_ARTIFACT_BASELINE.scheme = "repository-change";
+    }).toThrow(TypeError);
+    expect(DECLARED_ARTIFACT_BASELINE.scheme).toBe("declared-artifact");
   });
 });
 

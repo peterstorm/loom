@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "./canonical-temp-dir";
 import { git } from "./git-repository";
+import { value } from "./parse-result";
 import { captureStandaloneCliEvidence as capture } from "./standalone-cli-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
@@ -11,10 +12,6 @@ import type { StandaloneReviewerPayloadV3 } from "../../src/core/standalone-line
 export const CHECK_ID = "project:repair-regression";
 export const REPORT_PATH = ".loom/completion-reports/repair.xml";
 export const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-export function value<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw Error(JSON.stringify(result));
-  return result.value;
-}
 
 /** Same enrolled fixed command as the existing P3 fixture; never edits the project manifest. */
 export function successorRemediationRepository(): string {

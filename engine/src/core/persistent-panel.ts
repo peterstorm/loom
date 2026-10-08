@@ -1039,6 +1039,30 @@ function reduceRefutationVerdictRejected(state: RefutationPanelState, event: Ref
 // The two programs over the persistent program kernel
 // ---------------------------------------------------------------------------
 
+/** The fields of a panel authority whose value is (or may be) an issued roster. */
+export type PanelAuthorityRosterField<Authority> = {
+  [Field in keyof Authority]-?: [Extract<Authority[Field], ExactRoster>] extends [never] ? never : Field;
+}[keyof Authority];
+
+/**
+ * Exactly the roster fields of `Authority`, each named once. The set is
+ * derived from the authority type, so a roster field added to an authority
+ * without being named here, or a non-roster field named here, fails to
+ * compile — the comparison can never silently fall back to a roster's
+ * serialization. An authority with no roster field has no set at all (`never`,
+ * not the empty record, which would accept any field).
+ */
+export type PanelAuthorityRosterFields<Authority> = [PanelAuthorityRosterField<Authority>] extends [never]
+  ? never
+  : Readonly<Record<PanelAuthorityRosterField<Authority>, true>>;
+
+/** The default `Authority` of `canonicalPanelStateJson`, and its parameter type
+ *  while that default stands: the `never`-valued property admits no value, and
+ *  its name is the diagnostic a caller who omitted the type argument reads. */
+type AuthorityTypeArgumentRequired = Readonly<{
+  "canonicalPanelStateJson requires an explicit Authority type argument": never;
+}>;
+
 /**
  * The canonical form of one panel's state (live, or JSON read back from a
  * checkpoint): the issued rosters of its authority — the only place either
@@ -1046,11 +1070,22 @@ function reduceRefutationVerdictRejected(state: RefutationPanelState, event: Ref
  * canonical form (`canonicalExactRosterJson`), and every other field, key
  * order included, untouched. Positional, never by key name: a `byId` anywhere
  * else in the state stays part of the comparison.
+ *
+ * Callers must pass the authority type explicitly, e.g.
+ * `canonicalPanelStateJson<RefutationPanelAuthority>({ verifierRoster: true })`.
+ * The roster-field set is checked against that type, so the type cannot be
+ * inferred from the set. Without it, the parameter becomes
+ * `AuthorityTypeArgumentRequired`, which no value satisfies and whose one
+ * property names the omission in the compiler error.
  */
-const canonicalPanelStateJson = (rosterFields: readonly string[]) => (state: unknown): unknown => {
+export const canonicalPanelStateJson = <Authority = AuthorityTypeArgumentRequired>(
+  rosterFields: [Authority] extends [AuthorityTypeArgumentRequired]
+    ? AuthorityTypeArgumentRequired
+    : PanelAuthorityRosterFields<NoInfer<Authority>>,
+) => (state: unknown): unknown => {
   if (!isRecord(state) || !isRecord(state.authority)) return state;
   const authority = Object.fromEntries(Object.entries(state.authority).map(([field, value]) =>
-    [field, rosterFields.includes(field) ? canonicalExactRosterJson(value) : value] as const));
+    [field, Object.hasOwn(rosterFields, field) ? canonicalExactRosterJson(value) : value] as const));
   return { ...state, authority };
 };
 
@@ -1063,7 +1098,7 @@ const ARCHITECTURE_PROGRAM: PanelProgramDefinition<"architecture", ArchitectureP
   transition: reduceArchitectureTransition,
   parseAuthority: parseArchitecturePanelAuthority,
   authorityJson: (authority) => Object.freeze({ runId: authority.runId, candidateLenses: authority.candidateLenses, judgeCriteria: authority.judgeCriteria, candidateSlots: authority.candidateRoster.orderedSlots, judgeSlots: authority.judgeRoster.orderedSlots }),
-  canonicalStateJson: canonicalPanelStateJson(["candidateRoster", "judgeRoster"]),
+  canonicalStateJson: canonicalPanelStateJson<ArchitecturePanelAuthority>({ candidateRoster: true, judgeRoster: true }),
 };
 
 const REFUTATION_PROGRAM: PanelProgramDefinition<"refutation", RefutationPanelAuthority, RefutationPanelAuthorityInput, RefutationPanelState, RefutationPanelAction, PersistentRefutationPanelEvent> = {
@@ -1081,7 +1116,7 @@ const REFUTATION_PROGRAM: PanelProgramDefinition<"refutation", RefutationPanelAu
     lenses: authority.lenses,
     verifierSlots: authority.verifierRoster.orderedSlots,
   }),
-  canonicalStateJson: canonicalPanelStateJson(["verifierRoster"]),
+  canonicalStateJson: canonicalPanelStateJson<RefutationPanelAuthority>({ verifierRoster: true }),
 };
 
 export function reducePersistentArchitecturePanel(state: ArchitecturePanelState, event: PersistentArchitecturePanelEvent): PersistentPanelResult<PersistentArchitectureStep> {

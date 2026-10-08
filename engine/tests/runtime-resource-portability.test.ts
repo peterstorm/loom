@@ -148,8 +148,30 @@ describe("TaskGraph repository-root discovery", () => {
       });
 
       expect(run.status).not.toBe(0);
-      expect(run.stderr).toContain("git rev-parse failed (exit 128)");
+      expect(run.stderr).toContain("git rev-parse failed (exited 128)");
       expect(run.stderr).toContain("dubious ownership");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names a fatal exit whose stderr never arrived as a lost capture after the bounded retries", () => {
+    // The macos-15 verify failure (run 37744264682) surfaced this as
+    // `git rev-parse failed (exit 128): no diagnostic` in a non-repository.
+    const root = canonicalTempDir("loom-git-silent-fatal-");
+    try {
+      const bin = fakeGit(root, "", 128);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...discoveryEnv(), PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain(
+        `git rev-parse failed (exited 128) for ${root} (confirmed after bounded retries): stderr empty, stdout 0 bytes — ` +
+        "Git writes a diagnostic for every fatal exit",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

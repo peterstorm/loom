@@ -70,6 +70,21 @@ async function spawnOutcomes(handle: RunDirHandle): Promise<readonly unknown[]> 
   return (await handle.readEvents()).map(({ event }) => event).filter((event) => (event as { type?: string }).type === "spawn-outcome");
 }
 
+/** Publish an unparseable durable verdict-source record for `request`, so its settlement refuses. */
+async function corruptVerdictSource(handle: RunDirHandle, request: AgentRequestAuthority): Promise<void> {
+  const published = await handle.publishArtifactSet([{
+    relativePath: `panel-verdict-sources/${request.requestId}.json`,
+    bytes: Object.freeze([...Buffer.from("not a verdict source record", "utf-8")]),
+  }]);
+  if (!published.ok) throw new Error(published.error.message);
+}
+
+/** The refusal message of a drive result that must have failed. */
+function refusalMessage(result: FacadeDriveResult): string {
+  if (result.ok) throw new Error(`expected a refusal, got ${result.action.kind}`);
+  return result.message;
+}
+
 describe("driveRegisteredPanel", () => {
   it("runs the deterministic preparation internally and stops at the reserved verifier batch", async () => {
     const { handle, program } = await registeredRun("run.driver-start");
@@ -103,6 +118,16 @@ describe("submitRegisteredPanelAttempt", () => {
     expect(retry).toMatchObject({ requestId: "refutation:verifier:1:attempt-2", slotId: request!.slotId, attempt: 2 });
     expect(await spawnOutcomes(handle)).toEqual([expect.objectContaining({ requestId: "refutation:verifier:1", attempt: 1, outcome: "failed" })]);
   });
+
+  it("returns a settlement refusal unchanged and records no outcome", async () => {
+    const { handle, program } = await registeredRun("run.driver-submit-refused");
+    const [request] = spawned(await driveRegisteredPanel(handle, program));
+    await capture(handle, request!, verdict);
+    await corruptVerdictSource(handle, request!);
+    expect(refusalMessage(await submitRegisteredPanelAttempt(handle, program, request!, verdict)))
+      .toContain(`the durable panel verdict source for request ${request!.requestId} is not valid JSON`);
+    expect(await spawnOutcomes(handle)).toEqual([]);
+  });
 });
 
 describe("resumeRegisteredPanel", () => {
@@ -119,6 +144,16 @@ describe("resumeRegisteredPanel", () => {
     const { handle, program } = await registeredRun("run.driver-resume-pending");
     const [request] = spawned(await driveRegisteredPanel(handle, program));
     expect(spawned(await resumeRegisteredPanel(handle, program))).toEqual([request]);
+    expect(await spawnOutcomes(handle)).toEqual([]);
+  });
+
+  it("stops at the first settlement refusal, returns it unchanged, and records no outcome", async () => {
+    const { handle, program } = await registeredRun("run.driver-resume-refused");
+    const [request] = spawned(await driveRegisteredPanel(handle, program));
+    await capture(handle, request!, verdict);
+    await corruptVerdictSource(handle, request!);
+    const submitted = refusalMessage(await submitRegisteredPanelAttempt(handle, program, request!, verdict));
+    expect(refusalMessage(await resumeRegisteredPanel(handle, program))).toBe(submitted);
     expect(await spawnOutcomes(handle)).toEqual([]);
   });
 });

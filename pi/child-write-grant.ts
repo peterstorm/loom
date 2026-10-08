@@ -8,8 +8,9 @@
  * keeps direct edits blocked for the rest of its session. This module owns
  * that per-process registry, the activation, and both halves of the binding's
  * cleanup-authority lifecycle as pure decisions: what a rejected activation's
- * partial binding still owes (`rejectedChildWriteGrantDebt`) and what a
- * binding still owes after shutdown released part of it
+ * partial binding still owes (`rejectedChildWriteGrantDebt`), and a bound
+ * binding's authority as a durable claims ledger (`childBindingClaims`) whose
+ * release shutdown maps back to what the binding still owes
  * (`retainedChildWriteGrant`). The activation reaches the session registry,
  * the pointer lease and stderr only through `PiChildWriteGrantPorts`, so both
  * halves run against in-memory fakes.
@@ -27,6 +28,7 @@ import {
 import type { AgentId } from "../engine/src/machine/evidence";
 import { consumePiWriteGrant } from "./write-grant";
 import { cleanupFailureSuffix, runPiCleanupActions } from "./cleanup-actions";
+import type { DurableSpawnClaims, RosterClaim } from "./spawn-claims";
 
 type ActiveChildWriteGrantScope = Readonly<{
   scopeDirs?: readonly string[];
@@ -184,20 +186,37 @@ async function rejectChildWriteGrant(
 }
 
 /**
- * What a child binding still owes once shutdown released part of it: the
- * roster entry and pointer lease that were NOT released stay as cleanup
- * authority, in the variant that names exactly them, and a binding with
- * nothing left is retired (`null`). Pure; the shell stores the answer.
+ * The cleanup authority a child binding holds, as a durable claims ledger of
+ * its own: its roster entry (by bare id) and its pointer lease. It holds no
+ * grant — the child consumed its grant at activation, and the parent revokes
+ * what it issued — so shutdown releases it by the ledger's one plan and ports.
+ */
+export function childBindingClaims(binding: ActiveChildWriteGrant): DurableSpawnClaims<RosterClaim> {
+  return Object.freeze({
+    grants: Object.freeze([]),
+    roster: Object.freeze(binding.agentId === null ? [] : [Object.freeze({ rosterId: binding.agentId })]),
+    pointer: binding.pointerBinding,
+  });
+}
+
+/**
+ * What a child binding still owes once shutdown released part of it, given
+ * what the ledger's remaining-debt rule says its claims still owe
+ * (`remainingDurableClaims` over `childBindingClaims`): the roster entry and
+ * pointer lease still owed stay as cleanup authority, in the variant that
+ * names exactly them, and a binding with nothing left is retired (`null`).
+ * Pure; the shell stores the answer.
  */
 export function retainedChildWriteGrant(
   binding: ActiveChildWriteGrant,
-  removedRosterIds: ReadonlySet<AgentId>,
-  releasedPointers: ReadonlySet<SessionTaskGraphPointerBinding>,
+  owed: DurableSpawnClaims<RosterClaim>,
 ): ActiveChildWriteGrant | null {
-  const agentId = binding.agentId !== null && removedRosterIds.has(binding.agentId) ? null : binding.agentId;
-  const pointerBinding = binding.pointerBinding !== null && releasedPointers.has(binding.pointerBinding)
-    ? null
-    : binding.pointerBinding;
+  const agentId = binding.agentId !== null && owed.roster.some(({ rosterId }) => rosterId === binding.agentId)
+    ? binding.agentId
+    : null;
+  const pointerBinding = binding.pointerBinding !== null && owed.pointer === binding.pointerBinding
+    ? binding.pointerBinding
+    : null;
   if (agentId !== null && pointerBinding !== null) {
     return { ...binding, kind: "active", agentId, pointerBinding };
   }

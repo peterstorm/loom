@@ -34,10 +34,11 @@ const failedWith = (status: number): SpawnAnswer => ({ status, stdout: "", stder
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
+  const { logicalGitArgs } = await import("../../../fixtures/policy-bound-git-argv");
   return {
     ...actual,
     spawnSync: (file: string, args: readonly string[]) => {
-      scriptedResponses.calls.push([file, ...args]);
+      scriptedResponses.calls.push([file, ...logicalGitArgs(args)]);
       const next = scriptedResponses.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;
@@ -114,7 +115,7 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
       answered(SHA), answered(SHA), // HEAD and verified candidate reference
       { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
     ];
-    expect(() => deriveChangedPaths()).toThrow(/merge-base.*could not be spawned.*ENOENT/);
+    expect(() => deriveChangedPaths()).toThrow(/merge-base.*could not start.*ENOENT/);
     expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "merge-base"]);
   });
 
@@ -151,7 +152,7 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
     scriptedResponses.queue = [
       answered(SHA), { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
     ];
-    expect(() => deriveChangedPaths()).toThrow(/rev-parse.*could not be spawned.*ENOENT/);
+    expect(() => deriveChangedPaths()).toThrow(/rev-parse.*could not start.*ENOENT/);
     expect(scriptedResponses.calls).toHaveLength(2);
   });
 

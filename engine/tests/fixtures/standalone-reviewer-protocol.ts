@@ -4,11 +4,7 @@ import { parseIssuedReviewerProtocol, type ReviewerProtocolAuthorityResolver } f
 import { serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
 import { type FrozenStandaloneReviewAuthority } from "../../src/core/standalone-review-model";
 import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/registration";
-
-function value<T>(parsed: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!parsed.ok) throw new Error(JSON.stringify(parsed));
-  return parsed.value;
-}
+import { value } from "./parse-result";
 
 /** Explicit schema-1 fixture producer, not a production downgrade option. */
 export function legacyStandaloneContext(request: Readonly<{

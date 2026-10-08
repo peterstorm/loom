@@ -194,17 +194,40 @@ function driveStage<Step extends AnyStep>(driver: StageDriver<Step>, plans: read
   }
 }
 
-const stagePlans = (slots: number) => fc.record({
+type StagePlan = Readonly<{ plans: readonly SlotPlan[]; order: readonly number[] }>;
+
+const stagePlans = (slots: number): fc.Arbitrary<StagePlan> => fc.record({
   plans: fc.array(fc.constantFrom(...SLOT_PLANS), { minLength: slots, maxLength: slots }),
   order: fc.shuffledSubarray([...Array(slots).keys()], { minLength: slots, maxLength: slots }),
 });
 
+/** The whole outcome space of a stage: every per-slot plan crossed with every slot order. */
+function everyStagePlan(slots: number): readonly StagePlan[] {
+  const permutations = (pending: readonly number[]): readonly (readonly number[])[] => pending.length === 0
+    ? [[]]
+    : pending.flatMap((slot) => permutations(pending.filter((other) => other !== slot)).map((rest) => [slot, ...rest]));
+  const plansOf = (remaining: number): readonly (readonly SlotPlan[])[] => remaining === 0
+    ? [[]]
+    : SLOT_PLANS.flatMap((plan) => plansOf(remaining - 1).map((rest) => [plan, ...rest]));
+  const orders = permutations([...Array(slots).keys()]);
+  return plansOf(slots).flatMap((plans) => orders.map((order) => ({ plans, order })));
+}
+
 describe("property: the shared slot-progress and program kernel", () => {
-  it("drives every refutation verifier outcome order through the same retry, terminal and replay invariants", () => {
+  // 3 slots span 3^3 plans x 3! orders = 162 cases, too many to enumerate at
+  // ~150ms each (every recorded prefix replays through the production
+  // publication resolver), so this samples 25 unseeded; a failure reports its
+  // fast-check seed and path for replay. The sampling, not the assertion, sets
+  // the cost, so the case states its budget.
+  it("drives every refutation verifier outcome order through the same retry, terminal and replay invariants", { timeout: 30_000 }, () => {
     fc.assert(fc.property(stagePlans(3), ({ plans, order }) => driveStage(refutationDriver(), plans, order)), { numRuns: 25 });
   });
 
+  // 2 slots span only 3^2 plans x 2! orders = 18 cases: enumerate them all,
+  // which is both exhaustive and cheaper than sampling 25.
   it("drives every architecture candidate outcome order through the same retry, terminal and replay invariants", () => {
-    fc.assert(fc.property(stagePlans(2), ({ plans, order }) => driveStage(architectureDriver(), plans, order)), { numRuns: 25 });
+    const space = everyStagePlan(2);
+    expect(space).toHaveLength(18);
+    for (const { plans, order } of space) driveStage(architectureDriver(), plans, order);
   });
 });

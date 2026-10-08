@@ -16,6 +16,7 @@ import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, enc
 import { sha256Bytes } from "../../src/core/digest";
 import { parseRequestId, type RequestId } from "../../src/core/orchestration-contract";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { value } from "../fixtures/parse-result";
 
 const SCRIPT = resolve(__dirname, "../../../scripts/read-context-packet.ts");
 const ROLE = "code-reviewer";
@@ -23,15 +24,11 @@ const LABEL = `predecessor-context:${ROLE}`;
 const root = canonicalTempDir("loom-archive-reader-");
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-const ok = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
-  if (!result.ok) throw Error(JSON.stringify(result.error));
-  return result.value;
-};
-const requestId = (name: string): RequestId => ok(parseRequestId(`request:${name}`));
-const section = (label: string, text: string): ByteSection => ok(encodeByteSection(label, text));
+const requestId = (name: string): RequestId => value(parseRequestId(`request:${name}`));
+const section = (label: string, text: string): ByteSection => value(encodeByteSection(label, text));
 
 // The predecessor: an issued v2 reviewer packet, stored as its exact file bytes.
-const predecessor = ok(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
+const predecessor = value(buildReviewerContextPacket({ requestId: requestId("prior"), role: ROLE, requiredSkill: "review",
   fixedContext: [], variableContext: [section("prior-notes", "the predecessor's retained notes")] }));
 const predecessorBytes = Buffer.from(JSON.stringify(predecessor));
 const predecessorPath = join(root, "predecessor.json");
@@ -46,7 +43,7 @@ const gzipArchive = (overrides: Record<string, unknown> = {}) => JSON.stringify(
 let packets = 0;
 /** One successor v3 packet retaining `retained` under LABEL; returns the reader's issued identity flags. */
 function successorRetaining(retained: string): string[] {
-  const packet = ok(buildStandaloneReviewerContextPacketV3({ requestId: requestId(`successor-${packets}`), role: ROLE,
+  const packet = value(buildStandaloneReviewerContextPacketV3({ requestId: requestId(`successor-${packets}`), role: ROLE,
     requiredSkill: "review", fixedContext: [], variableContext: [section(LABEL, retained)] }));
   const path = join(root, `successor-${packets++}.json`);
   writeFileSync(path, JSON.stringify(packet));

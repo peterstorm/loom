@@ -4,7 +4,7 @@
  */
 import { sha256Bytes } from "./digest";
 import type { DomainResult } from "./orchestration-contract";
-import { isRecord, parseExactRecord, type UnknownRecord } from "./plain-record";
+import { hasExactPlainKeys, isRecord } from "./plain-record";
 import {
   parseReviewedArtifacts,
   reviewedWorkspaceHeadSha,
@@ -60,14 +60,11 @@ export function waveFrozenSource(snapshot: ReviewedWorkspaceObservation): WaveFr
   });
 }
 
-/** Exact own key set through the shared kernel: a plain prototype, no symbol
- *  keys, no missing or surplus field. The codec's diagnostics are its own. */
-const exactObject = (raw: unknown, keys: readonly string[]): raw is UnknownRecord =>
-  parseExactRecord(raw, keys, "wave frozen source").ok;
-
-/** Decode and re-prove every byte/digest/head join before reader projection. */
+/** Decode and re-prove every byte/digest/head join before reader projection.
+ *  Every record admits its exact key set through the strict `hasExactPlainKeys`
+ *  (plain prototype, no symbol keys); the diagnostics are the codec's own. */
 export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSource, string> {
-  if (!exactObject(raw, ["schemaVersion", "taskId", "workspaceHeadSha", "files"]) ||
+  if (!hasExactPlainKeys(raw, ["schemaVersion", "taskId", "workspaceHeadSha", "files"]) ||
       raw.schemaVersion !== WAVE_FROZEN_SOURCE_SCHEMA_VERSION || typeof raw.taskId !== "string" || raw.taskId.trim() === "" ||
       typeof raw.workspaceHeadSha !== "string" || !/^[0-9a-f]{64}$/.test(raw.workspaceHeadSha) || !Array.isArray(raw.files)) {
     return failed("wave frozen source has an invalid schema");
@@ -81,7 +78,7 @@ export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSour
     }
     paths.add(entry.path);
     if (entry.kind === "absent") {
-      if (!exactObject(entry, ["path", "kind", "digest", "byteLength"]) || entry.digest !== null || entry.byteLength !== 0) {
+      if (!hasExactPlainKeys(entry, ["path", "kind", "digest", "byteLength"]) || entry.digest !== null || entry.byteLength !== 0) {
         return failed(`wave frozen source absent file ${index} is malformed`);
       }
       files.push(Object.freeze({ path: entry.path, kind: "absent", digest: null, byteLength: 0 }));
@@ -89,7 +86,7 @@ export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSour
       continue;
     }
     const contentKey = entry.kind === "text" ? "content" : entry.kind === "binary" ? "contentBase64" : null;
-    if (contentKey === null || !exactObject(entry, ["path", "kind", "digest", "byteLength", contentKey]) ||
+    if (contentKey === null || !hasExactPlainKeys(entry, ["path", "kind", "digest", "byteLength", contentKey]) ||
         typeof entry.digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.digest) ||
         !Number.isSafeInteger(entry.byteLength) || (entry.byteLength as number) < 0 || typeof entry[contentKey] !== "string") {
       return failed(`wave frozen source file ${index} is malformed`);

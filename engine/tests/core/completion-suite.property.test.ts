@@ -24,6 +24,7 @@ import {
 } from "../../src/core/completion-suite";
 import { canonicalJson } from "../../src/core/review-packet";
 import { sha256Hex } from "../../src/core/digest";
+import { value } from "../fixtures/parse-result";
 
 const digest = (character: string): string => character.repeat(64);
 
@@ -54,13 +55,8 @@ const projectCheck = (
   reportPolicy: reportPolicy === "required" ? requiredFilePolicy() : notRequiredPolicy(),
 });
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-}
-
 function authorityFor(checks: readonly unknown[]): AuthorizedWaveCompletionSuite {
-  return valueOf(createAuthorizedWaveCompletionSuite({
+  return value(createAuthorizedWaveCompletionSuite({
     runId: "run.wave-suite",
     wave: 3,
     revision: 7,
@@ -257,14 +253,14 @@ describe("completion-suite exact parsers", () => {
   });
 
   it("freezes commands, argument arrays, report policies, and report outcomes", () => {
-    const parsedCheck = valueOf(parseAuthorizedWaveCompletionCheck(projectCheck("project:frozen", "required")));
+    const parsedCheck = value(parseAuthorizedWaveCompletionCheck(projectCheck("project:frozen", "required")));
     expect(parsedCheck.kind).toBe("project-command");
     if (parsedCheck.kind === "project-command") {
       expect(Object.isFrozen(parsedCheck)).toBe(true);
       expect(Object.isFrozen(parsedCheck.args)).toBe(true);
       expect(Object.isFrozen(parsedCheck.reportPolicy)).toBe(true);
     }
-    const parsedReport = valueOf(parseCompletionReportOutcome({
+    const parsedReport = value(parseCompletionReportOutcome({
       kind: "produced", path: ".loom/completion-reports/completion.json", digest: digest("a"), byteLength: 42,
     }));
     expect(Object.isFrozen(parsedReport)).toBe(true);
@@ -296,7 +292,7 @@ describe("accepted Wave completion receipt parsing", () => {
         ...(JSON.parse(JSON.stringify(accepted)) as Record<string, unknown>),
         checks: permute(accepted.checks, seed),
       };
-      const parsed = valueOf(parseAcceptedWaveCompletionReceipt(permuted));
+      const parsed = value(parseAcceptedWaveCompletionReceipt(permuted));
 
       expect(parsed).toEqual(accepted);
       expect(deepFrozen(parsed)).toBe(true);
@@ -376,7 +372,7 @@ describe("canonical exact Wave suite authority", () => {
 
   it("changes the suite digest when any command or report authority field changes", () => {
     const baseline = projectCheck("project:digest");
-    const baselineDigest = valueOf(completionSuiteDigest([lintCheck, baseline]));
+    const baselineDigest = value(completionSuiteDigest([lintCheck, baseline]));
     const commandMutations = [
       { ...baseline, executable: "npm" },
       { ...baseline, args: ["test", "--changed"] },
@@ -385,12 +381,12 @@ describe("canonical exact Wave suite authority", () => {
       { ...baseline, reportPolicy: requiredFilePolicy(".loom/completion-reports/completion.json") },
     ] as const;
     for (const mutation of commandMutations) {
-      expect(valueOf(completionSuiteDigest([lintCheck, mutation]))).not.toBe(baselineDigest);
+      expect(value(completionSuiteDigest([lintCheck, mutation]))).not.toBe(baselineDigest);
     }
 
     const required = projectCheck("project:digest", "required");
-    const requiredDigest = valueOf(completionSuiteDigest([lintCheck, required]));
-    expect(valueOf(completionSuiteDigest([
+    const requiredDigest = value(completionSuiteDigest([lintCheck, required]));
+    expect(value(completionSuiteDigest([
       lintCheck,
       { ...required, reportPolicy: requiredFilePolicy(".loom/completion-reports/other.json") },
     ]))).not.toBe(requiredDigest);
@@ -451,7 +447,7 @@ describe("pure completion-suite evaluator properties", () => {
         evaluateWaveCompletionSuite(authority, passingResult(authority, [
           ...exact,
           {
-            checkId: valueOf(parseCompletionCheckId("surplus:check")),
+            checkId: value(parseCompletionCheckId("surplus:check")),
             scope: "wave",
             outcome: {
               kind: "observed", exitCode: 0, timedOut: false, signal: null,
@@ -520,7 +516,7 @@ describe("pure completion-suite evaluator properties", () => {
 
   it("classifies spawn failure only as infrastructure", () => {
     const authority = authorityFor([lintCheck]);
-    const spawnFailure = valueOf(parseCompletionCheckResult({
+    const spawnFailure = value(parseCompletionCheckResult({
       checkId: authority.checks[0].checkId,
       scope: "wave",
       outcome: { kind: "spawn-failed", message: "ENOENT" },

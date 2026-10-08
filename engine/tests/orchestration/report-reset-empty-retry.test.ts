@@ -15,6 +15,10 @@
  * status-0/empty-stdout transient is reproduced deterministically — a real
  * repository cannot produce it on demand. The spawned check process itself
  * stays real, so the containment and report machinery is exercised unchanged.
+ *
+ * It also pins that the reset's ignore decision runs under the shared Git
+ * execution policy, so it agrees with the remediation candidate's ignore
+ * audit even when the operator's global config ignores the report.
  */
 
 import { spawnSync } from "node:child_process";
@@ -40,6 +44,7 @@ const answered = (stdout: string): SpawnAnswer => ({ status: 0, stdout, stderr: 
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
+  const { logicalGitArgs } = await import("../fixtures/policy-bound-git-argv");
   const realSpawnSync = actual.spawnSync;
   return {
     ...actual,
@@ -49,7 +54,7 @@ vi.mock("node:child_process", async (importOriginal) => {
       options: import("node:child_process").SpawnSyncOptions,
     ) => {
       if (scripted.passthrough) return realSpawnSync(file, args, options);
-      scripted.calls.push([file, ...args]);
+      scripted.calls.push([file, ...logicalGitArgs(args)]);
       const next = scripted.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;
@@ -61,24 +66,15 @@ import {
   runRemediationCheck,
   type RemediationCheckRunnerResult,
 } from "../../src/orchestration/completion-check-runner";
-import {
-  authorizeRemediationChecks,
-  createCandidateRepositoryWitness,
-  createRemediationCheckScope,
-  prepareDefectFamilyAccounting,
-  prepareDefectFamilyVerification,
-  type AuthorizedRemediationCheck,
-} from "../../src/core/defect-family-accounting";
-import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
-import { VERIFICATION_MANIFEST_KIND, freezeVerificationManifest } from "../../src/core/verification-manifest";
-import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
+import type { AuthorizedRemediationCheck } from "../../src/core/defect-family-accounting";
+import { authorizedRemediationCheck } from "../fixtures/authorized-remediation-check";
+import { spawnGit } from "../../src/utils/git-execution-policy";
 import {
   parseCanonicalRepositoryRoot,
   type CanonicalRepositoryRoot,
 } from "../../src/utils/workspace-digest";
 
 const roots: string[] = [];
-const digest = (character: string): string => character.repeat(64);
 const REPORT_PATH = ".loom/completion-reports/reset.xml";
 
 function fixtureRoot(): CanonicalRepositoryRoot {
@@ -109,74 +105,13 @@ function writeStaleReport(root: CanonicalRepositoryRoot, contents: string): stri
   return report;
 }
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
-  if (!result.ok) throw new Error(`fixture construction failed: ${JSON.stringify(result.error)}`);
-  return result.value;
-}
-
 function remediationCheck(root: CanonicalRepositoryRoot, name: string): AuthorizedRemediationCheck {
-  const source = standaloneFixture(["src/main.ts"], true).input.standaloneResult;
-  const findingId = source.survivingCriticals[0]!.id;
-  const accounting = valueOf(prepareDefectFamilyAccounting(source, {
-    kind: "declared-defect-family-accounting",
-    provenance: "DECLARED",
-    dispositions: [{ findingId, status: "repaired", repairGroupId: `family:${name}` }],
-    groups: [{
-      kind: "declared-repair-group",
-      provenance: "DECLARED",
-      repairGroupId: `family:${name}`,
-      findingIds: [findingId],
-      rootCause: { provenance: "DECLARED", statement: "The tested behavior regressed." },
-      invariant: { provenance: "DECLARED", statement: "The tested behavior remains fixed." },
-      siblings: { kind: "none-declared", provenance: "DECLARED", reason: "No siblings declared." },
-      checks: [{
-        checkId: `project:${name}`,
-        historicalRed: {
-          kind: "historical-red",
-          provenance: "DECLARED",
-          statement: "The check distinguishes the historical defect.",
-          reference: null,
-        },
-      }],
-    }],
-  }));
-  const manifest = valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-    schemaVersion: 1,
-    kind: VERIFICATION_MANIFEST_KIND,
-    checks: [{
-      id: `project:${name}`,
-      scope: "wave",
-      executable: "node",
-      args: ["reset-report.mjs", REPORT_PATH],
-      cwd: ".",
-      timeoutMs: 2_000,
-      report: { kind: "required-file", path: REPORT_PATH },
-    }],
-  }))));
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, manifest));
-  if (plan.kind !== "selected-operator-checks") throw new Error("selected remediation plan required");
-  const gitWitness = valueOf(parseRepositorySnapshotWitness({
-    baseTreeDigest: digest("1"),
-    indexDigest: digest("2"),
-    worktreeDigest: digest("3"),
-  }));
-  const candidate = valueOf(createCandidateRepositoryWitness({
-    kind: "candidate-repository-witness",
-    repositoryRoot: root,
-    workspaceDigest: digest("4"),
-    pathCount: 1,
-    observedPaths: ["src/candidate.ts"],
-    gitWitness,
-    generatedReportExclusions: [REPORT_PATH],
-  }));
-  const scope = valueOf(createRemediationCheckScope(plan.source, candidate, {
-    kind: "standalone-remediation",
-    remediationRunId: `run.reset-${name}`,
-    sourceRunId: plan.source.sourceRunId,
-    registrationDigest: digest("a"),
-    candidateWitnessDigest: candidate.digest,
-  }));
-  return valueOf(authorizeRemediationChecks(plan, scope))[0];
+  return authorizedRemediationCheck(root, {
+    name,
+    runIdPrefix: "run.reset",
+    reportPath: REPORT_PATH,
+    args: ["reset-report.mjs", REPORT_PATH],
+  });
 }
 
 function refusalText(result: { readonly ok: false; readonly error: unknown }): string {
@@ -197,6 +132,38 @@ afterEach(() => {
 beforeEach(() => {
   scripted.calls.length = 0;
   scripted.queue.length = 0;
+});
+
+describe("remediation report reset agrees with the remediation candidate's ignore audit", () => {
+  it("refuses a report that only the operator's global core.excludesFile ignores, as the policy-bound audit does", async () => {
+    const root = fixtureRoot();
+    // The repository itself does not ignore the report directory; only the
+    // operator's global excludes file does.
+    writeFileSync(join(root, ".gitignore"), "");
+    const report = writeStaleReport(root, "stale, globally ignored only");
+    const home = canonicalTempDir("loom-report-reset-home-");
+    roots.push(home);
+    writeFileSync(join(home, "global-ignore"), ".loom/\n");
+    writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${join(home, "global-ignore")}\n`);
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      // Control: an ambient-config Git honours the operator's global ignore file…
+      expect(spawnSync("git", ["check-ignore", "-q", "--", REPORT_PATH], { cwd: root }).status).toBe(0);
+      // …but the candidate audit's policy-bound check-ignore (its exact argv) does not.
+      expect(spawnGit(["check-ignore", "--no-index", "--quiet", "--", REPORT_PATH], { cwd: root, maxBuffer: 1024 }))
+        .toMatchObject({ kind: "exited", status: 1 });
+      const result = await runRemediationCheck(remediationCheck(root, "global-ignore"), root);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("a report the audit treats as a visible path was reset");
+      expect(result.error.kind).toBe("report-reset-failed");
+      expect(result.error.message).toContain("requires a Git-ignored path");
+      expect(readFileSync(report, "utf8")).toBe("stale, globally ignored only");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
 });
 
 describe("remediation report reset survives the transient empty tracked-state observation", () => {

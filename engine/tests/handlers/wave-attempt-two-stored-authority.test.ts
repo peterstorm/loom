@@ -30,16 +30,12 @@ import {
   type AgentRequestAuthority,
 } from "../../src/core/orchestration-contract";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
+import { value } from "../fixtures/parse-result";
 
 const cleanup: string[] = [];
 afterAll(() => {
   for (const path of cleanup) rmSync(path, { recursive: true, force: true });
 });
-
-const authorityValue = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
-  if (!result.ok) throw new Error(`invalid test authority: ${JSON.stringify(result.error)}`);
-  return result.value;
-};
 
 /** The historical binding: comment-analyzer ran on `mechanical` before it was
  * promoted. The tests assert this premise so they fail loudly rather than
@@ -60,13 +56,13 @@ function publishedAttemptOne(
   cleanup.push(runsRoot);
   const runDir = join(runsRoot, "run.storedauthority");
   mkdirSync(runDir);
-  const handle = authorityValue(openRunDirectory(runsRoot, runDir));
+  const handle = value(openRunDirectory(runsRoot, runDir));
 
-  const section = authorityValue(
+  const section = value(
     encodeByteSection("wave-review-authority", JSON.stringify({ agent: ROLE })),
   );
-  const slotId = authorityValue(parseSlotId(`slot:${slotSeed.repeat(32)}`));
-  const requestId = authorityValue(parseRequestId(`wave-request:${requestSeed.repeat(32)}:1`));
+  const slotId = value(parseSlotId(`slot:${slotSeed.repeat(32)}`));
+  const requestId = value(parseRequestId(`wave-request:${requestSeed.repeat(32)}:1`));
   const packetInput = {
     requestId,
     role: ROLE,
@@ -76,14 +72,14 @@ function publishedAttemptOne(
     variableContext: Object.freeze([]),
   };
   const packet = protocolVersion === 2
-    ? authorityValue(buildReviewerContextPacket(packetInput))
-    : authorityValue(buildContextPacket(packetInput));
+    ? value(buildReviewerContextPacket(packetInput))
+    : value(buildContextPacket(packetInput));
 
   return handle.publishContext(packet).then((published) => {
     if (!published.ok) throw new Error("test context could not be published");
     // An immutable attempt-1 record: issued under `profileId`, with a
     // harnessBinding that truthfully records the model that actually ran.
-    const attemptOne = authorityValue(parseStoredAgentRequestAuthority({
+    const attemptOne = value(parseStoredAgentRequestAuthority({
       runId: handle.runId,
       requestId,
       slotId,
@@ -92,8 +88,8 @@ function publishedAttemptOne(
       attempt: 1,
       modelProfile: profileId,
       harnessBinding: {
-        pi: lowerModelProfile(authorityValue(profile), "pi"),
-        claude: lowerModelProfile(authorityValue(profile), "claude-code"),
+        pi: lowerModelProfile(value(profile), "pi"),
+        claude: lowerModelProfile(value(profile), "claude-code"),
       },
       requiredSkill: null,
       contextDigest: packet.digest,
@@ -105,7 +101,7 @@ function publishedAttemptOne(
 
 describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
   it("preserves a grandfathered profile instead of re-checking today's policy", async () => {
-    const currentPolicy = authorityValue(resolveAgentPolicy(ROLE));
+    const currentPolicy = value(resolveAgentPolicy(ROLE));
     // Premise: the stored profile is NOT what policy would issue today.
     expect(currentPolicy.profile).not.toBe(STORED_PROFILE);
 
@@ -116,7 +112,7 @@ describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
     // Previously threw: "role 'comment-analyzer' requires profile
     // 'focused-review', received 'mechanical'".
     const derived = deriveWaveAttemptTwo(handle, attemptOne, "attempt 1 omitted REVIEW_GENERATION");
-    const attemptTwo = authorityValue(parseStoredAgentRequestAuthority(derived.request.authority));
+    const attemptTwo = value(parseStoredAgentRequestAuthority(derived.request.authority));
 
     expect(attemptTwo.attempt).toBe(2);
     expect(attemptTwo.modelProfile).toBe(STORED_PROFILE);
@@ -132,10 +128,10 @@ describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
   });
 
   it("keeps current descriptor and fixed bytes, appending exactly one bounded diagnostic instead of a duplicate schema", async () => {
-    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const policy = value(resolveAgentPolicy(ROLE));
     const { handle, attemptOne, packet } = await publishedAttemptOne("loom-v2-attempt2-", policy.profile, "e", "f", 2);
     const retry = deriveWaveAttemptTwo(handle, attemptOne, "bad input\n".repeat(2000));
-    const authority = authorityValue(parseStoredAgentRequestAuthority(retry.request.authority));
+    const authority = value(parseStoredAgentRequestAuthority(retry.request.authority));
     expect(retry.packet.schemaVersion).toBe(2);
     expect(retry.packet.fixedContext).toEqual(packet.fixedContext);
     expect(retry.packet.variableContext).toHaveLength(1);
@@ -148,13 +144,13 @@ describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
     expect(persistedWaveAttemptTwoCompatibilityProblem(attemptOne, authority, packet, retry.packet)).toBeNull();
     expect(() => deriveWaveAttemptTwo(handle, attemptOne)).toThrow("requires its rejection diagnostic");
     const stripped = { ...retry.packet, variableContext: [] };
-    const noDiagnostic = authorityValue(parseContextPacket({ ...stripped, digest: contextPacketDigest(stripped) }));
-    const rewrittenAuthority = authorityValue(parseStoredAgentRequestAuthority({ ...authority, contextDigest: noDiagnostic.digest }));
+    const noDiagnostic = value(parseContextPacket({ ...stripped, digest: contextPacketDigest(stripped) }));
+    const rewrittenAuthority = value(parseStoredAgentRequestAuthority({ ...authority, contextDigest: noDiagnostic.digest }));
     expect(persistedWaveAttemptTwoCompatibilityProblem(attemptOne, rewrittenAuthority, packet, noDiagnostic)).not.toBeNull();
   });
 
   it("preserves historical retry text exactly, including multiline rejection reasons", async () => {
-    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const policy = value(resolveAgentPolicy(ROLE));
     const { handle, attemptOne } = await publishedAttemptOne("loom-v1-retry-text-", policy.profile, "1", "2");
     const reason = "bad lifecycle JSON:\n  exact historical diagnostic  ";
     const retry = deriveWaveAttemptTwo(handle, attemptOne, reason);
@@ -163,13 +159,13 @@ describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
   });
 
   it("keeps the retry on the current profile when nothing was grandfathered", async () => {
-    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const policy = value(resolveAgentPolicy(ROLE));
     const { handle, attemptOne, packet } = await publishedAttemptOne(
       "loom-current-attempt2-", policy.profile, "c", "d",
     );
 
     const derived = deriveWaveAttemptTwo(handle, attemptOne, "attempt 1 was malformed");
-    const attemptTwo = authorityValue(parseStoredAgentRequestAuthority(derived.request.authority));
+    const attemptTwo = value(parseStoredAgentRequestAuthority(derived.request.authority));
 
     expect(attemptTwo.modelProfile).toBe(policy.profile);
     expect(persistedWaveAttemptTwoCompatibilityProblem(
@@ -182,18 +178,18 @@ describe("Wave attempt-2 derivation from stored attempt-1 authority", () => {
  *  persisted-retry compatibility check derive. */
 describe("deriveWaveAttemptTwoAuthority", () => {
   it("is exactly the envelope retry issuance publishes", async () => {
-    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const policy = value(resolveAgentPolicy(ROLE));
     const { handle, attemptOne } = await publishedAttemptOne("loom-envelope-attempt2-", policy.profile, "3", "4");
     const derived = deriveWaveAttemptTwo(handle, attemptOne, "attempt 1 was malformed");
-    const published = authorityValue(parseStoredAgentRequestAuthority(derived.request.authority));
+    const published = value(parseStoredAgentRequestAuthority(derived.request.authority));
     expect(deriveWaveAttemptTwoAuthority(attemptOne, derived.packet.digest)).toEqual({ ok: true, value: published });
     expect(waveAttemptTwoRequestId(attemptOne)).toEqual({ ok: true, value: published.requestId });
   });
 
   it("refuses, with one message on every path, an attempt 1 whose request id has no attempt suffix", async () => {
-    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const policy = value(resolveAgentPolicy(ROLE));
     const { handle, attemptOne, packet } = await publishedAttemptOne("loom-envelope-suffix-", policy.profile, "5", "6");
-    const unsuffixed = { ...attemptOne, requestId: authorityValue(parseRequestId(`wave-request:${"7".repeat(32)}`)) };
+    const unsuffixed = { ...attemptOne, requestId: value(parseRequestId(`wave-request:${"7".repeat(32)}`)) };
     const message = `Wave request ${unsuffixed.requestId} cannot derive canonical attempt-2 identity`;
     expect(waveAttemptTwoRequestId(unsuffixed)).toEqual({ ok: false, error: message });
     expect(deriveWaveAttemptTwoAuthority(unsuffixed, packet.digest)).toEqual({ ok: false, error: message });
@@ -202,10 +198,10 @@ describe("deriveWaveAttemptTwoAuthority", () => {
   });
 
   it("refuses a persisted retry whose envelope drifted from the derivation", async () => {
-    const policy = authorityValue(resolveAgentPolicy(ROLE));
+    const policy = value(resolveAgentPolicy(ROLE));
     const { handle, attemptOne, packet } = await publishedAttemptOne("loom-envelope-drift-", policy.profile, "8", "9");
     const derived = deriveWaveAttemptTwo(handle, attemptOne, "attempt 1 was malformed");
-    const published = authorityValue(parseStoredAgentRequestAuthority(derived.request.authority));
+    const published = value(parseStoredAgentRequestAuthority(derived.request.authority));
     const drifted = { ...published, modelProfile: "mechanical" } as typeof published;
     expect(persistedWaveAttemptTwoCompatibilityProblem(attemptOne, drifted, packet, derived.packet))
       .toBe("persisted attempt-2 request envelope does not derive from attempt 1");

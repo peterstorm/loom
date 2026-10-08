@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   activatePiChildWriteGrant,
+  childBindingClaims,
   createPiChildWriteGrants,
   rejectedChildWriteGrantDebt,
   retainedChildWriteGrant,
@@ -12,6 +13,7 @@ import {
   type PiChildWriteGrantPorts,
 } from "../../../pi/child-write-grant";
 import { injectPiWriteGrant, issuePiWriteGrant } from "../../../pi/write-grant";
+import { remainingDurableClaims } from "../../../pi/spawn-claims";
 import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AgentId } from "../../src/machine/evidence";
 
@@ -20,44 +22,57 @@ const pointer = { directory: "/state", pointerName: "p", registryName: "r", targ
 const scope = { scopeDirs: [".claude/specs/x/"], grantCwd: "/repo" } as const;
 const active: ActiveChildWriteGrant = { ...scope, kind: "active", agentId, pointerBinding: pointer };
 
-const none = new Set<never>();
+/** What `binding` still owes once exactly the named releases succeeded, by the
+ *  claims ledger's one remaining-debt rule over its claims. */
+const retainedAfter = (binding: ActiveChildWriteGrant, rosterRemoved: boolean, pointerReleased: boolean) =>
+  retainedChildWriteGrant(binding, remainingDurableClaims(childBindingClaims(binding), {
+    revokedTokens: new Set<string>(),
+    removedRosterIds: new Set<AgentId>(rosterRemoved && binding.agentId !== null ? [binding.agentId] : []),
+    pointerReleased,
+  }));
+
+describe("childBindingClaims", () => {
+  it("holds the binding's roster entry and pointer lease, and never a grant", () => {
+    expect(childBindingClaims(active)).toEqual({ grants: [], roster: [{ rosterId: agentId }], pointer });
+    expect(childBindingClaims({ kind: "pointer-cleanup-pending", agentId: null, pointerBinding: pointer }))
+      .toEqual({ grants: [], roster: [], pointer });
+    expect(childBindingClaims({ kind: "roster-cleanup-pending", agentId, pointerBinding: null }))
+      .toEqual({ grants: [], roster: [{ rosterId: agentId }], pointer: null });
+  });
+});
 
 describe("retainedChildWriteGrant", () => {
   it("retires a binding whose roster entry and pointer lease were both released", () => {
-    expect(retainedChildWriteGrant(active, new Set<AgentId>([agentId]), new Set([pointer]))).toBeNull();
+    expect(retainedAfter(active, true, true)).toBeNull();
   });
 
   it("keeps an untouched binding active, scope included", () => {
-    expect(retainedChildWriteGrant(active, none, none)).toEqual(active);
+    expect(retainedAfter(active, false, false)).toEqual(active);
   });
 
   it("names only the roster entry when the pointer lease was released", () => {
-    expect(retainedChildWriteGrant(active, none, new Set([pointer]))).toEqual({
+    expect(retainedAfter(active, false, true)).toEqual({
       ...scope, kind: "roster-cleanup-pending", agentId, pointerBinding: null,
     });
   });
 
   it("names only the pointer lease when the roster entry was removed", () => {
-    expect(retainedChildWriteGrant(active, new Set<AgentId>([agentId]), none)).toEqual({
+    expect(retainedAfter(active, true, false)).toEqual({
       ...scope, kind: "pointer-cleanup-pending", agentId: null, pointerBinding: pointer,
     });
   });
 
   it("retires a pending variant once its last debt is released", () => {
     const rosterPending: ActiveChildWriteGrant = { kind: "roster-cleanup-pending", agentId, pointerBinding: null };
-    expect(retainedChildWriteGrant(rosterPending, new Set<AgentId>([agentId]), none)).toBeNull();
+    expect(retainedAfter(rosterPending, true, false)).toBeNull();
     const pointerPending: ActiveChildWriteGrant = { kind: "pointer-cleanup-pending", agentId: null, pointerBinding: pointer };
-    expect(retainedChildWriteGrant(pointerPending, none, new Set([pointer]))).toBeNull();
+    expect(retainedAfter(pointerPending, false, true)).toBeNull();
   });
 
   it("retains exactly the capabilities that were not released, never mutating the binding", () => {
     fc.assert(fc.property(fc.boolean(), fc.boolean(), (rosterRemoved, pointerReleased) => {
       const before = structuredClone(active);
-      const retained = retainedChildWriteGrant(
-        active,
-        rosterRemoved ? new Set<AgentId>([agentId]) : none,
-        pointerReleased ? new Set([pointer]) : none,
-      );
+      const retained = retainedAfter(active, rosterRemoved, pointerReleased);
       expect(active).toEqual(before);
       expect(retained?.agentId ?? null).toBe(rosterRemoved ? null : agentId);
       expect(retained?.pointerBinding ?? null).toBe(pointerReleased ? null : pointer);

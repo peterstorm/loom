@@ -38,6 +38,7 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
 } from "../../src/core/proof-obligations";
+import { value } from "../fixtures/parse-result";
 
 const baseline = (entries: readonly [string, string | null][]) => entries.map(([artifact, digest]) => ({
   artifact,
@@ -53,16 +54,11 @@ const dirtyBaseline = baseline([
   ["engine/src/a.ts", "a".repeat(64)],
 ]);
 
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-}
-
 function authority(
   semanticAttempt: 1 | 2 = 1,
   reservationId = `reservation-${semanticAttempt}`,
 ): ImplementationAttemptAuthority {
-  return valueOf(createImplementationAttemptAuthority({
+  return value(createImplementationAttemptAuthority({
     taskId: "T1",
     wave: 2,
     semanticAttempt,
@@ -75,7 +71,7 @@ function authority(
 }
 
 function suiteAuthority(attempt: ImplementationAttemptAuthority): TaskCompletionSuiteAuthority {
-  return valueOf(createTaskCompletionSuiteAuthority(attempt));
+  return value(createTaskCompletionSuiteAuthority(attempt));
 }
 
 function suiteResult(
@@ -363,8 +359,8 @@ describe("implementation completion exact parsers", () => {
   it("round-trips canonical authority, suite, result, observation, receipt, and history immutably", () => {
     const attempt = authority();
     const suite = suiteAuthority(attempt);
-    const result = valueOf(parseTaskCompletionSuiteResult(suiteResult(attempt)));
-    const observed = valueOf(parseImplementationObservation(observation()));
+    const result = value(parseTaskCompletionSuiteResult(suiteResult(attempt)));
+    const observed = value(parseImplementationObservation(observation()));
     const transition = acceptedTransition(attempt);
     if (transition.kind !== "implemented") throw new Error("fixture must implement");
     const valuesAndParsers = [
@@ -387,21 +383,21 @@ describe("canonical baseline and self-digest policy", () => {
   it("treats baseline arrays as unordered path-keyed sets", () => {
     fc.assert(fc.property(fc.boolean(), (reverse) => {
       const input = reverse ? [...taskBaseline].reverse() : taskBaseline;
-      expect(valueOf(canonicalArtifactBaselineDigest(input)))
-        .toBe(valueOf(canonicalArtifactBaselineDigest(taskBaseline)));
-      expect(valueOf(parseCanonicalArtifactBaseline(input, "baseline", UNKNOWN_SCHEME_BASELINE)).map((entry) => entry.artifact))
+      expect(value(canonicalArtifactBaselineDigest(input)))
+        .toBe(value(canonicalArtifactBaselineDigest(taskBaseline)));
+      expect(value(parseCanonicalArtifactBaseline(input, "baseline", UNKNOWN_SCHEME_BASELINE)).map((entry) => entry.artifact))
         .toEqual(["engine/src/a.ts", "engine/tests/a.test.ts"]);
     }));
   });
 
   it("changes baseline digest with path, missing/present state, or bytes and rejects duplicates", () => {
-    const original = valueOf(canonicalArtifactBaselineDigest(taskBaseline));
+    const original = value(canonicalArtifactBaselineDigest(taskBaseline));
     const mutations = [
       baseline([["engine/src/renamed.ts", "a".repeat(64)], ["engine/tests/a.test.ts", null]]),
       baseline([["engine/src/a.ts", null], ["engine/tests/a.test.ts", null]]),
       baseline([["engine/src/a.ts", "d".repeat(64)], ["engine/tests/a.test.ts", null]]),
     ];
-    mutations.forEach((mutation) => expect(valueOf(canonicalArtifactBaselineDigest(mutation))).not.toBe(original));
+    mutations.forEach((mutation) => expect(value(canonicalArtifactBaselineDigest(mutation))).not.toBe(original));
     expect(parseCanonicalArtifactBaseline([taskBaseline[0], taskBaseline[0]], "baseline", UNKNOWN_SCHEME_BASELINE).ok).toBe(false);
   });
 
@@ -622,7 +618,7 @@ describe("Implementation Completion Oracle", () => {
       suiteResult(current),
     ))).toEqual({ kind: "ignored", reason: "duplicate" });
 
-    const parsedObservation = valueOf(parseImplementationObservation(observation()));
+    const parsedObservation = value(parseImplementationObservation(observation()));
     const satisfied = evaluateProofObligations(
       authoredProof().obligations,
       parsedObservation.kind === "implementation-observed"
@@ -700,7 +696,7 @@ describe("settlement receipt history", () => {
       throw new Error("fixtures must settle");
     }
     const history: readonly ImplementationAttemptSettlementReceipt[] = [first.receipt, second.receipt];
-    expect(valueOf(parseImplementationAttemptHistory(history))).toEqual(history);
+    expect(value(parseImplementationAttemptHistory(history))).toEqual(history);
     expect(parseImplementationAttemptHistory([first.receipt, first.receipt]).ok).toBe(false);
     expect(parseImplementationAttemptHistory([
       first.receipt,

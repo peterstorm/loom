@@ -3,7 +3,6 @@
  * raw bytes, or a directory's tree digest), captured from the worktree or from
  * a Git revision, and the byte-change comparisons over them.
  */
-import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import {
   DECLARED_ARTIFACT_BASELINE,
@@ -16,6 +15,7 @@ import {
 } from "../core/artifact-baseline";
 import { sha256Bytes } from "../core/digest";
 import type { ReviewPath } from "../core/review-packet";
+import { runGit } from "./git-execution-policy";
 import { gitOutput, revisionTreeLeaves, worktreeLeafBytes, worktreeVisibleLeaves } from "./git-leaves";
 import { inspectRepositoryPath } from "./repository-path";
 
@@ -124,10 +124,7 @@ export function captureDeclaredArtifactBaselineAtRevision(
   artifacts: readonly string[],
 ): DeclaredBaseline {
   captureDeclaredArtifactBaseline(root, artifacts);
-  execFileSync("git", ["cat-file", "-e", `${revision}^{commit}`], {
-    cwd: root,
-    stdio: ["ignore", "ignore", "pipe"],
-  });
+  runGit(["cat-file", "-e", `${revision}^{commit}`], { output: "discard", cwd: root });
   return capture(artifacts, (artifact) => snapshotArtifactAtRevision(root, revision, artifact));
 }
 

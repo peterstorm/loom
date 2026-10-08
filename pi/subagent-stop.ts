@@ -3,14 +3,18 @@
  *
  * When a subagent batch completes, this settles it against the reservation
  * its `tool_call` recorded (recovering that reservation from the Run
- * Directory when the in-memory copy is gone): it releases the batch's write
- * grants and roster entries, finalizes reserved implementation attempts,
- * reconciles missing gate-owned results, captures request-bound results,
+ * Directory when the in-memory copy is gone, and parsing either against the
+ * session that owns the batch): it releases the batch's write grants and
+ * roster entries, finalizes reserved implementation attempts, reconciles
+ * missing gate-owned results, captures request-bound results,
  * hands each remaining result to its named applier in `pi/subagent-result`,
  * and releases the pointer lease last — the equivalent of Claude Code's
  * SubagentStop hooks. Both releases run the batch's claims ledger
- * (`pi/spawn-claims.ts`) through the same plan and remaining-debt rule as an
- * admission rollback.
+ * (`pi/spawn-claims.ts`) through `releaseHeldSpawnClaims`
+ * (`pi/spawn-claim-shell.ts`) — the release path session shutdown shares —
+ * with the same plan and remaining-debt rule as an
+ * admission rollback; settlement also retries the capabilities failed
+ * admission compensations orphaned on the owner's session.
  *
  * Each stage is one function at one altitude that takes the reservation
  * explicitly and returns the processing errors it raised; the dispatcher
@@ -31,11 +35,7 @@ import { isRecord } from "../engine/src/core/plain-record";
 import { observeTaskGraphProjectBoundary } from "../engine/src/config";
 import { StateManager } from "../engine/src/state-manager";
 import type { Task, TaskGraph } from "../engine/src/types";
-import {
-  fsSessionRegistry,
-  parseSessionId,
-  rollbackSessionTaskGraphPointer,
-} from "../engine/src/machine";
+import { fsSessionRegistry, parseSessionId } from "../engine/src/machine";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { runtimeWriteBoundaryForTasks } from "../engine/src/utils/runtime-baseline-restore";
@@ -77,7 +77,6 @@ import {
   classifyMissingReservedResults,
   unrecordableMissingEvidenceDiagnostic,
 } from "./reserved-results";
-import { revokePiWriteGrant } from "./write-grant";
 import { piSpawnRosterId } from "./tool-input";
 import type { PiEmissionLaunchBridge } from "./emission-launch-bridge";
 import {
@@ -91,14 +90,13 @@ import { capturePiSubagentResult, classifyPiEmissionStartupRefusal } from "./rev
 import { describeCause } from "./cleanup-actions";
 import {
   pointerLeaseOnly,
-  releaseDurableSpawnClaims,
-  remainingDurableClaims,
-  settledSpawnClaims,
-  spawnDebtOf,
-  spawnSettlementStepLabel,
+  settlementReleasePhrasing,
   withoutPointerLease,
+  type DurableClaimReleasePorts,
   type DurableSpawnClaims,
+  type SpawnClaimHolder,
 } from "./spawn-claims";
+import { releaseHeldSpawnClaims, releaseOrphanedSpawnClaims } from "./spawn-claim-shell";
 import {
   missingResultMarkersProblem,
   missingTaskGraphNotice,
@@ -109,9 +107,11 @@ import {
   type PiResultNotice,
 } from "./subagent-result-route";
 import {
+  ownPiSpawnReservation,
   recoverPiSpawnReservation,
   reservedImplementationFailure,
   spawnedWithoutTaskGraph,
+  type OwnedPiSpawnReservation,
   type PiParentSessions,
   type PiSessionId,
   type PiSpawnReservation,
@@ -173,11 +173,11 @@ export type PiSubagentStopPorts = Readonly<{
   emissionLaunchBridge: PiEmissionLaunchBridge;
   /** The witness aggregate exactly captured standalone transcripts join. */
   reviewWitnesses: TrustedReviewWitnesses;
+  /** The durable release ports (`piDurableClaimReleasePorts` in production)
+   *  settlement releases the batch's grants, roster entries and lease by —
+   *  the same ports admission rollback and shutdown use. */
+  durableClaimReleases: (sessionId: PiSessionId) => DurableClaimReleasePorts;
 }>;
-
-/** The parsed session and tool call one batch's capabilities and debt are
- *  filed under on the parent session. */
-type PiSettlementOwner = Readonly<{ sessionId: PiSessionId; toolCallId: string }>;
 
 /** What every stage of one batch's settlement reads. */
 type PiStopBatch = Readonly<{
@@ -186,73 +186,99 @@ type PiStopBatch = Readonly<{
   resultSessionId: PiSessionId | null;
   /** Both identities parsed, once; `null` when either is missing, so the
    *  batch owns no session debt to settle. */
-  owner: PiSettlementOwner | null;
-  /** The reservation the batch settles against, `undefined` when none exists. */
-  reservation: PiSpawnReservation | undefined;
+  owner: SpawnClaimHolder | null;
+  /** The reservation the batch settles against, proven to name the owner's
+   *  session; `undefined` when none exists or none resolved. */
+  reservation: OwnedPiSpawnReservation | undefined;
   parentSessions: PiParentSessions;
+  durableClaimReleases: PiSubagentStopPorts["durableClaimReleases"];
 }>;
 
-/** The reservation in memory, else its durable Run Directory recovery
- *  (stored back on the session); a failed recovery is a processing error. */
+/** How one batch's reservation resolved against its owner. */
+type PiStopReservationResolution = Readonly<{
+  reservation: OwnedPiSpawnReservation | undefined;
+  /** Why no reservation could be settled against, a processing error. */
+  resolutionFailure: string | null;
+}>;
+
+/**
+ * The reservation in memory, else its durable Run Directory recovery (stored
+ * back on the session), parsed against the owner's session either way. A
+ * failed recovery, or a reservation naming another session, is a processing
+ * error and leaves the batch nothing to settle against.
+ */
 function resolveStopReservation(
-  owner: PiSettlementOwner | null,
+  owner: SpawnClaimHolder | null,
   parentSessions: PiParentSessions,
-): Readonly<{ reservation: PiSpawnReservation | undefined; recoveryFailure: string | null }> {
-  if (owner === null) return { reservation: undefined, recoveryFailure: null };
+): PiStopReservationResolution {
+  if (owner === null) return { reservation: undefined, resolutionFailure: null };
   const { sessionId, toolCallId } = owner;
-  const inMemory = parentSessions.get(sessionId)?.spawnReservations.get(toolCallId);
-  if (inMemory !== undefined) return { reservation: inMemory, recoveryFailure: null };
-  try {
-    const recovered = recoverPiSpawnReservation(sessionId, toolCallId) ?? undefined;
-    if (recovered !== undefined) {
-      parentSessions.runtimeFor(sessionId).spawnReservations.set(toolCallId, recovered);
-    }
-    return { reservation: recovered, recoveryFailure: null };
-  } catch (error) {
-    const diagnostic = `durable Pi orchestration reservation recovery failed: ${describeCause(error)}`;
+  const refuse = (diagnostic: string): PiStopReservationResolution => {
     process.stderr.write(`loom(pi): ${diagnostic}\n`);
-    return { reservation: undefined, recoveryFailure: diagnostic };
+    return { reservation: undefined, resolutionFailure: diagnostic };
+  };
+  const owned = (reservation: PiSpawnReservation): PiStopReservationResolution => {
+    const parsed = ownPiSpawnReservation(sessionId, reservation);
+    return parsed.ok ? { reservation: parsed.value, resolutionFailure: null } : refuse(parsed.error);
+  };
+  const inMemory = parentSessions.get(sessionId)?.spawnReservations.get(toolCallId);
+  if (inMemory !== undefined) return owned(inMemory);
+  let recovered: PiSpawnReservation | null;
+  try {
+    recovered = recoverPiSpawnReservation(sessionId, toolCallId);
+  } catch (error) {
+    return refuse(`durable Pi orchestration reservation recovery failed: ${describeCause(error)}`);
   }
+  if (recovered === null) return { reservation: undefined, resolutionFailure: null };
+  const resolution = owned(recovered);
+  if (resolution.reservation !== undefined) {
+    parentSessions.runtimeFor(sessionId).spawnReservations.set(toolCallId, resolution.reservation);
+  }
+  return resolution;
 }
 
 /**
  * Release the part `select` picks of the durable claims ledger the batch
- * still holds (`settledSpawnClaims`: its committed grants, reservation roster
- * and pointer lease) through the same plan and remaining-debt rule admission
- * rollback uses — and through durable release ports only, because a
- * dispatched batch holds no launch, prompt rewrite or witness claim. Every
- * step runs; the session keeps exactly what failed, so shutdown can retry a
- * transient result-time failure without replaying released capabilities.
+ * still holds through `releaseHeldSpawnClaims` — the release path shutdown
+ * shares, over durable release ports only, because a dispatched batch holds
+ * no launch, prompt rewrite or witness claim. Every step runs; the session
+ * keeps exactly what failed, so shutdown can retry a transient result-time
+ * failure without replaying released capabilities.
  *
- * Roster entries are removed under the owner's session: every reservation is
- * stored, recovered and retained under the session it names, so the owner is
- * the one removal authority.
+ * Roster entries are removed under the owner's session, which the stored
+ * reservation is parsed against. A batch whose reservation did not resolve
+ * holds only its grants here; a stored reservation naming another session
+ * stays on the parent session as debt rather than being released under the
+ * wrong session (its refusal is already this batch's resolution failure).
  */
 async function releaseSettledClaims(
   batch: PiStopBatch,
   select: (held: DurableSpawnClaims) => DurableSpawnClaims,
 ): Promise<readonly string[]> {
-  const { owner, parentSessions } = batch;
+  const { owner, parentSessions, durableClaimReleases } = batch;
   if (owner === null) return [];
-  const runtime = parentSessions.get(owner.sessionId);
-  const stored = runtime?.spawnReservations.get(owner.toolCallId);
-  const held = settledSpawnClaims(runtime?.issuedWriteGrants.get(owner.toolCallId) ?? [], stored ?? batch.reservation);
-  const { errors, releases } = await releaseDurableSpawnClaims(
-    select(held),
-    (step) => spawnSettlementStepLabel(step, owner),
-    {
-      revokeGrant: revokePiWriteGrant,
-      removeRosterEntry: (agentId) => fsSessionRegistry.removeActive(owner.sessionId, agentId),
-      releasePointer: rollbackSessionTaskGraphPointer,
-    },
+  const { errors } = await releaseHeldSpawnClaims(
+    owner,
+    parentSessions,
+    select,
+    settlementReleasePhrasing(owner),
+    durableClaimReleases(owner.sessionId),
   );
   for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
-  const owed = remainingDurableClaims(held, releases);
-  parentSessions.retainWriteGrantDebt(owner.sessionId, owner.toolCallId, owed.grants);
-  if (stored !== undefined) {
-    parentSessions.retainSpawnCleanupDebt(owner.sessionId, owner.toolCallId, spawnDebtOf(owed, stored).reservation);
-  }
   return errors;
+}
+
+/**
+ * Retry the capabilities failed admission compensations orphaned on the
+ * owner's session. They belong to no batch, so a failure is reported on
+ * stderr but never becomes this batch's processing error; shutdown retries
+ * again and surfaces whatever is still owed.
+ */
+async function retryOrphanedClaims(batch: PiStopBatch): Promise<void> {
+  const { owner, parentSessions, durableClaimReleases } = batch;
+  if (owner === null) return;
+  const errors = await releaseOrphanedSpawnClaims(owner.sessionId, parentSessions, durableClaimReleases(owner.sessionId));
+  for (const error of errors) process.stderr.write(`loom(pi): orphaned spawn claim cleanup failed: ${error}\n`);
 }
 
 /** Terminalise one request-bound result's capture slot; returns the failure
@@ -272,7 +298,7 @@ async function persistCaptureRejection(
 
 /** Settle a reserved implementation slot whose result processing crashed. */
 async function settleReservedImplementationCrash(
-  reservation: PiSpawnReservation | undefined,
+  reservation: OwnedPiSpawnReservation | undefined,
   item: PiSpawnReservationItem | undefined,
   diagnostic: string,
 ): Promise<readonly string[]> {
@@ -311,7 +337,7 @@ async function settleReservedImplementationCrash(
 
 /** Finalize every reserved implementation attempt the batch settles. */
 async function finalizeReservedImplementations(
-  reservation: PiSpawnReservation | undefined,
+  reservation: OwnedPiSpawnReservation | undefined,
   entries: readonly PiSubagentResultEntry[],
 ): Promise<readonly string[]> {
   if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
@@ -427,7 +453,7 @@ async function finalizeReservedImplementations(
  * review/spec evidence cannot remain authoritative.
  */
 async function reconcileMissingReservedResults(
-  reservation: PiSpawnReservation,
+  reservation: OwnedPiSpawnReservation,
   rawResults: readonly unknown[],
   toolCallId: unknown,
 ): Promise<readonly string[]> {
@@ -902,7 +928,7 @@ export async function dispatchPiSubagentStop(
   ctx: Readonly<{ sessionManager: Readonly<{ getSessionId: () => string | undefined }> }>,
   ports: PiSubagentStopPorts,
 ): Promise<PiSubagentStopResponse | undefined> {
-  const { parentSessions, emissionLaunchBridge, reviewWitnesses } = ports;
+  const { parentSessions, emissionLaunchBridge, reviewWitnesses, durableClaimReleases } = ports;
   const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
   const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
   if (typeof toolCallId === "string") emissionLaunchBridge.removeToolCall(rawSessionId, toolCallId);
@@ -917,12 +943,14 @@ export async function dispatchPiSubagentStop(
     owner,
     reservation: resolved.reservation,
     parentSessions,
+    durableClaimReleases,
   });
   const processingErrors: string[] = [
-    ...(resolved.recoveryFailure === null ? [] : [resolved.recoveryFailure]),
+    ...(resolved.resolutionFailure === null ? [] : [resolved.resolutionFailure]),
     ...await releaseSettledClaims(batch, withoutPointerLease),
   ];
-  if (resolved.recoveryFailure !== null) return processingErrorResponse(processingErrors);
+  await retryOrphanedClaims(batch);
+  if (resolved.resolutionFailure !== null) return processingErrorResponse(processingErrors);
   const { reservation } = batch;
 
   const rawDetails: unknown = event.details;

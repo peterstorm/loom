@@ -9,8 +9,10 @@
  * - `isPlainRecord` — additionally requires a `null` or `Object.prototype`
  *   prototype, so class instances, `Map`s and foreign-realm objects refuse.
  *
- * `hasExactKeys` is the lax guard's exact-key predicate, for parsers that
- * word one refusal of their own.
+ * Two exact-key predicates, for parsers that word one refusal of their own,
+ * mirror the two guards: `hasExactKeys` is the lax guard's (string keys only,
+ * any prototype) and `hasExactPlainKeys` the strict guard's (a plain record
+ * with no symbol keys) — exactly the records `parseExactRecord` admits.
  *
  * On top of the strict guard sit the two exact-shape parsers the completion
  * and verification aggregates share: `parseExactRecord` (exact own key set,
@@ -60,6 +62,18 @@ export function hasExactKeys(record: Readonly<UnknownRecord>, keys: readonly str
   const expected = new Set(keys);
   const own = Object.getOwnPropertyNames(record);
   return own.length === expected.size && own.every((key) => expected.has(key));
+}
+
+/**
+ * The exact-key predicate for the strict guard: a plain record (`null` or
+ * `Object.prototype` prototype) whose own keys are exactly the SET named by
+ * `keys` — any own symbol key refuses, where `hasExactKeys` ignores it. It is
+ * `parseExactRecord`'s verdict by construction (same checks, same inspection
+ * order, diagnostics discarded), so a caller that words one refusal of its own
+ * can never admit a record the diagnostic parser refuses.
+ */
+export function hasExactPlainKeys(raw: unknown, keys: readonly string[]): raw is UnknownRecord {
+  return parseExactRecord(raw, keys, "").ok;
 }
 
 export type ExactRecordResult =

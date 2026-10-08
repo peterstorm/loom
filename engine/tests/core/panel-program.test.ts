@@ -997,6 +997,28 @@ describe("persistent architecture panel", () => {
     }, publicationResolver)).toMatchObject({ ok: false, error: { kind: "invalid-aggregate" } });
   });
 
+  it("reloads a checkpoint whose candidate and judge roster views are both legacy serializations", () => {
+    const fixture = architectureFixture("legacy-roster-view");
+    const { step, events } = fullArchitectureHistory(fixture);
+    const durable = () => JSON.parse(JSON.stringify(value(architecturePanelCheckpoint(step.state, events, publicationResolver))));
+    // Both issued rosters carry the derived `byId` view, so both are compared
+    // through the roster's canonical form — `{}` and `{"size":N}` agree.
+    const legacy = durable();
+    for (const field of ["candidateRoster", "judgeRoster"] as const) {
+      const roster = legacy.state.authority[field];
+      expect(roster.byId).toEqual({});
+      roster.byId = { size: roster.orderedSlots.length };
+    }
+    expect(value(parseArchitecturePanelCheckpoint(legacy, publicationResolver)).state.stage).toBe("done");
+    // The slots each view derives from stay recorded content.
+    for (const field of ["candidateRoster", "judgeRoster"] as const) {
+      const reordered = durable();
+      reordered.state.authority[field].orderedSlots.reverse();
+      expect(parseArchitecturePanelCheckpoint(reordered, publicationResolver)).toMatchObject({ ok: false,
+        error: { kind: "malformed-checkpoint", message: expect.stringContaining("disagrees") } });
+    }
+  });
+
   it("keeps reduction total for malformed and cross-stage events", () => {
     const fixture = architectureFixture("transition-totality");
     const { step: done, events } = fullArchitectureHistory(fixture);

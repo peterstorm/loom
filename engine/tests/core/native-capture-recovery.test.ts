@@ -2,11 +2,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import { bindCapture, captureKey, nativeCaptureObservation, parseFinalPayload, recoverNativeCaptureArtifact } from "../../src/core/harness-capture";
-
-const value = <T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T => {
-  if (!result.ok) throw Error(JSON.stringify(result));
-  return result.value;
-};
+import { value } from "../fixtures/parse-result";
 
 function observed(text: string, harness: "pi" | "claude", attempt: 1 | 2) {
   const request = agentRequestAuthority("run.native-recovery", { attempt,

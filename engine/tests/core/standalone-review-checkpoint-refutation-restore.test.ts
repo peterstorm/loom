@@ -23,16 +23,12 @@ import { parseStandaloneReviewMachineState } from "../../src/core/standalone-rev
 import { parseIssuedReviewerProtocol, type ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
 import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import { loadReviewerV1Golden, type ReviewerV1Golden } from "../fixtures/reviewer-protocol-v1";
+import { value } from "../fixtures/parse-result";
 
 type Files = ReviewerV1Golden["files"];
 const record = z.record(z.string(), z.unknown());
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 const text = (bytes: Uint8Array): string => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-
-function required<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 
 function jsonAt(files: Files, path: string): unknown {
   const bytes = files.get(path);
@@ -41,7 +37,7 @@ function jsonAt(files: Files, path: string): unknown {
 }
 
 function registeredAuthority(files: Files): FrozenStandaloneReviewAuthority {
-  return required(parsedAuthority(required(parseRegistration(jsonAt(files, "program.json")))));
+  return value(parsedAuthority(value(parseRegistration(jsonAt(files, "program.json")))));
 }
 
 function contextualPublications(files: Files): PublicationAuthorityResolver {
@@ -67,21 +63,21 @@ function contextualPublications(files: Files): PublicationAuthorityResolver {
 }
 
 function protocols(files: Files): ReviewerProtocolAuthorityResolver {
-  const registration = required(parseRegistration(jsonAt(files, "program.json")));
-  const authority = required(parsedAuthority(registration));
+  const registration = value(parseRegistration(jsonAt(files, "program.json")));
+  const authority = value(parsedAuthority(registration));
   if (registration.schemaVersion !== 1) throw new Error("historical registration must remain v1");
   const resolvePublication = contextualPublications(files);
   return (request) => {
     for (const [path, bytes] of files) {
       if (!path.startsWith("artifacts/publications/")) continue;
-      const receipt = required(parseBatchPublishedReceipt(JSON.parse(text(bytes))));
+      const receipt = value(parseBatchPublishedReceipt(JSON.parse(text(bytes))));
       const index = receipt.issuedRequests.findIndex((entry) => sameAgentRequestAuthority(entry.authority, request));
       if (index < 0) continue;
-      const issued = required(parseIssuedSpawnRequest(resolvePublication, {
+      const issued = value(parseIssuedSpawnRequest(resolvePublication, {
         ...receipt.issuedRequests[index], issuance: { schemaVersion: 1, kind: "issued-spawn-request-proof",
           runId: receipt.runId, effectId: receipt.effectId, publicationDigest: receipt.publicationDigest, batchIndex: index },
       }));
-      const packet = required(parseContextPacket(jsonAt(files, `contexts/${request.contextDigest}.json`)));
+      const packet = value(parseContextPacket(jsonAt(files, `contexts/${request.contextDigest}.json`)));
       return parseIssuedReviewerProtocol({ request: issued, packet,
         registration: { schemaVersion: registration.schemaVersion, runId: authority.runId, program: registration.kind },
         subject: { kind: "standalone-review", runId: authority.runId, scope: authority.scope },

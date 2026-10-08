@@ -20,11 +20,8 @@ import { parseAdjudicatedStandaloneReview, parseHistoricalStandaloneAggregate } 
 import { parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";
 import { fixtureReviewerProtocols, standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
+import { value } from "../fixtures/parse-result";
 
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 const bytes = (raw: unknown) => Buffer.from(JSON.stringify(raw));
 const hash = (raw: Uint8Array) => createHash("sha256").update(raw).digest("hex");
 

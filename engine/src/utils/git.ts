@@ -1,22 +1,21 @@
 /**
- * Git utilities — pure functions for test counting, thin wrappers for I/O
- * Uses node:child_process (bun-compatible) — execFileSync for every spawned Git command
+ * Git utilities — pure functions for test counting, thin wrappers for I/O.
+ * Every Git command here runs through the shared `git-execution-policy` run
+ * seam; this module never spawns Git itself.
  */
 
-import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
 import { observeGitProbe } from "./git-probe";
 import {
-  GIT_OUTPUT_LIMIT,
   nulSeparatedGitPaths,
   splitNulPaths,
   worktreeVisibleLeafPaths,
   type WorktreeLeafSelection,
 } from "./git-leaves";
-import { hardenedGitInvocation, type GitRepositoryLocation } from "./git-execution-policy";
+import { runGit, type GitOutput, type GitOutputValue, type GitRun } from "./git-execution-policy";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -28,11 +27,11 @@ import { hardenedGitInvocation, type GitRepositoryLocation } from "./git-executi
  * there silently drops repository-relative agent-definition candidates. One
  * implementation, one diagnostic.
  *
- * It is deliberately NOT the only path to `git` in the engine, and claiming
- * otherwise would be false: `utils/git-leaves.ts` and several
- * handlers/orchestration modules shell out directly because they need failures
- * to THROW, where this module's helpers warn and return `undefined`. Two
- * failure contracts, chosen per call site; a caller that wants the warning
+ * It is deliberately NOT the only path to `git` in the engine: `utils/git-leaves.ts`
+ * and several handlers/orchestration modules run their own Git commands —
+ * through the same `git-execution-policy` run seam this module uses — because
+ * they need failures to THROW, where this module's helpers warn and return
+ * `undefined`. Two failure contracts, chosen per call site; a caller that wants the warning
  * contract uses this module.
  *
  * `context` names the caller so a stderr line identifies which resolution
@@ -41,10 +40,7 @@ import { hardenedGitInvocation, type GitRepositoryLocation } from "./git-executi
 export function resolveRepositoryRoot(context = "repository root"): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
-    return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], { stdin: "pipe" });
   } catch (error) {
     // Never silent, and never falsely reassuring: an unresolved root leaves
     // this module's helpers refusing with typed errors (never spawning Git
@@ -104,11 +100,11 @@ function commandFailure(error: unknown): string {
  *  caller's existing guards refuse loudly instead of ingesting a fabrication. */
 function probeGitWithEmptyRetry(
   args: readonly string[],
-  options: ExecFileSyncOptionsWithStringEncoding,
+  run: Omit<GitRun<"text">, "output"> = {},
 ): string {
   const observed = observeGitProbe(() => {
     try {
-      return { ok: true as const, value: execFileSync("git", args, options).trim() };
+      return { ok: true as const, value: runGit(args, { ...run, output: "text" }).trim() };
     } catch (error) {
       return { ok: false as const, error };
     }
@@ -128,16 +124,8 @@ function probeGitWithEmptyRetry(
 export function repositoryContext(cwd?: string): GitRepositoryContext {
   const base = cwd ?? (process.env.CLAUDE_PROJECT_DIR || process.cwd());
   try {
-    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
-      cwd: base,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
-      cwd: root,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], { cwd: base });
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], { cwd: root });
     if (!isExactGitSha(headSha)) {
       return { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
     }
@@ -168,11 +156,7 @@ export type GitHeadObservation =
 /** Fixed-argv exact HEAD observation for implementation authority checks. */
 export function observeExactHead(root: string): GitHeadObservation {
   try {
-    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
-      cwd: root,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], { cwd: root });
     return isExactGitSha(headSha)
       ? { ok: true, headSha }
       : { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
@@ -211,17 +195,6 @@ const isEvidenceBudgetFailure = (error: unknown): boolean =>
   typeof error === "object" && error !== null &&
   (error as NodeJS.ErrnoException).code === "ENOBUFS";
 
-const diffExecOptions = (
-  root: string,
-  environment: NodeJS.ProcessEnv,
-): ExecFileSyncOptionsWithStringEncoding => ({
-  encoding: "utf-8",
-  cwd: root,
-  env: environment,
-  maxBuffer: DIFF_EVIDENCE_BUDGET_BYTES,
-  stdio: ["pipe", "pipe", "pipe"],
-});
-
 type ShadowGitAuthority = Readonly<{
   indexPath: string;
   objectDirectory: string;
@@ -230,13 +203,7 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  const { argv, env } = hardenedGitInvocation(args);
-  return probeGitWithEmptyRetry(argv, {
-    cwd: root,
-    encoding: "utf8",
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  return probeGitWithEmptyRetry(args, { cwd: root });
 }
 
 function absoluteGitPath(root: string, observed: string, label: string): string {
@@ -275,14 +242,22 @@ function shadowGitConfig(objectFormat: ShadowGitAuthority["objectFormat"]): stri
     `\tbare = false\n\tfsmonitor = false${format}\n`;
 }
 
+/** `runGit` bound to one shadow administration directory: the working
+ *  directory and repository location are the lifecycle's, never the caller's. */
+type ShadowGit = <K extends GitOutput>(
+  args: readonly string[],
+  run: Omit<GitRun<K>, "cwd" | "location">,
+) => GitOutputValue[K];
+
 /**
  * Execute with real object/index bytes but no repository-authored executable
  * configuration. Worktree attributes may still name a filter or diff driver;
  * the shadow config defines none, so Git treats those attributes as inert data.
- * `operation` applies the shared execution policy at that location
- * (`hardenedGitInvocation(args, location)`).
+ * `operation` runs Git only through the bound `git`, which applies the shared
+ * execution policy at the shadow location; the directory is removed however
+ * the operation ends.
  */
-function withShadowGit<T>(root: string, operation: (location: GitRepositoryLocation) => T): T {
+function withShadowGit<T>(root: string, operation: (git: ShadowGit) => T): T {
   const authority = observeShadowGitAuthority(root);
   const shadow = mkdtempSync(join(tmpdir(), "loom-git-shadow-"));
   let primaryError: unknown = null;
@@ -290,12 +265,13 @@ function withShadowGit<T>(root: string, operation: (location: GitRepositoryLocat
     mkdirSync(join(shadow, "refs", "heads"), { recursive: true });
     writeFileSync(join(shadow, "HEAD"), `${authority.headSha}\n`);
     writeFileSync(join(shadow, "config"), shadowGitConfig(authority.objectFormat));
-    return operation({
+    const location = Object.freeze({
       GIT_DIR: shadow,
       GIT_WORK_TREE: root,
       GIT_INDEX_FILE: authority.indexPath,
       GIT_OBJECT_DIRECTORY: authority.objectDirectory,
     });
+    return operation((args, run) => runGit(args, { ...run, cwd: root, location }));
   } catch (error) {
     primaryError = error;
     throw error;
@@ -335,10 +311,11 @@ function diffArgsAt(
   try {
     return {
       ok: true,
-      diff: withShadowGit(root, (location) => {
-        const invocation = hardenedGitInvocation(argv, location);
-        return execFileSync("git", invocation.argv, diffExecOptions(root, invocation.env));
-      }),
+      diff: withShadowGit(root, (git) => git(argv, {
+        output: "text",
+        stdin: "pipe",
+        maxBuffer: DIFF_EVIDENCE_BUDGET_BYTES,
+      })),
     };
   } catch (error) {
     const detail = error && typeof error === "object"
@@ -480,16 +457,7 @@ export function changedPathListing(source: ChangedPathSource): GitPathListing {
 /** Run one classified listing on the route its class requires. */
 function gitPathListing(root: string, listing: GitPathListing): readonly string[] {
   if (listing.hashing === "filter-free") return nulSeparatedGitPaths(root, listing.argv);
-  return splitNulPaths(withShadowGit(root, (location) => {
-    const { argv, env } = hardenedGitInvocation(listing.argv, location);
-    return execFileSync("git", argv, {
-      cwd: root,
-      encoding: "buffer",
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: GIT_OUTPUT_LIMIT,
-    });
-  }));
+  return splitNulPaths(withShadowGit(root, (git) => git(listing.argv, { output: "bytes" })));
 }
 
 /**
@@ -514,14 +482,9 @@ export type GitTrackedResult =
  */
 export function isTrackedAt(root: string, file: string): GitTrackedResult {
   try {
-    const tracked = withShadowGit(root, (location) => {
-      const { argv, env } = hardenedGitInvocation(["ls-files", "--error-unmatch", "--", file], location);
+    const tracked = withShadowGit(root, (git) => {
       try {
-        execFileSync("git", argv, {
-          cwd: root,
-          env,
-          stdio: ["ignore", "ignore", "pipe"],
-        });
+        git(["ls-files", "--error-unmatch", "--", file], { output: "discard" });
         return true;
       } catch (error) {
         const status = typeof error === "object" && error !== null && "status" in error

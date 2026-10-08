@@ -8,14 +8,10 @@ import {
   freezeVerificationManifest,
   renderProjectVerificationCoverage,
 } from "../../src/core/verification-manifest";
-
-function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error("invalid coverage fixture");
-  return result.value;
-}
+import { value } from "../fixtures/parse-result";
 
 function manifest(ids: readonly string[]) {
-  return valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+  return value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
     kind: "loom-verification-manifest",
     checks: ids.map((id) => ({
@@ -55,7 +51,7 @@ describe("Project Verification Coverage projection", () => {
 
   it("projects historical project IDs only from the archived exact result, without claiming absent-versus-empty provenance", () => {
     fc.assert(fc.property(ids, (checkIds) => {
-      const authority = valueOf(authorizeWaveCompletionSuite(manifest(checkIds), {
+      const authority = value(authorizeWaveCompletionSuite(manifest(checkIds), {
         runId: "run.coverage-property", wave: 1, revision: 0, authorityDigest: "a".repeat(64),
       }, "b".repeat(64)));
       const evaluation = evaluateWaveCompletionSuite(authority, {

@@ -1,123 +1,153 @@
 /**
  * Consumer-level pin for the boundary root probe (pta-1).
  *
- * `config.ts` `gitRepositoryRootFrom` composes the canonical bounded
- * empty-stdout retry (`observeGitProbe`) around `git rev-parse
- * --show-toplevel` — the same policy `tests/utils/git-empty-retry.test.ts`
- * pins for the utils/git consumers. This file closes the config gap: a revert
- * of the retry or of the confirmed-empty attribution inside config alone would
- * otherwise pass every suite while a transient empty probe froze a fabricated
- * `root: ""` boundary and a confirmed one was silently ingested the same way.
+ * `config.ts` `gitRepositoryRootFrom` composes the canonical bounded retry
+ * (`observeGitProbe`) around `git rev-parse --show-toplevel` — the same policy
+ * `tests/utils/git-empty-retry.test.ts` pins for the utils/git consumers. This
+ * file closes the config gap: a revert of the retry or of the confirmed-empty
+ * attribution inside config alone would otherwise pass every suite while a
+ * transient empty probe froze a fabricated `root: ""` boundary and a confirmed
+ * one was silently ingested the same way.
  *
- * `spawnSync` is scripted, so the status-0/empty-stdout transient is
- * reproduced deterministically — a real repository cannot produce it on
- * demand. The mock falls through to the real spawnSync when the script is
- * empty, so the module-import-time `TASK_GRAPH_PATH` resolution (which probes
- * the real checkout) neither consumes the script nor breaks.
+ * The probe reaches Git through the injected `GitSpawn` port, so each case
+ * scripts `GitSpawnOutcome` values directly and asserts the LOGICAL argv the
+ * probe asked for — no `node:child_process` mock and no knowledge of the
+ * execution policy's private argv prefix. Two transients are reproduced
+ * deterministically, since a real repository produces neither on demand: a
+ * status-0 empty root, and a fatal exit whose stderr arrived empty (the
+ * macos-15 verify failure of run 37744264682).
  */
 
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
-
-const scripted = vi.hoisted(() => ({
-  queue: [] as Array<{ status: number; stdout: string; stderr: string }>,
-  calls: [] as Array<{ file: string; args: readonly string[]; cwd: string | undefined }>,
-}));
-
-vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
-  const scriptedSpawnSync = (
-    file: string,
-    args: readonly string[],
-    options?: { cwd?: string },
-  ) => {
-    scripted.calls.push({ file, args, cwd: options?.cwd });
-    const next = scripted.queue.shift();
-    if (next === undefined) return actual.spawnSync(file, args, options ?? {});
-    return {
-      status: next.status,
-      stdout: next.stdout,
-      stderr: next.stderr,
-      signal: null,
-      error: undefined,
-    } as unknown as ReturnType<typeof actual.spawnSync>;
-  };
-  return {
-    ...actual,
-    spawnSync: scriptedSpawnSync as unknown as typeof actual.spawnSync,
-  };
-});
-
+import { afterEach, describe, expect, it } from "vitest";
 import { observeTaskGraphProjectBoundary } from "../src/config";
+import type { GitSpawn, GitSpawnOutcome, SpawnGitRun } from "../src/utils/git-execution-policy";
+import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 
 const dirs: string[] = [];
 afterEach(() => {
-  vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
-beforeEach(() => {
-  scripted.queue = [];
-  scripted.calls = [];
-});
 
-function stateFileIn(dir: string): string {
+type ProbeCall = Readonly<{ args: readonly string[]; run: SpawnGitRun }>;
+
+/** A scripted `GitSpawn`: answers in order, records every call, and fails
+ *  loudly when the probe runs past its script. */
+function scriptedSpawn(answers: readonly GitSpawnOutcome[]): Readonly<{ spawn: GitSpawn; calls: readonly ProbeCall[] }> {
+  const queue = [...answers];
+  const calls: ProbeCall[] = [];
+  return {
+    calls,
+    spawn: (args, run) => {
+      calls.push({ args, run });
+      const next = queue.shift();
+      if (next === undefined) throw new Error("the root probe ran past its scripted Git outcomes");
+      return next;
+    },
+  };
+}
+
+const exited = (status: number, stdout: string, stderr = ""): GitSpawnOutcome =>
+  ({ kind: "exited", status, stdout: Buffer.from(stdout), stderr: Buffer.from(stderr) });
+
+function stateDirectory(): Readonly<{ dir: string; statePath: string }> {
+  const dir = canonicalTempDir("loom-boundary-root-");
+  dirs.push(dir);
   const statePath = join(dir, "active_task_graph.json");
   writeFileSync(statePath, JSON.stringify({ current_phase: "execute" }));
-  return statePath;
+  return { dir, statePath };
 }
+
+function thrownMessage(run: () => unknown): string {
+  try {
+    run();
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    return (error as Error).message;
+  }
+  throw new Error("expected the boundary probe to throw");
+}
+
+const ROOT_PROBE = ["rev-parse", "--show-toplevel"];
+const NOT_A_REPOSITORY = "fatal: not a git repository (or any of the parent directories): .git\n";
 
 describe("config boundary root probe retries the transient empty-stdout Git answer", () => {
   it("recovers the repository root when rev-parse answers empty once, and pins the exact probe sequence", () => {
-    const dir = canonicalTempDir("loom-boundary-root-");
-    dirs.push(dir);
-    const statePath = stateFileIn(dir);
-    scripted.queue = [
-      { status: 0, stdout: "", stderr: "" },          // the transient empty answer
-      { status: 0, stdout: `${dir}\n`, stderr: "" },  // the retried, real root
-    ];
+    const { dir, statePath } = stateDirectory();
+    const script = scriptedSpawn([
+      exited(0, ""), // the transient empty answer
+      exited(0, `${dir}\n`), // the retried, real root
+    ]);
 
-    expect(observeTaskGraphProjectBoundary(statePath)).toEqual({
-      kind: "git-repository",
-      root: dir,
-    });
+    expect(observeTaskGraphProjectBoundary(statePath, script.spawn)).toEqual({ kind: "git-repository", root: dir });
     // The retry consumed the transient; it did not ingest it as `root: ""`.
-    expect(scripted.calls).toEqual([
-      { file: "git", args: ["rev-parse", "--show-toplevel"], cwd: dir },
-      { file: "git", args: ["rev-parse", "--show-toplevel"], cwd: dir },
+    expect(script.calls).toEqual([
+      { args: ROOT_PROBE, run: { cwd: dir, maxBuffer: 1024 * 1024 } },
+      { args: ROOT_PROBE, run: { cwd: dir, maxBuffer: 1024 * 1024 } },
     ]);
   });
 
   it("refuses loudly when the root probe stays empty after bounded retries, attributing the confirmed anomaly", () => {
-    const dir = canonicalTempDir("loom-boundary-root-");
-    dirs.push(dir);
-    const statePath = stateFileIn(dir);
-    scripted.queue = [
-      { status: 0, stdout: "", stderr: "" },
-      { status: 0, stdout: "", stderr: "" },
-      { status: 0, stdout: "", stderr: "" },
-    ];
+    const { dir, statePath } = stateDirectory();
+    const script = scriptedSpawn([exited(0, ""), exited(0, ""), exited(0, "")]);
 
-    let thrown: unknown;
-    try {
-      observeTaskGraphProjectBoundary(statePath);
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(Error);
-    const message = (thrown as Error).message;
+    const message = thrownMessage(() => observeTaskGraphProjectBoundary(statePath, script.spawn));
     // The refusal names the probed directory and carries the full probe
     // evidence: a confirmed anomaly is thrown, never fabricated into a boundary.
     expect(message).toContain(`git rev-parse returned an empty repository root for ${dir}`);
     expect(message).toContain("confirmed after bounded retries");
     expect(message).toContain("status=0 stdoutLength=0 signal=none");
     // The bounded retry budget was actually spent before the refusal.
-    expect(scripted.calls.length).toBe(3);
-    for (const call of scripted.calls) {
-      expect(call.file).toBe("git");
-      expect(call.args).toEqual(["rev-parse", "--show-toplevel"]);
-      expect(call.cwd).toBe(dir);
-    }
+    expect(script.calls).toEqual(Array.from({ length: 3 }, () => ({ args: ROOT_PROBE, run: { cwd: dir, maxBuffer: 1024 * 1024 } })));
+  });
+});
+
+describe("config boundary root probe never mistakes a lost diagnostic for Git's answer", () => {
+  it("re-observes a fatal exit whose stderr arrived empty and classifies the real not-a-repository answer", () => {
+    const { statePath } = stateDirectory();
+    const script = scriptedSpawn([exited(128, ""), exited(128, "", NOT_A_REPOSITORY)]);
+
+    // The canonical temp directory has no repository metadata above it, so
+    // the recovered diagnostic proves a non-repository: the layout fallback.
+    expect(observeTaskGraphProjectBoundary(statePath, script.spawn)).toMatchObject({ kind: "state-layout" });
+    expect(script.calls.map(({ args }) => args)).toEqual([ROOT_PROBE, ROOT_PROBE]);
+  });
+
+  it("refuses a fatal exit that stays silent after bounded retries, naming the lost capture", () => {
+    const { dir, statePath } = stateDirectory();
+    const script = scriptedSpawn([exited(128, ""), exited(128, ""), exited(128, "")]);
+
+    expect(thrownMessage(() => observeTaskGraphProjectBoundary(statePath, script.spawn))).toBe(
+      `git rev-parse failed (exited 128) for ${dir} (confirmed after bounded retries): stderr empty, stdout 0 bytes — ` +
+      "Git writes a diagnostic for every fatal exit, so the child's stderr was lost before it reached the engine",
+    );
+    expect(script.calls).toHaveLength(3);
+  });
+
+  it("surfaces Git's own dubious-ownership diagnostic on the first attempt, without retrying it", () => {
+    const { dir, statePath } = stateDirectory();
+    const dubious = "fatal: detected dubious ownership in repository at '/srv/repo'\n" +
+      "To add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /srv/repo";
+    const script = scriptedSpawn([exited(128, "", dubious)]);
+
+    expect(thrownMessage(() => observeTaskGraphProjectBoundary(statePath, script.spawn)))
+      .toBe(`git rev-parse failed (exited 128) for ${dir}: ${dubious}`);
+    expect(script.calls).toHaveLength(1);
+  });
+
+  it.each<[string, GitSpawnOutcome, (dir: string) => string]>([
+    ["a child that never started", { kind: "spawn-failed", code: "ENOENT", message: "spawn git ENOENT" },
+      () => "git rev-parse could not start: spawn git ENOENT"],
+    ["a signalled child", { kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) },
+      (dir) => `git rev-parse failed (terminated on signal SIGKILL) for ${dir}`],
+    ["an over-budget capture", { kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) },
+      (dir) => `git rev-parse failed (exceeded its 1024-byte output budget) for ${dir}`],
+  ])("refuses %s with its rendered outcome on the first attempt", (_label, outcome, expected) => {
+    const { dir, statePath } = stateDirectory();
+    const script = scriptedSpawn([outcome]);
+
+    expect(thrownMessage(() => observeTaskGraphProjectBoundary(statePath, script.spawn))).toBe(expected(dir));
+    expect(script.calls).toHaveLength(1);
   });
 });

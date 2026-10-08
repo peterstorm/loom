@@ -36,6 +36,7 @@ import {
   type EnvironmentOverlay,
 } from "../../../fixtures/issue-route-env";
 import { normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { value } from "../../../fixtures/parse-result";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -45,10 +46,6 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
 const currentEmpty = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
 const legacyEmpty = "### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 0\n\n```findings\n[]\n```";
 
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 // Deterministic commit SHAs: frozen-source sections embed the head revision, and
 // packets minted by separate fixture projects are compared byte-for-byte.
 const git = (root: string, args: readonly string[]) => gitResult(root, args, PINNED_COMMIT_DATES).stdout.trim();

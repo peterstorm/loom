@@ -234,15 +234,14 @@ describe("the launcher's emission startup step sequence — one order, two adapt
       async (child) => {
         const { calls, run } = await sequence(child);
         const expected = expectedOf(child);
+        // The oracle binds the route only after a ready readiness, so exact
+        // call equality also pins that an open decision was route-bound.
         expect(calls).toEqual(expected.calls);
         if (expected.decision === null) {
           expect(refusal(run)).toEqual({ step: child.failing });
         } else {
           expect(value(run).decision).toEqual(expected.decision);
         }
-        // The route is bound only after a ready readiness; the prompt only on open.
-        expect(calls.includes("bindRoute")).toBe(expected.calls.includes("bindRoute"));
-        if (run.ok && run.value.decision.kind === "open") expect(calls).toContain("bindRoute");
       },
     ));
   });

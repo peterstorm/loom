@@ -12,21 +12,17 @@
  * failure; `utils/git.ts` wraps the enumerator in the warn-and-return Result
  * adapters (`visibleLeavesAt`, `untrackedLeavesAt`) its callers expect.
  */
-import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { compareStrings } from "../core/ordering";
-import { hardenedGitInvocation } from "./git-execution-policy";
-
-/** The stdout budget of one Git path or revision listing — this module's and
- *  `utils/git.ts`'s shadow-run dirty-path listings alike. */
-export const GIT_OUTPUT_LIMIT = 100 * 1024 * 1024;
+import { runGit } from "./git-execution-policy";
 
 /**
  * One Git command's stdout bytes, run in the real repository under the shared
  * `git-execution-policy`: an allow-listed environment (no ambient GIT_* or
- * config injection, no system or global config) and `core.fsmonitor`
- * disabled by a `-c` argv prefix. Every enumerator and revision read in this module — and every
+ * config injection, no system or global config), `core.fsmonitor` disabled by
+ * a `-c` argv prefix, and the policy's listing output budget. Every enumerator
+ * and revision read in this module — and every
  * consumer of them — therefore shares one execution policy, chosen in one
  * place. It deliberately does not use `utils/git.ts`'s shadow administration
  * directory: that removes `info/exclude` and the repository's
@@ -34,14 +30,7 @@ export const GIT_OUTPUT_LIMIT = 100 * 1024 * 1024;
  * the listing commands run no filter or diff driver.
  */
 export function gitOutput(root: string, args: readonly string[]): Buffer {
-  const { argv, env } = hardenedGitInvocation(args);
-  return execFileSync("git", argv, {
-    cwd: root,
-    encoding: "buffer",
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: GIT_OUTPUT_LIMIT,
-  });
+  return runGit(args, { output: "bytes", cwd: root });
 }
 
 /** Git's `-z` record format: NUL-terminated records, decoded as UTF-8. The one

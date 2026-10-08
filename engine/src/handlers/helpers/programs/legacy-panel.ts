@@ -405,29 +405,26 @@ export async function driveRegisteredPanel(
 // Settlement entry points: one submitted attempt, or every captured attempt
 // ---------------------------------------------------------------------------
 
-/** A settlement step's failure, in the façade's own failure shape so an entry
- *  point returns it unchanged. A step that succeeds has nothing to report. */
-type PanelShellFailure = ReturnType<typeof failed>;
-
 /**
  * Settle ONE attempt's raw bytes and record how it settled: the logical id is
  * derived, the attempt settled through its verdict source, then its outcome
  * appended under the reserved slot's dedup key. Both settlement entry points
  * go through here, so the logical-id/dedup-key pairing `appendSpawnOutcome`
  * owns has one caller sequence; they differ only in where `raw` comes from.
- * Recording has no result of its own: the failure, or `null` once recorded.
+ * Recording has no value of its own, so success is the unit `true`; a failure
+ * is already the façade's failure shape, which an entry point passes through.
  */
 async function settleAndRecordPanelAttempt(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
   request: AgentRequestAuthority,
   raw: string,
-): Promise<PanelShellFailure | null> {
+): Promise<ProgramParse<true>> {
   const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
   const settled = await settlePanelAttemptSubmission({ handle, registration, request, logicalRequestId, raw });
   if (!settled.ok) return failed(settled.error);
   await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settled.value.problem);
-  return null;
+  return { ok: true, value: true };
 }
 
 /**
@@ -440,8 +437,8 @@ export async function submitRegisteredPanelAttempt(
   request: AgentRequestAuthority,
   raw: string,
 ): Promise<FacadeDriveResult> {
-  const failure = await settleAndRecordPanelAttempt(handle, registration, request, raw);
-  if (failure !== null) return failure;
+  const recorded = await settleAndRecordPanelAttempt(handle, registration, request, raw);
+  if (!recorded.ok) return recorded;
   return driveRegisteredPanel(handle, registration);
 }
 
@@ -452,12 +449,13 @@ export async function submitRegisteredPanelAttempt(
  * having judged it — the capture and the judgement are separate writes. This
  * settles each such attempt through the same verdict-source seam a submission
  * uses and records the verdict, keyed so a repeat is a no-op. It decides no
- * policy of its own: the first failure, or `null` once every attempt settled.
+ * policy of its own: the first failure, or the unit `true` once every attempt
+ * settled.
  */
 async function reconcileCapturedPanelResults(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
-): Promise<PanelShellFailure | null> {
+): Promise<ProgramParse<true>> {
   const events = await handle.readEvents();
   const settled = new Set(events.flatMap(({ event }) => {
     if (typeof event !== "object" || event === null) return [];
@@ -481,10 +479,10 @@ async function reconcileCapturedPanelResults(
     // durable record's replay when one was published, otherwise the extraction
     // baseline — and the submission decision runs over exactly that resolution
     // (the same policy every later scan of the same attempt reproduces).
-    const failure = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
-    if (failure !== null) return failure;
+    const recorded = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
+    if (!recorded.ok) return recorded;
   }
-  return null;
+  return { ok: true, value: true };
 }
 
 /**
@@ -496,7 +494,7 @@ export async function resumeRegisteredPanel(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
 ): Promise<FacadeDriveResult> {
-  const failure = await reconcileCapturedPanelResults(handle, registration);
-  if (failure !== null) return failure;
+  const reconciled = await reconcileCapturedPanelResults(handle, registration);
+  if (!reconciled.ok) return reconciled;
   return driveRegisteredPanel(handle, registration);
 }

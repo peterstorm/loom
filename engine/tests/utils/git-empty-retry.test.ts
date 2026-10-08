@@ -20,10 +20,11 @@ const scriptedResponses: { queue: string[]; calls: string[][] } = vi.hoisted(() 
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
+  const { logicalGitArgs } = await import("../fixtures/policy-bound-git-argv");
   return {
     ...actual,
     execFileSync: (file: string, args: readonly string[]) => {
-      scriptedResponses.calls.push([file, ...args]);
+      scriptedResponses.calls.push([file, ...logicalGitArgs(args)]);
       const next = scriptedResponses.queue.shift();
       if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
       return next;

@@ -118,11 +118,9 @@ export type BatchSubjectMismatch = Readonly<{
  * once here: a count mismatch is a publication defect, returned as a typed
  * refusal before any request is paired, rather than checked per element.
  *
- * The check is deliberately EXACT equality, in both directions — a
- * tightening of the per-element lookup it replaced, which refused only a
- * published request with no subject and let a publication with FEWER
- * requests than subjects through. Fewer requests means some batch subject
- * was never published for, which the index-alignment invariant forbids.
+ * The check is exact equality in both directions: more requests means one
+ * has no subject, and fewer means some batch subject was never published
+ * for, which the index-alignment invariant forbids.
  */
 export function withBatchSubjects<R>(
   published: readonly R[],

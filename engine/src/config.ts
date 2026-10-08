@@ -4,7 +4,6 @@
  * update the docs if changed.
  */
 
-import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +28,19 @@ import { frozenSet } from "./core/frozen";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe } from "./utils/git-probe";
+import {
+  describeGitOutcome,
+  diagnoseGitOutcome,
+  gitDiagnosticLost,
+  gitExitedWith,
+  gitStderrText,
+  gitStdoutText,
+  GIT_PROBE_OUTPUT_LIMIT,
+  spawnGit,
+  type GitExit,
+  type GitSpawn,
+  type GitSpawnOutcome,
+} from "./utils/git-execution-policy";
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
@@ -508,29 +520,46 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
   }
 }
 
+/** One root probe's classified answer. Two answers are EMPTY observations the
+ *  bounded retry re-runs (see `observeGitProbe`): a status-0 root with no
+ *  stdout, and a fatal exit whose stderr arrived empty — Git writes a
+ *  diagnostic for every fatal exit, so that silence is a lost capture, and
+ *  without the text the not-a-repository answer cannot be told apart from a
+ *  failed probe. */
+type RootProbe =
+  | Readonly<{ kind: "root"; root: string; outcome: GitExit<0> }>
+  | Readonly<{ kind: "not-repository" }>
+  | Readonly<{ kind: "diagnostic-lost"; outcome: GitExit }>;
+
+/** A refused root probe, naming its directory, its rendered ending, and
+ *  whether the bounded retries confirmed it. */
+function rootProbeFailure(cwd: string, outcome: GitSpawnOutcome, attempts: "first" | "confirmed"): Error {
+  const { head, detail } = diagnoseGitOutcome(outcome);
+  const confirmed = attempts === "confirmed" ? " (confirmed after bounded retries)" : "";
+  return new Error(`git rev-parse failed (${head}) for ${cwd}${confirmed}${detail === null ? "" : `: ${detail}`}`);
+}
+
 /** The cwd-explicit core (the spawn-cwd runtime polarity): the probe runs with
  *  the explicit cwd, so the governing graph lives in the repository the caller
- *  declares — the bounded empty-stdout retry here discharges the transient
- *  documented at `observeGitProbe`; a confirmed anomaly throws with the full
- *  probe evidence. */
-function gitRepositoryRootFrom(cwd: string): string | null {
-  type RootProbe =
-    | Readonly<{ kind: "root"; root: string; status: number; stdoutLength: number; signal: NodeJS.Signals | null; stderr: string }>
-    | Readonly<{ kind: "not-repository" }>;
+ *  declares — the bounded retry here discharges the transients documented at
+ *  `observeGitProbe` (an empty root, a lost fatal diagnostic); a confirmed
+ *  anomaly throws with the full probe evidence. The probe runs under the
+ *  shared `git-execution-policy`, whose `LANG=C`/`LC_ALL=C` keeps the English
+ *  diagnostic the not-a-repository match below reads. `spawn` is the
+ *  status-returning seam as a port, so tests script outcomes directly. */
+function gitRepositoryRootFrom(cwd: string, spawn: GitSpawn): string | null {
   const observed = observeGitProbe<RootProbe, Error>(() => {
-    const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-      encoding: "utf-8",
-      cwd,
-      env: { ...process.env, LANG: "C", LC_ALL: "C" },
-    });
-    if (probe.error !== undefined) {
-      return { ok: false, error: new Error(`git rev-parse could not start: ${probe.error.message}`) };
+    const outcome = spawn(["rev-parse", "--show-toplevel"], { cwd, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
+    if (outcome.kind === "spawn-failed") {
+      return { ok: false, error: new Error(`git rev-parse ${describeGitOutcome(outcome)}`) };
     }
-    if (probe.status === 0) {
-      return { ok: true, value: Object.freeze({ kind: "root", root: probe.stdout.trim(), status: probe.status,
-        stdoutLength: probe.stdout.length, signal: probe.signal, stderr: probe.stderr.trim() }) };
+    if (gitExitedWith(outcome, [0])) {
+      return { ok: true, value: Object.freeze({ kind: "root", root: gitStdoutText(outcome).trim(), outcome }) };
     }
-    if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
+    if (gitDiagnosticLost(outcome)) {
+      return { ok: true, value: Object.freeze({ kind: "diagnostic-lost", outcome }) };
+    }
+    if (gitExitedWith(outcome, [128]) && NOT_A_GIT_REPOSITORY.test(gitStderrText(outcome))) {
       try {
         proveNoGitMetadataInAncestorsFrom(cwd);
         return { ok: true, value: Object.freeze({ kind: "not-repository" }) };
@@ -538,21 +567,24 @@ function gitRepositoryRootFrom(cwd: string): string | null {
         return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };
       }
     }
-    const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
-    return { ok: false, error: new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`) };
-  }, (value) => value.kind === "root" && value.root === "");
+    return { ok: false, error: rootProbeFailure(cwd, outcome, "first") };
+  }, (value) => value.kind === "diagnostic-lost" || (value.kind === "root" && value.root === ""));
   if (observed.kind === "failed") throw observed.error;
   if (observed.kind === "confirmed-empty") {
     const probe = observed.third;
-    if (probe.kind !== "root") throw new Error("confirmed-empty Git root probe has contradictory not-repository outcome");
+    if (probe.kind === "not-repository") throw new Error("confirmed-empty Git root probe has contradictory not-repository outcome");
+    if (probe.kind === "diagnostic-lost") throw rootProbeFailure(cwd, probe.outcome, "confirmed");
+    const stderr = gitStderrText(probe.outcome);
     throw new Error(
       `git rev-parse returned an empty repository root for ${cwd} (confirmed after bounded retries)` +
-      ` status=${probe.status} stdoutLength=${probe.stdoutLength}` +
-      ` signal=${probe.signal ?? "none"}` +
-      (probe.stderr === "" ? "" : ` stderr: ${probe.stderr}`),
+      ` status=${probe.outcome.status} stdoutLength=${gitStdoutText(probe.outcome).length}` +
+      " signal=none" +
+      (stderr === "" ? "" : ` stderr: ${stderr}`),
     );
   }
-  return observed.value.kind === "not-repository" ? null : observed.value.root;
+  const answer = observed.value;
+  if (answer.kind === "diagnostic-lost") throw new Error("observed Git root probe has contradictory lost-diagnostic outcome");
+  return answer.kind === "root" ? answer.root : null;
 }
 
 export type TaskGraphProjectBoundary =
@@ -565,10 +597,11 @@ export type TaskGraphProjectBoundary =
  * a possibly-relative LOOM_STATE_PATH against the caller's later cwd. A Git
  * repository supplies first-class boundary authority. Proven non-repositories
  * retain the canonical/legacy layout fallback used before Git authority was
- * recorded; Git observation failures throw rather than fabricate a boundary. */
-export function observeTaskGraphProjectBoundary(statePath: string): TaskGraphProjectBoundary {
+ * recorded; Git observation failures throw rather than fabricate a boundary.
+ * `spawn` defaults to the policy-bound `spawnGit`; tests pass a fake. */
+export function observeTaskGraphProjectBoundary(statePath: string, spawn: GitSpawn = spawnGit): TaskGraphProjectBoundary {
   const absolute = resolve(statePath);
-  const root = gitRepositoryRootFrom(dirname(absolute));
+  const root = gitRepositoryRootFrom(dirname(absolute), spawn);
   return root === null
     ? Object.freeze({ kind: "state-layout", root: projectRootForStateFile(absolute) })
     : Object.freeze({ kind: "git-repository", root: projectRootForStateFile(absolute, root) });
@@ -598,7 +631,7 @@ export function findTaskGraphPathFrom(cwd: string): string {
   // Only a proven non-repository permits fallback. Missing Git, permission,
   // safe-directory, I/O, and malformed-output failures throw so callers cannot
   // mistake an unobservable repository-root graph for no graph.
-  const root = gitRepositoryRootFrom(cwd);
+  const root = gitRepositoryRootFrom(cwd, spawnGit);
   if (root !== null) {
     for (const candidateRelative of relatives) {
       const absolute = join(root, candidateRelative);

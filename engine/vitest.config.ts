@@ -1,28 +1,38 @@
+import { availableParallelism } from "node:os";
 import { configDefaults, defineConfig } from "vitest/config";
+import { platformWorkerBudget } from "./vitest-worker-budget";
 
 /**
- * The suite's worker budget lives here, not in a CLI flag, because it is a
- * platform policy. The previous unconditional `--maxWorkers=4` was the right
- * cap for uncapped many-core machines (the same "Timeout calling
- * \"onTaskUpdate\"" failure class once fixed there), but macos-15 CI runners
- * expose 3 vCPUs: four forked workers — each also spawning cold `bun` CLI
- * children — oversubscribed the box until the Vitest main thread stayed
- * unresponsive past the worker's 60s RPC deadline, and fully green suites
- * (9060/9060 passing) failed the run. Two workers keep darwin unsaturated;
- * Linux keeps the four the command always pinned.
+ * Suite-wide policy lives here, not in CLI flags, so `npm run test:unit` and a
+ * direct `npx vitest run` agree.
  *
  * Calibration pilots and the operator-run qualification probes live outside
  * `engine/` (they are not Runtime Revision inputs) but are still project
  * code: `npm run verify` must run their tests.
  *
- * The setup file pins the ambient reviewer issue route to the catalog route
- * before every test file, so no suite's route election depends on which
- * fixture it happens to import first.
+ * Setup files, before every test file:
+ * - `catalog-issue-route` pins the ambient reviewer issue route to the catalog
+ *   route, so no suite's route election depends on which fixture it happens to
+ *   import first.
+ * - `task-update-yield` turns the worker's event loop after every test. Without
+ *   it, a file of back-to-back synchronous tests (`spawnSync` CLI children,
+ *   closure scans, gzip fixtures) never reads the main thread's reply to its
+ *   `onTaskUpdate` RPC, and the worker's fixed 60s RPC timer fails a fully
+ *   green run with "[vitest-worker]: Timeout calling \"onTaskUpdate\"". The
+ *   file documents the event-loop mechanism.
+ *
+ * `testTimeout`: integration suites drive real `bun`/`git` children and full
+ * reviewer fixtures; 15s is the one per-test budget for every entry point.
+ * A test that is intrinsically heavier states its own timeout and why.
+ *
+ * `maxWorkers` is this host's `platformWorkerBudget`; that module documents
+ * the per-platform caps.
  */
 export default defineConfig({
   test: {
     include: [...configDefaults.include, "../calibration/**/*.test.ts", "../probes/**/*.test.{ts,mjs}"],
-    setupFiles: ["./tests/setup/catalog-issue-route.ts"],
-    maxWorkers: process.platform === "darwin" ? 2 : 4,
+    setupFiles: ["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"],
+    testTimeout: 15_000,
+    maxWorkers: platformWorkerBudget(process.platform, availableParallelism()),
   },
 });
