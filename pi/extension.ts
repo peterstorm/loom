@@ -499,6 +499,7 @@ export default function (
       childWriteGrants,
       emissionLaunchBridge,
       reviewWitnesses,
+      durableClaimReleases: piDurableClaimReleasePorts,
     });
   });
 
@@ -587,7 +588,12 @@ export default function (
 
   pi.on("tool_result", async (event, ctx) => {
     if (!isPiSpawnTool(event.toolName)) return;
-    return dispatchPiSubagentStop(event, ctx, { parentSessions, emissionLaunchBridge, reviewWitnesses });
+    return dispatchPiSubagentStop(event, ctx, {
+      parentSessions,
+      emissionLaunchBridge,
+      reviewWitnesses,
+      durableClaimReleases: piDurableClaimReleasePorts,
+    });
   });
 
   // ─── Commands ─────────────────────────────────────────────────────────

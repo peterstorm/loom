@@ -3567,7 +3567,7 @@ describe("Pi extension review tool_result integration", () => {
     if (retainedPath === null) throw new Error("admission fault did not retain a grant path");
     const remaining = readdirSync(grantDir).filter((name) => !before.has(name));
     expect(remaining.map((name) => join(grantDir, name))).toEqual([retainedPath]);
-    await expect(pi.emit("session_shutdown", {}, context)).rejects.toThrow(/revoke outstanding write grant 1/i);
+    await expect(pi.emit("session_shutdown", {}, context)).rejects.toThrow(/revoke outstanding write grant for spawn item [12] of call-partial-admission-grants/i);
     rmSync(retainedPath, { recursive: true });
     expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
   });

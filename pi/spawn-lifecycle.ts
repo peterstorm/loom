@@ -240,10 +240,15 @@ export async function reservePiSpawnLifecycle(
   });
   const rollbackLabel = (step: SpawnRollbackStep): string => spawnRollbackStepLabel(step, toolCallId);
   // Record a claim in the ledger; a refusal, with whatever it left unowned
-  // already released, propagates to the rollback below.
+  // already released, propagates to the rollback below. A capability its
+  // failed compensation orphaned is owned by no ledger, so the session keeps
+  // it as debt that settlement and shutdown retry.
   const claim = async (taken: SpawnClaim): Promise<void> => {
     const claimed = await claimOrCompensate(claims, taken, rollbackLabel, releasePorts);
-    if (!claimed.ok) throw new Error(claimed.error);
+    if (!claimed.ok) {
+      if (claimed.error.orphaned !== null) parentSessions.addOrphanedClaim(safeSessionId, claimed.error.orphaned);
+      throw new Error(claimed.error.reason);
+    }
     claims = claimed.value;
   };
   const rollbackLifecycle = async (): Promise<readonly string[]> => {
