@@ -40,7 +40,6 @@ import {
   parseRequestId,
   parseSlotId,
   type AgentRequestAuthority,
-  type AgentRosterSlot,
   type DomainResult,
   type ExactRoster,
   type ExactRosterError,
@@ -489,12 +488,12 @@ function parseStrictBriefFinding(raw: unknown): DomainResult<BriefFinding, Reado
 }
 
 /**
- * A refutation panel's authority. `Slot` is what its verifier roster holds:
- * recorded history (`AgentRosterSlot`) for a panel parsed from a checkpoint or
- * reconstructed from its record, minted slots for one being issued
- * (`IssuedRefutationPanelAuthority`).
+ * A refutation panel's authority, however it was obtained — issued now
+ * (`issueRefutationPanelAuthority`), parsed from a checkpoint, or reconstructed
+ * from its record. No consumer branches on which, so the provenance is not
+ * part of the type; the minted proof is enforced where a panel is issued.
  */
-export type RefutationPanelAuthority<Slot extends AgentRosterSlot = AgentRosterSlot> = Readonly<{
+export type RefutationPanelAuthority = Readonly<{
   schemaVersion: 2;
   panel: "refutation";
   runId: OrchestrationRunId;
@@ -502,7 +501,7 @@ export type RefutationPanelAuthority<Slot extends AgentRosterSlot = AgentRosterS
   identityRunId: OrchestrationRunId;
   findings: readonly [BriefFinding, ...BriefFinding[]];
   lenses: readonly [ReviewLens, ...ReviewLens[]];
-  verifierRoster: ExactRoster<Slot>;
+  verifierRoster: ExactRoster;
 }>;
 
 export type RefutationPanelAuthorityInput = Readonly<{
@@ -567,33 +566,23 @@ export function boundCandidateEntry(
  *  `RefutationPanelAuthorityInput`, or a checkpoint's `authority` field read
  *  back from disk. No shape is assumed of `raw`. */
 export function parseRefutationPanelAuthority(raw: unknown): PersistentPanelResult<RefutationPanelAuthority> {
-  return refutationPanelAuthority(raw, { kind: "recorded", parse: parseExactRoster });
+  return refutationPanelAuthority(raw, parseExactRoster);
 }
 
 /**
- * Where a refutation panel's verifier roster comes from — the one input the
- * parsing and issuing seams differ in: the record's raw `verifierSlots`,
- * parsed as recorded history by `parse`, or a roster already `issued` from
- * minted slots, which is never re-read from untyped data.
- */
-type VerifierRosterSource<Slot extends AgentRosterSlot> =
-  | Readonly<{ kind: "recorded"; parse: (verifierSlots: unknown) => DomainResult<ExactRoster<Slot>, ExactRosterError> }>
-  | Readonly<{ kind: "issued"; roster: DomainResult<ExactRoster<Slot>, ExactRosterError> }>;
-
-/**
  * The refutation panel authority `raw` describes, over the verifier roster
- * `source` yields. Every check but the roster's origin is the same for a
- * parsed and an issued panel, and the result keeps the roster's slot type.
+ * `rosterOf` produces from its `verifierSlots` — the one input the parsing
+ * and issuing seams differ in. Every other check is the same for both.
  */
-function refutationPanelAuthority<Slot extends AgentRosterSlot>(
+function refutationPanelAuthority(
   raw: unknown,
-  source: VerifierRosterSource<Slot>,
-): PersistentPanelResult<RefutationPanelAuthority<Slot>> {
+  rosterOf: (verifierSlots: unknown) => DomainResult<ExactRoster, ExactRosterError>,
+): PersistentPanelResult<RefutationPanelAuthority> {
   try {
     const input = safeRecord(raw, ["runId", "identityRunId", "findings", "lenses", "verifierSlots"]) ??
       safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);
     if (input === null) return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority must be an exact data record"));
-    const roster = source.kind === "issued" ? source.roster : source.parse(input.verifierSlots);
+    const roster = rosterOf(input.verifierSlots);
     const runId = parseOrchestrationRunId(input.runId);
     const identityRunId = parseOrchestrationRunId(input.identityRunId ?? input.runId);
     const rawFindings = safeArray(input.findings);
@@ -644,23 +633,16 @@ export type IssuedRefutationPanelAuthorityInput = RefutationPanelAuthorityInput 
 }>;
 
 /**
- * A refutation panel as ISSUED: its verifier roster holds minted slots only.
- * A panel parsed back from a checkpoint or reconstructed from its durable
- * record is a plain `RefutationPanelAuthority` — history, not issuance.
- */
-export type IssuedRefutationPanelAuthority = RefutationPanelAuthority<MintedAgentRosterSlot>;
-
-/**
  * Issue a refutation panel authority: the issuing seam, typed so its verifier
- * slots must be minted (`mintAgentRosterSlot`). Its
- * roster is issued from those slots (`issueExactRoster`), so the result keeps
- * the minted slot type by construction; every other check is exactly
- * `parseRefutationPanelAuthority`'s.
+ * slots must be minted (`mintAgentRosterSlot`). Its roster is issued from
+ * those typed slots (`issueExactRoster`, which re-checks each against today's
+ * catalog at run time), never re-read from untyped data; every other check is
+ * exactly `parseRefutationPanelAuthority`'s.
  */
 export function issueRefutationPanelAuthority(
   input: IssuedRefutationPanelAuthorityInput,
-): PersistentPanelResult<IssuedRefutationPanelAuthority> {
-  return refutationPanelAuthority(input, { kind: "issued", roster: issueExactRoster(input.verifierSlots) });
+): PersistentPanelResult<RefutationPanelAuthority> {
+  return refutationPanelAuthority(input, () => issueExactRoster(input.verifierSlots));
 }
 
 const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";

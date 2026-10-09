@@ -5,7 +5,7 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 import { CURRENT_PI_CATALOG, currentProfileBindings, parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, profileBindingsUnder, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type CurrentProfileBindings, type LlmProfileId, type LocalPiBinding, type LoomAgentName, type PiBinding, type PiLowering, type RecordedLlmProfileId, type RecordedPiLowering } from '../model-profiles';
-import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+import { canonicalRecord, describeUnknown, failure, isNonEmpty, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
 import { ORCHESTRATION_PROGRAMS, type OrchestrationProgram } from './programs';
@@ -116,11 +116,6 @@ type ProfileAuthority = Readonly<{
   admitPi: (raw: unknown) => DomainResult<PiBinding, NonEmpty<AgentRequestAuthorityViolation>>;
 }>;
 
-const nonEmptyViolations = (
-  head: AgentRequestAuthorityViolation,
-  rest: readonly AgentRequestAuthorityViolation[],
-): NonEmpty<AgentRequestAuthorityViolation> => Object.freeze([head, ...rest]) as NonEmpty<AgentRequestAuthorityViolation>;
-
 /** Exactly one violation, as the non-empty list a refusal carries. */
 const oneViolation = (only: AgentRequestAuthorityViolation): NonEmpty<AgentRequestAuthorityViolation> =>
   Object.freeze([only]) as NonEmpty<AgentRequestAuthorityViolation>;
@@ -136,8 +131,8 @@ function issuedProfile(profileId: LlmProfileId, lowering: PiLowering): ProfileAu
     profileId,
     claude,
     admitPi: (raw: unknown) => {
-      const [head, ...rest] = exactBindingViolations(raw, "harnessBinding.pi", pi);
-      return head === undefined ? success<PiBinding>(pi) : failure(nonEmptyViolations(head, rest));
+      const violations = Object.freeze(exactBindingViolations(raw, "harnessBinding.pi", pi));
+      return isNonEmpty(violations) ? failure(violations) : success<PiBinding>(pi);
     },
   });
 }
@@ -399,13 +394,8 @@ function parseAgentRequestAuthorityInMode(
     }
   }
 
-  const head = violations[0];
-  if (head !== undefined) {
-    return failure(canonicalRecord({
-      kind: "invalid-agent-request-authority",
-      violations: Object.freeze([head, ...violations.slice(1)]) as NonEmpty<AgentRequestAuthorityViolation>,
-    }));
-  }
+  const refused = Object.freeze([...violations]);
+  if (isNonEmpty(refused)) return failure(canonicalRecord({ kind: "invalid-agent-request-authority", violations: refused }));
 
   if (
     !runId.ok || !requestId.ok || !slotId.ok || !contextDigest.ok || !outputSlot.ok ||
@@ -452,7 +442,9 @@ export type MintedHarnessBinding = Readonly<{ pi: LocalPiBinding; claude: Claude
  *   type and a builder that skipped the check does not compile there;
  * - it is a phantom brand: no runtime field, so serialization, equality and
  *   every reader typed `AgentRequestAuthority` are unchanged. It closes the
- *   forgetting path, not a hostile cast.
+ *   forgetting path at compile time; the issuing roster seam
+ *   (`issueExactRoster`) re-runs the strict parse against today's catalog, so
+ *   a slot cast past the brand that is not current is refused at run time too.
  *
  * Which seams take it, and where coverage stops: docs/model-profiles-and-calibration.md,
  * "Issuance (minting)".
@@ -959,25 +951,47 @@ export function parseExactRoster(
     }
     const parsedSlot = parseAgentRosterSlot(attempts.value[0], attempts.value[1]);
     if (!parsedSlot.ok) return { slot: null, violations: parsedSlot.error.violations };
-    return {
-      slot: parsedSlot.value,
-      violations: slotRecord.value.slotId === parsedSlot.value.slotId
-        ? []
-        : [canonicalRecord({ kind: "attempt-pair-mismatch", slotId: parsedSlot.value.slotId, field: "slotId" })],
-    };
+    return { slot: parsedSlot.value, violations: declaredSlotIdViolations(parsedSlot.value.slotId, slotRecord.value.slotId) };
   }));
 }
 
 /**
- * Issue an exact roster from freshly minted slots: the cross-slot checks are
- * exactly `parseExactRoster`'s, and the roster keeps the minted slot type, so
- * an issued aggregate carries its catalog proof without a cast.
+ * Issue an exact roster from freshly minted slots. The seam enforces its
+ * invariant itself rather than trusting the phantom brand: each slot is
+ * re-checked against TODAY's catalog with the strict issue-mode parse
+ * (`currentSlotEntry`), so a recorded slot cast past the type — a retired
+ * profile or binding, a mis-paired attempt — is refused at run time with the
+ * catalog's own violations. The cross-slot checks are exactly
+ * `parseExactRoster`'s, and the roster keeps the minted slot type, so an
+ * issued aggregate carries its catalog proof without a cast.
  */
 export function issueExactRoster(
   slots: readonly MintedAgentRosterSlot[],
 ): DomainResult<ExactRoster<MintedAgentRosterSlot>, ExactRosterError> {
-  return assembleExactRoster(slots.map((slot) => ({ slot, violations: [] })));
+  return assembleExactRoster(slots.map(currentSlotEntry));
 }
+
+/**
+ * `slot` as a roster entry, with every reason it is not one today's catalog
+ * issues: both attempts must pass the strict parse against today's catalog
+ * and pair, and the slot must declare its attempts' slot id, exactly as
+ * `parseExactRoster` reads a recorded slot. Every slot `mintAgentRosterSlot`
+ * returns passes, so for a caller the type admits this only ever refuses a cast.
+ */
+function currentSlotEntry(slot: MintedAgentRosterSlot): RosterEntry<MintedAgentRosterSlot> {
+  const current = <Attempt extends SemanticAttempt>(raw: unknown, attempt: Attempt) => {
+    const parsed = parseAgentRequestAuthorityInMode(raw, "issue");
+    return parsed.ok ? authorityForAttempt(parsed.value, attempt) : parsed;
+  };
+  const paired = pairRosterSlot<AgentRequestAuthority>(current(slot.attempts[0], 1), current(slot.attempts[1], 2));
+  return paired.ok
+    ? { slot, violations: declaredSlotIdViolations(paired.value.slotId, slot.slotId) }
+    : { slot: null, violations: paired.error.violations };
+}
+
+/** A roster slot must declare the slot id its attempts carry. */
+const declaredSlotIdViolations = (attemptsSlotId: SlotId, declared: unknown): readonly RosterViolation[] =>
+  declared === attemptsSlotId ? [] : [canonicalRecord({ kind: "attempt-pair-mismatch", slotId: attemptsSlotId, field: "slotId" })];
 
 /** One roster slot as read: the slot, or `null` when it did not parse, and its own violations. */
 type RosterEntry<S extends AgentRosterSlot> = Readonly<{ slot: S | null; violations: readonly RosterViolation[] }>;
