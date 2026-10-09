@@ -184,14 +184,14 @@ function draftSlot(plan: RefutationVerifierPlan, { lens, binding }: LensBinding)
   return ok(Object.freeze({ slotId, attempts: Object.freeze([first.value, retry.value] as const) }));
 }
 
-/** How a catalog mints one slot from its two request identities: today's (`mintAgentRosterSlot`) or a replayed one (`mintAgentRosterSlotAsOf`). */
-type SlotMint<Slot extends AgentRosterSlot> = (
-  first: AgentRequestIdentity<1>,
-  retry: AgentRequestIdentity<2>,
-) => DomainResult<Slot, AgentRosterSlotError>;
-
-/** Mint each draft's slot with `mint`, or name every reason the catalog refused it. */
-const mintedVerifierSlot = <Slot extends AgentRosterSlot>(mint: SlotMint<Slot>) =>
+/**
+ * Mint each draft's slot with `mint` — today's catalog (`mintAgentRosterSlot`)
+ * or a replayed one (`mintAgentRosterSlotAsOf`) — or name every reason the
+ * catalog refused it.
+ */
+const mintedVerifierSlot = <Slot extends AgentRosterSlot>(
+  mint: (first: AgentRequestIdentity<1>, retry: AgentRequestIdentity<2>) => DomainResult<Slot, AgentRosterSlotError>,
+) =>
   (draft: DraftSlot): Result<PairedSlot<Slot>> => {
     const slot = mint(draft.attempts[0].identity, draft.attempts[1].identity);
     return slot.ok

@@ -32,16 +32,10 @@ export type PiRouteGateSource = Readonly<{
   home: string;
 }>;
 
-function emissionParent(env: NodeJS.ProcessEnv): EmissionParent {
-  const announced = announcedParentHarness(env);
-  return announced === null
-    ? Object.freeze({ harness: "unannounced" })
-    : Object.freeze({ harness: announced.harness, sessionId: announced.sessionId });
-}
-
 /** The emission environment `source` describes: environment variables only, no I/O. */
-export function resolveEmissionEnvironment(source: EmissionEnvironmentSource): EmissionEnvironment {
-  return Object.freeze({ bindingDir: source.bindingDir, parent: emissionParent(source.env) });
+export function resolveEmissionEnvironment({ env, bindingDir }: EmissionEnvironmentSource): EmissionEnvironment {
+  const parent: EmissionParent = announcedParentHarness(env) ?? Object.freeze({ harness: "unannounced" });
+  return Object.freeze({ bindingDir, parent });
 }
 
 /** What a Pi parent's route gate reads under `source`: its agent directory, gate mode and routing context, each as parsed. */
