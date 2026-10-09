@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 /**
  * Process seam only: the real composition under test is
@@ -14,10 +14,6 @@ vi.mock("node:child_process", async (importOriginal) =>
 
 import { openGitRepository } from "../../src/orchestration/git-remediation";
 import { answered, failedToStart, scriptedGit, scriptGit } from "../fixtures/scripted-git";
-
-beforeEach(() => {
-  scriptGit([]);
-});
 
 describe("git boundary emptiness-guard ordering", () => {
   it("refuses a confirmed-empty root probe with the guard's exact message after both bounded probes", () => {
