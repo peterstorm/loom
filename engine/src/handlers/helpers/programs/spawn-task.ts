@@ -5,14 +5,12 @@
  * reader and archive presence, the frozen diff, the Pi parent flag and the
  * issued emission route), converts every refusal into a thrown bounded error,
  * reports an extraction-only route on stderr, and hands the facts to the pure
- * `renderSpawnTaskText` (core/spawn-task-text). The parent-session observation
- * the review programs need for profile selection lives here too.
+ * `renderSpawnTaskText` (core/spawn-task-text).
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
 import { verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { canonicalRecord, canonicalStructuralEquals, type AgentRequestAuthority } from '../../../core/orchestration-contract';
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineage-contract';
-import { reviewerIssueRouteForParent, type ReviewerIssueRoute } from '../../../core/model-profiles';
 import { readRunBytesNoFollow } from '../../../orchestration/no-follow-fs';
 import { CONTEXT_PACKET_MAX_BYTES } from '../../../orchestration/stored-context-packets';
 import type { ReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
@@ -33,17 +31,6 @@ import { requestFrozenDiff } from '../../../orchestration/standalone-read-covera
 
 /** The parent Pi flag: the one ambient read the emission route consumes. */
 const piParentExists = (): boolean => process.env.PI_CODING_AGENT === 'true';
-
-/** Observe the parent Pi session at the shell; only exact qualified model
- * identity may elect the catalog's local reviewer profile. */
-export function observedReviewerIssueRoute(): ReviewerIssueRoute {
-  return reviewerIssueRouteForParent({
-    pi: piParentExists(),
-    provider: process.env.PI_PROVIDER,
-    model: process.env.PI_MODEL,
-    thinking: process.env.PI_REASONING_LEVEL,
-  });
-}
 
 /**
  * The protocol projection a registered review program carries — exactly the

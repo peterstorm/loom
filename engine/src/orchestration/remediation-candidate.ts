@@ -12,7 +12,8 @@ import { compareStrings } from "../core/ordering";
 import { type ArtifactDigest, type DomainResult } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "../core/verification-manifest";
-import { describeGitOutcome, gitExitedWith, spawnGit } from "../utils/git-execution-policy";
+import { spawnGit } from "../utils/git-execution-policy";
+import { describeGitOutcome, gitExitedWith } from "../utils/git-spawn-outcome";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {
   observeWorkspaceDigest,

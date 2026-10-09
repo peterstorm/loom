@@ -13,6 +13,10 @@
  *   the policy would measure the copy. The extraction-only arm is offered no
  *   emission tool, so its transcript is classified by final-message
  *   extraction alone — the PR #52-only baseline — with no emission counters.
+ *   Only an attempt left WITHOUT an accepted payload after ingestion — a
+ *   kernel rejection, or an accepted decision the frozen parser refuses — is
+ *   then read for a provider error ending its last model turn
+ *   (`providerFailure`): an infrastructure failure, never a semantic rejection.
  * - `piArmDispatch` (I/O SHELL) launches the child exactly as production
  *   does per arm: the extraction-only arm is the launcher's print-mode JSON
  *   child; the emission-enabled arm goes through the INSTALLED production
@@ -39,7 +43,7 @@ import {
 } from "../../pi/emission-tool";
 import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../pi/emission-readiness-protocol";
 import { decideReadinessGate, parseReadinessStageObservation } from "../../pi/emission-readiness-gate";
-import { err, ok, type Result } from "../kernel";
+import { err, errorMessage, ok, type Result } from "../kernel";
 import { isRecord, piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine, type PiMessage } from "../pi-json-stream";
 import type { CellBinding } from "./pilot-binding";
 import {
@@ -174,20 +178,48 @@ function ingest<S extends AcceptedSource>(
   return ok(Object.freeze({ outcome, payload: parsed.value }));
 }
 
-/** A settled attempt's outcome: the frozen parser's accepted payload, or the
- *  selection's or the parser's rejection. */
+type InfrastructureFailure = Extract<LaunchEnd, { kind: "infrastructure-failure" }>;
+
+/**
+ * A provider error ending the LAST model turn (`stopReason: "error"`: the
+ * route refused the connection, answered 5xx, or dropped the stream), as the
+ * infrastructure failure it is; null when the last turn ended any other way.
+ */
+function providerFailure(records: readonly PiMessage[]): InfrastructureFailure | null {
+  const last = records.filter((message) => message["role"] === "assistant").at(-1);
+  if (last?.["stopReason"] !== "error") return null;
+  const message = last["errorMessage"];
+  const detail = typeof message === "string" && message.trim() !== "" ? message.trim() : "no error message";
+  return { kind: "infrastructure-failure", reason: `the provider ended the model turn with an error: ${detail}` };
+}
+
+/** A settled attempt's outcome: the frozen parser's accepted payload, the
+ *  selection's or the parser's rejection, or — for an attempt with no
+ *  accepted payload whose last turn failed at the provider — that failure. */
 type SettledOutcome<S extends AcceptedSource, C extends RejectionCause> =
   | Readonly<{ kind: "accepted" } & S & { payloadDigest: string }>
-  | Readonly<{ kind: "rejected"; cause: C | PayloadRefused }>;
+  | Readonly<{ kind: "rejected"; cause: C | PayloadRefused }>
+  | InfrastructureFailure;
 
-/** The settled branch both arms share: a rejected decision stands; an accepted one must pass ingestion. */
+/**
+ * The settled branch both arms share. The attempt is classified FIRST: an
+ * accepted decision must pass ingestion, and an accepted payload stands
+ * whatever happened after it — the production engine ingests an emission at
+ * the tool call, so a turn that errors after it costs nothing. Only an attempt
+ * left WITHOUT an accepted payload is then read for a provider error ending
+ * its last turn (`providerFailure`): that attempt never reached the model's
+ * answer, so it is an infrastructure failure, not a semantic rejection —
+ * counting it as one would charge a route outage to the arm under test and
+ * spend the attempt-2 retry on a route that is down.
+ */
 function settle<S extends AcceptedSource, C extends RejectionCause>(
   cell: CellKey,
   decision: Accepted<S> | Rejected<C>,
+  records: readonly PiMessage[],
 ): Readonly<{ outcome: SettledOutcome<S, C>; payload: unknown }> {
-  if (decision.kind === "rejected") return { outcome: { kind: "rejected", cause: decision.cause }, payload: null };
-  const ingested = ingest(cell, decision);
-  return ingested.ok ? ingested.value : { outcome: { kind: "rejected", cause: ingested.error }, payload: null };
+  const settled = decision.kind === "accepted" ? ingest(cell, decision) : err(decision.cause);
+  if (settled.ok) return settled.value;
+  return { outcome: providerFailure(records) ?? { kind: "rejected", cause: settled.error }, payload: null };
 }
 
 type TranscriptCommon = Readonly<{
@@ -244,7 +276,7 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
       .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
       .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
       .with({ kind: "settled" }, () => {
-        const settled = settle(input.cell, selectExtractionPayload(input.messages));
+        const settled = settle(input.cell, selectExtractionPayload(input.messages), records);
         return end(settled.outcome, settled.payload);
       })
       .exhaustive();
@@ -261,7 +293,7 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
     .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
     .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
     .with({ kind: "settled" }, () => {
-      const settled = settle(input.cell, selectEmissionPayload(input.cellBinding, input.messages));
+      const settled = settle(input.cell, selectEmissionPayload(input.cellBinding, input.messages), records);
       return end(settled.outcome, settled.payload);
     })
     .exhaustive();
@@ -400,8 +432,6 @@ function emissionArgs(config: PiDispatchConfig, toolName: string): readonly stri
   ];
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
 /**
  * How an emission launch ended, from the launcher's outcome (PURE). A launch
  * the launcher reports as successful counts as settled only if the adapter's
@@ -427,7 +457,7 @@ function emissionLaunchEnd(
  *  the window (the extraction arm maps its spawn errors the same way). */
 async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): Promise<AttemptClassification> {
   const launcher = await config.loadLauncher().catch((error: unknown): RpcLauncher =>
-    ({ kind: "unavailable", reason: `the installed launcher could not be loaded: ${messageOf(error)}` }));
+    ({ kind: "unavailable", reason: `the installed launcher could not be loaded: ${errorMessage(error)}` }));
   const started = performance.now();
   const messages: unknown[] = [];
   const readiness: { ms: number | null } = { ms: null };
@@ -463,7 +493,7 @@ async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): 
       (outcome) => emissionLaunchEnd(outcome, abort.signal.aborted, readiness.ms, config.timeoutMs),
       (error: unknown): LaunchEnd => abort.signal.aborted
         ? { kind: "timeout", afterMs: config.timeoutMs }
-        : { kind: "infrastructure-failure", reason: `the installed launcher's runRpcAgent rejected: ${messageOf(error)}` },
+        : { kind: "infrastructure-failure", reason: `the installed launcher's runRpcAgent rejected: ${errorMessage(error)}` },
     );
     return classify(launch);
   } finally {

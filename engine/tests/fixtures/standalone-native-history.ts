@@ -1,14 +1,11 @@
 import type { ContextPacket } from "../../src/core/context-packets";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
-import type { ReviewerIssueRoute } from "../../src/core/model-profiles";
 import { value } from "./parse-result";
 
 /** Genuine owned legacy issuance, never a relocated history pack or downgraded current Run.
- *  `issueRoute` elects the roster's reviewer profile through the catalog's one
- *  issue-route election (`issuedReviewerProfile`), so the SAME fixture mints
- *  the archived v1 contract under either parent route without re-deriving
- *  bindings from ambient environment. */
-export async function startNativeLegacyReview(handle: RunDirHandle, issueRoute: ReviewerIssueRoute = "catalog") {
+ *  Each reviewer is issued under its catalog profile, so the archived v1
+ *  contract carries the same local Pi binding a current request does. */
+export async function startNativeLegacyReview(handle: RunDirHandle) {
   const scopePolicy = await import("../../src/core/standalone-review-scope");
   const preparation = await import("../../src/core/standalone-review-preparation");
   const packets = await import("../../src/core/context-packets");
@@ -25,7 +22,7 @@ export async function startNativeLegacyReview(handle: RunDirHandle, issueRoute: 
   const contexts: ContextPacket[] = [];
   const roster = scopePolicy.STANDALONE_REVIEWER_ROLES.map(role => {
     const policy = value(models.resolveAgentPolicy(role));
-    const profile = value(models.issuedReviewerProfile(role, "standalone-review", issueRoute));
+    const profile = value(models.resolveModelProfile(policy.profile));
     return { slotId: `slot:${role}`, attempts: ([1, 2] as const).map(attempt => {
       const identity = { runId: handle.runId, requestId: standaloneRequests.standaloneRequestId(handle.runId, role, attempt),
         role, attempt, requiredSkill: policy.requiredSkill };

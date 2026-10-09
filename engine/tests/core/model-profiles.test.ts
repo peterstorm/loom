@@ -5,16 +5,21 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   AGENT_POLICIES,
+  CURRENT_PI_CATALOG,
   LLM_PROFILE_IDS,
   LLM_PROFILES,
-  QUALIFIED_LOCAL_REVIEW_PROGRAMS,
-  isIssuableProfile,
+  RETIRED_LLM_PROFILE_IDS,
   lowerModelProfile,
-  issuedReviewerProfile,
-  reviewerIssueRouteForParent,
+  currentProfileBindings,
+  recordedProfileBindings,
   parseAgentFrontmatter,
   parseLlmProfile,
   parseLlmProfileId,
+  parseRecordedLlmProfileId,
+  piCatalogAsOf,
+  piHistoryViolations,
+  piModelPattern,
+  profileBindingsUnder,
   resolveAgentPolicy,
   resolveAgentProfile,
   resolveHarnessBinding,
@@ -33,49 +38,19 @@ import {
   panelJudgeProfileCarriers,
 } from "../../src/core/agent-catalog-projections";
 import { classifyPiSpawnItems, parsePiSpawnItems } from "../../src/core/pi-spawn-input";
-import { ORCHESTRATION_PROGRAMS } from "../../src/core/orchestration-contract/programs";
+
+const LOCAL = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" } as const;
 
 const EXPECTED_PROFILES = {
-  implementation: {
-    claudeCode: { model: "opus" },
-    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
-  },
-  "architecture-finalize": {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  "general-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  "focused-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
-  },
-  "qualified-local-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
-  },
-  "panel-design": {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  "panel-judge": {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  refutation: {
-    claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  },
-  mechanical: {
-    claudeCode: { model: "haiku" },
-    pi: { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
-  },
-  "spec-check-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" },
-  },
+  implementation: { claudeCode: { model: "opus" }, pi: LOCAL },
+  "architecture-finalize": { claudeCode: { model: "opus" }, pi: LOCAL },
+  "general-review": { claudeCode: { model: "sonnet" }, pi: LOCAL },
+  "focused-review": { claudeCode: { model: "sonnet" }, pi: LOCAL },
+  "panel-design": { claudeCode: { model: "opus" }, pi: LOCAL },
+  "panel-judge": { claudeCode: { model: "opus" }, pi: LOCAL },
+  refutation: { claudeCode: { model: "opus" }, pi: LOCAL },
+  mechanical: { claudeCode: { model: "haiku" }, pi: LOCAL },
+  "spec-check-review": { claudeCode: { model: "sonnet" }, pi: LOCAL },
 } as const satisfies Record<LlmProfileId, unknown>;
 
 function errorsOf(result: { readonly ok: true } | { readonly ok: false; readonly errors: readonly string[] }): readonly string[] {
@@ -89,26 +64,13 @@ describe("semantic model profiles", () => {
       .toEqual(EXPECTED_PROFILES);
   });
 
-  it("keeps all default profiles on exact cloud targets and the alternative on one qualified local target", () => {
-    const defaults = LLM_PROFILES.filter(({ id }) => id !== "qualified-local-review");
-    // implementation rides the same local qualified route as the reviewer
-    // election; every other default stays on an exact cloud target.
-    const cloudDefaults = defaults.filter(({ id }) => id !== "implementation");
-    expect(new Set(cloudDefaults.map(({ pi }) => pi.provider))).toEqual(new Set(["github-copilot", "openai-codex"]));
-    expect(new Set(cloudDefaults.map(({ pi }) => pi.model))).toEqual(
-      new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.6-terra"]),
-    );
-    expect(defaults.find(({ id }) => id === "implementation")?.pi).toEqual(EXPECTED_PROFILES.implementation.pi);
-    expect(LLM_PROFILES.find(({ id }) => id === "qualified-local-review")?.pi).toEqual(EXPECTED_PROFILES["qualified-local-review"].pi);
-    expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
+  it("runs every Pi profile on the one local route; profiles differ only in their Claude model", () => {
+    expect(new Set(LLM_PROFILES.map(({ pi }) => piModelPattern(pi)))).toEqual(new Set([piModelPattern(LOCAL)]));
   });
 
-  it("keeps all architecture/discovery panel work on the strongest available harness models", () => {
+  it("keeps all architecture/discovery panel work on the strongest Claude model", () => {
     for (const id of ["panel-design", "panel-judge"] as const) {
-      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({
-        claudeCode: { model: "opus" },
-        pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-      });
+      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({ claudeCode: { model: "opus" }, pi: LOCAL });
     }
   });
 
@@ -143,71 +105,187 @@ describe("semantic model profiles", () => {
   });
 });
 
-describe("qualified-local reviewer issuance", () => {
-  const qualified = { pi: true, provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
-
-  it("elects the local profile only from the exact parent session route", () => {
-    expect(reviewerIssueRouteForParent(qualified)).toBe("qualified-local");
-    for (const changed of [
-      { pi: false }, { provider: "openai-codex" }, { model: "glm-5.3-flash-spark-tp2-v15" },
-      { thinking: "medium" },
-    ]) expect(reviewerIssueRouteForParent({ ...qualified, ...changed })).toBe("catalog");
+describe("recorded profile bindings", () => {
+  it("records each current profile's catalog lowering first, with its unchanged Claude model", () => {
+    for (const profile of LLM_PROFILES) {
+      const recorded = recordedProfileBindings(profile.id);
+      const current = currentProfileBindings(profile.id);
+      expect(current).toEqual({ claude: lowerModelProfile(profile, "claude-code"), pi: lowerModelProfile(profile, "pi") });
+      expect(recorded.pi[0]).toEqual(current.pi);
+      expect(recorded.claude).toEqual(current.claude);
+    }
   });
 
-  it.each(QUALIFIED_LOCAL_REVIEW_PROGRAMS)("preserves the catalog for all non-reviewers and the cloud default in %s", (program) => {
-    expect(issuedReviewerProfile("code-reviewer", program, "qualified-local")).toMatchObject({
-      ok: true, value: { id: "qualified-local-review", pi: qualifiedRoute },
+  it("keeps every recorded binding byte-for-byte, current lowering included", () => {
+    const rows = Object.fromEntries([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].map((id) => {
+      const recorded = recordedProfileBindings(id);
+      return [id, [recorded.claude.model, ...recorded.pi.map((binding) => JSON.stringify(binding))]];
+    }));
+    const local = JSON.stringify({ harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" });
+    const sol = JSON.stringify({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
+    expect(rows).toEqual({
+      implementation: ["opus", local, sol],
+      "architecture-finalize": ["opus", local, sol],
+      "general-review": ["sonnet", local, sol],
+      "focused-review": ["sonnet", local, JSON.stringify({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" })],
+      "qualified-local-review": ["sonnet", local],
+      "panel-design": ["opus", local, sol],
+      "panel-judge": ["opus", local, sol],
+      refutation: ["opus", local, sol],
+      mechanical: ["haiku", local, JSON.stringify({ harness: "pi", provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" })],
+      "spec-check-review": ["sonnet", local, JSON.stringify({ harness: "pi", provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" })],
     });
-    expect(issuedReviewerProfile("code-reviewer", program, "catalog")).toEqual(resolveModelProfile("general-review"));
-    expect(issuedReviewerProfile("spec-check-invoker", program, "qualified-local")).toEqual(resolveModelProfile("spec-check-review"));
-    expect(issuedReviewerProfile("review-verifier-agent", program, "qualified-local")).toEqual(resolveModelProfile("refutation"));
   });
 
-  it("names exactly the Wave Gate and Standalone Review programs as electing", () => {
-    expect(QUALIFIED_LOCAL_REVIEW_PROGRAMS).toEqual(["wave-gate", "standalone-review"]);
-    expect(Object.isFrozen(QUALIFIED_LOCAL_REVIEW_PROGRAMS)).toBe(true);
-  });
-});
-
-describe("the one profile-eligibility rule", () => {
-  // `null` is a program that did not parse: it elects nothing.
-  const programs = [...ORCHESTRATION_PROGRAMS, null];
-
-  it("admits a role's catalog profile in every program, and only qualified-local-review besides", () => {
-    for (const policy of AGENT_POLICIES) for (const program of programs) for (const id of LLM_PROFILE_IDS) {
-      const electsLocal = id === "qualified-local-review" && policy.kind.kind === "reviewer" &&
-        (program === "wave-gate" || program === "standalone-review");
-      expect(isIssuableProfile(policy, program, id), `${policy.agent}/${String(program)}/${id}`)
-        .toBe(id === policy.profile || electsLocal);
+  it("returns immutable recorded and current bindings", () => {
+    for (const id of [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]) {
+      const recorded = recordedProfileBindings(id);
+      expect(Object.isFrozen(recorded) && Object.isFrozen(recorded.pi) && Object.isFrozen(recorded.claude)).toBe(true);
+      expect(recorded.pi.every(Object.isFrozen)).toBe(true);
+    }
+    for (const id of LLM_PROFILE_IDS) {
+      const current = currentProfileBindings(id);
+      expect(Object.isFrozen(current) && Object.isFrozen(current.pi) && Object.isFrozen(current.claude)).toBe(true);
     }
   });
 
-  it("issuance only ever elects a profile the rule admits", () => {
-    fc.assert(fc.property(
-      fc.constantFrom(...AGENT_POLICIES),
-      fc.constantFrom(...QUALIFIED_LOCAL_REVIEW_PROGRAMS),
-      fc.constantFrom("catalog" as const, "qualified-local" as const),
-      (policy, program, route) => {
-        const issued = issuedReviewerProfile(policy.agent, program, route);
-        expect(issued.ok).toBe(true);
-        if (!issued.ok) return;
-        expect(isIssuableProfile(policy, program, issued.value.id)).toBe(true);
-        // The catalog route never leaves the role's catalog profile.
-        if (route === "catalog") expect(issued.value.id).toBe(policy.profile);
+  it("keeps the cloud targets each profile issued before 2026-10-08, and nothing it never issued", () => {
+    const history = Object.fromEntries([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].map((id) =>
+      [id, recordedProfileBindings(id).pi.slice(1).map(piModelPattern)]));
+    expect(history).toEqual({
+      implementation: ["openai-codex/gpt-5.6-sol:high"],
+      "architecture-finalize": ["openai-codex/gpt-5.6-sol:high"],
+      "general-review": ["openai-codex/gpt-5.6-sol:high"],
+      "focused-review": ["openai-codex/gpt-5.5:high"],
+      "qualified-local-review": [],
+      "panel-design": ["openai-codex/gpt-5.6-sol:high"],
+      "panel-judge": ["openai-codex/gpt-5.6-sol:high"],
+      refutation: ["openai-codex/gpt-5.6-sol:high"],
+      mechanical: ["openai-codex/gpt-5.4-mini:medium"],
+      "spec-check-review": ["github-copilot/gpt-5.6-terra:high"],
+    });
+  });
+
+  it("parses a retired profile id only as a recorded one", () => {
+    expect(parseRecordedLlmProfileId("qualified-local-review")).toEqual({ ok: true, value: "qualified-local-review" });
+    expect(parseRecordedLlmProfileId("general-review")).toEqual({ ok: true, value: "general-review" });
+    expect(parseLlmProfileId("qualified-local-review").ok).toBe(false);
+    expect(resolveModelProfile("qualified-local-review").ok).toBe(false);
+    expect(parseRecordedLlmProfileId("current").ok).toBe(false);
+  });
+
+  it("parses exactly the catalog and retired ids as recorded, naming both in one refusal", () => {
+    fc.assert(fc.property(fc.oneof(fc.constantFrom(...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS), fc.string(), fc.anything()), (raw) => {
+      const recorded = ([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as readonly unknown[]).includes(raw);
+      const parsed = parseRecordedLlmProfileId(raw);
+      expect(parsed.ok).toBe(recorded);
+      if (!parsed.ok) {
+        for (const id of [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]) expect(parsed.error.message).toContain(id);
+      }
+    }));
+  });
+
+  it("holds the history invariant on every recorded row: no repeat, never the current target", () => {
+    for (const id of LLM_PROFILE_IDS) {
+      const [current, ...history] = recordedProfileBindings(id).pi;
+      expect(piHistoryViolations(id, current!, history), id).toEqual([]);
+    }
+    for (const id of RETIRED_LLM_PROFILE_IDS) {
+      expect(piHistoryViolations(id, null, recordedProfileBindings(id).pi), id).toEqual([]);
+    }
+  });
+
+  it("names a history entry equal to the profile's current target, and every repeated entry", () => {
+    const local = currentProfileBindings("refutation").pi;
+    const sol = { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" } as const;
+    const mini = { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" } as const;
+    expect(piHistoryViolations("refutation", local, [sol, local, mini, sol, sol])).toEqual([
+      { kind: "current-target-in-history", profileId: "refutation", target: piModelPattern(local) },
+      { kind: "duplicate-history-target", profileId: "refutation", target: piModelPattern(sol) },
+      { kind: "duplicate-history-target", profileId: "refutation", target: piModelPattern(sol) },
+    ]);
+    expect(piHistoryViolations("qualified-local-review", null, [local, local])).toEqual([
+      { kind: "duplicate-history-target", profileId: "qualified-local-review", target: piModelPattern(local) },
+    ]);
+  });
+
+  it("property: a history of distinct non-current targets has no violation, and appending any of its entries adds exactly one", () => {
+    const targets = [
+      { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+      { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
+      { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
+      { provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" },
+    ] as const;
+    const current = currentProfileBindings("general-review").pi;
+    fc.assert(fc.property(fc.shuffledSubarray([...targets], { minLength: 1 }), fc.nat(), (history, pick) => {
+      expect(piHistoryViolations("general-review", current, history)).toEqual([]);
+      const repeated = history[pick % history.length]!;
+      expect(piHistoryViolations("general-review", current, [...history, repeated]))
+        .toEqual([{ kind: "duplicate-history-target", profileId: "general-review", target: piModelPattern(repeated) }]);
+    }));
+  });
+});
+
+describe("the Pi lowering table: today's catalog and a replayed one", () => {
+  /** Every Pi binding any catalog profile has issued: the vocabulary a replay may name. */
+  const ISSUED_TARGETS = [...new Map(LLM_PROFILE_IDS.flatMap((id) => recordedProfileBindings(id).pi)
+    .map((binding) => [piModelPattern(binding), binding] as const)).values()];
+
+  it("lowers every catalog profile through today's table, so the catalog, lowering and issuance agree", () => {
+    for (const profile of LLM_PROFILES) {
+      expect(CURRENT_PI_CATALOG.lowering[profile.id]).toEqual(profile.pi);
+      expect(profileBindingsUnder(CURRENT_PI_CATALOG.lowering, profile.id)).toEqual(currentProfileBindings(profile.id));
+      expect(currentProfileBindings(profile.id).pi).toEqual(lowerModelProfile(profile, "pi"));
+    }
+    expect(Object.isFrozen(CURRENT_PI_CATALOG) && Object.isFrozen(CURRENT_PI_CATALOG.lowering)).toBe(true);
+  });
+
+  it("replays nothing when a replay names no profile: the replayed table is today's", () => {
+    const replayed = piCatalogAsOf({});
+    expect(replayed).toEqual({ ok: true, value: { kind: "recorded-as-of", lowering: CURRENT_PI_CATALOG.lowering } });
+  });
+
+  it("property: accepts exactly the targets the named profile issued, lowering it there and every other profile as today", () => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...ISSUED_TARGETS), (named, target) => {
+      const issued = recordedProfileBindings(named).pi.some((binding) => piModelPattern(binding) === piModelPattern(target));
+      const replayed = piCatalogAsOf({ [named]: target });
+      expect(replayed.ok).toBe(issued);
+      if (!replayed.ok) {
+        expect(replayed.error).toEqual({
+          kind: "unrecorded-pi-binding",
+          message: `profile '${named}' never recorded the Pi binding ${piModelPattern(target)}`,
+        });
+        return;
+      }
+      for (const id of LLM_PROFILE_IDS) {
+        const bindings = profileBindingsUnder(replayed.value.lowering, id);
+        expect(bindings.claude).toEqual(currentProfileBindings(id).claude);
+        expect(bindings.pi).toEqual(id === named ? target : currentProfileBindings(id).pi);
+      }
+    }));
+  });
+
+  it("names every unrecorded binding of one replay in one refusal", () => {
+    const sol = recordedProfileBindings("refutation").pi[1]!;
+    const mini = recordedProfileBindings("mechanical").pi[1]!;
+    expect(piCatalogAsOf({ refutation: mini, mechanical: sol, implementation: sol })).toEqual({
+      ok: false,
+      error: {
+        kind: "unrecorded-pi-binding",
+        message: `profile 'refutation' never recorded the Pi binding ${piModelPattern(mini)}; ` +
+          `profile 'mechanical' never recorded the Pi binding ${piModelPattern(sol)}`,
       },
-    ));
+    });
   });
 
-  it("issuance elects the local profile for every reviewer the rule admits it for", () => {
-    for (const policy of AGENT_POLICIES) for (const program of QUALIFIED_LOCAL_REVIEW_PROGRAMS) {
-      const issued = issuedReviewerProfile(policy.agent, program, "qualified-local");
-      expect(issued.ok && issued.value.id === "qualified-local-review", policy.agent)
-        .toBe(isIssuableProfile(policy, program, "qualified-local-review"));
-    }
+  it("stores the recorded target itself, whatever extra fields the named binding carries", () => {
+    const sol = recordedProfileBindings("refutation").pi[1]!;
+    const replayed = piCatalogAsOf({ refutation: sol });
+    if (!replayed.ok) throw new Error(replayed.error.message);
+    expect(replayed.value.lowering.refutation).toEqual({ provider: sol.provider, model: sol.model, thinking: sol.thinking });
+    expect(Object.isFrozen(replayed.value) && Object.isFrozen(replayed.value.lowering)).toBe(true);
   });
 });
-
-const qualifiedRoute = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
 
 describe("Pi spawn input parsing", () => {
   it("parses each single, parallel, and chain mode in order", () => {
@@ -402,7 +480,7 @@ describe("exhaustive Loom agent policy", () => {
 describe("typed harness lowering", () => {
   it.each([
     ["claude-code", "sonnet", "opus"],
-    ["pi", "openai-codex/gpt-5.6-sol:high", "openai-codex/gpt-5.5:high"],
+    ["pi", "desktop-vllm/glm-5.3-flash-spark-tp2-v14:high", "openai-codex/gpt-5.6-sol:high"],
   ] as const)("requires the exact explicit %s model", (harness, expected, wrong) => {
     expect(validateExplicitSpawnModel("code-reviewer", harness, expected)).toEqual({ ok: true });
     const mismatch = validateExplicitSpawnModel("code-reviewer", harness, wrong);
@@ -422,24 +500,9 @@ describe("typed harness lowering", () => {
   });
 
   it("lowers Pi to exact provider/model/thinking fields", () => {
-    expect(resolveHarnessBinding("review-verifier-agent", "pi")).toEqual({
-      ok: true,
-      value: {
-        harness: "pi",
-        provider: "openai-codex",
-        model: "gpt-5.6-sol",
-        thinking: "high",
-      },
-    });
-    expect(resolveHarnessBinding("comment-analyzer", "pi")).toEqual({
-      ok: true,
-      value: {
-        harness: "pi",
-        provider: "openai-codex",
-        model: "gpt-5.5",
-        thinking: "high",
-      },
-    });
+    for (const agent of ["review-verifier-agent", "comment-analyzer", "spec-check-invoker"]) {
+      expect(resolveHarnessBinding(agent, "pi")).toEqual({ ok: true, value: { harness: "pi", ...LOCAL } });
+    }
   });
 
   it("rejects an unknown harness rather than returning a partial binding", () => {

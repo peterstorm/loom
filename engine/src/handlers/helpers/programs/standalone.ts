@@ -45,9 +45,10 @@ import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standalo
 import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { failed, type FacadeDriveResult, type ProgramParse } from './program-result';
-import { observedReviewerIssueRoute, renderReviewProgramSpawn } from './spawn-task';
+import { renderReviewProgramSpawn } from './spawn-task';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { type RegisteredStandaloneProgram } from './registration';
+import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 
 const preparedSuccessorStarts = new WeakSet<object>();
 
@@ -112,7 +113,7 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
     const prepared = prepareFreshStandaloneReview({ runId: destination.value.runId, explicitScope: input.files,
       changedPaths: changed.authority, successor: lineage.value.prepared, reviewerContexts: lineage.value.contexts,
       scopeSafety: lineage.value.prepared.snapshot.map(row => ({ path: row.path, status: row.kind === "absent" ? "absent" : "safe" })),
-      reviewMetadata: preparationMetadata(reviewMetadata), reviewerIssueRoute: observedReviewerIssueRoute() });
+      reviewMetadata: preparationMetadata(reviewMetadata) });
     if (!prepared.ok) return { ok: false as const, message: prepared.error.errors.join("; ") };
     const registration: RegisteredStandaloneSuccessorProgram = Object.freeze({ schemaVersion: 3, kind: "standalone-review",
       reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, input, currentSource: source.value.source,
@@ -185,7 +186,6 @@ export async function startStandaloneFacade(
       reviewMetadata: preparationMetadata(reviewMetadata),
       scopeSafety: safeScope(scope),
       reviewerContexts: packetSet.contexts,
-      reviewerIssueRoute: observedReviewerIssueRoute(),
     });
     if (!prepared.ok) return failed(prepared.error.errors.join("; "));
     const registration: RegisteredStandaloneProgram = Object.freeze({
@@ -354,9 +354,16 @@ export async function inspectStandaloneFacade(
   }
 }
 
+/**
+ * Resume a standalone review. `catalog` is the catalog a Refutation Panel
+ * with no record is minted under: today's in production; a replay of a run
+ * written before a catalog retargeting passes the catalog as it stood
+ * (`piCatalogAsOf`).
+ */
 export async function resumeStandaloneFacade(
   opened: RunDirHandle,
   registration: RegisteredStandaloneProgram,
+  catalog: PiCatalog = CURRENT_PI_CATALOG,
 ): Promise<FacadeDriveResult> {
   try {
     const admission = await admitStandaloneRun(opened, registration);
@@ -436,7 +443,7 @@ export async function resumeStandaloneFacade(
       case "awaiting-refutation":
         return resumeAwaitingRefutation(handle, state.value, resolver);
       case "awaiting-results":
-        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols, registration);
+        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols, registration, catalog);
       case "preparing":
       case "aggregating":
         return failed(`unsupported standalone resume state ${state.value.kind}`);
@@ -457,7 +464,8 @@ async function resumeAwaitingRefutation(
   state: Extract<StandaloneReviewMachineState, { kind: "awaiting-refutation" }>,
   resolver: PublicationAuthorityResolver,
 ): Promise<FacadeDriveResult> {
-  const preparation = standaloneRefutationPreparation(handle, state.authority, state.aggregate);
+  // The checkpointed panel is this run's record of issuance: resume reads it, never re-mints it.
+  const preparation = standaloneRefutationPreparation(handle, state.authority, state.aggregate, state.refutationAuthority, CURRENT_PI_CATALOG);
   if (state.authority.schemaVersion === 3) for (const packet of preparation.packets) await publishStandalonePanelView(handle, packet);
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver);
   if (recovered.kind === "corrupt") return failed(recovered.message);
@@ -498,7 +506,7 @@ async function resumeAwaitingRefutation(
       action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, reissues, true) },
     };
   }
-  let panelState = startPersistentRefutationPanel(preparation.panel).state;
+  let panelState = startPersistentRefutationPanel(preparation.refutationAuthority).state;
   // Collect the FULL immutable event prefix as the panel runs. The legacy
   // completed-state projection records accepted verdicts only, so a slot
   // accepted on attempt 2 (after an attempt-1 verdict was rejected) cannot
@@ -615,6 +623,7 @@ async function resumeAwaitingResults(
   resolver: PublicationAuthorityResolver,
   reviewerProtocols: StandaloneReviewerProtocolResolver,
   registration: RegisteredStandaloneProgram,
+  catalog: PiCatalog,
 ): Promise<FacadeDriveResult> {
   const activeAuthority = state.authority;
   const recovered = durableRequests(handle, activeAuthority, resolver);
@@ -798,12 +807,13 @@ async function resumeAwaitingResults(
   const aggregate = aggregateStandaloneReview({ authority: activeAuthority, completion: completion.value });
   if (!aggregate.ok) return failed(aggregate.errors.join("; "));
   if (aggregate.value.kind !== "clean") {
-    const preparation = standaloneRefutationPreparation(handle, activeAuthority, aggregate.value.aggregate);
+    // No panel checkpoint exists yet: it is written below, after this preparation.
+    const preparation = standaloneRefutationPreparation(handle, activeAuthority, aggregate.value.aggregate, null, catalog);
     reduced = reduceStandaloneReviewMachine(reduced.value, {
       kind: "aggregate-has-criticals",
       aggregate: aggregate.value.aggregate,
       panelAuthority: preparation.frozen,
-      refutationAuthority: preparation.panel,
+      refutationAuthority: preparation.refutationAuthority,
     });
     if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") return failed(reduced.ok ? "critical route did not reach refutation" : reduced.error.message);
     await handle.writeCheckpoint(serializeStandaloneReviewMachineState(reduced.value));

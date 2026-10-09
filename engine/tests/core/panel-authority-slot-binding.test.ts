@@ -22,6 +22,7 @@ import {
   type SlotId,
 } from "../../src/core/orchestration-contract";
 import { parseWaveFindingId, type BriefFinding, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
+import { lowerModelProfile, resolveModelProfile, type LlmProfileId } from "../../src/core/model-profiles";
 import { value } from "../fixtures/parse-result";
 
 /**
@@ -32,10 +33,12 @@ import { value } from "../fixtures/parse-result";
 
 
 const hexDigest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
-const harnessBinding = {
-  pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  claude: { harness: "claude-code", model: "opus" },
-} as const;
+/** The binding the catalog issues `profileId` under today, so each minted
+ *  attempt below passes the issue-mode check without re-spelling a target. */
+const harnessBinding = (profileId: LlmProfileId) => {
+  const profile = value(resolveModelProfile(profileId));
+  return { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") };
+};
 
 function attemptAuthority(
   runId: OrchestrationRunId,
@@ -45,7 +48,7 @@ function attemptAuthority(
   program: "architecture-panel" | "refutation-panel",
   role: "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent",
 ) {
-  const modelProfile = role === "arch-designer-agent" ? "panel-design" : role === "arch-judge-agent" ? "panel-judge" : "refutation";
+  const modelProfile: LlmProfileId = role === "arch-designer-agent" ? "panel-design" : role === "arch-judge-agent" ? "panel-judge" : "refutation";
   return value(parseAgentRequestAuthority({
     runId,
     requestId: value(parseRequestId(requestId)),
@@ -54,7 +57,7 @@ function attemptAuthority(
     role,
     attempt,
     modelProfile,
-    harnessBinding,
+    harnessBinding: harnessBinding(modelProfile),
     requiredSkill: role === "arch-designer-agent" ? "architecture-tech-lead" : null,
     contextDigest: value(parseContextDigest(hexDigest(`${requestId}:context`))),
     outputSlot: `transcripts/${slotId.replace(/:/g, "-")}-attempt-${attempt}.json`,

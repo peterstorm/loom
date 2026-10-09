@@ -3,7 +3,7 @@ import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { Result } from "../kernel";
-import { decidePreflight, type PreflightFacts } from "./pilot-preflight";
+import { decidePreflight } from "./pilot-preflight";
 import type { Preregistration } from "./pilot-preregistration";
 import {
   checkPreregistrationUnchanged,
@@ -11,7 +11,6 @@ import {
   parseAssessmentText,
   parseObservationLog,
   parsePreregistrationFile,
-  parseRetainedWindow,
   pilotWindowId,
   planDispatch,
   recordWindow,
@@ -19,12 +18,16 @@ import {
   WINDOW_FILES,
   type DecisionOutcome,
   type LoadedPreregistration,
-  type WindowRecord,
+  type RecordedWindow,
   type WindowRun,
   type WindowStore,
 } from "./pilot-retention";
-import { accepted, ATTEMPT_MS, fakeRoute, HERE, prereg, READY, REPO_ROOT, runWindow, WORKLOAD, type FakeRoute } from "./pilot-test-fixtures";
+import {
+  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, PILOT_1, pilot2PreregBytes, preregBytes, READY, READY_FACTS, REPO_ROOT, runWindow,
+  testWindowRecord as windowRecord, UNREACHABLE_FACTS, WORKLOAD, type FakeRoute,
+} from "./pilot-test-fixtures";
 import { contentDigest } from "./pilot-vocabulary";
+import { DISPATCHED, parseRetainedWindow, type WindowRecord } from "./pilot-window-record";
 
 /**
  * The retention rules of one AD-11 window (AS-017), pinned at the
@@ -48,35 +51,7 @@ function memoryStore(seed: ReadonlyMap<string, string> = new Map()): MemoryStore
   };
 }
 
-const preregBytes = readFileSync(join(HERE, "preregistration.json"));
-const LOADED: LoadedPreregistration = {
-  ref: { path: "calibration/grammar-constrained-decoding/preregistration.json", digest: contentDigest(preregBytes), id: prereg.id },
-  prereg,
-};
 const loadSame = (): Result<LoadedPreregistration, string> => ({ ok: true, value: LOADED });
-
-const UNREACHABLE_FACTS: PreflightFacts = {
-  registry: { "reviewer-payload/v2": null, "reviewer-payload/v3": null, "judge-verdict/v1": null, "refutation-verdict/v1": null },
-  workloadFixturesDigest: prereg.workloadFixturesDigest,
-  piVersion: prereg.route.piVersion,
-  stagedRuntimeRevision: "sha256:abc",
-  loadedRuntimeRevision: null,
-  route: { kind: "unreachable", reason: "connection refused" },
-};
-
-const windowRecord = (dispatched: boolean): WindowRecord => {
-  const preflight = dispatched ? READY : decidePreflight(prereg, UNREACHABLE_FACTS);
-  return {
-    schemaVersion: 1,
-    windowId: "test-window",
-    preregistration: LOADED.ref,
-    workloadFixtures: { path: "calibration/grammar-constrained-decoding/workload-fixtures.json", digest: prereg.workloadFixturesDigest },
-    startedAt: "2026-10-05T08:00:00.000Z",
-    preflightFacts: UNREACHABLE_FACTS,
-    preflight,
-    dispatch: planDispatch(preflight, false),
-  };
-};
 
 let tick = 0;
 const clock = (): string => new Date(Date.UTC(2026, 9, 5, 9, 0, tick++)).toISOString();
@@ -90,12 +65,22 @@ const decided = (result: Result<DecisionOutcome, string>): Extract<DecisionOutco
   return result.value;
 };
 
+/** A window `recordWindow` recorded (nothing refused before writing). */
+const recorded = (result: Result<RecordedWindow, string>): RecordedWindow => {
+  if (!result.ok) throw new Error(result.error);
+  return result.value;
+};
+
+/** A recorded window whose decision was recorded. */
+const decidedRecord = (result: Result<RecordedWindow, string>) => decided(recorded(result).decision);
+
 const json = (store: MemoryStore, name: string): Record<string, unknown> => JSON.parse(store.files.get(name) ?? "null");
 
 /** A `--pilot` run over a store, dispatching through a route (by default one that must never be reached). */
 const windowRun = (store: MemoryStore, record: WindowRecord, overrides: Partial<WindowRun> = {}, route?: FakeRoute): WindowRun => ({
   store, record, preregistration: LOADED, workload: WORKLOAD,
   dispatch: route?.dispatch ?? (() => { throw new Error("a window that does not dispatch never reaches the route"); }),
+  routeHealth: route === undefined ? () => { throw new Error("a window that does not dispatch never probes the route"); } : HEALTHY_ROUTE,
   monotonicNow: route?.now ?? (() => { throw new Error("a window that does not dispatch reads no monotonic clock"); }),
   onPair: () => {},
   externalAssessments: [], now: clock,
@@ -105,7 +90,7 @@ const windowRun = (store: MemoryStore, record: WindowRecord, overrides: Partial<
 /** A blocked window as `--pilot` leaves it. */
 async function blockedWindow(): Promise<MemoryStore> {
   const store = memoryStore();
-  decided(await recordWindow(windowRun(store, windowRecord(false))));
+  decidedRecord(await recordWindow(windowRun(store, windowRecord(UNREACHABLE_FACTS))));
   return store;
 }
 
@@ -113,9 +98,10 @@ async function blockedWindow(): Promise<MemoryStore> {
 
 describe("pure retention derivations", () => {
   it("plans dispatch only behind a ready preflight and without --preflight-only", () => {
-    expect(planDispatch(READY, false)).toEqual({ kind: "dispatched" });
+    // The dispatched plan has one definition, recorded at open and at close alike.
+    expect(planDispatch(READY, false)).toBe(DISPATCHED);
     expect(planDispatch(READY, true)).toEqual({ kind: "not-attempted", reason: "--preflight-only" });
-    expect(planDispatch(decidePreflight(prereg, UNREACHABLE_FACTS), false).kind).toBe("not-attempted");
+    expect(planDispatch(decidePreflight(PILOT_1, UNREACHABLE_FACTS), false).kind).toBe("not-attempted");
   });
 
   it("content-addresses a preregistration by its exact bytes and refuses malformed files", () => {
@@ -135,19 +121,21 @@ describe("pure retention derivations", () => {
     expect(parseObservationLog(`{"pairId":"x"}\n`)).toMatchObject({ ok: false, error: expect.stringMatching(/^observation line 1: /) });
   });
 
-  it("reads back a retained window's preregistration record and facts, and refuses one without them", () => {
-    const text = JSON.stringify(windowRecord(false));
-    expect(parseRetainedWindow(text, "w.json")).toEqual({
-      ok: true,
-      value: { preregistration: { path: LOADED.ref.path, digest: LOADED.ref.digest }, facts: UNREACHABLE_FACTS },
-    });
-    expect(parseRetainedWindow(JSON.stringify({ preflightFacts: UNREACHABLE_FACTS }), "w.json")).toEqual({ ok: false, error: "w.json carries no preregistration record" });
-    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(false), preflightFacts: {} }), "w.json"))
-      .toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json preflight facts: /) });
+  it("writes window.json through its codec: every aborted ending recordWindow writes parses back (property)", async () => {
+    await fc.assert(fc.asyncProperty(fc.nat({ max: 6 }), fc.boolean(), async (outageFrom, routeDown) => {
+      const store = memoryStore();
+      const route = fakeRoute((request) => (route.requests.length > outageFrom * 2 ? INFRASTRUCTURE : accepted(request)));
+      const { window } = recorded(await recordWindow(windowRun(store, windowRecord(READY_FACTS), {
+        routeHealth: async () => (routeDown ? { kind: "unreachable", reason: "down" } : { kind: "reachable" }),
+      }, route)));
+      if (!("ending" in window)) throw new Error("a dispatched window records its ending");
+      const readBack = parseRetainedWindow(store.files.get(WINDOW_FILES.window) ?? "", "w.json");
+      expect(readBack.ok && readBack.value.ending).toEqual({ kind: "dispatched", ending: window.ending });
+    }), { numRuns: 14 });
   });
 
   it("refuses to re-decide against a preregistration whose bytes changed", () => {
-    const window = { preregistration: { path: LOADED.ref.path, digest: LOADED.ref.digest }, facts: UNREACHABLE_FACTS };
+    const window = { preregistration: LOADED.ref, facts: UNREACHABLE_FACTS, ending: { kind: "not-dispatched" as const } };
     expect(checkPreregistrationUnchanged(window, LOADED, "w")).toEqual({ ok: true, value: null });
     const edited = { ...LOADED, ref: { ...LOADED.ref, digest: "e".repeat(64) } };
     expect(checkPreregistrationUnchanged(window, edited, "w")).toMatchObject({ ok: false, error: expect.stringContaining("changed after window w was recorded") });
@@ -191,7 +179,7 @@ describe("recordWindow (--pilot)", () => {
     const store = await blockedWindow();
     const before = new Map(store.files);
     const writes = store.writes.length;
-    const again = await recordWindow(windowRun(store, windowRecord(false)));
+    const again = await recordWindow(windowRun(store, windowRecord(UNREACHABLE_FACTS)));
     expect(again).toEqual({ ok: false, error: "window mem:/window/ already exists; a retained window is never overwritten" });
     expect(store.writes).toHaveLength(writes);
     expect(store.files).toEqual(before);
@@ -210,7 +198,7 @@ describe("recordWindow (--pilot)", () => {
       },
     };
     const progress: string[] = [];
-    decided(await recordWindow(windowRun(store, windowRecord(true), { onPair: (index, total) => { progress.push(`${index + 1}/${total}`); } }, counted)));
+    decidedRecord(await recordWindow(windowRun(store, windowRecord(READY_FACTS), { onPair: (index, total) => { progress.push(`${index + 1}/${total}`); } }, counted)));
     const lines = (store.files.get(WINDOW_FILES.observations) ?? "").trim().split("\n");
     // The fake route answers every attempt at once: attempt n sees the n-1 samples before it persisted.
     expect(persistedAtDispatch).toEqual(lines.map((_line, index) => index));
@@ -228,13 +216,13 @@ describe("recordWindow (--pilot)", () => {
 
   it("refuses a window whose case inputs do not resolve before writing anything", async () => {
     const store = memoryStore();
-    const [first, ...rest] = prereg.cells;
+    const [first, ...rest] = PILOT_1.cells;
     if (first === undefined) throw new Error("the preregistration has no cell");
     const [broken, ...cases] = first.workload.cases;
     if (broken === undefined) throw new Error(`${first.cell} has no case`);
-    const unresolvable: Preregistration = { ...prereg, cells: [{ ...first, workload: { ...first.workload, cases: [{ ...broken, source: "corpus:gone" }, ...cases] } }, ...rest] };
+    const unresolvable: Preregistration = { ...PILOT_1, cells: [{ ...first, workload: { ...first.workload, cases: [{ ...broken, source: "corpus:gone" }, ...cases] } }, ...rest] };
     const route = fakeRoute(accepted);
-    const outcome = await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: unresolvable } }, route));
+    const outcome = await recordWindow(windowRun(store, windowRecord(READY_FACTS), { preregistration: { ...LOADED, prereg: unresolvable } }, route));
     expect(outcome).toEqual({
       ok: false,
       error: `window test-window cannot dispatch: its preregistered case inputs do not resolve:\n  - ${first.cell} case ${broken.caseId}: corpus case gone is not in the corpus`,
@@ -242,16 +230,16 @@ describe("recordWindow (--pilot)", () => {
     expect(store.writes).toEqual([]);
     expect(route.requests).toHaveLength(0);
     // A window that will not dispatch never resolves its inputs.
-    decided(await recordWindow(windowRun(memoryStore(), windowRecord(false), { preregistration: { ...LOADED, prereg: unresolvable } })));
+    decidedRecord(await recordWindow(windowRun(memoryStore(), windowRecord(UNREACHABLE_FACTS), { preregistration: { ...LOADED, prereg: unresolvable } })));
   });
 
   it("loads the workload corpus only for a window that dispatches: a blocked or --preflight-only window is retained whatever the corpus", async () => {
     const loads: string[] = [];
     const unloadable = { ...WORKLOAD, loadCorpusCases: () => { loads.push("load"); return { ok: false as const, error: "ENOENT: no such corpus" }; } };
-    const preflightOnly: WindowRecord = { ...windowRecord(true), dispatch: planDispatch(READY, true) };
-    for (const record of [windowRecord(false), preflightOnly]) {
+    const preflightOnly: WindowRecord = { ...windowRecord(READY_FACTS), dispatch: planDispatch(READY, true) };
+    for (const record of [windowRecord(UNREACHABLE_FACTS), preflightOnly]) {
       const store = memoryStore();
-      const outcome = decided(await recordWindow(windowRun(store, record, { workload: unloadable })));
+      const outcome = decidedRecord(await recordWindow(windowRun(store, record, { workload: unloadable })));
       expect(outcome.decision).toBe("incomplete-missing-measurement");
       expect(json(store, WINDOW_FILES.window)).toMatchObject({ dispatch: record.dispatch, observations: 0 });
       expect(store.files.has(WINDOW_FILES.decision)).toBe(true);
@@ -261,7 +249,7 @@ describe("recordWindow (--pilot)", () => {
     // A window that will dispatch loads it first, and refuses before writing anything.
     const store = memoryStore();
     const route = fakeRoute(accepted);
-    expect(await recordWindow(windowRun(store, windowRecord(true), { workload: unloadable }, route))).toEqual({
+    expect(await recordWindow(windowRun(store, windowRecord(READY_FACTS), { workload: unloadable }, route))).toEqual({
       ok: false,
       error: "window test-window cannot dispatch: its workload corpus does not load: ENOENT: no such corpus",
     });
@@ -270,23 +258,73 @@ describe("recordWindow (--pilot)", () => {
     expect(route.requests).toHaveLength(0);
   });
 
+  it("records a window the route fail-fast stopped: its ending in window.json and in the result, every landed sample, and an incomplete decision", async () => {
+    const store = memoryStore();
+    const run = windowRun(store, windowRecord(READY_FACTS), {
+      routeHealth: async () => ({ kind: "unreachable", reason: "fetch failed (connect ECONNREFUSED)" }),
+    }, fakeRoute(() => INFRASTRUCTURE));
+    const { window, decision } = recorded(await recordWindow(run));
+    expect(decided(decision).decision).toBe("incomplete-missing-measurement");
+    const ending = {
+      kind: "aborted", afterPairs: 1, scheduledPairs: expect.any(Number),
+      reason: { kind: "route-unreachable", reason: "fetch failed (connect ECONNREFUSED)" },
+    };
+    expect(window).toMatchObject({ dispatch: { kind: "dispatched" }, observations: 2, ending });
+    // The result IS the record written: one source of how the window ended.
+    expect(json(store, WINDOW_FILES.window)).toEqual(JSON.parse(JSON.stringify(window)));
+    expect((store.files.get(WINDOW_FILES.observations) ?? "").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("closes a window whose route probe throws as route-unreachable with the error, never leaving it open", async () => {
+    const store = memoryStore();
+    const run = windowRun(store, windowRecord(READY_FACTS), {
+      routeHealth: async () => { throw new Error("probe crashed"); },
+    }, fakeRoute(() => INFRASTRUCTURE));
+    const { window } = recorded(await recordWindow(run));
+    expect(window).toMatchObject({
+      endedAt: expect.any(String),
+      ending: { kind: "aborted", afterPairs: 1, reason: { kind: "route-unreachable", reason: "the route probe failed: probe crashed" } },
+    });
+    expect(json(store, WINDOW_FILES.window)).toMatchObject({ endedAt: expect.any(String), ending: { kind: "aborted" } });
+    expect(store.files.has(WINDOW_FILES.decision)).toBe(true);
+  });
+
+  it("records a completed schedule's ending, and none for a window that never dispatched", async () => {
+    const dispatched = memoryStore();
+    const { window } = recorded(await recordWindow(windowRun(dispatched, windowRecord(READY_FACTS), {}, fakeRoute(accepted))));
+    expect(window).toMatchObject({ ending: { kind: "completed" } });
+    expect(json(dispatched, WINDOW_FILES.window)["ending"]).toMatchObject({ kind: "completed" });
+    const readBack = parseRetainedWindow(dispatched.files.get(WINDOW_FILES.window) ?? "", "w.json");
+    expect(readBack.ok && readBack.value.ending).toEqual({ kind: "dispatched", ending: { kind: "completed", pairs: expect.any(Number) } });
+    const blocked = recorded(await recordWindow(windowRun(memoryStore(), windowRecord(UNREACHABLE_FACTS))));
+    expect(blocked.window).toMatchObject({ dispatch: { kind: "not-attempted" }, observations: 0 });
+    expect(blocked.window).not.toHaveProperty("ending");
+    expect(json(await blockedWindow(), WINDOW_FILES.window)).not.toHaveProperty("ending");
+  });
+
   it("names a window by its preregistration id and a path-safe start time", () => {
     expect(pilotWindowId("gcd-ad11-pilot-1", "2026-10-03T09:23:39.047Z")).toBe("gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z");
-    expect(readdirSync(join(HERE, "windows")).every((id) => id.startsWith(`${prereg.id}--`) && !/[:.]/.test(id))).toBe(true);
+    // Every retained window belongs to one of the retained preregistrations (pilot-1, pilot-2).
+    const preregistrationIds = [preregBytes, pilot2PreregBytes].map((bytes) => (JSON.parse(bytes.toString("utf-8")) as { id: string }).id);
+    for (const id of readdirSync(join(HERE, "windows"))) {
+      expect(preregistrationIds.some((preregistrationId) => id.startsWith(`${preregistrationId}--`)), id).toBe(true);
+      expect(id).not.toMatch(/[:.]/);
+    }
   });
 
   it("records how a window ended even when the rubric cannot assess it (key and packet kept, no rubric file, no decision)", async () => {
     const store = memoryStore();
     const undeclared: Preregistration = {
-      ...prereg,
-      cells: prereg.cells.map((cell) => ({
+      ...PILOT_1,
+      cells: PILOT_1.cells.map((cell) => ({
         ...cell,
         workload: { ...cell.workload, cases: cell.workload.cases.map((entry) => ({ ...entry, knownDefects: [] })) },
       })),
     };
     const route = fakeRoute(accepted);
-    const outcome = await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: undeclared } }, route));
-    expect(outcome).toMatchObject({ ok: false, error: expect.stringMatching(/^the rubric assessor cannot assess window test-window:/) });
+    const outcome = recorded(await recordWindow(windowRun(store, windowRecord(READY_FACTS), { preregistration: { ...LOADED, prereg: undeclared } }, route)));
+    expect(outcome.decision).toMatchObject({ ok: false, error: expect.stringMatching(/^the rubric assessor cannot assess window test-window:/) });
+    expect(outcome.window).toMatchObject({ ending: { kind: "completed" } });
     const window = json(store, WINDOW_FILES.window);
     const samples = route.requests.length;
     expect(samples).toBeGreaterThan(0);

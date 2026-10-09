@@ -4,26 +4,22 @@
  * active critical Findings, and the user's advisory decision.
  *
  * Every derivation starts from a canonical readiness snapshot
- * (`wave-gate-machine`), so Findings, lenses, verifier slots and advisory
- * bytes are selected by protected authority alone; caller claims can only
- * reject drift.
+ * (`wave-gate-machine`), so Findings, lenses and advisory bytes are selected
+ * by protected authority alone. Verifier slots are not derived here: the
+ * shared verifier-issuance seam issues them from the refutation plan.
  */
 
 import type { Task, WaveGateNextAction } from "../types";
 import { sha256Bytes, sha256Hex } from "./digest";
-import { lowerModelProfile, resolveAgentProfile, type LoomAgentName } from "./model-profiles";
 import {
   awaitUserAction,
   canonicalRecord,
-  parseAgentRequestAuthority,
-  parseAgentRosterSlot,
   parseArtifactByteLength,
   parseArtifactDigest,
   parseArtifactRef,
   parseContextDigest,
   parseOrchestrationRunId,
   parseRequestId,
-  type AgentRosterSlot,
   type ArtifactRef,
   type ContextDigest,
   type DomainResult,
@@ -38,11 +34,6 @@ import {
   type BriefFinding,
   type ReviewLens,
 } from "./review-panel";
-import {
-  deriveRefutationVerifierBinding,
-  parseRefutationPanelAuthority,
-  type RefutationPanelAuthority,
-} from "./panel-authority";
 import {
   isCanonicalWaveReadiness,
   projectWaveGateLifecycle,
@@ -65,11 +56,13 @@ export type WaveRefutationPlan = Readonly<{
   lenses: NonEmpty<ReviewLens>;
 }>;
 
-export type WaveRefutationPreparation = Readonly<WaveRefutationPlan & {
-  authority: RefutationPanelAuthority;
-}>;
-
-/** Derive the idempotent run/finding/lens authority before request issuance. */
+/**
+ * Derive the idempotent run/finding/lens authority before request issuance.
+ * The panel's verifier requests are issued from this plan by the one
+ * verifier-issuance seam every Refutation Panel shares
+ * (`handlers/helpers/programs/refutation-verifiers.ts`), which mints them
+ * over their Context Packets or reads them back from the panel's record.
+ */
 export function deriveWaveRefutationPlan(
   snapshot: WaveReadinessSnapshot,
 ): DomainResult<WaveRefutationPlan, WavePreparationError> {
@@ -101,83 +94,6 @@ export function deriveWaveRefutationPlan(
     runId: panelRun.value,
     findings: Object.freeze(brief.findings) as NonEmpty<BriefFinding>,
     lenses: Object.freeze(lenses.value) as NonEmpty<ReviewLens>,
-  }) });
-}
-
-export type WaveRefutationAuthorityClaims = Readonly<{
-  /** Comparison-only legacy assertion; never used to select panel slots. */
-  verifierSlots?: readonly AgentRosterSlot[];
-}>;
-
-/** The Refutation Panel verifier role. Its model profile and both harness
- *  bindings are resolved through the catalog, never spelled here, so a catalog
- *  change re-routes Wave verifiers exactly as it re-routes every other role. */
-const WAVE_REFUTATION_VERIFIER_ROLE = "review-verifier-agent" satisfies LoomAgentName;
-
-function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResult<NonEmpty<AgentRosterSlot>, WavePreparationError> {
-  const profile = resolveAgentProfile(WAVE_REFUTATION_VERIFIER_ROLE);
-  if (!profile.ok) return preparationFailure(profile.error.message);
-  const panelBindings = canonicalRecord({
-    pi: lowerModelProfile(profile.value, "pi"),
-    claude: lowerModelProfile(profile.value, "claude-code"),
-  });
-  const slots: AgentRosterSlot[] = [];
-  const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
-  for (const lens of plan.lenses) {
-    const binding = deriveRefutationVerifierBinding(plan.runId, lens, findingIds);
-    if (!binding.ok) return preparationFailure(binding.errors.join("; "));
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = binding.value.requestIds[attempt - 1];
-      const contextDigest = parseContextDigest(sha256Hex(JSON.stringify([binding.value.slotId, attempt])));
-      if (!contextDigest.ok) return null;
-      const authority = parseAgentRequestAuthority({
-        runId: plan.runId,
-        requestId,
-        slotId: binding.value.slotId,
-        program: "refutation-panel",
-        role: WAVE_REFUTATION_VERIFIER_ROLE,
-        attempt,
-        modelProfile: profile.value.id,
-        harnessBinding: panelBindings,
-        requiredSkill: null,
-        contextDigest: contextDigest.value,
-        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
-      });
-      return authority.ok ? authority.value : null;
-    });
-    if (attempts[0] === null || attempts[1] === null) return preparationFailure(`failed to derive verifier authority for lens ${lens}`);
-    const slot = parseAgentRosterSlot(attempts[0], attempts[1]);
-    if (!slot.ok) return preparationFailure(`derived verifier slot for lens ${lens} is invalid`);
-    slots.push(slot.value);
-  }
-  return canonicalRecord({ ok: true, value: Object.freeze(slots) as NonEmpty<AgentRosterSlot> });
-}
-
-/** Findings, lens order, and verifier slots come only from the canonical Wave
- * snapshot. Caller claims can reject drift but never select authority. */
-export function prepareWaveRefutationPanel(
-  snapshot: WaveReadinessSnapshot,
-  claims: WaveRefutationAuthorityClaims = {},
-): DomainResult<WaveRefutationPreparation, WavePreparationError> {
-  const plan = deriveWaveRefutationPlan(snapshot);
-  if (!plan.ok) return plan;
-  const verifierSlots = deriveWaveRefutationVerifierSlots(plan.value);
-  if (!verifierSlots.ok) return verifierSlots;
-  if (claims.verifierSlots !== undefined && JSON.stringify(claims.verifierSlots) !== JSON.stringify(verifierSlots.value)) {
-    return preparationFailure("caller verifier slot claim drifted from canonical Finding/lens authority");
-  }
-  const authority = parseRefutationPanelAuthority({
-    runId: plan.value.runId,
-    findings: plan.value.findings,
-    lenses: plan.value.lenses,
-    verifierSlots: verifierSlots.value,
-  });
-  if (!authority.ok) return preparationFailure(authority.error.message);
-  return canonicalRecord({ ok: true, value: canonicalRecord({
-    runId: plan.value.runId,
-    findings: plan.value.findings,
-    lenses: plan.value.lenses,
-    authority: authority.value,
   }) });
 }
 

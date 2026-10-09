@@ -19,11 +19,20 @@ import {
   type ExtractionArmAttempt,
   type SampleObservation,
 } from "./pilot-observation";
-import type { PreflightDecision } from "./pilot-preflight";
-import { buildPairSchedule, parsePreregistration, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
-import type { WindowWorkload } from "./pilot-retention";
-import type { CellKey, PilotArm } from "./pilot-vocabulary";
-import { dispatchSchedule, type SampleRecord } from "./pilot-window";
+import { decidePreflight, type PreflightDecision, type PreflightFacts } from "./pilot-preflight";
+import {
+  buildPairSchedule,
+  parsePreregistration,
+  type CellPreregistration,
+  type Preregistration,
+  type RouteQualification,
+  type ScheduledPair,
+} from "./pilot-preregistration";
+import { planDispatch, type LoadedPreregistration, type WindowWorkload } from "./pilot-retention";
+import { contentDigest, type CellKey, type PilotArm } from "./pilot-vocabulary";
+import { dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
+import { CURRENT_WINDOW_SCHEMA_VERSION } from "./pilot-window-ending";
+import type { WindowRecord } from "./pilot-window-record";
 import {
   parseWorkloadFixtures,
   resolveWindowInputs,
@@ -37,32 +46,95 @@ export const REPO_ROOT = join(HERE, "../..");
 
 export const WINDOW_ID = "fake-route-window";
 export const ATTEMPT_MS = 100;
-export const READY: PreflightDecision = {
-  kind: "ready",
-  runtime: { stagedRuntimeRevision: "sha256:abc", loadedRuntime: { kind: "unobserved" }, piVersion: "0.83.0" },
-};
 
 export const preregBytes = readFileSync(join(HERE, "preregistration.json"));
+/** The pilot-2 preregistration: pilot-1's workload under the per-route release policy. */
+export const PILOT_2_PREREGISTRATION = "preregistration-gcd-ad11-pilot-2.json";
+export const pilot2PreregBytes = readFileSync(join(HERE, PILOT_2_PREREGISTRATION));
 export const fixtureBytes = readFileSync(join(HERE, "workload-fixtures.json"));
 
-function retainedWorkload(): Readonly<{ prereg: Preregistration; fixtures: WorkloadFixtures; cases: readonly CalibrationCase[] }> {
-  const prereg = parsePreregistration(JSON.parse(preregBytes.toString("utf-8")));
-  if (!prereg.ok) throw new Error(prereg.error.join("\n"));
+/** A retained preregistration, parsed from its exact bytes; a refused one throws. */
+function retainedPreregistration(bytes: Uint8Array): Preregistration {
+  const parsed = parsePreregistration(JSON.parse(new TextDecoder().decode(bytes)));
+  if (!parsed.ok) throw new Error(parsed.error.join("\n"));
+  return parsed.value;
+}
+
+/** The retained pilot-1 preregistration (schemaVersion 1, `capable-route-required`). */
+export const PILOT_1: Preregistration = retainedPreregistration(preregBytes);
+/** The retained pilot-2 preregistration: pilot-1's workload under the per-route release policy. */
+export const PILOT_2: Preregistration = retainedPreregistration(pilot2PreregBytes);
+
+function retainedWorkload(): Readonly<{ fixtures: WorkloadFixtures; cases: readonly CalibrationCase[] }> {
   const fixtures = parseWorkloadFixtures(JSON.parse(fixtureBytes.toString("utf-8")));
   if (!fixtures.ok) throw new Error(fixtures.error.join("\n"));
   const corpus = parseCalibrationCorpus(readFileSync(join(REPO_ROOT, fixtures.value.reviewer.corpus), "utf-8"));
   if (!corpus.ok) throw new Error(corpus.errors.join("\n"));
-  return { prereg: prereg.value, fixtures: fixtures.value, cases: corpus.value.cases };
+  return { fixtures: fixtures.value, cases: corpus.value.cases };
 }
 
 const workload = retainedWorkload();
-export const { prereg, fixtures } = workload;
+export const { fixtures } = workload;
 export const corpusCases: readonly CalibrationCase[] = workload.cases;
+
+/** The retained pilot-1 preregistration as a window loads it. */
+export const LOADED: LoadedPreregistration = {
+  ref: { path: "calibration/grammar-constrained-decoding/preregistration.json", digest: contentDigest(preregBytes), id: PILOT_1.id },
+  prereg: PILOT_1,
+};
+
+/** Preflight facts of a route that refused the connection: the preflight blocks. */
+export const UNREACHABLE_FACTS: PreflightFacts = {
+  registry: { "reviewer-payload/v2": null, "reviewer-payload/v3": null, "judge-verdict/v1": null, "refutation-verdict/v1": null },
+  workloadFixturesDigest: PILOT_1.workloadFixturesDigest,
+  piVersion: PILOT_1.route.piVersion,
+  stagedRuntimeRevision: "sha256:abc",
+  loadedRuntimeRevision: null,
+  route: { kind: "unreachable", reason: "connection refused" },
+};
+
+/** Preflight facts the retained pilot-1 preregistration dispatches behind:
+ *  every cell's frozen tool and schema staged, the pinned Pi and workload,
+ *  and the preregistered model served. */
+export const READY_FACTS: PreflightFacts = {
+  registry: { ...UNREACHABLE_FACTS.registry, ...Object.fromEntries(PILOT_1.cells.map((cell) => [cell.cell, { toolName: cell.toolName, schemaDigest: cell.schemaDigest }])) },
+  workloadFixturesDigest: PILOT_1.workloadFixturesDigest,
+  piVersion: PILOT_1.route.piVersion,
+  stagedRuntimeRevision: "sha256:abc",
+  loadedRuntimeRevision: null,
+  route: { kind: "reachable", servedModels: [PILOT_1.route.model] },
+};
+
+/** The preflight verdict over `READY_FACTS`, by the production decision; a
+ *  blocked one throws (the fixture itself would be wrong). */
+export const READY: PreflightDecision = (() => {
+  const decision = decidePreflight(PILOT_1, READY_FACTS);
+  if (decision.kind !== "ready") throw new Error(`READY_FACTS must pass the preflight: ${JSON.stringify(decision.blocks)}`);
+  return decision;
+})();
+
+/** An opened `window.json` of this revision over `facts`: its preflight
+ *  verdict and dispatch plan are DERIVED from those facts by the production
+ *  decisions, so the record cannot contradict itself — `READY_FACTS` open a
+ *  dispatching window, `UNREACHABLE_FACTS` a blocked one. */
+export const testWindowRecord = (facts: PreflightFacts): WindowRecord => {
+  const preflight = decidePreflight(PILOT_1, facts);
+  return {
+    schemaVersion: CURRENT_WINDOW_SCHEMA_VERSION,
+    windowId: "test-window",
+    preregistration: LOADED.ref,
+    workloadFixtures: { path: "calibration/grammar-constrained-decoding/workload-fixtures.json", digest: PILOT_1.workloadFixturesDigest },
+    startedAt: "2026-10-05T08:00:00.000Z",
+    preflightFacts: facts,
+    preflight,
+    dispatch: planDispatch(preflight, false),
+  };
+};
 
 /** The window workload `recordWindow` resolves, with no git-derived changed paths. */
 export const WORKLOAD: WindowWorkload = { fixtures, loadCorpusCases: () => ({ ok: true, value: corpusCases }), changedPathsOf: () => [] };
 
-const resolved = resolveWindowInputs(prereg, fixtures, corpusCases, WORKLOAD.changedPathsOf);
+const resolved = resolveWindowInputs(PILOT_1, fixtures, corpusCases, WORKLOAD.changedPathsOf);
 if (!resolved.ok) throw new Error(resolved.error.join("\n"));
 export const inputs: WindowInputs = resolved.value;
 
@@ -84,24 +156,44 @@ export function filedInputs(entries: Iterable<CaseInput>): WindowInputs {
 export const inputsWithout = (cell: CellKey, caseId: string): WindowInputs =>
   filedInputs(inputs.values().filter((input) => !(input.cell === cell && input.caseId === caseId)));
 
-/** A test preregistration: the retained one, optionally with every cell (but
- *  `unconstrained`, which keeps the retained unconstrained qualification)
- *  qualified as a capable (constrained) route and a cheaper bootstrap. */
-export function testPreregistration(options: Readonly<{ constrained?: boolean; extractionOnly?: CellKey; unconstrained?: CellKey }> = {}): Preregistration {
-  const raw = JSON.parse(preregBytes.toString("utf-8")) as { guardrails: { bootstrapResamples: number }; cells: Array<{ cell: string; qualification: unknown }> };
-  raw.guardrails.bootstrapResamples = 200;
-  for (const cell of raw.cells) {
-    if (options.constrained && options.unconstrained !== cell.cell) {
-      cell.qualification = { kind: "constrained-emission", enforcedConstraints: ["type", "required", "enum", "additionalProperties"], evidence: "test" };
-    }
-    if (options.extractionOnly === cell.cell) {
-      cell.qualification = { kind: "extraction-only", reason: "route rejects the schema", evidence: "test" };
-    }
-  }
-  const parsed = parsePreregistration(raw);
+/** A typed edit of a parsed preregistration; `testPreregistration` re-parses
+ *  the edited value, so no edit can yield a preregistration the production
+ *  parser refuses (a requalified cell's workload rules included). */
+export type PreregistrationEdit = (prereg: Preregistration) => Preregistration;
+
+const CONSTRAINED: RouteQualification = Object.freeze({
+  kind: "constrained-emission", enforcedConstraints: Object.freeze(["type", "required", "enum", "additionalProperties"]), evidence: "test",
+});
+const EXTRACTION_ONLY: RouteQualification = Object.freeze({ kind: "extraction-only", reason: "route rejects the schema", evidence: "test" });
+
+const requalified = (qualify: (cell: CellPreregistration) => RouteQualification): PreregistrationEdit =>
+  (base) => ({ ...base, cells: base.cells.map((cell) => ({ ...cell, qualification: qualify(cell) })) });
+
+/** Every cell but `except` qualified as a capable (constrained) route; `except` keeps its retained qualification. */
+export const constrainedCells = (...except: readonly CellKey[]): PreregistrationEdit =>
+  requalified((cell) => (except.includes(cell.cell) ? cell.qualification : CONSTRAINED));
+
+/** One cell qualified extraction-only: the route cannot carry its schema, so it schedules nothing. */
+export const extractionOnlyCell = (key: CellKey): PreregistrationEdit =>
+  requalified((cell) => (cell.cell === key ? EXTRACTION_ONLY : cell.qualification));
+
+/** The parse's minimum bootstrap, so the suites' release decisions stay cheap. */
+const cheapBootstrap: PreregistrationEdit = (base) => ({ ...base, guardrails: { ...base.guardrails, bootstrapResamples: 200 } });
+
+/** An edited preregistration through the production parser again. A
+ *  schemaVersion 1 value's policy is implied by its version (the file never
+ *  carries it), so it is left out of what is re-parsed. */
+function reparsed(edited: Preregistration): Preregistration {
+  const { releasePolicy: _implied, ...withoutPolicy } = edited;
+  const parsed = parsePreregistration(edited.schemaVersion === 1 ? withoutPolicy : edited);
   if (!parsed.ok) throw new Error(parsed.error.join("\n"));
   return parsed.value;
 }
+
+/** A test preregistration: a retained one (pilot-1 by default) with a cheap
+ *  bootstrap, then each edit in order, re-parsed. */
+export const testPreregistration = (base: Preregistration = PILOT_1, ...edits: readonly PreregistrationEdit[]): Preregistration =>
+  reparsed([cheapBootstrap, ...edits].reduce((edited, edit) => edit(edited), base));
 
 export type AttemptSpec = Readonly<{
   outcome: Record<string, unknown>;
@@ -137,8 +229,8 @@ export function sample(pair: ScheduledPair, arm: PilotArm, ms: number, attempts:
   return parsed.value;
 }
 
-/** The first scheduled pair of the retained preregistration. */
-export const firstPair = (): ScheduledPair => buildPairSchedule(prereg)[0] as ScheduledPair;
+/** The first scheduled pair of the retained pilot-1 preregistration. */
+export const firstPair = (): ScheduledPair => buildPairSchedule(PILOT_1)[0] as ScheduledPair;
 
 type Outcome = AttemptObservation["outcome"];
 export type Script = (request: ArmRequest) => Outcome;
@@ -152,6 +244,8 @@ export const accepted = (request: ArmRequest): Outcome => ({
 });
 export const REJECTED: Outcome = { kind: "rejected", cause: { kind: "extraction-failure", detail: "final message carried no JSON" } };
 export const TIMEOUT: Outcome = { kind: "timeout", afterMs: ATTEMPT_MS };
+/** What a route outage looks like from inside the window (`providerFailure`). */
+export const INFRASTRUCTURE: Outcome = { kind: "infrastructure-failure", reason: "the provider ended the model turn with an error: Connection error." };
 
 /**
  * A canonical payload each cell's frozen parser accepts, which lets every
@@ -202,14 +296,19 @@ export function fakeRoute(script: Script): FakeRoute {
   return { dispatch, now: () => clock, requests };
 }
 
+/** A route that always answers its listing: the fail-fast never trips on it. */
+export const HEALTHY_ROUTE: RouteHealthProbe = async () => ({ kind: "reachable" });
+
 /** The window dispatch path `recordWindow` runs, over a fake route. */
-export async function runWindow(route: FakeRoute, onSample: (record: SampleRecord) => void = () => {}) {
+export async function runWindow(
+  route: FakeRoute, onSample: (record: SampleRecord) => void = () => {}, routeHealth: RouteHealthProbe = HEALTHY_ROUTE,
+) {
   const landed: SampleRecord[] = [];
   const progress: string[] = [];
-  const records = await dispatchSchedule({
-    windowId: WINDOW_ID, prereg, fixtures, inputs, dispatch: route.dispatch, now: route.now,
+  const { records, ending } = await dispatchSchedule({
+    windowId: WINDOW_ID, prereg: PILOT_1, fixtures, inputs, dispatch: route.dispatch, routeHealth, now: route.now,
     onSample: (record) => { landed.push(record); onSample(record); },
     onPair: (index, total, pair) => { progress.push(`${index + 1}/${total} ${pair.pairId}`); },
   });
-  return { records, landed, progress };
+  return { records, ending, landed, progress };
 }

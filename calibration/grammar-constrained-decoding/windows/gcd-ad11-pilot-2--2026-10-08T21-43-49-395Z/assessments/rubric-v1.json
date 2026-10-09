@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "assessorId": "rubric-v1",
+  "method": "deterministic rubric: corpus match rules (reviewer), planted-flaw ranking (judge), real-defect refutation (refutation); sees blind id, source and canonical payload only",
+  "blinded": true,
+  "entries": [
+    {
+      "blindId": "3aed02b3-4b6d-4aef-9ce2-7824831c162e",
+      "escapedDefects": [
+        {
+          "defectId": "review-evidence-race",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "65113f88-2f14-40aa-8e09-60e2213b6e39",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "df90ec90-d810-4896-b473-b6643c335e3c",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "f0a5648a-2b2e-4d5f-9991-36eba2e1d5aa",
+      "escapedDefects": [
+        {
+          "defectId": "review-evidence-race",
+          "severity": "critical"
+        }
+      ]
+    }
+  ]
+}

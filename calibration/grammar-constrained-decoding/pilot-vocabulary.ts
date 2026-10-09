@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { EMISSION_TOOL_SPECS, type EmissionPayloadParser } from "../../engine/src/core/emission-tool";
-import { err, ok, type Result } from "../kernel";
+import { err, errorMessage, ok, type Result } from "../kernel";
 
 // ---------------------------------------------------------------------------
 // Schema primitives
@@ -35,6 +35,18 @@ export const parserOf = <S extends z.ZodType>(schema: S) =>
     const parsed = schema.safeParse(raw);
     return parsed.success ? ok(parsed.data as DeepReadonly<z.infer<S>>) : err(issuesOf(parsed.error));
   };
+
+/** How every retained JSON file is serialized: two-space indent, one trailing newline. */
+export const jsonText = (data: unknown): string => `${JSON.stringify(data, null, 2)}\n`;
+
+/** A retained file's JSON, or a refusal naming it (`label`) and why. */
+export function parseJsonText(text: string, label: string): Result<unknown, string> {
+  try {
+    return ok(JSON.parse(text) as unknown);
+  } catch (error) {
+    return err(`${label}: ${errorMessage(error)}`);
+  }
+}
 
 /** SHA-256 over exact bytes — the content address of a preregistration or a
  *  workload fixture file. Pure (no I/O); hashing is a function of its input. */

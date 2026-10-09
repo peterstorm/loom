@@ -16,8 +16,10 @@ import {
   deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
 import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
-import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
-import { lowerModelProfile, resolveModelProfile } from "../src/core/model-profiles";
+import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority } from "../src/core/orchestration-contract";
+import { DESKTOP_VLLM_ROUTE, lowerModelProfile, recordedProfileBindings, resolveModelProfile } from "../src/core/model-profiles";
+import { fixturePiAgentDirectory } from "./fixtures/fixture-pi-agent-directory";
+import { advertiseInstalledLaunchPort, SynchronousEventBus } from "./fixtures/emission-launch-port";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
@@ -62,12 +64,27 @@ class FakePi {
   }
 }
 
-const extension = async (): Promise<FakePi> => {
+/**
+ * A Pi runtime whose event bus carries the installed subagent launcher's v2
+ * capability. Every reviewer a Pi parent spawns is issued onto the emission
+ * route, and the extension refuses an emission-enabled spawn without a launch
+ * port, so suites that spawn CLI-issued reviewer requests need this runtime.
+ */
+class EmissionCapableFakePi extends FakePi {
+  readonly events = new SynchronousEventBus();
+
+  constructor() {
+    super();
+    advertiseInstalledLaunchPort(this.events);
+  }
+}
+
+const extension = async (runtime: "no-event-bus" | "emission-capable" = "no-event-bus"): Promise<FakePi> => {
   const extensionSpecifier = "../../pi/extension.ts";
   const module = await import(/* @vite-ignore */ extensionSpecifier) as {
     default: (pi: unknown) => void;
   };
-  const pi = new FakePi();
+  const pi = runtime === "emission-capable" ? new EmissionCapableFakePi() : new FakePi();
   module.default(pi as never);
   return pi;
 };
@@ -106,6 +123,11 @@ execFileSync("bash", [join(ROOT, "scripts/sync-pi-agents.sh")], {
   cwd: ROOT,
   env: { ...process.env, PI_CODING_AGENT_DIR: piAgentDir, HOME: isolatedHome, PI_PROVIDER: "", PI_MODEL: "" },
 });
+// A Pi parent's spawn batch is refused unless its route answers
+// (core/route-reachability.ts). The CLI children below inherit
+// PI_CODING_AGENT_DIR=piAgentDir, so that agent dir must name the global
+// setup's fake local route — never the operator's real models.json.
+cpSync(join(fixturePiAgentDirectory(), "models.json"), join(piAgentDir, "models.json"));
 
 const initialGraph = () => ({
   current_phase: "execute",
@@ -284,7 +306,30 @@ const reviewResult = (
   },
 });
 
-async function piCaptureRun(runSuffix: string, contextText = "Pi capture context", issueRoute: "catalog" | "qualified-local" = "catalog"): Promise<Readonly<{
+/**
+ * How the fixture request authority was issued, each with its profile, Pi
+ * binding and parser: under today's catalog ("catalog", minted in issue
+ * mode), or as HISTORY recorded under the retired `qualified-local-review`
+ * profile ("retired-qualified-local", read back in stored mode — the catalog
+ * no longer issues it, but runs already on disk carry it).
+ */
+const FIXTURE_ISSUANCE = Object.freeze({
+  "catalog": Object.freeze({
+    profile: () => {
+      const resolved = resolveModelProfile("general-review");
+      if (!resolved.ok) throw new Error(resolved.error.message);
+      return { id: resolved.value.id, pi: lowerModelProfile(resolved.value, "pi") };
+    },
+    parse: parseAgentRequestAuthority,
+  }),
+  "retired-qualified-local": Object.freeze({
+    profile: () => ({ id: "qualified-local-review", pi: recordedProfileBindings("qualified-local-review").pi[0] }),
+    parse: parseStoredAgentRequestAuthority,
+  }),
+});
+type FixtureIssuance = keyof typeof FIXTURE_ISSUANCE;
+
+async function piCaptureRun(runSuffix: string, contextText = "Pi capture context", issuance: FixtureIssuance = "catalog"): Promise<Readonly<{
   runsRoot: string;
   runDir: string;
   request: AgentRequestAuthority;
@@ -315,20 +360,8 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
     authorityDigest: waveGateAuthorityDigest(1, ["T1"], graph) };
   const registered = await opened.value.registerProgram(registration);
   if (!registered.ok) throw new Error(registered.error.message);
-  // The issue-route election is ambient-env sensitive: each arm pins its own
-  // route explicitly (the qualified arm pins the qualified local route, the
-  // catalog arm deletes the election variables), so waveRequests elects the
-  // same profiles the request authority below binds.
-  const routeEnv: Readonly<Record<string, string | undefined>> = issueRoute === "qualified-local"
-    ? { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" }
-    : { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined };
-  const previousRoute = Object.keys(routeEnv).map((key) => [key, process.env[key]] as const);
   const previousCwd = process.cwd();
   try {
-    for (const [key, value] of Object.entries(routeEnv)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
     process.chdir(repository);
     const batch = waveRequests(opened.value, registration, graph, 1, { kind: "git-repository", root: repository });
     const source = batch.packets.find(({ role }) => role === "code-reviewer");
@@ -337,10 +370,7 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
     if (!packet.ok) throw new Error(packet.error.message);
     const published = await opened.value.publishContext(packet.value);
     if (!published.ok) throw new Error(published.error.message);
-    const profile = issueRoute === "qualified-local" ? "qualified-local-review" : "general-review";
-    const resolved = resolveModelProfile(profile);
-    if (!resolved.ok) throw new Error(resolved.error.message);
-    const lowered = lowerModelProfile(resolved.value, "pi");
+    const profile = FIXTURE_ISSUANCE[issuance].profile();
     const request = {
       runId: `run.${runSuffix}`,
       requestId,
@@ -348,28 +378,28 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
       program: "wave-gate",
       role: "code-reviewer",
       attempt: 1,
-      modelProfile: profile,
+      modelProfile: profile.id,
       harnessBinding: {
-        pi: lowered,
+        pi: profile.pi,
         claude: { harness: "claude-code", model: "sonnet" },
       },
       requiredSkill: null,
       contextDigest: packet.value.digest,
       outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
     } as AgentRequestAuthority;
-    await publishPiFixtureRequest(opened.value, request);
+    await publishPiFixtureRequest(opened.value, request, issuance);
     return { runsRoot, runDir, request, handle: opened.value };
   } finally {
     process.chdir(previousCwd);
-    for (const [key, value] of previousRoute) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
   }
 }
 
-async function publishPiFixtureRequest(handle: RunDirHandle, raw: AgentRequestAuthority): Promise<void> {
-  const request = parseAgentRequestAuthority(raw);
+async function publishPiFixtureRequest(
+  handle: RunDirHandle,
+  raw: AgentRequestAuthority,
+  issuance: FixtureIssuance = "catalog",
+): Promise<void> {
+  const request = FIXTURE_ISSUANCE[issuance].parse(raw);
   if (!request.ok) throw new Error(JSON.stringify(request.error));
   const packet = handle.readContext(request.value.contextDigest);
   if (!packet.ok) throw new Error(packet.error.message);
@@ -629,6 +659,9 @@ describe("Pi extension review tool_result integration", () => {
   it("captures Pi tool_result bytes through request-bound run authority", async () => {
     const pi = await extension();
     const staged = await piCaptureRun("pi-tool-result");
+    // Today's catalog issues the reviewer onto the one local Pi route.
+    expect(staged.request.modelProfile).toBe("general-review");
+    expect(staged.request.harnessBinding.pi).toMatchObject(DESKTOP_VLLM_ROUTE);
     const toolCallId = "call-request-bound-capture";
     const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
     const correlated = await staged.handle.recordHarnessCorrelator({
@@ -653,13 +686,16 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
   });
 
-  it("captures Pi tool_result bytes identically for an issued authority on the qualified emission route (FR-012)", async () => {
+  it("captures Pi tool_result bytes identically for a stored authority recorded under the retired qualified-local-review profile (FR-012)", async () => {
     const pi = await extension();
-    const staged = await piCaptureRun("pi-qualified-route", "Pi capture context", "qualified-local");
-    // The issued authority genuinely binds the qualified local emission route.
+    const staged = await piCaptureRun("pi-retired-qualified-route", "Pi capture context", "retired-qualified-local");
+    // The recorded authority is history: issued under the since-retired
+    // profile, bound to the local emission route it lowered to.
     expect(staged.request.modelProfile).toBe("qualified-local-review");
-    expect(staged.request.harnessBinding.pi).toMatchObject({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" });
-    const toolCallId = "call-qualified-route-capture";
+    expect(staged.request.harnessBinding.pi).toMatchObject(DESKTOP_VLLM_ROUTE);
+    // Today's catalog would refuse to mint it: only stored history may name it.
+    expect(parseAgentRequestAuthority(staged.request).ok).toBe(false);
+    const toolCallId = "call-retired-qualified-route-capture";
     const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
     const correlated = await staged.handle.recordHarnessCorrelator({
       schemaVersion: 1,
@@ -672,15 +708,15 @@ describe("Pi extension review tool_result integration", () => {
     expect(correlated.ok).toBe(true);
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
     process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
-    const result = reviewResult("Task: T1", "qualified-route finding");
+    const result = reviewResult("Task: T1", "retired-profile finding");
     const expected = (result.details.results[0].messages[0].content[0] as { text: string }).text;
 
     await pi.emit("tool_result", { ...result, toolCallId }, {
       sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad499" },
     });
 
-    // The request-bound capture flow is route-independent: the same final
-    // payload lands byte-identically regardless of the issued emission route.
+    // The request-bound capture flow reads the request as recorded: the same
+    // final payload lands byte-identically under a retired issuing profile.
     expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
   });
@@ -1876,7 +1912,8 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("verifies only the current review witness, retires older accepted runs, and prunes on shutdown", async () => {
-    const pi = await extension();
+    // The CLI issues each reviewer onto the emission route under this Pi parent.
+    const pi = await extension("emission-capable");
     const session = "019fca39-f989-7510-8e62-50dadbcad43c";
     const toolCallId = "call-session-run-binding";
     const projectCwd = join(temp, "cli-session-binding-project");
@@ -1923,7 +1960,7 @@ describe("Pi extension review tool_result integration", () => {
       toolName: "subagent",
       toolCallId,
       input: { agent: request.authority.role, task: request.task, agentScope: "user" },
-    }, { sessionManager: { getSessionId: () => session } });
+    }, { cwd: projectCwd, sessionManager: { getSessionId: () => session } });
     expect(call).toEqual([undefined]);
 
     const expected = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
@@ -1939,7 +1976,7 @@ describe("Pi extension review tool_result integration", () => {
         exitCode: 0,
         messages: [{ role: "assistant", content: [{ type: "text", text: expected }] }],
       }] },
-    }, { sessionManager: { getSessionId: () => session } });
+    }, { cwd: projectCwd, sessionManager: { getSessionId: () => session } });
 
     expect(responses.every((response) => response === undefined)).toBe(true);
     expect(readFileSync(join(runDir, request.authority.outputSlot.path), "utf-8")).toBe(expected);
@@ -2056,7 +2093,7 @@ describe("Pi extension review tool_result integration", () => {
       toolName: "subagent",
       toolCallId: secondToolCallId,
       input: { agent: secondRequest.authority.role, task: secondRequest.task, agentScope: "user" },
-    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+    }, { cwd: projectCwd, sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
     const secondResponses = await pi.emit("tool_result", {
       toolName: "subagent",
       toolCallId: secondToolCallId,
@@ -2069,7 +2106,7 @@ describe("Pi extension review tool_result integration", () => {
         exitCode: 0,
         messages: [{ role: "assistant", content: [{ type: "text", text: expected }] }],
       }] },
-    }, { sessionManager: { getSessionId: () => session } });
+    }, { cwd: projectCwd, sessionManager: { getSessionId: () => session } });
     expect(secondResponses.every((response) => response === undefined)).toBe(true);
     const secondResumed = execFileSync("bun", [
       join(ROOT, "engine", "src", "cli.ts"),
@@ -2123,7 +2160,7 @@ describe("Pi extension review tool_result integration", () => {
       toolName: "subagent",
       toolCallId: rejectedToolCallId,
       input: { agent: rejectedRequest.authority.role, task: rejectedRequest.task, agentScope: "user" },
-    }, { sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
+    }, { cwd: projectCwd, sessionManager: { getSessionId: () => session } })).toEqual([undefined]);
     const rejectedResponses = await pi.emit("tool_result", {
       toolName: "subagent",
       toolCallId: rejectedToolCallId,
@@ -2136,7 +2173,7 @@ describe("Pi extension review tool_result integration", () => {
         exitCode: 0,
         messages: [null],
       }] },
-    }, { sessionManager: { getSessionId: () => session } });
+    }, { cwd: projectCwd, sessionManager: { getSessionId: () => session } });
     expect(rejectedResponses).toContainEqual(expect.objectContaining({ isError: true }));
     await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
       .rejects.toThrow(`current witnessed Standalone Review rejected: ${rejectedRunId}: no transcript capture was witnessed`);
@@ -2409,7 +2446,8 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("terminalizes a missing Pi result so Standalone Review resumes at attempt 2", async () => {
-    const pi = await extension();
+    // The CLI issues each reviewer onto the emission route under this Pi parent.
+    const pi = await extension("emission-capable");
     const session = "019fca39-f989-7510-8e62-50dadbcad446";
     const toolCallId = "call-registered-missing-result-retry";
     const projectCwd = join(temp, "registered-missing-result-project");

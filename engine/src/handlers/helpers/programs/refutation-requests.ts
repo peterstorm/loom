@@ -4,9 +4,9 @@
  * and recovery-or-publication of one verifier's attempt-2 retry, routing a
  * terminal capture rejection back to the panel as data.
  */
-import { parseAgentRequestAuthority, sameAgentRequestAuthority, type AgentRequestAuthority, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
-import type { ContextPacket } from '../../../core/context-packets';
+import { sameAgentRequestAuthority, type AgentRequestAuthority, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
 import { refutationRetryTask } from '../../../core/reviewer-retry';
+import type { PreparedVerifierRequest } from '../../../core/refutation-verifiers';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { durableCaptureRejection, durableRefutationRequests } from './durable-requests';
 import { publishLegacyInitialBatch } from './request-publication';
@@ -53,13 +53,12 @@ export type RefutationRetryRecovery =
 export async function recoverOrPublishRefutationRetry(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
-  retryInputs: readonly Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[],
+  retryInputs: readonly PreparedVerifierRequest[],
   resolver: PublicationAuthorityResolver,
   label: string,
 ): Promise<RefutationRetryRecovery> {
   const rejection = await durableCaptureRejection(handle, authority);
-  const prepared = retryInputs.find(({ input }) =>
-    (input.authority as AgentRequestAuthority).requestId === authority.requestId);
+  const prepared = retryInputs.find(({ input }) => input.authority.requestId === authority.requestId);
   const retryLabel = `${label}-retry:${authority.slotId}`;
   if (rejection !== null) {
     // The attempt-2 capture was TERMINALLY rejected: the capture runtime
@@ -79,8 +78,10 @@ export async function recoverOrPublishRefutationRetry(
       message: `refutation attempt 2 exhausted after capture rejection: ${rejection}`,
     };
   }
-  const preparedAuthority = prepared === undefined ? null : parseAgentRequestAuthority(prepared.input.authority);
-  if (prepared === undefined || !preparedAuthority?.ok || !sameAgentRequestAuthority(preparedAuthority.value, authority)) {
+  // The prepared retry is the panel's recorded (or, for an unrecorded panel,
+  // freshly minted) authority: it is compared as it is, never re-minted
+  // against today's catalog (ADR-0023).
+  if (prepared === undefined || !sameAgentRequestAuthority(prepared.input.authority, authority)) {
     return { ok: false, kind: "unrecoverable" as const, message: `refutation retry ${authority.requestId} is not exact prepared attempt-2 authority` };
   }
   const recovered = durableRefutationRequests(handle, [prepared.input], resolver, retryLabel);

@@ -6,7 +6,7 @@
  * sits beneath every module that reads it without offering a way to forge membership.
  */
 import type { Finding, RefutedFinding } from "./findings";
-import type { LlmProfileId } from "./model-profiles";
+import type { RecordedLlmProfileId } from "./model-profiles";
 import type {
   AgentRequestAuthority, AgentRosterSlot, ArtifactRef, ExactRoster, NonEmpty, OrchestrationRunId, RequestId, SlotId,
 } from "./orchestration-contract";
@@ -50,7 +50,7 @@ export interface StandaloneReviewerEvidence {
   readonly slotId: SlotId;
   readonly requestId: RequestId;
   readonly attempt: 1 | 2;
-  readonly modelProfile: LlmProfileId | null;
+  readonly modelProfile: RecordedLlmProfileId | null;
   readonly contextDigest: string | null;
   readonly artifact: ArtifactRef;
 }

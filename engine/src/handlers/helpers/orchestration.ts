@@ -78,6 +78,17 @@ import { dirname, join, resolve } from "node:path";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { homedir } from "node:os";
+import { resolveEmissionEnvironment } from "../../utils/emission-environment";
+import { httpRouteProbe, observeRouteReachability, type RouteProbePort } from "../../utils/route-endpoint";
+import { reportUnverifiedRoutes } from "../../core/route-reachability";
+import {
+  gateEmission,
+  parseSpawnRequestAuthority,
+  type EmissionEnvironment,
+  type EmissionParent,
+  type EmissionVerdict,
+} from "../../core/spawn-emission-gate";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -123,7 +134,6 @@ import {
   registerSessionRunBinding,
 } from "../../orchestration/session-run-bindings";
 import {
-  parseStoredAgentRequestAuthority,
   parseEffectId,
   type AgentRequestAuthority,
   type EffectIntent,
@@ -946,7 +956,9 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
 }
 
 /**
- * The harness session a façade invocation publishes capture authority into.
+ * The harness session a façade invocation publishes capture authority into:
+ * an announced parent (`EmissionParent`, resolved once at the composition
+ * root).
  *
  * Each harness's subagent hooks learn which run a spawned agent belongs to
  * from a durable SESSION RUN BINDING the façade publishes, never from the
@@ -956,29 +968,24 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
  * receive that same id as the payload `session_id`. Pi takes precedence: a Pi
  * process launched from inside Claude Code is still a Pi session.
  */
-type BindingSession =
-  | Readonly<{ harness: "pi"; sessionVariable: "PI_SESSION_ID"; sessionId: string | undefined }>
-  | Readonly<{ harness: "claude-code"; sessionVariable: "CLAUDE_CODE_SESSION_ID"; sessionId: string | undefined }>;
+type BindingSession = Exclude<EmissionParent, Readonly<{ harness: "unannounced" }>>;
 
-function bindingSessionOf(env: NodeJS.ProcessEnv): BindingSession | null {
-  if (env.PI_CODING_AGENT === "true") {
-    return { harness: "pi", sessionVariable: "PI_SESSION_ID", sessionId: env.PI_SESSION_ID };
-  }
-  if (env.CLAUDECODE === "1") {
-    return { harness: "claude-code", sessionVariable: "CLAUDE_CODE_SESSION_ID", sessionId: env.CLAUDE_CODE_SESSION_ID };
-  }
-  return null;
-}
+/** The variable each harness announces its session id in, named when it is missing. */
+const SESSION_VARIABLE: Readonly<Record<BindingSession["harness"], string>> = Object.freeze({
+  "pi": "PI_SESSION_ID",
+  "claude-code": "CLAUDE_CODE_SESSION_ID",
+});
 
 async function publishSpawnBinding(
+  bindingDir: string,
   session: BindingSession,
   handle: RunDirHandle,
   action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>,
 ): Promise<HookResult | null> {
   const { sessionId } = session;
   const label = HARNESS_LABEL[session.harness];
-  if (sessionId === undefined) {
-    return { kind: "error", message: `${label} orchestration spawn publication requires ${session.sessionVariable}` };
+  if (sessionId === null) {
+    return { kind: "error", message: `${label} orchestration spawn publication requires ${SESSION_VARIABLE[session.harness]}` };
   }
   const requests = action.requests;
   if (requests.length === 0) {
@@ -988,16 +995,14 @@ async function publishSpawnBinding(
   for (const [index, request] of requests.entries()) {
     // Re-parsed at the capture-authority boundary: the binding records only
     // authority the stored-request parser admits, never the in-memory value.
-    const parsed = parseStoredAgentRequestAuthority(request.authority);
-    if (!parsed.ok) {
-      return { kind: "error", message: `${label} orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}` };
-    }
+    const parsed = parseSpawnRequestAuthority(label, index, request.authority);
+    if (!parsed.ok) return { kind: "error", message: parsed.message };
     if (parsed.value.runId !== handle.runId) {
       return { kind: "error", message: `${label} orchestration spawn request ${index} belongs to another run` };
     }
     requestIds.push(parsed.value.requestId);
   }
-  const registered = await registerSessionRunBinding(SUBAGENT_DIR, sessionId, Object.freeze({
+  const registered = await registerSessionRunBinding(bindingDir, sessionId, Object.freeze({
     runId: handle.runId,
     runsRoot: dirname(handle.runDirectory),
     runDirectory: handle.runDirectory,
@@ -1010,6 +1015,7 @@ async function publishSpawnBinding(
 }
 
 async function publishCompletionBinding(
+  bindingDir: string,
   session: BindingSession,
   handle: RunDirHandle,
   action: Extract<FacadeAction, Readonly<{ kind: "done" }>>,
@@ -1022,10 +1028,10 @@ async function publishCompletionBinding(
   if (typeof outcome !== "object" || !("slot" in outcome) || outcome.slot.kind !== "fixed-artifact-slot" ||
       outcome.slot.path !== "result.json" || !/^[0-9a-f]{64}$/.test(outcome.digest)) return null;
   const resultDigest = outcome.digest;
-  if (sessionId === undefined) {
-    return { kind: "error", message: `${label} orchestration completion publication requires ${session.sessionVariable}` };
+  if (sessionId === null) {
+    return { kind: "error", message: `${label} orchestration completion publication requires ${SESSION_VARIABLE[session.harness]}` };
   }
-  const bindings = readSessionRunBindings(SUBAGENT_DIR, sessionId, session.harness);
+  const bindings = readSessionRunBindings(bindingDir, sessionId, session.harness);
   if (!bindings.ok) {
     return { kind: "error", message: `cannot read ${label} orchestration completion authority: ${bindings.message}` };
   }
@@ -1035,21 +1041,64 @@ async function publishCompletionBinding(
     return { kind: "error", message: `cannot bind completed result for unregistered ${label} run ${handle.runId}` };
   }
   const registered = await registerSessionRunBinding(
-    SUBAGENT_DIR, sessionId, Object.freeze({ ...binding, resultDigest }), session.harness);
+    bindingDir, sessionId, Object.freeze({ ...binding, resultDigest }), session.harness);
   return registered.ok
     ? null
     : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
 }
 
-async function emitRunAction(handle: RunDirHandle, action: FacadeAction): Promise<HookResult> {
-  const session = bindingSessionOf(process.env);
-  if (session !== null) {
-    const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(session, handle, action)
-      : action.kind === "done" ? await publishCompletionBinding(session, handle, action)
+/**
+ * What one façade invocation emits with: the environment resolved once at
+ * the composition root (`processEmission`), and the route probe port. Tests
+ * construct both — a resolved environment and a fake probe — instead of
+ * mutating the process environment.
+ */
+export type Emission = Readonly<{ environment: EmissionEnvironment; probe: RouteProbePort }>;
+
+/** The production emission: this process's environment, resolved once, and the HTTP route probe. */
+function processEmission(): Emission {
+  return Object.freeze({
+    environment: resolveEmissionEnvironment({ env: process.env, home: homedir(), bindingDir: SUBAGENT_DIR }),
+    probe: httpRouteProbe(),
+  });
+}
+
+/**
+ * Gate one action through the pure emission gate (`gateEmission`), observing
+ * the launch routes it names when it asks to: the only I/O here is the
+ * `models.json` read and the probe.
+ */
+async function gateEmittedAction(action: FacadeAction, emission: Emission): Promise<EmissionVerdict> {
+  const step = gateEmission(
+    action.kind === "spawn-batch"
+      ? { kind: "spawn-batch", authorities: action.requests.map(({ authority }) => authority) }
+      : { kind: "other" },
+    emission.environment.parent,
+  );
+  return step.kind === "decided"
+    ? step.verdict
+    : step.decide(await observeRouteReachability(step.launch, step.agentDir, emission.probe));
+}
+
+/**
+ * Emit one façade action: gate a Pi parent's spawn batch on its routes
+ * (ADR-0023; nothing is published when the gate refuses, so a later `resume`
+ * re-emits the same batch), publish the session binding, then print the
+ * action — annotated with the routes the gate admitted unverified, which are
+ * also reported on stderr as `loom-route-unverified` events.
+ */
+export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, emission: Emission): Promise<HookResult> {
+  const verdict = await gateEmittedAction(action, emission);
+  if (verdict.kind === "refuse") return { kind: "error", message: verdict.message };
+  for (const event of verdict.events) process.stderr.write(`${JSON.stringify(event)}\n`);
+  const { bindingDir, parent } = emission.environment;
+  if (parent.harness !== "unannounced") {
+    const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(bindingDir, parent, handle, action)
+      : action.kind === "done" ? await publishCompletionBinding(bindingDir, parent, handle, action)
       : null;
     if (failure !== null) return failure;
   }
-  process.stdout.write(`${JSON.stringify(action, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(reportUnverifiedRoutes(action, verdict.unverified), null, 2)}\n`);
   return { kind: "allow" };
 }
 
@@ -1140,21 +1189,22 @@ function startRunLocation(
  *  in its usage and prepare step and hands its driver here. */
 async function driveCreatedRun(
   args: readonly string[],
+  emission: Emission,
   drive: (handle: RunDirHandle) => Promise<FacadeDriveResult>,
 ): Promise<HookResult> {
   const bound = bindLiveRun(args, createRunDirectory);
   if (!isBound(bound)) return bound;
   const driven = await drive(bound.value.handle);
-  return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+  return driven.ok ? emitRunAction(bound.value.handle, driven.action, emission) : { kind: "error", message: driven.message };
 }
 
-async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
+async function startOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   const program = args[0];
   if (!isStartProgram(program)) {
     return { kind: "error", message: `start requires ${START_PROGRAMS.join(", ")}` };
   }
   const runArgs = args.slice(1);
-  if (program === "standalone-disposition") return startDispositionOperation(stdin, runArgs);
+  if (program === "standalone-disposition") return startDispositionOperation(stdin, runArgs, emission);
   const request = parseStartRequest(program, stdin);
   if (!request.ok) return { kind: "error", message: request.message };
   const startRequest = request.value;
@@ -1163,7 +1213,7 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
     if (!location.ok) return location.result;
     const prepared = await prepareStandaloneSuccessorFacadeStart(location.runsRoot, location.run, startRequest.input);
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    return driveCreatedRun(runArgs, (handle) => startPreparedStandaloneSuccessor(handle, prepared.value));
+    return driveCreatedRun(runArgs, emission, (handle) => startPreparedStandaloneSuccessor(handle, prepared.value));
   }
   if (startRequest.kind === "remediation") {
     const location = startRunLocation(runArgs, "remediation start requires --runs-root and --run");
@@ -1175,19 +1225,19 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
       remediationRun: location.run,
     });
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    return driveCreatedRun(runArgs, (handle) => startRemediationFacade(handle, prepared.value.registration));
+    return driveCreatedRun(runArgs, emission, (handle) => startRemediationFacade(handle, prepared.value.registration));
   }
   if (startRequest.kind === "wave-gate") {
     const location = startRunLocation(runArgs, "wave-gate start requires --runs-root and --run");
     if (!location.ok) return location.result;
     const prepared = prepareWaveGateFacadeStart(startRequest.input, location.runsRoot, location.run);
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    return driveCreatedRun(runArgs, (handle) => startWaveGateFacade(handle, prepared.value));
+    return driveCreatedRun(runArgs, emission, (handle) => startWaveGateFacade(handle, prepared.value));
   }
-  return driveCreatedRun(runArgs, (handle) => driveStart(handle, startRequest));
+  return driveCreatedRun(runArgs, emission, (handle) => driveStart(handle, startRequest));
 }
 
-async function startDispositionOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
+async function startDispositionOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   if (Buffer.byteLength(stdin) > STANDALONE_LINEAGE_LIMITS.retainedBytes) return { kind: "error", message: "disposition input exceeds byte budget" };
   const input = parseStandaloneDispositionStartBytes(Buffer.from(stdin));
   if (!input.ok) return { kind: "error", message: input.error.message };
@@ -1195,10 +1245,10 @@ async function startDispositionOperation(stdin: string, args: readonly string[])
   if (!location.ok) return location.result;
   const prepared = await prepareStandaloneDispositionFacadeStart(input.value, location.runsRoot, location.run);
   if (!prepared.ok) return { kind: "error", message: prepared.message };
-  return driveCreatedRun(args, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
+  return driveCreatedRun(args, emission, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
 }
 
-async function recoverOrphanOperation(args: readonly string[]): Promise<HookResult> {
+async function recoverOrphanOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
   const runsRoot = argumentValue(args, "--runs-root");
   const runId = argumentValue(args, "--run-id");
   const waveRaw = argumentValue(args, "--wave");
@@ -1221,10 +1271,10 @@ async function recoverOrphanOperation(args: readonly string[]): Promise<HookResu
     authorityDigest,
   }, next.value);
   if (!driven.ok) return { kind: "error", message: driven.message };
-  return emitRunAction(next.value, driven.action);
+  return emitRunAction(next.value, driven.action, emission);
 }
 
-async function restartOperation(args: readonly string[]): Promise<HookResult> {
+async function restartOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
   const previous = bindLiveRun(args);
   if (!isBound(previous)) return previous;
   const runsRoot = argumentValue(args, "--runs-root");
@@ -1246,7 +1296,7 @@ async function restartOperation(args: readonly string[]): Promise<HookResult> {
   }
   const driven = await restartWaveGateFacade(previous.value.handle, next.value, registration);
   if (!driven.ok) return { kind: "error", message: driven.message };
-  return emitRunAction(next.value, driven.action);
+  return emitRunAction(next.value, driven.action, emission);
 }
 
 /**
@@ -1267,7 +1317,7 @@ function unregisteredReviewerProblem(handle: RunDirHandle, requests: readonly Ag
   return null;
 }
 
-async function resumeOperation(args: readonly string[]): Promise<HookResult> {
+async function resumeOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
   const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
 
@@ -1293,13 +1343,13 @@ async function resumeOperation(args: readonly string[]): Promise<HookResult> {
           resumeWaveGateFacade(bound.value.handle, registration))
         .exhaustive();
       if (!driven.ok) return { kind: "error", message: driven.message };
-      return emitRunAction(bound.value.handle, driven.action);
+      return emitRunAction(bound.value.handle, driven.action, emission);
     }
     const registration = parseRegisteredPanelProgram(stored.value);
     if (registration === null) return { kind: "error", message: "registered orchestration program is malformed" };
     const driven = await resumeRegisteredPanel(bound.value.handle, registration);
     if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return emitRunAction(bound.value.handle, driven.action, emission);
   }
 
   const issued = bound.value.handle.readIssuedRequests();
@@ -1417,11 +1467,11 @@ async function captureSubmission(
     : { ok: false, result: { kind: "error", message: "transcript capture reconciled to the wrong receipt kind" } };
 }
 
-async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedSubmission): Promise<HookResult> {
+async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedSubmission, emission: Emission): Promise<HookResult> {
   const { facadeRegistration, handle, panelRegistration, requestId, reserved } = binding;
   if (facadeRegistration?.kind === "standalone-review") {
     const driven = await resumeStandaloneFacade(handle, facadeRegistration);
-    return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
+    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
   if (facadeRegistration?.kind === "wave-gate") {
     if (reserved.program === "wave-gate") {
@@ -1429,12 +1479,12 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
       if (!applied.ok) return { kind: "error", message: applied.message };
     }
     const driven = await resumeWaveGateFacade(handle, facadeRegistration);
-    return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
+    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
   if (panelRegistration !== null) {
     // bindSubmission proved `reserved` is exactly this request id and attempt.
     const driven = await submitRegisteredPanelAttempt(handle, panelRegistration, reserved, capture.semanticRaw);
-    return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
+    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
   process.stdout.write(`${JSON.stringify(capture.alreadyCaptured
     ? { kind: "already-captured", requestId, slotId: reserved.slotId, attempt: reserved.attempt }
@@ -1478,7 +1528,7 @@ async function recordSubmittedReadCoverage(binding: SubmissionBinding, toolOutpu
   return recorded.ok ? null : recorded.error;
 }
 
-async function submitOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
+async function submitOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   const binding = bindSubmission(args);
   if (!binding.ok) return binding.result;
   const toolOutputs = submittedToolOutputs(args);
@@ -1486,7 +1536,7 @@ async function submitOperation(stdin: string, args: readonly string[]): Promise<
   const coverage = await recordSubmittedReadCoverage(binding.value, toolOutputs.value);
   if (coverage !== null) return { kind: "error", message: coverage };
   const captured = await captureSubmission(binding.value, stdin);
-  return captured.ok ? dispatchSubmission(binding.value, captured.value) : captured.result;
+  return captured.ok ? dispatchSubmission(binding.value, captured.value, emission) : captured.result;
 }
 
 async function correlateOperation(args: readonly string[]): Promise<HookResult> {
@@ -1525,7 +1575,7 @@ async function correlateOperation(args: readonly string[]): Promise<HookResult> 
   return { kind: "allow" };
 }
 
-async function completeOperation(args: readonly string[]): Promise<HookResult> {
+async function completeOperation(args: readonly string[], emission: Emission): Promise<HookResult> {
   const bound = bindLiveRun(args);
   if (!isBound(bound)) return bound;
   const operationId = argumentValue(args, "--operation");
@@ -1551,7 +1601,7 @@ async function completeOperation(args: readonly string[]): Promise<HookResult> {
   }
   const next = await driveRegisteredPanel(bound.value.handle, registration);
   if (!next.ok) return { kind: "error", message: next.message };
-  return emitRunAction(bound.value.handle, next.action);
+  return emitRunAction(bound.value.handle, next.action, emission);
 }
 
 /**
@@ -1623,7 +1673,7 @@ function parseUserDecision(stdin: string, waveDecision: boolean): Readonly<{ ok:
   return { ok: true, value: decision };
 }
 
-async function decideOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
+async function decideOperation(stdin: string, args: readonly string[], emission: Emission): Promise<HookResult> {
   const binding = bindDecision(args);
   if (!binding.ok) return binding.result;
   const authorityError = waveDecisionAuthorityError(binding.value);
@@ -1638,7 +1688,7 @@ async function decideOperation(stdin: string, args: readonly string[]): Promise<
   });
   if (registration !== null) {
     const driven = await resumeWaveGateFacade(handle, registration);
-    return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
+    return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
   process.stdout.write(`${JSON.stringify({ kind: "decision-recorded", decisionId }, null, 2)}\n`);
   return { kind: "allow" };
@@ -1663,21 +1713,21 @@ const handler: HookHandler = async (stdin, args) => {
     case "abandon":
       return abandonOperation(rest);
     case "start":
-      return startOperation(stdin, rest);
+      return startOperation(stdin, rest, processEmission());
     case "restart":
-      return restartOperation(rest);
+      return restartOperation(rest, processEmission());
     case "recover-orphan":
-      return recoverOrphanOperation(rest);
+      return recoverOrphanOperation(rest, processEmission());
     case "resume":
-      return resumeOperation(rest);
+      return resumeOperation(rest, processEmission());
     case "submit":
-      return submitOperation(stdin, rest);
+      return submitOperation(stdin, rest, processEmission());
     case "correlate":
       return correlateOperation(rest);
     case "complete":
-      return completeOperation(rest);
+      return completeOperation(rest, processEmission());
     case "decide":
-      return decideOperation(stdin, rest);
+      return decideOperation(stdin, rest, processEmission());
     case "remediate":
       return remediateOperation(rest);
     case "attest":

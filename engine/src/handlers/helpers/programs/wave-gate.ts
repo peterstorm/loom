@@ -13,6 +13,7 @@ import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
 import { WAVE_REVIEW_AGENTS } from '../../../core/agent-catalog-projections';
+import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
@@ -72,15 +73,22 @@ function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: Regist
  */
 const MAX_WAVE_GATE_REDERIVATIONS = 64;
 
+/**
+ * Resume a Wave Gate run. `catalog` is the catalog a Refutation Panel with no
+ * record is minted under: today's in production; a replay of a run written
+ * before a catalog retargeting passes the catalog as it stood
+ * (`piCatalogAsOf`).
+ */
 export async function resumeWaveGateFacade(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
+  catalog: PiCatalog = CURRENT_PI_CATALOG,
   depth = 0,
 ): Promise<FacadeDriveResult> {
   // A settled phase answers this invocation; a rederive phase consumed
   // durable progress and re-enters the reducer one level deeper.
   const conclude = (phase: Exclude<WavePhase<unknown>, Readonly<{ kind: "proceed" }>>): Promise<FacadeDriveResult> | FacadeDriveResult =>
-    phase.kind === "settled" ? phase.result : resumeWaveGateFacade(handle, registration, depth + 1);
+    phase.kind === "settled" ? phase.result : resumeWaveGateFacade(handle, registration, catalog, depth + 1);
   try {
     if (depth > MAX_WAVE_GATE_REDERIVATIONS) {
       return waveBlocked(handle, `Wave Gate resume exceeded ${MAX_WAVE_GATE_REDERIVATIONS} re-derivations without durable progress; refusing to spin`);
@@ -166,7 +174,7 @@ export async function resumeWaveGateFacade(
         };
       }
       if (ensured.value.disposition === "installed") {
-        return resumeWaveGateFacade(handle, registration, depth + 1);
+        return resumeWaveGateFacade(handle, registration, catalog, depth + 1);
       }
     }
 
@@ -196,7 +204,7 @@ export async function resumeWaveGateFacade(
     })) return waveBlocked(handle, "current Wave review lacks exact accepted reviewer protocol authority");
     const current = deriveWaveReadiness(refreshed, currentWaveGateDeps(refreshed, handle.runDirectory));
     if (!current.ok) return waveBlocked(handle, current.error.reasons.map(({ message }) => message).join("; "));
-    const refutation = await driveWaveRefutation(context, current.value);
+    const refutation = await driveWaveRefutation(context, current.value, catalog);
     if (refutation.kind !== "proceed") return conclude(refutation);
     const advisory = await driveWaveAdvisoryDecision(handle, current.value);
     if (advisory.kind !== "proceed") return conclude(advisory);

@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 2,
+  "id": "gcd-ad11-pilot-2",
+  "recordedAt": "2026-10-08T21:27:58Z",
+  "releasePolicy": { "kind": "per-route-engine-authoritative" },
+  "route": {
+    "harness": "pi",
+    "provider": "desktop-vllm",
+    "api": "openai-completions",
+    "baseUrl": "http://192.168.0.80:8000/v1",
+    "model": "glm-5.3-flash-spark-tp2-v14",
+    "thinking": "high",
+    "piVersion": "0.83.0"
+  },
+  "workloadFixturesDigest": "b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201",
+  "minimumPairsPerCell": 100,
+  "semanticAttemptBudget": 2,
+  "perAttemptTimeoutMs": 900000,
+  "scheduleSeed": 20261008,
+  "guardrails": {
+    "p95RatioBound": 1.25,
+    "confidenceLevel": 0.95,
+    "bootstrapResamples": 2000,
+    "bootstrapSeed": 52,
+    "qualityNonInferiorityMargin": 0.3,
+    "requiredIndependentAssessors": 2
+  },
+  "cells": [
+    {
+      "cell": "reviewer-payload/v2",
+      "toolName": "loom_emit_reviewer_payload",
+      "schemaDigest": "3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200 with strict:\"prefer\"; vLLM ignores the OpenAI tool-level strict flag (forced tool_choice carried judge score 12 and refutation verdict \"partially_upheld\" through at HTTP 200); v2 direct-stage enforcement inconclusive. No constraint is verified as enforced."
+      },
+      "workload": {
+        "repeatsPerCase": 13,
+        "cases": [
+          { "caseId": "round12-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round12-finding-repair-idempotency-fixed" },
+          { "caseId": "round12-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "repair-idempotency", "severity": "critical" }], "source": "corpus:round12-finding-repair-idempotency-vulnerable" },
+          { "caseId": "round13-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round13-manifest-panel-shrink-fixed" },
+          { "caseId": "round13-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "panel-size-shrink", "severity": "critical" }], "source": "corpus:round13-manifest-panel-shrink-vulnerable" },
+          { "caseId": "round14-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round14-review-evidence-race-fixed" },
+          { "caseId": "round14-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "review-evidence-race", "severity": "critical" }], "source": "corpus:round14-review-evidence-race-vulnerable" },
+          { "caseId": "round15-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round15-retally-replay-fixed" },
+          { "caseId": "round15-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "retally-replay", "severity": "critical" }], "source": "corpus:round15-retally-replay-vulnerable" }
+        ]
+      }
+    },
+    {
+      "cell": "reviewer-payload/v3",
+      "toolName": "loom_emit_reviewer_payload",
+      "schemaDigest": "515ed14d0435d47da4f8299ed4f7ba9908f33c9f567051db93de84ec0017b4a2",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200 with strict:\"prefer\"; route ignores tool-level strict (decisive forced-call violations on judge/refutation, same server and flag); v3 direct-stage enforcement inconclusive. No constraint is verified as enforced."
+      },
+      "workload": {
+        "repeatsPerCase": 13,
+        "cases": [
+          { "caseId": "round12-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round12-finding-repair-idempotency-fixed" },
+          { "caseId": "round12-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "repair-idempotency", "severity": "critical" }], "source": "corpus:round12-finding-repair-idempotency-vulnerable" },
+          { "caseId": "round13-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round13-manifest-panel-shrink-fixed" },
+          { "caseId": "round13-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "panel-size-shrink", "severity": "critical" }], "source": "corpus:round13-manifest-panel-shrink-vulnerable" },
+          { "caseId": "round14-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round14-review-evidence-race-fixed" },
+          { "caseId": "round14-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "review-evidence-race", "severity": "critical" }], "source": "corpus:round14-review-evidence-race-vulnerable" },
+          { "caseId": "round15-fixed", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "corpus:round15-retally-replay-fixed" },
+          { "caseId": "round15-vulnerable", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "retally-replay", "severity": "critical" }], "source": "corpus:round15-retally-replay-vulnerable" }
+        ]
+      }
+    },
+    {
+      "cell": "judge-verdict/v1",
+      "toolName": "loom_emit_judge_verdict",
+      "schemaDigest": "3f590e9f4a9e4ef586220f4d0fa07bb061fb4ebaa32c9a24eeed07fbb044c569",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200; decisive forced tool_choice call carried score 12 (schema maximum 10) through at HTTP 200 — the route enforces no JSON Schema constraint."
+      },
+      "workload": {
+        "repeatsPerCase": 25,
+        "cases": [
+          { "caseId": "judge-easy-retry-budget", "difficulty": "easy", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "unbounded-in-spawn-retry", "severity": "critical" }], "source": "fixture:judge-easy-retry-budget" },
+          { "caseId": "judge-easy-cache-invalidation", "difficulty": "easy", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "stale-qualification-after-schema-change", "severity": "major" }], "source": "fixture:judge-easy-cache-invalidation" },
+          { "caseId": "judge-hard-readiness-barrier", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "caught-throw-is-not-a-barrier", "severity": "critical" }], "source": "fixture:judge-hard-readiness-barrier" },
+          { "caseId": "judge-hard-duplicate-identity", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "distinct-calls-collapsed-by-arguments", "severity": "major" }], "source": "fixture:judge-hard-duplicate-identity" }
+        ]
+      }
+    },
+    {
+      "cell": "refutation-verdict/v1",
+      "toolName": "loom_emit_refutation_verdict",
+      "schemaDigest": "766a0dee252ca3fb135253d51b6ddea5bac1ce941e367eebf2da10f81ce8b2fd",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200; decisive forced tool_choice call carried verdict \"partially_upheld\" (outside the enum) through at HTTP 200 — the route enforces no JSON Schema constraint."
+      },
+      "workload": {
+        "repeatsPerCase": 25,
+        "cases": [
+          { "caseId": "refutation-easy-off-by-one", "difficulty": "easy", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "loop-skips-last-line", "severity": "major" }], "source": "fixture:refutation-easy-off-by-one" },
+          { "caseId": "refutation-hard-locale-digest", "difficulty": "hard", "heldOutKnownDefectCase": true, "knownDefects": [{ "defectId": "locale-dependent-digest-order", "severity": "major" }], "source": "fixture:refutation-hard-locale-digest" },
+          { "caseId": "refutation-easy-guarded-null", "difficulty": "easy", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "fixture:refutation-easy-guarded-null" },
+          { "caseId": "refutation-hard-atomic-rename", "difficulty": "hard", "heldOutKnownDefectCase": false, "knownDefects": [], "source": "fixture:refutation-hard-atomic-rename" }
+        ]
+      }
+    }
+  ]
+}

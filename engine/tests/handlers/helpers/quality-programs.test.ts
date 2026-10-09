@@ -15,6 +15,7 @@ import {
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { LOCAL_PI_MODEL_ARGUMENT } from "../../fixtures/local-pi-binding";
 import { afterEach, describe, expect, it } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../../src/runtime-compatibility";
 import { readReviewPacketPostimage } from "../../../src/handlers/helpers/review-packet";
@@ -257,7 +258,7 @@ describe("quality-program helper boundaries", () => {
     expect([...allowedVolumeImports].map((edge) => edge.split(" -> ")[1]!).filter((module) => !volumes.has(module))).toEqual([]);
   });
 
-  it("validates source profiles and renders exact Pi OpenAI models", () => {
+  it("validates source profiles and renders every Pi agent onto the exact local route", () => {
     expect(cli(["helper", "model-profiles", "validate", "--agents-dir", "agents"]))
       .toContain("Validated 28");
     const output = canonicalTempDir("loom-pi-agents-");
@@ -277,11 +278,18 @@ describe("quality-program helper boundaries", () => {
     expect(readFileSync(symlinkTarget, "utf-8")).toBe("source must remain unchanged\n");
     expect(lstatSync(reviewerOutput).isSymbolicLink()).toBe(false);
     const renderedReviewer = readFileSync(reviewerOutput, "utf-8");
-    expect(renderedReviewer).toContain("model: openai-codex/gpt-5.6-sol:high");
+    // Pi runs local models only: general-review and focused-review, once two
+    // distinct cloud targets, now lower to the one local route.
+    expect(renderedReviewer).toMatch(/^model-profile: general-review$/m);
+    expect(renderedReviewer.split("\n")).toContain(`model: ${LOCAL_PI_MODEL_ARGUMENT}`);
     expect(renderedReviewer).toContain(`${ROOT}/rules/architecture.md`);
     expect(renderedReviewer).not.toContain("CLAUDE_PLUGIN_ROOT");
-    expect(readFileSync(join(output, "comment-analyzer.md"), "utf-8"))
-      .toContain("model: openai-codex/gpt-5.5:high");
+    const commentAnalyzer = readFileSync(join(output, "comment-analyzer.md"), "utf-8");
+    expect(commentAnalyzer).toMatch(/^model-profile: focused-review$/m);
+    expect(commentAnalyzer.split("\n")).toContain(`model: ${LOCAL_PI_MODEL_ARGUMENT}`);
+    for (const rendered of readdirSync(output).filter((entry) => entry.endsWith(".md"))) {
+      expect(readFileSync(join(output, rendered), "utf-8")).not.toMatch(/^model: (?:openai-codex|github-copilot)\//m);
+    }
     const specify = readFileSync(join(output, "specify-agent.md"), "utf-8");
     expect(specify).toContain("## Preloaded Loom Skill: specify");
     expect(specify).toContain("# Specify - Requirements Before Design");

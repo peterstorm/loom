@@ -32,7 +32,13 @@ import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
-import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
+import { disposeFixturePiSessions, withFixturePiSession } from "../../fixtures/pi-session";
+import { facadeParentEnvironment, parentAnnouncement, type FacadeParent } from "../../fixtures/facade-parent";
+import { normalizeRunRoot } from "../../fixtures/emission-route-delta";
+import { fixturePiAgentDirectory } from "../../fixtures/fixture-pi-agent-directory";
+import { CURRENT_PI_CATALOG, DESKTOP_VLLM_ROUTE, type PiCatalog } from "../../../src/core/model-profiles";
+import { RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING, retiredPiCatalog } from "../../fixtures/local-pi-binding";
+import { deadLoopbackPort } from "../../fixtures/dead-loopback-port";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
 import {
   replayStandaloneResultFromEvidence,
@@ -43,7 +49,9 @@ import {
 import { StateManager } from "../../../src/state-manager";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
+import { publicationFile } from "../../../src/handlers/helpers/programs/durable-requests";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/issued-emission-capability";
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../src/core/reviewer-retry";
 import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { waveRequests, installWaveReviewRuns } from "../../../src/handlers/helpers/programs/wave-review-requests";
@@ -86,6 +94,22 @@ function currentWavePayload(
 ): string {
   return JSON.stringify({ schemaVersion: 2, kind: "wave-review", packetId: run.packet_id,
     generation: run.generation, prior_findings: priors, findings });
+}
+
+/**
+ * A reviewer retry issued under a Pi parent rides the emission route: its
+ * attempt-2 task closes with the issued tool's fresh one-call budget, rendered
+ * from the descriptor the task itself carries — never the extraction-only
+ * "unchanged reviewer-payload-schema" instruction.
+ */
+function expectEmissionRetryWording(task: string): void {
+  const descriptor = parseEmissionDescriptor(task);
+  expect(descriptor.kind, task).toBe("issued");
+  if (descriptor.kind !== "issued") return;
+  expect(task).toContain(reviewerRetryInstruction({
+    kind: "emission", binding: descriptor.binding, contextDigest: descriptor.contextDigest,
+  }));
+  expect(task).not.toContain(REVIEWER_EXTRACTION_RETRY_INSTRUCTION);
 }
 
 afterEach(() => {
@@ -244,9 +268,10 @@ function runCli(
   stdin = "",
   cwd = ENGINE,
   envOverrides: Readonly<Record<string, string | undefined>> = {},
+  parent: FacadeParent = "pi",
 ) {
   const env: NodeJS.ProcessEnv = {
-    ...fixturePiEnvironment(cwd),
+    ...facadeParentEnvironment(parent, cwd),
     ...envOverrides,
   };
   // The ambient session's own runtime handshake must not leak into the spawned
@@ -707,7 +732,7 @@ describe("orchestration CLI", () => {
     return `${Array.from({ length: count }, (_, index) => `${prefix}-${index}`).join("\n")}\n`;
   }
 
-  async function resumeWaveFixture(root: string, runsRoot: string, runDir: string): Promise<unknown> {
+  async function resumeWaveFixture(root: string, runsRoot: string, runDir: string, catalog: PiCatalog = CURRENT_PI_CATALOG): Promise<unknown> {
     return withFixturePiSession(root, async () => {
       vi.resetModules();
       const driver = await import("../../../src/handlers/helpers/programs/wave-gate");
@@ -717,7 +742,7 @@ describe("orchestration CLI", () => {
       if (!raw.ok) throw new Error(raw.error.message);
       const registered = parseRegisteredFacadeProgram(raw.value);
       if (registered.kind !== "registered" || registered.program.kind !== "wave-gate") throw new Error("fixture Wave registration unavailable");
-      const driven = await driver.resumeWaveGateFacade(handle.value, registered.program);
+      const driven = await driver.resumeWaveGateFacade(handle.value, registered.program, catalog);
       if (!driven.ok) throw new Error(driven.message);
       return driven.action;
     });
@@ -752,7 +777,7 @@ describe("orchestration CLI", () => {
   }
 
   /** Current fixture completion must earn accepted authority through the issued roster. */
-  async function reviewedWave(root: string, runsRoot: string, runDir: string) {
+  async function reviewedWave(root: string, runsRoot: string, runDir: string, catalog: PiCatalog = CURRENT_PI_CATALOG) {
     const statePath = join(root, ".claude/state/active_task_graph.json");
     const fixture = JSON.parse(readFileSync(statePath, "utf8"));
     writeFileSync(statePath, JSON.stringify({ ...fixture, spec_trace_version: 2,
@@ -775,7 +800,7 @@ describe("orchestration CLI", () => {
         })));
       expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
-    return resumeWaveFixture(root, runsRoot, runDir);
+    return resumeWaveFixture(root, runsRoot, runDir, catalog);
   }
 
   /** A refutation verdict transcript with a caller-chosen vote direction. */
@@ -800,6 +825,10 @@ describe("orchestration CLI", () => {
       })),
     });
   }
+
+  /** The catalog as it stood before the 2026-10-08 retargeting, when the
+   *  `refutation` profile still lowered to its retired cloud binding. */
+  const RETIRED_REFUTATION_CATALOG = retiredPiCatalog({ refutation: RETIRED_REFUTATION_PI_BINDING });
 
   it("prints a status even when no state file exists", async () => {
     const result = (await runCli(["status"], "", project()));
@@ -1459,7 +1488,7 @@ describe("orchestration CLI", () => {
       attempt: 1,
       modelProfile: "general-review",
       harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+        pi: RETIRED_CLOUD_PI_BINDING,
         claude: { harness: "claude-code", model: "sonnet" },
       },
       requiredSkill: null,
@@ -1625,14 +1654,65 @@ describe("orchestration CLI", () => {
     expect(started.stderr).toContain("cannot publish Pi orchestration capture authority");
   });
 
-  // Claude Code: CLAUDECODE=1 plus CLAUDE_CODE_SESSION_ID, as Claude Code
-  // exposes them to the main agent's Bash commands, and no Pi announcement.
+  it("refuses a Pi spawn batch whose local route is unreachable, then emits it on resume once the route answers", async () => {
+    const root = sourceProject();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.pi-route-down");
+    const bindingDir = join(root, "pi-session-bindings");
+    const sessionId = "019ff290-ffee-7e86-8ed0-c834c04b7f71";
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(bindingDir);
+    // A Pi agent dir whose models.json points the catalog's local route at a
+    // loopback port nothing listens on: the route is configured but down.
+    const downAgentDir = join(root, "pi-agent-route-down");
+    mkdirSync(downAgentDir);
+    writeFileSync(join(downAgentDir, "models.json"), JSON.stringify({
+      providers: {
+        [DESKTOP_VLLM_ROUTE.provider]: {
+          baseUrl: `http://127.0.0.1:${await deadLoopbackPort()}/v1`,
+          api: "openai-completions",
+          models: [{ id: DESKTOP_VLLM_ROUTE.model }],
+        },
+      },
+    }));
+    const piEnv = (agentDir: string) => ({
+      PI_CODING_AGENT: "true",
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_SESSION_ID: sessionId,
+      LOOM_SUBAGENT_DIR: bindingDir,
+    });
+
+    const refused = await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root, piEnv(downAgentDir));
+
+    expect(refused.status).not.toBe(0);
+    expect(refused.stdout).not.toContain('"kind": "spawn-batch"');
+    expect(refused.stderr).toContain(
+      `refusing to spawn: route ${DESKTOP_VLLM_ROUTE.provider}/${DESKTOP_VLLM_ROUTE.model} is unreachable`,
+    );
+    // Fail closed: no session spawn binding was registered for the refused batch.
+    expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toEqual({ ok: true, value: [] });
+
+    const resumed = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv(fixturePiAgentDirectory()));
+
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const action = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests.length).toBeGreaterThan(0);
+    expect(action.requests.every(({ authority }) =>
+      authority.harnessBinding.pi.provider === DESKTOP_VLLM_ROUTE.provider &&
+      authority.harnessBinding.pi.model === DESKTOP_VLLM_ROUTE.model)).toBe(true);
+    expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toMatchObject({ ok: true, value: [expect.objectContaining({
+      runId: "run.pi-route-down",
+      requestIds: action.requests.map(({ authority }) => authority.requestId).sort(),
+    })] });
+  }, 30_000);
+
+  // A Claude Code parent's announcement of `sessionId`, with no ambient run
+  // directory and its session bindings in `bindingDir`.
   const claudeCodeEnvironment = (sessionId: string | undefined, bindingDir: string) => ({
-    PI_CODING_AGENT: undefined,
-    PI_SESSION_ID: undefined,
-    PI_SESSION_FILE: undefined,
-    CLAUDECODE: "1",
-    CLAUDE_CODE_SESSION_ID: sessionId,
+    ...parentAnnouncement("claude-code", sessionId),
     LOOM_ORCHESTRATION_RUNS_ROOT: undefined,
     LOOM_ORCHESTRATION_RUN_DIR: undefined,
     LOOM_SUBAGENT_DIR: bindingDir,
@@ -1817,19 +1897,18 @@ describe("orchestration CLI", () => {
     expect(panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
   }, 15_000);
 
-  it("keeps the refutation panel spawn tool-free under a qualified emission-capable parent (FR-001/AD-6)", async () => {
-    // runCli's envOverrides override (and undefined-delete) the fixture env,
-    // so each arm pins its own issue-route election explicitly.
-    const CATALOG_ROUTE_ENV = { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined } as const;
-    const QUALIFIED_ROUTE_ENV = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" } as const;
-    const runThroughPanel = async (routeEnv: Readonly<Record<string, string | undefined>>) => {
+  it("keeps the refutation panel spawn tool-free under an emission-capable Pi parent (FR-001/AD-6)", async () => {
+    // Each arm runs under its own parent harness: the fixture Pi session
+    // (every reviewer on the emission route) against a Claude Code parent
+    // (every reviewer extraction-only).
+    const runThroughPanel = async (parent: FacadeParent) => {
       const root = repository();
       writeFileSync(join(root, "README.md"), "fixture\npanel defect\n");
       const runsRoot = join(root, ".claude", "reviews", "review-and-fix-runs");
       const runDir = join(runsRoot, "run.panel-route");
       mkdirSync(runDir, { recursive: true });
       const startedResponse = await runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", runDir],
-        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, routeEnv);
+        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, {}, parent);
       expect(startedResponse.status, startedResponse.stderr).toBe(0);
       const started = JSON.parse(startedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
       const opened = openRunDirectory(runsRoot, runDir);
@@ -1839,37 +1918,39 @@ describe("orchestration CLI", () => {
       for (const [index, { authority }] of started.requests.entries()) {
         expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
       }
-      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, routeEnv);
+      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, parent);
       expect(resumedResponse.status, resumedResponse.stderr).toBe(0);
       const panel = JSON.parse(resumedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
       return { root, started, panel };
     };
-    const catalog = await runThroughPanel(CATALOG_ROUTE_ENV);
-    const qualified = await runThroughPanel(QUALIFIED_ROUTE_ENV);
+    const extraction = await runThroughPanel("claude-code");
+    const emission = await runThroughPanel("pi");
 
-    // The parent route is genuinely emission-capable: the reviewer slots of
-    // the qualified run issue descriptors, the catalog run's do not.
-    for (const { task } of qualified.started.requests) {
+    // The Pi parent is genuinely emission-capable: its reviewer slots issue
+    // descriptors, the Claude Code parent's do not.
+    for (const { authority, task } of emission.started.requests) {
+      expect(authority.role).not.toBe("review-verifier-agent");
       expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
       expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
     }
-    for (const { task } of catalog.started.requests) {
+    for (const { task } of extraction.started.requests) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     }
 
     // AD-6: the panel verdict slots are not this feature's emission route —
     // every panel task advertises no tool and is byte-identical across the
-    // two parent routes (modulo the project-local run-directory path).
-    const normalize = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
-    expect(qualified.panel.requests.map(({ authority }) => authority.role))
-      .toEqual(catalog.panel.requests.map(({ authority }) => authority.role));
-    for (const [catalogRequest, qualifiedRequest] of catalog.panel.requests.map((request, index) => [request, qualified.panel.requests[index]!] as const)) {
-      for (const task of [catalogRequest.task, qualifiedRequest.task]) {
+    // two parents (modulo the project-local run-directory path).
+    expect(emission.panel.requests.length).toBeGreaterThan(0);
+    expect(emission.panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
+    expect(emission.panel.requests.map(({ authority }) => authority.role))
+      .toEqual(extraction.panel.requests.map(({ authority }) => authority.role));
+    for (const [extractionRequest, emissionRequest] of extraction.panel.requests.map((request, index) => [request, emission.panel.requests[index]!] as const)) {
+      for (const task of [extractionRequest.task, emissionRequest.task]) {
         expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
         expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
         expect(parseEmissionDescriptor(task).kind).toBe("absent");
       }
-      expect(normalize(qualifiedRequest.task, qualified.root)).toBe(normalize(catalogRequest.task, catalog.root));
+      expect(normalizeRunRoot(emissionRequest.task, emission.root)).toBe(normalizeRunRoot(extractionRequest.task, extraction.root));
     }
   }, 60_000);
 
@@ -2238,8 +2319,9 @@ describe("orchestration CLI", () => {
         candidate.requestId === authority.requestId)?.task ?? "";
       expect(requestTask).toContain("YOUR PREVIOUS ATTEMPT WAS REJECTED");
       expect(requestTask).toContain("Reviewer payload must be exactly one strict JSON object.");
-      expect(requestTask).toContain("unchanged reviewer-payload-schema");
-      expect(requestTask).toContain("reviewer-impact-rubric");
+      // The schema/rubric restatement rides the packet diagnostic above; the
+      // task's final action is the Pi parent's emission route.
+      expectEmissionRetryWording(requestTask);
     }
     const protectedGraph = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: { slot_authority?: readonly { attempted: number }[] } }[] };
     expect(protectedGraph.tasks[0]?.review_run?.slot_authority?.every(({ attempted }) => attempted === 2)).toBe(true);
@@ -2723,7 +2805,7 @@ describe("orchestration CLI", () => {
       attempt: 2,
     });
     expect(retry.requests[0]?.task).toContain("model exited without a final payload");
-    expect(retry.requests[0]?.task).toContain("unchanged reviewer-payload-schema");
+    expectEmissionRetryWording(retry.requests[0]?.task ?? "");
     const lateAttemptOne = await captureReviewedTranscript(opened.value, rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
@@ -3940,6 +4022,161 @@ describe("orchestration CLI", () => {
     expect(replayed.stdout).not.toContain("spawn-batch");
   }, 30_000);
 
+  /**
+   * A standalone run whose reviewers raised one critical, with its Refutation
+   * Panel issued — checkpointed and its attempt-1 batch published — under the
+   * catalog as it stood before the 2026-10-08 retargeting.
+   */
+  async function standaloneRunWithRetiredRefutationPanel(name: string) {
+    const root = repository();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const runsRoot = canonicalTempDir(`loom-${name}-runs-`);
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, `run.${name}`);
+    mkdirSync(runDir);
+    const started = (await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "all", files: ["a.txt"], dryRun: false }), root));
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const critical = currentStandaloneCritical("a.txt", "retired-route finding");
+    const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
+    for (const [index, request] of initial.requests.entries()) {
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+    }
+
+    const panel = await withFixturePiSession(root, async () => {
+      const raw = opened.value.readProgramRegistration();
+      if (!raw.ok) throw new Error(raw.error.message);
+      const registered = parseRegistration(raw.value);
+      if (!registered.ok) throw new Error(registered.message);
+      const driven = await resumeStandaloneFacade(opened.value, registered.value, RETIRED_REFUTATION_CATALOG);
+      if (!driven.ok) throw new Error(driven.message);
+      return driven.action as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    });
+    expect(panel.kind).toBe("spawn-batch");
+    expect(panel.requests).toHaveLength(3);
+    expect(panel.requests.every(({ authority }) => authority.program === "refutation-panel" &&
+      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI_BINDING))).toBe(true);
+    return { root, runsRoot, runDir, opened: opened.value, panel };
+  }
+
+  // ADR-0023: a request is checked against today's catalog once, at mint.
+  // A refutation panel issued before the catalog retargeted its Pi route is
+  // history; resuming or replaying it must read the recorded authorities, not
+  // re-mint today's binding and compare the two.
+  it("resumes and replays a standalone refutation panel issued before the catalog retargeted its Pi route", async () => {
+    const { root, runsRoot, runDir, opened, panel } = await standaloneRunWithRetiredRefutationPanel("standalone-retired-refutation");
+
+    // From here on the catalog is today's. Slot 1's attempt 1 is rejected, so
+    // the panel owes the recorded slot's attempt-2 retry.
+    for (const [index, request] of panel.requests.entries()) {
+      const raw = index === 0 ? "malformed" : refutationVerdicts(opened, request.authority, "upheld");
+      expect((await captureReviewedTranscript(opened, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+    // A Pi parent may not spawn the retired route: the spawn gate refuses it
+    // by name, AFTER the recorded panel was read — never as a recorded-versus-
+    // minted authority mismatch. A Claude Code parent runs the retry on the
+    // recorded profile's Claude model, so the run completes there.
+    const piResume = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+    expect(piResume.status).not.toBe(0);
+    expect(piResume.stderr).toContain(`${RETIRED_REFUTATION_PI_BINDING.provider}/${RETIRED_REFUTATION_PI_BINDING.model}`);
+    expect(piResume.stderr).toContain("is retired");
+    expect(piResume.stderr).not.toContain("durable refutation request is invalid");
+    const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const retry = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(retry.kind, resumed.stdout).toBe("spawn-batch");
+    expect(retry.requests).toHaveLength(1);
+    // The retry is the recorded slot's second attempt: issued with the slot, under its recorded binding.
+    expect(retry.requests[0]?.authority).toMatchObject({
+      attempt: 2, program: "refutation-panel", slotId: panel.requests[0]!.authority.slotId,
+      modelProfile: "refutation", harnessBinding: { pi: RETIRED_REFUTATION_PI_BINDING },
+    });
+
+    const valid = refutationVerdicts(opened, retry.requests[0]!.authority, "upheld");
+    expect((await captureReviewedTranscript(opened, retry.requests[0]!.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(done.status, done.stderr).toBe(0);
+    expect(JSON.parse(done.stdout).kind, done.stdout).toBe("done");
+    const evidenceReplay = replayFromCapturedEvidence(opened);
+    expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
+    const again = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(JSON.parse(again.stdout).kind, again.stdout).toBe("done");
+  }, 60_000);
+
+  it("republishes a checkpointed standalone refutation panel from its record when its batch receipt was never written", async () => {
+    const { root, runsRoot, runDir, panel } = await standaloneRunWithRetiredRefutationPanel("standalone-checkpointed-refutation");
+    // The run checkpoints the issued panel BEFORE it publishes the batch, so a
+    // crash between the two leaves the checkpoint as the only record.
+    const effectId = `effect:standalone-refutation:${createHash("sha256")
+      .update(panel.requests.map(({ authority }) => authority.requestId).join("|")).digest("hex")}`;
+    rmSync(join(runDir, "artifacts", publicationFile(effectId)));
+
+    const republished = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(republished.status, republished.stderr).toBe(0);
+    const batch = JSON.parse(republished.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(batch.kind, republished.stdout).toBe("spawn-batch");
+    // The recorded panel, not one re-minted from today's catalog.
+    expect(batch.requests.map(({ authority }) => authority)).toEqual(panel.requests.map(({ authority }) => authority));
+  }, 60_000);
+
+  it("resumes a Wave refutation panel issued before the catalog retargeted its Pi route", async () => {
+    const root = repository();
+    const proof = passingWaveTaskProof();
+    expect(proof.state).toBe("satisfied");
+    const finding = {
+      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
+    };
+    const planFile = modelFreePlan(root);
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: planFile, wave_gates: {},
+      wave_review_epoch: {
+        runId: "run.wave-retired-refutation", wave: 1, batchEpoch: "c".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, planFile),
+      },
+      spec_check: {
+        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = canonicalTempDir("loom-wave-retired-refutation-runs-");
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-retired-refutation");
+    mkdirSync(runDir);
+
+    const action = await reviewedWave(root, runsRoot, runDir, RETIRED_REFUTATION_CATALOG) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests).toHaveLength(3);
+    expect(action.requests.every(({ authority }) => authority.program === "refutation-panel" &&
+      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI_BINDING))).toBe(true);
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of action.requests) {
+      const raw = refutationVerdicts(opened.value, authority, "refuted");
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+
+    // Today's catalog lowers `refutation` to the local route; the recorded
+    // panel still adjudicates and the refuting tally drives the Wave to done.
+    const resumed = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; outcome?: { kind: string } };
+    expect(resumed.kind, JSON.stringify(resumed)).toBe("done");
+    expect(resumed.outcome?.kind).toBe("protected-wave-state-committed");
+  }, 60_000);
+
   it("drives a registered standalone review from spawn-batch to idempotent done", async () => {
     const root = sourceProject();
     const runsRoot = join(root, "runs");
@@ -4053,7 +4290,7 @@ describe("orchestration CLI", () => {
       attempt: 2,
     });
     expect(retry.requests[0]?.task).toContain("no-final-payload: result carried no final text payload");
-    expect(retry.requests[0]?.task).toContain("unchanged reviewer-payload-schema");
+    expectEmissionRetryWording(retry.requests[0]?.task ?? "");
 
     // A later resume has no fresh rejection in its per-pass set. It must read
     // the durable diagnostic from LC-2 state when reissuing the exact retry.

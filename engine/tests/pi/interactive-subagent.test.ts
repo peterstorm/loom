@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { expectedPiAgentDefinition } from "../../src/utils/render-pi-agent";
+import { LOCAL_PI_MODEL_ARGUMENT } from "../fixtures/local-pi-binding";
 import type { ExtensionUiResponse } from "../../../pi/interactive-rpc";
 import {
   registerInteractiveSubagentTool,
@@ -114,7 +115,7 @@ describe("interactive Pi subagent shell", () => {
       "--no-extensions",
       "--extension", join(ROOT, "pi", "extension.ts"),
       "--extension", join(ROOT, "pi", "ask-user-question.ts"),
-      "--model", "openai-codex/gpt-5.6-sol:high",
+      "--model", LOCAL_PI_MODEL_ARGUMENT,
     ]));
     const toolFlag = invocation?.args.indexOf("--tools") ?? -1;
     expect(toolFlag).toBeGreaterThanOrEqual(0);
@@ -191,7 +192,7 @@ describe("interactive Pi subagent shell", () => {
       requestedModel: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
       routing: {
         decision: "override",
-        declared: "openai-codex/gpt-5.6-sol:high",
+        declared: LOCAL_PI_MODEL_ARGUMENT,
         effective: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
       },
     });

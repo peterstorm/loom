@@ -8,7 +8,6 @@
  */
 import type { CurrentReviewRunSlotAuthority, LegacyReviewRunSlotAuthority, TaskGraph } from "../types";
 import type { ContextPacket } from "./context-packets";
-import type { ReviewerIssueRoute } from "./model-profiles";
 import {
   canonicalStructuralEquals,
   parseStoredAgentRequestAuthority,
@@ -45,7 +44,6 @@ export type WaveReviewInstallObservation = Readonly<{
   workspaces: readonly ReviewedWorkspaceObservation[];
   /** Current spec/plan observation at the batch's document paths. */
   specCheckObservation: WaveSpecCheckObservation;
-  issueRoute: ReviewerIssueRoute;
 }>;
 
 function reviewSlotAuthorityRoster(
@@ -82,7 +80,7 @@ export function installWaveReviewRunsTransition(
   locked: TaskGraph,
   observation: WaveReviewInstallObservation,
 ): DomainResult<TaskGraph, IssuanceRefusal> {
-  const { registration, batch, workspaces, specCheckObservation, issueRoute } = observation;
+  const { registration, batch, workspaces, specCheckObservation } = observation;
   const specCheck = waveBatchSpecCheckAuthority(batch);
   if (!specCheck.ok) return specCheck;
   const specCheckAuthority = specCheck.value;
@@ -112,7 +110,6 @@ export function installWaveReviewRunsTransition(
     1,
     workspaces,
     specCheckObservation,
-    issueRoute,
   );
   if (!lockedPreparation.ok || !canonicalStructuralEquals(lockedPreparation.value, batch)) {
     return refuse("Wave review packet context changed before the batch could be installed");

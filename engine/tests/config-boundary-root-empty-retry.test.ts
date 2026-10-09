@@ -22,7 +22,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { observeTaskGraphProjectBoundary } from "../src/config";
-import type { GitSpawn, GitSpawnOutcome, SpawnGitRun } from "../src/utils/git-execution-policy";
+import type { GitSpawn, SpawnGitRun } from "../src/utils/git-execution-policy";
+import type { GitSpawnOutcome } from "../src/utils/git-spawn-outcome";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 
 const dirs: string[] = [];

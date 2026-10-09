@@ -8,6 +8,7 @@ import { fixtureSession } from "./pi-session";
 import { value } from "./parse-result";
 import { runReadCoverage } from "../../src/orchestration/standalone-read-coverage-evidence";
 import { claudeReadLines, frozenDiffReaderPages, piReadMessages } from "./read-coverage";
+import { advertiseInstalledLaunchPort, SynchronousEventBus } from "./emission-launch-port";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 type Emit = (event: string, payload: Record<string, unknown>) => Promise<unknown[]>;
@@ -95,8 +96,15 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
       for (const role of [...STANDALONE_REVIEWER_ROLES, "review-verifier-agent"]) {
         writeFileSync(join(process.env.PI_CODING_AGENT_DIR, "agents", `${role}.md`), render.expectedPiAgentDefinition(role, packageRoot));
       }
+      // Every catalog reviewer is issued on the emission-qualified local route,
+      // so a Pi parent's reviewer spawn is emission-enabled and needs the
+      // installed launcher's v2 capability on the extension event bus. The
+      // scripted children never call the tool: each final falls back to
+      // extraction, the path these suites drive.
+      const events = new SynchronousEventBus();
+      advertiseInstalledLaunchPort(events);
       const api = { on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-        registerTool: () => undefined, registerCommand: () => undefined };
+        registerTool: () => undefined, registerCommand: () => undefined, events };
       extension.default(api as never, () => []);
     }
     const context = { cwd: root, hasUI: false, sessionManager: { getSessionId: () => session.sessionId, getSessionFile: () => session.sessionFile } };

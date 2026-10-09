@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HERE, REPO_ROOT } from "./pilot-test-fixtures";
+import { HERE, PILOT_2_PREREGISTRATION, REPO_ROOT } from "./pilot-test-fixtures";
 
 /**
  * Shell-level behaviour of `scripts/run-model-calibration.ts --pilot/--decide`,
@@ -11,7 +11,9 @@ import { HERE, REPO_ROOT } from "./pilot-test-fixtures";
  * route — a blocked preflight recorded honestly (nothing dispatched, nothing
  * fabricated, decision incomplete, the workload corpus never loaded), the
  * never-overwrite refusal and the offline re-decision with its
- * preregistration-drift refusal.
+ * preregistration-drift refusal; and — against a loopback server answering
+ * 401 like the live vLLM — the engine's route probe recorded as an explicit
+ * served-model-unverified fact, decided under pilot-2's per-route policy.
  *
  * Everything behind the script's ports is pinned at its own interface: the
  * retention rules and `recordWindow`'s wiring at the `WindowStore` and
@@ -124,5 +126,74 @@ describe("run-model-calibration --pilot", () => {
     const tampered = run(["--decide", fixture.window]);
     expect(tampered.status).not.toBe(0);
     expect(tampered.stderr).toContain("changed after window");
+  });
+});
+
+/**
+ * A loopback model server that refuses every unauthenticated request with
+ * HTTP 401, like the live vLLM. It runs in its OWN process: the CLI is spawned
+ * synchronously, which blocks this test's event loop, so a server living in
+ * it could never answer. A request carrying an Authorization header would be
+ * answered with a model listing instead, so a leaked credential shows up as a
+ * served list rather than the served-model-unverified fact an auth refusal
+ * records.
+ */
+const AUTH_REFUSING_SERVER = `
+const server = require("node:http").createServer((request, response) => {
+  const listing = request.headers.authorization !== undefined;
+  response.writeHead(listing ? 200 : 401, { "content-type": "application/json" });
+  response.end(JSON.stringify(listing ? { data: [{ id: "credential-leaked" }] } : { error: "unauthorized" }));
+});
+server.listen(0, "127.0.0.1", () => process.stdout.write(server.address().port + "\\n"));
+`;
+
+async function authRefusingServer(): Promise<Readonly<{ baseUrl: string; stop: () => void }>> {
+  const child = spawn(process.execPath, ["-e", AUTH_REFUSING_SERVER], { stdio: ["ignore", "pipe", "inherit"] });
+  const port = await new Promise<string>((resolvePort, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => reject(new Error(`auth-refusing server exited with ${code}`)));
+    child.stdout.once("data", (chunk: Buffer) => resolvePort(chunk.toString("utf-8").trim()));
+  });
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, stop: () => child.kill() };
+}
+
+describe("run-model-calibration --pilot (pilot-2, route answering 401)", () => {
+  it("records an auth refusal as served-model-unverified, and decides under the per-route policy", async () => {
+    const server = await authRefusingServer();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "loom-gcd-pilot2-"));
+      temps.push(dir);
+      const raw = JSON.parse(readFileSync(join(HERE, PILOT_2_PREREGISTRATION), "utf-8")) as { route: { baseUrl: string } };
+      raw.route.baseUrl = server.baseUrl;
+      const prereg = join(dir, PILOT_2_PREREGISTRATION);
+      writeFileSync(prereg, JSON.stringify(raw, null, 2));
+      const windowDir = join(dir, "window");
+      const result = run([
+        "--pilot", prereg, "--preflight-only",
+        "--fixtures", join(HERE, "workload-fixtures.json"),
+        "--window-dir", windowDir,
+      ], { LOOM_RUN_MODEL_CALIBRATION: "1" });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("Release decision: incomplete-missing-measurement");
+
+      const window = JSON.parse(readFileSync(join(windowDir, "window.json"), "utf-8"));
+      expect(window.preflightFacts.route).toEqual({
+        kind: "served-model-unverified",
+        reason: `GET ${server.baseUrl}/models answered HTTP 401: the model list needs credentials Loom never sends`,
+      });
+      const blocks = window.preflight.kind === "blocked" ? window.preflight.blocks.map((block: { kind: string }) => block.kind) : [];
+      expect(blocks).not.toContain("route-unreachable");
+      expect(blocks).not.toContain("served-model-absent");
+      expect(window.dispatch.kind).toBe("not-attempted");
+      expect(window.observations).toBe(0);
+
+      const decision = JSON.parse(readFileSync(join(windowDir, "release-decision.json"), "utf-8"));
+      expect(decision.preregistration.id).toBe("gcd-ad11-pilot-2");
+      const missing = decision.decision.missing.map((entry: { kind: string }) => entry.kind);
+      expect(missing).toContain("cell-not-measured");
+      expect(missing).not.toContain("no-qualified-capable-route");
+    } finally {
+      server.stop();
+    }
   });
 });

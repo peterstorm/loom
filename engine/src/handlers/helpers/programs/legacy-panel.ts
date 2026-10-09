@@ -30,18 +30,19 @@
 import { createHash } from "node:crypto";
 import {
   AGENT_REQUIRED_SKILLS,
-  parseAgentRequestAuthority,
+  mintAgentRequestAuthority,
   parseEffectId,
   parseFixedArtifactSlot,
   parseRequestId,
   parseSlotId,
   type AgentRequestAuthority,
   type DomainResult,
+  type MintedAgentRequestAuthority,
 } from "../../../core/orchestration-contract";
 import type { PanelVerdictSource, PanelVerdictSourceRecord } from "../../../core/panel-verdict-source";
 import { captureKey } from "../../../core/harness-capture";
 import type { NextPanelProgramAction, PanelProgramAction, SpawnRequest as PanelSpawnRequest } from "../../../core/panel-program";
-import { lowerModelProfile, resolveModelProfile } from "../../../core/model-profiles";
+import { resolveAgentPolicy } from "../../../core/model-profiles";
 import {
   describePanelJournalReplayError,
   executeDeterministicPanelOperation,
@@ -217,7 +218,8 @@ async function appendSpawnOutcome(
 
 type MaterializedPanelRequest = Readonly<{
   request: PanelSpawnRequest;
-  authority: AgentRequestAuthority;
+  /** Minted at materialization: a panel request is issued against today's catalog. */
+  authority: MintedAgentRequestAuthority;
   packet: ContextPacket;
 }>;
 
@@ -230,14 +232,21 @@ function materializePanelRequest(
     request.attempt === 1 ? request.id : `${request.id}:attempt-${request.attempt}`,
   );
   const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
-  const profile = resolveModelProfile(request.modelProfile);
   const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
   if (!requestId.ok) return { ok: false, message: requestId.error.message };
   if (!slotId.ok) return { ok: false, message: slotId.error.message };
-  if (!profile.ok) return { ok: false, message: profile.error.message };
   if (!Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
     return { ok: false, message: `unknown panel agent ${request.agent}` };
   }
+  // The panel program names the profile it expects; the catalog decides the
+  // request's actual profile, so a disagreement is refused, never resolved.
+  const catalogProfile = resolveAgentPolicy(role);
+  if (!catalogProfile.ok) return { ok: false, message: catalogProfile.error.message };
+  if (catalogProfile.value.profile !== request.modelProfile) {
+    return { ok: false, message: `panel request ${request.id} names profile '${String(request.modelProfile)}', but role '${role}' is issued under '${catalogProfile.value.profile}'` };
+  }
+  // The packet names the role's Skill for the Agent to read; the request's own
+  // Skill is minted from the catalog below.
   const requiredSkill = AGENT_REQUIRED_SKILLS[role];
   const authoritySection = encodeByteSection("panel-authority", JSON.stringify({
     panel: registration.kind,
@@ -267,19 +276,13 @@ function materializePanelRequest(
     `transcripts/${slotId.value}/attempt-${request.attempt}.raw`,
   );
   if (!outputSlot.ok) return { ok: false, message: outputSlot.error.message };
-  const authority = parseAgentRequestAuthority({
+  const authority = mintAgentRequestAuthority({
     runId: handle.runId,
     requestId: requestId.value,
     slotId: slotId.value,
     program: registration.kind === "architecture" ? "architecture-panel" : "refutation-panel",
     role,
     attempt: request.attempt,
-    modelProfile: profile.value.id,
-    harnessBinding: {
-      pi: lowerModelProfile(profile.value, "pi"),
-      claude: lowerModelProfile(profile.value, "claude-code"),
-    },
-    requiredSkill,
     contextDigest: packet.value.digest,
     outputSlot: outputSlot.value,
   });
@@ -317,7 +320,7 @@ async function materializePanelAction(
     kind: "reserve-agent-requests",
     effectId: effectId.value,
     runId: handle.runId,
-    requests: materialized.map(({ authority }) => authority) as [AgentRequestAuthority, ...AgentRequestAuthority[]],
+    requests: materialized.map(({ authority }) => authority) as [MintedAgentRequestAuthority, ...MintedAgentRequestAuthority[]],
   });
   if (!reserved.ok) return { ok: false, message: reserved.error.message };
 
@@ -405,26 +408,29 @@ export async function driveRegisteredPanel(
 // Settlement entry points: one submitted attempt, or every captured attempt
 // ---------------------------------------------------------------------------
 
+/** A settlement step's failure, in the façade's own failure shape so an entry
+ *  point returns it unchanged. A step that succeeds has nothing to report. */
+type PanelShellFailure = ReturnType<typeof failed>;
+
 /**
  * Settle ONE attempt's raw bytes and record how it settled: the logical id is
  * derived, the attempt settled through its verdict source, then its outcome
  * appended under the reserved slot's dedup key. Both settlement entry points
  * go through here, so the logical-id/dedup-key pairing `appendSpawnOutcome`
  * owns has one caller sequence; they differ only in where `raw` comes from.
- * Recording has no value of its own, so success is the unit `true`; a failure
- * is already the façade's failure shape, which an entry point passes through.
+ * Recording has no result of its own: the failure, or `null` once recorded.
  */
 async function settleAndRecordPanelAttempt(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
   request: AgentRequestAuthority,
   raw: string,
-): Promise<ProgramParse<true>> {
+): Promise<PanelShellFailure | null> {
   const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
   const settled = await settlePanelAttemptSubmission({ handle, registration, request, logicalRequestId, raw });
   if (!settled.ok) return failed(settled.error);
   await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settled.value.problem);
-  return { ok: true, value: true };
+  return null;
 }
 
 /**
@@ -437,8 +443,8 @@ export async function submitRegisteredPanelAttempt(
   request: AgentRequestAuthority,
   raw: string,
 ): Promise<FacadeDriveResult> {
-  const recorded = await settleAndRecordPanelAttempt(handle, registration, request, raw);
-  if (!recorded.ok) return recorded;
+  const failure = await settleAndRecordPanelAttempt(handle, registration, request, raw);
+  if (failure !== null) return failure;
   return driveRegisteredPanel(handle, registration);
 }
 
@@ -449,13 +455,12 @@ export async function submitRegisteredPanelAttempt(
  * having judged it — the capture and the judgement are separate writes. This
  * settles each such attempt through the same verdict-source seam a submission
  * uses and records the verdict, keyed so a repeat is a no-op. It decides no
- * policy of its own: the first failure, or the unit `true` once every attempt
- * settled.
+ * policy of its own: the first failure, or `null` once every attempt settled.
  */
 async function reconcileCapturedPanelResults(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
-): Promise<ProgramParse<true>> {
+): Promise<PanelShellFailure | null> {
   const events = await handle.readEvents();
   const settled = new Set(events.flatMap(({ event }) => {
     if (typeof event !== "object" || event === null) return [];
@@ -479,10 +484,10 @@ async function reconcileCapturedPanelResults(
     // durable record's replay when one was published, otherwise the extraction
     // baseline — and the submission decision runs over exactly that resolution
     // (the same policy every later scan of the same attempt reproduces).
-    const recorded = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
-    if (!recorded.ok) return recorded;
+    const failure = await settleAndRecordPanelAttempt(handle, registration, request, Buffer.from(bytes.value).toString("utf-8"));
+    if (failure !== null) return failure;
   }
-  return { ok: true, value: true };
+  return null;
 }
 
 /**
@@ -494,7 +499,7 @@ export async function resumeRegisteredPanel(
   handle: RunDirHandle,
   registration: RegisteredPanelProgram,
 ): Promise<FacadeDriveResult> {
-  const reconciled = await reconcileCapturedPanelResults(handle, registration);
-  if (!reconciled.ok) return reconciled;
+  const failure = await reconcileCapturedPanelResults(handle, registration);
+  if (failure !== null) return failure;
   return driveRegisteredPanel(handle, registration);
 }

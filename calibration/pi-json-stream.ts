@@ -16,7 +16,7 @@
  * a caller holding the whole stdout folds it at once (`foldPiJsonStream`).
  */
 
-import { err, ok, type Result } from "./kernel";
+import { err, errorMessage, ok, type Result } from "./kernel";
 
 /** A message carried by a `message_end` event, as Pi wrote it. */
 export type PiMessage = Readonly<Record<string, unknown>>;
@@ -41,7 +41,7 @@ export function readPiJsonLine(line: string, lineNumber: number): PiJsonLine {
   try {
     event = JSON.parse(line);
   } catch (error) {
-    return Object.freeze({ kind: "malformed" as const, detail: `line ${lineNumber}: ${error instanceof Error ? error.message : String(error)}` });
+    return Object.freeze({ kind: "malformed" as const, detail: `line ${lineNumber}: ${errorMessage(error)}` });
   }
   if (!isRecord(event)) return Object.freeze({ kind: "malformed" as const, detail: `line ${lineNumber}: not a JSON event object` });
   return event["type"] === "message_end" && isRecord(event["message"])

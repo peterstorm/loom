@@ -1,12 +1,17 @@
 /**
  * Program-path emission wiring (T6), end to end through real Run Directories
- * and real facade CLI starts: frozen cloud bindings stay extraction-only, an
- * exactly qualified local Pi parent issues the tool-primary reviewer route, the
- * Pi issuance read behind the spawn admission port proves publication
+ * and real facade CLI starts: a non-Pi (Claude Code) parent's reviewers stay
+ * extraction-only and the reason is logged, a Pi parent issues every reviewer
+ * under its catalog profile on the one emission-qualified local route with the
+ * tool-primary instruction (whatever model the parent itself runs), the Pi
+ * issuance read behind the spawn admission port proves publication
  * independently of task markers, and the legacy publication route fails closed
  * against a current registration. These are shell integration tests (bun
  * subprocesses, process.env overlays); the pure decisions they wire are
- * issued-emission-capability.test.ts and spawn-task-emission.test.ts.
+ * issued-emission-capability.test.ts and spawn-task-emission.test.ts. An
+ * unqualified issued Pi route (a retired cloud binding) is no longer reachable
+ * through catalog issuance, so its extraction-only qualification is covered
+ * only by the pure issued-emission-capability.test.ts.
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -15,17 +20,17 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { git } from "../../../fixtures/git-repository";
-import { fixturePiEnvironment } from "../../../fixtures/pi-session";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
-import { withEnvOverlay } from "../../../fixtures/issue-route-env";
+import { withEnvOverlay } from "../../../fixtures/env-overlay";
+import { LOCAL_PI_BINDING } from "../../../fixtures/local-pi-binding";
 import { value } from "../../../fixtures/parse-result";
 import { catalogAuthority, mustAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import {
   DESKTOP_VLLM_ROUTE,
-  lowerModelProfile,
-  resolveModelProfile,
+  resolveAgentPolicy,
 } from "../../../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { parseRequestId } from "../../../../src/core/orchestration-contract/identity";
@@ -78,8 +83,8 @@ const standaloneV3Registration: RegisteredStandaloneProgram = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// Real facade CLI starts exercise both cloud extraction and an exactly
-// qualified local parent issuing a tool-primary reviewer route.
+// Real facade CLI starts exercise both a Claude Code parent (extraction-only)
+// and a Pi parent issuing the tool-primary reviewer route.
 // ---------------------------------------------------------------------------
 
 const waveCliRoots: string[] = [];
@@ -157,27 +162,31 @@ function standaloneEmissionProject(): { root: string; runsRoot: string } {
   return { root, runsRoot: join(root, "runs") };
 }
 
-const CHANGED_PARENT_ROUTE_ENV = Object.freeze({
-  PI_PROVIDER: DESKTOP_VLLM_ROUTE.provider,
-  PI_MODEL: DESKTOP_VLLM_ROUTE.model,
-  PI_REASONING_LEVEL: "medium",
-});
-const QUALIFIED_PARENT_ROUTE_ENV = Object.freeze({
-  ...CHANGED_PARENT_ROUTE_ENV,
+/** A Pi parent running a cloud model itself: issuance must not read it — every
+ *  reviewer still lands on the catalog's local emission route. */
+const CLOUD_PI_PARENT_MODEL_ENV = Object.freeze({
+  PI_PROVIDER: "openai-codex",
+  PI_MODEL: "gpt-5.6-sol",
   PI_REASONING_LEVEL: "high",
 });
+
+/** In-process renders read the Pi parent flag from this process: pin it to the
+ *  non-Pi parent the extraction arm runs under, whatever the ambient worker. */
+const withoutPiParent = <T>(operation: () => T | Promise<T>): Promise<T> =>
+  withEnvOverlay({ PI_CODING_AGENT: undefined }, operation);
 
 const startFacadeProgram = (
   project: Readonly<{ root: string; runsRoot: string }>,
   program: "wave-gate" | "standalone-review",
   runId: string,
   input: unknown,
-  environment: Readonly<Record<string, string>> = CHANGED_PARENT_ROUTE_ENV,
+  parent: FacadeParent = "pi",
+  environment: Readonly<Record<string, string>> = {},
 ): Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>> =>
   new Promise((resolve, reject) => {
     const child = spawn("bun", [waveCli, "helper", "orchestration", "start", program,
       "--runs-root", project.runsRoot, "--run", runId],
-      { cwd: project.root, env: { ...fixturePiEnvironment(project.root), ...environment } });
+      { cwd: project.root, env: { ...facadeParentEnvironment(parent, project.root), ...environment } });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
@@ -203,9 +212,9 @@ const spawnBatchRequests = (
 };
 
 describe("the wave-gate program path projects the frozen issued route (T6)", () => {
-  it("keeps frozen cloud Pi bindings extraction-only and renders supplied registration byte-identically to durable fallback", async () => {
+  it("keeps a Claude Code parent's reviewers extraction-only, logs the retained reason without changing the base instruction, and renders supplied registration byte-identically to durable fallback", async () => {
     const project = waveEmissionProject();
-    const started = await startFacadeProgram(project, "wave-gate", "run.wiring", { wave: 1 });
+    const started = await startFacadeProgram(project, "wave-gate", "run.wiring", { wave: 1 }, "claude-code");
     const requests = spawnBatchRequests(started);
     expect(requests.length).toBeGreaterThan(1);
     const specCheck = requests.find(({ authority }) => authority.role === "spec-check-invoker");
@@ -214,10 +223,15 @@ describe("the wave-gate program path projects the frozen issued route (T6)", () 
     expect(specCheck!.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     const reviewers = requests.filter(({ authority }) => authority.role !== "spec-check-invoker");
     expect(reviewers.length).toBeGreaterThan(0);
-    expect(started.stderr).toContain("issued Pi route openai-codex/gpt-5.6-sol");
+    // The frozen binding is the local emission route; only the parent decides.
+    for (const { authority } of reviewers) expect(authority.harnessBinding.pi).toMatchObject(DESKTOP_VLLM_ROUTE);
+    expect(started.stderr).toContain('"event":"loom-emission-route"');
+    expect(started.stderr).toContain('"kind":"extraction-only"');
+    expect(started.stderr).toContain("the parent harness is not Pi");
     for (const { task } of reviewers) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
       expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+      expect(task).toContain("Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.");
       // The delivery joins are retained regardless of emission-tool availability (FR-012).
       expect(task).toContain("LOOM_CONTEXT_READ_COMMAND: ");
       expect(task).toContain("Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.");
@@ -246,45 +260,20 @@ describe("the wave-gate program path projects the frozen issued route (T6)", () 
       authorityDigest: parsed.program.authorityDigest,
     });
     const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.";
-    const supplied = renderReviewProgramSpawn(
-      opened.value,
-      waveAuthority,
-      instruction,
-      suppliedRegistration,
-    ).task;
-    const fallback = renderSpawnTask(opened.value, waveAuthority, instruction);
+    const [supplied, fallback] = await withoutPiParent(() => [
+      renderReviewProgramSpawn(opened.value, waveAuthority, instruction, suppliedRegistration).task,
+      renderSpawnTask(opened.value, waveAuthority, instruction),
+    ] as const);
     expect(supplied).toBe(fallback);
     expect(supplied).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     expect(supplied).not.toContain("calling the exact tool loom_emit_reviewer_payload");
   }, 60_000);
-
-  it("keeps an unqualified Pi route explicitly extraction-only and logs the retained reason without changing the base instruction", async () => {
-    const project = waveEmissionProject();
-    const started = await startFacadeProgram(
-      project,
-      "wave-gate",
-      "run.unqualified-route",
-      { wave: 1 },
-      { PI_PROVIDER: "openai-codex", PI_MODEL: "gpt-5.6-sol" },
-    );
-    expect(started.status, started.stderr).toBe(0);
-    expect(started.stderr).toContain('"event":"loom-emission-route"');
-    expect(started.stderr).toContain('"kind":"extraction-only"');
-    expect(started.stderr).toContain("is not the explicitly trusted qualified route");
-    const reviewers = spawnBatchRequests(started).filter(({ authority }) => authority.role !== "spec-check-invoker");
-    expect(reviewers.length).toBeGreaterThan(0);
-    for (const { task } of reviewers) {
-      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-      expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
-      expect(task).toContain("Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.");
-    }
-  }, 60_000);
 });
 
-describe("positive program-path issuance through the qualified local Pi parent (T6)", () => {
-  it("issues a Wave v2 descriptor and tool-primary instruction only for authenticated reviewer slots", async () => {
+describe("positive program-path issuance through a Pi parent (T6)", () => {
+  it("issues every Wave reviewer under its catalog profile on the local route with a v2 descriptor and tool-primary instruction, whatever model the Pi parent runs", async () => {
     const project = waveEmissionProject();
-    const started = await startFacadeProgram(project, "wave-gate", "run.local-wave", { wave: 1 }, QUALIFIED_PARENT_ROUTE_ENV);
+    const started = await startFacadeProgram(project, "wave-gate", "run.local-wave", { wave: 1 }, "pi", CLOUD_PI_PARENT_MODEL_ENV);
     const requests = spawnBatchRequests(started);
     expect(requests).toHaveLength(6);
     const specCheck = requests.find(({ authority }) => authority.role === "spec-check-invoker");
@@ -293,8 +282,8 @@ describe("positive program-path issuance through the qualified local Pi parent (
     const { readPiIssuedSpawnRequest } = await import("../../../../../pi/review-run-authority");
     await withEnvOverlay({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.local-wave") }, () => {
       for (const { authority, task } of requests.filter(({ authority }) => authority.role !== "spec-check-invoker")) {
-        expect(authority.modelProfile).toBe("qualified-local-review");
-        expect(authority.harnessBinding.pi).toMatchObject({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+        expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
+        expect(authority.harnessBinding.pi).toMatchObject(LOCAL_PI_BINDING);
         const descriptor = parseEmissionDescriptor(task);
         expect(descriptor.kind).toBe("issued");
         if (descriptor.kind !== "issued") continue;
@@ -307,14 +296,16 @@ describe("positive program-path issuance through the qualified local Pi parent (
     });
   }, 60_000);
 
-  it("issues standalone v2 with the exact tool descriptor under the same parent route", async () => {
+  it("issues standalone v2 reviewers under their catalog profiles with the exact tool descriptor under a Pi parent", async () => {
     const project = standaloneEmissionProject();
     const started = await startFacadeProgram(project, "standalone-review", "run.local-standalone",
-      { kind: "all", files: ["src/x.ts"], dryRun: false }, QUALIFIED_PARENT_ROUTE_ENV);
+      { kind: "all", files: ["src/x.ts"], dryRun: false }, "pi", CLOUD_PI_PARENT_MODEL_ENV);
     const requests = spawnBatchRequests(started);
     expect(requests.length).toBeGreaterThan(0);
+    expect(requests.find(({ authority }) => authority.role === "code-reviewer")?.authority.modelProfile).toBe("general-review");
     for (const { authority, task } of requests) {
-      expect(authority.modelProfile).toBe("qualified-local-review");
+      expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
+      expect(authority.harnessBinding.pi).toMatchObject(LOCAL_PI_BINDING);
       expect(parseEmissionDescriptor(task)).toMatchObject({
         kind: "issued", contextDigest: authority.contextDigest,
         binding: { requestId: authority.requestId, version: "v2" },
@@ -350,7 +341,7 @@ describe("the Pi issuance read behind the spawn admission port (T6)", () => {
 });
 
 describe("the standalone successor v3 program path projects the issued route (T6)", () => {
-  it("keeps the published cloud Pi binding extraction-only and renders supplied registration byte-identically to durable fallback", async () => {
+  it("keeps a published successor v3 reviewer extraction-only without a Pi parent and renders supplied registration byte-identically to durable fallback", async () => {
     const project = standaloneEmissionProject();
     const created = createRunDirectory(project.runsRoot, "run.wiring");
     if (!created.ok) throw new Error(created.error.message);
@@ -384,21 +375,17 @@ describe("the standalone successor v3 program path projects the issued route (T6
     if (!published.ok) throw new Error(published.message);
 
     const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-    const supplied = renderReviewProgramSpawn(
-      handle,
-      authority,
-      instruction,
-      standaloneV3Registration,
-      { standalone: true },
-    ).task;
-    const fallback = renderSpawnTask(handle, authority, instruction, { standalone: true });
+    const [supplied, fallback] = await withoutPiParent(() => [
+      renderReviewProgramSpawn(handle, authority, instruction, standaloneV3Registration, { standalone: true }).task,
+      renderSpawnTask(handle, authority, instruction, { standalone: true }),
+    ] as const);
 
     expect(supplied).toBe(fallback);
     expect(supplied).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     expect(supplied).not.toContain("calling the exact tool loom_emit_reviewer_payload");
   });
 
-  it("renders a published qualified-local successor v3 reviewer descriptor from its issued binding", async () => {
+  it("renders a published successor v3 reviewer descriptor from its issued catalog binding under a Pi parent", async () => {
     const project = standaloneEmissionProject();
     const created = createRunDirectory(project.runsRoot, "run.wiring");
     if (!created.ok) throw new Error(created.error.message);
@@ -410,12 +397,9 @@ describe("the standalone successor v3 program path projects the issued route (T6
       requestId, role: "code-reviewer", requiredSkill: "none",
       fixedContext: Object.freeze([]), variableContext: Object.freeze([]),
     }));
-    const profile = value(resolveModelProfile("qualified-local-review"));
-    const authority = mustAuthority({
-      ...reviewerAuthority("standalone-review", requestId, packet.digest),
-      modelProfile: profile.id,
-      harnessBinding: { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") },
-    });
+    const authority = reviewerAuthority("standalone-review", requestId, packet.digest);
+    expect(authority.modelProfile).toBe("general-review");
+    expect(authority.harnessBinding.pi).toMatchObject(LOCAL_PI_BINDING);
     await withEnvOverlay({ PI_CODING_AGENT: "true" }, async () => {
       const published = await publishReviewInitialBatch(handle, [{ authority, context: {
         digest: packet.digest, slot: { kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` },
@@ -442,13 +426,14 @@ describe("the standalone successor v3 program path projects the issued route (T6
 });
 
 describe("the standalone-review v2 program path projects the issued route (T6)", () => {
-  it("keeps production requests extraction-only and renders supplied registration byte-identically to durable fallback", async () => {
+  it("keeps a Claude Code parent's production requests extraction-only and renders supplied registration byte-identically to durable fallback", async () => {
     const project = standaloneEmissionProject();
     const started = await startFacadeProgram(project, "standalone-review", "run.standalone-wiring",
-      { kind: "all", files: ["src/x.ts"], dryRun: false });
+      { kind: "all", files: ["src/x.ts"], dryRun: false }, "claude-code");
     const requests = spawnBatchRequests(started);
     expect(requests.length).toBeGreaterThan(0);
-    expect(started.stderr).toContain("issued Pi route openai-codex/gpt-5.6-sol");
+    expect(started.stderr).toContain('"kind":"extraction-only"');
+    expect(started.stderr).toContain("the parent harness is not Pi");
     for (const { task } of requests) {
       expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
       expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
@@ -466,14 +451,10 @@ describe("the standalone-review v2 program path projects the issued route (T6)",
     const reviewer = requests[0]!;
     const authority = mustAuthority(reviewer.authority);
     const instruction = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-    const supplied = renderReviewProgramSpawn(
-      opened.value,
-      authority,
-      instruction,
-      registration,
-      { standalone: true },
-    ).task;
-    const fallback = renderSpawnTask(opened.value, authority, instruction, { standalone: true });
+    const [supplied, fallback] = await withoutPiParent(() => [
+      renderReviewProgramSpawn(opened.value, authority, instruction, registration, { standalone: true }).task,
+      renderSpawnTask(opened.value, authority, instruction, { standalone: true }),
+    ] as const);
     expect(supplied).toBe(fallback);
     expect(supplied).toBe(reviewer.task);
     expect(supplied).not.toContain(EMISSION_DESCRIPTOR_MARKER);

@@ -13,7 +13,8 @@
  *   registry digests, workload fixtures, Pi version, staged vs loaded
  *   Runtime Revision, live route reachability), then — only when the
  *   preflight is ready — matched emission-enabled vs extraction-only dispatch
- *   with dispatch-to-ingestion counters, persisted incrementally, then the
+ *   with dispatch-to-ingestion counters, persisted incrementally and stopped
+ *   early by the route fail-fast if the route goes down mid-window, then the
  *   release decision. Cores: `calibration/grammar-constrained-decoding/`;
  *   `recordWindow` (`pilot-retention.ts`) runs the whole window — input
  *   resolution, the matched dispatch, retention and the decision — behind
@@ -33,10 +34,12 @@ import { parseCalibrationCorpus } from "../engine/src/core/model-calibration";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBinding } from "../engine/src/core/model-profiles";
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
+import { httpRouteProbe } from "../engine/src/utils/route-endpoint";
 import { corpusCaseResult, type CorpusRun } from "../calibration/corpus-calibration";
-import { ok, type Result } from "../calibration/kernel";
+import { errorMessage, ok, type Result } from "../calibration/kernel";
 import {
   decidePreflight,
+  preflightRouteProbe,
   stagedRegistryFacts,
   type PreflightFacts,
   type RouteProbe,
@@ -46,6 +49,8 @@ import { contentDigest } from "../calibration/grammar-constrained-decoding/pilot
 import { parseWorkloadFixtures, type WorkloadFixtures } from "../calibration/grammar-constrained-decoding/pilot-workload";
 import { workloadCorpusLoader } from "../calibration/grammar-constrained-decoding/pilot-corpus-loader";
 import { importRpcLauncher, piArmDispatch } from "../calibration/grammar-constrained-decoding/pilot-dispatch";
+import { CURRENT_WINDOW_SCHEMA_VERSION, routeHealthOf } from "../calibration/grammar-constrained-decoding/pilot-window-ending";
+import { describeWindowEnding } from "../calibration/grammar-constrained-decoding/pilot-window-record";
 import {
   decideRetainedWindow,
   parsePreregistrationFile,
@@ -94,7 +99,7 @@ function runCorpusCase(corpusPath: string, target: PiBinding, caseId: string): C
   try {
     prompt = corpusPrompt(corpusPath, caseId);
   } catch (error) {
-    return { kind: "unlaunched", reason: error instanceof Error ? error.message : String(error) };
+    return { kind: "unlaunched", reason: errorMessage(error) };
   }
   const run = spawnSync("pi", [
     "--mode", "json", "-p", "--no-session",
@@ -174,22 +179,12 @@ function loadFixtures(path: string): Readonly<{ digest: string; fixtures: Worklo
 const externalAssessments = (): readonly ExternalAssessment[] =>
   values("--assessment").map((path) => ({ path, text: readFileSync(path, "utf-8") }));
 
-async function probeRoute(baseUrl: string): Promise<RouteProbe> {
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, { signal: AbortSignal.timeout(ROUTE_PROBE_TIMEOUT_MS) });
-    if (!response.ok) return { kind: "unreachable", reason: `GET /models answered HTTP ${response.status}` };
-    const body: unknown = await response.json();
-    const data = typeof body === "object" && body !== null && Array.isArray((body as { data?: unknown }).data)
-      ? (body as { data: unknown[] }).data : [];
-    return {
-      kind: "reachable",
-      servedModels: data.flatMap((entry) =>
-        typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" ? [(entry as { id: string }).id] : []),
-    };
-  } catch (error) {
-    const cause = error instanceof Error && error.cause instanceof Error ? ` (${error.cause.message})` : "";
-    return { kind: "unreachable", reason: `GET ${baseUrl}/models failed: ${error instanceof Error ? error.message : String(error)}${cause}` };
-  }
+/** The engine's one route probe (an unauthenticated `GET {baseUrl}/models`;
+ *  no credential is resolved, sent or recorded), mapped by the pure core into
+ *  the preflight's route fact. */
+async function probeRoute(route: Preregistration["route"]): Promise<RouteProbe> {
+  const observed = await httpRouteProbe(ROUTE_PROBE_TIMEOUT_MS)({ provider: route.provider, baseUrl: route.baseUrl });
+  return preflightRouteProbe(route, observed);
 }
 
 function observedPiVersion(): string | null {
@@ -204,7 +199,7 @@ async function gatherPreflightFacts(prereg: Preregistration, fixturesDigest: str
     piVersion: observedPiVersion(),
     stagedRuntimeRevision: stagedRevision,
     loadedRuntimeRevision: process.env[PI_EXTENSION_RUNTIME_REVISION_ENV] ?? null,
-    route: await probeRoute(prereg.route.baseUrl),
+    route: await probeRoute(prereg.route),
   });
 }
 
@@ -232,10 +227,10 @@ async function runPilot(): Promise<number> {
   const facts = await gatherPreflightFacts(prereg, fixturesDigest, staged.revision);
   const preflight = decidePreflight(prereg, facts);
   // The composition root: the live adapters of the window's ports; recordWindow runs the rest.
-  const outcome = await recordWindow({
+  const recorded = orThrow(await recordWindow({
     store,
     record: {
-      schemaVersion: 1,
+      schemaVersion: CURRENT_WINDOW_SCHEMA_VERSION,
       windowId,
       preregistration: loaded.ref,
       workloadFixtures: { path: repoRelative(fixturesPath), digest: fixturesDigest },
@@ -258,12 +253,16 @@ async function runPilot(): Promise<number> {
       timeoutMs: prereg.perAttemptTimeoutMs,
       readinessTimeoutMs: READINESS_TIMEOUT_MS,
     }),
+    // The mid-window re-probe is the preflight's own probe, read by the pure core.
+    routeHealth: async () => routeHealthOf(await probeRoute(prereg.route)),
     monotonicNow: () => performance.now(),
     onPair: (index, total, pair) => { process.stderr.write(`pilot ${index + 1}/${total} ${pair.pairId}\n`); },
     externalAssessments: externalAssessments(),
     now: () => new Date().toISOString(),
-  });
-  return reportDecision(orThrow(outcome));
+  }));
+  const ending = describeWindowEnding(recorded.window);
+  if (ending !== null) process.stderr.write(`${ending}\n`);
+  return reportDecision(orThrow(recorded.decision));
 }
 
 /** Offline: re-evaluate a retained window from its retained assessments —

@@ -139,6 +139,8 @@ Measure initial dispatch through accepted ingestion, including startup, tool ack
 
 The p95 bound remains +25%. Use the same independent defect-severity rubric and blinded source/payload assessment for both arms, plus held-out known-defect cases; preserve disagreements and observed escapes. Required guardrail failure blocks done and triggers design reconsideration, not more retries until a favorable window appears.
 
+**Amendment (2026-10-08, ADR-0023):** the release decision is per route × schema cell, fixed by the preregistration's `releasePolicy`. The intended deployment is Pi on the local desktop-vllm route only, which is qualified unconstrained emission. Under `per-route-engine-authoritative` (preregistration `gcd-ad11-pilot-2`) an unconstrained cell is released as *unconstrained emission, engine-authoritative* when its window is complete and every applicable guardrail passes: AS-004 is not-applicable, AS-015/NFR-001 and AS-016 still apply. Constrained cells keep AS-004. The pilot-1 windows stay under the original `capable-route-required` rule above.
+
 ## File Structure
 
 All paths below are repository-relative unless explicitly identified as an external prerequisite. Reuse existing files before creating new abstractions.

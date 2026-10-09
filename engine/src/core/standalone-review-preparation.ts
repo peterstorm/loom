@@ -6,11 +6,11 @@
  */
 import { sha256Hex } from "./digest";
 import {
-  AGENT_REQUIRED_SKILLS, canonicalRecord, canonicalStructuralEquals, parseExactRoster, parseOrchestrationRunId,
-  type AgentRosterSlot, type DomainResult, type NonEmpty,
+  canonicalRecord, canonicalStructuralEquals, mintAgentRosterSlot,
+  parseExactRoster, parseOrchestrationRunId, rosterSlotErrorMessages,
+  type AgentRosterSlot, type DomainResult, type MintedAgentRosterSlot, type NonEmpty,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
-import { issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, type ReviewerIssueRoute } from "./model-profiles";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import type { ReviewPath } from "./review-packet";
@@ -154,8 +154,6 @@ interface FreshStandaloneReviewerContexts {
 interface PrepareFreshStandaloneReviewInput
   extends Omit<PrepareStandaloneReviewInput, "roster"> {
   readonly reviewerContexts: readonly FreshStandaloneReviewerContexts[];
-  /** Frozen in each issued attempt's modelProfile/harnessBinding. */
-  readonly reviewerIssueRoute?: ReviewerIssueRoute;
 }
 
 /**
@@ -184,42 +182,36 @@ export function prepareFreshStandaloneReview(
   }
 
   const authorityErrors: string[] = [];
-  const roster = reviewers.map((role, index) => {
-    const policy = resolveAgentPolicy(role);
-    if (!policy.ok) {
-      authorityErrors.push(`${role}: policy resolution failed: ${policy.error.message}`);
-      return null;
-    }
-    const profile = issuedReviewerProfile(role, "standalone-review", input.reviewerIssueRoute ?? "catalog");
-    if (!profile.ok) {
-      authorityErrors.push(`${role}: model profile resolution failed: ${profile.error.message}`);
-      return null;
-    }
+  const roster = reviewers.map((role, index): MintedAgentRosterSlot | null => {
     const contexts = input.reviewerContexts[index];
     if (contexts === undefined || !Array.isArray(contexts.attempts) || contexts.attempts.length !== 2) {
       authorityErrors.push(`${role}: exactly two immutable attempt context digests are required`);
       return null;
     }
+    const [firstContext, retryContext] = contexts.attempts;
+    if (typeof firstContext !== "string" || typeof retryContext !== "string") {
+      authorityErrors.push(`${role}: attempt context digests must be strings`);
+      return null;
+    }
     const slotId = `standalone-slot:${index + 1}:${role}`;
-    return {
+    // Each request is minted from the catalog: the one point a request is
+    // checked against today's catalog (rosters are re-read as recorded).
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt, contextDigest: string) => ({
+      runId: runId.value,
+      requestId: `request:${sha256Hex(`${runId.value}\u0000${role}\u0000${attempt}`)}`,
       slotId,
-      attempts: ([1, 2] as const).map((attempt, attemptIndex) => ({
-        runId: runId.value,
-        requestId: `request:${sha256Hex(`${runId.value}\u0000${role}\u0000${attempt}`)}`,
-        slotId,
-        program: "standalone-review",
-        role,
-        attempt,
-        modelProfile: profile.value.id,
-        harnessBinding: {
-          pi: lowerModelProfile(profile.value, "pi"),
-          claude: lowerModelProfile(profile.value, "claude-code"),
-        },
-        requiredSkill: AGENT_REQUIRED_SKILLS[role],
-        contextDigest: contexts.attempts[attemptIndex],
-        outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
-      })),
-    };
+      program: "standalone-review" as const,
+      role,
+      attempt,
+      contextDigest,
+      outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
+    });
+    const slot = mintAgentRosterSlot(identity(1, firstContext), identity(2, retryContext));
+    if (!slot.ok) {
+      authorityErrors.push(...rosterSlotErrorMessages(slot.error).map((message) => `${role}: ${message}`));
+      return null;
+    }
+    return slot.value;
   });
   if (roster.some((slot) => slot === null)) {
     return preparationFailure(authorityErrors);

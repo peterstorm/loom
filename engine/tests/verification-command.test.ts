@@ -1,10 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { availableParallelism, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFile, type ExecFileException } from "node:child_process";
 import vitestConfig from "../vitest.config";
-import { platformWorkerBudget } from "../vitest-worker-budget";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
 
@@ -136,9 +135,34 @@ describe("canonical verification command", () => {
     // fixed 60s timer and fail fully green runs.
     const test = vitestConfig.test!;
     expect(test.testTimeout).toBe(15_000);
-    expect(test.setupFiles).toEqual(["./tests/setup/catalog-issue-route.ts", "./tests/setup/task-update-yield.ts"]);
-    // The budget policy itself is pinned with explicit inputs in vitest-worker-budget.test.ts.
-    expect(test.maxWorkers).toBe(platformWorkerBudget(process.platform, availableParallelism()));
+    // Membership, not order: the load-bearing setup files run before every
+    // test file, whatever else the config adds beside them.
+    expect(test.setupFiles).toEqual(expect.arrayContaining(["./tests/setup/scrub-parent-model.ts", "./tests/setup/task-update-yield.ts"]));
+    // The fake local Pi route lives in the main process: workers' spawnSync children could not reach a worker-local server.
+    expect(test.globalSetup).toEqual(expect.arrayContaining(["./tests/setup/fixture-pi-route.ts"]));
+  });
+
+  // The config sizes its worker pool from the host it loads on. Loading it
+  // under fixed host shapes proves it applies the platform budget to the
+  // host's real core count; the policy's full table is pinned in
+  // vitest-worker-budget.test.ts.
+  it.each([
+    { platform: "linux", cores: 64, maxWorkers: 4 },
+    { platform: "linux", cores: 2, maxWorkers: 2 },
+    { platform: "darwin", cores: 3, maxWorkers: 2 },
+  ] as const)("sizes the worker pool of a $platform host with $cores cores at $maxWorkers", async ({ platform, cores, maxWorkers }) => {
+    const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    vi.doMock("node:os", async (importOriginal) => ({ ...await importOriginal<typeof import("node:os")>(), availableParallelism: () => cores }));
+    Object.defineProperty(process, "platform", { ...hostPlatform, value: platform });
+    try {
+      vi.resetModules();
+      const { default: config } = await import("../vitest.config");
+      expect(config.test!.maxWorkers).toBe(maxWorkers);
+    } finally {
+      Object.defineProperty(process, "platform", hostPlatform);
+      vi.doUnmock("node:os");
+      vi.resetModules();
+    }
   });
 
   it("missing local Pi is blocked even if a global Pi is on PATH", async () => {

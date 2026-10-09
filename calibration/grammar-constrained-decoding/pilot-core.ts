@@ -20,7 +20,15 @@
  *   guardrail verdict is `pass` (or `not-applicable` for a guardrail the
  *   preregistration declares inapplicable to that cell's qualification). A
  *   `violated`, `inconclusive` or `not-measured` guardrail is unrepresentable
- *   inside it.
+ *   inside it. Each released cell states its release class, and the class
+ *   fixes its AS-004 verdict: `constrained` carries provider-structural
+ *   retries `pass`, `unconstrained-engine-authoritative` carries it
+ *   `not-applicable`.
+ * - Which classes may be released is the preregistration's release policy,
+ *   fixed before any window: `capable-route-required` releases constrained
+ *   cells only, and any unconstrained cell keeps the whole claim incomplete
+ *   (`no-qualified-capable-route`); `per-route-engine-authoritative`
+ *   releases both classes, each on its own complete, all-passing window.
  * - Per-route/schema cells are never aggregated away: every preregistered
  *   cell yields exactly one CellOutcome — measured, qualification-only
  *   (explicit extraction-only qualification, no fabricated samples) or
@@ -52,6 +60,7 @@ import {
   type CellPreregistration,
   type EmissionRouteQualification,
   type Preregistration,
+  type ReleasePolicy,
   type RouteQualification,
   type ScheduledPair,
 } from "./pilot-preregistration";
@@ -75,7 +84,6 @@ import {
   type CellKey,
   type GuardrailId,
   type GuardrailOutcome,
-  type GuardrailRecord,
   type GuardrailVerdict,
   type PassingVerdict,
   type PilotArm,
@@ -116,7 +124,7 @@ export type EmissionArmRates = Readonly<{
 }>;
 
 export type StructuralSeries = Readonly<{
-  qualification: RouteQualification["kind"];
+  qualification: EmissionKind;
   /** Retries attributed to constraints the route was VERIFIED to enforce;
    *  not-applicable on a route that enforces nothing. */
   providerEnforcedStructuralRetries: number | "not-applicable";
@@ -160,19 +168,43 @@ export type CellMeasurement = Readonly<{
 
 declare const derivedFromMeasurement: unique symbol;
 
+type EmissionKind = EmissionRouteQualification["kind"];
+
+/**
+ * The AS-004 verdicts a route's qualification can yield: on a constrained
+ * route the provider-enforced retries pass or violate it; an unconstrained
+ * route enforces nothing, so AS-004 is not applicable there.
+ */
+type StructuralVerdictOn = Readonly<{ "constrained-emission": "pass" | "violated"; "unconstrained-emission": "not-applicable" }>;
+
+/** A guardrail record whose AS-004 verdict is `Structural` and every other verdict is `Other`. */
+type CellGuardrails<Structural extends GuardrailVerdict, Other extends GuardrailVerdict = GuardrailVerdict> = Readonly<{
+  [G in GuardrailId]: GuardrailOutcome<G extends "provider-structural-retries" ? Structural : Other, G>;
+}>;
+
+/** A measured cell on a `K`-qualified route whose verdicts lie in `V`. */
+type MeasuredOn<K extends EmissionKind, V extends GuardrailVerdict> = Readonly<{
+  kind: "measured";
+  cell: CellKey;
+  qualification: Extract<EmissionRouteQualification, { kind: K }>;
+  measurement: CellMeasurement;
+  guardrails: CellGuardrails<Extract<StructuralVerdictOn[K], V>, V>;
+}>;
+type MeasuredCellOf<V extends GuardrailVerdict> = MeasuredOn<"constrained-emission", V> | MeasuredOn<"unconstrained-emission", V>;
+type Sealed<T> = T & Readonly<{ [derivedFromMeasurement]: true }>;
+
 /**
  * A measured cell: its guardrail verdicts together with the measurement they
  * were derived from. Only `measureCell` constructs one — it computes both
  * from the same observed pairs — so a record pairing verdicts with a
- * measurement they were not derived from cannot be written outside it.
+ * measurement they were not derived from cannot be written outside it. The
+ * qualification fixes the AS-004 verdicts it can carry, so a constrained
+ * cell reading `not-applicable`, or an unconstrained one reading `pass`, is
+ * unrepresentable.
  */
-export type MeasuredCell = Readonly<{
-  kind: "measured";
-  cell: CellKey;
-  qualification: EmissionRouteQualification;
-  measurement: CellMeasurement;
-  guardrails: GuardrailRecord;
-}> & Readonly<{ [derivedFromMeasurement]: true }>;
+export type MeasuredCell = Sealed<MeasuredCellOf<GuardrailVerdict>>;
+/** A measured cell whose every guardrail passes. */
+type PassingCell = Sealed<MeasuredCellOf<PassingVerdict>>;
 
 export type CellOutcome =
   | MeasuredCell
@@ -196,16 +228,27 @@ export type CellOutcome =
 // Release decision (AS-017): illegal "done" states are unrepresentable
 // ---------------------------------------------------------------------------
 
-export type PassedCellEvidence = Readonly<{
-  cell: CellKey;
-  guardrails: GuardrailRecord<PassingVerdict>;
-}>;
+/** A released cell's guardrails: every verdict passing, AS-004's fixed by its release class. */
+type ReleasedGuardrails<Structural extends PassingVerdict> = CellGuardrails<Structural, PassingVerdict>;
+
+/**
+ * How a cell is released. `constrained`: the route was verified to enforce the
+ * schema, so AS-004 (zero provider-structural retries) passed.
+ * `unconstrained-engine-authoritative`: the route enforces nothing, so AS-004
+ * is not applicable and the engine's validation of every payload is the
+ * authority; AS-015 and AS-016 passed all the same.
+ */
+export type PassedCellEvidence =
+  | Readonly<{ cell: CellKey; releaseClass: "constrained"; guardrails: ReleasedGuardrails<"pass"> }>
+  | Readonly<{ cell: CellKey; releaseClass: "unconstrained-engine-authoritative"; guardrails: ReleasedGuardrails<"not-applicable"> }>;
 
 export type GuardrailViolation = Readonly<{ cell: CellKey; guardrail: GuardrailId; requirement: string; detail: string }>;
 
 export type MissingMeasurement =
   | Readonly<{ kind: "preflight-blocked"; blocks: NonEmpty<PreflightBlock> }>
   | Readonly<{ kind: "no-qualified-capable-route"; detail: string }>
+  /** Per-route policy: no cell was measured on an emission route, so nothing can be released. */
+  | Readonly<{ kind: "no-released-cell"; detail: string }>
   | Readonly<{ kind: "cell-not-measured"; cell: CellKey; reason: string }>
   | Readonly<{ kind: "guardrail-unresolved"; cell: CellKey; guardrail: GuardrailId; requirement: string; verdict: "inconclusive" | "not-measured"; detail: string }>;
 
@@ -305,13 +348,50 @@ function emissionRates(samples: readonly SampleObservation[]): EmissionArmRates 
   });
 }
 
-function structuralSeries(samples: readonly SampleObservation[], qualification: RouteQualification): StructuralSeries {
+type StructuralGuardrail<K extends EmissionKind> = GuardrailOutcome<StructuralVerdictOn[K], "provider-structural-retries">;
+
+/** A cell's AS-004 series and verdict, derived together from its qualification. */
+type StructuralEvidence =
+  | Readonly<{ qualification: Extract<EmissionRouteQualification, { kind: "constrained-emission" }>; series: StructuralSeries; guardrail: StructuralGuardrail<"constrained-emission"> }>
+  | Readonly<{ qualification: Extract<EmissionRouteQualification, { kind: "unconstrained-emission" }>; series: StructuralSeries; guardrail: StructuralGuardrail<"unconstrained-emission"> }>;
+
+function structuralEvidence(samples: readonly SampleObservation[], qualification: EmissionRouteQualification): StructuralEvidence {
   const { causes } = tallyRetries(samples, qualification);
+  const series = (providerEnforced: number | "not-applicable") => structuralSeries(samples, qualification.kind, causes, providerEnforced);
+  return match(qualification)
+    .returnType<StructuralEvidence>()
+    .with({ kind: "constrained-emission" }, (constrained) => {
+      const retries = causes["provider-structural"];
+      return Object.freeze({
+        qualification: constrained,
+        series: series(retries),
+        guardrail: retries === 0
+          ? guardrailOutcome("provider-structural-retries", "pass", "zero retries attributed to provider-enforced constraint violations")
+          : guardrailOutcome("provider-structural-retries", "violated", `${retries} retries attributed to violations of constraints the route was verified to enforce`),
+      });
+    })
+    .with({ kind: "unconstrained-emission" }, (unconstrained) => Object.freeze({
+      qualification: unconstrained,
+      series: series("not-applicable"),
+      guardrail: guardrailOutcome("provider-structural-retries", "not-applicable",
+        `route qualified ${unconstrained.kind}: it was verified to enforce no JSON Schema constraint; ` +
+        `${causes["unenforced-schema-violation"]} unenforced schema-violation retries and ${causes["engine-only-refusal"]} engine-only refusal retries reported separately`),
+    }))
+    .exhaustive();
+}
+
+/** The structural series, given the provider-enforced retry count its qualification admits. */
+function structuralSeries(
+  samples: readonly SampleObservation[],
+  qualification: EmissionKind,
+  causes: RetryTally["causes"],
+  providerEnforcedStructuralRetries: number | "not-applicable",
+): StructuralSeries {
   const rejections = (kind: RejectionCause["kind"]): number => samples.reduce((sum, sample) =>
     sum + sample.attempts.filter((attempt) => attempt.outcome.kind === "rejected" && attempt.outcome.cause.kind === kind).length, 0);
   return Object.freeze({
-    qualification: qualification.kind,
-    providerEnforcedStructuralRetries: qualification.kind === "constrained-emission" ? causes["provider-structural"] : "not-applicable" as const,
+    qualification,
+    providerEnforcedStructuralRetries,
     unenforcedSchemaViolationRetries: causes["unenforced-schema-violation"],
     engineOnlyRefusalRetries: causes["engine-only-refusal"],
     unclassifiedToolErrorRetries: causes["unclassified-tool-error"],
@@ -394,19 +474,6 @@ function terminalGuardrail(pairs: readonly ObservedPair[], prereg: Preregistrati
   });
 }
 
-function structuralGuardrail(series: StructuralSeries): GuardrailOutcome<GuardrailVerdict, "provider-structural-retries"> {
-  if (series.providerEnforcedStructuralRetries === "not-applicable") {
-    return guardrailOutcome("provider-structural-retries", "not-applicable",
-      `route qualified ${series.qualification}: it was verified to enforce no JSON Schema constraint; ` +
-      `${series.unenforcedSchemaViolationRetries} unenforced schema-violation retries and ${series.engineOnlyRefusalRetries} engine-only refusal retries reported separately`);
-  }
-  if (series.providerEnforcedStructuralRetries === 0) {
-    return guardrailOutcome("provider-structural-retries", "pass", "zero retries attributed to provider-enforced constraint violations");
-  }
-  return guardrailOutcome("provider-structural-retries", "violated",
-    `${series.providerEnforcedStructuralRetries} retries attributed to violations of constraints the route was verified to enforce`);
-}
-
 function byDifficulty(pairs: readonly ObservedPair[]): CellMeasurement["byDifficulty"] {
   const arm = (selected: readonly SampleObservation[]) => Object.freeze({
     samples: selected.length,
@@ -476,7 +543,7 @@ function measureCell(
   const latency = latencyGuardrail(pairs, evidence.preregistration);
   const terminal = terminalGuardrail(pairs, evidence.preregistration);
   const emissionSamples = pairs.map((pair) => pair.emission);
-  const structural = structuralSeries(emissionSamples, qualification);
+  const structural = structuralEvidence(emissionSamples, qualification);
   const quality = compareQuality(cell, pairs, evidence.preregistration, evidence.quality);
   if (!quality.ok) return quality;
   const measurement: CellMeasurement = Object.freeze({
@@ -489,18 +556,29 @@ function measureCell(
     latency: latency.measurement,
     terminal: terminal.measurement,
     emissionRates: emissionRates(emissionSamples),
-    structural,
+    structural: structural.series,
     byDifficulty: byDifficulty(pairs),
     quality: quality.value.comparison,
   });
-  const guardrails: GuardrailRecord = Object.freeze({
+  const guardrailsWith = <S extends GuardrailVerdict>(as004: GuardrailOutcome<S, "provider-structural-retries">): CellGuardrails<S> => Object.freeze({
     "measurement-complete": guardrailOutcome("measurement-complete", "pass", `${pairs.length}/${scheduledPairs} preregistered pairs observed in both arms`),
     "latency-p95": latency.guardrail,
     "terminal-failure-non-increase": terminal.guardrail,
-    "provider-structural-retries": structuralGuardrail(structural),
+    "provider-structural-retries": as004,
     "escaped-defect-severity": quality.value.guardrail,
   });
-  return ok(Object.freeze({ kind: "measured" as const, cell: cell.cell, qualification, measurement, guardrails }) as MeasuredCell);
+  // One arm per qualification on purpose: TypeScript cannot carry the qualification/AS-004-verdict
+  // correlation through a single generic arm, and merging them would trade that check for a cast.
+  const measured: MeasuredCellOf<GuardrailVerdict> = match(structural)
+    .returnType<MeasuredCellOf<GuardrailVerdict>>()
+    .with({ qualification: { kind: "constrained-emission" } }, ({ qualification: constrained, guardrail }) =>
+      ({ kind: "measured", cell: cell.cell, qualification: constrained, measurement, guardrails: guardrailsWith(guardrail) }))
+    .with({ qualification: { kind: "unconstrained-emission" } }, ({ qualification: unconstrained, guardrail }) =>
+      ({ kind: "measured", cell: cell.cell, qualification: unconstrained, measurement, guardrails: guardrailsWith(guardrail) }))
+    .exhaustive();
+  // The brand's one construction site: it seals only the value the two checked arms above built
+  // from this call's own measurement — no helper can seal anything else.
+  return ok(Object.freeze(measured) as MeasuredCell);
 }
 
 function consistencyProblems(evidence: PilotEvidence, schedule: readonly ScheduledPair[]): readonly string[] {
@@ -521,22 +599,97 @@ function consistencyProblems(evidence: PilotEvidence, schedule: readonly Schedul
   return problems;
 }
 
-const isPassing = (guardrail: GuardrailOutcome): guardrail is GuardrailOutcome<PassingVerdict> =>
-  guardrail.verdict === "pass" || guardrail.verdict === "not-applicable";
+const isPassing = (guardrail: GuardrailOutcome): boolean => guardrail.verdict === "pass" || guardrail.verdict === "not-applicable";
 
-const allPassing = (guardrails: GuardrailRecord): guardrails is GuardrailRecord<PassingVerdict> =>
-  GUARDRAIL_IDS.every((id) => isPassing(guardrails[id]));
+const allPassing = (measured: MeasuredCell): measured is PassingCell => GUARDRAIL_IDS.every((id) => isPassing(measured.guardrails[id]));
 
-/** What one cell contributes to the release decision, in cell order. */
+/**
+ * A passing cell's release evidence. Total: the qualification fixes both the
+ * release class and its AS-004 verdict (`constrained` carries `pass`,
+ * `unconstrained-engine-authoritative` carries `not-applicable`), so a passing
+ * cell whose verdict and class disagree cannot reach here.
+ */
+const releaseEvidence = (passing: PassingCell): PassedCellEvidence => match(passing)
+  .returnType<PassedCellEvidence>()
+  .with({ qualification: { kind: "constrained-emission" } }, ({ cell, guardrails }) =>
+    Object.freeze({ cell, releaseClass: "constrained" as const, guardrails }))
+  .with({ qualification: { kind: "unconstrained-emission" } }, ({ cell, guardrails }) =>
+    Object.freeze({ cell, releaseClass: "unconstrained-engine-authoritative" as const, guardrails }))
+  .exhaustive();
+
+/** What the preregistered release policy makes of a window's cells. */
+type PolicyRelease = Readonly<{
+  /** The policy's own gaps, recorded before any cell's. */
+  routeGaps: readonly MissingMeasurement[];
+  /** The passing cells the policy releases, in cell order; or, when it
+   *  releases none, the gap a record that is otherwise complete carries. */
+  release: Result<NonEmpty<PassedCellEvidence>, MissingMeasurement>;
+}>;
+
+/** AD-11: without a qualified capable route the constrained feature cannot be declared done. */
+const NO_CAPABLE_ROUTE: MissingMeasurement = Object.freeze({
+  kind: "no-qualified-capable-route" as const,
+  detail: "no preregistered cell is qualified constrained-emission on the intended deployment route; " +
+    "AD-11: without a qualified capable route the constrained feature cannot be declared measured/done",
+});
+
+/** Per-route policy: a release needs at least one cell measured on an emission route. */
+const NO_RELEASED_CELL: MissingMeasurement = Object.freeze({
+  kind: "no-released-cell" as const,
+  detail: "no preregistered cell is measured on an emission route (every cell is extraction-only); " +
+    "a per-route release needs at least one complete, all-passing emission cell",
+});
+
+/**
+ * The release policy's one interpreter. `capable-route-required` releases
+ * constrained cells only, and records the absent capable route — or, beside
+ * a capable one, the cells left unconstrained (capability is per cell, so one
+ * capable cell must not carry the others to done) — as gaps of its own.
+ * `per-route-engine-authoritative` releases every passing emission cell in its
+ * class and records no route gap: each cell stands on its own window.
+ */
+function releaseUnderPolicy(policy: ReleasePolicy, cells: readonly CellOutcome[]): PolicyRelease {
+  const passed = cells.flatMap((cell) => (cell.kind === "measured" && allPassing(cell) ? [releaseEvidence(cell)] : []));
+  return match(policy)
+    .returnType<PolicyRelease>()
+    .with({ kind: "capable-route-required" }, () => ({
+      routeGaps: capableRouteGaps(cells),
+      release: releasedOr(passed.filter((evidence) => evidence.releaseClass === "constrained"), NO_CAPABLE_ROUTE),
+    }))
+    .with({ kind: "per-route-engine-authoritative" }, () => ({ routeGaps: [], release: releasedOr(passed, NO_RELEASED_CELL) }))
+    .exhaustive();
+}
+
+/** The cells a policy releases, or — when it releases none — its gap. */
+function releasedOr(released: readonly PassedCellEvidence[], gap: MissingMeasurement): PolicyRelease["release"] {
+  const nonEmptyRelease = nonEmpty(released);
+  return nonEmptyRelease === null ? err(gap) : ok(nonEmptyRelease);
+}
+
+/** `capable-route-required`'s own gaps: the absent capable route, or the cells left unconstrained beside one. */
+function capableRouteGaps(cells: readonly CellOutcome[]): readonly MissingMeasurement[] {
+  const qualified = (kind: RouteQualification["kind"]): readonly CellKey[] =>
+    cells.filter((cell) => cell.qualification.kind === kind).map((cell) => cell.cell);
+  const constrained = qualified("constrained-emission");
+  const unconstrained = qualified("unconstrained-emission");
+  if (constrained.length === 0) return [NO_CAPABLE_ROUTE];
+  if (unconstrained.length === 0) return [];
+  return [Object.freeze({
+    kind: "no-qualified-capable-route" as const,
+    detail: `cells ${unconstrained.join(", ")} are qualified unconstrained-emission on the intended deployment route; ` +
+      "AD-11: every measured cell needs a qualified capable route before the constrained feature can be declared measured/done",
+  })];
+}
+
+/** What one cell contributes to the release decision, in cell order — the
+ *  same under every release policy. */
 type CellFindings = Readonly<{
   violations: readonly GuardrailViolation[];
   missing: readonly MissingMeasurement[];
-  /** The cell's all-passing evidence, only when it is measured on a qualified capable route. */
-  passedOnCapableRoute: readonly PassedCellEvidence[];
   qualificationOnly: readonly CellKey[];
 }>;
 
-const NO_FINDINGS: CellFindings = Object.freeze({ violations: [], missing: [], passedOnCapableRoute: [], qualificationOnly: [] });
+const NO_FINDINGS: CellFindings = Object.freeze({ violations: [], missing: [], qualificationOnly: [] });
 
 function cellFindings(cell: CellOutcome): CellFindings {
   return match(cell)
@@ -549,42 +702,20 @@ function cellFindings(cell: CellOutcome): CellFindings {
     .exhaustive();
 }
 
+/** A measured cell's violated and unresolved guardrails; a cell with neither is passing, and released by the policy. */
 function measuredCellFindings(measured: MeasuredCell): CellFindings {
   const guardrails = GUARDRAIL_IDS.map((id) => measured.guardrails[id]);
   const violations = guardrails.flatMap((guardrail): readonly GuardrailViolation[] => guardrail.verdict === "violated"
     ? [Object.freeze({ cell: measured.cell, guardrail: guardrail.guardrail, requirement: GUARDRAIL_REQUIREMENT[guardrail.guardrail], detail: guardrail.detail })]
     : []);
-  const missing = guardrails.flatMap((guardrail): readonly MissingMeasurement[] => match(guardrail.verdict)
+  const unresolved = guardrails.flatMap((guardrail): readonly MissingMeasurement[] => match(guardrail.verdict)
     .with("inconclusive", "not-measured", (verdict) => [Object.freeze({
       kind: "guardrail-unresolved" as const, cell: measured.cell, guardrail: guardrail.guardrail,
       requirement: GUARDRAIL_REQUIREMENT[guardrail.guardrail], verdict, detail: guardrail.detail,
     })])
     .with("pass", "not-applicable", "violated", () => [])
     .exhaustive());
-  const passedOnCapableRoute: readonly PassedCellEvidence[] =
-    measured.qualification.kind === "constrained-emission" && allPassing(measured.guardrails)
-      ? [Object.freeze({ cell: measured.cell, guardrails: measured.guardrails })]
-      : [];
-  return { violations, missing, passedOnCapableRoute, qualificationOnly: [] };
-}
-
-/** AD-11: without a qualified capable route the constrained feature cannot be declared done. */
-const NO_CAPABLE_ROUTE: MissingMeasurement = Object.freeze({
-  kind: "no-qualified-capable-route" as const,
-  detail: "no preregistered cell is qualified constrained-emission on the intended deployment route; " +
-    "AD-11: without a qualified capable route the constrained feature cannot be declared measured/done",
-});
-
-/** Capability is per cell: a measured (emission-arm) cell on an unconstrained
- *  route passes AS-004 only as not-applicable, so one capable cell must not
- *  carry the others to done. Extraction-only cells stay qualification-only. */
-function unconstrainedCellsGap(prereg: Preregistration): readonly MissingMeasurement[] {
-  const unconstrained = prereg.cells.filter((cell) => cell.qualification.kind === "unconstrained-emission").map((cell) => cell.cell);
-  return unconstrained.length === 0 ? [] : [Object.freeze({
-    kind: "no-qualified-capable-route" as const,
-    detail: `cells ${unconstrained.join(", ")} are qualified unconstrained-emission on the intended deployment route; ` +
-      "AD-11: every measured cell needs a qualified capable route before the constrained feature can be declared measured/done",
-  })];
+  return { violations, missing: unresolved, qualificationOnly: [] };
 }
 
 /**
@@ -592,24 +723,21 @@ function unconstrainedCellsGap(prereg: Preregistration): readonly MissingMeasure
  * demands design reconsideration — never more windows until one looks
  * favourable); otherwise any missing, not-measured or inconclusive
  * measurement leaves the claim incomplete; only a complete, all-passing
- * record with every measured cell on a qualified capable route allows done.
+ * record the preregistered policy releases allows done.
  *
  * Missing measurements form one list, in order: the preflight block, the
- * capable-route gap (no capable cell at all, or the cells left unconstrained
- * beside a capable one), then each cell's. When that list is empty and no
- * guardrail is violated, every emission cell is measured, all-passing and
- * constrained, so the done evidence is non-empty; the final guard only
- * narrows the type.
+ * policy's route gaps, then each cell's. When that list is empty and no
+ * guardrail is violated, every emission cell is measured and passing, so the
+ * policy releases them all unless no cell was dispatched at all — the gap
+ * the policy names for an empty release.
  */
 function decideRelease(evidence: PilotEvidence, cells: readonly CellOutcome[]): ReleaseDecision {
   const perCell = cells.map(cellFindings);
-  const prereg = evidence.preregistration;
+  const policy = releaseUnderPolicy(evidence.preregistration.releasePolicy, cells);
   const blocked: readonly MissingMeasurement[] = evidence.preflight.kind === "blocked"
     ? [Object.freeze({ kind: "preflight-blocked" as const, blocks: evidence.preflight.blocks })]
     : [];
-  const capable = prereg.cells.some((cell) => cell.qualification.kind === "constrained-emission");
-  const routeGap = capable ? unconstrainedCellsGap(prereg) : [NO_CAPABLE_ROUTE];
-  const missing = Object.freeze([...blocked, ...routeGap, ...perCell.flatMap((findings) => findings.missing)]);
+  const missing = Object.freeze([...blocked, ...policy.routeGaps, ...perCell.flatMap((findings) => findings.missing)]);
   const violated = nonEmpty(perCell.flatMap((findings) => findings.violations));
   if (violated !== null) {
     return Object.freeze({
@@ -621,13 +749,12 @@ function decideRelease(evidence: PilotEvidence, cells: readonly CellOutcome[]): 
   }
   const incomplete = nonEmpty(missing);
   if (incomplete !== null) return Object.freeze({ kind: "incomplete-missing-measurement" as const, missing: incomplete });
-  const measuredCells = nonEmpty(perCell.flatMap((findings) => findings.passedOnCapableRoute));
-  if (measuredCells === null) {
-    return Object.freeze({ kind: "incomplete-missing-measurement" as const, missing: Object.freeze([NO_CAPABLE_ROUTE] as const) });
+  if (!policy.release.ok) {
+    return Object.freeze({ kind: "incomplete-missing-measurement" as const, missing: Object.freeze([policy.release.error] as const) });
   }
   return Object.freeze({
     kind: "done-allowed" as const,
-    measuredCells,
+    measuredCells: policy.release.value,
     qualificationOnlyCells: Object.freeze(perCell.flatMap((findings) => findings.qualificationOnly)),
   });
 }

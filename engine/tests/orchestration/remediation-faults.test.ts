@@ -17,7 +17,7 @@ import {
   type TemporaryIndex,
 } from "../../src/orchestration/git-remediation";
 import type { CurrentVerifiedIndexInstallation, FixedGitPathspecContract } from "../../src/core/remediation-machine";
-import type { GitSpawnOutcome } from "../../src/utils/git-execution-policy";
+import type { GitSpawnOutcome } from "../../src/utils/git-spawn-outcome";
 import { git, pathspecContract, write } from "../fixtures/git-repository";
 import { verifiedRemediationInstallation } from "../fixtures/verified-remediation-installation";
 

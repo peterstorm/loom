@@ -257,8 +257,16 @@ A sum type representing success (`Right`) or failure (`Left`). Used for error ha
 _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 
 **LLM Profile**:
-A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Wave/standalone reviewer issuance may explicitly select the catalog's `qualified-local-review` alternative only when the observed Pi parent has the exact qualified provider, model, and thinking setting; other roles and cloud sessions retain their assigned default. That eligibility is one rule (`isIssuableProfile`) that issuance elects through and request validation checks against, so the two cannot disagree. Both harness bindings and the selected profile are frozen in Agent Request Authority. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary, but cannot change issued authority or infer a new profile from task text.
+A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Pi runs local models only, so every profile's Pi binding is the one local route and profiles differ only in their Claude Code model; every role is issued under its own profile. Retired profiles and bindings remain readable as recorded history in stored authorities. Both harness bindings and the selected profile are frozen in Agent Request Authority. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary, but cannot change issued authority or infer a new profile from task text.
 _Avoid_: Model alias, Sonnet equivalent, current model, implicit model fallback
+
+**Launch Route**:
+The `provider/model` a Pi child actually runs on: its Agent's LLM Profile binding after the spawn-boundary routing policy for the observed parent. The generated agent render and the Pi spawn route gate resolve it by one rule, so the route the gate checks is the route the child runs on. A stored request recorded on a route the catalog no longer issues is on a **retired route**: no reachability check can make it runnable, so its run is restarted, never resumed.
+_Avoid_: Declared binding (that is the profile's binding before routing), frozen binding, current route
+
+**Served-Model Evidence**:
+What a route's `GET /models` answer proves about the model: `listed` (the server's list was read), or unverified (the server answered but its list was unobservable — an authentication refusal or an unreadable body). Unverified routes are admitted and reported, never silently treated as confirmed.
+_Avoid_: Model check passed, reachable (alone — reachability does not confirm the model)
 
 **Runtime Revision**:
 A content-addressed identity over Loom's extension, engine, and runtime package bytes. Pi captures it when the extension loads; every fresh Pi-launched CLI mutator must present the same identity before changing a TaskGraph or Run Directory.
@@ -361,7 +369,7 @@ A one-time Pi capability minted per spawn, scoped to prompt-derived artifact dir
 _Avoid_: Write permit, edit allowance, blanket phase write
 
 **Agent Request Authority**:
-An engine-issued immutable binding of Run, request, roster slot, semantic attempt, program, Agent role, LLM Profile, both harness bindings, required Skill, Context Packet digest, and fixed transcript slot. Harness-native ids correlate to it but never replace it.
+An engine-issued immutable binding of Run, request, roster slot, semantic attempt, program, Agent role, LLM Profile, both harness bindings, required Skill, Context Packet digest, and fixed transcript slot. Harness-native ids correlate to it but never replace it. The issuer supplies only the request's identity (run, request, slot, program, role, attempt, Context Packet, transcript slot); the catalog fills the profile, both bindings and the Skill when the request is **minted** — the one time it is checked against today's catalog. A minted authority is a distinct, narrower type the issuing seams require: it names a catalog profile and the local Pi binding, never a retired one. An authority read back from a roster, checkpoint, receipt or diagnostic is recorded history, checked only against the bindings its recorded profile has issued; resuming or replaying recorded work reads that record and mints nothing, so a run issued before a catalog change is never compared with today's catalog. Whether a Pi binding is admitted is one operation of the profile authority, whose issuance and recorded-history strategies differ only in how many bindings a profile admits.
 _Avoid_: Prompt metadata, spawn args, transcript filename
 
 **Context Packet**:

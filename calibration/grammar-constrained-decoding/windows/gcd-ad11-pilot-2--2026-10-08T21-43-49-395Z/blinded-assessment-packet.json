@@ -1,0 +1,264 @@
+{
+  "schemaVersion": 1,
+  "windowId": "gcd-ad11-pilot-2--2026-10-08T21-43-49-395Z",
+  "instructions": "Score each entry with the preregistered severity rubric: list every KNOWN defect of the entry's case the payload lets escape. The arm is hidden; do not attempt to infer it.",
+  "entries": [
+    {
+      "blindId": "3aed02b3-4b6d-4aef-9ce2-7824831c162e",
+      "cell": "reviewer-payload/v2",
+      "caseId": "round14-vulnerable",
+      "payload": {
+        "schemaVersion": 2,
+        "kind": "standalone-review",
+        "findings": [
+          {
+            "severity": "advisory",
+            "file": "docs/pi-usage.md",
+            "line": 284,
+            "claim": "The revised doc states 'Every spawn gate reads both field spellings' (and 'Loom ships with all of them wired, so there is nothing to patch'), but validate-agent-model.ts:81 and validate-agent-skill.ts:151 read only input.tool_input?.subagent_type and never the Pi spelling input.tool_input.agent — on a Pi-shaped spawn payload (tool_name 'subagent', tool_input {agent, task}) both gates resolve an empty agent name and return allow with no stderr.",
+            "reason": "Correct the doc to match the code (or add the '?? (input.tool_input?.agent as string)' fallback as validate-phase-order.ts:26 already does), so the pi-usage contract stops asserting dual-spelling coverage that two of the five gates do not have; as written it re-legitimizes the exact 'reports healthy, enforces nothing' failure class this revision exists to eliminate.",
+            "basis": {
+              "evidence": {
+                "kind": "execution-trace",
+                "preconditions": [
+                  "A task graph exists (existsSync(TASK_GRAPH_PATH) true).",
+                  "A spawn payload arrives with tool_name 'subagent' and tool_input { agent: 'code-implementer-agent', task: '...' } — the Pi field spelling documented in docs/pi-usage.md:280-282."
+                ],
+                "steps": [
+                  "validate-agent-model.ts:80: SUBAGENT_SPAWN_TOOLS.has('subagent') is true (the constant includes 'subagent'), so the gate proceeds instead of early-returning.",
+                  "validate-agent-model.ts:81: subagentType = input.tool_input?.subagent_type ?? '' → Pi sends tool_input.agent, so subagentType is '' and bareAgent = stripNamespace('') = ''.",
+                  "VALIDATED_AGENTS.has('') is false → return { kind: 'allow' } with nothing on stderr. validate-agent-skill.ts:151-153 performs the identical read and allow for the same payload.",
+                  "Contrast: validate-phase-order.ts:26 reads (input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? '' — the dual-spelling pattern the doc claims for every gate."
+                ],
+                "observed": "Both model and skill gates silently allow any Pi-spelled spawn; docs/pi-usage.md:284's claim that every spawn gate reads both field spellings is false for two of the five gates.",
+                "expected": "Per docs/pi-usage.md:274-284, each gate should resolve the agent name from both field spellings (or the doc should say only phase-order/task-execution/template-substitution do), matching the dual-spelling read validate-phase-order.ts:26 already implements.",
+                "reference": "docs/pi-usage.md:284"
+              },
+              "violatedContract": {
+                "reference": "docs/pi-usage.md:284",
+                "statement": "'Every spawn gate reads both field spellings, and every gate tests tool_name against one shared constant' — the first half is false for validate-agent-model and validate-agent-skill, which read only tool_input.subagent_type."
+              },
+              "consequence": {
+                "affected": "Operators and porters relying on docs/pi-usage.md's 'no patching required' contract, and any future wiring of the model/skill gates on the Pi harness.",
+                "preconditions": "A harness (or ported integration) emits the Pi field spelling tool_input.agent for the agent name while a task graph exists.",
+                "impact": "Agent-model and agent-skill enforcement silently no-ops on such payloads — a spawn with a missing/mismatched model or an omitted required skill reference passes unblocked with no stderr — while the shipped documentation asserts the gates cover both spellings. No regression is introduced by this revision itself: pi/extension.ts (reference context, outside the frozen scope) currently invokes only validate-phase-order, validate-template-substitution and validate-task-execution, so these two handlers are not exercised under Pi today.",
+                "evidenceLimits": "Reviewer-reported static trace over the 0710b76 snapshot; no engine execution was performed for this specific Pi-shaped payload. The Pi-side non-invocation of the two handlers is asserted from pi/extension.ts, which is reference context outside the frozen scope, not engine proof."
+              },
+              "truthConfidence": 96,
+              "severityRationale": "A factual doc/code mismatch with no runtime consequence in this revision's supported paths: under Claude Code the gates use the correct spelling and work; under Pi the handlers are not currently invoked at all, so nothing that runs today regresses. Per the impact rubric, factual incorrectness without a concrete consequence to supported behavior is a nonblocking correction — advisory, not critical."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "blindId": "65113f88-2f14-40aa-8e09-60e2213b6e39",
+      "cell": "reviewer-payload/v2",
+      "caseId": "round14-fixed",
+      "payload": {
+        "schemaVersion": 2,
+        "kind": "standalone-review",
+        "findings": [
+          {
+            "severity": "critical",
+            "file": "engine/src/handlers/helpers/validate-task-graph.ts",
+            "line": 280,
+            "claim": "The duplicate-refuted-id load-boundary rule this revision adds (refutationsUnionError) names `helper validate-task-graph --fix` as its repair, but fixTaskFindings re-parses refuted_findings with parseStoredRefutations — which keeps both duplicate-id records — and writes them back verbatim, so --fix provably cannot clear the rejection it is named for and the task graph stays permanently unloadable.",
+            "basis": {
+              "evidence": {
+                "kind": "reproduction",
+                "execution": "reviewer-reported",
+                "setup": "Revision ec2cc90 checked out into a temporary git worktree; probe script imported engine/src/state-manager.ts and engine/src/handlers/helpers/validate-task-graph.ts from that snapshot and ran under bun. Not an engine execution receipt: the probe was authored and run by the reviewer.",
+                "input": "A graph whose single task T1 carries findings [code-reviewer-1 'live'] with in-step views, and refuted_findings holding two well-formed records whose finding.id is both 'code-reviewer-1' (claims 'old claim' and 'older claim').",
+                "observed": "parseTaskGraph rejects: `tasks[0] (T1): refuted_findings[1] repeats refuted finding id 'code-reviewer-1' (repair with: helper validate-task-graph --fix)`. After fixFull, the repaired file's refuted_findings ids are still [code-reviewer-1, code-reviewer-1] (droppedRefutations: 0) and parseTaskGraph rejects again with the identical message. The --fix CLI path exits passthrough (exit 0) while writing the unrepaired file, printing only a stderr 'Fixed structural defaults; 1 issues remain' note — re-running --fix reproduces the same output forever.",
+                "expected": "The repair the diagnostic itself names restores a graph StateManager.load() can open — the standard the sibling rules meet (findings duplicates: deduplicateFindingIds; cross-array collisions: deduplicateFindingIds seeded with refuted ids; evidence-failure biconditional: repairReviewRecord; malformed entries: salvage/drop-and-count).",
+                "reference": "ec2cc90 engine/src/handlers/helpers/validate-task-graph.ts:280,312 (repair) and engine/src/core/findings.ts:507-511 (new rejection with REPAIR_HINT)"
+              },
+              "violatedContract": {
+                "reference": "engine/src/handlers/helpers/validate-task-graph.ts:74 (findingsErrorsOf docstring, ec2cc90)",
+                "statement": "`taskUnionError` (state-manager) runs exactly these [rules], in this order, and `--fix` repairs exactly what they reject. A rule added to one and not the other is the drift that let the operator's validator disagree with the loader. — refutationsUnionError's duplicate-id rule was added to the load boundary in this same revision without a corresponding repair, and its own diagnostic directs the operator to the repair that cannot clear it."
+              },
+              "consequence": {
+                "affected": "The operator and every state-consuming hook of the affected repo: StateManager.load() throws in store-reviewer-findings (reviewer findings silently not stored), complete-wave-gate, review-panel tally/merge paths, and all other handlers once the graph is on disk.",
+                "preconditions": "A state file whose refuted_findings contains two records sharing one finding id — reachable only through hand-editing or external drift/corruption, which is exactly the input class the load boundary (and this revision's new rule) exists to police; no engine writer can mint it.",
+                "impact": "The whole orchestration dead-ends on an unloadable graph through the only repair path the snapshot's own diagnostic names; recovery requires unsanctioned hand-editing of the chmod-444 guarded state file or `cleanup-state` (full graph loss and re-decompose). Fail-closed — nothing silently passes — but the sanctioned repair is a no-op that exits 0.",
+                "evidenceLimits": "Verified by execution for the single-task, single-duplicated-id case against the snapshot; multi-task and triple-duplicate permutations were reasoned, not executed. Not observed: whether any out-of-tree tooling repairs refuted_findings."
+              },
+              "truthConfidence": 95,
+              "severityRationale": "A load-boundary rejection introduced by this revision comes with a repair hint that demonstrably cannot repair it — the exact 'rejection with no repair dead-ends the operator on an unloadable graph' class this revision's own comments (deduplicateFindingIds, recoverViewOnlyClaims) and its round-13/14 remediation history treat as blocking. State consumption fails everywhere until the operator steps outside the sanctioned path."
+            }
+          },
+          {
+            "severity": "critical",
+            "file": "engine/src/handlers/helpers/validate-task-graph.ts",
+            "line": 99,
+            "claim": "The new ValidationScope docstring states the `state-file` scope is 'held to every load-boundary rule', but validateFull still runs none of taskUnionError's union rules outside the findings aggregate — task `status`, `review_status`, and `test_result.verdict` enums (and top-level current_phase) — so the validator reports VALID on a graph StateManager.load() refuses, and --fix preserves the invalid enum value and re-validates clean with no 'issues remain' note: a silent, exit-0 failed repair on an unloadable graph.",
+            "basis": {
+              "evidence": {
+                "kind": "reproduction",
+                "execution": "reviewer-reported",
+                "setup": "Snapshot ec2cc90 in a temporary worktree; probe imported src/state-manager.ts and src/handlers/helpers/validate-task-graph.ts from the snapshot and ran under bun. Reviewer-authored probe, not an engine receipt.",
+                "input": "Three otherwise-valid state-file graphs, each with one task carrying exactly one invalid union value: review_status 'banana'; status 'banana'; test_result {verdict: 'banana'}.",
+                "observed": "For all three: validateFull(graph, default 'state-file' scope) returns ok:true (the command would report 'Task graph valid' at exit 0). fixFull preserves the invalid value (review_status stays 'banana'; status stays 'banana'; test_result untouched), the re-validation of the repaired JSON passes, so the handler prints no 'issues remain' note — the operator is told the repair succeeded — and parseTaskGraph still rejects the repaired file (`review_status 'banana' is not one of pending, passed, blocked, evidence_capture_failed`, likewise for status and test_result.verdict).",
+                "expected": "Per the docstring and the round-14 agreement the same revision's test file states ('the operator's validator and the loader must agree on `valid`'), the state-file scope must reject what taskUnionError rejects, and --fix must either repair the value (e.g. reset an invalid enum to its documented default, as it does for `status` structural defaults elsewhere) or at minimum report the remaining error instead of validating clean.",
+                "reference": "ec2cc90 engine/src/handlers/helpers/validate-task-graph.ts:99-101 (scope claim) and engine/src/state-manager.ts:85-107 (taskUnionError's union rules)"
+              },
+              "violatedContract": {
+                "reference": "engine/src/handlers/helpers/validate-task-graph.ts:99-101 (ValidationScope docstring) and engine/tests/handlers/validate-task-graph.test.ts:570-576 (round-14 agreement framing), ec2cc90",
+                "statement": "`state-file` is a graph that `StateManager.load()` must be able to open, so it is held to every load-boundary rule. — The round-14 remediation of A13 ('validateFull runs no findings/lockstep/duplicate-id checks, so the operator's validator reports {ok:true} on a graph the load boundary refuses') closed only the findings-aggregate rules; taskUnionError's status/review_status/test_result.verdict union proofs are still absent, so the two validators still disagree about 'valid' for exactly the drifted/hand-edited files the load boundary was built for."
+              },
+              "consequence": {
+                "affected": "The operator recovering a corrupted or hand-mangled state file, and every hook that subsequently refuses to load it.",
+                "preconditions": "An invalid enum value on disk (hand-edit typo, external corruption, or a partial/truncated write landing a mangled enum value); engine writers always emit enum values, so the loader is the only detector and the validator is the operator's tool for this class.",
+                "impact": "The operator runs the sanctioned validator/repair on an unloadable graph and receives a false all-clear ('valid', then '--fix' exits 0 with no remaining-issue note) while every hook keeps failing with 'Corrupt state file (...is not one of...)'. The gate never falsely opens (the loader fails closed), but the operator is dead-ended into hand-editing a chmod-444 guarded state file, contradicting the agreement this revision claims to have established.",
+                "evidenceLimits": "The three per-task union fields were verified by execution against the snapshot; the top-level current_phase gap and the depends_on:null disagreement (validateFull accepts null, taskUnionError rejects) were established by reading, not executed. Not observed: whether operators in practice reach for validate-task-graph on loader diagnostics that lack the REPAIR_HINT."
+              },
+              "truthConfidence": 88,
+              "severityRationale": "The revision's headline remediation claim for this file — that the operator's validator and the loader now agree on 'valid' — is demonstrably false for four union rules, and the failure mode is a silent, exit-0 repair that does not repair, leaving the operator on an unloadable state file with a false all-clear. That is a concrete failure of the explicit verification obligation this revision itself states, not a stylistic gap."
+            }
+          },
+          {
+            "severity": "advisory",
+            "file": "engine/src/core/findings.ts",
+            "line": 423,
+            "claim": "findingsUnionError's duplicate-id proof compares raw, untrimmed `id` strings while parseStoredFinding — the module's one definition of a well-formed finding — trims the id, so two findings whose ids differ only by surrounding whitespace pass the uniqueness check that 'is the only place that can prove it', and the file loads clean.",
+            "reason": "Reviewer-reported execution against the snapshot: a task with findings ids 'code-reviewer-1' and 'code-reviewer-1 ' (in-step views) passes parseTaskGraph, and the failure only surfaces later at `review-panel brief` as 'brief finding ids must be unique' — a diagnostic that names no repair, even though --fix's deduplicateFindingIds (which compares trimmed ids) does repair it (verified: re-mints to 'code-reviewer-2'). Comparing the ids after the same trim parseStoredFinding applies would make the load boundary convert this drift into the repairable diagnostic the module's contract promises; today the operator gets a bare brief error with no path back. Impact is fail-closed (the brief refuses; the wave stays blocked), so this does not falsely open a gate — it is a load-boundary completeness gap against the module's own stated uniqueness contract."
+          },
+          {
+            "severity": "advisory",
+            "file": "engine/src/handlers/helpers/panel-contract.ts",
+            "line": 148,
+            "claim": "The round-14 A35 remediation is only half-applied: `tallyRefutations` is wrapped at its call site so requireEntry's invariant throw reaches the operator as a contract diagnostic, but `aggregateVerdicts` at the panel-contract `aggregate` step is not wrapped, so the same throw there escapes as a hook crash ('Hook error', exit 1) instead of a contract diagnostic.",
+            "reason": "Both call sites reach requireEntry only after their own coverage guard holds, so the throw is unreachable today and the practical impact is limited to a future regression of the coverage check inside aggregateVerdicts surfacing as a raw crash rather than a diagnostic — against panel-run.ts's stated rule that 'errors are returned, never thrown; a panel helper's failure must reach the operator as a contract diagnostic'. The asymmetry between the two sibling handlers is itself the two-copies-drift pattern the kernel extraction exists to end; wrapping the aggregate call (or returning the coverage failure before ranking) restores the stated rule symmetrically."
+          }
+        ]
+      }
+    },
+    {
+      "blindId": "df90ec90-d810-4896-b473-b6643c335e3c",
+      "cell": "judge-verdict/v1",
+      "caseId": "judge-easy-cache-invalidation",
+      "payload": {
+        "criterion": "data-integrity",
+        "rankings": [
+          {
+            "candidate": "candidate-ttl-plus-digest.md",
+            "score": 9,
+            "fatal_flaw": null,
+            "strongest_idea": "Layering a time-based expiry on top of a content-addressed key defends against drift that is invisible to the key itself — a provider silently changing serving behavior or grammar support without changing its model id, Pi version, or schema digest — via forced periodic re-probing."
+          },
+          {
+            "candidate": "candidate-content-addressed.md",
+            "score": 8,
+            "fatal_flaw": null,
+            "strongest_idea": "Deriving the cache key from every input that determines a qualification's validity (provider, served model id, Pi version, frozen schema digest) makes invalidation automatic and precise: any relevant change is a miss, nothing else is, with no wasted requalification."
+          },
+          {
+            "candidate": "candidate-forever-cache.md",
+            "score": 1,
+            "fatal_flaw": "Keying by provider name alone ignores every factor that can invalidate a qualification — served model changes, Pi version upgrades, schema digest changes, provider-side behavior drift — and keeping entries forever means stale, wrong routing decisions are never corrected; it also defeats multi-model providers entirely.",
+            "strongest_idea": "Maximizes cache utilization: no qualified provider is ever re-probed, so qualification cost is paid exactly once per provider."
+          }
+        ]
+      }
+    },
+    {
+      "blindId": "f0a5648a-2b2e-4d5f-9991-36eba2e1d5aa",
+      "cell": "reviewer-payload/v2",
+      "caseId": "round14-vulnerable",
+      "payload": {
+        "schemaVersion": 2,
+        "kind": "standalone-review",
+        "findings": [
+          {
+            "severity": "critical",
+            "file": "engine/src/machine/test-report.ts",
+            "line": 131,
+            "claim": "judgeTestRun mints trusted-pass from a report artifact alone when the exit code is unknown, so an interrupted/killed test run — which extractBashOutcome deliberately maps to exit:null (interrupted:true → {exit:null, stdout:''}) — whose runner already wrote fresh partial report artifacts (per-class JUnit XML has mtime ≥ call start, satisfying findReport's freshness ordering) is recorded as ground-truth trusted-pass instead of untrusted.",
+            "basis": {
+              "evidence": {
+                "kind": "execution-trace",
+                "preconditions": [
+                  "A machine-bound loom session is recording evidence: record-evidence (PostToolUse) is active and call-start stamps are written per Bash call by guard-state-file (hooks.json wires guard-state-file.sh on PreToolUse Bash; engine/src/handlers/pre-tool-use/guard-state-file.ts records the stamp).",
+                  "The harness's Bash tool_response carries no exit code under any spelling (the motivating harness: keys {interrupted, isImage, noOutputExpected, stderr, stdout}) or the specific run was interrupted.",
+                  "The test command is a classified JVM runner (mvn/gradle) writing per-class XML into target/surefire-reports (or failsafe/build/test-results) during the run, or an explicit --outputFile JSON reporter whose file happens to be fresh."
+                ],
+                "steps": [
+                  "The agent runs `mvn test`; several test classes complete and surefire writes per-class XML with all-green counts (total>0, failed=0); the run is then interrupted or killed (timeout/user interrupt) before completing.",
+                  "extractBashOutcome sees interrupted:true (or no exit key) and yields {exit:null, stdout:''} (engine/src/machine/extract-evidence.ts:526-544); extractEvidence's Bash branch still mints a TestRun event for the classified command.",
+                  "findReportForSegment → findReport (engine/src/machine/report-discovery.ts) accepts the fresh on-disk XML: isFresh only requires mtime ≥ callStartMs − CALL_START_SLACK_MS and within FRESHNESS_MS; a partial report written before the interrupt satisfies both. parseJunitXml returns {total:N, failed:0}.",
+                  "judgeTestRun(null, report) at test-report.ts:131-136: `exit !== null && exit !== 0` is false, report is non-null, total>0 and failed===0 → {verdict:'trusted-pass'}.",
+                  "update-task-status folds the epoch: resolveTestEvidence keeps the trusted verdict as ground truth (a trusted pass is only demoted if a FileWrite follows it in the ledger), the task is written with test_result.verdict='trusted-pass', and the machine's terminal TestRun requirements are satisfied."
+                ],
+                "observed": "A trusted-pass — the system's strongest, ground-truth verdict — is minted and persisted for a test run that never completed, on the very harness class (no exit codes) this revision targets.",
+                "expected": "An interrupted/non-completing run carries no proof the verification step finished; under the prior rule (exit:null → untrusted, never success) and under the completion assumption the revision's own justification relies on ('findReport's freshness, staleness, and write-veto guards already refuse a staged or stale artifact' — none of which establish that the run COMPLETED), the resolution must remain untrusted/labeled, never trusted-pass.",
+                "reference": "engine/src/machine/test-report.ts:130-136 with engine/src/machine/extract-evidence.ts:526-544 (interrupted → exit:null) and engine/src/machine/report-discovery.ts isFresh (mtime ≥ call start cannot distinguish a completed run's report from a partial one written before an interrupt)."
+              },
+              "violatedContract": {
+                "reference": "engine/src/machine/test-report.ts judgeTestRun doc comment and engine/src/machine/extract-evidence.ts extractBashOutcome doc comment (0710b76 snapshot)",
+                "statement": "judgeTestRun's own contract states 'A nonzero exit still overrules a green report: a runner that exits nonzero after writing a passing report failed at something the report does not describe, and the failure is the ground truth.' On exit-less harnesses there is no nonzero exit to overrule anything, and the harness's only non-completion signal (interrupted:true) is deliberately collapsed into exit:null, whose documented meaning is 'downstream treats as untrusted (never as success)'. The revision makes exit:null + green report trusted-pass, so for runs that never finished nothing overrules the report and the non-completion signal is discarded."
+              },
+              "consequence": {
+                "affected": "update-task-status/task status recording, the per-agent machine gates (terminal TestRun requirements), and the wave gates and reviewers that read trusted verdicts as ground truth.",
+                "preconditions": "A machine-bound loom session with a classified JVM (or --outputFile) test command that is interrupted or killed without an exit code, and fresh partial report artifacts on disk.",
+                "impact": "Tasks are recorded implemented on trusted-pass ground truth derived from an incomplete run; wave gates and machine terminal requirements read green on evidence that does not vouch for the run having completed — the exact 'wave gate reading green on no evidence' failure class this revision's own message declares blocking.",
+                "evidenceLimits": "Trace derived by the reviewer from the 0710b76 snapshot code paths (test-report.ts, extract-evidence.ts, report-discovery.ts, record-evidence.ts, update-task-status.ts); it was NOT executed by the reviewer and no engine execution receipt exists — in particular, no live interrupted-run recording was observed, only the code-determined outcome."
+              },
+              "truthConfidence": 80,
+              "severityRationale": "The change mints the system's strongest verdict (trusted-pass ground truth) for a non-completing run on exactly the harness class the revision was written for; machines and wave gates act on it as verified completion, so the defect silently voids the verification guarantee the trust doctrine exists to provide. Factual incorrectness alone would not suffice, but this is a concrete consequence to the project's central safety contract, violating an invariant the revision itself states (nonzero exit overrules a green report) and the explicit obligation that gates never read green without evidence."
+            }
+          },
+          {
+            "severity": "critical",
+            "file": "engine/src/handlers/pre-tool-use/validate-agent-model.ts",
+            "line": 89,
+            "claim": "When resolveAgentPath cannot locate the agent .md file, the model gate returns allow with no stderr note, silently no-oping model enforcement for a validated loom agent; resolveAgentPath also never consults CLAUDE_PLUGIN_ROOT (the first candidate its sibling validate-agent-skill uses) nor the cache/local-plugins half of the plugin cache its sibling scans, so on installs where agent files are reachable only via those locations the gate silently allows every spawn with a wrong or missing model.",
+            "basis": {
+              "evidence": {
+                "kind": "execution-trace",
+                "preconditions": [
+                  "loom installed such that a VALIDATED_AGENTS .md file (e.g. code-implementer-agent.md) is resolvable only via CLAUDE_PLUGIN_ROOT/agents or under ~/.claude/plugins/cache/local-plugins/... — layouts validate-agent-skill.ts explicitly covers ('Prefer CLAUDE_PLUGIN_ROOT — set by the plugin system, portable across OS and users' and its cache scan comment 'covers both \"plugins\" and \"local-plugins\"') and validate-agent-model.ts does not (its scan is hardcoded to ~/.claude/plugins/cache/plugins/<ns>).",
+                  "The task graph exists so the gate is active, and the spawn names a validated loom agent (tool_name Task/Agent, subagent_type 'loom:<agent>') with a missing or mismatched model."
+                ],
+                "steps": [
+                  "PreToolUse fires validate-agent-model for the spawn; the handler passes the SUBAGENT_SPAWN_TOOLS and VALIDATED_AGENTS checks.",
+                  "resolveAgentPath probes only: <git-root>/.claude/agents/<agent>.md, $HOME/.claude/agents/<agent>.md, and — only for namespaced types — ~/.claude/plugins/cache/plugins/<ns>/<version>/agents/<agent>.md. None exist for this install layout (CLAUDE_PLUGIN_ROOT is never probed; the local-plugins cache half is never scanned).",
+                  "Line 89: `if (!agentPath) return { kind: \"allow\" };` — the spawn is allowed with no message of any kind, whether or not the model parameter is missing or wrong."
+                ],
+                "observed": "The spawn proceeds with any model (or none) and the gate leaves no trace — nothing on stderr — that model enforcement was skipped for a validated agent.",
+                "expected": "Per the sibling handler in the same revision, which for the identical uncertainty (agent file unresolvable) writes a loud stderr note ('[loom] validate-agent-skill: no agent file found ... skill enforcement SKIPPED for this spawn'), and per the revision's own doctrine (hooks-sync.test.ts / tool-vocabulary.ts: 'a name in the matcher but not the constant fires and early-returns allow... Both are silent, so neither is allowed'), a gate that cannot find its rule source must say so loudly, and its resolver should cover the same locations its sibling reads.",
+                "reference": "engine/src/handlers/pre-tool-use/validate-agent-skill.ts resolveAgentPath (CLAUDE_PLUGIN_ROOT first; cache scan over both 'plugins' and 'local-plugins') and its no-agent-file arm; engine/src/core/tool-vocabulary.ts doctrine comment."
+              },
+              "violatedContract": {
+                "reference": "engine/src/core/tool-vocabulary.ts (0710b76) and the revision's hooks-sync doctrine",
+                "statement": "'One set, two layers... a name known to one layer and not the other is a gate that reports healthy and enforces nothing... because that exact drift already happened and cost a full session to notice' and 'Both are silent, so neither is allowed.' A gate that fires but silently allows because it cannot locate the agent file it enforces against is the same silent-no-op shape this revision bans; the commit's own sibling fix treats the identical uncertainty as requiring a loud stderr note, and the resolver asymmetry (no CLAUDE_PLUGIN_ROOT, no local-plugins scan) recreates a per-layout dead gate."
+              },
+              "consequence": {
+                "affected": "Operators relying on agent-model pinning — declared model enforced on every validated loom spawn — and any downstream gate or reviewer assuming the declared model ran.",
+                "preconditions": "An install layout where agent .md files are not under <git-root>/.claude/agents, ~/.claude/agents, or ~/.claude/plugins/cache/plugins/<ns>/<version>/agents — i.e. CLAUDE_PLUGIN_ROOT-only or cache/local-plugins layouts, which the sibling handler documents as real layouts it covers.",
+                "impact": "Wrong-model or model-less spawns are allowed silently while the plugin reports healthy; the model gate degrades to a no-op indistinguishable from enforcement — precisely the 'reports healthy while enforcing nothing' failure class this revision exists to eliminate.",
+                "evidenceLimits": "Code-level derivation from the 0710b76 snapshot; the triggering install layouts are reviewer-asserted from the sibling handler's own comments (which document CLAUDE_PLUGIN_ROOT and both cache layouts as locations it covers), not executed by the reviewer and not accompanied by an engine execution receipt."
+              },
+              "truthConfidence": 75,
+              "severityRationale": "Silent non-enforcement of a supported safety gate under documented install layouts; the revision's stated acceptance bar — no silent dead gates in either direction — is violated by an arm it left silent in the same handler family it fixed in this very commit, so it must block this delivery."
+            }
+          },
+          {
+            "severity": "advisory",
+            "file": "docs/pi-usage.md",
+            "line": 284,
+            "claim": "The doc states 'Every spawn gate reads both field spellings', but validate-agent-model and validate-agent-skill read only input.tool_input.subagent_type (no `?? input.tool_input.agent` fallback), so the statement is false for two of the five gates.",
+            "reason": "An operator wiring another harness (or pi-over-hooks) per this doc would believe agent-name extraction is universal; for these two gates a spawn carrying the pi-style `agent` field resolves to no validated agent and is silently allowed. Adding the same `?? (input.tool_input?.agent as string)` fallback the other three gates have makes the doc true and the gates uniform."
+          },
+          {
+            "severity": "advisory",
+            "file": "engine/tests/machine/advance.property.test.ts",
+            "line": 48,
+            "claim": "The property's trusted-pass oracle now delegates to judgeTestRun itself (`isTrustedPass = ... judgeTestRun(e.exit, e.report).verdict === 'trusted-pass'`), so the invariant can no longer fail when judgeTestRun's rule itself regresses — e.g. it cannot detect the interrupted-run trusted-pass minting reported against engine/src/machine/test-report.ts:131.",
+            "reason": "A tautological oracle verifies only that the reducer agrees with judgeTestRun, not that the rule is correct; the previous oracle independently pinned 'exit 0 + confirming report' and could fail on a rule change. Restoring an independent completion requirement (e.g. an observed run-composition/completion fact for trust) would let the property fail on trust-rule regressions like the one in this revision."
+          }
+        ]
+      }
+    }
+  ]
+}

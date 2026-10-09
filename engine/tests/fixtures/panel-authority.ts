@@ -45,11 +45,12 @@ import {
 } from "../../src/core/orchestration-contract";
 import { parseWaveFindingId, type BriefFinding, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
 import { value } from "./parse-result";
+import { LOCAL_PI_BINDING } from "./local-pi-binding";
 
 const hexDigest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
 
 export const PANEL_HARNESS_BINDINGS = {
-  pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+  pi: LOCAL_PI_BINDING,
   claude: { harness: "claude-code", model: "opus" },
 } as const;
 

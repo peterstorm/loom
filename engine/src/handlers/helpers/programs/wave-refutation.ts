@@ -4,80 +4,60 @@
  * recover verifier requests, replay captured verdicts and terminal capture
  * rejections, then commit refuted outcomes under exact active authority.
  */
-import { parseAgentRequestAuthority, type InitialSpawnRequestInput } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold, type FindingOutcome } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, panelRequestIdentity, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/persistent-panel';
-import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority } from '../../../core/panel-authority';
-import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
+import { buildContextPacket, encodeByteSection } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { deriveWaveRefutationPlan } from '../../../core/wave-gate-preparation';
 import { applyFindingOutcomes } from '../../../core/findings';
 import { reconcileWaveBlock } from '../../../core/wave-gate-model';
-import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { decideRefutationTranscriptRead, refutationRejectionDiagnostic } from '../../../core/reviewer-retry';
 import { waveRefutationCommitProblem } from '../../../core/wave-gate-membership';
 import { durableCaptureRejection, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { failed } from './program-result';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
+import { prepareRefutationVerifiers } from './refutation-verifiers';
+import type { PiCatalog } from '../../../core/model-profiles';
 import { publishLegacyInitialBatch } from './request-publication';
 import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 
 type WaveReadiness = Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"];
 
+/**
+ * The current Wave's Refutation Panel. The Wave Gate checkpoints no panel
+ * authority, so its record is the durable attempt-1 batch receipt: its
+ * verifier requests are read from that receipt when one exists and minted
+ * under `catalog` (today's in production) only when none does
+ * (`prepareRefutationVerifiers`), so
+ * resuming a panel issued under an older catalog compares recorded history
+ * with itself.
+ */
 function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: WaveReadiness,
+  catalog: PiCatalog,
 ) {
   const plan = deriveWaveRefutationPlan(readiness);
   if (!plan.ok) throw new Error(plan.error.message);
-  const profile = resolveModelProfile("refutation");
-  if (!profile.ok) throw new Error(profile.error.message);
-  const slots = [];
-  const packets: ContextPacket[] = [];
-  const inputs: InitialSpawnRequestInput[] = [];
-  const retryInputs: Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[] = [];
-  for (const lens of plan.value.lenses) {
-    const binding = deriveRefutationVerifierBinding(
-      plan.value.runId,
-      lens,
-      [plan.value.findings[0].id, ...plan.value.findings.slice(1).map(({ id }) => id)],
-    );
-    if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = binding.value.requestIds[attempt - 1];
-      const section = encodeByteSection("wave-refutation-authority", JSON.stringify({
-        panelRunId: plan.value.runId, lens, findings: plan.value.findings, attempt,
-      }));
-      if (!section.ok) throw new Error(section.error.message);
-      const packet = buildContextPacket({ requestId, role: "review-verifier-agent", requiredSkill: "none",
-        outputContract: `Adjudicate every Wave Finding through lens '${lens}' and emit exact refutation verdict JSON.`,
-        fixedContext: [section.value], variableContext: [] });
-      if (!packet.ok) throw new Error(packet.error.message);
-      if (attempt === 1) packets.push(packet.value);
-      const authority = parseAgentRequestAuthority({ runId: handle.runId, requestId, slotId: binding.value.slotId,
-        program: "refutation-panel", role: "review-verifier-agent", attempt, modelProfile: profile.value.id,
-        harnessBinding: { pi: lowerModelProfile(profile.value, "pi"), claude: lowerModelProfile(profile.value, "claude-code") },
-        requiredSkill: null, contextDigest: packet.value.digest, outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw` });
-      if (!authority.ok) throw new Error(authority.error.violations.map(({ message }) => message).join("; "));
-      const input = { authority: authority.value, context: { digest: packet.value.digest,
-        slot: { kind: "fixed-artifact-slot" as const, path: `contexts/${packet.value.digest}.json` } } };
-      if (attempt === 1) inputs.push(input);
-      else retryInputs.push(Object.freeze({ input: Object.freeze(input), packet: packet.value }));
-      return authority.value;
-    });
-    slots.push({ slotId: binding.value.slotId, attempts });
-  }
-  const panel = parseRefutationPanelAuthority({
-    runId: handle.runId,
+  const verifiers = prepareRefutationVerifiers({ handle, label: "wave-refutation", checkpointed: null }, {
     identityRunId: plan.value.runId,
     findings: plan.value.findings,
     lenses: plan.value.lenses,
-    verifierSlots: slots,
+    catalog,
+    packet: (lens, requestId, attempt) => {
+      const section = encodeByteSection("wave-refutation-authority", JSON.stringify({
+        panelRunId: plan.value.runId, lens, findings: plan.value.findings, attempt,
+      }));
+      return section.ok
+        ? buildContextPacket({ requestId, role: "review-verifier-agent", requiredSkill: "none",
+            outputContract: `Adjudicate every Wave Finding through lens '${lens}' and emit exact refutation verdict JSON.`,
+            fixedContext: [section.value], variableContext: [] })
+        : section;
+    },
   });
-  if (!panel.ok) throw new Error(panel.error.message);
-  return { panel: panel.value, inputs, packets, retryInputs, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
+  return { ...verifiers, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
 }
 
 /**
@@ -88,12 +68,13 @@ function waveRefutationPreparation(
 export async function driveWaveRefutation(
   context: WaveResumeContext,
   current: WaveReadiness,
+  catalog: PiCatalog,
 ): Promise<WavePhase> {
   const { handle, manager, registration } = context;
   if (!(current.facts.findingCounts.kind === "known" && current.facts.findingCounts.value.activeCritical > 0)) {
     return proceed();
   }
-  const preparation = waveRefutationPreparation(handle, current);
+  const preparation = waveRefutationPreparation(handle, current, catalog);
   const resolver = publicationResolver(handle);
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver, "wave-refutation");
   if (recovered.kind === "corrupt") return settled(waveBlocked(handle, recovered.message));
@@ -128,7 +109,7 @@ export async function driveWaveRefutation(
       action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, reissues, false) },
     });
   }
-  let panelState = startPersistentRefutationPanel(preparation.panel).state;
+  let panelState = startPersistentRefutationPanel(preparation.refutationAuthority).state;
   for (const request of requests) {
     const transcript = decideRefutationTranscriptRead(
       handle.readTranscriptBytes(request.authority),
@@ -203,7 +184,7 @@ export async function driveWaveRefutation(
         locked,
         registration,
         current.registration,
-        preparation.panel,
+        preparation.refutationAuthority,
       );
       if (authorityProblem !== null) throw new Error(authorityProblem);
       const tasks = locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes));

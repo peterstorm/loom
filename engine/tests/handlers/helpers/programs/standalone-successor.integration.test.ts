@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureStandaloneCliEvidence } from "../../../fixtures/standalone-cli-capture";
-import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
+import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withEnvOverlay, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
-import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
+import { shellQuote, withGitShim } from "../../../fixtures/git-path-shim";
+import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
@@ -45,10 +46,9 @@ function project() {
   }
   writeFileSync(join(root, "a.ts"), "export const value = 1;\n"); return root;
 }
-async function invoke(root: string, args: readonly string[], input = "") {
-  const env = fixturePiEnvironment(root);
+async function invoke(root: string, args: readonly string[], input = "", parent: FacadeParent = "pi") {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: root, env });
+    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: root, env: facadeParentEnvironment(parent, root) });
     let stdout = ""; let stderr = ""; let failure: Error | null = null;
     child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
     child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
@@ -58,8 +58,8 @@ async function invoke(root: string, args: readonly string[], input = "") {
     child.stdin.end(input);
   });
 }
-async function command(root: string, args: readonly string[], input = ""): Promise<Action> {
-  const result = await invoke(root, args, input); expect(result.code, result.stderr).toBe(0);
+async function command(root: string, args: readonly string[], input = "", parent: FacadeParent = "pi"): Promise<Action> {
+  const result = await invoke(root, args, input, parent); expect(result.code, result.stderr).toBe(0);
   return JSON.parse(result.stdout);
 }
 async function submit(root: string, run: string, request: AgentRequestAuthority, raw: unknown) {
@@ -112,8 +112,9 @@ function input(p: Awaited<ReturnType<typeof policy>>) {
   return { schemaVersion: 3, kind: "types", files: ["a.ts"], dryRun: false,
     successor: { source: p.source, disposition: { kind: "selected-record", publication: p.publication } } };
 }
-async function successor(root: string, run: string, p: Awaited<ReturnType<typeof policy>>, f: Awaited<ReturnType<typeof predecessor>>) {
-  const started = await command(root, ["start", "standalone-review", ...flags(root, run)], json(input(p)));
+async function successor(root: string, run: string, p: Awaited<ReturnType<typeof policy>>, f: Awaited<ReturnType<typeof predecessor>>,
+  parent: FacadeParent = "pi") {
+  const started = await command(root, ["start", "standalone-review", ...flags(root, run)], json(input(p)), parent);
   expect(started.requests.map(row => row.authority.role)).toEqual(["code-reviewer", "type-design-analyzer"]);
   const handle = value(f.handles.openRegisteredRunDirectory(join(root, "runs"), run));
   const registration = value(f.helpers.parseRegistration(value(handle.readProgramRegistration())));
@@ -188,24 +189,27 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       expect(committed.status, committed.stderr).toBe(0);
       const concurrentHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
       expect(spawnSync("git", ["update-ref", "HEAD", originalHead], { cwd: root }).status).toBe(0);
-      const shim = join(root, "git-shim"); mkdirSync(shim);
-      const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const shim = join(root, "git-shim");
       const marker = join(shim, "advanced");
-      // The engine's Git children run under the shared execution policy: the
-      // argv opens with `-c core.fsmonitor=false` and the environment is
-      // allow-listed, so the shim matches past that prefix and carries its
-      // own paths rather than reading them from the (scrubbed) environment.
-      writeFileSync(join(shim, "git"), `#!/bin/sh\nif [ "$1" = -c ] && [ "$3" = rev-parse ] && [ "$4" = HEAD ] && [ ! -e '${marker}' ]; then\n  '${realGit}' "$@"\n  status=$?\n  : > '${marker}'\n  '${realGit}' update-ref HEAD '${concurrentHead}'\n  exit $status\nfi\nexec '${realGit}' "$@"\n`);
-      chmodSync(join(shim, "git"), 0o755);
-      const previousPath = process.env.PATH;
-      Object.assign(process.env, { PATH: `${shim}:${previousPath ?? ""}` });
+      // The first policy-bound `rev-parse HEAD` answers the original HEAD, and
+      // the shim then advances HEAD once: the observation sees authority drift.
+      const advanceHeadOnce = { command: ["rev-parse", "HEAD"], script: [
+        `if [ ! -e ${shellQuote(marker)} ]; then`,
+        `  policy_git "$@"`,
+        "  status=$?",
+        `  : > ${shellQuote(marker)}`,
+        `  real_git update-ref HEAD ${shellQuote(concurrentHead)}`,
+        "  exit $status",
+        "fi",
+      ].join("\n") };
       try {
-        const drifting = await f.shell.prepareStandaloneSuccessorFacadeStart(join(root, "runs"), "head-drift", validInput);
-        expect(drifting).toEqual({ ok: false,
-          message: "successor source unavailable: successor Git/reviewer authority changed during observation" });
-        expect(existsSync(join(root, "runs/head-drift"))).toBe(false);
+        await withGitShim(shim, advanceHeadOnce, async () => {
+          const drifting = await f.shell.prepareStandaloneSuccessorFacadeStart(join(root, "runs"), "head-drift", validInput);
+          expect(drifting).toEqual({ ok: false,
+            message: "successor source unavailable: successor Git/reviewer authority changed during observation" });
+          expect(existsSync(join(root, "runs/head-drift"))).toBe(false);
+        });
       } finally {
-        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
         expect(spawnSync("git", ["update-ref", "HEAD", originalHead], { cwd: root }).status).toBe(0);
       }
 
@@ -217,24 +221,16 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
   it("refuses three empty-success Git status witnesses before registering a successor", async () => {
     const root = project(); await ownedSession(root, async () => {
       const f = await predecessor(root); const p = await policy(root, "source", "policy-zero", f.publisher);
-      const shim = join(root, "empty-status-git"); mkdirSync(shim);
-      const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
       const trace = join(root, "status-attempts");
-      // Policy-bound argv (`-c core.fsmonitor=false` first) and an allow-listed
-      // environment: the shim matches past the prefix and embeds its paths.
-      writeFileSync(join(shim, "git"), `#!/bin/sh\nif [ "$1" = -c ] && [ "$3" = status ] && [ "$4" = --porcelain=v2 ]; then\n  echo attempt >> '${trace}'\n  exit 0\nfi\nexec '${realGit}' "$@"\n`);
-      chmodSync(join(shim, "git"), 0o755);
-      const previousPath = process.env.PATH;
-      Object.assign(process.env, { PATH: `${shim}:${previousPath ?? ""}` });
-      try {
+      // Every policy-bound `status --porcelain=v2` succeeds with empty output.
+      const emptyStatus = { command: ["status", "--porcelain=v2"], script: `echo attempt >> ${shellQuote(trace)}\nexit 0` };
+      await withGitShim(join(root, "empty-status-git"), emptyStatus, async () => {
         const refused = await invoke(root, ["start", "standalone-review", ...flags(root, "empty-status")], json(input(p)));
         expect(refused.code).not.toBe(0);
         expect(refused.stderr).toContain("git status --porcelain=v2 --branch -z --untracked-files=all returned empty output after bounded retries");
         expect(readFileSync(trace, "utf8").trim().split("\n")).toHaveLength(3);
         expect(existsSync(join(root, "runs", "empty-status"))).toBe(false);
-      } finally {
-        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
-      }
+      });
     });
   });
 
@@ -549,23 +545,18 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const f = await predecessor(root);
       const p = await policy(root, "source", "policy-route", f.publisher);
       writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
-      // The catalog arm explicitly DELETES the election variables: the outer
-      // Loom session may run this suite under the qualified-local model, and
-      // the catalog issue route must not inherit it.
-      const startSuccessor = (run: string, environment: EnvironmentOverlay) => withEnvOverlay(environment, () => successor(root, run, p, f));
-      const extraction = await startSuccessor("route-extraction", CATALOG_ROUTE_ENV);
-      const emission = await startSuccessor("route-emission", QUALIFIED_ROUTE_ENV);
+      // The route is decided by the parent harness alone: the same successor
+      // started from Claude Code (extraction-only) and from Pi (emission).
+      const extraction = await successor(root, "route-extraction", p, f, "claude-code");
+      const emission = await successor(root, "route-emission", p, f, "pi");
 
-      // The route election is genuinely exercised and both runs freeze the
-      // same successor v3 program shape (schemaVersion 3, same lineage).
+      // Both runs freeze the same successor v3 program shape (schemaVersion
+      // 3, same lineage), and issuance is parent-independent.
       for (const run of [extraction, emission]) {
         expect(run.registration.schemaVersion).toBe(3);
         expect(run.started.requests.map(({ authority }) => authority.role)).toEqual(["code-reviewer", "type-design-analyzer"]);
       }
-      expect(emission.started.requests.map(({ authority }) => authority.modelProfile))
-        .toEqual(emission.started.requests.map(() => "qualified-local-review"));
-      expect(emission.started.requests.map(({ authority }) => authority.modelProfile))
-        .not.toEqual(extraction.started.requests.map(({ authority }) => authority.modelProfile));
+      expectParentIndependentIssuance(emission.started.requests, extraction.started.requests);
 
       // The successor's frozen packet content is route-independent: the v3
       // packet digests embed each run's request identity, but the lineage and
@@ -611,7 +602,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
         const descriptor = parseEmissionDescriptor(emissionRequest.task);
         expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
           binding: { requestId: emissionRequest.authority.requestId, version: "v3" } });
-        if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+        if (descriptor.kind !== "issued") throw new Error("a Pi-parented successor reviewer must mint an issued descriptor");
         expect(withoutEmissionRouteDelta(emissionTask, descriptor.binding, descriptor.contextDigest,
           (rendered) => normalize(rendered, emission, "route-emission"))).toBe(extractionTask);
         expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
@@ -625,10 +616,10 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const f = await predecessor(root);
       const p = await policy(root, "source", "policy-source-record", f.publisher);
       writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
-      const s = await withEnvOverlay(QUALIFIED_ROUTE_ENV, () => successor(root, "emission-source", p, f));
+      const s = await successor(root, "emission-source", p, f, "pi");
       const { authority, task } = s.started.requests[0]!;
       const descriptor = parseEmissionDescriptor(task);
-      if (descriptor.kind !== "issued") throw Error("qualified-route successor must issue an emission descriptor");
+      if (descriptor.kind !== "issued") throw Error("a Pi-parented successor must issue an emission descriptor");
       value(await s.handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "pi", nativeId: "native-emission-source",
         requestId: authority.requestId, role: authority.role, attempt: authority.attempt }));
       const args = payload(s);
