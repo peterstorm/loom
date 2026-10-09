@@ -94,8 +94,9 @@ const releasePolicySchema = z.discriminatedUnion("kind", [
 ]);
 export type ReleasePolicy = DeepReadonly<z.infer<typeof releasePolicySchema>>;
 
-/** The policy a schemaVersion 1 preregistration (which predates the field) is decided under. */
-const CAPABLE_ROUTE_REQUIRED: ReleasePolicy = Object.freeze({ kind: "capable-route-required" as const });
+/** The only policy a schemaVersion 1 preregistration (which predates the field) is decided under.
+ *  Kept at its literal type, so the parsed v1 shape cannot carry any other policy. */
+const CAPABLE_ROUTE_REQUIRED = Object.freeze({ kind: "capable-route-required" as const }) satisfies ReleasePolicy;
 
 const preregistrationFields = {
   id: text,
@@ -157,6 +158,9 @@ const preregistrationSchema = z.discriminatedUnion("schemaVersion", [
   });
 }).transform((prereg) => (prereg.schemaVersion === 1 ? { ...prereg, releasePolicy: CAPABLE_ROUTE_REQUIRED } : prereg));
 
+/** A parsed preregistration: schemaVersion 1 with `capable-route-required`
+ *  (its implicit policy), or schemaVersion 2 with the policy it states. A v1
+ *  value carrying any other policy is unrepresentable. */
 export type Preregistration = DeepReadonly<z.infer<typeof preregistrationSchema>>;
 export type CellPreregistration = Preregistration["cells"][number];
 export type WorkloadCase = CellPreregistration["workload"]["cases"][number];
