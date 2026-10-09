@@ -2,9 +2,13 @@ export type GitProbeStep<T, E> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; error: E }>;
 
-export type GitProbeObservation<T, E> =
+/** One bounded observation. `Empty` is what a confirmed-empty carries: `T`
+ *  itself, unless the caller's emptiness predicate is a type guard — then an
+ *  observed value is `T` without `Empty` and a confirmed-empty holds only
+ *  `Empty` values, so the union says what the retry proved. */
+export type GitProbeObservation<T, E, Empty = T> =
   | Readonly<{ kind: "observed"; value: T; attempts: 1 | 2 | 3 }>
-  | Readonly<{ kind: "confirmed-empty"; first: T; second: T; third: T }>
+  | Readonly<{ kind: "confirmed-empty"; first: Empty; second: Empty; third: Empty }>
   | Readonly<{ kind: "failed"; error: E; attempt: 1 | 2 | 3 }>;
 
 /**
@@ -31,7 +35,19 @@ export type GitProbeObservation<T, E> =
  * attribution — an empty output that reached a digesting site would silently
  * become sha256(""): a plausible witness that later reads as "repository
  * changed since verification".
+ *
+ * When `isEmpty` is a type guard the observation is typed by it: an observed
+ * value is never an `Empty` one and a confirmed-empty holds only `Empty`
+ * values, so no caller re-narrows a state the retry already excluded.
  */
+export function observeGitProbe<T, E, Empty extends T>(
+  run: () => GitProbeStep<T, E>,
+  isEmpty: (value: T) => value is Empty,
+): GitProbeObservation<Exclude<T, Empty>, E, Empty>;
+export function observeGitProbe<T, E>(
+  run: () => GitProbeStep<T, E>,
+  isEmpty: (value: T) => boolean,
+): GitProbeObservation<T, E>;
 export function observeGitProbe<T, E>(
   run: () => GitProbeStep<T, E>,
   isEmpty: (value: T) => boolean,

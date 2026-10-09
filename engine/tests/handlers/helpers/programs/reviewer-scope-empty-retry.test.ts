@@ -22,11 +22,13 @@ const scriptedResponses: { queue: SpawnAnswer[]; calls: string[][] } = vi.hoiste
   calls: [] as string[][],
 }));
 
+/** A scripted raw `spawnSync` result. A spawn that started no child hands back
+ *  null streams, as both runtimes do; a child that ran hands back strings. */
 type SpawnAnswer = {
   error?: Error;
   status: number | null;
-  stdout: string;
-  stderr: string;
+  stdout: string | null;
+  stderr: string | null;
 };
 
 const answered = (stdout: string): SpawnAnswer => ({ status: 0, stdout, stderr: "" });
@@ -113,7 +115,7 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
   it("refuses a merge-base spawn error before trying another base or omitting committed paths", () => {
     scriptedResponses.queue = [
       answered(SHA), answered(SHA), // HEAD and verified candidate reference
-      { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
+      { error: new Error("spawn git ENOENT"), status: null, stdout: null, stderr: null },
     ];
     expect(() => deriveChangedPaths()).toThrow(/merge-base.*could not start.*ENOENT/);
     expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "merge-base"]);
@@ -150,7 +152,7 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
 
   it("refuses candidate-reference process errors instead of skipping that candidate", () => {
     scriptedResponses.queue = [
-      answered(SHA), { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
+      answered(SHA), { error: new Error("spawn git ENOENT"), status: null, stdout: null, stderr: null },
     ];
     expect(() => deriveChangedPaths()).toThrow(/rev-parse.*could not start.*ENOENT/);
     expect(scriptedResponses.calls).toHaveLength(2);

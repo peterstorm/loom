@@ -1,13 +1,14 @@
 /**
  * The shared Git execution policy, pinned at its own interface — the two
  * policy-bound spawns `runGit` and `spawnGit` — and at every engine route that
- * reaches Git through them. A recording `git` shim on PATH captures each
- * child's argv and environment, so every assertion is about what a Git child
- * actually received: the allow-listed environment, and `core.fsmonitor`
- * disabled in BOTH forms — the `-c` argv prefix every Git honours and the
- * GIT_CONFIG_COUNT/KEY/VALUE environment form only Git 2.31+ honours. An
- * "old Git" shim that strips the environment form proves the argv form alone
- * keeps a repository-configured fsmonitor hook from running.
+ * reaches Git through them. The pure outcome core those spawns feed is pinned
+ * on its own in `git-spawn-outcome.test.ts`. A recording `git` shim on PATH
+ * captures each child's argv and environment, so every assertion is about
+ * what a Git child actually received: the allow-listed environment, and
+ * `core.fsmonitor` disabled in BOTH forms — the `-c` argv prefix every Git
+ * honours and the GIT_CONFIG_COUNT/KEY/VALUE environment form only Git 2.31+
+ * honours. An "old Git" shim that strips the environment form proves the argv
+ * form alone keeps a repository-configured fsmonitor hook from running.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -30,17 +31,7 @@ import {
 } from "../../src/orchestration/remediation-candidate";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../src/utils/declared-artifact-snapshot";
 import { runGit, spawnGit, type GitOutput } from "../../src/utils/git-execution-policy";
-import {
-  describeGitOutcome,
-  diagnoseGitOutcome,
-  gitCleanNegative,
-  gitDiagnosticLost,
-  gitExitedWith,
-  gitStdoutText,
-  parseGitSpawnResult,
-  type GitSpawnOutcome,
-  type RawGitSpawnResult,
-} from "../../src/utils/git-spawn-outcome";
+import { describeGitOutcome, diagnoseGitOutcome, gitExitedWith, gitStdoutText } from "../../src/utils/git-spawn-outcome";
 import {
   changedPaths,
   diffFilesAt,
@@ -409,70 +400,6 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
         detail: "stderr empty, stdout 0 bytes — Git writes a diagnostic for every fatal exit, so the child's stderr was lost before it reached the engine",
       });
     });
-  });
-});
-
-describe("the closed spawn outcome", () => {
-  const error = (message: string, code?: string): Error => Object.assign(new Error(message), code === undefined ? {} : { code });
-  const run = { maxBuffer: 1024, timeout: 500 };
-
-  it.each<[string, RawGitSpawnResult, GitSpawnOutcome]>([
-    ["Node's missing executable", { error: error("spawnSync git ENOENT", "ENOENT"), status: null, signal: null, stdout: null, stderr: null },
-      { kind: "spawn-failed", code: "ENOENT", message: "spawnSync git ENOENT" }],
-    ["Bun's missing executable (no status, no streams)", { error: error('Executable not found in $PATH: "git"', "ENOENT"), signal: null },
-      { kind: "spawn-failed", code: "ENOENT", message: 'Executable not found in $PATH: "git"' }],
-    ["a code-less spawn error", { error: error("spawn boom"), status: null, signal: null },
-      { kind: "spawn-failed", code: null, message: "spawn boom" }],
-    ["a timeout, keeping what the child wrote", { error: error("spawnSync git ETIMEDOUT", "ETIMEDOUT"), status: null, signal: "SIGTERM", stdout: Buffer.from("partial"), stderr: Buffer.from("warning") },
-      { kind: "timed-out", timeoutMs: 500, signal: "SIGTERM", stdout: Buffer.from("partial"), stderr: Buffer.from("warning") }],
-    ["an over-budget capture", { error: error("spawnSync git ENOBUFS", "ENOBUFS"), status: 0, signal: null, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) },
-      { kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) }],
-    ["a signal", { status: null, signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.from("killed mid-write") },
-      { kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.from("killed mid-write") }],
-    ["an exit with string captures, as a scripted double hands them back", { error: null, status: 128, signal: null, stdout: "", stderr: "fatal: x\n" },
-      { kind: "exited", status: 128, stdout: Buffer.alloc(0), stderr: Buffer.from("fatal: x\n") }],
-    ["a result naming no ending at all", {},
-      { kind: "spawn-failed", code: null, message: "the spawn reported no exit status, no signal and no error" }],
-  ])("parses %s", (_label, raw, expected) => {
-    expect(parseGitSpawnResult(raw, run)).toEqual(expected);
-  });
-
-  it.each<[GitSpawnOutcome, string]>([
-    [{ kind: "spawn-failed", code: "ENOENT", message: "spawnSync git ENOENT" }, "could not start: spawnSync git ENOENT"],
-    [{ kind: "timed-out", timeoutMs: null, signal: "SIGTERM", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, "timed out"],
-    [{ kind: "timed-out", timeoutMs: 500, signal: "SIGTERM", stdout: Buffer.alloc(0), stderr: Buffer.from("warning\n") }, "timed out after 500 ms: warning"],
-    [{ kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) }, "exceeded its 1024-byte output budget"],
-    [{ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, "terminated on signal SIGKILL"],
-    [{ kind: "exited", status: 0, stdout: Buffer.from("out"), stderr: Buffer.alloc(0) }, "exited 0"],
-    [{ kind: "exited", status: 1, stdout: Buffer.from("ab"), stderr: Buffer.alloc(0) }, "exited 1: stderr empty, stdout 2 bytes"],
-    [{ kind: "exited", status: 129, stdout: Buffer.alloc(0), stderr: Buffer.from("usage: git rev-parse\n") }, "exited 129: usage: git rev-parse"],
-  ])("renders %j as %j", (outcome, expected) => {
-    expect(describeGitOutcome(outcome)).toBe(expected);
-  });
-
-  it("accepts an exit only when its caller's protocol names that status", () => {
-    const exited = (status: number): GitSpawnOutcome => ({ kind: "exited", status, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
-    expect([0, 1, 128].map((status) => gitExitedWith(exited(status), [0, 1]))).toEqual([true, true, false]);
-    expect(gitExitedWith({ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, [0, 1])).toBe(false);
-    expect(gitExitedWith({ kind: "spawn-failed", code: null, message: "boom" }, [0])).toBe(false);
-  });
-
-  it("reads only a silent exit 1 as a 0/1 protocol's clean negative answer", () => {
-    const exited = (status: number, stdout: string, stderr: string): GitSpawnOutcome =>
-      ({ kind: "exited", status, stdout: Buffer.from(stdout), stderr: Buffer.from(stderr) });
-    expect([
-      exited(1, "", ""), exited(1, "\n", " "), exited(1, "", "fatal: cannot read object"), exited(1, "abc", ""), exited(0, "", ""), exited(128, "", ""),
-    ].map(gitCleanNegative)).toEqual([true, true, false, false, false, false]);
-    expect(gitCleanNegative({ kind: "spawn-failed", code: "ENOENT", message: "spawn git ENOENT" })).toBe(false);
-  });
-
-  it("calls only a silent FATAL exit a lost diagnostic", () => {
-    const exited = (status: number, stderr: string): GitSpawnOutcome =>
-      ({ kind: "exited", status, stdout: Buffer.alloc(0), stderr: Buffer.from(stderr) });
-    expect([
-      exited(128, ""), exited(129, " \n"), exited(128, "fatal: x"), exited(1, ""), exited(0, ""),
-    ].map(gitDiagnosticLost)).toEqual([true, true, false, false, false]);
-    expect(gitDiagnosticLost({ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) })).toBe(false);
   });
 });
 
