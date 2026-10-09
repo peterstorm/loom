@@ -9,10 +9,8 @@
  * `grammar-constrained-decoding/`; neither core imports the other.
  */
 
-import { err, ok, type Result } from "./kernel";
+import { err, errorMessage, ok, type Result } from "./kernel";
 import { foldPiJsonStream, piContentText } from "./pi-json-stream";
-
-const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export type CorpusCaseResult =
   | Readonly<{ case_id: string; status: "executed"; findings: unknown[] }>
@@ -40,7 +38,7 @@ export function parseFindings(text: string): Result<unknown[], string> {
   try {
     parsed = JSON.parse(unfenced);
   } catch (error) {
-    return err(message(error));
+    return err(errorMessage(error));
   }
   return Array.isArray(parsed) ? ok(parsed) : err("model output was not a JSON array");
 }

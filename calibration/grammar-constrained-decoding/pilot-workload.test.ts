@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REVIEWER_OUTPUT_CONTRACT } from "../../engine/src/core/reviewer-contract";
 import { mintCellBinding, pilotRequestId, type CellBinding } from "./pilot-binding";
-import { corpusCases, filedInputs, fixtures, inputOf, inputs, prereg } from "./pilot-test-fixtures";
+import { corpusCases, filedInputs, fixtures, inputOf, inputs, PILOT_1 } from "./pilot-test-fixtures";
 import { PILOT_CELLS, type CellKey } from "./pilot-vocabulary";
 import {
   parseCaseSource,
@@ -20,9 +20,9 @@ const source = (value: string) => ({ caseId: "case-under-test", source: value })
 describe("case-input resolution (the one resolver the window and the tests share)", () => {
   it("resolves every preregistered case to the input its cell can render, carrying its case", () => {
     const changed = (revision: string): readonly string[] => [`changed-in-${revision}`];
-    const resolved = resolveWindowInputs(prereg, fixtures, corpusCases, changed);
+    const resolved = resolveWindowInputs(PILOT_1, fixtures, corpusCases, changed);
     if (!resolved.ok) throw new Error(resolved.error.join("\n"));
-    const cases = prereg.cells.flatMap((cell) => cell.workload.cases.map((entry) => ({ cell: cell.cell, entry })));
+    const cases = PILOT_1.cells.flatMap((cell) => cell.workload.cases.map((entry) => ({ cell: cell.cell, entry })));
     expect(resolved.value.size).toBe(cases.length);
     for (const { cell, entry } of cases) {
       const input = resolved.value.caseInput(cell, entry.caseId);
@@ -71,7 +71,7 @@ describe("case-input resolution (the one resolver the window and the tests share
 
   it("looks an input up only for exactly the cell and case it was resolved for", () => {
     const [judge = "", refutation = ""] = (["judge-verdict/v1", "refutation-verdict/v1"] as const)
-      .map((cell) => prereg.cells.find((entry) => entry.cell === cell)?.workload.cases[0]?.caseId ?? "");
+      .map((cell) => PILOT_1.cells.find((entry) => entry.cell === cell)?.workload.cases[0]?.caseId ?? "");
     expect(inputs.caseInput("judge-verdict/v1", judge)).toMatchObject({ cell: "judge-verdict/v1", caseId: judge });
     expect(inputs.caseInput("refutation-verdict/v1", judge)).toBeUndefined();
     expect(inputs.caseInput("judge-verdict/v1", refutation)).toBeUndefined();
@@ -104,12 +104,12 @@ describe("case-input resolution (the one resolver the window and the tests share
   });
 
   it("refuses a window's inputs that resolve one case twice, alongside every unresolvable case", () => {
-    const [first, ...rest] = prereg.cells;
+    const [first, ...rest] = PILOT_1.cells;
     if (first === undefined) throw new Error("the preregistration has no cell");
     const [case0, case1, ...others] = first.workload.cases;
     if (case0 === undefined || case1 === undefined) throw new Error(`${first.cell} has fewer than two cases`);
     const duplicated = {
-      ...prereg,
+      ...PILOT_1,
       cells: [{ ...first, workload: { ...first.workload, cases: [case0, case0, { ...case1, source: "corpus:gone" }, ...others] } }, ...rest],
     };
     expect(resolveWindowInputs(duplicated, fixtures, corpusCases, NO_PATHS)).toEqual({
@@ -122,12 +122,12 @@ describe("case-input resolution (the one resolver the window and the tests share
   });
 
   it("refuses a window's inputs naming every unresolvable case", () => {
-    const [first, ...rest] = prereg.cells;
+    const [first, ...rest] = PILOT_1.cells;
     if (first === undefined) throw new Error("the preregistration has no cell");
     const [case0, case1, ...others] = first.workload.cases;
     if (case0 === undefined || case1 === undefined) throw new Error(`${first.cell} has fewer than two cases`);
     const broken = {
-      ...prereg,
+      ...PILOT_1,
       cells: [{ ...first, workload: { ...first.workload, cases: [{ ...case0, source: "corpus:gone" }, { ...case1, source: "fixture:gone" }, ...others] } }, ...rest],
     };
     expect(resolveWindowInputs(broken, fixtures, corpusCases, NO_PATHS)).toEqual({
@@ -140,7 +140,7 @@ describe("case-input resolution (the one resolver the window and the tests share
   });
 
   it("makes an input that cannot feed its cell unrepresentable", () => {
-    const judge = inputOf("judge-verdict/v1", prereg.cells.find((cell) => cell.cell === "judge-verdict/v1")?.workload.cases[0]?.caseId ?? "");
+    const judge = inputOf("judge-verdict/v1", PILOT_1.cells.find((cell) => cell.cell === "judge-verdict/v1")?.workload.cases[0]?.caseId ?? "");
     if (!("fixture" in judge) || judge.fixture.kind !== "judge-verdict") throw new Error("the judge cell resolved to no judge fixture");
     // @ts-expect-error — a judge fixture is not a refutation cell's input.
     const crossed: CaseInput = { cell: "refutation-verdict/v1", caseId: judge.caseId, fixture: judge.fixture };
@@ -161,7 +161,7 @@ describe("matched workload prompts", () => {
     return minted.value;
   };
   const caseOf = (cell: CellKey): string => {
-    const caseId = prereg.cells.find((entry) => entry.cell === cell)?.workload.cases[0]?.caseId;
+    const caseId = PILOT_1.cells.find((entry) => entry.cell === cell)?.workload.cases[0]?.caseId;
     if (caseId === undefined) throw new Error(`${cell} has no case`);
     return caseId;
   };

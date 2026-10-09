@@ -2,9 +2,12 @@
  * The calibration kernel — PURE, generic, domain-free: the Result vocabulary
  * both calibration cores (the historical corpus core and the AD-11 pilot
  * under `grammar-constrained-decoding/`) return, plus the NonEmpty helper the
- * AD-11 pilot uses. Sharing it couples the cores to no domain: neither imports
- * the other.
+ * AD-11 pilot uses, and the one rendering of a caught error. Sharing it
+ * couples the cores to no domain: neither imports the other.
  */
+
+/** A caught value's message: an Error's own message, anything else as text. */
+export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export type Result<T, E> =
   | Readonly<{ ok: true; value: T }>

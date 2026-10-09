@@ -3,7 +3,7 @@ import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { Result } from "../kernel";
-import { decidePreflight, type PreflightFacts } from "./pilot-preflight";
+import { decidePreflight } from "./pilot-preflight";
 import type { Preregistration } from "./pilot-preregistration";
 import {
   checkPreregistrationUnchanged,
@@ -11,7 +11,6 @@ import {
   parseAssessmentText,
   parseObservationLog,
   parsePreregistrationFile,
-  parseRetainedWindow,
   pilotWindowId,
   planDispatch,
   recordWindow,
@@ -20,14 +19,15 @@ import {
   type DecisionOutcome,
   type LoadedPreregistration,
   type RecordedWindow,
-  type WindowRecord,
   type WindowRun,
   type WindowStore,
 } from "./pilot-retention";
 import {
-  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, pilot2PreregBytes, prereg, READY, REPO_ROOT, runWindow, WORKLOAD, type FakeRoute,
+  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, PILOT_1, pilot2PreregBytes, preregBytes, READY, REPO_ROOT, runWindow,
+  testWindowRecord as windowRecord, UNREACHABLE_FACTS, WORKLOAD, type FakeRoute,
 } from "./pilot-test-fixtures";
 import { contentDigest } from "./pilot-vocabulary";
+import { DISPATCHED, parseRetainedWindow, type WindowRecord } from "./pilot-window-record";
 
 /**
  * The retention rules of one AD-11 window (AS-017), pinned at the
@@ -51,35 +51,7 @@ function memoryStore(seed: ReadonlyMap<string, string> = new Map()): MemoryStore
   };
 }
 
-const preregBytes = readFileSync(join(HERE, "preregistration.json"));
-const LOADED: LoadedPreregistration = {
-  ref: { path: "calibration/grammar-constrained-decoding/preregistration.json", digest: contentDigest(preregBytes), id: prereg.id },
-  prereg,
-};
 const loadSame = (): Result<LoadedPreregistration, string> => ({ ok: true, value: LOADED });
-
-const UNREACHABLE_FACTS: PreflightFacts = {
-  registry: { "reviewer-payload/v2": null, "reviewer-payload/v3": null, "judge-verdict/v1": null, "refutation-verdict/v1": null },
-  workloadFixturesDigest: prereg.workloadFixturesDigest,
-  piVersion: prereg.route.piVersion,
-  stagedRuntimeRevision: "sha256:abc",
-  loadedRuntimeRevision: null,
-  route: { kind: "unreachable", reason: "connection refused" },
-};
-
-const windowRecord = (dispatched: boolean): WindowRecord => {
-  const preflight = dispatched ? READY : decidePreflight(prereg, UNREACHABLE_FACTS);
-  return {
-    schemaVersion: 2,
-    windowId: "test-window",
-    preregistration: LOADED.ref,
-    workloadFixtures: { path: "calibration/grammar-constrained-decoding/workload-fixtures.json", digest: prereg.workloadFixturesDigest },
-    startedAt: "2026-10-05T08:00:00.000Z",
-    preflightFacts: UNREACHABLE_FACTS,
-    preflight,
-    dispatch: planDispatch(preflight, false),
-  };
-};
 
 let tick = 0;
 const clock = (): string => new Date(Date.UTC(2026, 9, 5, 9, 0, tick++)).toISOString();
@@ -126,9 +98,10 @@ async function blockedWindow(): Promise<MemoryStore> {
 
 describe("pure retention derivations", () => {
   it("plans dispatch only behind a ready preflight and without --preflight-only", () => {
-    expect(planDispatch(READY, false)).toEqual({ kind: "dispatched" });
+    // The dispatched plan has one definition, recorded at open and at close alike.
+    expect(planDispatch(READY, false)).toBe(DISPATCHED);
     expect(planDispatch(READY, true)).toEqual({ kind: "not-attempted", reason: "--preflight-only" });
-    expect(planDispatch(decidePreflight(prereg, UNREACHABLE_FACTS), false).kind).toBe("not-attempted");
+    expect(planDispatch(decidePreflight(PILOT_1, UNREACHABLE_FACTS), false).kind).toBe("not-attempted");
   });
 
   it("content-addresses a preregistration by its exact bytes and refuses malformed files", () => {
@@ -148,70 +121,21 @@ describe("pure retention derivations", () => {
     expect(parseObservationLog(`{"pairId":"x"}\n`)).toMatchObject({ ok: false, error: expect.stringMatching(/^observation line 1: /) });
   });
 
-  it("reads back a retained window's preregistration record and facts, and refuses one without them", () => {
-    const text = JSON.stringify(windowRecord(false));
-    expect(parseRetainedWindow(text, "w.json")).toEqual({
-      ok: true,
-      value: { preregistration: { path: LOADED.ref.path, digest: LOADED.ref.digest }, facts: UNREACHABLE_FACTS, ending: { kind: "open" } },
-    });
-    expect(parseRetainedWindow(JSON.stringify({ preflightFacts: UNREACHABLE_FACTS }), "w.json")).toEqual({ ok: false, error: "w.json carries no preregistration record" });
-    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(false), preflightFacts: {} }), "w.json"))
-      .toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json preflight facts: /) });
-    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(false), schemaVersion: 3 }), "w.json"))
-      .toEqual({ ok: false, error: "w.json carries no schemaVersion 1 or 2 dispatch record" });
-  });
-
-  describe("reads a retained window's ending back (parse, don't validate)", () => {
-    const COMPLETED = { kind: "completed", pairs: 4 };
-    const ABORTED = { kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-outage-pairs", pairs: 3 } };
-    const LEGACY = { kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-infrastructure-failures", pairs: 3 } };
-    const closed = (version: 1 | 2, dispatched: boolean, ending?: unknown): string => JSON.stringify({
-      ...windowRecord(dispatched), schemaVersion: version, endedAt: "2026-10-05T09:00:00.000Z", observations: 0, ...(ending === undefined ? {} : { ending }),
-    });
-    const endingOf = (text: string) => {
-      const parsed = parseRetainedWindow(text, "w.json");
-      return parsed.ok ? parsed.value.ending : parsed;
-    };
-
-    it("parses a closed dispatched window's ending, completed or aborted", () => {
-      expect(endingOf(closed(2, true, COMPLETED))).toEqual({ kind: "dispatched", ending: COMPLETED });
-      expect(endingOf(closed(2, true, ABORTED))).toEqual({ kind: "dispatched", ending: ABORTED });
-      // A window retained at e8d688d8 (schemaVersion 1) parses its ending too, legacy reason included.
-      expect(endingOf(closed(1, true, LEGACY))).toEqual({ kind: "dispatched", ending: LEGACY });
-    });
-
-    it("admits a missing ending only on a schemaVersion 1 window retained before the field existed", () => {
-      expect(endingOf(closed(1, true))).toEqual({ kind: "dispatched-unrecorded" });
-      expect(endingOf(closed(2, true))).toEqual({ ok: false, error: "w.json is a closed dispatched schemaVersion 2 window without its ending" });
-      expect(endingOf(closed(1, false))).toEqual({ kind: "not-dispatched" });
-      expect(endingOf(closed(2, false))).toEqual({ kind: "not-dispatched" });
-    });
-
-    it("refuses an ending where none can exist, and a corrupt or out-of-version ending", () => {
-      expect(endingOf(closed(2, false, COMPLETED))).toEqual({ ok: false, error: "w.json never dispatched, yet records an ending" });
-      expect(endingOf(JSON.stringify({ ...windowRecord(true), ending: COMPLETED }))).toEqual({ ok: false, error: "w.json records an ending but was never closed" });
-      expect(endingOf(closed(2, true, LEGACY))).toMatchObject({ ok: false, error: expect.stringContaining("exists only in a schemaVersion 1 window") });
-      expect(endingOf(closed(2, true, { ...ABORTED, afterPairs: 5 }))).toMatchObject({ ok: false, error: expect.stringContaining("aborted after 5 of 4 scheduled pairs") });
-      expect(endingOf(closed(2, true, { ...ABORTED, afterPairs: 0 }))).toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json invalid window ending: afterPairs/) });
-      expect(endingOf(closed(2, true, { ...ABORTED, afterPairs: 2 }))).toMatchObject({ ok: false, error: expect.stringContaining("3 consecutive pairs exceed the 2 dispatched") });
-      expect(endingOf(closed(2, true, { kind: "completed" }))).toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json invalid window ending: pairs/) });
-    });
-
-    it("round-trips every aborted ending recordWindow writes (property)", async () => {
-      await fc.assert(fc.asyncProperty(fc.nat({ max: 6 }), fc.boolean(), async (outageFrom, routeDown) => {
-        const store = memoryStore();
-        const route = fakeRoute((request) => (route.requests.length > outageFrom * 2 ? INFRASTRUCTURE : accepted(request)));
-        const { window } = recorded(await recordWindow(windowRun(store, windowRecord(true), {
-          routeHealth: async () => (routeDown ? { kind: "unreachable", reason: "down" } : { kind: "reachable" }),
-        }, route)));
-        if (!("ending" in window)) throw new Error("a dispatched window records its ending");
-        expect(endingOf(store.files.get(WINDOW_FILES.window) ?? "")).toEqual({ kind: "dispatched", ending: window.ending });
-      }), { numRuns: 14 });
-    });
+  it("writes window.json through its codec: every aborted ending recordWindow writes parses back (property)", async () => {
+    await fc.assert(fc.asyncProperty(fc.nat({ max: 6 }), fc.boolean(), async (outageFrom, routeDown) => {
+      const store = memoryStore();
+      const route = fakeRoute((request) => (route.requests.length > outageFrom * 2 ? INFRASTRUCTURE : accepted(request)));
+      const { window } = recorded(await recordWindow(windowRun(store, windowRecord(true), {
+        routeHealth: async () => (routeDown ? { kind: "unreachable", reason: "down" } : { kind: "reachable" }),
+      }, route)));
+      if (!("ending" in window)) throw new Error("a dispatched window records its ending");
+      const readBack = parseRetainedWindow(store.files.get(WINDOW_FILES.window) ?? "", "w.json");
+      expect(readBack.ok && readBack.value.ending).toEqual({ kind: "dispatched", ending: window.ending });
+    }), { numRuns: 14 });
   });
 
   it("refuses to re-decide against a preregistration whose bytes changed", () => {
-    const window = { preregistration: { path: LOADED.ref.path, digest: LOADED.ref.digest }, facts: UNREACHABLE_FACTS, ending: { kind: "not-dispatched" as const } };
+    const window = { preregistration: LOADED.ref, facts: UNREACHABLE_FACTS, ending: { kind: "not-dispatched" as const } };
     expect(checkPreregistrationUnchanged(window, LOADED, "w")).toEqual({ ok: true, value: null });
     const edited = { ...LOADED, ref: { ...LOADED.ref, digest: "e".repeat(64) } };
     expect(checkPreregistrationUnchanged(window, edited, "w")).toMatchObject({ ok: false, error: expect.stringContaining("changed after window w was recorded") });
@@ -292,11 +216,11 @@ describe("recordWindow (--pilot)", () => {
 
   it("refuses a window whose case inputs do not resolve before writing anything", async () => {
     const store = memoryStore();
-    const [first, ...rest] = prereg.cells;
+    const [first, ...rest] = PILOT_1.cells;
     if (first === undefined) throw new Error("the preregistration has no cell");
     const [broken, ...cases] = first.workload.cases;
     if (broken === undefined) throw new Error(`${first.cell} has no case`);
-    const unresolvable: Preregistration = { ...prereg, cells: [{ ...first, workload: { ...first.workload, cases: [{ ...broken, source: "corpus:gone" }, ...cases] } }, ...rest] };
+    const unresolvable: Preregistration = { ...PILOT_1, cells: [{ ...first, workload: { ...first.workload, cases: [{ ...broken, source: "corpus:gone" }, ...cases] } }, ...rest] };
     const route = fakeRoute(accepted);
     const outcome = await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: unresolvable } }, route));
     expect(outcome).toEqual({
@@ -391,8 +315,8 @@ describe("recordWindow (--pilot)", () => {
   it("records how a window ended even when the rubric cannot assess it (key and packet kept, no rubric file, no decision)", async () => {
     const store = memoryStore();
     const undeclared: Preregistration = {
-      ...prereg,
-      cells: prereg.cells.map((cell) => ({
+      ...PILOT_1,
+      cells: PILOT_1.cells.map((cell) => ({
         ...cell,
         workload: { ...cell.workload, cases: cell.workload.cases.map((entry) => ({ ...entry, knownDefects: [] })) },
       })),

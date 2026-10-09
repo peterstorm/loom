@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { parseCalibrationCorpus } from "../../engine/src/core/model-calibration";
-import { err, ok } from "../kernel";
+import { err, errorMessage, ok } from "../kernel";
 import type { WindowWorkload } from "./pilot-retention";
 import type { WorkloadFixtures } from "./pilot-workload";
 
@@ -23,7 +23,7 @@ export const workloadCorpusLoader = (repoRoot: string, fixtures: WorkloadFixture
   try {
     text = readFileSync(path, "utf-8");
   } catch (error) {
-    return err(`cannot read ${label}: ${error instanceof Error ? error.message : String(error)}`);
+    return err(`cannot read ${label}: ${errorMessage(error)}`);
   }
   const corpus = parseCalibrationCorpus(text);
   return corpus.ok ? ok(corpus.value.cases) : err(`invalid corpus ${label}:\n  - ${corpus.errors.join("\n  - ")}`);

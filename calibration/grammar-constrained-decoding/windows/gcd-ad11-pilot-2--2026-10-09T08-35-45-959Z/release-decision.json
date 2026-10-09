@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "decidedAt": "2026-10-09T11:00:56.924Z",
+  "preregistration": {
+    "path": "calibration/grammar-constrained-decoding/preregistration-gcd-ad11-pilot-2.json",
+    "digest": "3448a9f34eb21d43e3c8a632788350fa788e3eadb1c8da70b23b620e382ef75e",
+    "id": "gcd-ad11-pilot-2"
+  },
+  "decidedFrom": {
+    "observations": 26,
+    "assessors": [
+      "rubric-v1"
+    ]
+  },
+  "decision": {
+    "kind": "incomplete-missing-measurement",
+    "missing": [
+      {
+        "kind": "cell-not-measured",
+        "cell": "reviewer-payload/v2",
+        "reason": "6/104 preregistered pairs observed in both arms"
+      },
+      {
+        "kind": "cell-not-measured",
+        "cell": "reviewer-payload/v3",
+        "reason": "2/104 preregistered pairs observed in both arms"
+      },
+      {
+        "kind": "cell-not-measured",
+        "cell": "judge-verdict/v1",
+        "reason": "3/100 preregistered pairs observed in both arms"
+      },
+      {
+        "kind": "cell-not-measured",
+        "cell": "refutation-verdict/v1",
+        "reason": "2/100 preregistered pairs observed in both arms"
+      }
+    ]
+  },
+  "cells": [
+    {
+      "kind": "not-measured",
+      "cell": "reviewer-payload/v2",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200 with strict:\"prefer\"; vLLM ignores the OpenAI tool-level strict flag (forced tool_choice carried judge score 12 and refutation verdict \"partially_upheld\" through at HTTP 200); v2 direct-stage enforcement inconclusive. No constraint is verified as enforced."
+      },
+      "reason": "6/104 preregistered pairs observed in both arms",
+      "scheduledPairs": 104,
+      "observedPairs": 6,
+      "partialObservations": 12
+    },
+    {
+      "kind": "not-measured",
+      "cell": "reviewer-payload/v3",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200 with strict:\"prefer\"; route ignores tool-level strict (decisive forced-call violations on judge/refutation, same server and flag); v3 direct-stage enforcement inconclusive. No constraint is verified as enforced."
+      },
+      "reason": "2/104 preregistered pairs observed in both arms",
+      "scheduledPairs": 104,
+      "observedPairs": 2,
+      "partialObservations": 4
+    },
+    {
+      "kind": "not-measured",
+      "cell": "judge-verdict/v1",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200; decisive forced tool_choice call carried score 12 (schema maximum 10) through at HTTP 200 — the route enforces no JSON Schema constraint."
+      },
+      "reason": "3/100 preregistered pairs observed in both arms",
+      "scheduledPairs": 100,
+      "observedPairs": 3,
+      "partialObservations": 6
+    },
+    {
+      "kind": "not-measured",
+      "cell": "refutation-verdict/v1",
+      "qualification": {
+        "kind": "unconstrained-emission",
+        "evidence": "probes/emission-qualification/README.md + recordings/ (2026-09-19): schema ACCEPTED at HTTP 200; decisive forced tool_choice call carried verdict \"partially_upheld\" (outside the enum) through at HTTP 200 — the route enforces no JSON Schema constraint."
+      },
+      "reason": "2/100 preregistered pairs observed in both arms",
+      "scheduledPairs": 100,
+      "observedPairs": 2,
+      "partialObservations": 4
+    }
+  ]
+}

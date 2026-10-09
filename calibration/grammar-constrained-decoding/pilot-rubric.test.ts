@@ -4,13 +4,13 @@ import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-cont
 import type { Preregistration, WorkloadCase } from "./pilot-preregistration";
 import { parseQualityAssessment } from "./pilot-quality";
 import { rubricAssessment, rubricEscapes } from "./pilot-rubric";
-import { accepted, corpusCases, fakeRoute, fixtures, inputOf, inputs, inputsWithout, prereg, runWindow, WINDOW_ID } from "./pilot-test-fixtures";
+import { accepted, corpusCases, fakeRoute, fixtures, inputOf, inputs, inputsWithout, PILOT_1, runWindow, WINDOW_ID } from "./pilot-test-fixtures";
 import type { CellKey } from "./pilot-vocabulary";
 import { blind } from "./pilot-window";
 import type { CaseInput, JudgeFixture, RefutationFixture } from "./pilot-workload";
 
 const caseOf = (cell: CellKey, caseId: string): WorkloadCase => {
-  const found = prereg.cells.find((entry) => entry.cell === cell)?.workload.cases.find((entry) => entry.caseId === caseId);
+  const found = PILOT_1.cells.find((entry) => entry.cell === cell)?.workload.cases.find((entry) => entry.caseId === caseId);
   if (found === undefined) throw new Error(`${cell} ${caseId} is not preregistered`);
   return found;
 };
@@ -173,7 +173,7 @@ describe("rubric assessment over the blinded packet", () => {
 
   it("scores every blinded entry by its case's rubric, as an assessment the release decision parses", async () => {
     const entries = await blindedWindow();
-    const assessed = rubricAssessment(prereg, entries, inputs);
+    const assessed = rubricAssessment(PILOT_1, entries, inputs);
     if (!assessed.ok) throw new Error(assessed.error.join("; "));
     const rubric = parseQualityAssessment(assessed.value);
     if (!rubric.ok) throw new Error(rubric.error.join("; "));
@@ -187,7 +187,7 @@ describe("rubric assessment over the blinded packet", () => {
   it("refuses an entry whose case is not preregistered", async () => {
     const [first, ...rest] = await blindedWindow();
     if (first === undefined) throw new Error("the window blinded no entry");
-    const assessed = rubricAssessment(prereg, [{ ...first, caseId: "not-preregistered" }, ...rest], inputs);
+    const assessed = rubricAssessment(PILOT_1, [{ ...first, caseId: "not-preregistered" }, ...rest], inputs);
     expect(assessed).toEqual({ ok: false, error: [expect.stringContaining(`${first.blindId} (${first.cell} case not-preregistered): the case is not preregistered`)] });
   });
 
@@ -195,7 +195,7 @@ describe("rubric assessment over the blinded packet", () => {
     const entries = await blindedWindow();
     const [first] = entries;
     if (first === undefined) throw new Error("the window blinded no entry");
-    const assessed = rubricAssessment(prereg, entries, inputsWithout(first.cell, first.caseId));
+    const assessed = rubricAssessment(PILOT_1, entries, inputsWithout(first.cell, first.caseId));
     expect(assessed.ok).toBe(false);
     expect(assessed.ok ? [] : assessed.error).toContainEqual(expect.stringContaining(`${first.blindId} (${first.cell} case ${first.caseId}): no resolved input`));
   });
@@ -203,20 +203,20 @@ describe("rubric assessment over the blinded packet", () => {
   it("refuses an entry whose payload its cell's parser refuses, naming it", async () => {
     const [first, ...rest] = await blindedWindow();
     if (first === undefined) throw new Error("the window blinded no entry");
-    const assessed = rubricAssessment(prereg, [{ ...first, payload: { findings: [] } }, ...rest], inputs);
+    const assessed = rubricAssessment(PILOT_1, [{ ...first, payload: { findings: [] } }, ...rest], inputs);
     expect(assessed).toEqual({ ok: false, error: [expect.stringContaining(`${first.blindId} (${first.cell} case ${first.caseId}): case ${first.caseId}: the accepted payload does not parse as a ${first.cell} payload`)] });
   });
 
   it("refuses an escaped defect id the case does not declare, naming every such entry", async () => {
     const entries = await blindedWindow();
     const undeclared: Preregistration = {
-      ...prereg,
-      cells: prereg.cells.map((cell) => ({
+      ...PILOT_1,
+      cells: PILOT_1.cells.map((cell) => ({
         ...cell,
         workload: { ...cell.workload, cases: cell.workload.cases.map((entry) => ({ ...entry, knownDefects: [] })) },
       })),
     };
-    const declared = rubricAssessment(prereg, entries, inputs);
+    const declared = rubricAssessment(PILOT_1, entries, inputs);
     if (!declared.ok) throw new Error(declared.error.join("; "));
     const escaping = declared.value.entries.filter((entry) => entry.escapedDefects.length > 0);
     expect(escaping.length).toBeGreaterThan(0);

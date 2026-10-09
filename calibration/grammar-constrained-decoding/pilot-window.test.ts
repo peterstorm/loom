@@ -18,7 +18,7 @@ import {
   inputOf,
   inputs,
   inputsWithout,
-  prereg,
+  PILOT_1,
   READY,
   REJECTED,
   runWindow,
@@ -26,21 +26,8 @@ import {
   TIMEOUT,
   WINDOW_ID,
 } from "./pilot-test-fixtures";
-import {
-  blind,
-  blindedPacket,
-  CONSECUTIVE_OUTAGE_PAIR_LIMIT,
-  dispatchSchedule,
-  judgePair,
-  pairHealth,
-  parseWindowEnding,
-  ROUTE_BREAKER_START,
-  type JudgedPair,
-  type RouteBreaker,
-  type RouteHealth,
-  type RouteHealthProbe,
-  type SampleRecord,
-} from "./pilot-window";
+import { blind, blindedPacket, dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
+import { CONSECUTIVE_OUTAGE_PAIR_LIMIT, UNEXPLAINED_UNREACHABLE_REASON, type RouteHealth } from "./pilot-window-ending";
 import { renderTaskBody } from "./pilot-workload";
 
 /**
@@ -50,11 +37,14 @@ import { renderTaskBody } from "./pilot-workload";
  * adapter — and `blind` / `blindedPacket` over plain sample records: the
  * matched-arm dispatch, the attempt-2 retry budget, the blinding key and the
  * arm-free packet, and the fail-closed aborts on a missing input or an
- * inconsistent recorded sample. `recordWindow`'s own wiring is pinned in
+ * inconsistent recorded sample, and the route fail-fast end to end (the
+ * probe port, a probe that throws or gives no reason, the last-pair
+ * boundary). The pure fail-fast rule and the ending codec are pinned in
+ * pilot-window-ending.test.ts; `recordWindow`'s own wiring in
  * pilot-retention.test.ts.
  */
 
-const schedule = buildPairSchedule(prereg);
+const schedule = buildPairSchedule(PILOT_1);
 
 const taskBody = (cell: ArmRequest["cell"], caseId: string): string => renderTaskBody(inputOf(cell, caseId), fixtures);
 
@@ -76,7 +66,7 @@ describe("dispatchSchedule (matched dispatch over the ArmDispatch port)", () => 
       expect(arms[0]?.cellBinding.contextDigest).toBe(arms[1]?.cellBinding.contextDigest);
     });
     const dispatchedCells = new Set(route.requests.map((request) => request.cell));
-    const emissionCells = prereg.cells.filter((cell) => cell.qualification.kind !== "extraction-only").map((cell) => cell.cell);
+    const emissionCells = PILOT_1.cells.filter((cell) => cell.qualification.kind !== "extraction-only").map((cell) => cell.cell);
     expect([...dispatchedCells].sort()).toEqual([...emissionCells].sort());
     expect(landed).toEqual(records);
     expect(records.map((record) => `${record.sample.pairId}|${record.sample.arm}`))
@@ -126,7 +116,7 @@ describe("dispatchSchedule (matched dispatch over the ArmDispatch port)", () => 
       const route = fakeRoute(accepted);
       const landed: unknown[] = [];
       await expect(dispatchSchedule({
-        windowId: WINDOW_ID, prereg, fixtures, inputs: inputsWithout(first.cell, first.caseId), dispatch: route.dispatch, routeHealth: HEALTHY_ROUTE, now: route.now,
+        windowId: WINDOW_ID, prereg: PILOT_1, fixtures, inputs: inputsWithout(first.cell, first.caseId), dispatch: route.dispatch, routeHealth: HEALTHY_ROUTE, now: route.now,
         onSample: (record) => { landed.push(record); }, onPair: () => {},
       })).rejects.toThrow(`no resolved input for ${first.cell} case ${first.caseId}`);
       expect(route.requests).toHaveLength(0);
@@ -198,7 +188,8 @@ describe("dispatchSchedule route fail-fast", () => {
     const probe = countingProbe({ kind: "reachable" });
     const { ending } = await runWindow(fakeRoute((request) => (request.arm === "emission-enabled" ? TIMEOUT : accepted(request))), () => {}, probe);
     expect(ending.kind).toBe("completed");
-    expect(probe.calls()).toBe(schedule.length);
+    // Every pair but the last is re-probed: the last has no pair after it to protect (`judgesPair`).
+    expect(probe.calls()).toBe(schedule.length - 1);
   });
 
   it(`stops after ${CONSECUTIVE_OUTAGE_PAIR_LIMIT} consecutive all-outage pairs even while the route answers its listing`, async () => {
@@ -229,118 +220,49 @@ describe("dispatchSchedule route fail-fast", () => {
       expect(records).toHaveLength(2);
     }
   });
-});
 
-type PairKind = "accepted" | "rejected" | "timeout" | "infrastructure" | "mixed-outage" | "mixed-infrastructure" | "mixed-timeout" | "rejected-and-timeout";
-
-/** A landed pair of one kind: both arms alike, or two different outcomes. */
-function landedPair(kind: PairKind): readonly SampleRecord[] {
-  const pair = schedule[0] as (typeof schedule)[number];
-  const terminal = (arm: "emission-enabled" | "extraction-only", outcome: Record<string, unknown>): SampleRecord =>
-    ({ kind: "terminal", sample: sample(pair, arm, 10, outcome["kind"] === "rejected" ? [{ outcome }, { outcome }] : [{ outcome }]) });
-  const acceptedRecord = (arm: "emission-enabled" | "extraction-only"): SampleRecord =>
-    ({ kind: "accepted", sample: sample(pair, arm, 10, [arm === "emission-enabled" ? ACCEPT_EMISSION : ACCEPT_EXTRACTION]), acceptedPayload: {} });
-  const both = (make: (arm: "emission-enabled" | "extraction-only") => SampleRecord) => [make("emission-enabled"), make("extraction-only")];
-  switch (kind) {
-    case "accepted": return both(acceptedRecord);
-    case "rejected": return both((arm) => terminal(arm, REJECTED));
-    case "timeout": return both((arm) => terminal(arm, TIMEOUT));
-    case "infrastructure": return both((arm) => terminal(arm, INFRASTRUCTURE));
-    case "mixed-outage": return [terminal("emission-enabled", INFRASTRUCTURE), terminal("extraction-only", TIMEOUT)];
-    case "mixed-infrastructure": return [terminal("emission-enabled", INFRASTRUCTURE), acceptedRecord("extraction-only")];
-    case "mixed-timeout": return [acceptedRecord("emission-enabled"), terminal("extraction-only", TIMEOUT)];
-    case "rejected-and-timeout": return [terminal("emission-enabled", REJECTED), terminal("extraction-only", TIMEOUT)];
-  }
-}
-
-/** The pair health each kind must have: outage-like = infrastructure or timeout, never a rejection. */
-const EXPECTED_HEALTH: Readonly<Record<PairKind, ReturnType<typeof pairHealth>["kind"]>> = {
-  "accepted": "none",
-  "rejected": "none",
-  "timeout": "all-outage",
-  "infrastructure": "all-outage",
-  "mixed-outage": "all-outage",
-  "mixed-infrastructure": "needs-probe",
-  "mixed-timeout": "needs-probe",
-  "rejected-and-timeout": "needs-probe",
-};
-
-describe("pairHealth (what an outage looks like from inside the window)", () => {
-  const terminalOutcomes = fc.constantFrom("accepted", "rejected", "timeout", "infrastructure");
-
-  it("is none with no outage-like sample, all-outage when every sample is one, needs-probe otherwise (property)", () => {
-    const pair = schedule[0] as (typeof schedule)[number];
-    fc.assert(fc.property(fc.array(fc.record({ arm: fc.constantFrom("emission-enabled" as const, "extraction-only" as const), outcome: terminalOutcomes }), { maxLength: 4 }), (specs) => {
-      const records = specs.map(({ arm, outcome }): SampleRecord => outcome === "accepted"
-        ? { kind: "accepted", sample: sample(pair, arm, 10, [arm === "emission-enabled" ? ACCEPT_EMISSION : ACCEPT_EXTRACTION]), acceptedPayload: {} }
-        : outcome === "rejected"
-          // A semantic rejection spends the attempt-2 retry before it is terminal.
-          ? { kind: "terminal", sample: sample(pair, arm, 10, [{ outcome: REJECTED }, { outcome: REJECTED }]) }
-          : { kind: "terminal", sample: sample(pair, arm, 10, [{ outcome: outcome === "timeout" ? TIMEOUT : INFRASTRUCTURE }]) });
-      const outageLike = specs.filter(({ outcome }) => outcome === "timeout" || outcome === "infrastructure").length;
-      const expected = outageLike === 0 ? "none" : outageLike === specs.length ? "all-outage" : "needs-probe";
-      expect(pairHealth(records)).toEqual({ kind: expected });
-    }), { numRuns: 200 });
+  it("still closes the window as aborted when the probe reports unreachable with a blank reason", async () => {
+    for (const blank of ["", "   "]) {
+      const { ending, records } = await runWindow(fakeRoute(() => INFRASTRUCTURE), () => {}, countingProbe({ kind: "unreachable", reason: blank }));
+      expect(ending).toEqual({
+        kind: "aborted", afterPairs: 1, scheduledPairs: schedule.length,
+        reason: { kind: "route-unreachable", reason: UNEXPLAINED_UNREACHABLE_REASON },
+      });
+      expect(records).toHaveLength(2);
+    }
   });
 
-  it("classifies each landed pair kind", () => {
-    for (const [kind, health] of Object.entries(EXPECTED_HEALTH)) expect(pairHealth(landedPair(kind as PairKind)), kind).toEqual({ kind: health });
-  });
-});
+  describe("the last scheduled pair: a schedule dispatched in full ends completed, never aborted after all its pairs", () => {
+    it("does not re-probe or stop on an outage that starts on the last pair", async () => {
+      const lastPair = schedule.length - 1;
+      const outage = fakeRoute((request) => (outage.requests.length > lastPair * 2 ? INFRASTRUCTURE : accepted(request)));
+      const probe = countingProbe(DOWN);
+      const { ending, records } = await runWindow(outage, () => {}, probe);
+      expect(ending).toEqual({ kind: "completed", pairs: schedule.length });
+      expect(records).toHaveLength(schedule.length * 2);
+      expect(records.slice(-2).every((landed) => landed.kind === "terminal")).toBe(true);
+      expect(probe.calls()).toBe(0);
+    });
 
-describe("judgePair (the fail-fast rule)", () => {
-  const pairKinds = fc.constantFrom<PairKind>(...(Object.keys(EXPECTED_HEALTH) as PairKind[]));
+    it(`completes when the ${CONSECUTIVE_OUTAGE_PAIR_LIMIT}rd consecutive all-outage pair is the last one`, async () => {
+      const firstOutage = schedule.length - CONSECUTIVE_OUTAGE_PAIR_LIMIT;
+      const outage = fakeRoute((request) => (outage.requests.length > firstOutage * 2 ? INFRASTRUCTURE : accepted(request)));
+      const probe = countingProbe({ kind: "reachable" });
+      const { ending } = await runWindow(outage, () => {}, probe);
+      expect(ending).toEqual({ kind: "completed", pairs: schedule.length });
+      // Every outage pair but the last was judged (re-probed); the last has nothing left to protect.
+      expect(probe.calls()).toBe(CONSECUTIVE_OUTAGE_PAIR_LIMIT - 1);
+    });
 
-  const judged = (kind: PairKind, routeDown: boolean): JudgedPair => {
-    const health = pairHealth(landedPair(kind));
-    return health.kind === "none" ? health : { ...health, route: routeDown ? DOWN : { kind: "reachable" } };
-  };
-
-  it("aborts exactly on an unreachable re-probe or the consecutive all-outage limit, and never on model behaviour (property)", () => {
-    fc.assert(fc.property(
-      fc.array(fc.record({ kind: pairKinds, routeDown: fc.boolean() }), { maxLength: 12 }),
-      (steps) => {
-        let breaker: RouteBreaker = ROUTE_BREAKER_START;
-        let streak = 0;
-        for (const { kind, routeDown } of steps) {
-          const probes = EXPECTED_HEALTH[kind] !== "none";
-          const result = judgePair(breaker, judged(kind, routeDown));
-          streak = EXPECTED_HEALTH[kind] === "all-outage" ? streak + 1 : 0;
-          expect(result.breaker.consecutiveOutagePairs).toBe(streak);
-          const expected = probes && routeDown
-            ? { kind: "route-unreachable", reason: DOWN.reason }
-            : streak >= CONSECUTIVE_OUTAGE_PAIR_LIMIT ? { kind: "consecutive-outage-pairs", pairs: streak } : null;
-          expect(result.abort).toEqual(expected);
-          // A pair the model answered (accepted or rejected) never stops the window.
-          if (kind === "accepted" || kind === "rejected") expect(result.abort).toBeNull();
-          if (result.abort !== null) return;
-          breaker = result.breaker;
-        }
-      },
-    ), { numRuns: 300 });
-  });
-});
-
-describe("parseWindowEnding (the one WindowEnding constructor)", () => {
-  const reasons = fc.oneof(
-    fc.string({ minLength: 1 }).map((reason) => ({ kind: "route-unreachable", reason })),
-    fc.integer({ min: 1, max: 12 }).map((pairs) => ({ kind: "consecutive-outage-pairs", pairs })),
-  );
-
-  it("admits an aborted ending exactly when 1 ≤ afterPairs ≤ scheduledPairs and the reason's streak fits the pairs dispatched (property)", () => {
-    fc.assert(fc.property(fc.integer({ min: -2, max: 12 }), fc.integer({ min: -2, max: 12 }), reasons, (afterPairs, scheduledPairs, reason) => {
-      const parsed = parseWindowEnding({ kind: "aborted", afterPairs, scheduledPairs, reason });
-      const streakFits = reason.kind === "route-unreachable" || (reason as { pairs: number }).pairs <= afterPairs;
-      expect(parsed.ok).toBe(afterPairs >= 1 && afterPairs <= scheduledPairs && streakFits);
-      if (parsed.ok) expect(parsed.value).toEqual({ kind: "aborted", afterPairs, scheduledPairs, reason });
-    }), { numRuns: 300 });
-  });
-
-  it("admits a completed ending over any non-negative pair count, and refuses the legacy reason and unknown fields", () => {
-    expect(parseWindowEnding({ kind: "completed", pairs: 0 })).toEqual({ ok: true, value: { kind: "completed", pairs: 0 } });
-    expect(parseWindowEnding({ kind: "completed", pairs: -1 }).ok).toBe(false);
-    expect(parseWindowEnding({ kind: "completed", pairs: 4, extra: true }).ok).toBe(false);
-    expect(parseWindowEnding({ kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-infrastructure-failures", pairs: 3 } }).ok).toBe(false);
+    it("still stops on the pair before the last", async () => {
+      const penultimate = schedule.length - 2;
+      const outage = fakeRoute((request) => (outage.requests.length > penultimate * 2 ? INFRASTRUCTURE : accepted(request)));
+      const { ending } = await runWindow(outage, () => {}, countingProbe(DOWN));
+      expect(ending).toEqual({
+        kind: "aborted", afterPairs: schedule.length - 1, scheduledPairs: schedule.length,
+        reason: { kind: "route-unreachable", reason: DOWN.reason },
+      });
+    });
   });
 });
 
@@ -425,7 +347,7 @@ describe("blindedPacket (what an assessor sees)", () => {
   it("feeds the rubric assessor evidence the release decision accepts", async () => {
     const { records } = await runWindow(fakeRoute(accepted));
     const blinded = blind(WINDOW_ID, records);
-    const assessed = rubricAssessment(prereg, blinded.entries, inputs);
+    const assessed = rubricAssessment(PILOT_1, blinded.entries, inputs);
     if (!assessed.ok) throw new Error(assessed.error.join("; "));
     const rubric = parseQualityAssessment(assessed.value);
     if (!rubric.ok) throw new Error(rubric.error.join("; "));
@@ -434,7 +356,7 @@ describe("blindedPacket (what an assessor sees)", () => {
     expect(rubric.value.entries.some((entry) => entry.escapedDefects.length > 0)).toBe(true);
 
     const evaluated = evaluatePilot({
-      preregistration: prereg, preflight: READY, observations: records.map((entry) => entry.sample),
+      preregistration: PILOT_1, preflight: READY, observations: records.map((entry) => entry.sample),
       quality: { key: blinded.key, assessments: [rubric.value] },
     });
     if (!evaluated.ok) throw new Error(evaluated.error.problems.join("\n"));

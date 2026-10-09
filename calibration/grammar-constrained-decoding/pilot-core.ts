@@ -568,6 +568,8 @@ function measureCell(
     "escaped-defect-severity": quality.value.guardrail,
   });
   const seal = (measured: MeasuredCellOf<GuardrailVerdict>): MeasuredCell => Object.freeze(measured) as MeasuredCell;
+  // One arm per qualification on purpose: TypeScript cannot carry the qualification/AS-004-verdict
+  // correlation through a single generic arm, and merging them would trade that check for a cast.
   return ok(match(structural)
     .returnType<MeasuredCell>()
     .with({ qualification: { kind: "constrained-emission" } }, ({ qualification: constrained, guardrail }) =>

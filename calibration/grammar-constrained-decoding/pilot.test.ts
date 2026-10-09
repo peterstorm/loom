@@ -9,7 +9,6 @@ import type { BlindingKey, QualityAssessment } from "./pilot-quality";
 import {
   ACCEPT_EMISSION,
   ACCEPT_EXTRACTION,
-  prereg as retainedPrereg,
   READY,
   sample,
   constrainedCells,
@@ -129,7 +128,7 @@ describe("capable-route gap (folded into the done evidence)", () => {
       kind: "incomplete-missing-measurement",
       missing: [{ kind: "preflight-blocked", blocks: BLOCKED.kind === "blocked" ? BLOCKED.blocks : [] }, NO_CAPABLE_ROUTE],
     });
-    const unconstrained = decide(retainedPrereg, BLOCKED).decision;
+    const unconstrained = decide(PILOT_1, BLOCKED).decision;
     if (unconstrained.kind !== "incomplete-missing-measurement") throw new Error(unconstrained.kind);
     expect(unconstrained.missing.map((missing) => missing.kind)).toEqual([
       "preflight-blocked", "no-qualified-capable-route", "cell-not-measured", "cell-not-measured", "cell-not-measured", "cell-not-measured",
@@ -198,7 +197,7 @@ describe("release decision", () => {
   });
 
   it("records a blocked preflight as incomplete with every cell not measured and nothing fabricated", () => {
-    const prereg = retainedPrereg;
+    const prereg = PILOT_1;
     const blocked: PreflightDecision = {
       kind: "blocked",
       blocks: [{ kind: "route-unreachable", reason: "ECONNREFUSED" }],
