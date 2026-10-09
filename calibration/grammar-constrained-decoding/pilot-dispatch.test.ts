@@ -401,6 +401,46 @@ describe("transcript classification through the engine's own selection", () => {
     expect(classify("judge-verdict/v1", [providerError], { kind: "timeout", afterMs: 9 }).observation.outcome).toEqual({ kind: "timeout", afterMs: 9 });
   });
 
+  describe("an accepted payload stands over a trailing provider error (classify first, then the provider-error rule)", () => {
+    const providerError = { role: "assistant", stopReason: "error", errorMessage: "Connection error.", content: [] };
+    const infrastructure = { kind: "infrastructure-failure", reason: "the provider ended the model turn with an error: Connection error." };
+
+    it("keeps an emission the engine accepted at the tool call when the turn after it errors", () => {
+      const result = classify("judge-verdict/v1", [
+        toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "accepted"), providerError,
+      ]);
+      expect(result.observation).toMatchObject({
+        emissionCalls: 1, toolAcknowledged: true, followUpTurnsAfterAck: 1, modelRequests: 2,
+        outcome: { kind: "accepted", source: "emission-tool", payloadDigest: contentDigest(JSON.stringify(judgePayload)) },
+      });
+      expect(result.acceptedPayload).toEqual(judgePayload);
+    });
+
+    it("reads an attempt with nothing usable before its errored last turn as an infrastructure failure on both arms", () => {
+      // A refused emission call (no accepted payload) and then the provider error.
+      const refused = classify("judge-verdict/v1", [
+        toolCall("c1", "loom_emit_judge_verdict", { criterion: "c" }), toolResult("c1", "loom_emit_judge_verdict", true, "Validation failed"), providerError,
+      ]);
+      expect(refused.observation).toMatchObject({ emissionCalls: 1, toolAcknowledged: false, outcome: infrastructure });
+      expect(refused.acceptedPayload).toBeNull();
+      const extraction = classifyAttemptTranscript({
+        arm: "extraction-only", cell: "judge-verdict/v1", cellBinding: cellBinding("judge-verdict/v1"),
+        messages: [toolCall("c1", "read", { path: "a.md" }), toolResult("c1", "read", false, "text"), providerError],
+        attempt: 1, elapsedMs: 5, launch: { kind: "settled" },
+      });
+      expect(extraction.observation.outcome).toEqual(infrastructure);
+      expect(extraction.acceptedPayload).toBeNull();
+    });
+
+    it("decides a final message by the LAST model turn, as the production extraction does: an earlier answer the errored turn superseded is not accepted", () => {
+      expect(classify("judge-verdict/v1", [finalText(JSON.stringify(judgePayload)), providerError]).observation.outcome).toEqual(infrastructure);
+    });
+
+    it("never overrides a rejection the last turn did not end in a provider error", () => {
+      expect(classify("judge-verdict/v1", [finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+    });
+  });
+
   it("passes launch failures through as their own terminal classes", () => {
     expect(classify("judge-verdict/v1", [], { kind: "startup-refused", reason: "readiness refused" }).observation.outcome).toEqual({ kind: "startup-refused", reason: "readiness refused" });
     expect(classify("judge-verdict/v1", [], { kind: "timeout", afterMs: 900_000 }).observation.outcome).toEqual({ kind: "timeout", afterMs: 900_000 });

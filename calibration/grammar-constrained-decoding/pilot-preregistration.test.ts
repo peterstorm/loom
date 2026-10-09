@@ -10,6 +10,8 @@ import {
   pilot2PreregBytes,
   preregBytes,
   prereg as retainedPrereg,
+  extractionOnlyCell,
+  PILOT_1,
   testPreregistration,
 } from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest } from "./pilot-vocabulary";
@@ -88,7 +90,7 @@ describe("paired schedule", () => {
   });
 
   it("schedules nothing for an extraction-only-qualified cell (no fabricated samples)", () => {
-    const schedule = buildPairSchedule(testPreregistration({ extractionOnly: "judge-verdict/v1" }));
+    const schedule = buildPairSchedule(testPreregistration(PILOT_1, extractionOnlyCell("judge-verdict/v1")));
     expect(schedule.some((pair) => pair.cell === "judge-verdict/v1")).toBe(false);
   });
 

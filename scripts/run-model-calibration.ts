@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { match } from "ts-pattern";
 import { parseCalibrationCorpus } from "../engine/src/core/model-calibration";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBinding } from "../engine/src/core/model-profiles";
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
@@ -49,13 +50,14 @@ import { contentDigest } from "../calibration/grammar-constrained-decoding/pilot
 import { parseWorkloadFixtures, type WorkloadFixtures } from "../calibration/grammar-constrained-decoding/pilot-workload";
 import { workloadCorpusLoader } from "../calibration/grammar-constrained-decoding/pilot-corpus-loader";
 import { importRpcLauncher, piArmDispatch } from "../calibration/grammar-constrained-decoding/pilot-dispatch";
-import type { RouteHealth, WindowEnding } from "../calibration/grammar-constrained-decoding/pilot-window";
+import type { RouteHealth } from "../calibration/grammar-constrained-decoding/pilot-window";
 import {
   decideRetainedWindow,
   parsePreregistrationFile,
   pilotWindowId,
   planDispatch,
   recordWindow,
+  type ClosedWindowRecord,
   type DecisionOutcome,
   type ExternalAssessment,
   type LoadedPreregistration,
@@ -194,13 +196,17 @@ async function routeHealth(route: Preregistration["route"]): Promise<RouteHealth
   return probe.kind === "unreachable" ? { kind: "unreachable", reason: probe.reason } : { kind: "reachable" };
 }
 
-const reportEnding = (ending: WindowEnding): void => {
-  if (ending.kind === "completed") return;
-  const why = ending.reason.kind === "route-unreachable"
-    ? `the route stopped answering: ${ending.reason.reason}`
-    : `${ending.reason.pairs} consecutive pairs failed at the infrastructure`;
-  process.stderr.write(`pilot window ABORTED after ${ending.afterPairs}/${ending.scheduledPairs} pairs: ${why}. Every landed sample is retained; the rest are unmeasured.\n`);
-};
+/** Prints how a recorded window's schedule ended, from its closed record. */
+const reportEnding = (window: ClosedWindowRecord): void => match(window)
+  .with({ dispatch: { kind: "dispatched" }, ending: { kind: "aborted" } }, ({ ending }) => {
+    const why = match(ending.reason)
+      .with({ kind: "route-unreachable" }, ({ reason }) => `the route stopped answering: ${reason}`)
+      .with({ kind: "consecutive-outage-pairs" }, ({ pairs }) => `${pairs} consecutive pairs failed at the infrastructure or timed out`)
+      .exhaustive();
+    process.stderr.write(`pilot window ABORTED after ${ending.afterPairs}/${ending.scheduledPairs} pairs: ${why}. Every landed sample is retained; the rest are unmeasured.\n`);
+  })
+  // A completed schedule, or a window that never dispatched, has nothing to report beyond its decision.
+  .otherwise(() => undefined);
 
 function observedPiVersion(): string | null {
   const run = spawnSync("pi", ["--version"], { encoding: "utf-8" });
@@ -242,10 +248,10 @@ async function runPilot(): Promise<number> {
   const facts = await gatherPreflightFacts(prereg, fixturesDigest, staged.revision);
   const preflight = decidePreflight(prereg, facts);
   // The composition root: the live adapters of the window's ports; recordWindow runs the rest.
-  const outcome = await recordWindow({
+  const recorded = orThrow(await recordWindow({
     store,
     record: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       windowId,
       preregistration: loaded.ref,
       workloadFixtures: { path: repoRelative(fixturesPath), digest: fixturesDigest },
@@ -271,11 +277,11 @@ async function runPilot(): Promise<number> {
     routeHealth: () => routeHealth(prereg.route),
     monotonicNow: () => performance.now(),
     onPair: (index, total, pair) => { process.stderr.write(`pilot ${index + 1}/${total} ${pair.pairId}\n`); },
-    onEnding: reportEnding,
     externalAssessments: externalAssessments(),
     now: () => new Date().toISOString(),
-  });
-  return reportDecision(orThrow(outcome));
+  }));
+  reportEnding(recorded.window);
+  return reportDecision(orThrow(recorded.decision));
 }
 
 /** Offline: re-evaluate a retained window from its retained assessments —

@@ -3,9 +3,7 @@
  *
  * Two halves, kept apart:
  *
- * - `classifyAttemptTranscript` (PURE) first reads a provider error ending
- *   the last model turn (`providerFailure`) as an infrastructure failure, then
- *   folds a settled child transcript
+ * - `classifyAttemptTranscript` (PURE) folds a settled child transcript
  *   through the engine's OWN observation and selection kernel —
  *   `piEmissionCallFrames` → `observeEmissionCalls` → `selectCanonicalPayload`
  *   / `selectVerdictSource` → the frozen registry parser — and counts model
@@ -15,6 +13,9 @@
  *   the policy would measure the copy. The extraction-only arm is offered no
  *   emission tool, so its transcript is classified by final-message
  *   extraction alone — the PR #52-only baseline — with no emission counters.
+ *   Only an attempt the kernel leaves WITHOUT an accepted payload is then
+ *   read for a provider error ending its last model turn (`providerFailure`):
+ *   an infrastructure failure, never a semantic rejection.
  * - `piArmDispatch` (I/O SHELL) launches the child exactly as production
  *   does per arm: the extraction-only arm is the launcher's print-mode JSON
  *   child; the emission-enabled arm goes through the INSTALLED production
@@ -176,20 +177,48 @@ function ingest<S extends AcceptedSource>(
   return ok(Object.freeze({ outcome, payload: parsed.value }));
 }
 
-/** A settled attempt's outcome: the frozen parser's accepted payload, or the
- *  selection's or the parser's rejection. */
+type InfrastructureFailure = Extract<LaunchEnd, { kind: "infrastructure-failure" }>;
+
+/**
+ * A provider error ending the LAST model turn (`stopReason: "error"`: the
+ * route refused the connection, answered 5xx, or dropped the stream), as the
+ * infrastructure failure it is; null when the last turn ended any other way.
+ */
+function providerFailure(records: readonly PiMessage[]): InfrastructureFailure | null {
+  const last = records.filter((message) => message["role"] === "assistant").at(-1);
+  if (last?.["stopReason"] !== "error") return null;
+  const message = last["errorMessage"];
+  const detail = typeof message === "string" && message.trim() !== "" ? message.trim() : "no error message";
+  return { kind: "infrastructure-failure", reason: `the provider ended the model turn with an error: ${detail}` };
+}
+
+/** A settled attempt's outcome: the frozen parser's accepted payload, the
+ *  selection's or the parser's rejection, or — for an attempt with no
+ *  accepted payload whose last turn failed at the provider — that failure. */
 type SettledOutcome<S extends AcceptedSource, C extends RejectionCause> =
   | Readonly<{ kind: "accepted" } & S & { payloadDigest: string }>
-  | Readonly<{ kind: "rejected"; cause: C | PayloadRefused }>;
+  | Readonly<{ kind: "rejected"; cause: C | PayloadRefused }>
+  | InfrastructureFailure;
 
-/** The settled branch both arms share: a rejected decision stands; an accepted one must pass ingestion. */
+/**
+ * The settled branch both arms share. The attempt is classified FIRST: an
+ * accepted decision must pass ingestion, and an accepted payload stands
+ * whatever happened after it — the production engine ingests an emission at
+ * the tool call, so a turn that errors after it costs nothing. Only an attempt
+ * left WITHOUT an accepted payload is then read for a provider error ending
+ * its last turn (`providerFailure`): that attempt never reached the model's
+ * answer, so it is an infrastructure failure, not a semantic rejection —
+ * counting it as one would charge a route outage to the arm under test and
+ * spend the attempt-2 retry on a route that is down.
+ */
 function settle<S extends AcceptedSource, C extends RejectionCause>(
   cell: CellKey,
   decision: Accepted<S> | Rejected<C>,
+  records: readonly PiMessage[],
 ): Readonly<{ outcome: SettledOutcome<S, C>; payload: unknown }> {
-  if (decision.kind === "rejected") return { outcome: { kind: "rejected", cause: decision.cause }, payload: null };
-  const ingested = ingest(cell, decision);
-  return ingested.ok ? ingested.value : { outcome: { kind: "rejected", cause: ingested.error }, payload: null };
+  const settled = decision.kind === "accepted" ? ingest(cell, decision) : err(decision.cause);
+  if (settled.ok) return settled.value;
+  return { outcome: providerFailure(records) ?? { kind: "rejected", cause: settled.error }, payload: null };
 }
 
 type TranscriptCommon = Readonly<{
@@ -230,28 +259,6 @@ function emissionCounters(toolName: string, records: readonly PiMessage[], assis
   };
 }
 
-/**
- * A settled child whose LAST model turn ended in a provider error
- * (`stopReason: "error"`: the route refused the connection, answered 5xx, or
- * dropped the stream) never reached the model's answer. That is an
- * infrastructure failure of the attempt, not a semantic rejection: counting it
- * as "no final payload" would charge a route outage to the arm under test and
- * spend the attempt-2 retry on a route that is down.
- */
-type InfrastructureFailure = Extract<LaunchEnd, { kind: "infrastructure-failure" }>;
-
-export function providerFailure(records: readonly PiMessage[]): InfrastructureFailure | null {
-  const last = records.filter((message) => message["role"] === "assistant").at(-1);
-  if (last?.["stopReason"] !== "error") return null;
-  const message = last["errorMessage"];
-  const detail = typeof message === "string" && message.trim() !== "" ? message.trim() : "no error message";
-  return { kind: "infrastructure-failure", reason: `the provider ended the model turn with an error: ${detail}` };
-}
-
-/** A settled launch whose last model turn failed at the provider is that failure; otherwise the launch stands. */
-const effectiveLaunch = <L extends LaunchEnd>(launch: L, records: readonly PiMessage[]): L | InfrastructureFailure =>
-  launch.kind === "settled" ? providerFailure(records) ?? launch : launch;
-
 export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassification {
   const records = input.messages.filter(isRecord);
   const assistantIndices = records.flatMap((message, index) => (message["role"] === "assistant" ? [index] : []));
@@ -264,11 +271,11 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
       }),
       acceptedPayload,
     });
-    return match(effectiveLaunch(input.launch, records))
+    return match(input.launch)
       .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
       .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
       .with({ kind: "settled" }, () => {
-        const settled = settle(input.cell, selectExtractionPayload(input.messages));
+        const settled = settle(input.cell, selectExtractionPayload(input.messages), records);
         return end(settled.outcome, settled.payload);
       })
       .exhaustive();
@@ -280,12 +287,12 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
   };
   const end = (outcome: EmissionArmAttempt["outcome"], acceptedPayload: unknown = null): AttemptClassification =>
     Object.freeze({ observation: Object.freeze({ ...counters, outcome: Object.freeze(outcome) }), acceptedPayload });
-  return match(effectiveLaunch(input.launch, records))
+  return match(input.launch)
     .with({ kind: "startup-refused" }, (launch) => end({ kind: "startup-refused", reason: launch.reason }))
     .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
     .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
     .with({ kind: "settled" }, () => {
-      const settled = settle(input.cell, selectEmissionPayload(input.cellBinding, input.messages));
+      const settled = settle(input.cell, selectEmissionPayload(input.cellBinding, input.messages), records);
       return end(settled.outcome, settled.payload);
     })
     .exhaustive();

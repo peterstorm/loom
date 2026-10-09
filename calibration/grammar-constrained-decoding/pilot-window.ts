@@ -7,12 +7,15 @@
  * - `dispatchSchedule` walks the preregistered pair schedule, dispatching
  *   each pair's two arms in its scheduled order over ONE rendered task body
  *   (matched inputs), and hands every sample to the caller as it lands.
- * - Route fail-fast: after a pair with an infrastructure failure or a
- *   timeout the window re-probes the preregistered route through the
- *   `RouteHealthProbe` port; the pure `judgePair` stops the window when the
- *   route is unreachable, or after `CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT`
- *   all-infrastructure-failure pairs, so an outage is recorded as an aborted
- *   window instead of being spent across the schedule as measurements.
+ * - Route fail-fast: the pure `pairHealth` reads each landed pair; after a
+ *   pair with an infrastructure failure or a timeout the window re-probes the
+ *   preregistered route through the `RouteHealthProbe` port (a probe that
+ *   throws counts as unreachable), and the pure `judgePair` stops the window
+ *   when the route is unreachable, or after `CONSECUTIVE_OUTAGE_PAIR_LIMIT`
+ *   consecutive pairs whose every sample was an infrastructure failure or a
+ *   timeout, so an outage is recorded as an aborted window instead of being
+ *   spent across the schedule as measurements. The `WindowEnding` it records
+ *   is parsed evidence (`parseWindowEnding`).
  * - Each arm runs attempt 1 and — only after a semantic rejection — the one
  *   fresh engine-issued attempt 2 (AD-9's shared request-slot budget). Wall
  *   clock runs from the initial dispatch through accepted ingestion.
@@ -24,6 +27,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { err, ok, type Result } from "../kernel";
 import { parseSampleObservation, sampleTerminal, type SampleObservation } from "./pilot-observation";
 import { buildPairSchedule, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
@@ -59,59 +63,157 @@ export type RouteHealth = Readonly<{ kind: "reachable" }> | Readonly<{ kind: "un
 /** Re-probes the preregistered route (`GET {baseUrl}/models`, no credentials). */
 export type RouteHealthProbe = () => Promise<RouteHealth>;
 
-/** Consecutive pairs whose every sample ended in an infrastructure failure
- *  that stop the window even while the route still answers its listing (the
- *  server is up but cannot serve the model). */
-export const CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT = 3;
+/** A probe that rejects or throws is itself the route failing to answer:
+ *  the window fails CLOSED on it (recorded as unreachable, with the error),
+ *  never left open by an exception between pairs. */
+async function observeRoute(probe: RouteHealthProbe): Promise<RouteHealth> {
+  try {
+    return await probe();
+  } catch (error) {
+    return Object.freeze({ kind: "unreachable" as const, reason: `the route probe failed: ${error instanceof Error ? error.message : String(error)}` });
+  }
+}
+
+/** Consecutive all-outage pairs (`PairHealth` `all-outage`: every sample an
+ *  infrastructure failure or a timeout) that stop the window even while the
+ *  route still answers its listing — a server that is up but cannot serve,
+ *  or hangs, inference. */
+export const CONSECUTIVE_OUTAGE_PAIR_LIMIT = 3;
 
 export type WindowAbortReason =
   | Readonly<{ kind: "route-unreachable"; reason: string }>
-  | Readonly<{ kind: "consecutive-infrastructure-failures"; pairs: number }>;
+  | Readonly<{ kind: "consecutive-outage-pairs"; pairs: number }>;
 
-/** How a dispatched window's schedule ended. An aborted window keeps every
- *  sample that landed; the pairs it never dispatched are simply unmeasured,
- *  so its decision is `incomplete` — never a fabricated or censored sample. */
-export type WindowEnding =
-  | Readonly<{ kind: "completed"; pairs: number }>
-  | Readonly<{ kind: "aborted"; afterPairs: number; scheduledPairs: number; reason: WindowAbortReason }>;
+/**
+ * What one landed pair says about the route (PURE) — the one owner of what an
+ * outage looks like from inside the window. An infrastructure failure and a
+ * timeout are outage-like; a semantic rejection never is (the model
+ * answered), so model behaviour never probes or stops the window.
+ *
+ * - `none`: no outage-like sample; no probe.
+ * - `needs-probe`: some, not all, samples outage-like; re-probe the route.
+ * - `all-outage`: every sample outage-like; re-probe, and the pair counts
+ *   toward `CONSECUTIVE_OUTAGE_PAIR_LIMIT`.
+ */
+export type PairHealth = Readonly<{ kind: "none" }> | Readonly<{ kind: "needs-probe" }> | Readonly<{ kind: "all-outage" }>;
 
-/** The fail-fast state carried between pairs. */
-export type RouteBreaker = Readonly<{ consecutiveInfrastructurePairs: number }>;
-
-export const ROUTE_BREAKER_START: RouteBreaker = Object.freeze({ consecutiveInfrastructurePairs: 0 });
-
-const isInfrastructureFailure = (record: SampleRecord): boolean => {
+const isOutageLike = (record: SampleRecord): boolean => {
   const terminal = sampleTerminal(record.sample);
-  return terminal.kind === "terminal-failure" && terminal.cause === "infrastructure";
+  return terminal.kind === "terminal-failure" && (terminal.cause === "infrastructure" || terminal.cause === "timeout");
 };
 
-/** A pair calls for a route re-probe when any of its samples ended in an
- *  infrastructure failure or a timeout: both are what a route going down
- *  looks like from inside the window. A semantic rejection never does — the
- *  model answered — so model behaviour is never cut short by this rule. */
-export const pairNeedsRouteProbe = (pair: readonly SampleRecord[]): boolean =>
-  pair.some((record) => {
-    const terminal = sampleTerminal(record.sample);
-    return terminal.kind === "terminal-failure" && (terminal.cause === "infrastructure" || terminal.cause === "timeout");
-  });
+const PAIR_HEALTH = Object.freeze({
+  none: Object.freeze({ kind: "none" as const }),
+  needsProbe: Object.freeze({ kind: "needs-probe" as const }),
+  allOutage: Object.freeze({ kind: "all-outage" as const }),
+});
+
+export function pairHealth(pair: readonly SampleRecord[]): PairHealth {
+  const outageLike = pair.filter(isOutageLike).length;
+  if (outageLike === 0) return PAIR_HEALTH.none;
+  return outageLike === pair.length ? PAIR_HEALTH.allOutage : PAIR_HEALTH.needsProbe;
+}
+
+/** A pair's health with the re-probe it called for: a probe exists exactly
+ *  when the pair called for one. */
+export type JudgedPair =
+  | Extract<PairHealth, { kind: "none" }>
+  | (Exclude<PairHealth, { kind: "none" }> & Readonly<{ route: RouteHealth }>);
+
+/** The fail-fast state carried between pairs. */
+export type RouteBreaker = Readonly<{ consecutiveOutagePairs: number }>;
+
+export const ROUTE_BREAKER_START: RouteBreaker = Object.freeze({ consecutiveOutagePairs: 0 });
 
 /**
  * The fail-fast rule after one dispatched pair (PURE): an unreachable route
  * stops the window at once; otherwise the window stops after
- * `CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT` consecutive pairs whose every sample
- * was an infrastructure failure. `health` is the re-probe the pair called for
- * (`pairNeedsRouteProbe`), or null when it called for none.
+ * `CONSECUTIVE_OUTAGE_PAIR_LIMIT` consecutive `all-outage` pairs.
  */
-export function judgePair(
-  breaker: RouteBreaker, pair: readonly SampleRecord[], health: RouteHealth | null,
-): Readonly<{ breaker: RouteBreaker; abort: WindowAbortReason | null }> {
-  const allInfrastructure = pair.length > 0 && pair.every(isInfrastructureFailure);
-  const next: RouteBreaker = Object.freeze({ consecutiveInfrastructurePairs: allInfrastructure ? breaker.consecutiveInfrastructurePairs + 1 : 0 });
-  if (health?.kind === "unreachable") return { breaker: next, abort: Object.freeze({ kind: "route-unreachable" as const, reason: health.reason }) };
-  if (next.consecutiveInfrastructurePairs >= CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT) {
-    return { breaker: next, abort: Object.freeze({ kind: "consecutive-infrastructure-failures" as const, pairs: next.consecutiveInfrastructurePairs }) };
+export function judgePair(breaker: RouteBreaker, pair: JudgedPair): Readonly<{ breaker: RouteBreaker; abort: WindowAbortReason | null }> {
+  const next: RouteBreaker = Object.freeze({ consecutiveOutagePairs: pair.kind === "all-outage" ? breaker.consecutiveOutagePairs + 1 : 0 });
+  if (pair.kind !== "none" && pair.route.kind === "unreachable") {
+    return { breaker: next, abort: Object.freeze({ kind: "route-unreachable" as const, reason: pair.route.reason }) };
+  }
+  if (next.consecutiveOutagePairs >= CONSECUTIVE_OUTAGE_PAIR_LIMIT) {
+    return { breaker: next, abort: Object.freeze({ kind: "consecutive-outage-pairs" as const, pairs: next.consecutiveOutagePairs }) };
   }
   return { breaker: next, abort: null };
+}
+
+// ---------------------------------------------------------------------------
+// The window ending (parsed evidence)
+// ---------------------------------------------------------------------------
+
+/** The abort reason revision e8d688d8 recorded: consecutive pairs whose every
+ *  sample was an infrastructure failure (timeouts did not count). Only a
+ *  retained schemaVersion 1 window can carry it; nothing produces it now. */
+type LegacyAbortReason = Readonly<{ kind: "consecutive-infrastructure-failures"; pairs: number }>;
+
+declare const windowEndingBrand: unique symbol;
+
+/**
+ * How a dispatched window's schedule ended. An aborted window keeps every
+ * sample that landed; the pairs it never dispatched are simply unmeasured, so
+ * its decision is `incomplete` — never a fabricated or censored sample.
+ * Branded: only `parseWindowEnding` makes one, so its invariants hold —
+ * a completed window ran its whole schedule (`pairs` is the scheduled pair
+ * count, 0 for an empty schedule of extraction-only cells),
+ * an aborted one stopped between pairs (1 ≤ `afterPairs` ≤ `scheduledPairs`)
+ * after no more consecutive outage pairs than it dispatched.
+ */
+export type WindowEnding<R = WindowAbortReason> = (
+  | Readonly<{ kind: "completed"; pairs: number }>
+  | Readonly<{ kind: "aborted"; afterPairs: number; scheduledPairs: number; reason: R }>
+) & Readonly<{ [windowEndingBrand]: true }>;
+
+/** An ending read back from a retained window: a schemaVersion 1 window may carry the legacy reason. */
+export type RetainedWindowEnding = WindowEnding<WindowAbortReason | LegacyAbortReason>;
+
+const atLeastOnePair = z.number().int().min(1);
+
+const windowEndingSchema = z.discriminatedUnion("kind", [
+  // An empty schedule (every cell extraction-only) completes after zero pairs.
+  z.object({ kind: z.literal("completed"), pairs: z.number().int().min(0) }).strict(),
+  z.object({
+    kind: z.literal("aborted"),
+    afterPairs: atLeastOnePair,
+    scheduledPairs: atLeastOnePair,
+    reason: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("route-unreachable"), reason: z.string().min(1) }).strict(),
+      z.object({ kind: z.literal("consecutive-outage-pairs"), pairs: atLeastOnePair }).strict(),
+      z.object({ kind: z.literal("consecutive-infrastructure-failures"), pairs: atLeastOnePair }).strict(),
+    ]),
+  }).strict(),
+]).superRefine((ending, ctx) => {
+  if (ending.kind !== "aborted") return;
+  if (ending.afterPairs > ending.scheduledPairs) {
+    ctx.addIssue({ code: "custom", message: `aborted after ${ending.afterPairs} of ${ending.scheduledPairs} scheduled pairs`, path: ["afterPairs"] });
+  }
+  if (ending.reason.kind !== "route-unreachable" && ending.reason.pairs > ending.afterPairs) {
+    ctx.addIssue({ code: "custom", message: `${ending.reason.pairs} consecutive pairs exceed the ${ending.afterPairs} dispatched`, path: ["reason", "pairs"] });
+  }
+});
+
+/** A retained window's recorded ending; only a schemaVersion 1 window
+ *  (`legacy`) may carry the e8d688d8 abort reason. */
+export function parseRetainedWindowEnding(raw: unknown, legacy: boolean): Result<RetainedWindowEnding, string> {
+  const parsed = windowEndingSchema.safeParse(raw);
+  if (!parsed.success) {
+    return err(`invalid window ending: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`).join("; ")}`);
+  }
+  const ending = parsed.data;
+  if (!legacy && ending.kind === "aborted" && ending.reason.kind === "consecutive-infrastructure-failures") {
+    return err("invalid window ending: the consecutive-infrastructure-failures reason exists only in a schemaVersion 1 window");
+  }
+  return ok(Object.freeze(ending) as RetainedWindowEnding);
+}
+
+/** The one constructor of a `WindowEnding` this revision records. */
+export function parseWindowEnding(raw: unknown): Result<WindowEnding, string> {
+  const parsed = parseRetainedWindowEnding(raw, false);
+  // The non-legacy parse refused the e8d688d8 reason, so the reason is current.
+  return parsed as Result<WindowEnding, string>;
 }
 
 export type WindowDispatch = Readonly<{
@@ -122,7 +224,7 @@ export type WindowDispatch = Readonly<{
   inputs: WindowInputs;
   /** The dispatch port: one attempt of one arm, launched and classified. */
   dispatch: ArmDispatch;
-  /** Re-probes the preregistered route when a pair looks like an outage (`judgePair`). */
+  /** Re-probes the preregistered route when a pair looks like an outage (`pairHealth`). */
   routeHealth: RouteHealthProbe;
   /** Monotonic clock in milliseconds. */
   now: () => number;
@@ -165,6 +267,20 @@ async function dispatchSample(window: WindowDispatch, pair: ScheduledPair, arm: 
 
 export type DispatchedSchedule = Readonly<{ records: readonly SampleRecord[]; ending: WindowEnding }>;
 
+/** A landed pair with the re-probe its health called for (none when it called for none). */
+async function observePair(window: WindowDispatch, pair: readonly SampleRecord[]): Promise<JudgedPair> {
+  const health = pairHealth(pair);
+  return health.kind === "none" ? health : Object.freeze({ ...health, route: await observeRoute(window.routeHealth) });
+}
+
+/** The ending `dispatchSchedule` reached; it is built from the loop's own
+ *  counts, so a refusal is a defect in this module, never in the evidence. */
+function endingOf(raw: unknown): WindowEnding {
+  const ending = parseWindowEnding(raw);
+  if (!ending.ok) throw new Error(`the dispatched schedule produced an inconsistent ending: ${ending.error}`);
+  return ending.value;
+}
+
 /** Matched dispatch of the preregistered schedule, stopped early by the route
  *  fail-fast (`judgePair`) — always between pairs, so every landed pair keeps
  *  both arms. */
@@ -176,24 +292,21 @@ export async function dispatchSchedule(window: WindowDispatch): Promise<Dispatch
     const input = window.inputs.caseInput(pair.cell, pair.caseId);
     if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
     const body = renderTaskBody(input, window.fixtures);
-    const landed: SampleRecord[] = [];
+    const pairStart = records.length;
     for (const arm of pair.armOrder) {
       const record = await dispatchSample(window, pair, arm, body);
-      landed.push(record);
       records.push(record);
       window.onSample(record);
     }
     window.onPair(index, schedule.length, pair);
-    const judged = judgePair(breaker, landed, pairNeedsRouteProbe(landed) ? await window.routeHealth() : null);
+    const judged = judgePair(breaker, await observePair(window, records.slice(pairStart)));
     breaker = judged.breaker;
     if (judged.abort !== null) {
-      return Object.freeze({
-        records: Object.freeze(records),
-        ending: Object.freeze({ kind: "aborted" as const, afterPairs: index + 1, scheduledPairs: schedule.length, reason: judged.abort }),
-      });
+      const ending = endingOf({ kind: "aborted", afterPairs: index + 1, scheduledPairs: schedule.length, reason: judged.abort });
+      return Object.freeze({ records: Object.freeze(records), ending });
     }
   }
-  return Object.freeze({ records: Object.freeze(records), ending: Object.freeze({ kind: "completed" as const, pairs: schedule.length }) });
+  return Object.freeze({ records: Object.freeze(records), ending: endingOf({ kind: "completed", pairs: schedule.length }) });
 }
 
 export type BlindedEntry = Readonly<{ blindId: string; pairId: string; arm: PilotArm; cell: CellKey; caseId: string; payload: unknown }>;
