@@ -35,12 +35,20 @@ Three things followed from the earlier cloud-default catalog:
    reconstructed from the catalog's Git history). A request is checked against today's catalog once, where it
    is minted (`parseAgentRequestAuthority`); every roster re-read parses its attempts as recorded.
 3. **Fail closed on reachability.** Before a Pi parent's CLI emits a spawn batch, each distinct route its
-   frozen bindings name must answer `GET {baseUrl}/models`, with `baseUrl` from Pi's `models.json`
-   (`core/route-reachability.ts`, `utils/route-endpoint.ts`). A refused connection, timeout, non-auth error
-   status or unlisted model refuses the spawn, naming the route, URL and reason; a provider with no endpoint
-   is `unconfigured`. Nothing is published, so `resume` re-emits the same batch once the route answers. An
-   authentication refusal (401/403) proves the server is up: Loom never resolves or sends credentials, and
-   Pi authenticates the inference.
+   children will launch on must answer `GET {baseUrl}/models`, with `baseUrl` from Pi's `models.json`
+   (`core/route-reachability.ts`, `utils/route-endpoint.ts`). The launch route is the one the generated
+   agent render carries — the Agent's catalog binding after `model-routing.json` rules
+   (`resolveAgentLaunchBinding`, shared by the renderer, `render-pi` and the gate) — so the gate never probes
+   a route the child will not run on. A refused connection, timeout, non-auth error status or a listing
+   without the model refuses the spawn, naming the route, URL and reason; a provider with no endpoint is
+   `unconfigured`. Nothing is published, so `resume` re-emits the same batch once the route answers. An
+   authentication refusal (401/403), or a 2xx whose body is not a model list, proves the server is up but
+   not which model it serves: the batch is admitted and the unverified route is reported on stderr as a
+   `loom-route-unverified` event. Loom never resolves or sends credentials; Pi authenticates the inference.
+   A stored request recorded on a retired cloud route is refused as `retired` without a probe: that run
+   predates local-only routing, `resume` can never recover it, and the operator starts a fresh run. The
+   calibration preflight maps the same pure decision (`decideProbedRoute`) rather than reading HTTP statuses
+   itself, and records an unobservable list as an explicit `served-model-unverified` fact.
 4. **Per-route release (AD-11 amended).** The release decision is per route × schema cell, fixed by the
    preregistration's `releasePolicy`. Under `per-route-engine-authoritative` a measured cell on an
    unconstrained-emission route is released as **unconstrained emission, engine-authoritative** when its

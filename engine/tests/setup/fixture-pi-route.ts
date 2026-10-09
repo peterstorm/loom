@@ -7,8 +7,9 @@
  * must therefore point at a route that answers, never at the operator's real
  * `~/.pi/agent/models.json`. This starts a loopback HTTP server listing the
  * catalog's local model and a fixture agent directory whose `models.json`
- * names it; `tests/fixtures/pi-session.ts` sets `PI_CODING_AGENT_DIR` to that
- * directory for every fixture Pi session.
+ * names it, plus an empty routing policy (see below);
+ * `tests/fixtures/pi-session.ts` sets `PI_CODING_AGENT_DIR` to that directory
+ * for every fixture Pi session.
  *
  * The server lives in Vitest's main process on purpose: test workers run CLI
  * children through `spawnSync`, which blocks the worker's own event loop, so a
@@ -40,6 +41,16 @@ export default async function setup(): Promise<() => Promise<void>> {
         models: [{ id: DESKTOP_VLLM_ROUTE.model }],
       },
     },
+  }, null, 2));
+  // A routing config with no rules, so the routing loader never falls back to
+  // the operator's `~/.pi/agent/model-routing.json`: the spawn route gate
+  // probes the route a child launches on, and that must not depend on the
+  // machine running the suite.
+  writeFileSync(join(agentDir, "model-routing.json"), JSON.stringify({
+    schemaVersion: 1,
+    defaultClass: "cloud",
+    modelClasses: {},
+    rules: [],
   }, null, 2));
   // Workers are started after global setup and inherit this environment.
   process.env[FIXTURE_PI_AGENT_DIR_ENV] = agentDir;

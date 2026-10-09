@@ -4,7 +4,7 @@ import { parseDeclaredSkills } from "../core/agent-skills";
 import { renderPiAgentResource, type PreloadedSkill } from "../core/harness-resources";
 import { lowerModelProfile, resolveAgentProfile } from "../core/model-profiles";
 import {
-  resolveEffectivePiBinding,
+  resolveAgentLaunchBinding,
   type EffectivePiBinding,
   type ModelRef,
   type ModelRoutingConfig,
@@ -170,13 +170,12 @@ function routedPiAgentDefinitionIfAuthorized(
   packageRoot: string,
   routing: PiRoutingContext,
 ): Readonly<{ ok: true; value: string | null }> | Readonly<{ ok: false; error: string }> {
-  const profile = resolveAgentProfile(agent);
-  if (!profile.ok) {
-    return { ok: false, error: `cannot resolve routed agent '${agent}': ${profile.error.message}` };
+  const launch = resolveAgentLaunchBinding(agent, routing.parentRef, routing.config);
+  if (!launch.ok) {
+    return { ok: false, error: `cannot resolve routed agent '${agent}': ${launch.error.message}` };
   }
-  const declaredBinding = lowerModelProfile(profile.value, "pi");
-  const effective = resolveEffectivePiBinding(declaredBinding, routing.parentRef, routing.config);
-  if (effective.provider === declaredBinding.provider && effective.model === declaredBinding.model) {
+  const { declared, effective } = launch.value;
+  if (effective.provider === declared.provider && effective.model === declared.model) {
     return { ok: true, value: null };
   }
   try {

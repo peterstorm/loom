@@ -16,9 +16,13 @@ import {
   decideRouteReachability,
   distinctRoutes,
   modelsUrl,
+  planSpawnRoutes,
   type RouteEndpoint,
+  type RouteObservation,
   type RouteProbe,
   type RouteReachability,
+  type SpawnRouteDecision,
+  type SpawnRouting,
 } from "../core/route-reachability";
 
 /** How long one probe waits before the route counts as unreachable. */
@@ -57,23 +61,49 @@ export function readRouteEndpoint(agentDir: string, provider: string): EndpointL
 /** One route probe: the port the gate depends on, so tests substitute a fake. */
 export type RouteProbePort = (endpoint: RouteEndpoint) => Promise<RouteProbe>;
 
-/** The live probe: an unauthenticated `GET {baseUrl}/models` with a timeout. */
+const failureText = (error: unknown): string => {
+  const cause = error instanceof Error && error.cause instanceof Error ? ` (${error.cause.message})` : "";
+  return `${error instanceof Error ? error.message : String(error)}${cause}`;
+};
+
+/** The model ids a body lists, or null when it is not an OpenAI-style model list. */
+function listedModels(body: string): readonly string[] | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const listed = modelListSchema.safeParse(raw);
+  return listed.success ? Object.freeze(listed.data.data.map(({ id }) => id)) : null;
+}
+
+/**
+ * The live probe: an unauthenticated `GET {baseUrl}/models`, bounded by one
+ * timeout over the whole exchange. A server that never answers, or that
+ * stalls mid-body, is `refused`; a body that arrives but lists nothing
+ * readable is an answer without a list.
+ */
 export function httpRouteProbe(timeoutMs: number = ROUTE_PROBE_TIMEOUT_MS): RouteProbePort {
   return async (endpoint) => {
+    const signal = AbortSignal.timeout(timeoutMs);
     let response: Response;
     try {
-      response = await fetch(modelsUrl(endpoint), { signal: AbortSignal.timeout(timeoutMs) });
+      response = await fetch(modelsUrl(endpoint), { signal });
     } catch (error) {
-      const cause = error instanceof Error && error.cause instanceof Error ? ` (${error.cause.message})` : "";
-      return { kind: "refused", reason: `${error instanceof Error ? error.message : String(error)}${cause}` };
+      return { kind: "refused", reason: failureText(error) };
     }
-    if (!response.ok) return { kind: "answered", status: response.status, servedModels: null };
-    const listed = modelListSchema.safeParse(await response.json().catch(() => null));
-    return {
-      kind: "answered",
-      status: response.status,
-      servedModels: listed.success ? Object.freeze(listed.data.data.map(({ id }) => id)) : null,
-    };
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return { kind: "answered", status: response.status, servedModels: null };
+    }
+    let body: string;
+    try {
+      body = await response.text();
+    } catch (error) {
+      return { kind: "refused", reason: `HTTP ${response.status} body did not arrive: ${failureText(error)}` };
+    }
+    return { kind: "answered", status: response.status, servedModels: listedModels(body) };
   };
 }
 
@@ -90,8 +120,30 @@ export async function observeRouteReachability(
   for (const binding of distinctRoutes(bindings)) {
     const lookup = readRouteEndpoint(agentDir, binding.provider);
     if (!lookup.ok) return lookup;
-    const observed = lookup.endpoint === null ? null : await probe(lookup.endpoint);
-    decisions.push(decideRouteReachability(binding, lookup.endpoint, observed));
+    const observation: RouteObservation = lookup.endpoint === null
+      ? { kind: "unconfigured" }
+      : { kind: "probed", endpoint: lookup.endpoint, probe: await probe(lookup.endpoint) };
+    decisions.push(decideRouteReachability(binding, observation));
   }
   return { ok: true, decisions: Object.freeze(decisions) };
+}
+
+/** What the Pi spawn gate observes with: Pi's agent directory, the routing context and the probe. */
+export type SpawnRouteGatePorts = Readonly<{ agentDir: string; routing: SpawnRouting; probe: RouteProbePort }>;
+
+/**
+ * Observe and decide every route a Pi spawn batch needs: the retired routes
+ * it recorded (decided without a probe — none can come back) and each
+ * distinct route its children launch on, resolved by the same rule as the
+ * generated-agent render.
+ */
+export async function observeSpawnRoutes(
+  requests: Parameters<typeof planSpawnRoutes>[0],
+  ports: SpawnRouteGatePorts,
+): Promise<Readonly<{ ok: true; decisions: readonly SpawnRouteDecision[] }> | Readonly<{ ok: false; error: string }>> {
+  const plan = planSpawnRoutes(requests, ports.routing);
+  if (!plan.ok) return { ok: false, error: plan.error.message };
+  const observed = await observeRouteReachability(plan.value.launch, ports.agentDir, ports.probe);
+  if (!observed.ok) return observed;
+  return { ok: true, decisions: Object.freeze([...plan.value.retired, ...observed.decisions]) };
 }

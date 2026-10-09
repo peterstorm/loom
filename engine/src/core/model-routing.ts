@@ -5,8 +5,10 @@
  * caller-supplied values. This module performs no I/O and reads no
  * environment. The imperative shell — the agent renderer and the spawn
  * gate — loads `model-routing.json` and observes the parent session's model
- * ref, then calls {@link resolveEffectivePiBinding} to obtain the binding a
- * child actually runs on.
+ * ref, then calls {@link resolveAgentLaunchBinding} (or, for an interactive
+ * child with a parent thinking level and workload,
+ * {@link resolveEffectivePiBindingFromParent}) to obtain the binding a child
+ * actually runs on.
  *
  * This is the spawn-boundary override the model-profile core deliberately
  * defers to the launcher: `model-profiles.ts` owns the *declared* (pinned)
@@ -17,7 +19,7 @@
  * all resolve to the declared binding.
  */
 
-import type { PiBinding } from "./model-profiles";
+import { lowerModelProfile, resolveAgentProfile, type PiBinding, type PolicyResult } from "./model-profiles";
 
 /** A parsed `provider/model` reference, as a value object (not a raw string). */
 export type ModelRef = Readonly<{ provider: string; model: string }>;
@@ -461,4 +463,28 @@ export function resolveEffectivePiBindingFromParent(
     });
   }
   return declaredEffective;
+}
+
+/** One Agent's launch under a routing context: its catalog binding and the binding Pi actually launches. */
+export type AgentLaunchBinding = Readonly<{ declared: PiBinding; effective: EffectivePiBinding }>;
+
+/**
+ * The binding Pi launches `agent` with: the Agent's catalog profile lowered
+ * for Pi, then routed exactly as {@link resolveEffectivePiBinding}. This is
+ * the one rule the generated-agent validator, `render-pi` and the Pi spawn
+ * route gate share, so the route the gate probes is the route the child runs
+ * on.
+ */
+export function resolveAgentLaunchBinding(
+  agent: unknown,
+  parentRef: ModelRef | null,
+  config: ModelRoutingConfig | null,
+): PolicyResult<AgentLaunchBinding> {
+  const profile = resolveAgentProfile(agent);
+  if (!profile.ok) return profile;
+  const declared = lowerModelProfile(profile.value, "pi");
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({ declared, effective: resolveEffectivePiBinding(declared, parentRef, config) }),
+  });
 }

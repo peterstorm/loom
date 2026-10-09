@@ -1,7 +1,8 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { EMISSION_TOOL_SPECS } from "../../engine/src/core/emission-tool";
-import { decidePreflight, parsePreflightFacts, preflightRouteProbe, stagedRegistryFacts, type PreflightDecision, type PreflightFacts, type RouteProbe } from "./pilot-preflight";
+import { decideProbedRoute } from "../../engine/src/core/route-reachability";
+import { decidePreflight, LEGACY_UNVERIFIED_REASON, parsePreflightFacts, preflightRouteProbe, stagedRegistryFacts, type PreflightDecision, type PreflightFacts, type RouteProbe } from "./pilot-preflight";
 import { prereg as retainedPrereg } from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest, PILOT_CELLS } from "./pilot-vocabulary";
 
@@ -96,41 +97,56 @@ describe("route probe (the engine's probe, mapped into the preflight's route fac
     expect(decision.kind === "blocked" && decision.blocks).toEqual([{ kind: "served-model-absent", model: route.model, served: ["other"] }]);
   });
 
-  it("maps an authentication refusal (401/403) to reachable with an unobservable served list, which blocks nothing", () => {
+  it("records an authentication refusal (401/403) as an explicit served-model-unverified fact, which blocks nothing", () => {
     for (const status of [401, 403]) {
       const probe = preflightRouteProbe(route, answered(status));
-      expect(probe).toEqual({ kind: "reachable", servedModels: null });
+      expect(probe).toEqual({
+        kind: "served-model-unverified",
+        reason: `GET ${url} answered HTTP ${status}: the model list needs credentials Loom never sends`,
+      });
       expect(decidePreflight(retainedPrereg, ready(probe)).kind).toBe("ready");
     }
   });
 
-  it("maps everything else to unreachable, naming the URL and the reason", () => {
+  it("maps everything else to unreachable, naming the URL and the engine's reason", () => {
     expect(preflightRouteProbe(route, { kind: "refused", reason: "ECONNREFUSED" })).toEqual({ kind: "unreachable", reason: `GET ${url}: ECONNREFUSED` });
     expect(preflightRouteProbe(route, answered(500))).toEqual({ kind: "unreachable", reason: `GET ${url}: GET /models answered HTTP 500` });
     expect(preflightRouteProbe(route, answered(200))).toEqual({ kind: "unreachable", reason: `GET ${url} answered without a readable model list` });
   });
 
-  it("is reachable exactly for a 2xx listing or an auth refusal (property)", () => {
+  it("is a total mapping of the engine's one route decision (property)", () => {
     fc.assert(fc.property(
       fc.integer({ min: 100, max: 599 }),
       fc.option(fc.array(fc.constantFrom(route.model, "other", "third")), { nil: null }),
       (status, servedModels) => {
-        const probe = preflightRouteProbe(route, answered(status, servedModels));
-        const listed = status >= 200 && status <= 299 && servedModels !== null;
-        const auth = status === 401 || status === 403;
-        expect(probe.kind).toBe(listed || auth ? "reachable" : "unreachable");
-        if (probe.kind === "reachable") expect(probe.servedModels).toEqual(listed ? servedModels : null);
+        const probe = answered(status, servedModels);
+        const fact = preflightRouteProbe(route, probe);
+        const engine = decideProbedRoute(route, { provider: route.provider, baseUrl: route.baseUrl }, probe);
+        // A served list (with or without the model) is `reachable`, its list recorded for decidePreflight.
+        const listed = engine.kind === "reachable" ? engine.served.kind === "listed" : engine.cause.kind === "model-not-served";
+        const unverified = engine.kind === "reachable" && engine.served.kind === "unlisted" && engine.served.cause === "auth-refused";
+        expect(fact.kind).toBe(listed ? "reachable" : unverified ? "served-model-unverified" : "unreachable");
+        if (fact.kind === "reachable") expect(fact.servedModels).toEqual(servedModels);
       },
-    ), { numRuns: 200 });
+    ), { numRuns: 300 });
   });
 
-  it("round-trips an unobservable served list through the retained-facts parser; retained arrays parse unchanged", () => {
-    const retained = JSON.parse(JSON.stringify(ready({ kind: "reachable", servedModels: null })));
+  it("round-trips the explicit unverified fact through the retained-facts parser; retained arrays parse unchanged", () => {
+    const fact = preflightRouteProbe(route, answered(401));
+    const retained = JSON.parse(JSON.stringify(ready(fact)));
     const parsed = parsePreflightFacts(retained);
-    expect(parsed.ok && parsed.value.route).toEqual({ kind: "reachable", servedModels: null });
+    expect(parsed.ok && parsed.value.route).toEqual(fact);
     expect(parsed.ok && decidePreflight(retainedPrereg, parsed.value).kind).toBe("ready");
     const listed = parsePreflightFacts({ ...retained, route: { kind: "reachable", servedModels: [route.model] } });
     expect(listed.ok && listed.value.route).toEqual({ kind: "reachable", servedModels: [route.model] });
     expect(parsePreflightFacts({ ...retained, route: { kind: "reachable" } }).ok).toBe(false);
+    expect(parsePreflightFacts({ ...retained, route: { kind: "served-model-unverified" } }).ok).toBe(false);
+  });
+
+  it("reads a window retained before the explicit fact (servedModels null, as gcd-ad11-pilot-2 recorded) as served-model-unverified", () => {
+    const retained = JSON.parse(JSON.stringify({ ...ready(preflightRouteProbe(route, answered(401))), route: { kind: "reachable", servedModels: null } }));
+    const parsed = parsePreflightFacts(retained);
+    expect(parsed.ok && parsed.value.route).toEqual({ kind: "served-model-unverified", reason: LEGACY_UNVERIFIED_REASON });
+    expect(parsed.ok && decidePreflight(retainedPrereg, parsed.value).kind).toBe("ready");
   });
 });

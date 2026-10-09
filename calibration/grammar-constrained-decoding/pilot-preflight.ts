@@ -10,57 +10,67 @@
 import { z } from "zod";
 import { match } from "ts-pattern";
 import { sha256Hex } from "../../engine/src/core/digest";
-import { decideRouteReachability, type RouteProbe as RouteObservation } from "../../engine/src/core/route-reachability";
+import { decideProbedRoute, unreachableReason, type RouteProbe as RouteObservation } from "../../engine/src/core/route-reachability";
 import { nonEmpty, type NonEmpty, type Result } from "../kernel";
 import type { Preregistration } from "./pilot-preregistration";
 import { CELL_KEYS, hex64, parserOf, PILOT_CELLS, text, type CellKey, type DeepReadonly } from "./pilot-vocabulary";
 
-const routeProbeSchema = z.discriminatedUnion("kind", [
-  /** `servedModels` null: the server answered but its model list is unobservable
-   *  (listing needs credentials Loom never sends; Pi authenticates inference). */
-  z.object({ kind: z.literal("reachable"), servedModels: z.array(z.string()).nullable() }).strict(),
+/** Why a retained window recorded before the explicit fact (gcd-ad11-pilot-2,
+ *  2026-10-08) has an unverified served model: it wrote `servedModels: null`. */
+export const LEGACY_UNVERIFIED_REASON =
+  "recorded as servedModels null: the server answered, its model list was unobservable";
+
+const routeProbeSchema = z.union([
+  /** The server's list was read: `decidePreflight` checks the preregistered model is in it. */
+  z.object({ kind: z.literal("reachable"), servedModels: z.array(z.string()) }).strict(),
+  /** The server answered, but its model list is unobservable (listing needs
+   *  credentials Loom never sends; Pi authenticates inference): the model
+   *  identity was never confirmed, and the window's evidence says so. */
+  z.object({ kind: z.literal("served-model-unverified"), reason: z.string() }).strict(),
+  /** The pre-fact retained shape of the same observation, read as it. */
+  z.object({ kind: z.literal("reachable"), servedModels: z.null() }).strict()
+    .transform(() => ({ kind: "served-model-unverified" as const, reason: LEGACY_UNVERIFIED_REASON })),
   z.object({ kind: z.literal("unreachable"), reason: z.string() }).strict(),
 ]);
 export type RouteProbe = DeepReadonly<z.infer<typeof routeProbeSchema>>;
 
-const reachable = (servedModels: readonly string[] | null): RouteProbe => Object.freeze({ kind: "reachable" as const, servedModels });
-const unreachable = (reason: string): RouteProbe => Object.freeze({ kind: "unreachable" as const, reason });
-
-/** The served model list a 2xx answer carried, or null when it carried none. */
-const listing = (probe: RouteObservation): readonly string[] | null =>
-  probe.kind === "answered" && probe.status >= 200 && probe.status <= 299 ? probe.servedModels : null;
-
-const authRefused = (probe: RouteObservation): boolean =>
-  probe.kind === "answered" && (probe.status === 401 || probe.status === 403);
-
 /**
  * The preflight's route fact from the engine's one route probe
- * (`httpRouteProbe` observes `GET {baseUrl}/models`; the pure
- * `decideRouteReachability` judges it):
+ * (`httpRouteProbe` observes `GET {baseUrl}/models`) as the engine's pure
+ * `decideProbedRoute` judges it. This maps that closed union; it reads no
+ * HTTP status itself.
  *
- * - a 2xx model listing → `reachable` with the served models — whether the
- *   preregistered model is among them is `decidePreflight`'s check, so an
- *   absent model is recorded as `served-model-absent` with what is served;
- * - an authentication refusal (401/403) → `reachable` with `servedModels:
- *   null`: the server answers, its list is unobservable without credentials
- *   Loom never resolves or sends, and Pi authenticates the inference itself;
- * - anything else (refused connection, timeout, any other status, a 2xx
- *   without a readable list) → `unreachable`, with the reason.
+ * - the model listed, or a listing without it → `reachable` with everything
+ *   served: whether the preregistered model is among them is
+ *   `decidePreflight`'s check, so an absent model is recorded as
+ *   `served-model-absent` with what is served;
+ * - an authentication refusal → `served-model-unverified`: the server
+ *   answers, its list is unobservable without credentials Loom never
+ *   resolves or sends, and Pi authenticates the inference itself;
+ * - a 2xx without a readable list → `unreachable`: unlike an auth refusal,
+ *   nothing says this is the OpenAI-compatible server the window measures;
+ * - any other unreachable answer → `unreachable`, with the engine's reason.
  */
 export function preflightRouteProbe(route: Preregistration["route"], probe: RouteObservation): RouteProbe {
-  const listed = listing(probe);
-  if (listed !== null) return reachable(listed);
-  return match(decideRouteReachability(
+  const decision = decideProbedRoute(
     { provider: route.provider, model: route.model },
     { provider: route.provider, baseUrl: route.baseUrl },
     probe,
-  ))
-    .with({ kind: "reachable" }, ({ url }) => (authRefused(probe)
-      ? reachable(null)
-      : unreachable(`GET ${url} answered without a readable model list`)))
-    .with({ kind: "unreachable" }, ({ url, reason }) => unreachable(`GET ${url}: ${reason}`))
-    .with({ kind: "unconfigured" }, ({ reason }) => unreachable(reason))
-    .exhaustive();
+  );
+  return Object.freeze(match(decision)
+    .returnType<RouteProbe>()
+    .with({ kind: "reachable", served: { kind: "listed" } }, ({ served }) => ({ kind: "reachable", servedModels: served.models }))
+    .with({ kind: "reachable", served: { kind: "unlisted", cause: "auth-refused" } }, ({ url, served }) => ({
+      kind: "served-model-unverified",
+      reason: `GET ${url} answered HTTP ${served.status}: the model list needs credentials Loom never sends`,
+    }))
+    .with({ kind: "reachable", served: { kind: "unlisted", cause: "unreadable-listing" } }, ({ url }) => ({
+      kind: "unreachable",
+      reason: `GET ${url} answered without a readable model list`,
+    }))
+    .with({ kind: "unreachable", cause: { kind: "model-not-served" } }, ({ cause }) => ({ kind: "reachable", servedModels: cause.served }))
+    .with({ kind: "unreachable" }, ({ url, cause }) => ({ kind: "unreachable", reason: `GET ${url}: ${unreachableReason(cause)}` }))
+    .exhaustive());
 }
 
 /** Retained digests parse as strictly as the preregistered digests they are compared with. */
@@ -146,11 +156,13 @@ export function decidePreflight(prereg: Preregistration, facts: PreflightFacts):
   match(facts.route)
     .with({ kind: "unreachable" }, (route) => { blocks.push({ kind: "route-unreachable", reason: route.reason }); })
     .with({ kind: "reachable" }, ({ servedModels }) => {
-      // An unobservable list (null) records no block: it proves nothing absent.
-      if (servedModels !== null && !servedModels.includes(prereg.route.model)) {
+      if (!servedModels.includes(prereg.route.model)) {
         blocks.push({ kind: "served-model-absent", model: prereg.route.model, served: servedModels });
       }
     })
+    // An unobservable list records no block — it proves nothing absent — and
+    // the retained fact itself records that the model was never confirmed.
+    .with({ kind: "served-model-unverified" }, () => undefined)
     .exhaustive();
   const loaded = facts.loadedRuntimeRevision;
   if (loaded !== null && loaded !== facts.stagedRuntimeRevision) {

@@ -20,7 +20,7 @@ import {
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
 } from "../../core/model-profiles";
-import { parseModelRef, resolveEffectivePiBinding, type ModelRef } from "../../core/model-routing";
+import { parseModelRef, resolveAgentLaunchBinding, type ModelRef } from "../../core/model-routing";
 import { renderPiAgentDefinitionWithBinding } from "../../utils/render-pi-agent";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 
@@ -119,11 +119,9 @@ const handler: HookHandler = async (_stdin, args) => {
   for (const file of files) {
     const agent = basename(file, ".md");
     const content = readFileSync(join(agentsDir, file), "utf-8");
-    const profile = resolveAgentProfile(agent);
-    if (!profile.ok) return { kind: "error", message: profile.error.message };
-    const declared = lowerModelProfile(profile.value, "pi");
-    const effective = resolveEffectivePiBinding(declared, parentRef, config);
-    writePiAgent(join(output, file), renderPiAgentDefinitionWithBinding(content, agent, packageRoot, effective));
+    const launch = resolveAgentLaunchBinding(agent, parentRef, config);
+    if (!launch.ok) return { kind: "error", message: launch.error.message };
+    writePiAgent(join(output, file), renderPiAgentDefinitionWithBinding(content, agent, packageRoot, launch.value.effective));
   }
   process.stdout.write(`Rendered ${files.length} Pi agent definitions to ${output}.\n`);
   return { kind: "passthrough" };
