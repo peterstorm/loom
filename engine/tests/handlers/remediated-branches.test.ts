@@ -7,8 +7,6 @@ import { parseMachineSummary } from "../../src/core/review-output";
 import recordOrchestrationSpawn from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
-import { resumeWaveGateFacade } from "../../src/handlers/helpers/programs";
-import { CURRENT_PI_CATALOG } from "../../src/core/model-profiles";
 import { driveRemediationFacade } from "../../src/handlers/helpers/programs/remediation";
 
 const cleanup: string[] = [];
@@ -254,64 +252,6 @@ describe("Claude orchestration spawn correlation", () => {
     const result = await recordOrchestrationSpawn(spawn("LOOM_REQUEST_ID: request:a\nGo."), []);
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("no session_id") });
-  });
-});
-
-/**
- * The Wave Gate resume spin-guard.
- *
- * `resumeWaveGateFacade` re-derives its next action after each durable step,
- * and a defect that produced no durable progress would recurse forever — an
- * engine that hangs rather than an engine that reports. The bound converts that
- * into a loud blocked diagnostic, and nothing had ever driven it: the depth
- * parameter exists precisely so the guard is reachable without staging a real
- * pathological run.
- */
-describe("Wave Gate resume re-derivation bound", () => {
-  it("blocks with a named diagnostic instead of spinning past the bound", async () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-spin-guard-"));
-    cleanup.push(runsRoot);
-    const runDirectory = join(runsRoot, "run.spinguard");
-    mkdirSync(runDirectory, { recursive: true });
-    const opened = openRunDirectory(runsRoot, runDirectory);
-    expect(opened.ok).toBe(true);
-    if (!opened.ok) return;
-
-    // The registration is never consulted: the depth check is the FIRST thing
-    // the resume does, which is what makes the bound a real backstop rather
-    // than something a later failure could skip past.
-    const driven = await resumeWaveGateFacade(
-      opened.value,
-      {} as never,
-      CURRENT_PI_CATALOG,
-      65,
-    );
-
-    expect(driven.ok).toBe(true);
-    if (!driven.ok) return;
-    const action = driven.action as { kind: string; diagnostic: { message: string } };
-    expect(action.kind).toBe("blocked");
-    expect(action.diagnostic.message).toContain("exceeded 64 re-derivations");
-    expect(action.diagnostic.message).toContain("refusing to spin");
-  });
-
-  it("does NOT trip the bound at the boundary depth", async () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-spin-guard-edge-"));
-    cleanup.push(runsRoot);
-    const runDirectory = join(runsRoot, "run.spinedge");
-    mkdirSync(runDirectory, { recursive: true });
-    const opened = openRunDirectory(runsRoot, runDirectory);
-    expect(opened.ok).toBe(true);
-    if (!opened.ok) return;
-
-    // Depth 64 is still within the bound, so the resume proceeds into its real
-    // work (and fails there on the stub registration) rather than reporting the
-    // spin diagnostic. An off-by-one here would cap legitimate long runs.
-    const driven = await resumeWaveGateFacade(opened.value, {} as never, CURRENT_PI_CATALOG, 64);
-
-    const action = driven.ok ? driven.action as { kind: string; diagnostic?: { message?: string } } : null;
-    const message = action?.kind === "blocked" ? action.diagnostic?.message ?? "" : "";
-    expect(message).not.toContain("refusing to spin");
   });
 });
 

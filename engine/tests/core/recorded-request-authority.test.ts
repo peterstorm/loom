@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_POLICIES,
   LLM_PROFILE_IDS,
+  RECORDED_LLM_PROFILE_IDS,
   RETIRED_LLM_PROFILE_IDS,
   currentProfileBindings,
   piCatalogAsOf,
@@ -32,7 +33,7 @@ import { samePiBinding } from "../../src/core/orchestration-contract/roster";
 import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
-import { LOCAL_PI_BINDING, RETIRED_CLOUD_PI_BINDING } from "../fixtures/local-pi-binding";
+import { LOCAL_PI_BINDING, RECORDED_PI_VOCABULARY, RETIRED_CLOUD_PI_BINDING } from "../fixtures/local-pi-binding";
 
 /**
  * A request authority is issued against today's catalog and read back as
@@ -41,14 +42,9 @@ import { LOCAL_PI_BINDING, RETIRED_CLOUD_PI_BINDING } from "../fixtures/local-pi
  * while a binding its profile never issued stays a tamper refusal.
  */
 
-const RECORDED_IDS: readonly RecordedLlmProfileId[] = [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS];
 const LOCAL: PiBinding = LOCAL_PI_BINDING;
 const SOL: PiBinding = RETIRED_CLOUD_PI_BINDING;
 const PI_FIELDS = ["harness", "provider", "model", "thinking"] as const;
-
-/** Every Pi binding the vocabulary can record, across all profiles, keyed by its model pattern. */
-const VOCABULARY: readonly PiBinding[] = [...new Map(RECORDED_IDS.flatMap((id) => recordedProfileBindings(id).pi)
-  .map((binding) => [piModelPattern(binding), binding])).values()];
 
 const issuedBy = (profile: RecordedLlmProfileId, pi: PiBinding): boolean =>
   recordedProfileBindings(profile).pi.some((candidate) => samePiBinding(pi, candidate));
@@ -96,14 +92,14 @@ describe("stored request authority is history", () => {
   });
 
   it("admits a stored Pi binding exactly when its recorded profile has issued it", () => {
-    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...RECORDED_LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       const stored = parseStoredAgentRequestAuthority(request(profile, pi));
       expect(stored.ok, `${profile} ${piModelPattern(pi)}`).toBe(issuedBy(profile, pi));
     }));
   });
 
   it("refuses a stored binding its profile never issued once, against the whole recorded set", () => {
-    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...RECORDED_LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       fc.pre(!issuedBy(profile, pi));
       const violations = piViolations(parseStoredAgentRequestAuthority(request(profile, pi)));
       expect(violations).toHaveLength(1);
@@ -134,7 +130,7 @@ describe("issued request authority is today's catalog", () => {
   });
 
   it("admits at issuance exactly the profile's current catalog lowering", () => {
-    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...RECORDED_PI_VOCABULARY), (policy, pi) => {
       const current = currentProfileBindings(policy.profile).pi;
       const issued = parseAgentRequestAuthority(request(policy.profile, pi, policy.agent));
       expect(issued.ok, `${policy.agent} ${piModelPattern(pi)}`).toBe(samePiBinding(pi, current));
@@ -142,7 +138,7 @@ describe("issued request authority is today's catalog", () => {
   });
 
   it("names exactly the differing fields of a binding refused at issuance", () => {
-    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...RECORDED_PI_VOCABULARY), (policy, pi) => {
       const current = currentProfileBindings(policy.profile).pi;
       const differing = PI_FIELDS.filter((key) => pi[key] !== current[key]).map((key) => `harnessBinding.pi.${key}`);
       const fields = piViolations(parseAgentRequestAuthority(request(policy.profile, pi, policy.agent))).map(({ field }) => field);
@@ -250,7 +246,7 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
     parseAgentRequestAuthority(request(profile, pi as PiBinding, roleIssuing(profile)));
 
   it("admits a recorded binding exactly when the recorded profile has issued it, returning that binding", () => {
-    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...RECORDED_LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       const admitted = stored(profile, { ...pi });
       expect(admitted.ok, `${profile} ${piModelPattern(pi)}`).toBe(issuedBy(profile, pi));
       if (admitted.ok) expect(admitted.value.harnessBinding.pi).toEqual(pi);
@@ -259,7 +255,7 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
   });
 
   it("admits at issuance only the catalog profile's current binding, naming each differing field", () => {
-    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       const current = currentProfileBindings(profile).pi;
       const admitted = issued(profile, { ...pi });
       expect(piViolations(admitted).map(({ field }) => field))
@@ -269,7 +265,7 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
   });
 
   it("admits at issuance a subset of what the same profile admits as history", () => {
-    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       fc.pre(piViolations(issued(profile, pi)).length === 0);
       expect(stored(profile, pi).ok).toBe(true);
     }));
@@ -279,7 +275,7 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
     const shapes = fc.oneof(
       fc.constant(undefined), fc.constant(null), fc.string(), fc.integer(), fc.array(fc.string()),
       fc.dictionary(fc.string(), fc.string()),
-      fc.constantFrom(...VOCABULARY).map((pi) => ({ ...pi, extra: true })),
+      fc.constantFrom(...RECORDED_PI_VOCABULARY).map((pi) => ({ ...pi, extra: true })),
     );
     const origins = fc.constantFrom(issued, stored);
     fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), origins, shapes, (profile, parse, raw) => {
@@ -323,7 +319,7 @@ describe("the catalog mints a request from its identity alone", () => {
   });
 
   it("mints under a replayed catalog exactly the binding it lowers each role's profile to, which history admits (property)", () => {
-    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, replayedTo) => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...RECORDED_PI_VOCABULARY), (policy, replayedTo) => {
       const catalog = piCatalogAsOf({ [policy.profile]: replayedTo });
       fc.pre(catalog.ok);
       if (!catalog.ok) return;

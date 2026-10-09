@@ -47,7 +47,7 @@ export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
 export const RETIRED_LLM_PROFILE_IDS = ["qualified-local-review"] as const;
 export type RetiredLlmProfileId = (typeof RETIRED_LLM_PROFILE_IDS)[number];
 /** Every profile id a stored request authority may record: the catalog's, then the retired. */
-const RECORDED_LLM_PROFILE_IDS = Object.freeze([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as const);
+export const RECORDED_LLM_PROFILE_IDS = Object.freeze([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as const);
 export type RecordedLlmProfileId = (typeof RECORDED_LLM_PROFILE_IDS)[number];
 
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
