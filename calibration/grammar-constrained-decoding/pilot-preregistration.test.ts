@@ -1,7 +1,17 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
-import { buildPairSchedule, parsePreregistration, type Preregistration } from "./pilot-preregistration";
-import { fixtureBytes, pilot2PreregBytes, preregBytes, prereg as retainedPrereg, testPreregistration } from "./pilot-test-fixtures";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { buildPairSchedule, parsePreregistration, type Preregistration, type ReleasePolicy } from "./pilot-preregistration";
+import {
+  fixtureBytes,
+  HERE,
+  PILOT_2_PREREGISTRATION,
+  pilot2PreregBytes,
+  preregBytes,
+  prereg as retainedPrereg,
+  testPreregistration,
+} from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest } from "./pilot-vocabulary";
 
 describe("preregistration (retained before any window)", () => {
@@ -16,6 +26,21 @@ describe("preregistration (retained before any window)", () => {
 
   it("pins the exact workload fixture bytes by content address", () => {
     expect(retainedPrereg.workloadFixturesDigest).toBe(contentDigest(fixtureBytes));
+  });
+
+  it("pins each retained preregistration's SHA-256, and the README states the same digest", () => {
+    const readme = readFileSync(join(HERE, "README.md"), "utf-8");
+    const statedDigest = (file: string): readonly string[] => readme.split("\n")
+      .filter((line) => line.startsWith(`| \`${file}\` |`))
+      .flatMap((line) => line.match(/\b[0-9a-f]{64}\b/g) ?? []);
+    const RETAINED = [
+      { file: "preregistration.json", bytes: preregBytes, digest: "4f00b74ff732f779da9e4421a034ce1f8fc4045aee51dd8c249293447458f7b9" },
+      { file: PILOT_2_PREREGISTRATION, bytes: pilot2PreregBytes, digest: "3448a9f34eb21d43e3c8a632788350fa788e3eadb1c8da70b23b620e382ef75e" },
+    ] as const;
+    for (const { file, bytes, digest } of RETAINED) {
+      expect(contentDigest(bytes), file).toBe(digest);
+      expect(statedDigest(file), `README row for ${file}`).toEqual([digest]);
+    }
   });
 
   it("refuses preregistrations that loosen the spec or under-size a cell", () => {
@@ -115,6 +140,15 @@ describe("release policy (fixed by the preregistration, before any window)", () 
     expect(parsedPolicy({ ...pilot1(), releasePolicy: { kind: "per-route-engine-authoritative" } })).toBeNull();
     expect(parsedPolicy({ ...pilot1(), releasePolicy: { kind: "capable-route-required" } })).toBeNull();
     expect(parsedPolicy({ ...pilot1(), schemaVersion: 3 })).toBeNull();
+  });
+
+  it("types a schemaVersion 1 preregistration as carrying only capable-route-required", () => {
+    expectTypeOf<Extract<Preregistration, { schemaVersion: 1 }>["releasePolicy"]>().toEqualTypeOf<Readonly<{ kind: "capable-route-required" }>>();
+    expectTypeOf<Extract<Preregistration, { schemaVersion: 2 }>["releasePolicy"]>().toEqualTypeOf<ReleasePolicy>();
+    if (retainedPrereg.schemaVersion !== 1) throw new Error("the retained pilot-1 preregistration is schemaVersion 1");
+    // @ts-expect-error — a schemaVersion 1 preregistration cannot carry the per-route policy.
+    const forged: Preregistration = { ...retainedPrereg, releasePolicy: { kind: "per-route-engine-authoritative" } };
+    expect(forged.schemaVersion).toBe(1);
   });
 
   it("admits a policy exactly when the version allows it (property)", () => {

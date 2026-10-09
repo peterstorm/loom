@@ -1,7 +1,7 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { match } from "ts-pattern";
-import { evaluatePilot, type CellOutcome, type PassedCellEvidence, type PilotEvaluation } from "./pilot-core";
+import { evaluatePilot, type CellOutcome, type MeasuredCell, type PassedCellEvidence, type PilotEvaluation } from "./pilot-core";
 import type { SampleObservation } from "./pilot-observation";
 import type { PreflightDecision } from "./pilot-preflight";
 import { buildPairSchedule, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
@@ -88,6 +88,13 @@ const NO_CAPABLE_ROUTE = {
   detail: "no preregistered cell is qualified constrained-emission on the intended deployment route; " +
     "AD-11: without a qualified capable route the constrained feature cannot be declared measured/done",
 };
+
+/** The kinds of every missing measurement a decision records, blocked or not. */
+const missingKinds = (result: PilotEvaluation): readonly string[] => match(result.decision)
+  .with({ kind: "incomplete-missing-measurement" }, ({ missing }) => missing.map((entry) => entry.kind))
+  .with({ kind: "blocked-guardrail-violated" }, ({ alsoMissing }) => alsoMissing.map((entry) => entry.kind))
+  .with({ kind: "done-allowed" }, () => [])
+  .exhaustive();
 
 // ---------------------------------------------------------------------------
 
@@ -397,11 +404,6 @@ describe("decision soundness (properties)", () => {
 
 describe("per-route release policy (pilot-2: unconstrained emission, engine-authoritative)", () => {
   const perRoute = (options: Parameters<typeof testPreregistration>[0] = {}) => testPreregistration({ ...options, perRoute: true });
-  const missingKinds = (result: PilotEvaluation): readonly string[] => match(result.decision)
-    .with({ kind: "incomplete-missing-measurement" }, ({ missing }) => missing.map((entry) => entry.kind))
-    .with({ kind: "blocked-guardrail-violated" }, ({ alsoMissing }) => alsoMissing.map((entry) => entry.kind))
-    .with({ kind: "done-allowed" }, () => [])
-    .exhaustive();
 
   it("releases a complete, all-passing unconstrained window as unconstrained-engine-authoritative, AS-004 not applicable", () => {
     const prereg = perRoute();
@@ -496,16 +498,37 @@ describe("per-route release policy (pilot-2: unconstrained emission, engine-auth
     const unresolved: PassedCellEvidence = { ...released, guardrails: { ...released.guardrails, "latency-p95": inconclusive } };
     expect([forged.cell, unresolved.cell]).toEqual([released.cell, released.cell]);
   });
+
+  it("types a measured cell's AS-004 verdict by its qualification, so a passing cell cannot mismatch its release class", () => {
+    type As004Of<K extends MeasuredCell["qualification"]["kind"]> =
+      Extract<MeasuredCell, { qualification: { kind: K } }>["guardrails"]["provider-structural-retries"]["verdict"];
+    expectTypeOf<As004Of<"constrained-emission">>().toEqualTypeOf<"pass" | "violated">();
+    expectTypeOf<As004Of<"unconstrained-emission">>().toEqualTypeOf<"not-applicable">();
+    expectTypeOf<Extract<PassedCellEvidence, { releaseClass: "constrained" }>["guardrails"]["provider-structural-retries"]["verdict"]>().toEqualTypeOf<"pass">();
+    expectTypeOf<Extract<PassedCellEvidence, { releaseClass: "unconstrained-engine-authoritative" }>["guardrails"]["provider-structural-retries"]["verdict"]>()
+      .toEqualTypeOf<"not-applicable">();
+
+    const prereg = perRoute({ constrained: true, unconstrained: "judge-verdict/v1" });
+    const { cells } = evaluate(prereg, fullWindow(prereg, matchedArms));
+    expect(measured(cells, "judge-verdict/v1").guardrails["provider-structural-retries"].verdict).toBe("not-applicable");
+    expect(measured(cells, "reviewer-payload/v2").guardrails["provider-structural-retries"].verdict).toBe("pass");
+  });
 });
 
 describe("release policy soundness (properties)", () => {
-  /** A window with an arbitrary emission slowdown and arbitrary emission timeouts on one cell. */
-  const perturbed = (prereg: Preregistration, slowdown: number, emissionTimeouts: number) => {
+  /** A window with an arbitrary emission slowdown and arbitrary emission timeouts on one cell,
+   *  optionally with one provider-structural retry on another cell's emission arm. */
+  const perturbed = (prereg: Preregistration, slowdown: number, emissionTimeouts: number, structuralRetryOn: CellKey | null = null) => {
     let timeouts = 0;
+    let retried = false;
     return evaluate(prereg, fullWindow(prereg, (pair, arm) => {
       if (arm === "emission-enabled" && pair.cell === "judge-verdict/v1" && timeouts < emissionTimeouts) {
         timeouts += 1;
         return { ms: 900_000, attempts: [{ outcome: { kind: "timeout", afterMs: 900_000 } }] };
+      }
+      if (arm === "emission-enabled" && pair.cell === structuralRetryOn && !retried) {
+        retried = true;
+        return { ms: 10_000 + pair.repeat * 50, attempts: [{ ...ACCEPT_EMISSION, toolErrors: [{ class: "harness-schema-validation" }] }] };
       }
       const base = 10_000 + pair.repeat * 50;
       return { ms: arm === "emission-enabled" ? base * slowdown : base, attempts: [arm === "emission-enabled" ? ACCEPT_EMISSION : ACCEPT_EXTRACTION] };
@@ -537,5 +560,31 @@ describe("release policy soundness (properties)", () => {
         expect(result.decision.measuredCells.every((cell) => cell.releaseClass === "unconstrained-engine-authoritative")).toBe(true);
       }
     }), { numRuns: 8 });
+  });
+
+  it("per-route, mixed matrix: AS-004 reads only its qualification's verdicts, and every passing cell is released in its class (no per-cell gap)", () => {
+    const prereg = testPreregistration({ perRoute: true, constrained: true, unconstrained: "judge-verdict/v1" });
+    const RELEASE_CLASS = { "constrained-emission": "constrained", "unconstrained-emission": "unconstrained-engine-authoritative" } as const;
+    const AS004_VERDICTS = { "constrained-emission": ["pass", "violated"], "unconstrained-emission": ["not-applicable"] } as const;
+    fc.assert(fc.property(
+      ...arbitraryWindow,
+      fc.constantFrom<CellKey | null>(null, "reviewer-payload/v2", "judge-verdict/v1"),
+      (slowdown, emissionTimeouts, structuralRetryOn) => {
+        const result = perturbed(prereg, slowdown, emissionTimeouts, structuralRetryOn);
+        const measuredCells = result.cells.flatMap((cell) => (cell.kind === "measured" ? [cell] : []));
+        expect(measuredCells.map((cell) => cell.cell)).toEqual(prereg.cells.map((cell) => cell.cell));
+        for (const cell of measuredCells) {
+          expect(AS004_VERDICTS[cell.qualification.kind]).toContain(cell.guardrails["provider-structural-retries"].verdict);
+        }
+        expect(missingKinds(result)).not.toContain("no-released-cell");
+        expect(missingKinds(result)).not.toContain("no-qualified-capable-route");
+        const passing = measuredCells.filter((cell) => verdictsOf({ ...result, cells: [cell] }).every((verdict) => verdict === "pass" || verdict === "not-applicable"));
+        expect(result.decision.kind === "done-allowed").toBe(passing.length === measuredCells.length);
+        if (result.decision.kind === "done-allowed") {
+          expect(result.decision.measuredCells.map((cell) => [cell.cell, cell.releaseClass]))
+            .toEqual(passing.map((cell) => [cell.cell, RELEASE_CLASS[cell.qualification.kind]]));
+        }
+      },
+    ), { numRuns: 12 });
   });
 });
