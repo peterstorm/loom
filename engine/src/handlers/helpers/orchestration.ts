@@ -79,16 +79,17 @@ import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { homedir } from "node:os";
-import { resolveEmissionEnvironment } from "../../utils/emission-environment";
+import { readPiRouteGateFacts, resolveEmissionEnvironment } from "../../utils/emission-environment";
 import { httpRouteProbe, observeRouteReachability, type RouteProbePort } from "../../utils/route-endpoint";
 import { reportUnverifiedRoutes } from "../../core/route-reachability";
 import {
   gateEmission,
-  parseSpawnRequestAuthority,
   type EmissionEnvironment,
   type EmissionParent,
   type EmissionVerdict,
+  type PiRouteGateFacts,
 } from "../../core/spawn-emission-gate";
+import { parseSpawnRequestAuthority } from "../../core/spawn-request-authority";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -1047,26 +1048,43 @@ async function publishCompletionBinding(
     : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
 }
 
-/**
- * What one façade invocation emits with: the environment resolved once at
- * the composition root (`processEmission`), and the route probe port. Tests
- * construct both — a resolved environment and a fake probe — instead of
- * mutating the process environment.
- */
-export type Emission = Readonly<{ environment: EmissionEnvironment; probe: RouteProbePort }>;
+/** Where an emitted action is printed (`stdout`) and its route events reported (`stderr`). */
+export type EmissionOutput = Readonly<{ stdout: (text: string) => void; stderr: (text: string) => void }>;
 
-/** The production emission: this process's environment, resolved once, and the HTTP route probe. */
+/**
+ * What one façade invocation emits with: the environment resolved at the
+ * composition root (`processEmission`), the reader of a Pi parent's
+ * route-gate facts — called only when the gate asks for them, i.e. for a Pi
+ * spawn batch whose requests parse — the route probe port and the output
+ * channel. Tests construct each — a resolved environment, a fact reader, a
+ * fake probe and a recording output — instead of mutating the process
+ * environment or its streams.
+ */
+export type Emission = Readonly<{
+  environment: EmissionEnvironment;
+  routeGateFacts: () => PiRouteGateFacts;
+  probe: RouteProbePort;
+  output: EmissionOutput;
+}>;
+
+/** The production emission: this process's environment and streams, its Pi route-gate facts read on demand, and the HTTP route probe. */
 function processEmission(): Emission {
   return Object.freeze({
-    environment: resolveEmissionEnvironment({ env: process.env, home: homedir(), bindingDir: SUBAGENT_DIR }),
+    environment: resolveEmissionEnvironment({ env: process.env, bindingDir: SUBAGENT_DIR }),
+    routeGateFacts: () => readPiRouteGateFacts({ env: process.env, home: homedir() }),
     probe: httpRouteProbe(),
+    output: Object.freeze({
+      stdout: (text: string) => { process.stdout.write(text); },
+      stderr: (text: string) => { process.stderr.write(text); },
+    }),
   });
 }
 
 /**
- * Gate one action through the pure emission gate (`gateEmission`), observing
- * the launch routes it names when it asks to: the only I/O here is the
- * `models.json` read and the probe.
+ * Gate one action through the pure emission gate (`gateEmission`), reading
+ * the route-gate facts and observing the launch routes only when it asks to:
+ * the only I/O here is the `model-routing.json` and `models.json` reads and
+ * the probe.
  */
 async function gateEmittedAction(action: FacadeAction, emission: Emission): Promise<EmissionVerdict> {
   const step = gateEmission(
@@ -1075,9 +1093,11 @@ async function gateEmittedAction(action: FacadeAction, emission: Emission): Prom
       : { kind: "other" },
     emission.environment.parent,
   );
-  return step.kind === "decided"
-    ? step.verdict
-    : step.decide(await observeRouteReachability(step.launch, step.agentDir, emission.probe));
+  if (step.kind === "decided") return step.verdict;
+  const routed = step.gate(emission.routeGateFacts());
+  return routed.kind === "decided"
+    ? routed.verdict
+    : routed.decide(await observeRouteReachability(routed.launch, routed.agentDir, emission.probe));
 }
 
 /**
@@ -1090,7 +1110,7 @@ async function gateEmittedAction(action: FacadeAction, emission: Emission): Prom
 export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, emission: Emission): Promise<HookResult> {
   const verdict = await gateEmittedAction(action, emission);
   if (verdict.kind === "refuse") return { kind: "error", message: verdict.message };
-  for (const event of verdict.events) process.stderr.write(`${JSON.stringify(event)}\n`);
+  for (const event of verdict.events) emission.output.stderr(`${JSON.stringify(event)}\n`);
   const { bindingDir, parent } = emission.environment;
   if (parent.harness !== "unannounced") {
     const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(bindingDir, parent, handle, action)
@@ -1098,7 +1118,7 @@ export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, 
       : null;
     if (failure !== null) return failure;
   }
-  process.stdout.write(`${JSON.stringify(reportUnverifiedRoutes(action, verdict.unverified), null, 2)}\n`);
+  emission.output.stdout(`${JSON.stringify(reportUnverifiedRoutes(action, verdict.unverified), null, 2)}\n`);
   return { kind: "allow" };
 }
 
