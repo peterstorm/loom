@@ -13,6 +13,7 @@ import {
   type ExactRoster,
   type MintedAgentRequestAuthority,
   type MintedAgentRosterSlot,
+  type SlotId,
 } from "../../src/core/orchestration-contract";
 
 /**
@@ -106,6 +107,14 @@ describe("issueExactRoster", () => {
     expect(repeated.ok).toBe(false);
     if (!repeated.ok) expect(repeated.error.violations.map(({ kind }) => kind)).toContain("duplicate-slot");
     expect(repeated).toEqual(parseExactRoster([slot, slot]));
+  });
+
+  it("re-checks each slot's pairing at run time: a minted slot relabelled past the type is refused as parseExactRoster refuses it", () => {
+    const slot = mintedSlot("code-reviewer", 4);
+    const relabelled: MintedAgentRosterSlot = { ...slot, slotId: "slot:relabelled" as SlotId };
+    const issued = issueExactRoster([relabelled]);
+    expect(issued).toMatchObject({ ok: false, error: { violations: [{ kind: "attempt-pair-mismatch", slotId: slot.slotId, field: "slotId" }] } });
+    expect(issued).toEqual(parseExactRoster([relabelled]));
   });
 });
 

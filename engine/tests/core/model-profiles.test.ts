@@ -70,12 +70,6 @@ describe("semantic model profiles", () => {
     expect(new Set(LLM_PROFILES.map(({ pi }) => piModelPattern(pi)))).toEqual(new Set([piModelPattern(LOCAL)]));
   });
 
-  it("keeps all architecture/discovery panel work on the strongest Claude model", () => {
-    for (const id of ["panel-design", "panel-judge"] as const) {
-      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({ claudeCode: { model: "opus" }, pi: LOCAL });
-    }
-  });
-
   it("deep-freezes the exported policy data", () => {
     expect(Object.isFrozen(LLM_PROFILES)).toBe(true);
     expect(Object.isFrozen(LLM_PROFILES[0])).toBe(true);

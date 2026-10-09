@@ -100,8 +100,10 @@ export type PreparedVerifierRequest = Readonly<{
  * and freezes, whether it was minted now or read back from its record: no
  * consumer branches on which, and a recovered panel is frozen exactly as an
  * issued one is (the standalone evidence replay freezes a receipt-recorded
- * panel), so the provenance is not part of the result. The minted proof stays
- * at the issuing seam (`issueRefutationPanelAuthority`).
+ * panel), so the provenance is not part of the result — nor of
+ * `RefutationPanelAuthority`. The minted proof is enforced at the issuing seam
+ * (`issueRefutationPanelAuthority`): its input must be minted slots, and each
+ * is re-checked against today's catalog at run time.
  */
 export type RefutationVerifierPreparation = Readonly<{
   refutationAuthority: RefutationPanelAuthority;
