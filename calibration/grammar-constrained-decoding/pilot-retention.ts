@@ -6,7 +6,8 @@
  *
  * - Pure derivations over bytes and text, each returning a Result:
  *   preregistration and assessment parsing, the preregistration-drift check,
- *   the observation log, the assessment
+ *   the retained ending against its preregistration's schedule, the
+ *   observation log, the assessment
  *   retention decision (identical bytes are a no-op, different bytes are
  *   refused — never overwritten) and the decision record.
  * - `recordWindow` and `decideRetainedWindow` sequence them over the store:
@@ -32,11 +33,12 @@ import { evaluatePilot, type PilotEvaluation, type ReleaseDecision } from "./pil
 import type { ArmDispatch } from "./pilot-dispatch";
 import { parseSampleObservation, type SampleObservation } from "./pilot-observation";
 import { decidePreflight, type PreflightDecision } from "./pilot-preflight";
-import { parsePreregistration, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
+import { buildPairSchedule, parsePreregistration, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
 import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type QualityAssessment } from "./pilot-quality";
 import { rubricAssessment } from "./pilot-rubric";
 import { contentDigest, jsonText, parseJsonText } from "./pilot-vocabulary";
 import { blind, blindedPacket, dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
+import { checkEndsSchedule } from "./pilot-window-ending";
 import {
   closeWindowRecord,
   DISPATCHED,
@@ -117,6 +119,13 @@ export function checkPreregistrationUnchanged(window: RetainedWindow, loaded: Lo
   return loaded.ref.digest === window.preregistration.digest
     ? ok(null)
     : err(`preregistration ${window.preregistration.path} changed after window ${windowLabel} was recorded (digest ${loaded.ref.digest} ≠ ${window.preregistration.digest})`);
+}
+
+/** A retained dispatched window's ending ends the schedule of the preregistration it recorded. */
+export function checkEndingOnSchedule(window: RetainedWindow, loaded: LoadedPreregistration, windowLabel: string): Result<null, string> {
+  if (window.ending.kind !== "dispatched") return ok(null);
+  const onSchedule = checkEndsSchedule(window.ending.ending, buildPairSchedule(loaded.prereg).length);
+  return onSchedule.ok ? onSchedule : err(`window ${windowLabel} ${onSchedule.error}`);
 }
 
 /** `observations.jsonl`: one sample per line; a missing log is a window that observed nothing. */
@@ -418,7 +427,8 @@ export type RetainedWindowDecision = Readonly<{
 /** Offline `--decide`: re-evaluate a retained window from its retained
  *  evidence. The preflight is RE-DERIVED from the retained facts by the same
  *  pure decision, never trusted as a stored verdict, and only against the
- *  exact preregistration the window recorded. */
+ *  exact preregistration the window recorded, whose schedule its recorded
+ *  ending must end. */
 export function decideRetainedWindow(input: RetainedWindowDecision): Result<DecisionOutcome, string> {
   const { store } = input;
   const window = parseRetainedWindow(store.read(WINDOW_FILES.window) ?? "", store.locate(WINDOW_FILES.window));
@@ -427,6 +437,8 @@ export function decideRetainedWindow(input: RetainedWindowDecision): Result<Deci
   if (!loaded.ok) return loaded;
   const unchanged = checkPreregistrationUnchanged(window.value, loaded.value, store.locate(""));
   if (!unchanged.ok) return unchanged;
+  const onSchedule = checkEndingOnSchedule(window.value, loaded.value, store.locate(""));
+  if (!onSchedule.ok) return onSchedule;
   const observations = parseObservationLog(store.read(WINDOW_FILES.observations));
   if (!observations.ok) return observations;
   const key = parseRetainedKey(store.read(WINDOW_FILES.key), store.locate(WINDOW_FILES.key));

@@ -3,28 +3,33 @@
  * actions it gates, that a refusal publishes nothing, that it probes the
  * route the child will actually launch on, and that every input it cannot
  * read refuses rather than passing. The route probe port is substituted by
- * a recording fake keyed by provider, and the emission environment is
- * resolved from a constructed environment record — never the process's;
- * everything else — the agent directory's `models.json` and
- * `model-routing.json`, the session binding registry — is real files in a
- * scratch directory.
+ * a recording fake keyed by provider and the output channel by a recording
+ * fake; the emission environment and the route-gate facts are resolved from a
+ * constructed environment record — never the process's — through a reader
+ * that counts its reads. Everything else — the agent directory's
+ * `models.json` and `model-routing.json`, the session binding registry — is
+ * real files in a scratch directory. The last suite drives the façade's
+ * entry point (`orchestrationHandler`) over the same recording output, to
+ * show every run-advancing operation prints through that one seam.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  parseAgentRequestAuthority,
   parseArtifactRef,
   parseFixedArtifactSlot,
   parseStoredAgentRequestAuthority,
   type AgentRequestAuthority,
 } from "../../../src/core/orchestration-contract";
 import { ROUTE_GATE_VARIABLE, type RouteProbe } from "../../../src/core/route-reachability";
-import { emitRunAction, type Emission } from "../../../src/handlers/helpers/orchestration";
+import { emitRunAction, orchestrationHandler, type Emission } from "../../../src/handlers/helpers/orchestration";
+import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
 import type { FacadeAction } from "../../../src/handlers/helpers/programs/program-result";
-import { resolveEmissionEnvironment } from "../../../src/utils/emission-environment";
+import { readPiRouteGateFacts, resolveEmissionEnvironment } from "../../../src/utils/emission-environment";
 import type { RouteProbePort } from "../../../src/utils/route-endpoint";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { FIXTURE_CLAUDE_CODE_SESSION_ID, parentAnnouncement } from "../../fixtures/facade-parent";
@@ -48,6 +53,8 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 let counter = 0;
 let stdout: string[];
 let stderr: string[];
+/** How many times this case's emission read its Pi route-gate facts. */
+let factReads: number;
 let handle: RunDirHandle;
 let agentDir: string;
 let home: string;
@@ -76,10 +83,8 @@ beforeEach(() => {
   handle = created.value;
   stdout = [];
   stderr = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => { stdout.push(String(chunk)); return true; });
-  vi.spyOn(process.stderr, "write").mockImplementation((chunk) => { stderr.push(String(chunk)); return true; });
+  factReads = 0;
 });
-afterEach(() => vi.restoreAllMocks());
 
 const sessionId = (): string => `019ff290-ffee-7e86-8ed0-${String(counter).padStart(12, "0")}`;
 
@@ -105,9 +110,16 @@ function gateMode(mode: string): void {
   parentEnv = { ...parentEnv, [ROUTE_GATE_VARIABLE]: mode };
 }
 
-/** The emission this case's parent resolves to at the composition root, with `probe` as its route probe. */
-const emission = (probe: RouteProbePort): Emission =>
-  ({ environment: resolveEmissionEnvironment({ env: parentEnv, home, bindingDir }), probe });
+/** The emission this case's parent resolves to at the composition root, with `probe` as its route probe and a recording output. */
+const emission = (probe: RouteProbePort): Emission => ({
+  environment: resolveEmissionEnvironment({ env: parentEnv, bindingDir }),
+  routeGateFacts: () => {
+    factReads += 1;
+    return readPiRouteGateFacts({ env: parentEnv, home });
+  },
+  probe,
+  output: { stdout: (text) => { stdout.push(text); }, stderr: (text) => { stderr.push(text); } },
+});
 
 /** A recording probe fake: each provider answers as configured; unlisted providers refuse. */
 function probeFake(answers: Readonly<Record<string, RouteProbe>>): Readonly<{ probe: RouteProbePort; probed: readonly string[] }> {
@@ -209,6 +221,7 @@ describe("emitRunAction: Pi route gate wiring", () => {
     expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: "spawn-batch", runId: RUN_ID });
     expect(JSON.parse(stdout.join(""))).not.toHaveProperty("unverifiedRoutes");
     expect(stderr.join("")).not.toContain("loom-route-unverified");
+    expect(factReads).toBe(1);
   });
 
   it("refuses a batch recorded on a retired route with the restart remedy, without probing it", async () => {
@@ -232,11 +245,12 @@ describe("emitRunAction: Pi route gate wiring", () => {
     expect(await emitRunAction(handle, spawnBatch([authority]), emission(probe))).toEqual({ kind: "allow" });
 
     expect(probed).toEqual([]);
+    expect(factReads).toBe(0);
     expect(readSessionRunBindings(bindingDir, id, "claude-code"))
       .toMatchObject({ ok: true, value: [{ runId: RUN_ID, requestIds: [authority.requestId] }] });
   });
 
-  it("leaves every non-spawn action under a Pi parent untouched", async () => {
+  it("leaves every non-spawn action under a Pi parent untouched, never reading its route-gate facts", async () => {
     piParent();
     const { probe, probed } = probeFake({});
     const { runId } = storedAuthority();
@@ -252,6 +266,7 @@ describe("emitRunAction: Pi route gate wiring", () => {
       expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: action.kind });
     }
     expect(probed).toEqual([]);
+    expect(factReads).toBe(0);
   });
 });
 
@@ -262,6 +277,7 @@ describe("emitRunAction: the gate refuses every input it cannot read", () => {
     const batch = spawnBatch([unparseable(storedAuthority())]);
 
     expectRefusedUntouched(await emitRunAction(handle, batch, emission(probe)), id, probed, "Pi orchestration spawn request 0");
+    expect(factReads).toBe(0);
   });
 
   it("refuses a batch with one unparseable authority among checkable ones, naming it, before probing any route", async () => {
@@ -270,6 +286,7 @@ describe("emitRunAction: the gate refuses every input it cannot read", () => {
     const batch = spawnBatch([storedAuthority(), unparseable(storedAuthority({ requestId: "request:reviewer:broken" }))]);
 
     expectRefusedUntouched(await emitRunAction(handle, batch, emission(probe)), id, probed, "Pi orchestration spawn request 1");
+    expect(factReads).toBe(0);
   });
 
   it("refuses when model-routing.json is malformed, since the child may launch elsewhere than the declared route", async () => {
@@ -419,12 +436,103 @@ describe("emitRunAction: a Pi parent is gated whatever session it announced", ()
     expect(stdout).toEqual([]);
   });
 
-  it("emits ungated, publishing nothing, for a process that announces no parent harness", async () => {
-    const { probe, probed } = probeFake({});
+  it("reports no unverified-route event for a batch the gate admitted but publication refused", async () => {
+    piParent(null, null);
+    const { probe, probed } = probeFake({ [LOCAL.provider]: AUTH_REFUSED });
 
-    expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), emission(probe))).toEqual({ kind: "allow" });
+    const result = await emitRunAction(handle, spawnBatch([storedAuthority()]), emission(probe));
+
+    expect(result).toEqual({ kind: "error", message: "Pi orchestration spawn publication requires PI_SESSION_ID" });
+    expect(probed).toEqual([LOCAL.provider]);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual([]);
+  });
+
+  it("emits ungated and unparsed, publishing nothing, for a process that announces no parent harness", async () => {
+    const { probe, probed } = probeFake({});
+    const batch = spawnBatch([unparseable(storedAuthority())]);
+
+    expect(await emitRunAction(handle, batch, emission(probe))).toEqual({ kind: "allow" });
 
     expect(probed).toEqual([]);
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: "spawn-batch", runId: RUN_ID });
+    expect(factReads).toBe(0);
+    expect(JSON.parse(stdout.join(""))).toEqual(JSON.parse(JSON.stringify(batch)));
+  });
+});
+
+describe("emitRunAction: one parse of the batch serves the gate and the session binding", () => {
+  it("refuses a Claude Code batch's unparseable request at publication, labelled by its harness", async () => {
+    const id = claudeCodeParent();
+    const { probe } = probeFake({});
+
+    const result = await emitRunAction(handle, spawnBatch([storedAuthority(), unparseable(storedAuthority())]), emission(probe));
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringMatching(/^Claude Code orchestration spawn request 1: /) });
+    expect(stdout).toEqual([]);
+    // The fixture Claude Code session is shared across cases, so only this case's run must be absent from it.
+    const bound = readSessionRunBindings(bindingDir, id, "claude-code");
+    if (!bound.ok) throw new Error(bound.message);
+    expect(bound.value.map(({ runDirectory }) => runDirectory)).not.toContain(handle.runDirectory);
+  });
+
+  it("still names a request of another run before a later request that did not parse", async () => {
+    claudeCodeParent();
+    const { probe } = probeFake({});
+    const foreign = parseStoredAgentRequestAuthority(agentRequestAuthority("run.elsewhere"));
+    if (!foreign.ok) throw new Error("the foreign fixture must parse");
+
+    const result = await emitRunAction(handle, spawnBatch([foreign.value, unparseable(storedAuthority())]), emission(probe));
+
+    expect(result).toEqual({ kind: "error", message: "Claude Code orchestration spawn request 0 belongs to another run" });
+  });
+});
+
+describe("orchestrationHandler: every run-advancing operation prints through the Emission output", () => {
+  const silencedProcessStdout = () => vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  let processStdout: ReturnType<typeof silencedProcessStdout>;
+  beforeEach(() => {
+    processStdout = silencedProcessStdout();
+  });
+  afterEach(() => processStdout.mockRestore());
+
+  const run = (operation: string, flags: readonly string[], stdin = "") =>
+    orchestrationHandler(() => emission(probeFake({}).probe))(
+      stdin, [operation, "--runs-root", dirname(handle.runDirectory), "--run", handle.runDirectory, ...flags]);
+  const printed = (): unknown => JSON.parse(stdout.join(""));
+
+  it("prints a recorded decision of a run with no registered program", async () => {
+    expect(await run("decide", ["--request", "advisory-1"], JSON.stringify({ kind: "approve" }))).toEqual({ kind: "allow" });
+
+    expect(printed()).toEqual({ kind: "decision-recorded", decisionId: "advisory-1" });
+    expect(processStdout).not.toHaveBeenCalled();
+  });
+
+  it("prints a historical run's resume receipt", async () => {
+    expect(await run("resume", [])).toEqual({ kind: "allow" });
+
+    expect(printed()).toEqual({ kind: "resumed", runId: RUN_ID, runDirectory: handle.runDirectory });
+    expect(processStdout).not.toHaveBeenCalled();
+  });
+
+  it("prints a captured submission, then its idempotent repeat", async () => {
+    const request = agentRequestAuthority(RUN_ID);
+    const section = encodeByteSection("historical-capture-fixture", "Unregistered historical raw capture");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({ requestId: request.requestId, role: request.role,
+      requiredSkill: request.requiredSkill ?? "none", outputContract: "historical raw capture fixture",
+      fixedContext: [section.value], variableContext: [] });
+    if (!packet.ok) throw new Error(packet.error.message);
+    expect((await handle.publishContext(packet.value)).ok).toBe(true);
+    const reserved = parseAgentRequestAuthority({ ...request, contextDigest: packet.value.digest });
+    if (!reserved.ok) throw new Error("the fixture authority must parse");
+    expect((await handle.reserveRequest(reserved.value)).ok).toBe(true);
+    const submit = () => run("submit", ["--request", request.requestId, "--slot", request.slotId, "--attempt", "1"], "reviewer bytes");
+
+    expect(await submit()).toEqual({ kind: "allow" });
+    expect(printed()).toMatchObject({ kind: "captured", requestId: request.requestId });
+    stdout.length = 0;
+    expect(await submit()).toEqual({ kind: "allow" });
+    expect(printed()).toEqual({ kind: "already-captured", requestId: request.requestId, slotId: request.slotId, attempt: 1 });
+    expect(processStdout).not.toHaveBeenCalled();
   });
 });

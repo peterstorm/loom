@@ -21,7 +21,12 @@ export type GitCapture = Readonly<{ stdout: Buffer; stderr: Buffer }>;
  * outcome whose diagnostic was dropped on the way:
  *
  * - `spawn-failed` — no child ran (missing executable, bad cwd, …): the
- *   spawn error's code and message.
+ *   spawn error's code and message. Neither runtime hands back a stream then.
+ * - `faulted` — a child ran, but the spawn reported an error other than a
+ *   timeout or an over-budget capture (Node's `spawnSync` reports a pipe
+ *   read/write fault or a failed kill this way), or reported no ending at
+ *   all: the error's code and message, the status or signal the child ended
+ *   on when one was reported, and whatever it wrote before the fault.
  * - `timed-out` — the child outlived the run's timeout and was killed.
  * - `over-budget` — a stream outgrew the run's `maxBuffer`; the child was
  *   killed and its captures are truncated.
@@ -31,6 +36,13 @@ export type GitCapture = Readonly<{ stdout: Buffer; stderr: Buffer }>;
  */
 export type GitSpawnOutcome =
   | Readonly<{ kind: "spawn-failed"; code: string | null; message: string }>
+  | GitCapture & Readonly<{
+    kind: "faulted";
+    code: string | null;
+    message: string;
+    status: number | null;
+    signal: NodeJS.Signals | null;
+  }>
   | GitCapture & Readonly<{ kind: "timed-out"; timeoutMs: number | null; signal: NodeJS.Signals | null }>
   | GitCapture & Readonly<{ kind: "over-budget"; maxBuffer: number }>
   | GitCapture & Readonly<{ kind: "signalled"; signal: NodeJS.Signals }>
@@ -54,26 +66,32 @@ export type RawGitSpawnResult = Readonly<{
   stderr?: Buffer | string | null;
 }>;
 
+const present = <T>(value: T | null | undefined): value is T => value !== null && value !== undefined;
+
 const captured = (stream: Buffer | string | null | undefined): Buffer =>
-  stream === null || stream === undefined ? Buffer.alloc(0) : Buffer.from(stream);
+  present(stream) ? Buffer.from(stream) : Buffer.alloc(0);
 
 /** Parse one raw spawn result into its closed outcome; `bounds` are what a
  *  timed-out or over-budget arm names. */
 export function parseGitSpawnResult(raw: RawGitSpawnResult, bounds: GitSpawnBounds): GitSpawnOutcome {
   const capture: GitCapture = Object.freeze({ stdout: captured(raw.stdout), stderr: captured(raw.stderr) });
   const signal = raw.signal ?? null;
+  const status = typeof raw.status === "number" ? raw.status : null;
   const error = raw.error ?? null;
   const code = error !== null && typeof error.code === "string" ? error.code : null;
   if (code === "ETIMEDOUT") return Object.freeze({ kind: "timed-out", timeoutMs: bounds.timeout ?? null, signal, ...capture });
   if (code === "ENOBUFS") return Object.freeze({ kind: "over-budget", maxBuffer: bounds.maxBuffer, ...capture });
-  if (error !== null) return Object.freeze({ kind: "spawn-failed", code, message: error.message });
-  if (signal !== null) return Object.freeze({ kind: "signalled", signal, ...capture });
-  if (typeof raw.status === "number") return Object.freeze({ kind: "exited", status: raw.status, ...capture });
-  return Object.freeze({
-    kind: "spawn-failed",
-    code: null,
-    message: "the spawn reported no exit status, no signal and no error",
-  });
+  if (error === null && signal !== null) return Object.freeze({ kind: "signalled", signal, ...capture });
+  if (error === null && status !== null) return Object.freeze({ kind: "exited", status, ...capture });
+  // A spawn error, or no ending reported at all: a fault when the result shows
+  // a child ran — a stream, a status or a signal, none of which either runtime
+  // hands back when no child started (Node: `output: null`; Bun: null
+  // streams, no status) — so what it wrote is kept.
+  const message = error === null ? "the spawn reported no exit status, no signal and no error" : error.message;
+  const childRan = present(raw.stdout) || present(raw.stderr) || status !== null || signal !== null;
+  return childRan
+    ? Object.freeze({ kind: "faulted", code, message, status, signal, ...capture })
+    : Object.freeze({ kind: "spawn-failed", code, message });
 }
 
 /** Whether the outcome is an exit its caller's status protocol accepts. */
@@ -82,8 +100,9 @@ export function gitExitedWith<S extends number>(outcome: GitSpawnOutcome, accept
 }
 
 /** The clean negative answer of a 0/1 status protocol (`check-ignore -q`,
- *  `rev-parse --verify --quiet`, `merge-base`): exit 1 with nothing on either
- *  stream. An exit 1 that wrote anything is an error, never a "no". */
+ *  `rev-parse --verify --quiet`, `merge-base`): exit 1 with both streams blank
+ *  (empty or whitespace only — each is read trimmed). An exit 1 that wrote any
+ *  other text is an error, never a "no". */
 export function gitCleanNegative(outcome: GitSpawnOutcome): outcome is GitExit<1> {
   return gitExitedWith(outcome, [1]) && gitStdoutText(outcome).trim() === "" && gitStderrText(outcome) === "";
 }
@@ -101,19 +120,27 @@ export type GitDiagnosis = Readonly<{ head: string; detail: string | null }>;
 
 const FATAL_EXIT_STATUS = 128;
 
-/** Whether the outcome is a FATAL exit whose stderr arrived empty. Git writes
- *  a diagnostic for every fatal exit (`die()` exits 128, usage errors 129), so
- *  this is a capture lost between the child and this process — never Git's
- *  own silence, and never an answer a caller may classify. */
-export function gitDiagnosticLost(outcome: GitSpawnOutcome): outcome is GitExit {
-  return outcome.kind === "exited" && outcome.status >= FATAL_EXIT_STATUS && gitStderrText(outcome) === "";
+/** Whether an exit is FATAL with a blank stderr. Git writes a diagnostic for
+ *  every fatal exit (`die()` exits 128, usage errors 129), so this is a
+ *  capture lost between the child and this process — never Git's own
+ *  silence, and never an answer a caller may classify. It reads an exit
+ *  rather than narrowing the outcome union: a `false` answer is still an
+ *  exit, only an ordinary one. */
+export function gitDiagnosticLost(exit: GitExit): boolean {
+  return exit.status >= FATAL_EXIT_STATUS && gitStderrText(exit) === "";
 }
 
-function silentExitDetail(outcome: GitExit): string {
-  const bytes = `stderr empty, stdout ${outcome.stdout.byteLength} bytes`;
-  return gitDiagnosticLost(outcome)
+function silentExitDetail(exit: GitExit): string {
+  const bytes = `stderr empty, stdout ${exit.stdout.byteLength} bytes`;
+  return gitDiagnosticLost(exit)
     ? `${bytes} — Git writes a diagnostic for every fatal exit, so the child's stderr was lost before it reached the engine`
     : bytes;
+}
+
+/** How a faulted child ended, as far as the spawn reported it. */
+function faultedEnding(faulted: Extract<GitSpawnOutcome, { kind: "faulted" }>): string {
+  if (faulted.status !== null) return `exited ${faulted.status}`;
+  return faulted.signal === null ? "ended" : `terminated on signal ${faulted.signal}`;
 }
 
 /** Render any outcome so a failure names its own cause. */
@@ -124,6 +151,10 @@ export function diagnoseGitOutcome(outcome: GitSpawnOutcome): GitDiagnosis {
   };
   return Object.freeze(match(outcome)
     .with({ kind: "spawn-failed" }, ({ message }) => ({ head: "could not start", detail: message }))
+    .with({ kind: "faulted" }, (faulted) => ({
+      head: `${faultedEnding(faulted)} after a spawn fault (${faulted.message})`,
+      detail: stderrOr(faulted, null),
+    }))
     .with({ kind: "timed-out" }, (timedOut) => ({
       head: timedOut.timeoutMs === null ? "timed out" : `timed out after ${timedOut.timeoutMs} ms`,
       detail: stderrOr(timedOut, null),

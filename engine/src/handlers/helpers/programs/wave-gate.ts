@@ -24,7 +24,15 @@ import type { TaskGraph } from '../../../types';
 import { waveSpecCheckDocumentsMatch } from '../../../core/wave-review-authority';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
-import { reportUncaughtWaveGateFailure, waveBlocked, waveResumeContext, type WavePhase } from './wave-gate-outcome';
+import {
+  NO_WAVE_REDERIVATIONS,
+  reportUncaughtWaveGateFailure,
+  spendWaveRederivation,
+  waveBlocked,
+  waveResumeContext,
+  type WavePhase,
+  type WaveRederivations,
+} from './wave-gate-outcome';
 import { driveWaveAdvisoryDecision } from './wave-advisory-decision';
 import { driveWaveRefutation } from './wave-refutation';
 import { reconcileCurrentReviewEvidence } from './wave-review-collection';
@@ -64,35 +72,36 @@ function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: Regist
 }
 
 /**
- * Upper bound on same-invocation re-derivations of the Wave Gate reducer.
- * Every legitimate recursion consumes durable progress (a captured retry
- * applied, an accepted spec-check retry, a tally that retired a finding), each
- * at most once per resume invocation, so a depth beyond this is a reducer
- * defect, not a large run. The bound converts a hypothetical spin back into a
- * loud blocked diagnostic instead of an engine hang.
- */
-const MAX_WAVE_GATE_REDERIVATIONS = 64;
-
-/**
  * Resume a Wave Gate run. `catalog` is the catalog a Refutation Panel with no
  * record is minted under: today's in production; a replay of a run written
  * before a catalog retargeting passes the catalog as it stood
  * (`piCatalogAsOf`).
  */
-export async function resumeWaveGateFacade(
+export function resumeWaveGateFacade(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
   catalog: PiCatalog = CURRENT_PI_CATALOG,
-  depth = 0,
 ): Promise<FacadeDriveResult> {
-  // A settled phase answers this invocation; a rederive phase consumed
-  // durable progress and re-enters the reducer one level deeper.
+  return resumeWaveGateAfter(handle, registration, catalog, NO_WAVE_REDERIVATIONS);
+}
+
+/** One reducer pass of an invocation that has already made `spent` re-derivations. */
+async function resumeWaveGateAfter(
+  handle: RunDirHandle,
+  registration: RegisteredWaveGateProgram,
+  catalog: PiCatalog,
+  spent: WaveRederivations,
+): Promise<FacadeDriveResult> {
+  // Durable progress was consumed: re-enter the reducer, spending one
+  // re-derivation, or block once the invocation's budget is spent.
+  const rederiveNext = (): Promise<FacadeDriveResult> | FacadeDriveResult => {
+    const next = spendWaveRederivation(spent);
+    return next.ok ? resumeWaveGateAfter(handle, registration, catalog, next.value) : waveBlocked(handle, next.error);
+  };
+  // A settled phase answers this invocation; a rederive phase re-derives.
   const conclude = (phase: Exclude<WavePhase<unknown>, Readonly<{ kind: "proceed" }>>): Promise<FacadeDriveResult> | FacadeDriveResult =>
-    phase.kind === "settled" ? phase.result : resumeWaveGateFacade(handle, registration, catalog, depth + 1);
+    phase.kind === "settled" ? phase.result : rederiveNext();
   try {
-    if (depth > MAX_WAVE_GATE_REDERIVATIONS) {
-      return waveBlocked(handle, `Wave Gate resume exceeded ${MAX_WAVE_GATE_REDERIVATIONS} re-derivations without durable progress; refusing to spin`);
-    }
     const registered = readRegisteredWaveProgram(handle);
     if (!canonicalStructuralEquals(registered, registration)) {
       return waveBlocked(handle, "supplied Wave registration differs from durable protocol authority");
@@ -173,9 +182,7 @@ export async function resumeWaveGateFacade(
           },
         };
       }
-      if (ensured.value.disposition === "installed") {
-        return resumeWaveGateFacade(handle, registration, catalog, depth + 1);
-      }
+      if (ensured.value.disposition === "installed") return rederiveNext();
     }
 
     const issued = handle.readIssuedRequests();

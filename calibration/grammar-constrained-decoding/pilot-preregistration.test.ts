@@ -2,7 +2,7 @@ import fc from "fast-check";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { buildPairSchedule, parsePreregistration, type Preregistration, type ReleasePolicy } from "./pilot-preregistration";
+import { buildPairSchedule, encodePreregistration, parsePreregistration, type Preregistration, type ReleasePolicy } from "./pilot-preregistration";
 import {
   fixtureBytes,
   HERE,
@@ -11,6 +11,7 @@ import {
   preregBytes,
   extractionOnlyCell,
   PILOT_1,
+  PILOT_2,
   testPreregistration,
 } from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest } from "./pilot-vocabulary";
@@ -148,6 +149,22 @@ describe("release policy (fixed by the preregistration, before any window)", () 
     // @ts-expect-error — a schemaVersion 1 preregistration cannot carry the per-route policy.
     const forged: Preregistration = { ...PILOT_1, releasePolicy: { kind: "per-route-engine-authoritative" } };
     expect(forged.schemaVersion).toBe(1);
+  });
+
+  it("encodes each retained preregistration back to exactly its recorded record (a v1 record without the implied policy)", () => {
+    expect(encodePreregistration(PILOT_1)).toEqual(pilot1());
+    expect(encodePreregistration(PILOT_1)).not.toHaveProperty("releasePolicy");
+    expect(encodePreregistration(PILOT_2)).toEqual(pilot2());
+  });
+
+  it("round-trips any parsed preregistration through its record (property)", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(PILOT_1, PILOT_2), fc.nat(), fc.integer({ min: 200, max: 5000 }),
+      (base, scheduleSeed, bootstrapResamples) => {
+        const prereg: Preregistration = { ...base, scheduleSeed, guardrails: { ...base.guardrails, bootstrapResamples } };
+        expect(parsePreregistration(encodePreregistration(prereg))).toEqual({ ok: true, value: prereg });
+      },
+    ), { numRuns: 40 });
   });
 
   it("admits a policy exactly when the version allows it (property)", () => {

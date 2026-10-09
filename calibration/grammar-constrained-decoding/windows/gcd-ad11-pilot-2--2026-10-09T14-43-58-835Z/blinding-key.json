@@ -1,0 +1,241 @@
+{
+  "schemaVersion": 1,
+  "windowId": "gcd-ad11-pilot-2--2026-10-09T14-43-58-835Z",
+  "entries": [
+    {
+      "blindId": "00785b89-a4ac-42a6-b983-1ae13005fd77",
+      "pairId": "reviewer-payload/v2#round13-vulnerable#r7",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "07370a5e-409e-4daa-bce2-a57b0c605216",
+      "pairId": "reviewer-payload/v3#round14-vulnerable#r1",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "07a7051a-48fb-4508-8aed-1f5004590ca5",
+      "pairId": "reviewer-payload/v2#round15-fixed#r4",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "0b72a465-2561-4ed0-aea1-6b76ce6a65dd",
+      "pairId": "reviewer-payload/v2#round13-vulnerable#r7",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "0f29a23b-e367-41f9-904c-0e280ee73057",
+      "pairId": "refutation-verdict/v1#refutation-hard-locale-digest#r18",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "12808eb5-b600-44a0-9bda-eb611b933274",
+      "pairId": "reviewer-payload/v3#round14-vulnerable#r1",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "14c3f3dc-3bba-4435-b9b6-ab5ef0edcaa9",
+      "pairId": "judge-verdict/v1#judge-hard-readiness-barrier#r21",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "1f923ab2-b0ef-44ad-8dd2-c75447cefcf7",
+      "pairId": "reviewer-payload/v2#round12-fixed#r9",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "26ac2613-58e8-4f6a-b436-e4151df39e56",
+      "pairId": "reviewer-payload/v2#round12-fixed#r1",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "292c8a51-1f29-4f4c-885b-e45eca5c9c91",
+      "pairId": "refutation-verdict/v1#refutation-hard-locale-digest#r23",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "2b2bf9c5-5de4-4291-ab71-b45bfcce8f3f",
+      "pairId": "reviewer-payload/v3#round12-fixed#r10",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "2d5ab0f2-cb5b-456d-9d6b-ddfc282e5255",
+      "pairId": "reviewer-payload/v2#round12-fixed#r6",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "308490ca-8c96-4af1-87bc-c129a7d2b936",
+      "pairId": "reviewer-payload/v2#round12-fixed#r9",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "3f820021-8972-48d2-ba21-316724d07f2f",
+      "pairId": "judge-verdict/v1#judge-hard-readiness-barrier#r20",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "40be2cd8-eba0-4dba-9ea1-bd5e19535946",
+      "pairId": "reviewer-payload/v2#round12-vulnerable#r1",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "4352443c-b395-4639-82b5-aaa53bec8088",
+      "pairId": "reviewer-payload/v2#round15-fixed#r4",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "46544092-7d9d-412b-9289-7e4074648cad",
+      "pairId": "reviewer-payload/v3#round15-vulnerable#r3",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "48170af2-9737-4f28-ac4e-c8f0246a5c01",
+      "pairId": "judge-verdict/v1#judge-easy-cache-invalidation#r22",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "4c55759c-5bd4-4d03-a3ec-fc995b321978",
+      "pairId": "judge-verdict/v1#judge-hard-duplicate-identity#r12",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "5b00a648-38e7-4bfa-9920-28a8d8c43bba",
+      "pairId": "reviewer-payload/v2#round15-fixed#r2",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "5c648666-ed35-49c3-bc4b-8f9dab26543a",
+      "pairId": "reviewer-payload/v3#round13-fixed#r3",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "6e46255a-df2f-43de-a4dd-1e8faf7abd60",
+      "pairId": "refutation-verdict/v1#refutation-easy-guarded-null#r4",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "6f449214-d686-4a69-8a42-616d86eeee20",
+      "pairId": "judge-verdict/v1#judge-easy-cache-invalidation#r22",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "734f4085-f013-436a-b7e9-2773bb162ba7",
+      "pairId": "reviewer-payload/v2#round12-fixed#r11",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "7c0b4cef-0616-4f44-b756-26176840d0da",
+      "pairId": "reviewer-payload/v2#round14-fixed#r8",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "7fafb96a-9ced-4583-91f0-58bbd137169c",
+      "pairId": "reviewer-payload/v2#round12-fixed#r1",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "8176ba1f-cd18-4754-8d2a-2fa7cdec861d",
+      "pairId": "reviewer-payload/v2#round15-vulnerable#r13",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "84bcec2c-a070-4493-8b66-4ffea33a009d",
+      "pairId": "judge-verdict/v1#judge-easy-retry-budget#r25",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "8ac91cdc-5884-4b49-bd69-aa4693fbfc02",
+      "pairId": "judge-verdict/v1#judge-hard-duplicate-identity#r16",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "a016412d-7b21-4f12-b51a-095fcd9d4dd0",
+      "pairId": "judge-verdict/v1#judge-hard-readiness-barrier#r20",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "a43fcb49-2ec9-4486-bebe-741f27c24dab",
+      "pairId": "reviewer-payload/v3#round15-vulnerable#r3",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "a4aba854-f34e-4d3c-90bb-1a2c9e16d328",
+      "pairId": "reviewer-payload/v2#round12-fixed#r6",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "acf1afa6-2c73-4bcc-8a31-5dad57889a1a",
+      "pairId": "judge-verdict/v1#judge-easy-cache-invalidation#r6",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "b84bef95-4e71-4f16-b57d-8af887790b63",
+      "pairId": "reviewer-payload/v2#round15-fixed#r2",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "bb540926-5b3a-4ed9-9586-daf8428fb1e2",
+      "pairId": "reviewer-payload/v2#round12-vulnerable#r1",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "bfb2d4db-eda2-4041-90a5-49adac11eb8d",
+      "pairId": "reviewer-payload/v2#round14-vulnerable#r10",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "d16206ac-a8ca-4778-9207-5b8f0029518a",
+      "pairId": "judge-verdict/v1#judge-easy-cache-invalidation#r10",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "dc390f74-e760-49a6-b8d8-cb4d511d164b",
+      "pairId": "reviewer-payload/v2#round15-vulnerable#r13",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "dcfeb4f6-7a09-48ff-91ff-5fa0e5cb705c",
+      "pairId": "reviewer-payload/v2#round14-vulnerable#r10",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "e4851dd1-c0ec-457d-9387-49a3e1dcabeb",
+      "pairId": "refutation-verdict/v1#refutation-hard-locale-digest#r12",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "e53e1238-0a58-4477-ace4-d68a7c582a79",
+      "pairId": "judge-verdict/v1#judge-easy-cache-invalidation#r6",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "e8b8ce9b-4048-4e55-96e3-ccac07f9f1f9",
+      "pairId": "reviewer-payload/v3#round12-fixed#r10",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "ed589fa6-c27e-4c69-8a35-984082618b48",
+      "pairId": "refutation-verdict/v1#refutation-hard-locale-digest#r23",
+      "arm": "extraction-only"
+    },
+    {
+      "blindId": "ef71e426-7f31-4093-8343-d7e288357872",
+      "pairId": "reviewer-payload/v2#round12-fixed#r11",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "ef7e6131-208c-4d01-ba60-6cbe13189790",
+      "pairId": "reviewer-payload/v2#round12-vulnerable#r3",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "fdaa5082-ec7a-49bc-a888-a919c4a894bb",
+      "pairId": "reviewer-payload/v3#round13-fixed#r3",
+      "arm": "emission-enabled"
+    },
+    {
+      "blindId": "ff2eb16e-e9ee-4f41-b439-93fa1f54f190",
+      "pairId": "reviewer-payload/v2#round12-vulnerable#r3",
+      "arm": "extraction-only"
+    }
+  ]
+}

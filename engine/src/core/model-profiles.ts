@@ -47,7 +47,7 @@ export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
 export const RETIRED_LLM_PROFILE_IDS = ["qualified-local-review"] as const;
 export type RetiredLlmProfileId = (typeof RETIRED_LLM_PROFILE_IDS)[number];
 /** Every profile id a stored request authority may record: the catalog's, then the retired. */
-const RECORDED_LLM_PROFILE_IDS = Object.freeze([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as const);
+export const RECORDED_LLM_PROFILE_IDS = Object.freeze([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as const);
 export type RecordedLlmProfileId = (typeof RECORDED_LLM_PROFILE_IDS)[number];
 
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
@@ -304,6 +304,15 @@ export type RecordedProfileBindings = Readonly<{
 const lowerPiTarget = (target: PiTarget): PiBinding => Object.freeze({ harness: "pi", ...target });
 
 /**
+ * Every Pi target catalog profile `id` has issued, current first: its catalog
+ * lowering, then its recorded history. The one statement of "what this
+ * profile has issued", shared by replay (`piCatalogAsOf`) and history
+ * (`recordedProfileBindings`).
+ */
+const issuedPiTargets = (id: LlmProfileId): readonly [PiTarget, ...PiTarget[]] =>
+  [CURRENT_PI_CATALOG.lowering[id], ...RETIRED_PI_HISTORY[id]];
+
+/**
  * The bindings `profileId` is minted with under `lowering`: its catalog
  * Claude model, and the Pi target the lowering gives it. The Pi binding is
  * typed by the lowering, so only today's lowering yields a `LocalPiBinding`.
@@ -337,7 +346,7 @@ export function piCatalogAsOf(
     const named = retired[id];
     if (named === undefined) return [];
     const pattern = piModelPattern(named);
-    return [{ id, pattern, target: [CURRENT_PI_CATALOG.lowering[id], ...RETIRED_PI_HISTORY[id]].find((entry) => piModelPattern(entry) === pattern) }];
+    return [{ id, pattern, target: issuedPiTargets(id).find((entry) => piModelPattern(entry) === pattern) }];
   });
   const unrecorded = recorded.filter(({ target }) => target === undefined);
   if (unrecorded.length > 0) {
@@ -365,10 +374,10 @@ export function recordedProfileBindings(profileId: RecordedLlmProfileId): Record
       pi: Object.freeze(row.pi.map(lowerPiTarget) as [PiBinding, ...PiBinding[]]),
     });
   }
-  const current = currentProfileBindings(profileId);
+  const [current, ...history] = issuedPiTargets(profileId);
   return Object.freeze({
-    claude: current.claude,
-    pi: Object.freeze([current.pi, ...RETIRED_PI_HISTORY[profileId].map(lowerPiTarget)] as const),
+    claude: currentProfileBindings(profileId).claude,
+    pi: Object.freeze([lowerPiTarget(current), ...history.map(lowerPiTarget)] as const),
   });
 }
 

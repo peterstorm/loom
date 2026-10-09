@@ -2,7 +2,6 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { AGENT_POLICIES, type LoomAgentName } from "../../src/core/model-profiles";
 import {
-  issueAgentRosterSlot,
   issueExactRoster,
   mintAgentRequestAuthority,
   mintAgentRosterSlot,
@@ -14,6 +13,7 @@ import {
   type ExactRoster,
   type MintedAgentRequestAuthority,
   type MintedAgentRosterSlot,
+  type SlotId,
 } from "../../src/core/orchestration-contract";
 
 /**
@@ -47,13 +47,13 @@ function mintedSlot(role: LoomAgentName, index: number): MintedAgentRosterSlot {
 const roles = fc.constantFrom(...AGENT_POLICIES.map(({ agent }) => agent));
 
 describe("mintAgentRosterSlot", () => {
-  it("mints the slot issueAgentRosterSlot issues from the two separately minted requests (property)", () => {
+  it("mints the slot a recorded read of its two separately minted requests parses (property)", () => {
     fc.assert(fc.property(roles, fc.nat({ max: 50 }), (role, index) => {
       const first = mintAgentRequestAuthority(identity(role, index, 1));
       const retry = mintAgentRequestAuthority(identity(role, index, 2));
       if (!first.ok || !retry.ok) throw new Error("every catalog role mints");
       expect(mintAgentRosterSlot(identity(role, index, 1), identity(role, index, 2)))
-        .toEqual(issueAgentRosterSlot(first.value, retry.value));
+        .toEqual(parseAgentRosterSlot(first.value, retry.value));
     }));
   });
 
@@ -78,11 +78,11 @@ describe("mintAgentRosterSlot", () => {
     expect(messages.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("names a pair violation by its kind", () => {
+  it("names a pair violation by its kind and the field the attempts disagree on", () => {
     const slot = mintAgentRosterSlot(identity("code-reviewer", 1, 1), { ...identity("code-reviewer", 1, 2), slotId: "slot:other" });
     expect(slot.ok).toBe(false);
     if (slot.ok) return;
-    expect(rosterSlotErrorMessages(slot.error)).toContain("roster slot: attempt-pair-mismatch");
+    expect(rosterSlotErrorMessages(slot.error)).toContain("roster slot: attempt-pair-mismatch (slotId)");
   });
 });
 
@@ -107,6 +107,14 @@ describe("issueExactRoster", () => {
     expect(repeated.ok).toBe(false);
     if (!repeated.ok) expect(repeated.error.violations.map(({ kind }) => kind)).toContain("duplicate-slot");
     expect(repeated).toEqual(parseExactRoster([slot, slot]));
+  });
+
+  it("re-checks each slot's pairing at run time: a minted slot relabelled past the type is refused as parseExactRoster refuses it", () => {
+    const slot = mintedSlot("code-reviewer", 4);
+    const relabelled: MintedAgentRosterSlot = { ...slot, slotId: "slot:relabelled" as SlotId };
+    const issued = issueExactRoster([relabelled]);
+    expect(issued).toMatchObject({ ok: false, error: { violations: [{ kind: "attempt-pair-mismatch", slotId: slot.slotId, field: "slotId" }] } });
+    expect(issued).toEqual(parseExactRoster([relabelled]));
   });
 });
 

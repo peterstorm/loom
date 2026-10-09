@@ -22,6 +22,7 @@ import {
 import { decidePreflight, type PreflightDecision, type PreflightFacts } from "./pilot-preflight";
 import {
   buildPairSchedule,
+  encodePreregistration,
   parsePreregistration,
   type CellPreregistration,
   type Preregistration,
@@ -29,7 +30,7 @@ import {
   type ScheduledPair,
 } from "./pilot-preregistration";
 import { planDispatch, type LoadedPreregistration, type WindowWorkload } from "./pilot-retention";
-import { contentDigest, type CellKey, type PilotArm } from "./pilot-vocabulary";
+import { contentDigest, PILOT_ARMS, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import { dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
 import { CURRENT_WINDOW_SCHEMA_VERSION } from "./pilot-window-ending";
 import type { WindowRecord } from "./pilot-window-record";
@@ -180,12 +181,9 @@ export const extractionOnlyCell = (key: CellKey): PreregistrationEdit =>
 /** The parse's minimum bootstrap, so the suites' release decisions stay cheap. */
 const cheapBootstrap: PreregistrationEdit = (base) => ({ ...base, guardrails: { ...base.guardrails, bootstrapResamples: 200 } });
 
-/** An edited preregistration through the production parser again. A
- *  schemaVersion 1 value's policy is implied by its version (the file never
- *  carries it), so it is left out of what is re-parsed. */
+/** An edited preregistration written back as its record and parsed again by the production parser. */
 function reparsed(edited: Preregistration): Preregistration {
-  const { releasePolicy: _implied, ...withoutPolicy } = edited;
-  const parsed = parsePreregistration(edited.schemaVersion === 1 ? withoutPolicy : edited);
+  const parsed = parsePreregistration(encodePreregistration(edited));
   if (!parsed.ok) throw new Error(parsed.error.join("\n"));
   return parsed.value;
 }
@@ -296,7 +294,17 @@ export function fakeRoute(script: Script): FakeRoute {
   return { dispatch, now: () => clock, requests };
 }
 
-/** A route that always answers its listing: the fail-fast never trips on it. */
+/** A route whose outage begins at (0-based) pair `pair`: every attempt before
+ *  it is accepted on its first try, every attempt from it on fails at the
+ *  infrastructure (terminal, so it never spends a retry). */
+export function outageFromPair(pair: number): FakeRoute {
+  const route: FakeRoute = fakeRoute((request) => (route.requests.length > pair * PILOT_ARMS.length ? INFRASTRUCTURE : accepted(request)));
+  return route;
+}
+
+/** A route that always answers its listing: its re-probe never stops the
+ *  window as `route-unreachable` (the `consecutive-outage-pairs` stop still
+ *  can, on a dispatch that keeps failing — e.g. `outageFromPair`). */
 export const HEALTHY_ROUTE: RouteHealthProbe = async () => ({ kind: "reachable" });
 
 /** The window dispatch path `recordWindow` runs, over a fake route. */

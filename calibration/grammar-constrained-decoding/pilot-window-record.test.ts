@@ -23,8 +23,9 @@ import {
  * writes through this codec is pinned in pilot-retention.test.ts.
  */
 
-const ending = (raw: unknown): WindowEnding => {
-  const parsed = parseWindowEnding(raw);
+/** An ending of the schedule it names: a completed one's pairs, an aborted one's scheduledPairs. */
+const ending = (raw: Readonly<{ kind: string; pairs?: number; scheduledPairs?: number; [field: string]: unknown }>): WindowEnding => {
+  const parsed = parseWindowEnding(raw, (raw.kind === "completed" ? raw.pairs : raw.scheduledPairs) ?? Number.NaN);
   if (!parsed.ok) throw new Error(parsed.error);
   return parsed.value;
 };

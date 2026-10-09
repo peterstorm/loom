@@ -405,6 +405,19 @@ const holdPromptResponseOf = (outcome: SettledWait): HoldPromptResponse => {
 
 const HOLD_PROBE_WINDOW_MS = 2_500;
 
+/** Bind the issued route through the harness's settle-aware bind, failing
+ *  `what` closed unless the child is now on exactly that route. */
+const requireBoundRoute = async (
+  rpc: PiRpcChild,
+  route: EmissionStartupExpectation["route"],
+  what: string,
+): Promise<void> => {
+  const bound = await bindRouteWithSettle(rpc.rpcRequest, route);
+  if (bound.kind !== "bound" || bound.model.provider !== route.provider || bound.model.id !== route.modelId) {
+    throw new Error(`${what}: ${JSON.stringify(bound)}; stderr: ${rpc.stderr()}`);
+  }
+};
+
 const runProductionHoldGate = (spec: ProductionHoldGateSpec): Promise<Readonly<{
   holdPhases: readonly string[];
   childAliveDuringProbe: boolean;
@@ -423,10 +436,12 @@ const runProductionHoldGate = (spec: ProductionHoldGateSpec): Promise<Readonly<{
   // The stale launcher binds the route and delivers the prompt WITHOUT a
   // readiness exchange. Keep the request live so the release variant can
   // prove this exact awaited prompt resumes after readiness.
-  await rpc.rpcRequest(
-    { type: "set_model", provider: expectation.route.provider, modelId: expectation.route.modelId },
-    "stale-launcher set_model",
-  );
+  // The bind must land and be checked: without readiness first it can fall in
+  // pi's registry-settle window, and an unchecked refusal leaves the session
+  // on pi's placeholder model, so pi refuses the prompt ("No API key found
+  // for the selected model") at its own auth check — before the hold, which
+  // is a before_agent_start handler, is ever reached.
+  await requireBoundRoute(rpc, expectation.route, "the stale launcher's route bind did not land");
   await rpc.rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
   let promptResponse: HoldPromptResponse = canonicalRecord({ kind: "pending" as const });
   const promptOutcome = settleWait(rpc.rpcRequest(
@@ -454,11 +469,7 @@ const runProductionHoldGate = (spec: ProductionHoldGateSpec): Promise<Readonly<{
     // mirror the real launcher's post-readiness bind before requiring the
     // first model request from this already-wedged prompt. Otherwise a
     // refreshed default model can receive it instead of the counting route.
-    const rebound = await bindRouteWithSettle(rpc.rpcRequest, expectation.route);
-    if (rebound.kind !== "bound" || rebound.model.provider !== expectation.route.provider ||
-        rebound.model.id !== expectation.route.modelId) {
-      throw new Error(`the hold-release route was not rebound after readiness: ${JSON.stringify(rebound)}`);
-    }
+    await requireBoundRoute(rpc, expectation.route, "the hold-release route was not rebound after readiness");
     const resumed = await promptOutcome;
     if (resumed.kind === "failed") {
       throw new Error(`the wedged prompt did not resume: ${boundedDiagnostic(resumed.error)}; stderr: ${rpc.stderr()}`);

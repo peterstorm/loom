@@ -1,9 +1,11 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { SampleObservation } from "./pilot-observation";
 import type { RouteProbe } from "./pilot-preflight";
 import { buildPairSchedule, type ScheduledPair } from "./pilot-preregistration";
-import { ACCEPT_EMISSION, ACCEPT_EXTRACTION, INFRASTRUCTURE, PILOT_1, REJECTED, sample, TIMEOUT } from "./pilot-test-fixtures";
+import { ACCEPT_EMISSION, ACCEPT_EXTRACTION, HERE, INFRASTRUCTURE, PILOT_1, REJECTED, sample, TIMEOUT } from "./pilot-test-fixtures";
 import type { PilotArm } from "./pilot-vocabulary";
 import {
   CONSECUTIVE_OUTAGE_PAIR_LIMIT,
@@ -50,7 +52,8 @@ function landed(kind: SampleKind, arm: PilotArm, pair: ScheduledPair = PAIR): Sa
 
 const isOutageLike = (kind: SampleKind): boolean => kind === "timeout" || kind === "infrastructure";
 
-type PairKind = "accepted" | "rejected" | "timeout" | "infrastructure" | "mixed-outage" | "mixed-infrastructure" | "mixed-timeout" | "rejected-and-timeout";
+/** A pair whose two arms landed the same sample kind is named by it; the mixed pairs are the rest. */
+type PairKind = SampleKind | "mixed-outage" | "mixed-infrastructure" | "mixed-timeout" | "rejected-and-timeout";
 
 /** Each landed pair kind: its two arms' sample kinds, and the pair health it
  *  must have (outage-like = infrastructure or timeout, never a rejection). */
@@ -89,7 +92,7 @@ describe("route health (what the window records of the route)", () => {
       expect(observedRouteHealth({ kind: "unreachable", reason })).toEqual(expected);
       expect(routeHealthOf({ kind: "unreachable", reason })).toEqual(expected);
       // Every recorded reason is one an ending accepts.
-      const ending = parseWindowEnding({ kind: "aborted", afterPairs: 1, scheduledPairs: 2, reason: { kind: "route-unreachable", reason: expected.reason } });
+      const ending = parseWindowEnding({ kind: "aborted", afterPairs: 1, scheduledPairs: 2, reason: { kind: "route-unreachable", reason: expected.reason } }, 2);
       expect(ending.ok).toBe(true);
     }), { numRuns: 200 });
     expect(observedRouteHealth({ kind: "reachable" })).toEqual({ kind: "reachable" });
@@ -170,7 +173,7 @@ describe("startSchedule / landPair (the one fail-fast step)", () => {
       const { progress, probedAfter } = run(scheduled, script);
       if (progress.kind !== "ended") throw new Error("a schedule always ends by its last pair");
       // The recorded ending round-trips through the one constructor, as window.json writes it.
-      const reread = parseWindowEnding(JSON.parse(JSON.stringify(progress.ending)));
+      const reread = parseWindowEnding(JSON.parse(JSON.stringify(progress.ending)), scheduled);
       expect(reread).toEqual({ ok: true, value: progress.ending });
       expect(probedAfter.every((afterPairs) => afterPairs < scheduled)).toBe(true);
       if (progress.ending.kind === "aborted") expect(progress.ending.afterPairs).toBeLessThan(scheduled);
@@ -223,7 +226,7 @@ describe("parseWindowEnding (the one WindowEnding constructor of this revision)"
 
   it("admits an aborted ending exactly when 1 ≤ afterPairs < scheduledPairs, a non-empty reason, and a streak of exactly the limit within the pairs dispatched (property)", () => {
     fc.assert(fc.property(fc.integer({ min: -2, max: 12 }), fc.integer({ min: -2, max: 12 }), reasons, (afterPairs, scheduledPairs, reason) => {
-      const parsed = parseWindowEnding({ kind: "aborted", afterPairs, scheduledPairs, reason });
+      const parsed = parseWindowEnding({ kind: "aborted", afterPairs, scheduledPairs, reason }, scheduledPairs);
       const reasonFits = reason.kind === "route-unreachable"
         ? (reason as { reason: string }).reason.length > 0
         : (reason as { pairs: number }).pairs === CONSECUTIVE_OUTAGE_PAIR_LIMIT && CONSECUTIVE_OUTAGE_PAIR_LIMIT <= afterPairs;
@@ -232,25 +235,55 @@ describe("parseWindowEnding (the one WindowEnding constructor of this revision)"
     }), { numRuns: 400 });
   });
 
+  it("admits an ending only of the schedule it is parsed against: a completed one ran every pair, an aborted one names that schedule (property)", () => {
+    const pairCounts = fc.integer({ min: 0, max: 12 });
+    fc.assert(fc.property(pairCounts, pairCounts, (pairs, scheduledPairs) => {
+      const completed = parseWindowEnding({ kind: "completed", pairs }, scheduledPairs);
+      expect(completed.ok).toBe(pairs === scheduledPairs);
+      if (!completed.ok) expect(completed.error).toBe(`invalid window ending: pairs: completed after ${pairs} pairs of a ${scheduledPairs}-pair schedule`);
+      // An abort between the pairs of a `pairs + 2`-pair schedule, parsed against `scheduledPairs`.
+      const recorded = pairs + 2;
+      const aborted = parseWindowEnding({ kind: "aborted", afterPairs: 1, scheduledPairs: recorded, reason: { kind: "route-unreachable", reason: "down" } }, scheduledPairs);
+      expect(aborted.ok).toBe(recorded === scheduledPairs);
+      if (!aborted.ok) expect(aborted.error).toBe(`invalid window ending: scheduledPairs: ${recorded} recorded for a ${scheduledPairs}-pair schedule`);
+    }), { numRuns: 200 });
+  });
+
   it("refuses a schedule aborted after every one of its pairs: a schedule dispatched in full ends completed", () => {
-    const parsed = parseWindowEnding({ kind: "aborted", afterPairs: 4, scheduledPairs: 4, reason: { kind: "route-unreachable", reason: "down" } });
+    const parsed = parseWindowEnding({ kind: "aborted", afterPairs: 4, scheduledPairs: 4, reason: { kind: "route-unreachable", reason: "down" } }, 4);
     expect(parsed).toMatchObject({ ok: false, error: expect.stringContaining("aborted after all 4 scheduled pairs: a schedule dispatched in full ends completed") });
   });
 
   it("admits a completed ending over any non-negative pair count, and refuses the legacy reason and unknown fields", () => {
-    expect(parseWindowEnding({ kind: "completed", pairs: 0 })).toEqual({ ok: true, value: { kind: "completed", pairs: 0 } });
-    expect(parseWindowEnding({ kind: "completed", pairs: -1 }).ok).toBe(false);
-    expect(parseWindowEnding({ kind: "completed", pairs: 4, extra: true }).ok).toBe(false);
-    expect(parseWindowEnding({ kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-infrastructure-failures", pairs: 3 } }))
+    expect(parseWindowEnding({ kind: "completed", pairs: 0 }, 0)).toEqual({ ok: true, value: { kind: "completed", pairs: 0 } });
+    expect(parseWindowEnding({ kind: "completed", pairs: -1 }, -1).ok).toBe(false);
+    expect(parseWindowEnding({ kind: "completed", pairs: 4, extra: true }, 4).ok).toBe(false);
+    expect(parseWindowEnding({ kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-infrastructure-failures", pairs: 3 } }, 4))
       .toEqual({ ok: false, error: "invalid window ending: the consecutive-infrastructure-failures reason exists only in a schemaVersion 1 window" });
-    expect(parseWindowEnding({ kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "route-unreachable", reason: "" } }).ok).toBe(false);
+    expect(parseWindowEnding({ kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "route-unreachable", reason: "" } }, 4).ok).toBe(false);
   });
 });
 
 describe("parseRetainedWindowEnding (a retained ending, under the rules of the version that wrote it)", () => {
   it("reads schemaVersion 2 exactly as this revision writes it", () => {
     const raw = { kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT } };
-    expect(parseRetainedWindowEnding(raw, 2)).toEqual(parseWindowEnding(raw));
+    expect(parseRetainedWindowEnding(raw, 2)).toEqual(parseWindowEnding(raw, 4));
+  });
+
+  it("reads a schemaVersion 2 streak under the limit that version recorded (3), not under the live limit", () => {
+    // Literal 3, never CONSECUTIVE_OUTAGE_PAIR_LIMIT: a retained window's evidence must not move with the live rule.
+    const recorded = { kind: "aborted", afterPairs: 5, scheduledPairs: 408, reason: { kind: "consecutive-outage-pairs", pairs: 3 } };
+    expect(parseRetainedWindowEnding(recorded, 2)).toEqual({ ok: true, value: recorded });
+    for (const pairs of [2, 4]) expect(parseRetainedWindowEnding({ ...recorded, reason: { kind: "consecutive-outage-pairs", pairs } }, 2).ok).toBe(false);
+  });
+
+  it("reads every retained schemaVersion 2 window's ending back as it was recorded", () => {
+    const windows = join(HERE, "windows");
+    const retained = readdirSync(windows)
+      .map((id) => JSON.parse(readFileSync(join(windows, id, "window.json"), "utf-8")) as { schemaVersion: number; ending?: unknown })
+      .filter((record) => record.schemaVersion === 2);
+    expect(retained.length).toBeGreaterThan(0);
+    for (const { ending } of retained) expect(parseRetainedWindowEnding(ending, 2)).toEqual({ ok: true, value: ending });
   });
 
   it("reads schemaVersion 1 as revision e8d688d8 recorded it: its legacy reason, and an abort judged on the last pair", () => {

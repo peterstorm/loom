@@ -159,6 +159,20 @@ function selectEmissionPayload(cellBinding: CellBinding, messages: readonly unkn
 type PayloadRefused = Extract<RejectionCause, { kind: "payload-refused" }>;
 
 /**
+ * A frozen-parser refusal of the selected bytes, naming where they came from.
+ * The registry parser is the emission tool's, so its own message speaks of
+ * "emission arguments" (for a verdict kind: `invalid-json: emission arguments
+ * are not valid JSON`) whatever it read; an extraction-source decision handed
+ * it the FINAL MESSAGE, and the detail says so. Free text: no reader parses it.
+ */
+function payloadRefused(cell: CellKey, source: AcceptedSource["source"], refusal: Readonly<{ code: string; message: string }>): PayloadRefused {
+  const detail = source === "extraction"
+    ? `${refusal.code}: the final message was refused by the frozen ${cell} emission-tool parser: ${refusal.message}`
+    : `${refusal.code}: ${refusal.message}`;
+  return { kind: "payload-refused", detail };
+}
+
+/**
  * Accepted ingestion: the selected bytes must pass the frozen registry's
  * parser for the issued kind/version (the same parse the engine applies).
  * The parser's contract value IS the canonical payload — one parse, and the
@@ -171,7 +185,7 @@ function ingest<S extends AcceptedSource>(
   decision: Accepted<S>,
 ): Result<Readonly<{ outcome: Readonly<{ kind: "accepted" } & S & { payloadDigest: string }>; payload: unknown }>, PayloadRefused> {
   const parsed = PILOT_CELLS[cell].parsePayload(decision.bytes);
-  if (!parsed.ok) return err({ kind: "payload-refused", detail: `${parsed.error.code}: ${parsed.error.message}` });
+  if (!parsed.ok) return err(payloadRefused(cell, decision.selection.source, parsed.error));
   const outcome = Object.freeze<{ kind: "accepted" } & S & { payloadDigest: string }>({
     kind: "accepted", ...decision.selection, payloadDigest: contentDigest(JSON.stringify(parsed.value)),
   });

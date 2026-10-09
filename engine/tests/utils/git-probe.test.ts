@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { observeGitProbe, type GitProbeStep } from "../../src/utils/git-probe";
 
 const scripted = <T, E>(steps: readonly GitProbeStep<T, E>[]) => {
@@ -52,5 +52,18 @@ describe("observeGitProbe", () => {
       { ok: true, value: "" },
       { ok: false, error: "third" },
     ]), (value) => value === "")).toEqual({ kind: "failed", error: "third", attempt: 3 });
+  });
+
+  it("types the observation by a type-guard emptiness predicate", () => {
+    type Probe = Readonly<{ kind: "answer"; text: string }> | Readonly<{ kind: "silent" }>;
+    const silent = (probe: Probe): probe is Extract<Probe, { kind: "silent" }> => probe.kind === "silent";
+    const observed = observeGitProbe(scripted<Probe, string>([
+      { ok: true, value: { kind: "silent" } },
+      { ok: true, value: { kind: "answer", text: "root" } },
+    ]), silent);
+
+    expect(observed).toEqual({ kind: "observed", value: { kind: "answer", text: "root" }, attempts: 2 });
+    if (observed.kind === "observed") expectTypeOf(observed.value).toEqualTypeOf<Extract<Probe, { kind: "answer" }>>();
+    if (observed.kind === "confirmed-empty") expectTypeOf(observed.third).toEqualTypeOf<Extract<Probe, { kind: "silent" }>>();
   });
 });

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "windowId": "gcd-ad11-pilot-2--2026-10-09T14-43-58-835Z",
+  "preregistration": {
+    "path": "calibration/grammar-constrained-decoding/preregistration-gcd-ad11-pilot-2.json",
+    "digest": "3448a9f34eb21d43e3c8a632788350fa788e3eadb1c8da70b23b620e382ef75e",
+    "id": "gcd-ad11-pilot-2"
+  },
+  "workloadFixtures": {
+    "path": "calibration/grammar-constrained-decoding/workload-fixtures.json",
+    "digest": "b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201"
+  },
+  "startedAt": "2026-10-09T14:43:58.835Z",
+  "preflightFacts": {
+    "registry": {
+      "reviewer-payload/v2": {
+        "toolName": "loom_emit_reviewer_payload",
+        "schemaDigest": "3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37"
+      },
+      "reviewer-payload/v3": {
+        "toolName": "loom_emit_reviewer_payload",
+        "schemaDigest": "515ed14d0435d47da4f8299ed4f7ba9908f33c9f567051db93de84ec0017b4a2"
+      },
+      "judge-verdict/v1": {
+        "toolName": "loom_emit_judge_verdict",
+        "schemaDigest": "3f590e9f4a9e4ef586220f4d0fa07bb061fb4ebaa32c9a24eeed07fbb044c569"
+      },
+      "refutation-verdict/v1": {
+        "toolName": "loom_emit_refutation_verdict",
+        "schemaDigest": "766a0dee252ca3fb135253d51b6ddea5bac1ce941e367eebf2da10f81ce8b2fd"
+      }
+    },
+    "workloadFixturesDigest": "b60755891d4b26081f64d978e0fd688cd1359157d25d9e0be544cddd3851d201",
+    "piVersion": "0.83.0",
+    "stagedRuntimeRevision": "sha256:ca0f51eb9251a1bc11a1dbd9238c2d720ec237a3c1d4adda13ff49b3921da502",
+    "loadedRuntimeRevision": null,
+    "route": {
+      "kind": "served-model-unverified",
+      "reason": "GET http://192.168.0.80:8000/v1/models answered HTTP 401: the model list needs credentials Loom never sends"
+    }
+  },
+  "preflight": {
+    "kind": "ready",
+    "runtime": {
+      "stagedRuntimeRevision": "sha256:ca0f51eb9251a1bc11a1dbd9238c2d720ec237a3c1d4adda13ff49b3921da502",
+      "loadedRuntime": {
+        "kind": "unobserved"
+      },
+      "piVersion": "0.83.0"
+    }
+  },
+  "dispatch": {
+    "kind": "dispatched"
+  },
+  "endedAt": "2026-10-09T18:00:36.311Z",
+  "observations": 60,
+  "ending": {
+    "kind": "aborted",
+    "afterPairs": 30,
+    "scheduledPairs": 408,
+    "reason": {
+      "kind": "route-unreachable",
+      "reason": "GET http://192.168.0.80:8000/v1/models: Unable to connect. Is the computer able to access the url?"
+    }
+  }
+}

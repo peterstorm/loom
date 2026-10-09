@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_POLICIES,
   LLM_PROFILE_IDS,
+  RECORDED_LLM_PROFILE_IDS,
   RETIRED_LLM_PROFILE_IDS,
   currentProfileBindings,
   piCatalogAsOf,
@@ -11,11 +12,12 @@ import {
   recordedProfileBindings,
   type LlmProfileId,
   type LocalPiBinding,
+  type LoomAgentName,
   type PiBinding,
   type RecordedLlmProfileId,
 } from "../../src/core/model-profiles";
 import {
-  issueAgentRosterSlot,
+  issueExactRoster,
   mintAgentRequestAuthority,
   mintAgentRosterSlot,
   mintAgentRosterSlotAsOf,
@@ -23,17 +25,15 @@ import {
   parseAgentRosterSlot,
   parseOrchestrationRunId,
   parseStoredAgentRequestAuthority,
-  type AgentRequestAuthority,
   type AgentRosterSlot,
   type MintedAgentRequestAuthority,
-  type MintedAgentRosterSlot,
   type MintedHarnessBinding,
 } from "../../src/core/orchestration-contract";
 import { samePiBinding } from "../../src/core/orchestration-contract/roster";
 import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
-import { LOCAL_PI_BINDING, RETIRED_CLOUD_PI_BINDING } from "../fixtures/local-pi-binding";
+import { LOCAL_PI_BINDING, RECORDED_PI_VOCABULARY, RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING } from "../fixtures/local-pi-binding";
 
 /**
  * A request authority is issued against today's catalog and read back as
@@ -42,14 +42,7 @@ import { LOCAL_PI_BINDING, RETIRED_CLOUD_PI_BINDING } from "../fixtures/local-pi
  * while a binding its profile never issued stays a tamper refusal.
  */
 
-const RECORDED_IDS: readonly RecordedLlmProfileId[] = [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS];
-const LOCAL: PiBinding = LOCAL_PI_BINDING;
-const SOL: PiBinding = RETIRED_CLOUD_PI_BINDING;
 const PI_FIELDS = ["harness", "provider", "model", "thinking"] as const;
-
-/** Every Pi binding the vocabulary can record, across all profiles, keyed by its model pattern. */
-const VOCABULARY: readonly PiBinding[] = [...new Map(RECORDED_IDS.flatMap((id) => recordedProfileBindings(id).pi)
-  .map((binding) => [piModelPattern(binding), binding])).values()];
 
 const issuedBy = (profile: RecordedLlmProfileId, pi: PiBinding): boolean =>
   recordedProfileBindings(profile).pi.some((candidate) => samePiBinding(pi, candidate));
@@ -85,44 +78,24 @@ const piViolations = (result: ReturnType<typeof parseStoredAgentRequestAuthority
 
 describe("stored request authority is history", () => {
   it("reads back a reviewer issued on the retired cloud route", () => {
-    const stored = parseStoredAgentRequestAuthority(request("general-review", SOL));
+    const stored = parseStoredAgentRequestAuthority(request("general-review", RETIRED_CLOUD_PI_BINDING));
     expect(stored.ok).toBe(true);
-    if (stored.ok) expect(stored.value.harnessBinding.pi).toEqual(SOL);
+    if (stored.ok) expect(stored.value.harnessBinding.pi).toEqual(RETIRED_CLOUD_PI_BINDING);
   });
 
   it("reads back a reviewer issued under the retired qualified-local-review profile", () => {
-    const stored = parseStoredAgentRequestAuthority(request("qualified-local-review", LOCAL));
+    const stored = parseStoredAgentRequestAuthority(request("qualified-local-review", LOCAL_PI_BINDING));
     expect(stored.ok).toBe(true);
     if (stored.ok) expect(stored.value.modelProfile).toBe("qualified-local-review");
   });
 
-  it("admits a stored Pi binding exactly when its recorded profile has issued it", () => {
-    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
-      const stored = parseStoredAgentRequestAuthority(request(profile, pi));
-      expect(stored.ok, `${profile} ${piModelPattern(pi)}`).toBe(issuedBy(profile, pi));
-    }));
-  });
-
-  it("refuses a stored binding its profile never issued once, against the whole recorded set", () => {
-    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
-      fc.pre(!issuedBy(profile, pi));
-      const violations = piViolations(parseStoredAgentRequestAuthority(request(profile, pi)));
-      expect(violations).toHaveLength(1);
-      expect(violations[0]!.kind).toBe("model-binding-mismatch");
-      expect(violations[0]!.field).toBe("harnessBinding.pi");
-      for (const admitted of recordedProfileBindings(profile).pi) {
-        expect(violations[0]!.message).toContain(piModelPattern(admitted));
-      }
-    }));
-  });
-
   it("reports the set-level refusal even for a profile with a single recorded binding", () => {
-    const violations = piViolations(parseStoredAgentRequestAuthority(request("qualified-local-review", SOL)));
+    const violations = piViolations(parseStoredAgentRequestAuthority(request("qualified-local-review", RETIRED_CLOUD_PI_BINDING)));
     expect(violations.map(({ field }) => field)).toEqual(["harnessBinding.pi"]);
   });
 
   it("refuses a stored Claude model its profile never bound", () => {
-    const tampered = { ...request("general-review", SOL), harnessBinding: { pi: SOL, claude: { harness: "claude-code", model: "opus" } } };
+    const tampered = { ...request("general-review", RETIRED_CLOUD_PI_BINDING), harnessBinding: { pi: RETIRED_CLOUD_PI_BINDING, claude: { harness: "claude-code", model: "opus" } } };
     expect(kinds(parseStoredAgentRequestAuthority(tampered))).toContain("model-binding-mismatch:harnessBinding.claude.model");
   });
 });
@@ -130,35 +103,18 @@ describe("stored request authority is history", () => {
 describe("issued request authority is today's catalog", () => {
   it("issues every role under its catalog profile on the local route", () => {
     for (const policy of AGENT_POLICIES) {
-      expect(parseAgentRequestAuthority(request(policy.profile, LOCAL, policy.agent)).ok, policy.agent).toBe(true);
+      expect(parseAgentRequestAuthority(request(policy.profile, LOCAL_PI_BINDING, policy.agent)).ok, policy.agent).toBe(true);
     }
   });
 
-  it("admits at issuance exactly the profile's current catalog lowering", () => {
-    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, pi) => {
-      const current = currentProfileBindings(policy.profile).pi;
-      const issued = parseAgentRequestAuthority(request(policy.profile, pi, policy.agent));
-      expect(issued.ok, `${policy.agent} ${piModelPattern(pi)}`).toBe(samePiBinding(pi, current));
-    }));
-  });
-
-  it("names exactly the differing fields of a binding refused at issuance", () => {
-    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, pi) => {
-      const current = currentProfileBindings(policy.profile).pi;
-      const differing = PI_FIELDS.filter((key) => pi[key] !== current[key]).map((key) => `harnessBinding.pi.${key}`);
-      const fields = piViolations(parseAgentRequestAuthority(request(policy.profile, pi, policy.agent))).map(({ field }) => field);
-      expect(fields).toEqual(differing);
-    }));
-  });
-
   it("refuses the retired qualified-local-review profile at issuance", () => {
-    expect(kinds(parseAgentRequestAuthority(request("qualified-local-review", LOCAL))))
+    expect(kinds(parseAgentRequestAuthority(request("qualified-local-review", LOCAL_PI_BINDING))))
       .toContain("invalid-agent-request-field:modelProfile");
   });
 
   it("raises model-policy-mismatch exactly where the profile is not the role's catalog profile", () => {
     for (const policy of AGENT_POLICIES) for (const profile of LLM_PROFILE_IDS) {
-      const mismatch = kinds(parseAgentRequestAuthority(request(profile, LOCAL, policy.agent)))
+      const mismatch = kinds(parseAgentRequestAuthority(request(profile, LOCAL_PI_BINDING, policy.agent)))
         .includes("model-policy-mismatch:modelProfile");
       expect(mismatch, `${policy.agent}/${profile}`).toBe(profile !== policy.profile);
     }
@@ -189,55 +145,60 @@ describe("issued request authority is today's catalog", () => {
     expect(requests).toHaveLength(4);
     for (const issued of requests) {
       expect(issued.modelProfile).toBe(AGENT_POLICIES.find(({ agent }) => agent === issued.role)!.profile);
-      expect(issued.harnessBinding.pi).toEqual(LOCAL);
+      expect(issued.harnessBinding.pi).toEqual(LOCAL_PI_BINDING);
     }
   });
 });
 
 describe("a minted authority is the only thing an issuing seam accepts", () => {
-  const mint = (attempt: 1 | 2): MintedAgentRequestAuthority => {
-    const minted = mintAgentRequestAuthority({
-      runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
-      program: "standalone-review", role: "code-reviewer", attempt, contextDigest: String(attempt).repeat(64),
-      outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
-    });
+  const identity = <Attempt extends 1 | 2>(attempt: Attempt, role: LoomAgentName = "code-reviewer") => ({
+    runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
+    program: "standalone-review" as const, role, attempt, contextDigest: String(attempt).repeat(64),
+    outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
+  });
+  const mint = (attempt: 1 | 2, role?: LoomAgentName): MintedAgentRequestAuthority => {
+    const minted = mintAgentRequestAuthority(identity(attempt, role));
     if (!minted.ok) throw new Error(JSON.stringify(minted.error));
     return minted.value;
   };
 
-  it("issues the same slot a stored read of the same requests parses", () => {
-    const issued = issueAgentRosterSlot(mint(1), mint(2));
+  it("mints the same slot a stored read of the same minted requests parses", () => {
+    const issued = mintAgentRosterSlot(identity(1), identity(2));
     const stored = parseAgentRosterSlot(mint(1), mint(2));
     expect(issued).toEqual(stored);
     expect(issued.ok).toBe(true);
   });
 
-  it("refuses a slot whose minted requests are out of attempt order", () => {
-    const swapped = issueAgentRosterSlot(mint(2), mint(1));
+  it("refuses, at compile time and at run time, identities out of attempt order", () => {
+    // @ts-expect-error the first identity of a slot authorizes attempt 1
+    const swapped = mintAgentRosterSlot(identity(2), identity(1));
     expect(swapped.ok).toBe(false);
-    if (!swapped.ok) {
-      expect(swapped.error.violations.map((v) => v.kind)).toEqual(["malformed-attempt-authority", "malformed-attempt-authority"]);
-    }
+    if (!swapped.ok) expect(swapped.error.violations.map(({ kind }) => kind)).toContain("attempt-pair-mismatch");
   });
 
-  it("rejects, at compile time, a stored authority or roster slot handed to an issuing seam", () => {
-    const stored = parseStoredAgentRequestAuthority(request("general-review", SOL));
-    if (!stored.ok) throw new Error("stored authority must parse");
-    const recorded: AgentRequestAuthority = stored.value;
-    // @ts-expect-error a stored authority never passed the catalog check
-    expect(issueAgentRosterSlot(recorded, recorded).ok).toBe(false);
-
-    const slot = parseAgentRosterSlot(mint(1), mint(2));
-    if (!slot.ok) throw new Error("slot must parse");
-    const storedSlots: readonly AgentRosterSlot[] = [slot.value];
-    const panel = () => issueRefutationPanelAuthority({
-      runId: "run:recorded-authority",
-      findings: [],
-      lenses: [],
-      // @ts-expect-error a re-read roster slot is history, not an issued one
-      verifierSlots: storedSlots,
-    });
-    expect(panel().ok).toBe(false);
+  it("refuses a recorded roster slot at the issuing seam at compile time, and at run time exactly when it is not today's catalog (property)", () => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...RECORDED_PI_VOCABULARY), (policy, pi) => {
+      fc.pre(issuedBy(policy.profile, pi));
+      const recordedOn = (attempt: 1 | 2) => {
+        const minted = mint(attempt, policy.agent);
+        return { ...minted, harnessBinding: { ...minted.harnessBinding, pi } };
+      };
+      const recorded = parseAgentRosterSlot(recordedOn(1), recordedOn(2));
+      if (!recorded.ok) throw new Error(JSON.stringify(recorded.error));
+      const storedSlots: readonly AgentRosterSlot[] = [recorded.value];
+      // @ts-expect-error a recorded roster slot never passed the catalog check
+      const issued = issueExactRoster(storedSlots);
+      // The brand closes the forgetting path at compile time; the seam re-runs the catalog check itself.
+      expect(issued.ok, `${policy.agent} ${piModelPattern(pi)}`).toBe(samePiBinding(pi, currentProfileBindings(policy.profile).pi));
+      if (issued.ok) {
+        expect(issued.value.orderedSlots).toEqual(storedSlots);
+        return;
+      }
+      expect(issued.error.violations).toEqual(recorded.value.attempts.map((authority) => {
+        const strict = parseAgentRequestAuthority(authority);
+        return { kind: "malformed-attempt-authority", attempt: authority.attempt, authorityViolations: strict.ok ? [] : strict.error.violations };
+      }));
+    }));
   });
 });
 
@@ -252,27 +213,39 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
   const issued = (profile: LlmProfileId, pi: unknown) =>
     parseAgentRequestAuthority(request(profile, pi as PiBinding, roleIssuing(profile)));
 
-  it("admits a recorded binding exactly when the recorded profile has issued it, returning that binding", () => {
-    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+  it("admits a recorded binding exactly when the recorded profile has issued it, returning that binding, and refuses it once against the whole recorded set", () => {
+    fc.assert(fc.property(fc.constantFrom(...RECORDED_LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       const admitted = stored(profile, { ...pi });
       expect(admitted.ok, `${profile} ${piModelPattern(pi)}`).toBe(issuedBy(profile, pi));
-      if (admitted.ok) expect(admitted.value.harnessBinding.pi).toEqual(pi);
-      else expect(admitted.error.violations.map(({ field }) => field)).toEqual(["harnessBinding.pi"]);
+      if (admitted.ok) {
+        expect(admitted.value.harnessBinding.pi).toEqual(pi);
+        return;
+      }
+      const [refusal, ...others] = admitted.error.violations;
+      expect(others).toEqual([]);
+      expect([refusal.kind, refusal.field]).toEqual(["model-binding-mismatch", "harnessBinding.pi"]);
+      for (const recorded of recordedProfileBindings(profile).pi) expect(refusal.message).toContain(piModelPattern(recorded));
     }));
   });
 
-  it("admits at issuance only the catalog profile's current binding, naming each differing field", () => {
-    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
-      const current = currentProfileBindings(profile).pi;
-      const admitted = issued(profile, { ...pi });
-      expect(piViolations(admitted).map(({ field }) => field))
-        .toEqual(PI_FIELDS.filter((key) => pi[key] !== current[key]).map((key) => `harnessBinding.pi.${key}`));
-      if (admitted.ok) expect(admitted.value.harnessBinding.pi).toEqual(current);
-    }));
+  it("admits at issuance, for any role, exactly the catalog profile's current binding on the role's own profile, naming each differing field", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY),
+      (policy, profile, pi) => {
+        const current = currentProfileBindings(profile).pi;
+        const admitted = parseAgentRequestAuthority(request(profile, { ...pi }, policy.agent));
+        // The Pi admission depends on the profile alone; the role decides only whether the profile is its own.
+        expect(piViolations(admitted).map(({ field }) => field))
+          .toEqual(PI_FIELDS.filter((key) => pi[key] !== current[key]).map((key) => `harnessBinding.pi.${key}`));
+        expect(admitted.ok, `${policy.agent} ${profile} ${piModelPattern(pi)}`)
+          .toBe(policy.profile === profile && samePiBinding(pi, current));
+        if (admitted.ok) expect(admitted.value.harnessBinding.pi).toEqual(current);
+      },
+    ));
   });
 
   it("admits at issuance a subset of what the same profile admits as history", () => {
-    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (profile, pi) => {
       fc.pre(piViolations(issued(profile, pi)).length === 0);
       expect(stored(profile, pi).ok).toBe(true);
     }));
@@ -282,7 +255,7 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
     const shapes = fc.oneof(
       fc.constant(undefined), fc.constant(null), fc.string(), fc.integer(), fc.array(fc.string()),
       fc.dictionary(fc.string(), fc.string()),
-      fc.constantFrom(...VOCABULARY).map((pi) => ({ ...pi, extra: true })),
+      fc.constantFrom(...RECORDED_PI_VOCABULARY).map((pi) => ({ ...pi, extra: true })),
     );
     const origins = fc.constantFrom(issued, stored);
     fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), origins, shapes, (profile, parse, raw) => {
@@ -296,7 +269,7 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
       expect(kinds(parseAgentRequestAuthority(request(profile, pi)))).toContain("invalid-agent-request-field:modelProfile");
       expect(stored(profile, pi).ok).toBe(true);
     }
-    expect(kinds(parseStoredAgentRequestAuthority({ ...request("general-review", LOCAL), modelProfile: 7 })))
+    expect(kinds(parseStoredAgentRequestAuthority({ ...request("general-review", LOCAL_PI_BINDING), modelProfile: 7 })))
       .toContain("invalid-agent-request-field:modelProfile");
   });
 });
@@ -326,7 +299,7 @@ describe("the catalog mints a request from its identity alone", () => {
   });
 
   it("mints under a replayed catalog exactly the binding it lowers each role's profile to, which history admits (property)", () => {
-    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, replayedTo) => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...RECORDED_PI_VOCABULARY), (policy, replayedTo) => {
       const catalog = piCatalogAsOf({ [policy.profile]: replayedTo });
       fc.pre(catalog.ok);
       if (!catalog.ok) return;
@@ -345,14 +318,14 @@ describe("the catalog mints a request from its identity alone", () => {
   });
 
   it("mints a slot under a replayed catalog as history: today's slot, on the binding the replay lowers to", () => {
-    const catalog = piCatalogAsOf({ "general-review": SOL });
+    const catalog = piCatalogAsOf({ "general-review": RETIRED_CLOUD_PI_BINDING });
     if (!catalog.ok) throw new Error(catalog.error.message);
     const first = identity("code-reviewer", 1);
     const retry = { ...identity("code-reviewer", 2), requestId: "request:minted-retry" };
     const replayed = mintAgentRosterSlotAsOf(catalog.value.lowering, first, retry);
     const today = mintAgentRosterSlot(first, retry);
     if (!replayed.ok || !today.ok) throw new Error("mint failed");
-    const rebound = today.value.attempts.map((authority) => ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi: SOL } }));
+    const rebound = today.value.attempts.map((authority) => ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi: RETIRED_CLOUD_PI_BINDING } }));
     expect(replayed.value.attempts).toEqual(rebound);
     // History parses back unchanged, as any recorded slot does.
     expect(parseAgentRosterSlot(replayed.value.attempts[0], replayed.value.attempts[1])).toEqual(replayed);
@@ -363,11 +336,13 @@ describe("the catalog mints a request from its identity alone", () => {
       .toEqual(mintAgentRosterSlot(untouched(1), untouched(2)));
   });
 
-  it("keeps the attempt it was asked to mint, so a minted pair issues a slot", () => {
+  it("keeps the attempt it was asked to mint, so a slot mints from the same pair", () => {
+    const retryIdentity = { ...identity("code-reviewer", 2), requestId: "request:minted-retry" };
     const first = mintAgentRequestAuthority(identity("code-reviewer", 1));
-    const retry = mintAgentRequestAuthority({ ...identity("code-reviewer", 2), requestId: "request:minted-retry" });
+    const retry = mintAgentRequestAuthority(retryIdentity);
     if (!first.ok || !retry.ok) throw new Error("mint failed");
-    expect(issueAgentRosterSlot(first.value, retry.value).ok).toBe(true);
+    expect([first.value.attempt, retry.value.attempt]).toEqual([1, 2]);
+    expect(mintAgentRosterSlot(identity("code-reviewer", 1), retryIdentity)).toEqual(parseAgentRosterSlot(first.value, retry.value));
   });
 
   it("refuses an identity whose own fields do not parse", () => {
@@ -380,37 +355,33 @@ describe("the catalog mints a request from its identity alone", () => {
     if (!minted.ok) throw new Error("mint failed");
     const binding: LocalPiBinding = minted.value.harnessBinding.pi;
     const profile: LlmProfileId = minted.value.modelProfile;
-    expect([binding.provider, profile]).toEqual([LOCAL.provider, "general-review"]);
+    expect([binding.provider, profile]).toEqual([LOCAL_PI_BINDING.provider, "general-review"]);
     // @ts-expect-error a minted binding is never a retired cloud target
-    const retired: MintedHarnessBinding = { pi: SOL, claude: minted.value.harnessBinding.claude };
+    const retired: MintedHarnessBinding = { pi: RETIRED_CLOUD_PI_BINDING, claude: minted.value.harnessBinding.claude };
     // @ts-expect-error a minted authority never names a retired profile
     const retiredProfile: MintedAgentRequestAuthority["modelProfile"] = "qualified-local-review";
-    expect([retired.pi.provider, retiredProfile]).toEqual([SOL.provider, "qualified-local-review"]);
+    expect([retired.pi.provider, retiredProfile]).toEqual([RETIRED_CLOUD_PI_BINDING.provider, "qualified-local-review"]);
   });
 });
 
-describe("an issued refutation panel keeps its minted roster", () => {
-  it("types the issued panel's verifier slots as minted, and a parsed panel's as history", () => {
+describe("an issued refutation panel is the panel its record parses as", () => {
+  it("issues exactly the parsed panel from minted slots, and refuses at run time a recorded slot that is not current", () => {
     const runId = parseOrchestrationRunId("run:issued-panel");
     const findingId = parseWaveFindingId("T1:finding-1");
     if (!runId.ok || findingId === null) throw new Error("fixture identities must parse");
     const binding = deriveRefutationVerifierBinding(runId.value, "reproduction", [findingId]);
     if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const mint = <Attempt extends 1 | 2>(attempt: Attempt) => {
-      const minted = mintAgentRequestAuthority({
-        runId: runId.value,
-        requestId: binding.value.requestIds[attempt - 1]!,
-        slotId: binding.value.slotId,
-        program: "refutation-panel",
-        role: "review-verifier-agent",
-        attempt,
-        contextDigest: String(attempt).repeat(64),
-        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
-      });
-      if (!minted.ok) throw new Error(JSON.stringify(minted.error));
-      return minted.value;
-    };
-    const slot = issueAgentRosterSlot(mint(1), mint(2));
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => ({
+      runId: runId.value,
+      requestId: binding.value.requestIds[attempt - 1]!,
+      slotId: binding.value.slotId,
+      program: "refutation-panel" as const,
+      role: "review-verifier-agent" as const,
+      attempt,
+      contextDigest: String(attempt).repeat(64),
+      outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
+    });
+    const slot = mintAgentRosterSlot(identity(1), identity(2));
     if (!slot.ok) throw new Error("slot must issue");
     const input = {
       runId: runId.value,
@@ -420,14 +391,23 @@ describe("an issued refutation panel keeps its minted roster", () => {
     };
     const issued = issueRefutationPanelAuthority(input);
     if (!issued.ok) throw new Error(issued.error.message);
-    const minted: MintedAgentRosterSlot = issued.value.verifierRoster.orderedSlots[0];
-    expect(minted.attempts[0].harnessBinding.pi).toEqual(LOCAL);
+    expect(issued.value.verifierRoster.orderedSlots[0].attempts[0].harnessBinding.pi).toEqual(LOCAL_PI_BINDING);
+    expect(parseRefutationPanelAuthority(input)).toEqual(issued);
 
-    const parsed = parseRefutationPanelAuthority(input);
-    if (!parsed.ok) throw new Error(parsed.error.message);
-    expect(parsed.value).toEqual(issued.value);
-    // @ts-expect-error a parsed (recorded) panel's roster is history, not issuance
-    const recorded: MintedAgentRosterSlot = parsed.value.verifierRoster.orderedSlots[0];
-    expect(recorded).toEqual(minted);
+    // The same panel recorded on its profile's retired binding is history: it parses, and is never issued.
+    const onRetired = (authority: MintedAgentRequestAuthority) =>
+      ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi: RETIRED_REFUTATION_PI_BINDING } });
+    const retired = parseAgentRosterSlot(onRetired(slot.value.attempts[0]), onRetired(slot.value.attempts[1]));
+    if (!retired.ok) throw new Error(JSON.stringify(retired.error));
+    expect(parseRefutationPanelAuthority({ ...input, verifierSlots: [retired.value] }).ok).toBe(true);
+    // @ts-expect-error a re-read roster slot is history, not an issued one
+    expect(issueRefutationPanelAuthority({ ...input, verifierSlots: [retired.value] })).toEqual({
+      ok: false,
+      error: {
+        kind: "invalid-authority",
+        panel: "refutation",
+        message: "verifier roster: malformed-attempt-authority; verifier roster: malformed-attempt-authority",
+      },
+    });
   });
 });

@@ -18,6 +18,7 @@ import {
   inputOf,
   inputs,
   inputsWithout,
+  outageFromPair,
   PILOT_1,
   READY,
   REJECTED,
@@ -169,8 +170,7 @@ describe("dispatchSchedule route fail-fast", () => {
 
   it("stops right after the first pair whose re-probe finds the route unreachable, keeping both arms of every landed pair", async () => {
     const outageFrom = 4;
-    const route = fakeRoute((request) =>
-      route.requests.length > outageFrom * 2 ? INFRASTRUCTURE : accepted(request));
+    const route = outageFromPair(outageFrom);
     const probe = countingProbe(DOWN);
     const { ending, records, landed } = await runWindow(route, () => {}, probe);
     expect(ending).toEqual({
@@ -240,10 +240,8 @@ describe("dispatchSchedule route fail-fast", () => {
 
   describe("the last scheduled pair: a schedule dispatched in full ends completed, never aborted after all its pairs", () => {
     it("does not re-probe or stop on an outage that starts on the last pair", async () => {
-      const lastPair = schedule.length - 1;
-      const outage = fakeRoute((request) => (outage.requests.length > lastPair * 2 ? INFRASTRUCTURE : accepted(request)));
       const probe = countingProbe(DOWN);
-      const { ending, records } = await runWindow(outage, () => {}, probe);
+      const { ending, records } = await runWindow(outageFromPair(schedule.length - 1), () => {}, probe);
       expect(ending).toEqual({ kind: "completed", pairs: schedule.length });
       expect(records).toHaveLength(schedule.length * 2);
       expect(records.slice(-2).every((landed) => landed.kind === "terminal")).toBe(true);
@@ -251,19 +249,15 @@ describe("dispatchSchedule route fail-fast", () => {
     });
 
     it(`completes when the ${CONSECUTIVE_OUTAGE_PAIR_LIMIT}rd consecutive all-outage pair is the last one`, async () => {
-      const firstOutage = schedule.length - CONSECUTIVE_OUTAGE_PAIR_LIMIT;
-      const outage = fakeRoute((request) => (outage.requests.length > firstOutage * 2 ? INFRASTRUCTURE : accepted(request)));
       const probe = countingProbe({ kind: "reachable" });
-      const { ending } = await runWindow(outage, () => {}, probe);
+      const { ending } = await runWindow(outageFromPair(schedule.length - CONSECUTIVE_OUTAGE_PAIR_LIMIT), () => {}, probe);
       expect(ending).toEqual({ kind: "completed", pairs: schedule.length });
       // Every outage pair but the last was judged (re-probed); the last has nothing left to protect.
       expect(probe.calls()).toBe(CONSECUTIVE_OUTAGE_PAIR_LIMIT - 1);
     });
 
     it("still stops on the pair before the last", async () => {
-      const penultimate = schedule.length - 2;
-      const outage = fakeRoute((request) => (outage.requests.length > penultimate * 2 ? INFRASTRUCTURE : accepted(request)));
-      const { ending } = await runWindow(outage, () => {}, countingProbe(DOWN));
+      const { ending } = await runWindow(outageFromPair(schedule.length - 2), () => {}, countingProbe(DOWN));
       expect(ending).toEqual({
         kind: "aborted", afterPairs: schedule.length - 1, scheduledPairs: schedule.length,
         reason: { kind: "route-unreachable", reason: DOWN.reason },

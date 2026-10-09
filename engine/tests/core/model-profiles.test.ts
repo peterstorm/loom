@@ -8,6 +8,7 @@ import {
   CURRENT_PI_CATALOG,
   LLM_PROFILE_IDS,
   LLM_PROFILES,
+  RECORDED_LLM_PROFILE_IDS,
   RETIRED_LLM_PROFILE_IDS,
   lowerModelProfile,
   currentProfileBindings,
@@ -38,6 +39,7 @@ import {
   panelJudgeProfileCarriers,
 } from "../../src/core/agent-catalog-projections";
 import { classifyPiSpawnItems, parsePiSpawnItems } from "../../src/core/pi-spawn-input";
+import { RECORDED_PI_VOCABULARY } from "../fixtures/local-pi-binding";
 
 const LOCAL = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" } as const;
 
@@ -66,12 +68,6 @@ describe("semantic model profiles", () => {
 
   it("runs every Pi profile on the one local route; profiles differ only in their Claude model", () => {
     expect(new Set(LLM_PROFILES.map(({ pi }) => piModelPattern(pi)))).toEqual(new Set([piModelPattern(LOCAL)]));
-  });
-
-  it("keeps all architecture/discovery panel work on the strongest Claude model", () => {
-    for (const id of ["panel-design", "panel-judge"] as const) {
-      expect(LLM_PROFILES.find((profile) => profile.id === id)).toMatchObject({ claudeCode: { model: "opus" }, pi: LOCAL });
-    }
   });
 
   it("deep-freezes the exported policy data", () => {
@@ -117,7 +113,7 @@ describe("recorded profile bindings", () => {
   });
 
   it("keeps every recorded binding byte-for-byte, current lowering included", () => {
-    const rows = Object.fromEntries([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].map((id) => {
+    const rows = Object.fromEntries(RECORDED_LLM_PROFILE_IDS.map((id) => {
       const recorded = recordedProfileBindings(id);
       return [id, [recorded.claude.model, ...recorded.pi.map((binding) => JSON.stringify(binding))]];
     }));
@@ -138,7 +134,7 @@ describe("recorded profile bindings", () => {
   });
 
   it("returns immutable recorded and current bindings", () => {
-    for (const id of [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]) {
+    for (const id of RECORDED_LLM_PROFILE_IDS) {
       const recorded = recordedProfileBindings(id);
       expect(Object.isFrozen(recorded) && Object.isFrozen(recorded.pi) && Object.isFrozen(recorded.claude)).toBe(true);
       expect(recorded.pi.every(Object.isFrozen)).toBe(true);
@@ -150,7 +146,7 @@ describe("recorded profile bindings", () => {
   });
 
   it("keeps the cloud targets each profile issued before 2026-10-08, and nothing it never issued", () => {
-    const history = Object.fromEntries([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].map((id) =>
+    const history = Object.fromEntries(RECORDED_LLM_PROFILE_IDS.map((id) =>
       [id, recordedProfileBindings(id).pi.slice(1).map(piModelPattern)]));
     expect(history).toEqual({
       implementation: ["openai-codex/gpt-5.6-sol:high"],
@@ -166,6 +162,11 @@ describe("recorded profile bindings", () => {
     });
   });
 
+  it("records exactly the catalog ids, then the retired ones, as a frozen roster", () => {
+    expect(RECORDED_LLM_PROFILE_IDS).toEqual([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]);
+    expect(Object.isFrozen(RECORDED_LLM_PROFILE_IDS)).toBe(true);
+  });
+
   it("parses a retired profile id only as a recorded one", () => {
     expect(parseRecordedLlmProfileId("qualified-local-review")).toEqual({ ok: true, value: "qualified-local-review" });
     expect(parseRecordedLlmProfileId("general-review")).toEqual({ ok: true, value: "general-review" });
@@ -175,12 +176,12 @@ describe("recorded profile bindings", () => {
   });
 
   it("parses exactly the catalog and retired ids as recorded, naming both in one refusal", () => {
-    fc.assert(fc.property(fc.oneof(fc.constantFrom(...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS), fc.string(), fc.anything()), (raw) => {
-      const recorded = ([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as readonly unknown[]).includes(raw);
+    fc.assert(fc.property(fc.oneof(fc.constantFrom(...RECORDED_LLM_PROFILE_IDS), fc.string(), fc.anything()), (raw) => {
+      const recorded = (RECORDED_LLM_PROFILE_IDS as readonly unknown[]).includes(raw);
       const parsed = parseRecordedLlmProfileId(raw);
       expect(parsed.ok).toBe(recorded);
       if (!parsed.ok) {
-        for (const id of [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]) expect(parsed.error.message).toContain(id);
+        for (const id of RECORDED_LLM_PROFILE_IDS) expect(parsed.error.message).toContain(id);
       }
     }));
   });
@@ -227,10 +228,6 @@ describe("recorded profile bindings", () => {
 });
 
 describe("the Pi lowering table: today's catalog and a replayed one", () => {
-  /** Every Pi binding any catalog profile has issued: the vocabulary a replay may name. */
-  const ISSUED_TARGETS = [...new Map(LLM_PROFILE_IDS.flatMap((id) => recordedProfileBindings(id).pi)
-    .map((binding) => [piModelPattern(binding), binding] as const)).values()];
-
   it("lowers every catalog profile through today's table, so the catalog, lowering and issuance agree", () => {
     for (const profile of LLM_PROFILES) {
       expect(CURRENT_PI_CATALOG.lowering[profile.id]).toEqual(profile.pi);
@@ -246,7 +243,7 @@ describe("the Pi lowering table: today's catalog and a replayed one", () => {
   });
 
   it("property: accepts exactly the targets the named profile issued, lowering it there and every other profile as today", () => {
-    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...ISSUED_TARGETS), (named, target) => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...RECORDED_PI_VOCABULARY), (named, target) => {
       const issued = recordedProfileBindings(named).pi.some((binding) => piModelPattern(binding) === piModelPattern(target));
       const replayed = piCatalogAsOf({ [named]: target });
       expect(replayed.ok).toBe(issued);

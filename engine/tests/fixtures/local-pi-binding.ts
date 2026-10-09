@@ -21,7 +21,9 @@
  */
 import {
   DESKTOP_VLLM_ROUTE,
+  RECORDED_LLM_PROFILE_IDS,
   piCatalogAsOf,
+  piModelPattern,
   recordedProfileBindings,
   type LlmProfileId,
   type PiBinding,
@@ -43,6 +45,17 @@ export function retiredCloudPiBinding(profile: LlmProfileId): PiBinding {
   if (retired === undefined) throw new Error(`profile '${profile}' records no retired cloud Pi binding`);
   return retired;
 }
+
+/**
+ * Every Pi binding any recorded profile — catalog or retired — has issued,
+ * once each by model pattern, in first-recorded order: the vocabulary a stored
+ * authority may carry and a replay may name. Properties sample it to pair a
+ * profile with a binding it did or never issued.
+ */
+export const RECORDED_PI_VOCABULARY: readonly PiBinding[] = Object.freeze([
+  ...new Map(RECORDED_LLM_PROFILE_IDS.flatMap((id) => recordedProfileBindings(id).pi)
+    .map((binding) => [piModelPattern(binding), binding] as const)).values(),
+]);
 
 /** The catalog profile whose retired cloud binding the route suites record. */
 export const RETIRED_CLOUD_PROFILE = "general-review" as const;

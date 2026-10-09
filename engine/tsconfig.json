@@ -22,5 +22,5 @@
       "fast-check": ["./node_modules/fast-check"]
     }
   },
-  "include": ["src", "tests", "../pi", "../calibration", "../scripts/run-model-calibration.ts", "../scripts/read-context-packet.ts", "../scripts/read-context-section.ts", "../probes/emission-qualification/*.mts", "../probes/emission-qualification/*.test.ts", "scripts/typecheck.ts", "vitest.config.ts", "vitest-worker-budget.ts"]
+  "include": ["src", "tests", "../pi", "../calibration", "../scripts/run-model-calibration.ts", "../scripts/read-context-packet.ts", "../scripts/read-context-section.ts", "../scripts/route-stub.ts", "../probes/emission-qualification/*.mts", "../probes/emission-qualification/*.test.ts", "scripts/typecheck.ts", "vitest.config.ts", "vitest-worker-budget.ts"]
 }
