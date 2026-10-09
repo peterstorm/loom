@@ -1,10 +1,17 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PiBinding } from "../../src/core/model-profiles";
-import { httpRouteProbe, observeRouteReachability, readRouteEndpoint, type RouteProbePort } from "../../src/utils/route-endpoint";
+import { parseModelRoutingConfig } from "../../src/core/model-routing";
+import {
+  httpRouteProbe,
+  observeRouteReachability,
+  observeSpawnRoutes,
+  readRouteEndpoint,
+  type RouteProbePort,
+} from "../../src/utils/route-endpoint";
 
 const LOCAL: PiBinding = { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
 
@@ -20,18 +27,27 @@ function agentDir(models: unknown): string {
   return dir;
 }
 
-/** A real HTTP server on loopback answering `/v1/models` as configured. */
-async function server(status: number, body: unknown): Promise<string> {
-  const instance: Server = createServer((request, response) => {
-    response.writeHead(request.url === "/v1/models" ? status : 404, { "content-type": "application/json" });
-    response.end(JSON.stringify(body));
-  });
+/** A real HTTP server on loopback; `handle` decides how (and whether) it answers. */
+async function rawServer(handle: (request: IncomingMessage, response: ServerResponse) => void): Promise<string> {
+  const instance: Server = createServer(handle);
   await new Promise<void>((resolve) => instance.listen(0, "127.0.0.1", resolve));
-  cleanups.push(() => new Promise<void>((resolve) => instance.close(() => resolve())));
+  cleanups.push(() => new Promise<void>((resolve) => {
+    instance.closeAllConnections();
+    instance.close(() => resolve());
+  }));
   const address = instance.address();
   if (address === null || typeof address === "string") throw new Error("no TCP address");
   return `http://127.0.0.1:${address.port}/v1`;
 }
+
+/** A loopback server answering `/v1/models` with `status` and the raw `body`. */
+const server = (status: number, body: string, contentType = "application/json"): Promise<string> =>
+  rawServer((request, response) => {
+    response.writeHead(request.url === "/v1/models" ? status : 404, { "content-type": contentType });
+    response.end(body);
+  });
+
+const json = (body: unknown): string => JSON.stringify(body);
 
 describe("readRouteEndpoint", () => {
   it("reads only the provider's baseUrl", () => {
@@ -54,14 +70,43 @@ describe("readRouteEndpoint", () => {
 
 describe("httpRouteProbe against a real loopback server", () => {
   it("returns the served model ids from a 2xx list", async () => {
-    const baseUrl = await server(200, { object: "list", data: [{ id: LOCAL.model, object: "model" }] });
+    const baseUrl = await server(200, json({ object: "list", data: [{ id: LOCAL.model, object: "model" }] }));
     expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl }))
       .toEqual({ kind: "answered", status: 200, servedModels: [LOCAL.model] });
   });
 
   it("returns the status, without a list, when the server refuses authentication", async () => {
-    const baseUrl = await server(401, { error: "Unauthorized" });
+    const baseUrl = await server(401, json({ error: "Unauthorized" }));
     expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl })).toEqual({ kind: "answered", status: 401, servedModels: null });
+  });
+
+  it("answers without a list when a 2xx body is not JSON (a proxy or captive page)", async () => {
+    const baseUrl = await server(200, "<html><body>Sign in to the network</body></html>", "text/html");
+    expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl })).toEqual({ kind: "answered", status: 200, servedModels: null });
+  });
+
+  it("answers without a list when a 2xx JSON body is not an OpenAI-style model list", async () => {
+    for (const body of [json({ models: [LOCAL.model] }), json([{ id: LOCAL.model }]), json({ data: [{ name: LOCAL.model }] }), "null"]) {
+      const baseUrl = await server(200, body);
+      expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl }), body)
+        .toEqual({ kind: "answered", status: 200, servedModels: null });
+    }
+  });
+
+  it("is refused when the server accepts the connection but never answers", async () => {
+    const baseUrl = await rawServer(() => undefined);
+    const started = Date.now();
+    expect(await httpRouteProbe(150)({ provider: "desktop-vllm", baseUrl })).toMatchObject({ kind: "refused" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("is refused when a 2xx starts its body and then stalls past the timeout", async () => {
+    const baseUrl = await rawServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write("{\"data\": [");
+    });
+    expect(await httpRouteProbe(150)({ provider: "desktop-vllm", baseUrl }))
+      .toMatchObject({ kind: "refused", reason: expect.stringContaining("HTTP 200 body did not arrive") });
   });
 
   it("is refused when nothing listens", async () => {
@@ -72,7 +117,7 @@ describe("httpRouteProbe against a real loopback server", () => {
 
 describe("observeRouteReachability", () => {
   it("probes each distinct route once and decides it", async () => {
-    const baseUrl = await server(200, { data: [{ id: LOCAL.model }] });
+    const baseUrl = await server(200, json({ data: [{ id: LOCAL.model }] }));
     const probed: string[] = [];
     const probe: RouteProbePort = async (endpoint) => {
       probed.push(endpoint.baseUrl);
@@ -80,7 +125,7 @@ describe("observeRouteReachability", () => {
     };
     const observed = await observeRouteReachability([LOCAL, LOCAL], agentDir({ providers: { "desktop-vllm": { baseUrl } } }), probe);
     expect(probed).toEqual([baseUrl]);
-    expect(observed).toMatchObject({ ok: true, decisions: [{ kind: "reachable", served: "listed" }] });
+    expect(observed).toMatchObject({ ok: true, decisions: [{ kind: "reachable", served: { kind: "listed" } }] });
   });
 
   it("decides an unconfigured provider without probing", async () => {
@@ -92,5 +137,50 @@ describe("observeRouteReachability", () => {
   it("reports a malformed models.json", async () => {
     const probe: RouteProbePort = async () => { throw new Error("must not probe"); };
     expect(await observeRouteReachability([LOCAL], agentDir("[]"), probe)).toMatchObject({ ok: false });
+  });
+});
+
+describe("observeSpawnRoutes", () => {
+  const request = (pi: PiBinding) =>
+    ({ role: "code-reviewer", modelProfile: "general-review", harnessBinding: { pi, claude: { harness: "claude-code", model: "sonnet" } } } as const);
+  const retired: PiBinding = { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" };
+  const recording = (answer: Awaited<ReturnType<RouteProbePort>>) => {
+    const probed: string[] = [];
+    const probe: RouteProbePort = async (endpoint) => {
+      probed.push(endpoint.provider);
+      return answer;
+    };
+    return { probed, probe };
+  };
+
+  it("decides a retired recorded route without probing it", async () => {
+    const { probed, probe } = recording({ kind: "answered", status: 200, servedModels: [LOCAL.model] });
+    const dir = agentDir({ providers: { "desktop-vllm": { baseUrl: "http://vllm/v1" } } });
+    expect(await observeSpawnRoutes([request(retired), request(LOCAL)], { agentDir: dir, routing: { parentRef: null, config: null }, probe }))
+      .toMatchObject({ ok: true, decisions: [
+        { kind: "retired", route: "openai-codex/gpt-5.6-sol", profile: "general-review" },
+        { kind: "reachable", route: "desktop-vllm/glm-5.3-flash-spark-tp2-v14" },
+      ] });
+    expect(probed).toEqual(["desktop-vllm"]);
+  });
+
+  it("probes the routed launch target, not the recorded binding", async () => {
+    const parsed = parseModelRoutingConfig({
+      schemaVersion: 1,
+      defaultClass: "cloud",
+      modelClasses: { local: ["desktop-vllm/*"] },
+      targets: { muse: { model: "desktop-muse/qwen3.8-27b", thinkingLevel: "medium" } },
+      rules: [{ id: "local-uses-muse", when: { parentClass: "local" }, use: { kind: "named", target: "muse" } }],
+    });
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    const { probed, probe } = recording({ kind: "answered", status: 200, servedModels: ["qwen3.8-27b"] });
+    const dir = agentDir({ providers: { "desktop-vllm": { baseUrl: "http://vllm/v1" }, "desktop-muse": { baseUrl: "http://muse/v1" } } });
+    const observed = await observeSpawnRoutes([request(LOCAL)], {
+      agentDir: dir,
+      routing: { parentRef: { provider: "desktop-vllm", model: LOCAL.model }, config: parsed.value },
+      probe,
+    });
+    expect(probed).toEqual(["desktop-muse"]);
+    expect(observed).toMatchObject({ ok: true, decisions: [{ kind: "reachable", route: "desktop-muse/qwen3.8-27b", served: { kind: "listed" } }] });
   });
 });

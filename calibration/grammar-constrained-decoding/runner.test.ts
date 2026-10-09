@@ -12,8 +12,8 @@ import { HERE, PILOT_2_PREREGISTRATION, REPO_ROOT } from "./pilot-test-fixtures"
  * fabricated, decision incomplete, the workload corpus never loaded), the
  * never-overwrite refusal and the offline re-decision with its
  * preregistration-drift refusal; and — against a loopback server answering
- * 401 like the live vLLM — the engine's route probe recorded as reachable with
- * an unobservable served list, decided under pilot-2's per-route policy.
+ * 401 like the live vLLM — the engine's route probe recorded as an explicit
+ * served-model-unverified fact, decided under pilot-2's per-route policy.
  *
  * Everything behind the script's ports is pinned at its own interface: the
  * retention rules and `recordWindow`'s wiring at the `WindowStore` and
@@ -135,7 +135,8 @@ describe("run-model-calibration --pilot", () => {
  * synchronously, which blocks this test's event loop, so a server living in
  * it could never answer. A request carrying an Authorization header would be
  * answered with a model listing instead, so a leaked credential shows up as a
- * served list rather than the null an auth refusal records.
+ * served list rather than the served-model-unverified fact an auth refusal
+ * records.
  */
 const AUTH_REFUSING_SERVER = `
 const server = require("node:http").createServer((request, response) => {
@@ -157,7 +158,7 @@ async function authRefusingServer(): Promise<Readonly<{ baseUrl: string; stop: (
 }
 
 describe("run-model-calibration --pilot (pilot-2, route answering 401)", () => {
-  it("records an auth refusal as reachable with an unobservable served list, and decides under the per-route policy", async () => {
+  it("records an auth refusal as served-model-unverified, and decides under the per-route policy", async () => {
     const server = await authRefusingServer();
     try {
       const dir = mkdtempSync(join(tmpdir(), "loom-gcd-pilot2-"));
@@ -176,7 +177,10 @@ describe("run-model-calibration --pilot (pilot-2, route answering 401)", () => {
       expect(result.stderr).toContain("Release decision: incomplete-missing-measurement");
 
       const window = JSON.parse(readFileSync(join(windowDir, "window.json"), "utf-8"));
-      expect(window.preflightFacts.route).toEqual({ kind: "reachable", servedModels: null });
+      expect(window.preflightFacts.route).toEqual({
+        kind: "served-model-unverified",
+        reason: `GET ${server.baseUrl}/models answered HTTP 401: the model list needs credentials Loom never sends`,
+      });
       const blocks = window.preflight.kind === "blocked" ? window.preflight.blocks.map((block: { kind: string }) => block.kind) : [];
       expect(blocks).not.toContain("route-unreachable");
       expect(blocks).not.toContain("served-model-absent");

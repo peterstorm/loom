@@ -78,9 +78,9 @@ import { dirname, join, resolve } from "node:path";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
-import { activeAgentDir } from "../../utils/model-routing-context";
-import { httpRouteProbe, observeRouteReachability } from "../../utils/route-endpoint";
-import { reachabilityRefusal } from "../../core/route-reachability";
+import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
+import { httpRouteProbe, observeSpawnRoutes, type RouteProbePort } from "../../utils/route-endpoint";
+import { reachabilityRefusal, unverifiedRoutes } from "../../core/route-reachability";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -1046,26 +1046,49 @@ async function publishCompletionBinding(
 
 /**
  * Fail closed before a Pi parent spawns a batch: every distinct route the
- * batch's frozen Pi bindings name must answer. Nothing is published to the
- * session when a route is down, so a later `resume` re-emits the same batch.
- * A request whose authority does not parse is left to the binding
- * publication below, which reports it.
+ * batch's children will launch on — resolved by the same routing rule as the
+ * generated-agent render — must answer, and no request may carry a retired
+ * route. Nothing is published to the session when the gate refuses, so a
+ * later `resume` re-emits the same batch. A reachable route whose served
+ * model went unconfirmed is admitted and reported on stderr
+ * (`loom-route-unverified`). A request whose authority does not parse is left
+ * to the binding publication below, which reports it.
  */
-async function spawnRouteRefusal(action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>): Promise<HookResult | null> {
-  const bindings = action.requests.flatMap(({ authority }) => {
+async function spawnRouteRefusal(
+  action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>,
+  probe: RouteProbePort,
+): Promise<HookResult | null> {
+  const requests = action.requests.flatMap(({ authority }) => {
     const parsed = parseStoredAgentRequestAuthority(authority);
-    return parsed.ok ? [parsed.value.harnessBinding.pi] : [];
+    return parsed.ok ? [parsed.value] : [];
   });
-  const observed = await observeRouteReachability(bindings, activeAgentDir(), httpRouteProbe());
+  const agentDir = activeAgentDir();
+  const routing = buildPiRoutingContext(process.env, agentDir);
+  if (routing.configError !== null) {
+    process.stderr.write(`warning: Pi route gate resolves declared bindings: ${routing.configError}\n`);
+  }
+  const observed = await observeSpawnRoutes(requests, { agentDir, routing: routing.context, probe });
   if (!observed.ok) return { kind: "error", message: `cannot check Pi route reachability: ${observed.error}` };
+  for (const unverified of unverifiedRoutes(observed.decisions)) {
+    process.stderr.write(`${JSON.stringify({ event: "loom-route-unverified", ...unverified })}\n`);
+  }
   const refusal = reachabilityRefusal(observed.decisions);
   return refusal === null ? null : { kind: "error", message: refusal };
 }
 
-async function emitRunAction(handle: RunDirHandle, action: FacadeAction): Promise<HookResult> {
+/**
+ * Emit one façade action: gate a Pi parent's spawn batch on its routes,
+ * publish the session binding, then print the action. `probe` is the route
+ * probe port; the handler tests substitute a fake.
+ */
+export async function emitRunAction(
+  handle: RunDirHandle,
+  action: FacadeAction,
+  probe: RouteProbePort = httpRouteProbe(),
+): Promise<HookResult> {
   const session = bindingSessionOf(process.env);
   if (session?.harness === "pi" && action.kind === "spawn-batch") {
-    const refusal = await spawnRouteRefusal(action);
+    const refusal = await spawnRouteRefusal(action, probe);
     if (refusal !== null) return refusal;
   }
   if (session !== null) {
