@@ -10,6 +10,7 @@ import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from '../../../utils/git-execution-p
 import {
   describeGitOutcome,
   gitCleanNegative,
+  gitExitedWith,
   gitStderrText,
   gitStdoutText,
   type GitExit,
@@ -107,8 +108,8 @@ function resolveObservation<T, R>(
  *  probe runs under the shared `git-execution-policy`, so review scope is
  *  derived under the same ignore rules and config as every other observer.
  *  Only an `exited` outcome reaches `classify`; a child that never started,
- *  timed out, outgrew its budget or was signalled refuses here with its
- *  rendered outcome. */
+ *  faulted, timed out, outgrew its budget or was signalled refuses here with
+ *  its rendered outcome. */
 function gitSpawnProbe<T>(
   args: readonly string[],
   maxBuffer: number,
@@ -123,14 +124,25 @@ function gitSpawnProbe<T>(
   };
 }
 
+/** `gitSpawnProbe` for the probes whose protocol accepts only status 0: any
+ *  other exit refuses through `exitRefusal` with `failure` as its fallback
+ *  label, and `decode` reads the accepted exit. */
+function gitZeroExitProbe<T>(
+  args: readonly string[],
+  maxBuffer: number,
+  failure: string,
+  decode: (exit: GitExit<0>) => GitProbeStep<T, Error>,
+): () => GitProbeStep<T, Error> {
+  return gitSpawnProbe(args, maxBuffer, (exit) => gitExitedWith(exit, [0]) ? decode(exit) : exitRefusal(exit, failure));
+}
+
+const decoded = <T>(value: T): GitProbeStep<T, Error> => ({ ok: true as const, value });
+
 function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly string[] {
   const frozenPaths = (paths: readonly string[]): readonly string[] => Object.freeze([...paths]);
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(args, SCOPE_LISTING_LIMIT, (exit) =>
-        exit.status !== 0
-          ? exitRefusal(exit, `git ${args[0]} failed`)
-          : decodeListedPaths(exit.stdout)),
+      gitZeroExitProbe(args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decodeListedPaths(exit.stdout)),
       (paths) => paths.length === 0,
     ),
     (confirmed) => {
@@ -150,10 +162,7 @@ function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly st
 export function gitText(args: readonly string[], empty: GitEmptyDecision): string {
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(args, SCOPE_LISTING_LIMIT, (exit) =>
-        exit.status !== 0
-          ? exitRefusal(exit, `git ${args[0]} failed`)
-          : { ok: true as const, value: gitStdoutText(exit).trim() }),
+      gitZeroExitProbe(args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decoded(gitStdoutText(exit).trim())),
       (value) => value === "",
     ),
     (confirmed) => {
@@ -253,10 +262,8 @@ function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(["diff", "--numstat", baseline, "--", ...paths], GIT_PROBE_OUTPUT_LIMIT, (exit) =>
-        exit.status !== 0
-          ? exitRefusal(exit, "git diff --numstat failed")
-          : { ok: true as const, value: gitStdoutText(exit) }),
+      gitZeroExitProbe(["diff", "--numstat", baseline, "--", ...paths], GIT_PROBE_OUTPUT_LIMIT, "git diff --numstat failed",
+        (exit) => decoded(gitStdoutText(exit))),
       (output) => output === "",
     ),
     // Explicit caller decision: numstat legitimately produces no lines when
@@ -311,10 +318,8 @@ export function baselineBlob(revision: string, path: string): Uint8Array | null 
   const object = `${revision}:${path}`;
   const listing = resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT, (exit) =>
-        exit.status !== 0
-          ? exitRefusal(exit, `git ls-tree failed for ${object}`)
-          : { ok: true as const, value: gitStdoutText(exit) }),
+      gitZeroExitProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT, `git ls-tree failed for ${object}`,
+        (exit) => decoded(gitStdoutText(exit))),
       (entry) => entry === "",
     ),
     () => null,
@@ -328,10 +333,8 @@ export function baselineBlob(revision: string, path: string): Uint8Array | null 
   if (type !== "blob") throw new Error(`${object} is a ${type}, not a file`);
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe(["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, (exit) =>
-        exit.status !== 0
-          ? exitRefusal(exit, `git cat-file blob failed for ${object}`)
-          : { ok: true as const, value: new Uint8Array(exit.stdout) }),
+      gitZeroExitProbe(["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, `git cat-file blob failed for ${object}`,
+        (exit) => decoded(new Uint8Array(exit.stdout))),
       (bytes) => bytes.length === 0,
     ),
     // An empty file is a real blob: confirmed-empty bytes are its content.

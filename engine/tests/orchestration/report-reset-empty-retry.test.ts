@@ -33,11 +33,13 @@ const scripted = vi.hoisted(() => ({
   passthrough: true,
 }));
 
+/** A scripted raw `spawnSync` result. A spawn that started no child hands back
+ *  null streams, as both runtimes do; a child that ran hands back strings. */
 type SpawnAnswer = {
   error?: Error;
   status: number | null;
-  stdout: string;
-  stderr: string;
+  stdout: string | null;
+  stderr: string | null;
 };
 
 const answered = (stdout: string): SpawnAnswer => ({ status: 0, stdout, stderr: "" });
@@ -221,7 +223,7 @@ describe("remediation report reset survives the transient empty tracked-state ob
 
     scripted.passthrough = false;
     scripted.queue = [
-      { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
+      { error: new Error("spawn git ENOENT"), status: null, stdout: null, stderr: null },
     ];
     const result = await runRemediationCheck(remediationCheck(root, "failed-probe"), root);
     expect(result.ok).toBe(false);

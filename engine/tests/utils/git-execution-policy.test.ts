@@ -1,20 +1,21 @@
 /**
  * The shared Git execution policy, pinned at its own interface — the two
  * policy-bound spawns `runGit` and `spawnGit` — and at every engine route that
- * reaches Git through them. A recording `git` shim on PATH captures each
- * child's argv and environment, so every assertion is about what a Git child
- * actually received: the allow-listed environment, and `core.fsmonitor`
- * disabled in BOTH forms — the `-c` argv prefix every Git honours and the
- * GIT_CONFIG_COUNT/KEY/VALUE environment form only Git 2.31+ honours. An
- * "old Git" shim that strips the environment form proves the argv form alone
- * keeps a repository-configured fsmonitor hook from running.
+ * reaches Git through them. The pure outcome core those spawns feed is pinned
+ * on its own in `git-spawn-outcome.test.ts`. A recording `git` shim on PATH
+ * captures each child's argv and environment, so every assertion is about
+ * what a Git child actually received: the allow-listed environment, and
+ * `core.fsmonitor` disabled in BOTH forms — the `-c` argv prefix every Git
+ * honours and the GIT_CONFIG_COUNT/KEY/VALUE environment form only Git 2.31+
+ * honours. An "old Git" shim that strips the environment form proves the argv
+ * form alone keeps a repository-configured fsmonitor hook from running.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { observeTaskGraphProjectBoundary } from "../../src/config";
-import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
+import { parseRepositorySnapshotWitness, type RepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import { baselineBlob, deriveChangedPaths } from "../../src/handlers/helpers/programs/changed-paths";
 import { calibrationRevisionPaths } from "../../src/handlers/helpers/model-calibration";
 import {
@@ -30,17 +31,7 @@ import {
 } from "../../src/orchestration/remediation-candidate";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../src/utils/declared-artifact-snapshot";
 import { runGit, spawnGit, type GitOutput } from "../../src/utils/git-execution-policy";
-import {
-  describeGitOutcome,
-  diagnoseGitOutcome,
-  gitCleanNegative,
-  gitDiagnosticLost,
-  gitExitedWith,
-  gitStdoutText,
-  parseGitSpawnResult,
-  type GitSpawnOutcome,
-  type RawGitSpawnResult,
-} from "../../src/utils/git-spawn-outcome";
+import { describeGitOutcome, diagnoseGitOutcome, gitExitedWith, gitStdoutText } from "../../src/utils/git-spawn-outcome";
 import {
   changedPaths,
   diffFilesAt,
@@ -84,13 +75,6 @@ const POLICY_ENVIRONMENT: Readonly<Record<string, string>> = Object.freeze({
 });
 const FSMONITOR_PREFIX = Object.freeze(["-c", "core.fsmonitor=false"]);
 const DUBIOUS_OWNERSHIP = "fatal: detected dubious ownership in repository at '/srv/repo'";
-
-/** The Git subcommand of one recorded invocation: the first non-option word
- *  after the policy prefix, skipping the directory a `-C` names. */
-function subcommandOf(argv: readonly string[]): string | undefined {
-  const logical = argv.slice(FSMONITOR_PREFIX.length);
-  return logical.find((arg, index) => !arg.startsWith("-") && logical[index - 1] !== "-C");
-}
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -412,114 +396,88 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
   });
 });
 
-describe("the closed spawn outcome", () => {
-  const error = (message: string, code?: string): Error => Object.assign(new Error(message), code === undefined ? {} : { code });
-  const run = { maxBuffer: 1024, timeout: 500 };
+/** A remediation candidate's repository witness, minted the way the shell
+ *  mints it: open the repository, snapshot it, parse the snapshot. */
+function repositoryWitness(root: string): RepositorySnapshotWitness {
+  const repository = openGitRepository(root);
+  if (!repository.ok) throw new Error(repository.error.message);
+  const raw = snapshotRepositoryWitness(repository.value);
+  if (!raw.ok) throw new Error(raw.error.message);
+  const witness = parseRepositorySnapshotWitness(raw.value);
+  if (!witness.ok) throw new Error(witness.error.message);
+  return witness.value;
+}
 
-  it.each<[string, RawGitSpawnResult, GitSpawnOutcome]>([
-    ["Node's missing executable", { error: error("spawnSync git ENOENT", "ENOENT"), status: null, signal: null, stdout: null, stderr: null },
-      { kind: "spawn-failed", code: "ENOENT", message: "spawnSync git ENOENT" }],
-    ["Bun's missing executable (no status, no streams)", { error: error('Executable not found in $PATH: "git"', "ENOENT"), signal: null },
-      { kind: "spawn-failed", code: "ENOENT", message: 'Executable not found in $PATH: "git"' }],
-    ["a code-less spawn error", { error: error("spawn boom"), status: null, signal: null },
-      { kind: "spawn-failed", code: null, message: "spawn boom" }],
-    ["a timeout, keeping what the child wrote", { error: error("spawnSync git ETIMEDOUT", "ETIMEDOUT"), status: null, signal: "SIGTERM", stdout: Buffer.from("partial"), stderr: Buffer.from("warning") },
-      { kind: "timed-out", timeoutMs: 500, signal: "SIGTERM", stdout: Buffer.from("partial"), stderr: Buffer.from("warning") }],
-    ["an over-budget capture", { error: error("spawnSync git ENOBUFS", "ENOBUFS"), status: 0, signal: null, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) },
-      { kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) }],
-    ["a signal", { status: null, signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.from("killed mid-write") },
-      { kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.from("killed mid-write") }],
-    ["an exit with string captures, as a scripted double hands them back", { error: null, status: 128, signal: null, stdout: "", stderr: "fatal: x\n" },
-      { kind: "exited", status: 128, stdout: Buffer.alloc(0), stderr: Buffer.from("fatal: x\n") }],
-    ["a result naming no ending at all", {},
-      { kind: "spawn-failed", code: null, message: "the spawn reported no exit status, no signal and no error" }],
-  ])("parses %s", (_label, raw, expected) => {
-    expect(parseGitSpawnResult(raw, run)).toEqual(expected);
-  });
+/** Capture reads only the verification plan's kind; a minted plan would need a
+ *  full source inventory these routes never exercise. */
+const NOT_REQUIRED_VERIFICATION = { kind: "not-required" } as unknown as RemediationCandidateCaptureInput["verification"];
 
-  it.each<[GitSpawnOutcome, string]>([
-    [{ kind: "spawn-failed", code: "ENOENT", message: "spawnSync git ENOENT" }, "could not start: spawnSync git ENOENT"],
-    [{ kind: "timed-out", timeoutMs: null, signal: "SIGTERM", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, "timed out"],
-    [{ kind: "timed-out", timeoutMs: 500, signal: "SIGTERM", stdout: Buffer.alloc(0), stderr: Buffer.from("warning\n") }, "timed out after 500 ms: warning"],
-    [{ kind: "over-budget", maxBuffer: 1024, stdout: Buffer.alloc(2048), stderr: Buffer.alloc(0) }, "exceeded its 1024-byte output budget"],
-    [{ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, "terminated on signal SIGKILL"],
-    [{ kind: "exited", status: 0, stdout: Buffer.from("out"), stderr: Buffer.alloc(0) }, "exited 0"],
-    [{ kind: "exited", status: 1, stdout: Buffer.from("ab"), stderr: Buffer.alloc(0) }, "exited 1: stderr empty, stdout 2 bytes"],
-    [{ kind: "exited", status: 129, stdout: Buffer.alloc(0), stderr: Buffer.from("usage: git rev-parse\n") }, "exited 129: usage: git rev-parse"],
-  ])("renders %j as %j", (outcome, expected) => {
-    expect(describeGitOutcome(outcome)).toBe(expected);
-  });
+/** Capture the remediation candidate workspace for `tracked.txt` into `runDirectory`. */
+function captureTrackedCandidate(root: string, runDirectory: string, witness: RepositorySnapshotWitness) {
+  return captureRemediationCandidateWorkspace({
+    repositoryStartPath: root,
+    verification: NOT_REQUIRED_VERIFICATION,
+    pathSources: { reviewedPaths: ["tracked.txt"], supportPaths: [], siblingPaths: [], inputSourcePaths: [] },
+    runDirectory,
+  }, witness);
+}
 
-  it("accepts an exit only when its caller's protocol names that status", () => {
-    const exited = (status: number): GitSpawnOutcome => ({ kind: "exited", status, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
-    expect([0, 1, 128].map((status) => gitExitedWith(exited(status), [0, 1]))).toEqual([true, true, false]);
-    expect(gitExitedWith({ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }, [0, 1])).toBe(false);
-    expect(gitExitedWith({ kind: "spawn-failed", code: null, message: "boom" }, [0])).toBe(false);
-  });
+/**
+ * Run each named route against one recording shim and hand back the Git
+ * children that route spawned. A route that reached no Git child fails here,
+ * by name: the policy invariant below is vacuous for a route it never saw.
+ */
+function routeSpawns(shim: ReturnType<typeof recordingGit>): (route: string, run: () => void) => readonly Invocation[] {
+  return (route, run) => {
+    const before = shim.invocations().length;
+    run();
+    const spawned = shim.invocations().slice(before);
+    expect(spawned.length, `${route} spawned no Git child`).toBeGreaterThan(0);
+    return spawned;
+  };
+}
 
-  it("reads only a silent exit 1 as a 0/1 protocol's clean negative answer", () => {
-    const exited = (status: number, stdout: string, stderr: string): GitSpawnOutcome =>
-      ({ kind: "exited", status, stdout: Buffer.from(stdout), stderr: Buffer.from(stderr) });
-    expect([
-      exited(1, "", ""), exited(1, "\n", " "), exited(1, "", "fatal: cannot read object"), exited(1, "abc", ""), exited(0, "", ""), exited(128, "", ""),
-    ].map(gitCleanNegative)).toEqual([true, true, false, false, false, false]);
-    expect(gitCleanNegative({ kind: "spawn-failed", code: "ENOENT", message: "spawn git ENOENT" })).toBe(false);
-  });
-
-  it("calls only a silent FATAL exit a lost diagnostic", () => {
-    const exited = (status: number, stderr: string): GitSpawnOutcome =>
-      ({ kind: "exited", status, stdout: Buffer.alloc(0), stderr: Buffer.from(stderr) });
-    expect([
-      exited(128, ""), exited(129, " \n"), exited(128, "fatal: x"), exited(1, ""), exited(0, ""),
-    ].map(gitDiagnosticLost)).toEqual([true, true, false, false, false]);
-    expect(gitDiagnosticLost({ kind: "signalled", signal: "SIGKILL", stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) })).toBe(false);
-  });
-});
+/** Whether a Git child ran inside the shadow administration directory. */
+const inShadow = (invocation: Invocation): boolean => /loom-git-shadow-/.test(invocation.env.GIT_DIR ?? "");
 
 describe("every engine Git route runs under the policy", () => {
   it("leaf listings, revision reads, shadow diffs and listings, tracking, the workspace digest and remediation audits", () => {
     const { root, marker } = fsmonitorRepository();
     write(root, "tracked.txt", "dirty\n");
     write(root, "untracked.txt", "new\n");
-    const repository = openGitRepository(root);
-    if (!repository.ok) throw new Error(repository.error.message);
-    const rawWitness = snapshotRepositoryWitness(repository.value);
-    if (!rawWitness.ok) throw new Error(rawWitness.error.message);
-    const witness = parseRepositorySnapshotWitness(rawWitness.value);
-    if (!witness.ok) throw new Error(witness.error.message);
+    const witness = repositoryWitness(root);
     rmSync(marker, { force: true });
 
     const shim = recordingGit("real");
-    withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => {
-      expect(gitOutput(root, ["rev-parse", "HEAD"]).toString("utf-8").trim()).toMatch(/^[0-9a-f]{40}$/);
-      expect(worktreeVisibleLeafPaths(root, ".")).toEqual([".gitignore", "tracked.txt", "untracked.txt"]);
-      expect(changedPaths(root, "worktree")).toEqual(["tracked.txt"]);
-      expect(changedPaths(root, "untracked")).toEqual(["untracked.txt"]);
-      expect(diffFilesAt(root, ["tracked.txt"])).toMatchObject({ ok: true, diff: expect.stringContaining("+dirty") });
-      expect(isTrackedAt(root, "tracked.txt")).toEqual({ ok: true, tracked: true });
-      expect(isTrackedAt(root, "untracked.txt")).toEqual({ ok: true, tracked: false });
-      expect(observeWorkspaceDigest(root)).toMatchObject({ ok: true, value: { pathCount: 3 } });
-      const captured = captureRemediationCandidateWorkspace({
-        repositoryStartPath: root,
-        // Capture reads only the plan kind; a minted plan needs a full source inventory.
-        verification: { kind: "not-required" } as unknown as RemediationCandidateCaptureInput["verification"],
-        pathSources: { reviewedPaths: ["tracked.txt"], supportPaths: [], siblingPaths: [], inputSourcePaths: [] },
-        runDirectory: join(root, ".claude/reviews/run"),
-      }, witness.value);
-      expect(captured.ok, captured.ok ? "" : captured.error.message).toBe(true);
-    });
+    const spawns = routeSpawns(shim);
+    const routes = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => ({
+      revisionRead: spawns("revision read", () =>
+        expect(gitOutput(root, ["rev-parse", "HEAD"]).toString("utf-8").trim()).toMatch(/^[0-9a-f]{40}$/)),
+      leafListing: spawns("leaf listing", () =>
+        expect(worktreeVisibleLeafPaths(root, ".")).toEqual([".gitignore", "tracked.txt", "untracked.txt"])),
+      worktreeChanges: spawns("worktree changed paths", () => expect(changedPaths(root, "worktree")).toEqual(["tracked.txt"])),
+      untrackedChanges: spawns("untracked changed paths", () => expect(changedPaths(root, "untracked")).toEqual(["untracked.txt"])),
+      diff: spawns("diff", () => expect(diffFilesAt(root, ["tracked.txt"])).toMatchObject({ ok: true, diff: expect.stringContaining("+dirty") })),
+      tracking: spawns("tracking probe", () => {
+        expect(isTrackedAt(root, "tracked.txt")).toEqual({ ok: true, tracked: true });
+        expect(isTrackedAt(root, "untracked.txt")).toEqual({ ok: true, tracked: false });
+      }),
+      workspaceDigest: spawns("workspace digest", () => expect(observeWorkspaceDigest(root)).toMatchObject({ ok: true, value: { pathCount: 3 } })),
+      remediationAudit: spawns("remediation candidate audit", () => {
+        const captured = captureTrackedCandidate(root, join(root, ".claude/reviews/run"), witness);
+        expect(captured.ok, captured.ok ? "" : captured.error.message).toBe(true);
+      }),
+    }));
 
     const invocations = shim.invocations();
     for (const invocation of invocations) expectHardened(invocation, shim.path);
-    expect(new Set(invocations.map(({ argv }) => subcommandOf(argv)))).toEqual(new Set(["rev-parse", "ls-files", "diff", "check-ignore"]));
     // Content-hashing listings, diffs and the tracking probe run in the shadow
-    // administration directory; leaf listings never do.
-    const shadowRoutes = invocations.filter(({ argv }) => argv.includes("diff") || argv.includes("--error-unmatch"));
-    expect(shadowRoutes.length).toBe(4);
+    // administration directory; leaf listings and the other routes never do.
     for (const invocation of invocations) {
-      if (shadowRoutes.includes(invocation)) expect(invocation.env.GIT_DIR).toMatch(/loom-git-shadow-/);
-      else expect(invocation.env.GIT_DIR).toBeUndefined();
+      expect(inShadow(invocation), invocation.argv.join(" ")).toBe(invocation.argv.includes("diff") || invocation.argv.includes("--error-unmatch"));
     }
+    for (const shadowed of [routes.worktreeChanges, routes.diff, routes.tracking]) expect(shadowed.some(inShadow)).toBe(true);
+    for (const direct of [routes.revisionRead, routes.leafListing, routes.workspaceDigest]) expect(direct.some(inShadow)).toBe(false);
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -535,37 +493,35 @@ describe("every engine Git route runs under the policy", () => {
     rmSync(marker, { force: true });
 
     const shim = recordingGit("real");
+    const spawns = routeSpawns(shim);
     let temporaryIndex: string | null = null;
-    withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => withCwd(root, () => withoutProjectDirectory(() => {
-      expect(resolveRepositoryRoot("policy route test")).toBe(root);
-      expect(repositoryContext(root)).toEqual({ ok: true, root, headSha: head });
-      expect(observeExactHead(root)).toEqual({ ok: true, headSha: head });
-      expect(observeTaskGraphProjectBoundary(join(stateDirectory, "active_task_graph.json")))
-        .toEqual({ kind: "git-repository", root });
-      expect(captureDeclaredArtifactBaselineAtRevision(root, head, ["tracked.txt"])).toHaveLength(1);
-      expect(deriveChangedPaths().authority).toMatchObject({ head_revision: head, unstaged: expect.arrayContaining(["tracked.txt"]) });
-      expect(Buffer.from(baselineBlob(head, "tracked.txt") ?? []).toString("utf-8")).toBe("tracked\n");
-      expect(calibrationRevisionPaths(head)).toEqual([".gitignore", "tracked.txt"]);
-      const temporary = createTemporaryIndex(repository.value);
-      if (!temporary.ok) throw new Error(temporary.error.message);
-      temporaryIndex = temporary.value.path;
-      try {
-        expect(stageAuditedPaths(repository.value, temporary.value, pathspecContract(["staged.txt"])))
-          .toEqual({ ok: true, value: ["staged.txt"] });
-      } finally {
-        discardTemporaryIndex(temporary.value);
-      }
+    const staging = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => withCwd(root, () => withoutProjectDirectory(() => {
+      spawns("repository root", () => expect(resolveRepositoryRoot("policy route test")).toBe(root));
+      spawns("repository context", () => expect(repositoryContext(root)).toEqual({ ok: true, root, headSha: head }));
+      spawns("exact HEAD", () => expect(observeExactHead(root)).toEqual({ ok: true, headSha: head }));
+      spawns("task-graph boundary", () => expect(observeTaskGraphProjectBoundary(join(stateDirectory, "active_task_graph.json")))
+        .toEqual({ kind: "git-repository", root }));
+      spawns("declared-artifact baseline", () => expect(captureDeclaredArtifactBaselineAtRevision(root, head, ["tracked.txt"])).toHaveLength(1));
+      spawns("review scope", () => expect(deriveChangedPaths().authority)
+        .toMatchObject({ head_revision: head, unstaged: expect.arrayContaining(["tracked.txt"]) }));
+      spawns("baseline blob", () => expect(Buffer.from(baselineBlob(head, "tracked.txt") ?? []).toString("utf-8")).toBe("tracked\n"));
+      spawns("calibration paths", () => expect(calibrationRevisionPaths(head)).toEqual([".gitignore", "tracked.txt"]));
+      return spawns("remediation staging", () => {
+        const temporary = createTemporaryIndex(repository.value);
+        if (!temporary.ok) throw new Error(temporary.error.message);
+        temporaryIndex = temporary.value.path;
+        try {
+          expect(stageAuditedPaths(repository.value, temporary.value, pathspecContract(["staged.txt"])))
+            .toEqual({ ok: true, value: ["staged.txt"] });
+        } finally {
+          discardTemporaryIndex(temporary.value);
+        }
+      });
     })));
 
-    const invocations = shim.invocations();
-    for (const invocation of invocations) expectHardened(invocation, shim.path);
-    expect(new Set(invocations.map(({ argv }) => subcommandOf(argv)))).toEqual(new Set([
-      "rev-parse", "cat-file", "ls-tree", "show", "ls-files", "diff", "merge-base", "diff-tree", "read-tree", "add", "diff-index",
-    ]));
+    for (const invocation of shim.invocations()) expectHardened(invocation, shim.path);
     // Remediation staging relocates only the index, through the closed index
     // overlay, and pipes its NUL manifest as stdin.
-    const staging = invocations.filter(({ argv }) => ["read-tree", "add", "diff-index"].includes(subcommandOf(argv) ?? ""));
-    expect(staging.length).toBe(3);
     for (const invocation of staging) {
       expect(invocation.env.GIT_INDEX_FILE).toBe(temporaryIndex);
       expect(invocation.env.GIT_DIR).toBeUndefined();
@@ -591,12 +547,7 @@ describe("every engine Git route runs under the policy", () => {
 
   it.each(GLOBAL_IGNORE_SOURCES)("keeps the remediation candidate's tracking and ignore audits blind to %s", (_label, ignoreGlobally) => {
     const { root } = fsmonitorRepository();
-    const repository = openGitRepository(root);
-    if (!repository.ok) throw new Error(repository.error.message);
-    const rawWitness = snapshotRepositoryWitness(repository.value);
-    if (!rawWitness.ok) throw new Error(rawWitness.error.message);
-    const witness = parseRepositorySnapshotWitness(rawWitness.value);
-    if (!witness.ok) throw new Error(witness.error.message);
+    const witness = repositoryWitness(root);
     const home = tempDir("loom-git-home-");
     ignoreGlobally(home, "operator-runs/\n");
     const runDirectory = join(root, "operator-runs", "run");
@@ -607,13 +558,7 @@ describe("every engine Git route runs under the policy", () => {
       expect(spawnSync(REAL_GIT, ["check-ignore", "--quiet", "operator-runs/run"], { cwd: root }).status).toBe(0);
       // …but the audit proves it untracked and then refuses it as Git-visible,
       // because no operator-local ignore rule reaches the policy-bound probes.
-      const captured = captureRemediationCandidateWorkspace({
-        repositoryStartPath: root,
-        verification: { kind: "not-required" } as unknown as RemediationCandidateCaptureInput["verification"],
-        pathSources: { reviewedPaths: ["tracked.txt"], supportPaths: [], siblingPaths: [], inputSourcePaths: [] },
-        runDirectory,
-      }, witness.value);
-      expect(captured).toMatchObject({
+      expect(captureTrackedCandidate(root, runDirectory, witness)).toMatchObject({
         ok: false,
         error: { field: "runDirectory", message: "protected Run Directory is Git-visible: operator-runs/run; choose an already-ignored location or a location outside the repository" },
       });

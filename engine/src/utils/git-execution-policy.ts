@@ -23,12 +23,9 @@
  *   exactly when the engine's own process has it — never ambient authority
  *   such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
  *   GIT_LITERAL_PATHSPECS/GIT_GLOB_PATHSPECS, GIT_CONFIG_COUNT/KEY/VALUE
- *   config injection, or executable diff overrides. The macOS verify failure
- *   that first surfaced a lost diagnostic here (run 37744264682) was not an
- *   environment gap: the same job's policy-bound Git children wrote 94
- *   not-a-repository diagnostics that arrived intact, Git there is Homebrew's
- *   binary rather than the `xcrun` shim (so `DEVELOPER_DIR`/`SDKROOT` are not
- *   consulted), and `TMPDIR`/`HOME`/`PATH` were passed.
+ *   config injection, or executable diff overrides. The allow-list is
+ *   deliberately minimal: a fatal exit whose diagnostic arrived empty is a
+ *   lost capture (see `observeGitProbe`), not a variable this list withholds.
  * - System and global config are excluded, so no config authored outside the
  *   repository reaches the observation — and every observer agrees on one
  *   ignore rule set (an operator's global `core.excludesFile` is invisible to

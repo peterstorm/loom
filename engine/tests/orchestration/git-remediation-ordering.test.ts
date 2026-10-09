@@ -23,8 +23,8 @@ type SpawnShape = {
   error: Error | null;
   status: number | null;
   signal: NodeJS.Signals | null;
-  stdout: Buffer;
-  stderr: Buffer;
+  stdout: Buffer | null;
+  stderr: Buffer | null;
 };
 
 const spawnResult = (
@@ -69,7 +69,7 @@ describe("git boundary emptiness-guard ordering", () => {
   });
 
   it("keeps the spawn-failure arm ahead of the emptiness guard (one attempt, exact message)", () => {
-    script.responses = [spawnResult({ error: new Error("spawn boom") })];
+    script.responses = [spawnResult({ error: new Error("spawn boom"), status: null, stdout: null, stderr: null })];
     const opened = openGitRepository("/fixture/repo");
     expect(opened.ok).toBe(false);
     if (opened.ok) throw new Error("expected refusal");
