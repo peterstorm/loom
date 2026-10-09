@@ -71,12 +71,6 @@ const present = <T>(value: T | null | undefined): value is T => value !== null &
 const captured = (stream: Buffer | string | null | undefined): Buffer =>
   present(stream) ? Buffer.from(stream) : Buffer.alloc(0);
 
-/** Whether the raw result shows that a child ran: it handed back a stream, a
- *  status or a signal. A spawn that started no child hands back none of them
- *  (Node: `output: null`; Bun: `stdout`/`stderr` null and no status). */
-const childRan = (raw: RawGitSpawnResult): boolean =>
-  present(raw.stdout) || present(raw.stderr) || typeof raw.status === "number" || present(raw.signal);
-
 /** Parse one raw spawn result into its closed outcome; `bounds` are what a
  *  timed-out or over-budget arm names. */
 export function parseGitSpawnResult(raw: RawGitSpawnResult, bounds: GitSpawnBounds): GitSpawnOutcome {
@@ -89,10 +83,13 @@ export function parseGitSpawnResult(raw: RawGitSpawnResult, bounds: GitSpawnBoun
   if (code === "ENOBUFS") return Object.freeze({ kind: "over-budget", maxBuffer: bounds.maxBuffer, ...capture });
   if (error === null && signal !== null) return Object.freeze({ kind: "signalled", signal, ...capture });
   if (error === null && status !== null) return Object.freeze({ kind: "exited", status, ...capture });
-  // A spawn error, or no ending reported at all: a fault when a child ran, so
-  // what it wrote is kept; otherwise no child ran.
+  // A spawn error, or no ending reported at all: a fault when the result shows
+  // a child ran — a stream, a status or a signal, none of which either runtime
+  // hands back when no child started (Node: `output: null`; Bun: null
+  // streams, no status) — so what it wrote is kept.
   const message = error === null ? "the spawn reported no exit status, no signal and no error" : error.message;
-  return childRan(raw)
+  const childRan = present(raw.stdout) || present(raw.stderr) || status !== null || signal !== null;
+  return childRan
     ? Object.freeze({ kind: "faulted", code, message, status, signal, ...capture })
     : Object.freeze({ kind: "spawn-failed", code, message });
 }
