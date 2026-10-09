@@ -2,9 +2,14 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { buildContextPacket, encodeByteSection } from "../../../../src/core/context-packets";
-import { currentProfileBindings, type PiBinding } from "../../../../src/core/model-profiles";
-import { parseAgentRosterSlot, type AgentRequestAuthority, type AgentRosterSlot } from "../../../../src/core/orchestration-contract";
+import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../../../src/core/context-packets";
+import { currentProfileBindings, resolveAgentPolicy, type PiBinding } from "../../../../src/core/model-profiles";
+import {
+  parseAgentRosterSlot,
+  type AgentRequestAuthority,
+  type AgentRosterSlot,
+  type MintedAgentRosterSlot,
+} from "../../../../src/core/orchestration-contract";
 import { parseRefutationPanelAuthority, type RefutationPanelAuthority } from "../../../../src/core/panel-authority";
 import { parseWaveFindingId, type BriefFinding, type ReviewLens } from "../../../../src/core/review-panel";
 import { prepareRefutationVerifiers, type RefutationVerifierPlan } from "../../../../src/handlers/helpers/programs/refutation-verifiers";
@@ -77,27 +82,27 @@ const bindings = (slots: readonly AgentRosterSlot[]) =>
 describe("refutation verifier preparation", () => {
   it("mints every verifier request from today's catalog when the panel has no record", () => {
     const prepared = prepareRefutationVerifiers(plan(runDirectory()));
-    expect(bindings(prepared.panel.verifierRoster.orderedSlots))
+    expect(bindings(prepared.panel.authority.verifierRoster.orderedSlots))
       .toEqual(Array(4).fill(currentProfileBindings("refutation").pi));
     expect(prepared.inputs.map(({ authority }) => authority))
-      .toEqual(prepared.panel.verifierRoster.orderedSlots.map(({ attempts }) => attempts[0]));
+      .toEqual(prepared.panel.authority.verifierRoster.orderedSlots.map(({ attempts }) => attempts[0]));
     expect(prepared.retryInputs.map(({ input }) => input.authority))
-      .toEqual(prepared.panel.verifierRoster.orderedSlots.map(({ attempts }) => attempts[1]));
+      .toEqual(prepared.panel.authority.verifierRoster.orderedSlots.map(({ attempts }) => attempts[1]));
     expect(prepared.packets.map(({ digest }) => digest)).toEqual(prepared.inputs.map(({ authority }) => authority.contextDigest));
   });
 
   it("reads a recorded panel back as history instead of re-minting today's binding", () => {
     const handle = runDirectory();
-    const recorded = recordedOn(prepareRefutationVerifiers(plan(handle)).panel, RETIRED);
+    const recorded = recordedOn(prepareRefutationVerifiers(plan(handle)).panel.authority, RETIRED);
     const prepared = prepareRefutationVerifiers(plan(handle, { recorded }));
-    expect(prepared.panel).toEqual(recorded);
-    expect(bindings(prepared.panel.verifierRoster.orderedSlots)).toEqual(Array(4).fill(RETIRED));
+    expect(prepared.panel).toEqual({ kind: "recorded", authority: recorded });
+    expect(bindings(prepared.panel.authority.verifierRoster.orderedSlots)).toEqual(Array(4).fill(RETIRED));
     expect(prepared.retryInputs.map(({ input }) => input.authority.harnessBinding.pi)).toEqual([RETIRED, RETIRED]);
   });
 
   it("refuses a record whose request differs from the panel's deterministic request", () => {
     const handle = runDirectory();
-    const recorded = recordedOn(prepareRefutationVerifiers(plan(handle)).panel, RETIRED);
+    const recorded = recordedOn(prepareRefutationVerifiers(plan(handle)).panel.authority, RETIRED);
     const drifted = plan(handle, {
       recorded,
       packet: (lens, requestId, attempt) => plan(handle).packet(lens, requestId, attempt === 1 ? 2 : 1),
@@ -105,9 +110,66 @@ describe("refutation verifier preparation", () => {
     expect(() => prepareRefutationVerifiers(drifted)).toThrow(/differs from the panel's deterministic request/);
   });
 
+  it("issues an unrecorded panel as minted, routing every verifier request through the catalog's verifier policy", () => {
+    const prepared = prepareRefutationVerifiers(plan(runDirectory()));
+    expect(prepared.panel.kind).toBe("issued");
+    if (prepared.panel.kind !== "issued") return;
+    // The issued roster keeps its minted proof: a catalog profile on the local binding, by type.
+    const minted: readonly MintedAgentRosterSlot[] = prepared.panel.authority.verifierRoster.orderedSlots;
+    const policy = resolveAgentPolicy("review-verifier-agent");
+    if (!policy.ok) throw new Error(policy.error.message);
+    const verifierPolicy = policy.value;
+    for (const request of minted.flatMap(({ attempts }) => attempts)) {
+      expect(request.role).toBe("review-verifier-agent");
+      expect(request.modelProfile).toBe(verifierPolicy.profile);
+      expect(request.requiredSkill).toBe(verifierPolicy.requiredSkill);
+      expect(request.harnessBinding).toEqual(currentProfileBindings(verifierPolicy.profile));
+      // Golden bytes: the serialized verifier authority's binding, as every
+      // Refutation Panel (standalone and Wave) issues it today.
+      expect(JSON.stringify(request.harnessBinding)).toBe(
+        '{"pi":{"harness":"pi","provider":"desktop-vllm","model":"glm-5.3-flash-spark-tp2-v14","thinking":"high"},' +
+        '"claude":{"harness":"claude-code","model":"opus"}}',
+      );
+      expect(request.modelProfile).toBe("refutation");
+    }
+    expect(prepared.panel.authority.findings).toEqual(FINDINGS);
+    expect(prepared.panel.authority.lenses).toEqual(LENSES);
+  });
+
+  it("issues the same panel a re-read of its own record parses, so issuance and history agree", () => {
+    const handle = runDirectory();
+    const issued = prepareRefutationVerifiers(plan(handle)).panel.authority;
+    expect(prepareRefutationVerifiers(plan(handle, { recorded: issued })).panel).toEqual({ kind: "recorded", authority: issued });
+  });
+
+  it("names the catalog's own reasons when a verifier request cannot be minted", () => {
+    const handle = runDirectory();
+    const malformed = plan(handle, {
+      // A forged packet: its digest is no Context Packet digest, so the catalog parse refuses it.
+      packet: (lens, requestId, attempt) =>
+        ({ ...plan(handle).packet(lens, requestId, attempt), digest: "not-a-digest" }) as unknown as ContextPacket,
+    });
+    const refusal = (): string => {
+      try {
+        prepareRefutationVerifiers(malformed);
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      throw new Error("a verifier request with a malformed Context Packet digest must not mint");
+    };
+    // Both attempts' catalog violations are propagated verbatim, never collapsed
+    // into a bare "failed to derive".
+    const parsed = refusal().match(/^verifier slot (refutation-slot:[0-9a-f]+) cannot be minted: (.+)$/);
+    expect(parsed).not.toBeNull();
+    const reasons = parsed?.[2]?.split("; ") ?? [];
+    expect(reasons.length).toBeGreaterThanOrEqual(2);
+    expect(reasons.some((reason) => /digest/i.test(reason))).toBe(true);
+    expect(reasons.every((reason) => reason.length > 0 && reason !== "roster slot: invalid")).toBe(true);
+  });
+
   it("refuses a record that lacks one of the panel's verifier slots", () => {
     const handle = runDirectory();
-    const oneLens = prepareRefutationVerifiers(plan(handle, { lenses: ["reproduction"] })).panel;
+    const oneLens = prepareRefutationVerifiers(plan(handle, { lenses: ["reproduction"] })).panel.authority;
     expect(() => prepareRefutationVerifiers(plan(handle, { recorded: recordedOn(oneLens, RETIRED) }))).toThrow(/lacks verifier request/);
   });
 });

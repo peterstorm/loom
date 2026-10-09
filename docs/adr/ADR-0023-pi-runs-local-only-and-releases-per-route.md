@@ -6,7 +6,10 @@ Accepted (2026-10-08). Amends AD-11 of the grammar-constrained decoding plan; su
 issue-route election (`qualified-local-review`).
 
 Amended (2026-10-09): decision 3 gains the operator opt-in `LOOM_ROUTE_GATE=strict` and states that every
-gate input that cannot be read refuses the batch. The default admission of an unverified route is unchanged.
+gate input that cannot be read refuses the batch. The default admission of an unverified route is unchanged,
+and the admitted batch's emitted action also names each unverified route (`unverifiedRoutes`) beside the
+stderr event. A `retired` refusal is derived from the request's recorded binding and its profile's current
+one, so a later retargeting is reported in its own terms.
 
 ## Context
 
@@ -36,7 +39,7 @@ Three things followed from the earlier cloud-default catalog:
    retired profile id, and the cloud targets as `RetiredPiTarget`s, only so that stored authorities parse.
    Each recorded profile admits exactly the bindings it has issued (`recordedProfileBindings`,
    reconstructed from the catalog's Git history). A request is checked against today's catalog once, where it
-   is minted (`parseAgentRequestAuthority`); every roster re-read parses its attempts as recorded.
+   is minted (`mintAgentRequestAuthority`); every roster re-read parses its attempts as recorded.
 3. **Fail closed on reachability.** Before a Pi parent's CLI emits a spawn batch, each distinct route its
    children will launch on must answer `GET {baseUrl}/models`, with `baseUrl` from Pi's `models.json`
    (`core/route-reachability.ts`, `utils/route-endpoint.ts`). The launch route is the one the generated

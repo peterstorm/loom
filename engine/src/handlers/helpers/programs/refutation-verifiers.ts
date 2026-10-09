@@ -1,7 +1,8 @@
 /**
  * Refutation Panel verifier authority shared by the standalone and Wave Gate
  * programs: one verifier slot per lens, both attempts' Context Packets and
- * requests, and the panel authority over them.
+ * requests, and the panel authority over them. It is the one place a
+ * verifier request is issued or read back.
  *
  * ADR-0023: a request is checked against today's catalog ONCE, where it is
  * minted. A panel whose verifier requests are already on record — its
@@ -11,21 +12,19 @@
  * recorded one and refuse every run issued before the catalog changed.
  */
 import {
-  issueAgentRosterSlot,
-  mintAgentRequestAuthority,
+  mintAgentRosterSlot,
   parseAgentRosterSlot,
   parseStoredAgentRequestAuthorityForAttempt,
+  rosterSlotErrorMessages,
   sameAgentRequestAuthority,
   type AgentRequestAuthority,
   type AgentRequestIdentity,
   type AgentRosterSlot,
-  type DomainResult,
   type InitialSpawnRequestInput,
   type MintedAgentRosterSlot,
   type NonEmpty,
   type OrchestrationRunId,
   type RequestId,
-  type RosterViolation,
   type SemanticAttempt,
   type SlotId,
 } from '../../../core/orchestration-contract';
@@ -35,6 +34,7 @@ import {
   deriveRefutationVerifierBinding,
   issueRefutationPanelAuthority,
   parseRefutationPanelAuthority,
+  type IssuedRefutationPanelAuthority,
   type RefutationPanelAuthority,
 } from '../../../core/panel-authority';
 import type { LoomAgentName } from '../../../core/model-profiles';
@@ -49,8 +49,17 @@ export type PreparedVerifierRequest = Readonly<{
   packet: ContextPacket;
 }>;
 
+/**
+ * The panel a preparation produced: `issued` when it was minted now from
+ * today's catalog (its roster keeps the minted proof), `recorded` when it was
+ * read back from the panel's record as history.
+ */
+export type PreparedRefutationPanel =
+  | Readonly<{ kind: "issued"; authority: IssuedRefutationPanelAuthority }>
+  | Readonly<{ kind: "recorded"; authority: RefutationPanelAuthority }>;
+
 export type RefutationVerifierPreparation = Readonly<{
-  panel: RefutationPanelAuthority;
+  panel: PreparedRefutationPanel;
   /** Attempt-1 requests and their packets, index-aligned, in lens order. */
   inputs: readonly PreparedVerifierRequest["input"][];
   packets: readonly ContextPacket[];
@@ -74,6 +83,9 @@ export type RefutationVerifierPlan = Readonly<{
 
 type DraftAttempt<Attempt extends SemanticAttempt> = Readonly<{ identity: AgentRequestIdentity<Attempt>; packet: ContextPacket }>;
 type DraftSlot = Readonly<{ slotId: SlotId; attempts: readonly [DraftAttempt<1>, DraftAttempt<2>] }>;
+
+/** A verifier slot beside the draft it was issued or read for, so its packets are never looked up by index. */
+type PairedSlot<Slot extends AgentRosterSlot> = Readonly<{ draft: DraftSlot; slot: Slot }>;
 
 /** The recorded verifier requests of the panel, keyed by request id; empty when the panel has no record. */
 function recordedVerifierRequests(plan: RefutationVerifierPlan, drafts: readonly DraftSlot[]): ReadonlyMap<string, AgentRequestAuthority> {
@@ -114,22 +126,11 @@ function recordedAttempt<Attempt extends SemanticAttempt>(
   return parsed.value;
 }
 
-/** The issued (or recorded) slot, or a thrown refusal: the one owner of the verifier-slot error wording. */
-function verifierSlot<Slot extends AgentRosterSlot>(
-  slotId: SlotId,
-  slot: DomainResult<Slot, Readonly<{ violations: NonEmpty<RosterViolation> }>>,
-): Slot {
-  if (!slot.ok) throw new Error(`verifier slot ${slotId} is invalid: ${slot.error.violations.map(({ kind }) => kind).join(", ")}`);
-  return slot.value;
-}
-
+/** Mint `draft`'s slot from today's catalog, or throw naming every reason the catalog refused it. */
 function mintedVerifierSlot(draft: DraftSlot): MintedAgentRosterSlot {
-  const first = mintAgentRequestAuthority(draft.attempts[0].identity);
-  const retry = mintAgentRequestAuthority(draft.attempts[1].identity);
-  if (!first.ok || !retry.ok) {
-    throw new Error([first, retry].flatMap((minted) => minted.ok ? [] : minted.error.violations.map(({ message }) => message)).join("; "));
-  }
-  return verifierSlot(draft.slotId, issueAgentRosterSlot(first.value, retry.value));
+  const slot = mintAgentRosterSlot(draft.attempts[0].identity, draft.attempts[1].identity);
+  if (!slot.ok) throw new Error(`verifier slot ${draft.slotId} cannot be minted: ${rosterSlotErrorMessages(slot.error).join("; ")}`);
+  return slot.value;
 }
 
 function recordedVerifierSlot(draft: DraftSlot, recorded: ReadonlyMap<string, AgentRequestAuthority>): AgentRosterSlot {
@@ -138,10 +139,59 @@ function recordedVerifierSlot(draft: DraftSlot, recorded: ReadonlyMap<string, Ag
   if (recordedFirst === undefined) {
     throw new Error(`refutation panel record lacks verifier request ${firstDraft.identity.requestId}`);
   }
-  return verifierSlot(draft.slotId, parseAgentRosterSlot(
+  const slot = parseAgentRosterSlot(
     recordedAttempt(firstDraft, recordedFirst),
     recordedAttempt(retryDraft, recorded.get(retryDraft.identity.requestId) ?? recordedFirst),
-  ));
+  );
+  if (!slot.ok) throw new Error(`verifier slot ${draft.slotId} is invalid: ${slot.error.violations.map(({ kind }) => kind).join(", ")}`);
+  return slot.value;
+}
+
+/** The deterministic identities and packets of one lens's verifier slot. */
+function draftSlot(plan: RefutationVerifierPlan, identityRunId: OrchestrationRunId, lens: ReviewLens, findingIds: NonEmpty<BriefFinding["id"]>): DraftSlot {
+  const binding = deriveRefutationVerifierBinding(identityRunId, lens, findingIds);
+  if (!binding.ok) throw new Error(binding.errors.join("; "));
+  const { slotId, requestIds: [firstRequestId, retryRequestId] } = binding.value;
+  const draft = <Attempt extends SemanticAttempt>(attempt: Attempt, requestId: RequestId): DraftAttempt<Attempt> => {
+    const packet = plan.packet(lens, requestId, attempt);
+    return Object.freeze({
+      packet,
+      identity: Object.freeze({
+        runId: plan.handle.runId,
+        requestId,
+        slotId,
+        program: "refutation-panel" as const,
+        role: VERIFIER_ROLE,
+        attempt,
+        contextDigest: packet.digest,
+        outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
+      }),
+    });
+  };
+  return Object.freeze({ slotId, attempts: Object.freeze([draft(1, firstRequestId), draft(2, retryRequestId)] as const) });
+}
+
+function preparedRequest(authority: AgentRequestAuthority, packet: ContextPacket): PreparedVerifierRequest {
+  return Object.freeze({
+    input: Object.freeze({
+      authority,
+      context: Object.freeze({
+        digest: packet.digest,
+        slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${packet.digest}.json` }),
+      }),
+    }),
+    packet,
+  });
+}
+
+function preparation(panel: PreparedRefutationPanel, paired: readonly PairedSlot<AgentRosterSlot>[]): RefutationVerifierPreparation {
+  const first = paired.map(({ draft, slot }) => preparedRequest(slot.attempts[0], draft.attempts[0].packet));
+  return Object.freeze({
+    panel,
+    inputs: Object.freeze(first.map(({ input }) => input)),
+    packets: Object.freeze(first.map(({ packet }) => packet)),
+    retryInputs: Object.freeze(paired.map(({ draft, slot }) => preparedRequest(slot.attempts[1], draft.attempts[1].packet))),
+  });
 }
 
 /**
@@ -154,63 +204,18 @@ export function prepareRefutationVerifiers(plan: RefutationVerifierPlan): Refuta
   const { handle, findings, lenses } = plan;
   const identityRunId = plan.identityRunId ?? handle.runId;
   const findingIds = [findings[0].id, ...findings.slice(1).map(({ id }) => id)] as const;
-  const drafts: DraftSlot[] = lenses.map((lens) => {
-    const binding = deriveRefutationVerifierBinding(identityRunId, lens, findingIds);
-    if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const { slotId, requestIds } = binding.value;
-    const draft = <Attempt extends SemanticAttempt>(attempt: Attempt): DraftAttempt<Attempt> => {
-      const packet = plan.packet(lens, requestIds[attempt - 1]!, attempt);
-      return Object.freeze({
-        packet,
-        identity: Object.freeze({
-          runId: handle.runId,
-          requestId: requestIds[attempt - 1]!,
-          slotId,
-          program: "refutation-panel" as const,
-          role: VERIFIER_ROLE,
-          attempt,
-          contextDigest: packet.digest,
-          outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
-        }),
-      });
-    };
-    return Object.freeze({ slotId, attempts: Object.freeze([draft(1), draft(2)] as const) });
-  });
+  const drafts = lenses.map((lens) => draftSlot(plan, identityRunId, lens, findingIds));
+  const panelInput = { runId: handle.runId, identityRunId, findings, lenses };
 
   const recorded = recordedVerifierRequests(plan, drafts);
-  const panelInput = { runId: handle.runId, identityRunId, findings, lenses };
-  let panel: RefutationPanelAuthority;
-  let slots: readonly AgentRosterSlot[];
   if (recorded.size === 0) {
-    const minted = drafts.map(mintedVerifierSlot);
-    const issued = issueRefutationPanelAuthority({ ...panelInput, verifierSlots: minted });
+    const minted = drafts.map((draft): PairedSlot<MintedAgentRosterSlot> => ({ draft, slot: mintedVerifierSlot(draft) }));
+    const issued = issueRefutationPanelAuthority({ ...panelInput, verifierSlots: minted.map(({ slot }) => slot) });
     if (!issued.ok) throw new Error(issued.error.message);
-    panel = issued.value;
-    slots = minted;
-  } else {
-    slots = drafts.map((draft) => recordedVerifierSlot(draft, recorded));
-    const parsed = parseRefutationPanelAuthority({ ...panelInput, verifierSlots: slots });
-    if (!parsed.ok) throw new Error(parsed.error.message);
-    panel = parsed.value;
+    return preparation(Object.freeze({ kind: "issued", authority: issued.value }), minted);
   }
-
-  const prepared = slots.map((slot, index) => slot.attempts.map((authority, attempt) => {
-    const packet = drafts[index]!.attempts[attempt]!.packet;
-    return Object.freeze({
-      input: Object.freeze({
-        authority,
-        context: Object.freeze({
-          digest: packet.digest,
-          slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${packet.digest}.json` }),
-        }),
-      }),
-      packet,
-    });
-  }));
-  return Object.freeze({
-    panel,
-    inputs: Object.freeze(prepared.map(([first]) => first!.input)),
-    packets: Object.freeze(prepared.map(([first]) => first!.packet)),
-    retryInputs: Object.freeze(prepared.map(([, retry]) => retry!)),
-  });
+  const read = drafts.map((draft): PairedSlot<AgentRosterSlot> => ({ draft, slot: recordedVerifierSlot(draft, recorded) }));
+  const parsed = parseRefutationPanelAuthority({ ...panelInput, verifierSlots: read.map(({ slot }) => slot) });
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return preparation(Object.freeze({ kind: "recorded", authority: parsed.value }), read);
 }

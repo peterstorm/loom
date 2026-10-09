@@ -15,7 +15,7 @@
  */
 
 import { match } from "ts-pattern";
-import { recordedProfileBindings, type PolicyResult, type RecordedLlmProfileId } from "./model-profiles";
+import { piModelPattern, recordedProfileBindings, type PiBinding, type PolicyResult, type RecordedLlmProfileId } from "./model-profiles";
 import { resolveAgentLaunchBinding, type EffectivePiBinding, type ModelRef, type ModelRoutingConfig } from "./model-routing";
 import type { AgentRequestAuthority } from "./orchestration-contract";
 import { samePiBinding } from "./orchestration-contract/roster";
@@ -72,11 +72,21 @@ export type RouteReachability =
   | Readonly<{ kind: "unconfigured"; route: string; provider: string }>;
 
 /**
- * A request recorded on a cloud route the catalog has retired. Pi launches
- * every child on the local route now, so no probe can make the recorded
- * route runnable: the run predates local-only routing and must be restarted.
+ * A request recorded on a Pi binding its profile no longer issues: the
+ * recorded binding is not the profile's current one. A child is launched on
+ * its profile's current binding, never on a recorded one, so no probe can
+ * make the recorded route runnable and the run must be restarted. The
+ * decision carries both bindings, and the operator-facing text is derived
+ * from them rather than from any one retirement.
  */
-export type RetiredRoute = Readonly<{ kind: "retired"; route: string; profile: RecordedLlmProfileId }>;
+export type RetiredRoute = Readonly<{
+  kind: "retired";
+  profile: RecordedLlmProfileId;
+  /** The binding the request recorded. */
+  recorded: PiBinding;
+  /** The profile's current binding: the one its requests are issued on now. */
+  current: PiBinding;
+}>;
 
 /** Every outcome the Pi spawn gate refuses or admits on. */
 export type SpawnRouteDecision = RouteReachability | RetiredRoute;
@@ -109,9 +119,10 @@ export type SpawnRoutePlan = Readonly<{ launch: readonly EffectivePiBinding[]; r
 
 /**
  * Plan a batch's routes. A request whose recorded Pi binding is not its
- * profile's current one was issued on a route the catalog has retired; every
- * other request launches on {@link resolveAgentLaunchBinding} — the exact
- * binding the generated-agent render carries, routing rules included.
+ * profile's current one was issued on a route the profile has retired (one
+ * {@link RetiredRoute} per profile and recorded binding); every other request
+ * launches on {@link resolveAgentLaunchBinding} — the exact binding the
+ * generated-agent render carries, routing rules included.
  */
 export function planSpawnRoutes(
   requests: readonly Pick<AgentRequestAuthority, "role" | "modelProfile" | "harnessBinding">[],
@@ -120,9 +131,10 @@ export function planSpawnRoutes(
   const launch: EffectivePiBinding[] = [];
   const retired = new Map<string, RetiredRoute>();
   for (const { role, modelProfile, harnessBinding: { pi: recorded } } of requests) {
-    if (!samePiBinding(recorded, recordedProfileBindings(modelProfile).pi[0])) {
-      const route = routeName(recorded);
-      if (!retired.has(route)) retired.set(route, Object.freeze({ kind: "retired", route, profile: modelProfile }));
+    const current = recordedProfileBindings(modelProfile).pi[0];
+    if (!samePiBinding(recorded, current)) {
+      const key = `${modelProfile}\u0000${piModelPattern(recorded)}`;
+      if (!retired.has(key)) retired.set(key, Object.freeze({ kind: "retired", profile: modelProfile, recorded, current }));
       continue;
     }
     const resolved = resolveAgentLaunchBinding(role, routing.parentRef, routing.config);
@@ -185,7 +197,8 @@ export function unreachableReason(cause: UnreachableCause): string {
  * How the gate treats a reachable route whose served model went unconfirmed
  * (401/403, or a 2xx without a readable model list):
  * - `admit-unverified` (the default, ADR-0023) admits it, and the shell
- *   reports it on stderr as a `loom-route-unverified` event;
+ *   reports it on stderr as a `loom-route-unverified` event and in the
+ *   emitted action's `unverifiedRoutes` ({@link reportUnverifiedRoutes});
  * - `strict` refuses it, for an operator whose authenticating gateway can
  *   answer while the model server behind it is down.
  */
@@ -216,6 +229,24 @@ export type SpawnGateVerdict =
   | Readonly<{ kind: "admitted"; unverified: readonly UnverifiedRoute[] }>
   | Readonly<{ kind: "refused"; message: string }>;
 
+/** The field an admitted spawn batch carries when a route it runs on went unverified. */
+export type UnverifiedRoutesReport = Readonly<{ unverifiedRoutes: NonEmptyRoutes }>;
+type NonEmptyRoutes = readonly [UnverifiedRoute, ...UnverifiedRoute[]];
+
+/**
+ * The action an admitted batch is emitted as. With every route verified it
+ * is `action`, unchanged; otherwise it also carries `unverifiedRoutes`, so an
+ * operator (or parent) reading only the emitted action — not stderr — sees
+ * which routes were admitted without a confirmed model.
+ */
+export function reportUnverifiedRoutes<Action extends object>(
+  action: Action,
+  unverified: readonly UnverifiedRoute[],
+): Action | (Action & UnverifiedRoutesReport) {
+  const [head, ...rest] = unverified;
+  return head === undefined ? action : Object.freeze({ ...action, unverifiedRoutes: Object.freeze([head, ...rest] as const) });
+}
+
 /** The operator-facing reason a live server's model list could not confirm its model. */
 function unlistedReason(cause: UnlistedCause, status: number): string {
   return match(cause)
@@ -231,8 +262,14 @@ const REMEDIES: Readonly<Record<Remedy, string>> = Object.freeze({
   resume: "bring the route up, then resume the run",
   verify: `make the route list its models at GET /models without credentials, or unset ${ROUTE_GATE_VARIABLE} to admit unverified routes, then resume the run`,
   configure: "declare the provider's baseUrl in Pi's models.json or route the child elsewhere in model-routing.json, then resume the run",
-  restart: "this run predates local-only routing and can never resume its retired routes, so start a fresh run",
+  restart: "a retired route is never launched again, so this run can never resume; start a fresh run",
 });
+
+/** The operator-facing refusal of one retired route, derived from the binding it recorded and its profile's current one. */
+function retiredRouteText({ profile, recorded, current }: RetiredRoute): string {
+  return `route ${routeName(recorded)} (recorded under profile '${profile}') is retired: ` +
+    `the request records ${piModelPattern(recorded)}, and profile '${profile}' now issues ${piModelPattern(current)}`;
+}
 
 /**
  * Decide a batch from its route decisions: refused, naming every route that
@@ -263,9 +300,7 @@ export function decideSpawnGate(decisions: readonly SpawnRouteDecision[], mode: 
     .with({ kind: "unconfigured" }, ({ route, provider }) => [
       { remedy: "configure", text: `route ${route} is unconfigured: Pi's models.json declares no baseUrl for provider '${provider}'` },
     ])
-    .with({ kind: "retired" }, ({ route, profile }) => [
-      { remedy: "restart", text: `route ${route} (recorded under profile '${profile}') is retired: Pi runs on the local route only since ADR-0023` },
-    ])
+    .with({ kind: "retired" }, (retired) => [{ remedy: "restart", text: retiredRouteText(retired) }])
     .exhaustive());
   if (refusals.length === 0) return Object.freeze({ kind: "admitted", unverified: Object.freeze(unverified) });
   const needed = new Set(refusals.map(({ remedy }) => remedy));

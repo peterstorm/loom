@@ -5,7 +5,7 @@
  * thinking `high`.
  *
  * The one deliberate literal spelling is the golden-bytes assertion in
- * `tests/handlers/complete-wave-gate.test.ts`, which pins the serialized
+ * `tests/handlers/helpers/programs/refutation-verifiers.test.ts`, which pins the serialized
  * authority bytes themselves.
  *
  * Beside it sits the one retired cloud binding the route suites record: read
