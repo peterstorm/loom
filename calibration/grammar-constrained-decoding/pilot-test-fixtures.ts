@@ -29,7 +29,7 @@ import {
   type ScheduledPair,
 } from "./pilot-preregistration";
 import { planDispatch, type LoadedPreregistration, type WindowWorkload } from "./pilot-retention";
-import { contentDigest, type CellKey, type PilotArm } from "./pilot-vocabulary";
+import { contentDigest, PILOT_ARMS, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import { dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
 import { CURRENT_WINDOW_SCHEMA_VERSION } from "./pilot-window-ending";
 import type { WindowRecord } from "./pilot-window-record";
@@ -294,6 +294,14 @@ export function fakeRoute(script: Script): FakeRoute {
     return { observation, acceptedPayload };
   };
   return { dispatch, now: () => clock, requests };
+}
+
+/** A route whose outage begins at (0-based) pair `pair`: every attempt before
+ *  it is accepted on its first try, every attempt from it on fails at the
+ *  infrastructure (terminal, so it never spends a retry). */
+export function outageFromPair(pair: number): FakeRoute {
+  const route: FakeRoute = fakeRoute((request) => (route.requests.length > pair * PILOT_ARMS.length ? INFRASTRUCTURE : accepted(request)));
+  return route;
 }
 
 /** A route that always answers its listing: the fail-fast never trips on it. */

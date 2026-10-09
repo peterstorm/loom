@@ -123,11 +123,16 @@ export type EmissionArmRates = Readonly<{
   acceptedViaEmissionRate: number | null;
 }>;
 
-export type StructuralSeries = Readonly<{
-  qualification: EmissionKind;
+/** The provider-enforced retry count a route's qualification admits: a count
+ *  on a constrained route, `not-applicable` on a route that enforces nothing. */
+type ProviderEnforcedRetriesOn = Readonly<{ "constrained-emission": number; "unconstrained-emission": "not-applicable" }>;
+
+/** The structural series of a cell on a `K`-qualified route. */
+type StructuralSeriesOn<K extends EmissionKind> = Readonly<{
+  qualification: K;
   /** Retries attributed to constraints the route was VERIFIED to enforce;
    *  not-applicable on a route that enforces nothing. */
-  providerEnforcedStructuralRetries: number | "not-applicable";
+  providerEnforcedStructuralRetries: ProviderEnforcedRetriesOn[K];
   unenforcedSchemaViolationRetries: number;
   engineOnlyRefusalRetries: number;
   unclassifiedToolErrorRetries: number;
@@ -140,6 +145,11 @@ export type StructuralSeries = Readonly<{
     duplicateKeyMeasurement: "not-claimed";
   }>;
 }>;
+
+/** A cell's structural series. Its qualification fixes what its
+ *  provider-enforced retry count can be, so a constrained series reading
+ *  `not-applicable`, or an unconstrained one carrying a count, is unrepresentable. */
+export type StructuralSeries = StructuralSeriesOn<"constrained-emission"> | StructuralSeriesOn<"unconstrained-emission">;
 
 export type CellMeasurement = Readonly<{
   scheduledPairs: number;
@@ -169,6 +179,8 @@ export type CellMeasurement = Readonly<{
 declare const derivedFromMeasurement: unique symbol;
 
 type EmissionKind = EmissionRouteQualification["kind"];
+/** The `K` arm of an emission route's qualification. */
+type QualificationOn<K extends EmissionKind> = Extract<EmissionRouteQualification, { kind: K }>;
 
 /**
  * The AS-004 verdicts a route's qualification can yield: on a constrained
@@ -186,7 +198,7 @@ type CellGuardrails<Structural extends GuardrailVerdict, Other extends Guardrail
 type MeasuredOn<K extends EmissionKind, V extends GuardrailVerdict> = Readonly<{
   kind: "measured";
   cell: CellKey;
-  qualification: Extract<EmissionRouteQualification, { kind: K }>;
+  qualification: QualificationOn<K>;
   measurement: CellMeasurement;
   guardrails: CellGuardrails<Extract<StructuralVerdictOn[K], V>, V>;
 }>;
@@ -350,21 +362,19 @@ function emissionRates(samples: readonly SampleObservation[]): EmissionArmRates 
 
 type StructuralGuardrail<K extends EmissionKind> = GuardrailOutcome<StructuralVerdictOn[K], "provider-structural-retries">;
 
-/** A cell's AS-004 series and verdict, derived together from its qualification. */
-type StructuralEvidence =
-  | Readonly<{ qualification: Extract<EmissionRouteQualification, { kind: "constrained-emission" }>; series: StructuralSeries; guardrail: StructuralGuardrail<"constrained-emission"> }>
-  | Readonly<{ qualification: Extract<EmissionRouteQualification, { kind: "unconstrained-emission" }>; series: StructuralSeries; guardrail: StructuralGuardrail<"unconstrained-emission"> }>;
+/** A `K`-qualified cell's AS-004 series and verdict, derived together from its qualification. */
+type StructuralEvidenceOn<K extends EmissionKind> = Readonly<{ qualification: QualificationOn<K>; series: StructuralSeriesOn<K>; guardrail: StructuralGuardrail<K> }>;
+type StructuralEvidence = StructuralEvidenceOn<"constrained-emission"> | StructuralEvidenceOn<"unconstrained-emission">;
 
 function structuralEvidence(samples: readonly SampleObservation[], qualification: EmissionRouteQualification): StructuralEvidence {
   const { causes } = tallyRetries(samples, qualification);
-  const series = (providerEnforced: number | "not-applicable") => structuralSeries(samples, qualification.kind, causes, providerEnforced);
   return match(qualification)
     .returnType<StructuralEvidence>()
     .with({ kind: "constrained-emission" }, (constrained) => {
       const retries = causes["provider-structural"];
       return Object.freeze({
         qualification: constrained,
-        series: series(retries),
+        series: structuralSeries(samples, constrained.kind, causes, retries),
         guardrail: retries === 0
           ? guardrailOutcome("provider-structural-retries", "pass", "zero retries attributed to provider-enforced constraint violations")
           : guardrailOutcome("provider-structural-retries", "violated", `${retries} retries attributed to violations of constraints the route was verified to enforce`),
@@ -372,7 +382,7 @@ function structuralEvidence(samples: readonly SampleObservation[], qualification
     })
     .with({ kind: "unconstrained-emission" }, (unconstrained) => Object.freeze({
       qualification: unconstrained,
-      series: series("not-applicable"),
+      series: structuralSeries(samples, unconstrained.kind, causes, "not-applicable"),
       guardrail: guardrailOutcome("provider-structural-retries", "not-applicable",
         `route qualified ${unconstrained.kind}: it was verified to enforce no JSON Schema constraint; ` +
         `${causes["unenforced-schema-violation"]} unenforced schema-violation retries and ${causes["engine-only-refusal"]} engine-only refusal retries reported separately`),
@@ -380,13 +390,13 @@ function structuralEvidence(samples: readonly SampleObservation[], qualification
     .exhaustive();
 }
 
-/** The structural series, given the provider-enforced retry count its qualification admits. */
-function structuralSeries(
+/** The structural series on a `K`-qualified route, given the provider-enforced retry count `K` admits. */
+function structuralSeries<K extends EmissionKind>(
   samples: readonly SampleObservation[],
-  qualification: EmissionKind,
+  qualification: K,
   causes: RetryTally["causes"],
-  providerEnforcedStructuralRetries: number | "not-applicable",
-): StructuralSeries {
+  providerEnforcedStructuralRetries: ProviderEnforcedRetriesOn[K],
+): StructuralSeriesOn<K> {
   const rejections = (kind: RejectionCause["kind"]): number => samples.reduce((sum, sample) =>
     sum + sample.attempts.filter((attempt) => attempt.outcome.kind === "rejected" && attempt.outcome.cause.kind === kind).length, 0);
   return Object.freeze({
@@ -708,14 +718,14 @@ function measuredCellFindings(measured: MeasuredCell): CellFindings {
   const violations = guardrails.flatMap((guardrail): readonly GuardrailViolation[] => guardrail.verdict === "violated"
     ? [Object.freeze({ cell: measured.cell, guardrail: guardrail.guardrail, requirement: GUARDRAIL_REQUIREMENT[guardrail.guardrail], detail: guardrail.detail })]
     : []);
-  const unresolved = guardrails.flatMap((guardrail): readonly MissingMeasurement[] => match(guardrail.verdict)
+  const missing = guardrails.flatMap((guardrail): readonly MissingMeasurement[] => match(guardrail.verdict)
     .with("inconclusive", "not-measured", (verdict) => [Object.freeze({
       kind: "guardrail-unresolved" as const, cell: measured.cell, guardrail: guardrail.guardrail,
       requirement: GUARDRAIL_REQUIREMENT[guardrail.guardrail], verdict, detail: guardrail.detail,
     })])
     .with("pass", "not-applicable", "violated", () => [])
     .exhaustive());
-  return { violations, missing: unresolved, qualificationOnly: [] };
+  return { violations, missing, qualificationOnly: [] };
 }
 
 /**

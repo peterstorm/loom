@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { match } from "ts-pattern";
-import { evaluatePilot, type CellOutcome, type MeasuredCell, type PassedCellEvidence, type PilotEvaluation } from "./pilot-core";
+import { evaluatePilot, type CellOutcome, type MeasuredCell, type PassedCellEvidence, type PilotEvaluation, type StructuralSeries } from "./pilot-core";
 import type { SampleObservation } from "./pilot-observation";
 import type { PreflightDecision } from "./pilot-preflight";
 import { buildPairSchedule, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
@@ -516,6 +516,25 @@ describe("per-route release policy (pilot-2: unconstrained emission, engine-auth
     const { cells } = evaluate(prereg, fullWindow(prereg, matchedArms));
     expect(measured(cells, "judge-verdict/v1").guardrails["provider-structural-retries"].verdict).toBe("not-applicable");
     expect(measured(cells, "reviewer-payload/v2").guardrails["provider-structural-retries"].verdict).toBe("pass");
+  });
+
+  it("types a cell's structural series by its qualification, so its provider-enforced retries cannot contradict the route", () => {
+    type ProviderEnforcedOn<K extends StructuralSeries["qualification"]> =
+      Extract<StructuralSeries, { qualification: K }>["providerEnforcedStructuralRetries"];
+    expectTypeOf<ProviderEnforcedOn<"constrained-emission">>().toEqualTypeOf<number>();
+    expectTypeOf<ProviderEnforcedOn<"unconstrained-emission">>().toEqualTypeOf<"not-applicable">();
+
+    const prereg = perRoute(constrainedCells("judge-verdict/v1"));
+    const { cells } = evaluate(prereg, fullWindow(prereg, matchedArms));
+    const unconstrained = measured(cells, "judge-verdict/v1").measurement.structural;
+    const constrained = measured(cells, "reviewer-payload/v2").measurement.structural;
+    expect([unconstrained.qualification, unconstrained.providerEnforcedStructuralRetries]).toEqual(["unconstrained-emission", "not-applicable"]);
+    expect([constrained.qualification, constrained.providerEnforcedStructuralRetries]).toEqual(["constrained-emission", 0]);
+    // @ts-expect-error — a constrained series counts its provider-enforced retries; it never reads not-applicable.
+    const forgedConstrained: StructuralSeries = { ...constrained, qualification: "constrained-emission", providerEnforcedStructuralRetries: "not-applicable" };
+    // @ts-expect-error — an unconstrained route enforces nothing, so its series carries no provider-enforced count.
+    const forgedUnconstrained: StructuralSeries = { ...unconstrained, qualification: "unconstrained-emission", providerEnforcedStructuralRetries: 0 };
+    expect([forgedConstrained.qualification, forgedUnconstrained.qualification]).toEqual(["constrained-emission", "unconstrained-emission"]);
   });
 });
 

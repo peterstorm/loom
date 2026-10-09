@@ -4,8 +4,9 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { Result } from "../kernel";
 import { decidePreflight } from "./pilot-preflight";
-import type { Preregistration } from "./pilot-preregistration";
+import { buildPairSchedule, type Preregistration } from "./pilot-preregistration";
 import {
+  checkEndingOnSchedule,
   checkPreregistrationUnchanged,
   decideRetainedWindow,
   parseAssessmentText,
@@ -23,11 +24,12 @@ import {
   type WindowStore,
 } from "./pilot-retention";
 import {
-  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, PILOT_1, pilot2PreregBytes, preregBytes, READY, READY_FACTS, REPO_ROOT, runWindow,
+  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, outageFromPair, PILOT_1, pilot2PreregBytes, preregBytes, READY, READY_FACTS, REPO_ROOT, runWindow,
   testWindowRecord as windowRecord, UNREACHABLE_FACTS, WORKLOAD, type FakeRoute,
 } from "./pilot-test-fixtures";
 import { contentDigest } from "./pilot-vocabulary";
-import { DISPATCHED, parseRetainedWindow, type WindowRecord } from "./pilot-window-record";
+import { parseRetainedWindowEnding } from "./pilot-window-ending";
+import { DISPATCHED, parseRetainedWindow, type RetainedEnding, type RetainedWindow, type WindowRecord } from "./pilot-window-record";
 
 /**
  * The retention rules of one AD-11 window (AS-017), pinned at the
@@ -124,10 +126,9 @@ describe("pure retention derivations", () => {
   it("writes window.json through its codec: every aborted ending recordWindow writes parses back (property)", async () => {
     await fc.assert(fc.asyncProperty(fc.nat({ max: 6 }), fc.boolean(), async (outageFrom, routeDown) => {
       const store = memoryStore();
-      const route = fakeRoute((request) => (route.requests.length > outageFrom * 2 ? INFRASTRUCTURE : accepted(request)));
       const { window } = recorded(await recordWindow(windowRun(store, windowRecord(READY_FACTS), {
         routeHealth: async () => (routeDown ? { kind: "unreachable", reason: "down" } : { kind: "reachable" }),
-      }, route)));
+      }, outageFromPair(outageFrom))));
       if (!("ending" in window)) throw new Error("a dispatched window records its ending");
       const readBack = parseRetainedWindow(store.files.get(WINDOW_FILES.window) ?? "", "w.json");
       expect(readBack.ok && readBack.value.ending).toEqual({ kind: "dispatched", ending: window.ending });
@@ -139,6 +140,27 @@ describe("pure retention derivations", () => {
     expect(checkPreregistrationUnchanged(window, LOADED, "w")).toEqual({ ok: true, value: null });
     const edited = { ...LOADED, ref: { ...LOADED.ref, digest: "e".repeat(64) } };
     expect(checkPreregistrationUnchanged(window, edited, "w")).toMatchObject({ ok: false, error: expect.stringContaining("changed after window w was recorded") });
+  });
+
+  it("refuses to re-decide a window whose recorded ending does not end its preregistration's schedule", () => {
+    const scheduled = buildPairSchedule(LOADED.prereg).length;
+    const retained = (ending: RetainedEnding): RetainedWindow => ({ preregistration: LOADED.ref, facts: READY_FACTS, ending });
+    const windowEnding = (raw: unknown): RetainedWindow => {
+      const parsed = parseRetainedWindowEnding(raw, 2);
+      if (!parsed.ok) throw new Error(parsed.error);
+      return retained({ kind: "dispatched", ending: parsed.value });
+    };
+    const route = { kind: "route-unreachable", reason: "down" };
+    expect(checkEndingOnSchedule(windowEnding({ kind: "completed", pairs: scheduled }), LOADED, "w")).toEqual({ ok: true, value: null });
+    expect(checkEndingOnSchedule(windowEnding({ kind: "aborted", afterPairs: 1, scheduledPairs: scheduled, reason: route }), LOADED, "w")).toEqual({ ok: true, value: null });
+    expect(checkEndingOnSchedule(windowEnding({ kind: "completed", pairs: scheduled - 1 }), LOADED, "w"))
+      .toEqual({ ok: false, error: `window w invalid window ending: pairs: completed after ${scheduled - 1} pairs of a ${scheduled}-pair schedule` });
+    expect(checkEndingOnSchedule(windowEnding({ kind: "aborted", afterPairs: 1, scheduledPairs: scheduled + 1, reason: route }), LOADED, "w"))
+      .toEqual({ ok: false, error: `window w invalid window ending: scheduledPairs: ${scheduled + 1} recorded for a ${scheduled}-pair schedule` });
+    // A window without a recorded ending has no schedule to check it against.
+    for (const ending of [{ kind: "open" }, { kind: "not-dispatched" }, { kind: "dispatched-unrecorded" }] as const) {
+      expect(checkEndingOnSchedule(retained(ending), LOADED, "w")).toEqual({ ok: true, value: null });
+    }
   });
 
   it("retains a new assessment, ignores identical bytes and refuses different bytes (property)", () => {
@@ -376,6 +398,19 @@ describe("decideRetainedWindow (--decide)", () => {
     const edited = (): Result<LoadedPreregistration, string> => ({ ok: true, value: { ...LOADED, ref: { ...LOADED.ref, digest: "e".repeat(64) } } });
     const result = decideRetainedWindow({ store, loadPreregistration: edited, externalAssessments: [], now: clock });
     expect(result).toMatchObject({ ok: false, error: expect.stringContaining(`preregistration ${LOADED.ref.path} changed after window mem:/window/ was recorded`) });
+    expect(store.files.get(WINDOW_FILES.decisionLog)).toBe(decisions);
+  });
+
+  it("refuses a window whose recorded ending ends another schedule than its preregistration's, before deciding anything", async () => {
+    const store = memoryStore();
+    decidedRecord(await recordWindow(windowRun(store, windowRecord(READY_FACTS), {}, fakeRoute(accepted))));
+    const decisions = store.files.get(WINDOW_FILES.decisionLog);
+    const [first, ...rest] = LOADED.prereg.cells;
+    if (first === undefined) throw new Error("the preregistration has no cell");
+    // Same recorded digest, one case fewer: its schedule is not the one the window ran.
+    const shorter: Preregistration = { ...LOADED.prereg, cells: [{ ...first, workload: { ...first.workload, cases: first.workload.cases.slice(1) } }, ...rest] };
+    const result = decideRetainedWindow({ store, loadPreregistration: () => ({ ok: true, value: { ...LOADED, prereg: shorter } }), externalAssessments: [], now: clock });
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/^window mem:\/window\/ invalid window ending: pairs: completed after \d+ pairs of a \d+-pair schedule$/) });
     expect(store.files.get(WINDOW_FILES.decisionLog)).toBe(decisions);
   });
 
