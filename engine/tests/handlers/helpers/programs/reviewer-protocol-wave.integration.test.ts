@@ -10,7 +10,6 @@ import { WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projectio
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
-import { resolveAgentPolicy } from "../../../../src/core/model-profiles";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
@@ -23,13 +22,13 @@ import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../../src/cor
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
-import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
+import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { Finding, TaskGraph } from "../../../../src/types";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
-import { claudeCodeParentEnvironment } from "../../../fixtures/issue-route-env";
-import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
+import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -99,14 +98,9 @@ function project(priors: readonly Finding[] = []) {
 }
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[];
   diagnostic?: { message: string }; request?: { requestId: string }; outcome?: unknown }>;
-/** The harness that parents the facade CLI child: a Pi parent issues reviewers
- *  the emission route; a Claude Code parent keeps them extraction-only. */
-type FacadeParent = "pi" | "claude-code";
 async function cliResult(p: ReturnType<typeof project>, args: readonly string[], stdin = "", parent: FacadeParent = "pi") {
   const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root,
-      env: parent === "pi" ? fixturePiEnvironment(p.root) : claudeCodeParentEnvironment(p.root),
-    });
+    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: p.root, env: facadeParentEnvironment(parent, p.root) });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
@@ -489,14 +483,8 @@ describe("the issued emission route on the Wave program path (T6)", () => {
     const extraction = await startRun("claude-code");
     const emission = await startRun("pi");
 
-    // Issuance is parent-independent: every slot carries its catalog profile
-    // and the identical frozen binding on both routes (AD-6).
-    const issuance = ({ authority }: { authority: AgentRequestAuthority }) => ({ role: authority.role,
-      modelProfile: authority.modelProfile, harnessBinding: authority.harnessBinding, requiredSkill: authority.requiredSkill });
-    expect(emission.requests.map(issuance)).toEqual(extraction.requests.map(issuance));
-    for (const { authority } of emission.requests) {
-      expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
-    }
+    // AD-6: every slot carries its catalog profile and the identical frozen binding on both routes.
+    expectParentIndependentIssuance(emission.requests, extraction.requests);
 
     // FR-012 on the emission route: the issuance joins survive — the packet
     // read command still resolves the exact issued v2 packet for every slot,

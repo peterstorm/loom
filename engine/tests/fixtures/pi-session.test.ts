@@ -3,13 +3,17 @@ import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
+import { NO_PARENT_MODEL_ENV, scrubAmbientParentModel, withEnvOverlay } from "./env-overlay";
 import {
-  claudeCodeParentEnvironment, FIXTURE_CLAUDE_CODE_SESSION_ID, NO_PARENT_MODEL_ENV, scrubAmbientParentModel, withEnvOverlay,
-} from "./issue-route-env";
+  claudeCodeParentEnvironment, facadeParentEnvironment, FIXTURE_CLAUDE_CODE_SESSION_ID, PI_PARENT_VARIABLES,
+} from "./facade-parent";
+import { LOCAL_PI_BINDING } from "./local-pi-binding";
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "./pi-session";
 
 /** A parent model a wrapper Pi session would announce. */
-const PARENT_MODEL_ENV = Object.freeze({ PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" });
+const PARENT_MODEL_ENV = Object.freeze({
+  PI_PROVIDER: LOCAL_PI_BINDING.provider, PI_MODEL: LOCAL_PI_BINDING.model, PI_REASONING_LEVEL: LOCAL_PI_BINDING.thinking,
+});
 
 const roots: string[] = [];
 const directory = () => { const root = canonicalTempDir("loom-session-test-"); roots.push(root); return root; };
@@ -114,7 +118,10 @@ describe("fixture-owned Pi session scopes", () => {
   it("a Claude Code parent environment carries the Claude session and no Pi announcement, without touching the process environment", () => {
     const previous = { ...process.env };
     try {
-      Object.assign(process.env, { PI_CODING_AGENT: "true", PI_SESSION_ID: "ambient-pi", PI_SESSION_FILE: "/ambient/session.jsonl" });
+      // Keyed by the announcement set itself: a variable added to it must be seeded here too.
+      const ambientPiParent: Readonly<Record<(typeof PI_PARENT_VARIABLES)[number], string>> =
+        { PI_CODING_AGENT: "true", PI_SESSION_ID: "ambient-pi", PI_SESSION_FILE: "/ambient/session.jsonl" };
+      Object.assign(process.env, ambientPiParent);
       const before = { ...process.env };
       const root = directory();
       const env = claudeCodeParentEnvironment(root);
@@ -122,11 +129,19 @@ describe("fixture-owned Pi session scopes", () => {
       expect(env).toMatchObject({ CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: FIXTURE_CLAUDE_CODE_SESSION_ID,
         LOOM_SUBAGENT_DIR: join(root, ".git", "loom-claude-session-bindings"),
         LOOM_STATE_PATH: join(root, ".claude", "state", "active_task_graph.json") });
-      for (const key of ["PI_CODING_AGENT", "PI_SESSION_ID", "PI_SESSION_FILE"]) expect(env[key], key).toBeUndefined();
+      for (const key of PI_PARENT_VARIABLES) expect(env[key], key).toBeUndefined();
     } finally {
       for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
       Object.assign(process.env, previous);
     }
+  });
+
+  it("a facade parent resolves to its own harness environment", () => {
+    const root = directory();
+    expect(facadeParentEnvironment("pi", root)).toEqual(fixturePiEnvironment(root));
+    expect(facadeParentEnvironment("claude-code", root)).toEqual(claudeCodeParentEnvironment(root));
+    expect(facadeParentEnvironment("pi", root).PI_CODING_AGENT).toBe("true");
+    expect(facadeParentEnvironment("claude-code", root).CLAUDECODE).toBe("1");
   });
 
   it("importing the session fixture has no side effect on the process environment", async () => {

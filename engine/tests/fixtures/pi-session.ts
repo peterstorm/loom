@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
-import { FIXTURE_PI_AGENT_DIR_ENV } from "../setup/fixture-pi-route";
+import { fixturePiAgentDirectory } from "./fixture-pi-agent-directory";
 import { PI_AGENT_DIRECTORY_VARIABLE } from "../../src/core/pi-agent-directory";
 
 // This fixture propagates ambient state: `fixturePiEnvironment` spreads
@@ -13,8 +13,8 @@ import { PI_AGENT_DIRECTORY_VARIABLE } from "../../src/core/pi-agent-directory";
 // model) from process.env. Importing it has no side effect: the ambient parent
 // model is cleared by the Vitest setup file (tests/setup/scrub-parent-model.ts)
 // before every test file, and a suite sets one explicitly with `withEnvOverlay`
-// from ./issue-route-env. The Claude Code counterpart of
-// `fixturePiEnvironment` is `claudeCodeParentEnvironment` there.
+// from ./env-overlay. Suites choose between this Pi parent and its Claude Code
+// counterpart with `facadeParentEnvironment` (./facade-parent).
 
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 type FixtureSession = Readonly<{ directory: string; sessionId: string; sessionFile: string; transport: string }>;
@@ -32,17 +32,10 @@ export function fixtureSession(repository: string): FixtureSession {
   return session;
 }
 
-/** The fixture Pi agent directory, whose models.json names the global setup's fake local route. */
-function fixtureAgentDirectory(): string {
-  const directory = process.env[FIXTURE_PI_AGENT_DIR_ENV];
-  if (directory === undefined) throw new Error(`${FIXTURE_PI_AGENT_DIR_ENV} is unset: tests/setup/fixture-pi-route.ts did not run`);
-  return directory;
-}
-
 function ownedEnvironment(repository: string) {
   const session = fixtureSession(repository);
   const runtime = captureLoomRuntimeIdentity(packageRoot);
-  return { PI_CODING_AGENT: "true", [PI_AGENT_DIRECTORY_VARIABLE]: fixtureAgentDirectory(), PI_SESSION_ID: session.sessionId, PI_SESSION_FILE: session.sessionFile,
+  return { PI_CODING_AGENT: "true", [PI_AGENT_DIRECTORY_VARIABLE]: fixturePiAgentDirectory(), PI_SESSION_ID: session.sessionId, PI_SESSION_FILE: session.sessionFile,
     LOOM_SUBAGENT_DIR: session.transport, LOOM_STATE_PATH: join(repository, ".claude/state/active_task_graph.json"),
     [PI_EXTENSION_RUNTIME_ROOT_ENV]: runtime.packageRoot, [PI_EXTENSION_RUNTIME_REVISION_ENV]: runtime.revision };
 }

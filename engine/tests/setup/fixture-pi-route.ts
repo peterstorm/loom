@@ -7,8 +7,10 @@
  * must therefore point at a route that answers, never at the operator's real
  * `~/.pi/agent/models.json`. This starts a loopback HTTP server listing the
  * catalog's local model and a fixture agent directory whose `models.json`
- * names it; `tests/fixtures/pi-session.ts` sets `PI_CODING_AGENT_DIR` to that
- * directory for every fixture Pi session.
+ * names it, published to the workers under `FIXTURE_PI_AGENT_DIR_ENV`
+ * (`tests/fixtures/fixture-pi-agent-directory.ts`, which owns the read);
+ * `tests/fixtures/pi-session.ts` sets `PI_CODING_AGENT_DIR` to that directory
+ * for every fixture Pi session.
  *
  * The server lives in Vitest's main process on purpose: test workers run CLI
  * children through `spawnSync`, which blocks the worker's own event loop, so a
@@ -19,8 +21,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DESKTOP_VLLM_ROUTE } from "../../src/core/model-profiles";
-
-export const FIXTURE_PI_AGENT_DIR_ENV = "LOOM_FIXTURE_PI_AGENT_DIR";
+import { FIXTURE_PI_AGENT_DIR_ENV } from "../fixtures/fixture-pi-agent-directory";
 
 export default async function setup(): Promise<() => Promise<void>> {
   const server = createServer((request, response) => {

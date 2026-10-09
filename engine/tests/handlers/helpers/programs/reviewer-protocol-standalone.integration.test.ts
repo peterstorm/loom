@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildContextPacket, encodeByteSection } from "../../../../src/core/context-packets";
 import { captureKey } from "../../../../src/core/harness-capture";
-import { DESKTOP_VLLM_ROUTE, lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
+import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
 import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
@@ -24,14 +24,16 @@ import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/progr
 import { inspectStandaloneFacade, readStandaloneReviewedSource, replayStandaloneResultFromEvidence, type StandaloneCaptureWitness } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
-import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "../../../fixtures/pi-session";
+import { disposeFixturePiSessions, fixtureSession, withFixturePiSession } from "../../../fixtures/pi-session";
 import { startNativeLegacyReview } from "../../../fixtures/standalone-native-history";
 import { readSessionRunBindings } from "../../../../src/orchestration/session-run-bindings";
 import { frozenDiffReaderPages } from "../../../fixtures/read-coverage";
 import { gitResult, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
-import { claudeCodeParentEnvironment, withEnvOverlay } from "../../../fixtures/issue-route-env";
+import { withEnvOverlay } from "../../../fixtures/env-overlay";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
+import { LOCAL_PI_BINDING } from "../../../fixtures/local-pi-binding";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
-import { normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { expectParentIndependentIssuance, normalizeRunRoot, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -63,15 +65,12 @@ function project() {
 }
 
 type Action = Readonly<{ kind: string; requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[] }>;
-/** The harness that parents the facade CLI child: a Pi parent issues reviewers
- *  the emission route; a Claude Code parent keeps them extraction-only. */
-type FacadeParent = "pi" | "claude-code";
 /** Child-only real runtime admission. No parent environment or live worktree mutation. */
 async function runCli(root: string, args: readonly string[], stdin = "", parent: FacadeParent = "pi"): Promise<Action> {
   const result = await new Promise<Readonly<{ status: number | null; stdout: string; stderr: string }>>((resolve, reject) => {
     const child = spawn("bun", [cli, "helper", "orchestration", ...args], {
       cwd: root,
-      env: parent === "pi" ? fixturePiEnvironment(root) : claudeCodeParentEnvironment(root),
+      env: facadeParentEnvironment(parent, root),
     });
     let stdout = "";
     let stderr = "";
@@ -361,14 +360,7 @@ describe("the issued emission route on the standalone program path (T6)", () => 
     const extraction = await startRun("claude-code");
     const emission = await startRun("pi");
 
-    // Issuance is parent-independent: every reviewer carries its catalog
-    // profile and the identical frozen binding on both routes.
-    const issuance = ({ authority }: { authority: AgentRequestAuthority }) => ({ role: authority.role,
-      modelProfile: authority.modelProfile, harnessBinding: authority.harnessBinding, requiredSkill: authority.requiredSkill });
-    expect(emission.requests.map(issuance)).toEqual(extraction.requests.map(issuance));
-    for (const { authority } of emission.requests) {
-      expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
-    }
+    expectParentIndependentIssuance(emission.requests, extraction.requests);
 
     // The reserved request structure and frozen packets are route-independent.
     expect(emission.requests.map(({ authority }) => [authority.requestId, authority.slotId, authority.role, authority.attempt,
@@ -423,8 +415,7 @@ describe("the issued emission route on the standalone program path (T6)", () => 
 
     // The control is genuinely exercised: every archived v1 request is issued
     // on the emission-qualified local route under a Pi parent.
-    const qualifiedRoute = { harness: "pi", ...DESKTOP_VLLM_ROUTE, thinking: "high" };
-    expect(legacy.map(({ authority }) => authority.harnessBinding.pi)).toEqual(legacy.map(() => qualifiedRoute));
+    expect(legacy.map(({ authority }) => authority.harnessBinding.pi)).toEqual(legacy.map(() => LOCAL_PI_BINDING));
 
     for (const request of legacy) {
       // AD-7: the archived issued contract keeps its exact final-message

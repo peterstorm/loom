@@ -8,6 +8,7 @@
  */
 
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
+import { LOCAL_PI_BINDING } from "./local-pi-binding";
 
 export function agentRequestAuthority(
   runId: string,
@@ -22,7 +23,7 @@ export function agentRequestAuthority(
     attempt: 1,
     modelProfile: "general-review",
     harnessBinding: {
-      pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
+      pi: LOCAL_PI_BINDING,
       claude: { harness: "claude-code", model: "sonnet" },
     },
     requiredSkill: null,

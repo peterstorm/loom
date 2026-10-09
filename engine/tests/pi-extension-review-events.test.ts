@@ -18,7 +18,7 @@ import {
 import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority } from "../src/core/orchestration-contract";
 import { DESKTOP_VLLM_ROUTE, lowerModelProfile, recordedProfileBindings, resolveModelProfile } from "../src/core/model-profiles";
-import { FIXTURE_PI_AGENT_DIR_ENV } from "./setup/fixture-pi-route";
+import { fixturePiAgentDirectory } from "./fixtures/fixture-pi-agent-directory";
 import { advertiseInstalledLaunchPort, SynchronousEventBus } from "./fixtures/emission-launch-port";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
@@ -127,9 +127,7 @@ execFileSync("bash", [join(ROOT, "scripts/sync-pi-agents.sh")], {
 // (core/route-reachability.ts). The CLI children below inherit
 // PI_CODING_AGENT_DIR=piAgentDir, so that agent dir must name the global
 // setup's fake local route — never the operator's real models.json.
-const fixturePiAgentDir = process.env[FIXTURE_PI_AGENT_DIR_ENV];
-if (fixturePiAgentDir === undefined) throw new Error(`${FIXTURE_PI_AGENT_DIR_ENV} is unset: tests/setup/fixture-pi-route.ts did not run`);
-cpSync(join(fixturePiAgentDir, "models.json"), join(piAgentDir, "models.json"));
+cpSync(join(fixturePiAgentDirectory(), "models.json"), join(piAgentDir, "models.json"));
 
 const initialGraph = () => ({
   current_phase: "execute",
