@@ -37,6 +37,7 @@ import {
   parseSlotId,
   type AgentRequestAuthority,
   type DomainResult,
+  type MintedAgentRequestAuthority,
 } from "../../../core/orchestration-contract";
 import type { PanelVerdictSource, PanelVerdictSourceRecord } from "../../../core/panel-verdict-source";
 import { captureKey } from "../../../core/harness-capture";
@@ -217,7 +218,8 @@ async function appendSpawnOutcome(
 
 type MaterializedPanelRequest = Readonly<{
   request: PanelSpawnRequest;
-  authority: AgentRequestAuthority;
+  /** Minted at materialization: a panel request is issued against today's catalog. */
+  authority: MintedAgentRequestAuthority;
   packet: ContextPacket;
 }>;
 
@@ -317,7 +319,7 @@ async function materializePanelAction(
     kind: "reserve-agent-requests",
     effectId: effectId.value,
     runId: handle.runId,
-    requests: materialized.map(({ authority }) => authority) as [AgentRequestAuthority, ...AgentRequestAuthority[]],
+    requests: materialized.map(({ authority }) => authority) as [MintedAgentRequestAuthority, ...MintedAgentRequestAuthority[]],
   });
   if (!reserved.ok) return { ok: false, message: reserved.error.message };
 

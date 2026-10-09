@@ -13,7 +13,7 @@ import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } fro
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
 import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
-import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, issueAgentRosterSlot, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type MintedAgentRosterSlot, type SpawnRequest } from '../../../core/orchestration-contract';
 import {
   aggregateStandaloneReview,
   proveStandaloneRosterCompletion,
@@ -27,7 +27,7 @@ import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-r
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
-import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';
+import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';
 import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
@@ -73,7 +73,7 @@ export function standaloneRefutationPreparation(
   if (!selected.ok) throw new Error(selected.errors.join("; "));
   const lenses = selected.value;
   const sources = standalonePanelSources(handle, authority);
-  const slots = [];
+  const slots: MintedAgentRosterSlot[] = [];
   const packets: ContextPacket[] = [];
   const inputs: InitialSpawnRequestInput[] = [];
   const retryInputs: Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[] = [];
@@ -123,9 +123,11 @@ export function standaloneRefutationPreparation(
       else retryInputs.push(Object.freeze({ input: Object.freeze(input), packet: packet.value }));
       return parsed.value;
     });
-    slots.push({ slotId: binding.value.slotId, attempts });
+    const slot = issueAgentRosterSlot(attempts[0], attempts[1]);
+    if (!slot.ok) throw new Error(`verifier slot ${binding.value.slotId} is invalid: ${slot.error.violations.map(({ kind }) => kind).join(", ")}`);
+    slots.push(slot.value);
   }
-  const panel = parseRefutationPanelAuthority({ runId: handle.runId, findings: brief.findings, lenses, verifierSlots: slots });
+  const panel = issueRefutationPanelAuthority({ runId: handle.runId, findings: brief.findings, lenses, verifierSlots: slots });
   if (!panel.ok) throw new Error(panel.error.message);
   const threshold = defaultRefutationThreshold(lenses.length);
   const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: panel.value, threshold });

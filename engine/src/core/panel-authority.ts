@@ -41,6 +41,7 @@ import {
   type AgentRequestAuthority,
   type DomainResult,
   type ExactRoster,
+  type MintedAgentRosterSlot,
   type NonEmpty,
   type OrchestrationRunId,
   type RequestId,
@@ -604,6 +605,24 @@ export function parseRefutationPanelAuthority(raw: unknown): PersistentPanelResu
   } catch {
     return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority could not be safely inspected"));
   }
+}
+
+/** A refutation panel being ISSUED now: its verifier slots hold only minted requests. */
+export type IssuedRefutationPanelAuthorityInput = RefutationPanelAuthorityInput & Readonly<{
+  verifierSlots: readonly MintedAgentRosterSlot[];
+}>;
+
+/**
+ * Issue a refutation panel authority. The parse is exactly
+ * `parseRefutationPanelAuthority`'s, which also re-reads checkpoints and so
+ * takes its roster as recorded history; this entry point is the issuing seam,
+ * typed so its verifier slots must come from `issueAgentRosterSlot` — every
+ * request in a newly issued panel was checked against today's catalog.
+ */
+export function issueRefutationPanelAuthority(
+  input: IssuedRefutationPanelAuthorityInput,
+): PersistentPanelResult<RefutationPanelAuthority> {
+  return parseRefutationPanelAuthority(input);
 }
 
 

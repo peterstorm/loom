@@ -6,7 +6,7 @@
  */
 import { canonicalRecord, failure, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SlotId } from './identity';
 import { causedMessage, includes, readExactDataRecord } from './bytes';
-import { parseAgentRequestAuthorityForAttempt, parseAgentRosterSlot, type AgentRequestAuthority, type AgentRosterSlot, type AgentRosterSlotError, type ArtifactRef, type RosterViolation } from './roster';
+import { parseStoredAgentRequestAuthorityForAttempt, parseAgentRosterSlot, type AgentRequestAuthority, type AgentRosterSlot, type AgentRosterSlotError, type ArtifactRef, type RosterViolation } from './roster';
 import { type ContextReference } from './publication';
 
 export type UserDecisionRequest = Readonly<{
@@ -331,7 +331,7 @@ export function terminalBlockedDiagnostic(
 
   if (exhaustedResult) {
     // A terminal diagnostic names an already-issued request, read as recorded.
-    const failedRequest = parseAgentRequestAuthorityForAttempt(exactInput.value.failedRequest, 2, "stored");
+    const failedRequest = parseStoredAgentRequestAuthorityForAttempt(exactInput.value.failedRequest, 2);
     if (!failedRequest.ok) {
       return diagnosticFailure(
         "failedRequest",

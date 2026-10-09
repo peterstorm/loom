@@ -4,7 +4,7 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type LoomAgentName, type PiBinding, type RecordedLlmProfileId } from '../model-profiles';
+import { currentProfileBindings, parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type LlmProfileId, type LoomAgentName, type PiBinding, type RecordedLlmProfileId } from '../model-profiles';
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
@@ -104,23 +104,68 @@ export function exactBindingViolations(
 }
 
 /**
- * Why a recorded Pi binding is none of the bindings its profile admits. With
- * one admissible binding the per-field exactness violations name the field;
- * with several, a well-formed binding is reported once against the whole set.
+ * The profile a request authority names, resolved for the origin it was
+ * parsed in, with exactly the bindings that origin admits. An issued
+ * authority names a catalog profile and admits its ONE current lowering; a
+ * stored one may name a retired profile and admits any binding it has issued.
  */
-function recordedPiBindingViolations(
+type ProfileAuthority =
+  | Readonly<{ origin: "issue"; profileId: LlmProfileId; claude: ClaudeCodeBinding; pi: PiBinding }>
+  | Readonly<{ origin: "stored"; profileId: RecordedLlmProfileId; claude: ClaudeCodeBinding; pi: NonEmpty<PiBinding> }>;
+
+function parseProfileAuthority(
   raw: unknown,
-  profileId: RecordedLlmProfileId,
-  allowed: readonly [PiBinding, ...PiBinding[]],
-): readonly AgentRequestAuthorityViolation[] {
-  if (allowed.length === 1) return exactBindingViolations(raw, "harnessBinding.pi", allowed[0]);
-  const parsed = readExactDataRecord(raw, PI_BINDING_KEYS, "harnessBinding.pi");
-  if (!parsed.ok) return [authorityBoundaryViolation(parsed.error, "harnessBinding.pi", "model-binding-mismatch")];
-  return [violation(
-    "model-binding-mismatch",
-    "harnessBinding.pi",
-    `harnessBinding.pi must be a binding profile '${profileId}' has issued: ${allowed.map(piModelPattern).join(", ")}`,
-  )];
+  origin: AgentRequestAuthorityOrigin,
+): DomainResult<ProfileAuthority, Readonly<{ message: string }>> {
+  if (typeof raw !== "string") {
+    return failure(canonicalRecord({ message: `model profile must be a string; received ${describeUnknown(raw)}` }));
+  }
+  if (origin === "issue") {
+    const profileId = parseLlmProfileId(raw);
+    return profileId.ok
+      ? success(canonicalRecord({ origin, profileId: profileId.value, ...currentProfileBindings(profileId.value) }))
+      : failure(canonicalRecord({ message: profileId.error.message }));
+  }
+  const profileId = parseRecordedLlmProfileId(raw);
+  return profileId.ok
+    ? success(canonicalRecord({ origin, profileId: profileId.value, ...recordedProfileBindings(profileId.value) }))
+    : failure(canonicalRecord({ message: profileId.error.message }));
+}
+
+/*
+ * The two functions below branch with an exhaustive `switch` rather than
+ * ts-pattern: this volume is inside the audited reviewer runtime closure
+ * (tests/linter/programmatic/machine-purity.test.ts), which grants it no
+ * package imports.
+ */
+
+/** The admitted Pi binding `raw` is, if any. */
+function matchedPiBinding(raw: unknown, profile: ProfileAuthority): PiBinding | undefined {
+  switch (profile.origin) {
+    case "issue": return samePiBinding(raw, profile.pi) ? profile.pi : undefined;
+    case "stored": return profile.pi.find((candidate) => samePiBinding(raw, candidate));
+  }
+}
+
+/**
+ * Why a Pi binding is none of the bindings its profile admits. Issuance
+ * admits one exact binding, so each differing field is named; a stored
+ * binding is history checked against a SET, so a well-formed one is reported
+ * once against everything the recorded profile has issued.
+ */
+function piBindingViolations(raw: unknown, profile: ProfileAuthority): readonly AgentRequestAuthorityViolation[] {
+  switch (profile.origin) {
+    case "issue": return exactBindingViolations(raw, "harnessBinding.pi", profile.pi);
+    case "stored": {
+      const parsed = readExactDataRecord(raw, PI_BINDING_KEYS, "harnessBinding.pi");
+      if (!parsed.ok) return [authorityBoundaryViolation(parsed.error, "harnessBinding.pi", "model-binding-mismatch")];
+      return [violation(
+        "model-binding-mismatch",
+        "harnessBinding.pi",
+        `harnessBinding.pi must be a binding profile '${profile.profileId}' has issued: ${profile.pi.map(piModelPattern).join(", ")}`,
+      )];
+    }
+  }
 }
 
 
@@ -188,7 +233,8 @@ export const AGENT_REQUEST_KEYS = [
  *
  * "issue"  — the authority is being CONSTRUCTED now from the live catalog.
  *            The role must carry its catalog profile, and the binding must be
- *            that profile's current lowering.
+ *            that profile's current lowering. Only this origin yields a
+ *            `MintedAgentRequestAuthority`.
  * "stored" — the authority is being READ BACK from an immutable run artifact,
  *            event, receipt, or publication record. It is HISTORY: "issued
  *            under profile X, ran on model Y." Re-checking history against
@@ -197,7 +243,7 @@ export const AGENT_REQUEST_KEYS = [
  *            strand every run already on disk. The binding must still be one
  *            the recorded profile has issued (`recordedProfileBindings`).
  */
-export type AgentRequestAuthorityOrigin = "issue" | "stored";
+type AgentRequestAuthorityOrigin = "issue" | "stored";
 
 function parseAgentRequestAuthorityInMode(
   raw: unknown,
@@ -227,9 +273,7 @@ function parseAgentRequestAuthorityInMode(
     : failure(canonicalRecord({ message: `agent role must be a string; received ${describeUnknown(fields.role)}` }));
   // An issued authority names a profile the catalog issues today; a stored one
   // may name a profile the catalog has since retired.
-  const profileId: DomainResult<RecordedLlmProfileId, Readonly<{ message: string }>> = typeof fields.modelProfile === "string"
-    ? (origin === "issue" ? parseLlmProfileId : parseRecordedLlmProfileId)(fields.modelProfile)
-    : failure(canonicalRecord({ message: `model profile must be a string; received ${describeUnknown(fields.modelProfile)}` }));
+  const profile = parseProfileAuthority(fields.modelProfile, origin);
 
   if (!runId.ok) violations.push(violation("invalid-agent-request-field", "runId", runId.error.message));
   if (!requestId.ok) violations.push(violation("invalid-agent-request-field", "requestId", requestId.error.message));
@@ -239,7 +283,7 @@ function parseAgentRequestAuthorityInMode(
   if (!attempt.ok) violations.push(attempt.error);
   if (!skill.ok) violations.push(skill.error);
   if (!role.ok) violations.push(violation("invalid-agent-request-field", "role", role.error.message));
-  if (!profileId.ok) violations.push(violation("invalid-agent-request-field", "modelProfile", profileId.error.message));
+  if (!profile.ok) violations.push(violation("invalid-agent-request-field", "modelProfile", profile.error.message));
   const program: OrchestrationProgram | null = includes(ORCHESTRATION_PROGRAMS, fields.program) ? fields.program : null;
   if (program === null) {
     violations.push(violation(
@@ -262,11 +306,11 @@ function parseAgentRequestAuthorityInMode(
       ));
     } else {
       policyResolved = true;
-      if (profileId.ok && profileId.value !== policy.value.profile) {
+      if (profile.ok && profile.value.profileId !== policy.value.profile) {
         violations.push(violation(
           "model-policy-mismatch",
           "modelProfile",
-          `role '${role.value}' requires profile '${policy.value.profile}', received '${profileId.value}'`,
+          `role '${role.value}' requires profile '${policy.value.profile}', received '${profile.value.profileId}'`,
         ));
       }
       if (skill.ok) {
@@ -292,17 +336,15 @@ function parseAgentRequestAuthorityInMode(
   // authority must carry the profile's current binding, a stored one any
   // binding that profile has issued.
   let resolvedBinding: ExactHarnessBinding | null = null;
-  if (profileId.ok) {
-    const recorded = recordedProfileBindings(profileId.value);
-    const allowedPi = origin === "issue" ? [recorded.pi[0]] as const : recorded.pi;
+  if (profile.ok) {
     const rawPi = binding.ok ? binding.value.pi : undefined;
     const rawClaude = binding.ok ? binding.value.claude : undefined;
-    const matchedPi = allowedPi.find((candidate) => samePiBinding(rawPi, candidate));
-    const piViolations = matchedPi === undefined ? recordedPiBindingViolations(rawPi, profileId.value, allowedPi) : [];
-    const claudeViolations = exactBindingViolations(rawClaude, "harnessBinding.claude", recorded.claude);
+    const matchedPi = matchedPiBinding(rawPi, profile.value);
+    const piViolations = matchedPi === undefined ? piBindingViolations(rawPi, profile.value) : [];
+    const claudeViolations = exactBindingViolations(rawClaude, "harnessBinding.claude", profile.value.claude);
     violations.push(...piViolations, ...claudeViolations);
     if (matchedPi !== undefined && claudeViolations.length === 0) {
-      resolvedBinding = canonicalHarnessBinding(matchedPi, recorded.claude);
+      resolvedBinding = canonicalHarnessBinding(matchedPi, profile.value.claude);
     }
   }
 
@@ -316,7 +358,7 @@ function parseAgentRequestAuthorityInMode(
 
   if (
     !runId.ok || !requestId.ok || !slotId.ok || !contextDigest.ok || !outputSlot.ok ||
-    !attempt.ok || !skill.ok || !role.ok || !profileId.ok || !policyResolved ||
+    !attempt.ok || !skill.ok || !role.ok || !profile.ok || !policyResolved ||
     program === null || resolvedBinding === null
   ) {
     return failure(canonicalRecord({
@@ -334,7 +376,7 @@ function parseAgentRequestAuthorityInMode(
     program,
     role: role.value,
     attempt: attempt.value,
-    modelProfile: profileId.value,
+    modelProfile: profile.value.profileId,
     harnessBinding: resolvedBinding,
     requiredSkill: origin === "stored" ? skill.value : AGENT_REQUIRED_SKILLS[role.value],
     contextDigest: contextDigest.value,
@@ -342,11 +384,30 @@ function parseAgentRequestAuthorityInMode(
   }));
 }
 
-/** Strict parse for an authority being issued now. */
+declare const mintedAgentRequestAuthority: unique symbol;
+
+/**
+ * A request authority checked against TODAY's catalog — role -> profile,
+ * role -> Skill, and the profile's current binding — at the one place a
+ * request is minted (`parseAgentRequestAuthority`). Rosters, checkpoints and
+ * diagnostics re-read authorities as recorded history and never repeat that
+ * check, so the seams that ISSUE requests (`issueAgentRosterSlot`, the Wave
+ * review batch, panel issuance) take this type: a builder that skipped minting
+ * fails to compile instead of issuing an unchecked request.
+ *
+ * A phantom brand: there is no runtime field, so serialization, equality and
+ * every reader typed `AgentRequestAuthority` are unchanged. Like every phantom
+ * brand it closes the forgetting path, not a hostile cast.
+ */
+export type MintedAgentRequestAuthority<Attempt extends SemanticAttempt = SemanticAttempt> =
+  AgentRequestAuthority<Attempt> & Readonly<{ [mintedAgentRequestAuthority]: true }>;
+
+/** Strict parse for an authority being issued now: the only producer of a minted authority. */
 export function parseAgentRequestAuthority(
   raw: unknown,
-): DomainResult<AgentRequestAuthority, AgentRequestAuthorityError> {
-  return parseAgentRequestAuthorityInMode(raw, "issue");
+): DomainResult<MintedAgentRequestAuthority, AgentRequestAuthorityError> {
+  const parsed = parseAgentRequestAuthorityInMode(raw, "issue");
+  return parsed.ok ? success(parsed.value as MintedAgentRequestAuthority) : parsed;
 }
 
 /**
@@ -360,28 +421,41 @@ export function parseStoredAgentRequestAuthority(
   return parseAgentRequestAuthorityInMode(raw, "stored");
 }
 
-export function parseAgentRequestAuthorityForAttempt<Attempt extends SemanticAttempt>(
-  raw: unknown,
+/** `authority`, narrowed to the semantic attempt it must authorize. */
+function authorityForAttempt<Authority extends AgentRequestAuthority, Attempt extends SemanticAttempt>(
+  authority: Authority,
   expectedAttempt: Attempt,
-  origin: AgentRequestAuthorityOrigin = "issue",
-): DomainResult<AgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
-  const parsed = parseAgentRequestAuthorityInMode(raw, origin);
-  if (!parsed.ok) return parsed;
-  return parsed.value.attempt === expectedAttempt
-    ? success(parsed.value as AgentRequestAuthority<Attempt>)
+): DomainResult<Authority & AgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
+  return authority.attempt === expectedAttempt
+    ? success(authority as Authority & AgentRequestAuthority<Attempt>)
     : failure(canonicalRecord({
         kind: "invalid-agent-request-authority",
         violations: Object.freeze([violation(
           "invalid-agent-request-field",
           "attempt",
-          `request must authorize semantic attempt ${expectedAttempt}, received ${parsed.value.attempt}`,
+          `request must authorize semantic attempt ${expectedAttempt}, received ${authority.attempt}`,
         )]) as NonEmpty<AgentRequestAuthorityViolation>,
       }));
+}
+
+/** Read back a stored authority that must authorize `expectedAttempt`. */
+export function parseStoredAgentRequestAuthorityForAttempt<Attempt extends SemanticAttempt>(
+  raw: unknown,
+  expectedAttempt: Attempt,
+): DomainResult<AgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
+  const parsed = parseStoredAgentRequestAuthority(raw);
+  return parsed.ok ? authorityForAttempt(parsed.value, expectedAttempt) : parsed;
 }
 
 export type AgentRosterSlot = Readonly<{
   slotId: SlotId;
   attempts: readonly [AgentRequestAuthority<1>, AgentRequestAuthority<2>];
+}>;
+
+/** A roster slot whose two requests were both minted against today's catalog. */
+export type MintedAgentRosterSlot = Readonly<{
+  slotId: SlotId;
+  attempts: readonly [MintedAgentRequestAuthority<1>, MintedAgentRequestAuthority<2>];
 }>;
 
 export type UnissuedResultCause =
@@ -482,14 +556,39 @@ export function authorityPairMismatches(
  * attempt parses in "stored" mode, so a roster issued under a since-retired
  * profile or binding still parses. The check against today's catalog happens
  * once, where each request is minted (`parseAgentRequestAuthority`), never
- * again when a roster is re-read from a checkpoint or registration.
+ * again when a roster is re-read from a checkpoint or registration; a slot
+ * being ISSUED is built from minted requests by `issueAgentRosterSlot`.
  */
 export function parseAgentRosterSlot(
   rawFirst: unknown,
   rawRetry: unknown,
 ): DomainResult<AgentRosterSlot, AgentRosterSlotError> {
-  const first = parseAgentRequestAuthorityForAttempt(rawFirst, 1, "stored");
-  const retry = parseAgentRequestAuthorityForAttempt(rawRetry, 2, "stored");
+  return pairRosterSlot(
+    parseStoredAgentRequestAuthorityForAttempt(rawFirst, 1),
+    parseStoredAgentRequestAuthorityForAttempt(rawRetry, 2),
+  );
+}
+
+/**
+ * Issue one roster slot from two freshly minted requests. The pair checks are
+ * exactly `parseAgentRosterSlot`'s; only the input differs — minted
+ * authorities, so a slot cannot be issued from requests that skipped the
+ * catalog check.
+ */
+export function issueAgentRosterSlot(
+  first: MintedAgentRequestAuthority,
+  retry: MintedAgentRequestAuthority,
+): DomainResult<MintedAgentRosterSlot, AgentRosterSlotError> {
+  return pairRosterSlot<MintedAgentRequestAuthority>(authorityForAttempt(first, 1), authorityForAttempt(retry, 2));
+}
+
+function pairRosterSlot<Authority extends AgentRequestAuthority>(
+  first: DomainResult<Authority & AgentRequestAuthority<1>, AgentRequestAuthorityError>,
+  retry: DomainResult<Authority & AgentRequestAuthority<2>, AgentRequestAuthorityError>,
+): DomainResult<Readonly<{
+  slotId: SlotId;
+  attempts: readonly [Authority & AgentRequestAuthority<1>, Authority & AgentRequestAuthority<2>];
+}>, AgentRosterSlotError> {
   const violations: RosterViolation[] = [];
   if (!first.ok) {
     violations.push(canonicalRecord({
@@ -539,7 +638,7 @@ export function parseAgentRosterSlot(
   }
   return success(canonicalRecord({
     slotId: first.value.slotId,
-    attempts: Object.freeze([first.value, retry.value]) as readonly [AgentRequestAuthority<1>, AgentRequestAuthority<2>],
+    attempts: Object.freeze([first.value, retry.value] as const),
   }));
 }
 

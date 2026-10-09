@@ -6,12 +6,12 @@
  */
 import { sha256Hex } from "./digest";
 import {
-  AGENT_REQUIRED_SKILLS, canonicalRecord, canonicalStructuralEquals, parseAgentRequestAuthority, parseExactRoster,
-  parseOrchestrationRunId,
-  type AgentRosterSlot, type DomainResult, type NonEmpty,
+  AGENT_REQUIRED_SKILLS, canonicalRecord, canonicalStructuralEquals, issueAgentRosterSlot, parseAgentRequestAuthority,
+  parseExactRoster, parseOrchestrationRunId,
+  type AgentRosterSlot, type DomainResult, type MintedAgentRosterSlot, type NonEmpty,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "./model-profiles";
+import { lowerModelProfile, resolveAgentProfile } from "./model-profiles";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import type { ReviewPath } from "./review-packet";
@@ -183,13 +183,8 @@ export function prepareFreshStandaloneReview(
   }
 
   const authorityErrors: string[] = [];
-  const roster = reviewers.map((role, index) => {
-    const policy = resolveAgentPolicy(role);
-    if (!policy.ok) {
-      authorityErrors.push(`${role}: policy resolution failed: ${policy.error.message}`);
-      return null;
-    }
-    const profile = resolveModelProfile(policy.value.profile);
+  const roster = reviewers.map((role, index): MintedAgentRosterSlot | null => {
+    const profile = resolveAgentProfile(role);
     if (!profile.ok) {
       authorityErrors.push(`${role}: model profile resolution failed: ${profile.error.message}`);
       return null;
@@ -226,7 +221,12 @@ export function prepareFreshStandaloneReview(
       }
       return null;
     }
-    return { slotId, attempts: [first.value, retry.value] };
+    const slot = issueAgentRosterSlot(first.value, retry.value);
+    if (!slot.ok) {
+      authorityErrors.push(...slot.error.violations.map(({ kind }) => `${role}: roster slot: ${kind}`));
+      return null;
+    }
+    return slot.value;
   });
   if (roster.some((slot) => slot === null)) {
     return preparationFailure(authorityErrors);

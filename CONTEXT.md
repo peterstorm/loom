@@ -361,7 +361,7 @@ A one-time Pi capability minted per spawn, scoped to prompt-derived artifact dir
 _Avoid_: Write permit, edit allowance, blanket phase write
 
 **Agent Request Authority**:
-An engine-issued immutable binding of Run, request, roster slot, semantic attempt, program, Agent role, LLM Profile, both harness bindings, required Skill, Context Packet digest, and fixed transcript slot. Harness-native ids correlate to it but never replace it.
+An engine-issued immutable binding of Run, request, roster slot, semantic attempt, program, Agent role, LLM Profile, both harness bindings, required Skill, Context Packet digest, and fixed transcript slot. Harness-native ids correlate to it but never replace it. It is checked against today's catalog exactly once, when it is minted; a minted authority is a distinct type the issuing seams require, while an authority read back from a roster, checkpoint or diagnostic is recorded history, checked only against the bindings its recorded profile has issued.
 _Avoid_: Prompt metadata, spawn args, transcript filename
 
 **Context Packet**:

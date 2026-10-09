@@ -18,9 +18,10 @@ import {
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
-import { DECISION_RECORD_AGENT, lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "./model-profiles";
+import { DECISION_RECORD_AGENT, lowerModelProfile, resolveAgentProfile } from "./model-profiles";
 import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import {
+  AGENT_REQUIRED_SKILLS,
   canonicalRecord,
   parseAgentRequestAuthority,
   parseArtifactDigest,
@@ -31,6 +32,7 @@ import {
   type ArtifactDigest,
   type DomainResult,
   type InitialSpawnRequestInput,
+  type MintedAgentRequestAuthority,
   type OrchestrationRunId,
 } from "./orchestration-contract";
 import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
@@ -158,6 +160,9 @@ export function classifyPersistedWaveBatch<C>(
     : Object.freeze({ kind: "incomplete" });
 }
 
+/** One Wave review request as issued: its authority was minted against today's catalog. */
+type IssuedWaveReviewRequest = InitialSpawnRequestInput & Readonly<{ authority: MintedAgentRequestAuthority }>;
+
 export type WaveRequestBatch = Readonly<{
   batchEpoch: ArtifactDigest;
   specCheckDocuments: WaveSpecCheckDocumentsAuthority;
@@ -165,7 +170,7 @@ export type WaveRequestBatch = Readonly<{
   settledFloor: SettledFloor;
   /** `waveReviewSubjects` of the roster; `requests` and `packets` are index-aligned with it. */
   subjects: readonly WaveReviewSubject[];
-  requests: readonly InitialSpawnRequestInput[];
+  requests: readonly IssuedWaveReviewRequest[];
   packets: readonly ContextPacket[];
   taskRuns: readonly WaveTaskRunAuthority[];
 }>;
@@ -854,7 +859,7 @@ export function prepareWaveReviewBatch(
   }
 
   const subjects = waveReviewSubjects(registration.taskIds);
-  const requests: InitialSpawnRequestInput[] = [];
+  const requests: IssuedWaveReviewRequest[] = [];
   const packets: ContextPacket[] = [];
   for (const subject of subjects) {
     const taskRun = subject.taskId === null ? null : taskRuns.find(({ taskId }) => taskId === subject.taskId) ?? null;
@@ -885,10 +890,9 @@ export function prepareWaveReviewBatch(
     const requestId = parseRequestId(`wave-request:${hash.slice(0, 32)}:${attempt}`);
     if (!slotId.ok) return failure(slotId.error.message);
     if (!requestId.ok) return failure(requestId.error.message);
-    const policy = resolveAgentPolicy(subject.role);
-    if (!policy.ok) return failure(policy.error.message);
-    const profile = resolveModelProfile(policy.value.profile);
+    const profile = resolveAgentProfile(subject.role);
     if (!profile.ok) return failure(profile.error.message);
+    const requiredSkill = AGENT_REQUIRED_SKILLS[subject.role];
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
     const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
       runId,
@@ -936,7 +940,7 @@ export function prepareWaveReviewBatch(
     const packetInput = {
       requestId: requestId.value,
       role: subject.role,
-      requiredSkill: policy.value.requiredSkill ?? "none",
+      requiredSkill: requiredSkill ?? "none",
       outputContract: subject.role === "spec-check-invoker"
         ? `Run the Wave ${registration.input.wave} spec alignment check and emit its exact Machine Summary.`
         : `Review Task ${subject.taskId} from the immutable packet and emit the exact Machine Summary and findings contract.`,
@@ -959,7 +963,7 @@ export function prepareWaveReviewBatch(
         pi: lowerModelProfile(profile.value, "pi"),
         claude: lowerModelProfile(profile.value, "claude-code"),
       },
-      requiredSkill: policy.value.requiredSkill,
+      requiredSkill,
       contextDigest: packet.value.digest,
       outputSlot: `transcripts/${slotId.value}/attempt-${attempt}.raw`,
     });

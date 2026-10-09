@@ -4,10 +4,10 @@
  * recover verifier requests, replay captured verdicts and terminal capture
  * rejections, then commit refuted outcomes under exact active authority.
  */
-import { parseAgentRequestAuthority, type InitialSpawnRequestInput } from '../../../core/orchestration-contract';
+import { issueAgentRosterSlot, parseAgentRequestAuthority, type InitialSpawnRequestInput, type MintedAgentRosterSlot } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold, type FindingOutcome } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, panelRequestIdentity, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/persistent-panel';
-import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority } from '../../../core/panel-authority';
+import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority } from '../../../core/panel-authority';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -34,7 +34,7 @@ function waveRefutationPreparation(
   if (!plan.ok) throw new Error(plan.error.message);
   const profile = resolveModelProfile("refutation");
   if (!profile.ok) throw new Error(profile.error.message);
-  const slots = [];
+  const slots: MintedAgentRosterSlot[] = [];
   const packets: ContextPacket[] = [];
   const inputs: InitialSpawnRequestInput[] = [];
   const retryInputs: Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[] = [];
@@ -67,9 +67,11 @@ function waveRefutationPreparation(
       else retryInputs.push(Object.freeze({ input: Object.freeze(input), packet: packet.value }));
       return authority.value;
     });
-    slots.push({ slotId: binding.value.slotId, attempts });
+    const slot = issueAgentRosterSlot(attempts[0], attempts[1]);
+    if (!slot.ok) throw new Error(`verifier slot ${binding.value.slotId} is invalid: ${slot.error.violations.map(({ kind }) => kind).join(", ")}`);
+    slots.push(slot.value);
   }
-  const panel = parseRefutationPanelAuthority({
+  const panel = issueRefutationPanelAuthority({
     runId: handle.runId,
     identityRunId: plan.value.runId,
     findings: plan.value.findings,

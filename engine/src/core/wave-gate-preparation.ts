@@ -15,8 +15,8 @@ import { lowerModelProfile, resolveAgentProfile, type LoomAgentName } from "./mo
 import {
   awaitUserAction,
   canonicalRecord,
+  issueAgentRosterSlot,
   parseAgentRequestAuthority,
-  parseAgentRosterSlot,
   parseArtifactByteLength,
   parseArtifactDigest,
   parseArtifactRef,
@@ -27,6 +27,7 @@ import {
   type ArtifactRef,
   type ContextDigest,
   type DomainResult,
+  type MintedAgentRosterSlot,
   type NonEmpty,
   type OrchestrationRunId,
   type RequestId,
@@ -40,7 +41,7 @@ import {
 } from "./review-panel";
 import {
   deriveRefutationVerifierBinding,
-  parseRefutationPanelAuthority,
+  issueRefutationPanelAuthority,
   type RefutationPanelAuthority,
 } from "./panel-authority";
 import {
@@ -114,14 +115,14 @@ export type WaveRefutationAuthorityClaims = Readonly<{
  *  change re-routes Wave verifiers exactly as it re-routes every other role. */
 const WAVE_REFUTATION_VERIFIER_ROLE = "review-verifier-agent" satisfies LoomAgentName;
 
-function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResult<NonEmpty<AgentRosterSlot>, WavePreparationError> {
+function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResult<NonEmpty<MintedAgentRosterSlot>, WavePreparationError> {
   const profile = resolveAgentProfile(WAVE_REFUTATION_VERIFIER_ROLE);
   if (!profile.ok) return preparationFailure(profile.error.message);
   const panelBindings = canonicalRecord({
     pi: lowerModelProfile(profile.value, "pi"),
     claude: lowerModelProfile(profile.value, "claude-code"),
   });
-  const slots: AgentRosterSlot[] = [];
+  const slots: MintedAgentRosterSlot[] = [];
   const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
   for (const lens of plan.lenses) {
     const binding = deriveRefutationVerifierBinding(plan.runId, lens, findingIds);
@@ -146,11 +147,11 @@ function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResu
       return authority.ok ? authority.value : null;
     });
     if (attempts[0] === null || attempts[1] === null) return preparationFailure(`failed to derive verifier authority for lens ${lens}`);
-    const slot = parseAgentRosterSlot(attempts[0], attempts[1]);
+    const slot = issueAgentRosterSlot(attempts[0], attempts[1]);
     if (!slot.ok) return preparationFailure(`derived verifier slot for lens ${lens} is invalid`);
     slots.push(slot.value);
   }
-  return canonicalRecord({ ok: true, value: Object.freeze(slots) as NonEmpty<AgentRosterSlot> });
+  return canonicalRecord({ ok: true, value: Object.freeze(slots) as NonEmpty<MintedAgentRosterSlot> });
 }
 
 /** Findings, lens order, and verifier slots come only from the canonical Wave
@@ -166,7 +167,7 @@ export function prepareWaveRefutationPanel(
   if (claims.verifierSlots !== undefined && JSON.stringify(claims.verifierSlots) !== JSON.stringify(verifierSlots.value)) {
     return preparationFailure("caller verifier slot claim drifted from canonical Finding/lens authority");
   }
-  const authority = parseRefutationPanelAuthority({
+  const authority = issueRefutationPanelAuthority({
     runId: plan.value.runId,
     findings: plan.value.findings,
     lenses: plan.value.lenses,
