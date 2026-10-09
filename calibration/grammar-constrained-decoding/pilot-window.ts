@@ -125,6 +125,21 @@ async function dispatchSample(window: WindowDispatch, pair: ScheduledPair, arm: 
   return record.value;
 }
 
+/** One pair's two arms in its scheduled order over ONE rendered task body
+ *  (matched inputs), each sample handed to the caller as it lands. */
+async function dispatchPair(window: WindowDispatch, pair: ScheduledPair): Promise<readonly SampleRecord[]> {
+  const input = window.inputs.caseInput(pair.cell, pair.caseId);
+  if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
+  const body = renderTaskBody(input, window.fixtures);
+  const landed: SampleRecord[] = [];
+  for (const arm of pair.armOrder) {
+    const record = await dispatchSample(window, pair, arm, body);
+    landed.push(record);
+    window.onSample(record);
+  }
+  return landed;
+}
+
 export type DispatchedSchedule = Readonly<{ records: readonly SampleRecord[]; ending: WindowEnding }>;
 
 /** Matched dispatch of the preregistered schedule, stopped early by the pure
@@ -138,16 +153,8 @@ export async function dispatchSchedule(window: WindowDispatch): Promise<Dispatch
   let progress: ScheduleProgress = startSchedule(schedule.length);
   for (const [index, pair] of schedule.entries()) {
     if (progress.kind === "ended") break;
-    const input = window.inputs.caseInput(pair.cell, pair.caseId);
-    if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
-    const body = renderTaskBody(input, window.fixtures);
-    const landed: SampleRecord[] = [];
-    for (const arm of pair.armOrder) {
-      const record = await dispatchSample(window, pair, arm, body);
-      landed.push(record);
-      records.push(record);
-      window.onSample(record);
-    }
+    const landed = await dispatchPair(window, pair);
+    records.push(...landed);
     window.onPair(index, schedule.length, pair);
     const step = landPair(progress.breaker, landed.map((record) => record.sample));
     progress = step.kind === "probe-route" ? step.judge(await observeRoute(window.routeHealth)) : step;

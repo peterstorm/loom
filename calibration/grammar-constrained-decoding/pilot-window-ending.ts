@@ -21,8 +21,10 @@
  *   one per-version table (`WINDOW_VERSIONS`) says which abort reasons each
  *   version recorded and whether it judged the last pair, `parseWindowEnding`
  *   is the one constructor of the ending this revision records (schemaVersion
- *   2), and `parseRetainedWindowEnding` reads back a retained window's ending
- *   under the rules of the version that wrote it.
+ *   2) against the schedule it ends, and `parseRetainedWindowEnding` reads
+ *   back a retained window's ending under the rules of the version that wrote
+ *   it — checked against its preregistration's schedule once a re-decision
+ *   has loaded that (`checkEndsSchedule`).
  *
  * The dispatch shell (`pilot-window.ts`) runs this rule behind its ports; the
  * window record codec (`pilot-window-record.ts`) reads the ending back.
@@ -144,10 +146,11 @@ const breakerOf = (dispatchedPairs: number, scheduledPairs: number, consecutiveO
     breaker: Object.freeze({ dispatchedPairs, scheduledPairs, consecutiveOutagePairs }) as RouteBreaker,
   });
 
-/** An ending the step reached by construction; a refusal here is a defect in
- *  this module (the breaker's invariants failed), never in the evidence. */
-function ended(raw: unknown): ScheduleProgress {
-  const ending = parseWindowEnding(raw);
+/** An ending of a `scheduledPairs`-pair schedule the step reached by
+ *  construction; a refusal here is a defect in this module (the breaker's
+ *  invariants failed), never in the evidence. */
+function ended(raw: unknown, scheduledPairs: number): ScheduleProgress {
+  const ending = parseWindowEnding(raw, scheduledPairs);
   if (!ending.ok) throw new Error(`the route fail-fast reached an inconsistent ending: ${ending.error}`);
   return Object.freeze({ kind: "ended" as const, ending: ending.value });
 }
@@ -156,7 +159,7 @@ function ended(raw: unknown): ScheduleProgress {
  *  (every cell extraction-only) has already completed. */
 export function startSchedule(scheduledPairs: number): ScheduleProgress {
   if (!Number.isInteger(scheduledPairs) || scheduledPairs < 0) throw new Error(`a schedule has a whole number of pairs, not ${scheduledPairs}`);
-  return scheduledPairs === 0 ? ended({ kind: "completed", pairs: 0 }) : breakerOf(0, scheduledPairs, 0);
+  return scheduledPairs === 0 ? ended({ kind: "completed", pairs: 0 }, 0) : breakerOf(0, scheduledPairs, 0);
 }
 
 /**
@@ -170,11 +173,11 @@ export function startSchedule(scheduledPairs: number): ScheduleProgress {
 export function landPair(breaker: RouteBreaker, pair: readonly SampleObservation[]): LandedPair {
   const { scheduledPairs } = breaker;
   const dispatchedPairs = breaker.dispatchedPairs + 1;
-  if (dispatchedPairs === scheduledPairs) return ended({ kind: "completed", pairs: scheduledPairs });
+  if (dispatchedPairs === scheduledPairs) return ended({ kind: "completed", pairs: scheduledPairs }, scheduledPairs);
   const health = pairHealth(pair);
   const consecutiveOutagePairs = health.kind === "all-outage" ? breaker.consecutiveOutagePairs + 1 : 0;
   const aborted = (reason: WindowAbortReason): ScheduleProgress =>
-    ended({ kind: "aborted", afterPairs: dispatchedPairs, scheduledPairs, reason });
+    ended({ kind: "aborted", afterPairs: dispatchedPairs, scheduledPairs, reason }, scheduledPairs);
   const byStreak = (): ScheduleProgress => consecutiveOutagePairs >= CONSECUTIVE_OUTAGE_PAIR_LIMIT
     ? aborted({ kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT })
     : breakerOf(dispatchedPairs, scheduledPairs, consecutiveOutagePairs);
@@ -223,26 +226,19 @@ type VersionRules = Readonly<{
   abortAfterLastPair: "admitted" | "refused";
 }>;
 
-/** A version table: exactly one entry per `WindowSchemaVersion` (a missing
- *  one does not compile), and every abort reason admitted by some version (a
- *  reason added to `abortReasonSchema` but to no version does not compile —
- *  the argument must then also name it as `unversionedReasons`). */
-function versionTable<const T extends { readonly [V in WindowSchemaVersion]: VersionRules }>(
-  table: T & ([Exclude<AbortReasonKind, T[WindowSchemaVersion]["reasons"][number]>] extends [never]
-    ? unknown
-    : Readonly<{ unversionedReasons: Exclude<AbortReasonKind, T[WindowSchemaVersion]["reasons"][number]> }>),
-): T {
-  return table;
-}
-
-/** The one per-version table of window endings, selected by `schemaVersion`. */
-const WINDOW_VERSIONS = versionTable({
+/** The one per-version table of window endings, selected by `schemaVersion`:
+ *  exactly one entry per `WindowSchemaVersion` (a missing or extra one does
+ *  not compile). */
+const WINDOW_VERSIONS = {
   1: { reasons: ["route-unreachable", "consecutive-infrastructure-failures"], abortAfterLastPair: "admitted" },
   2: { reasons: ["route-unreachable", "consecutive-outage-pairs"], abortAfterLastPair: "refused" },
-});
+} as const satisfies Readonly<Record<WindowSchemaVersion, VersionRules>>;
 
-type ReasonKindIn<V extends WindowSchemaVersion> = (typeof WINDOW_VERSIONS)[V]["reasons"][number];
-type AbortReasonIn<V extends WindowSchemaVersion> = Extract<AnyAbortReason, Readonly<{ kind: ReasonKindIn<V> }>>;
+/** The abort reasons window version `V`'s writer recorded. */
+type AbortReasonIn<V extends WindowSchemaVersion> = Extract<AnyAbortReason, Readonly<{ kind: (typeof WINDOW_VERSIONS)[V]["reasons"][number] }>>;
+
+// Every abort reason is recorded by some version: a reason added to `abortReasonSchema` but to no version does not compile.
+true satisfies [Exclude<AbortReasonKind, AbortReasonIn<WindowSchemaVersion>["kind"]>] extends [never] ? true : never;
 
 /** Why the fail-fast stopped a window this revision dispatched. */
 type WindowAbortReason = AbortReasonIn<typeof CURRENT_WINDOW_SCHEMA_VERSION>;
@@ -257,10 +253,11 @@ const anyEndingSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("aborted"), afterPairs: atLeastOnePair, scheduledPairs: atLeastOnePair, reason: abortReasonSchema }).strict(),
 ]);
 type AnyEnding = DeepReadonly<z.infer<typeof anyEndingSchema>>;
-type CompletedEnding = Extract<AnyEnding, Readonly<{ kind: "completed" }>>;
-type AbortedEnding<V extends WindowSchemaVersion> =
-  Readonly<{ kind: "aborted"; afterPairs: number; scheduledPairs: number; reason: AbortReasonIn<V> }>;
-type EndingIn<V extends WindowSchemaVersion> = CompletedEnding | AbortedEnding<V>;
+
+/** An ending window version `V`'s writer could record. */
+type EndingIn<V extends WindowSchemaVersion> =
+  | Extract<AnyEnding, Readonly<{ kind: "completed" }>>
+  | Readonly<{ kind: "aborted"; afterPairs: number; scheduledPairs: number; reason: AbortReasonIn<V> }>;
 
 declare const windowEndingBrand: unique symbol;
 type Branded<T> = T & Readonly<{ [windowEndingBrand]: true }>;
@@ -269,18 +266,22 @@ type Branded<T> = T & Readonly<{ [windowEndingBrand]: true }>;
  * How a dispatched window's schedule ended. An aborted window keeps every
  * sample that landed; the pairs it never dispatched are simply unmeasured, so
  * its decision is `incomplete` — never a fabricated or censored sample.
- * Branded: only `parseWindowEnding` makes one, so its invariants hold — a
- * completed window ran its whole schedule (`pairs` is the scheduled pair
- * count, 0 for an empty schedule of extraction-only cells); an aborted one
- * stopped between pairs (1 ≤ `afterPairs` < `scheduledPairs`), on an
- * unreachable route (with a non-empty reason) or on exactly
- * `CONSECUTIVE_OUTAGE_PAIR_LIMIT` consecutive outage pairs.
+ * Branded: only `parseWindowEnding` makes one, against the schedule it ends,
+ * so its invariants hold — a completed window ran its whole schedule
+ * (`pairs` is the scheduled pair count, 0 for an empty schedule of
+ * extraction-only cells); an aborted one names that schedule
+ * (`scheduledPairs`) and stopped between its pairs
+ * (1 ≤ `afterPairs` < `scheduledPairs`), on an unreachable route (with a
+ * non-empty reason) or on exactly `CONSECUTIVE_OUTAGE_PAIR_LIMIT` consecutive
+ * outage pairs.
  */
 export type WindowEnding = Branded<EndingIn<typeof CURRENT_WINDOW_SCHEMA_VERSION>>;
 
 /** An ending read back from a retained window, under its own version's rules:
  *  a schemaVersion 1 window may carry `e8d688d8`'s legacy reason, and may have
- *  been recorded aborted after its last pair. */
+ *  been recorded aborted after its last pair. The schedule it ends is the
+ *  preregistration's, which the window names but does not carry: a
+ *  re-decision checks it once that is loaded (`checkEndsSchedule`). */
 export type RetainedWindowEnding = Branded<EndingIn<WindowSchemaVersion>>;
 
 const invalid = (problem: string): Result<never, string> => err(`invalid window ending: ${problem}`);
@@ -333,13 +334,28 @@ function admittedUnder<V extends WindowSchemaVersion>(version: V, raw: unknown):
   return problems.length === 0 ? ok(branded({ ...ending, reason })) : invalid(problems.join("; "));
 }
 
-/** The one constructor of the `WindowEnding` this revision records. */
-export const parseWindowEnding = (raw: unknown): Result<WindowEnding, string> => admittedUnder(CURRENT_WINDOW_SCHEMA_VERSION, raw);
+/** Whether `ending` ends a schedule of `scheduledPairs` pairs: a completed
+ *  ending ran every one of them, and an aborted one names that schedule. */
+export function checkEndsSchedule(ending: RetainedWindowEnding, scheduledPairs: number): Result<null, string> {
+  if (ending.kind === "completed") {
+    return ending.pairs === scheduledPairs ? ok(null) : invalid(`pairs: completed after ${ending.pairs} pairs of a ${scheduledPairs}-pair schedule`);
+  }
+  return ending.scheduledPairs === scheduledPairs ? ok(null) : invalid(`scheduledPairs: ${ending.scheduledPairs} recorded for a ${scheduledPairs}-pair schedule`);
+}
+
+/** The one constructor of the `WindowEnding` this revision records: an ending
+ *  of the schedule of `scheduledPairs` pairs the window dispatched. */
+export function parseWindowEnding(raw: unknown, scheduledPairs: number): Result<WindowEnding, string> {
+  const ending = admittedUnder(CURRENT_WINDOW_SCHEMA_VERSION, raw);
+  if (!ending.ok) return ending;
+  const onSchedule = checkEndsSchedule(ending.value, scheduledPairs);
+  return onSchedule.ok ? ending : onSchedule;
+}
 
 /** A retained window's recorded ending, under the rules of the version that wrote it. */
 export const parseRetainedWindowEnding = (raw: unknown, version: WindowSchemaVersion): Result<RetainedWindowEnding, string> =>
   admittedUnder(version, raw);
 
-/** The pairs a window dispatched before its ending: two samples each (one per arm). */
+/** The pairs a window dispatched before its ending. */
 export const dispatchedPairsOf = (ending: RetainedWindowEnding): number =>
   ending.kind === "completed" ? ending.pairs : ending.afterPairs;
