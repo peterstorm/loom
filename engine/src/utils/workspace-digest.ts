@@ -11,7 +11,8 @@ import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
-import { describeGitOutcome, gitExitedWith, spawnGit } from "./git-execution-policy";
+import { spawnGit } from "./git-execution-policy";
+import { describeGitOutcome, gitExitedWith } from "./git-spawn-outcome";
 import { confirmedEmptyPassthrough, observeGitProbe } from "./git-probe";
 import { inspectRepositoryPath } from "./repository-path";
 

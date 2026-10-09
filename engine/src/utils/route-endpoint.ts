@@ -16,13 +16,10 @@ import {
   decideRouteReachability,
   distinctRoutes,
   modelsUrl,
-  planSpawnRoutes,
   type RouteEndpoint,
   type RouteObservation,
   type RouteProbe,
   type RouteReachability,
-  type SpawnRouteDecision,
-  type SpawnRouting,
 } from "../core/route-reachability";
 
 /** How long one probe waits before the route counts as unreachable. */
@@ -126,24 +123,4 @@ export async function observeRouteReachability(
     decisions.push(decideRouteReachability(binding, observation));
   }
   return { ok: true, decisions: Object.freeze(decisions) };
-}
-
-/** What the Pi spawn gate observes with: Pi's agent directory, the routing context and the probe. */
-export type SpawnRouteGatePorts = Readonly<{ agentDir: string; routing: SpawnRouting; probe: RouteProbePort }>;
-
-/**
- * Observe and decide every route a Pi spawn batch needs: the retired routes
- * it recorded (decided without a probe — none can come back) and each
- * distinct route its children launch on, resolved by the same rule as the
- * generated-agent render.
- */
-export async function observeSpawnRoutes(
-  requests: Parameters<typeof planSpawnRoutes>[0],
-  ports: SpawnRouteGatePorts,
-): Promise<Readonly<{ ok: true; decisions: readonly SpawnRouteDecision[] }> | Readonly<{ ok: false; error: string }>> {
-  const plan = planSpawnRoutes(requests, ports.routing);
-  if (!plan.ok) return { ok: false, error: plan.error.message };
-  const observed = await observeRouteReachability(plan.value.launch, ports.agentDir, ports.probe);
-  if (!observed.ok) return observed;
-  return { ok: true, decisions: Object.freeze([...plan.value.retired, ...observed.decisions]) };
 }

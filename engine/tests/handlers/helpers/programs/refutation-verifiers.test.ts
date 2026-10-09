@@ -1,26 +1,26 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../../../src/core/context-packets";
-import { currentProfileBindings, resolveAgentPolicy, type PiBinding } from "../../../../src/core/model-profiles";
-import {
-  parseAgentRosterSlot,
-  type AgentRequestAuthority,
-  type AgentRosterSlot,
-  type MintedAgentRosterSlot,
-} from "../../../../src/core/orchestration-contract";
+import { buildContextPacket, encodeByteSection } from "../../../../src/core/context-packets";
+import { currentProfileBindings, type PiBinding } from "../../../../src/core/model-profiles";
+import { parseAgentRosterSlot, type AgentRequestAuthority, type AgentRosterSlot } from "../../../../src/core/orchestration-contract";
 import { parseRefutationPanelAuthority, type RefutationPanelAuthority } from "../../../../src/core/panel-authority";
+import { decideRefutationVerifiers, type RefutationVerifierPlan } from "../../../../src/core/refutation-verifiers";
 import { parseWaveFindingId, type BriefFinding, type ReviewLens } from "../../../../src/core/review-panel";
-import { prepareRefutationVerifiers, type RefutationVerifierPlan } from "../../../../src/handlers/helpers/programs/refutation-verifiers";
+import { publicationFile, refutationBatchEffectId } from "../../../../src/handlers/helpers/programs/durable-requests";
+import { prepareRefutationVerifiers } from "../../../../src/handlers/helpers/programs/refutation-verifiers";
+import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { RETIRED_REFUTATION_PI_BINDING as RETIRED } from "../../../fixtures/local-pi-binding";
 
 /**
- * A refutation panel's verifier requests are minted from today's catalog only
- * when the panel has no record; a recorded panel is read back as history.
+ * The shell step reads the panel's record — the checkpoint the caller holds,
+ * else the published attempt-1 receipt — and hands it to the pure decision
+ * (tests/core/refutation-verifiers.test.ts covers the decision itself).
  */
 
+const LABEL = "fixture-refutation";
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
@@ -41,30 +41,24 @@ const FINDINGS: readonly [BriefFinding] = [Object.freeze({
 })];
 const LENSES: readonly [ReviewLens, ReviewLens] = ["reproduction", "intent"];
 
-function plan(handle: RunDirHandle, overrides: Partial<RefutationVerifierPlan> = {}): RefutationVerifierPlan {
-  return {
-    handle,
-    label: "fixture-refutation",
-    findings: FINDINGS,
-    lenses: LENSES,
-    packet: (lens, requestId, attempt) => {
-      const section = encodeByteSection("fixture-refutation-authority", JSON.stringify({ lens, attempt }));
-      if (!section.ok) throw new Error(section.error.message);
-      const packet = buildContextPacket({
-        requestId, role: "review-verifier-agent", requiredSkill: "none",
-        outputContract: `Adjudicate through lens '${lens}'.`, fixedContext: [section.value], variableContext: [],
-      });
-      if (!packet.ok) throw new Error(packet.error.message);
-      return packet.value;
-    },
-    ...overrides,
-  };
-}
+const PANEL: Omit<RefutationVerifierPlan, "runId"> = {
+  findings: FINDINGS,
+  lenses: LENSES,
+  packet: (lens, requestId, attempt) => {
+    const section = encodeByteSection("fixture-refutation-authority", JSON.stringify({ lens, attempt }));
+    return section.ok
+      ? buildContextPacket({
+          requestId, role: "review-verifier-agent", requiredSkill: "none",
+          outputContract: `Adjudicate through lens '${lens}'.`, fixedContext: [section.value], variableContext: [],
+        })
+      : section;
+  },
+};
 
 /** `panel` as it would have been recorded with every verifier request on `pi`. */
-function recordedOn(panel: RefutationPanelAuthority, pi: PiBinding, slots = panel.verifierRoster.orderedSlots): RefutationPanelAuthority {
+function recordedOn(panel: RefutationPanelAuthority, pi: PiBinding): RefutationPanelAuthority {
   const rebind = (authority: AgentRequestAuthority) => ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi } });
-  const verifierSlots = slots.map(({ attempts }) => {
+  const verifierSlots = panel.verifierRoster.orderedSlots.map(({ attempts }) => {
     const slot = parseAgentRosterSlot(rebind(attempts[0]), rebind(attempts[1]));
     if (!slot.ok) throw new Error(JSON.stringify(slot.error));
     return slot.value;
@@ -79,97 +73,62 @@ function recordedOn(panel: RefutationPanelAuthority, pi: PiBinding, slots = pane
 const bindings = (slots: readonly AgentRosterSlot[]) =>
   slots.flatMap(({ attempts }) => attempts.map(({ harnessBinding }) => harnessBinding.pi));
 
-describe("refutation verifier preparation", () => {
-  it("mints every verifier request from today's catalog when the panel has no record", () => {
-    const prepared = prepareRefutationVerifiers(plan(runDirectory()));
-    expect(bindings(prepared.panel.authority.verifierRoster.orderedSlots))
+/** Publish `panel`'s attempt-1 batch under the fixture label, as a program's first emission does. */
+async function publishAttemptOne(handle: RunDirHandle, panel: RefutationPanelAuthority): Promise<void> {
+  const prepared = decideRefutationVerifiers({ ...PANEL, runId: handle.runId }, { kind: "checkpointed-panel", panel });
+  if (!prepared.ok) throw new Error(prepared.error.message);
+  const published = await publishLegacyInitialBatch(handle, prepared.value.inputs, prepared.value.packets, LABEL);
+  if (!published.ok) throw new Error(published.message);
+}
+
+describe("prepareRefutationVerifiers: the record the shell reads", () => {
+  it("mints the panel when it has neither a checkpoint nor a published receipt", () => {
+    const prepared = prepareRefutationVerifiers({ handle: runDirectory(), label: LABEL, checkpointed: null }, PANEL);
+    expect(bindings(prepared.refutationAuthority.verifierRoster.orderedSlots))
       .toEqual(Array(4).fill(currentProfileBindings("refutation").pi));
-    expect(prepared.inputs.map(({ authority }) => authority))
-      .toEqual(prepared.panel.authority.verifierRoster.orderedSlots.map(({ attempts }) => attempts[0]));
-    expect(prepared.retryInputs.map(({ input }) => input.authority))
-      .toEqual(prepared.panel.authority.verifierRoster.orderedSlots.map(({ attempts }) => attempts[1]));
-    expect(prepared.packets.map(({ digest }) => digest)).toEqual(prepared.inputs.map(({ authority }) => authority.contextDigest));
   });
 
-  it("reads a recorded panel back as history instead of re-minting today's binding", () => {
+  it("reads a published attempt-1 receipt as the panel's record when no checkpoint is held", async () => {
     const handle = runDirectory();
-    const recorded = recordedOn(prepareRefutationVerifiers(plan(handle)).panel.authority, RETIRED);
-    const prepared = prepareRefutationVerifiers(plan(handle, { recorded }));
-    expect(prepared.panel).toEqual({ kind: "recorded", authority: recorded });
-    expect(bindings(prepared.panel.authority.verifierRoster.orderedSlots)).toEqual(Array(4).fill(RETIRED));
-    expect(prepared.retryInputs.map(({ input }) => input.authority.harnessBinding.pi)).toEqual([RETIRED, RETIRED]);
+    const minted = prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: null }, PANEL);
+    const recorded = recordedOn(minted.refutationAuthority, RETIRED);
+    await publishAttemptOne(handle, recorded);
+
+    const prepared = prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: null }, PANEL);
+
+    expect(prepared.refutationAuthority).toEqual(recorded);
+    expect(bindings(prepared.refutationAuthority.verifierRoster.orderedSlots)).toEqual(Array(4).fill(RETIRED));
   });
 
-  it("refuses a record whose request differs from the panel's deterministic request", () => {
+  it("prefers the checkpointed panel to the receipt: the checkpoint is the earliest record of issuance", async () => {
     const handle = runDirectory();
-    const recorded = recordedOn(prepareRefutationVerifiers(plan(handle)).panel.authority, RETIRED);
-    const drifted = plan(handle, {
-      recorded,
-      packet: (lens, requestId, attempt) => plan(handle).packet(lens, requestId, attempt === 1 ? 2 : 1),
-    });
-    expect(() => prepareRefutationVerifiers(drifted)).toThrow(/differs from the panel's deterministic request/);
+    const minted = prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: null }, PANEL).refutationAuthority;
+    await publishAttemptOne(handle, minted);
+    const checkpoint = recordedOn(minted, RETIRED);
+
+    const prepared = prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: checkpoint }, PANEL);
+
+    expect(prepared.refutationAuthority).toEqual(checkpoint);
   });
 
-  it("issues an unrecorded panel as minted, routing every verifier request through the catalog's verifier policy", () => {
-    const prepared = prepareRefutationVerifiers(plan(runDirectory()));
-    expect(prepared.panel.kind).toBe("issued");
-    if (prepared.panel.kind !== "issued") return;
-    // The issued roster keeps its minted proof: a catalog profile on the local binding, by type.
-    const minted: readonly MintedAgentRosterSlot[] = prepared.panel.authority.verifierRoster.orderedSlots;
-    const policy = resolveAgentPolicy("review-verifier-agent");
-    if (!policy.ok) throw new Error(policy.error.message);
-    const verifierPolicy = policy.value;
-    for (const request of minted.flatMap(({ attempts }) => attempts)) {
-      expect(request.role).toBe("review-verifier-agent");
-      expect(request.modelProfile).toBe(verifierPolicy.profile);
-      expect(request.requiredSkill).toBe(verifierPolicy.requiredSkill);
-      expect(request.harnessBinding).toEqual(currentProfileBindings(verifierPolicy.profile));
-      // Golden bytes: the serialized verifier authority's binding, as every
-      // Refutation Panel (standalone and Wave) issues it today.
-      expect(JSON.stringify(request.harnessBinding)).toBe(
-        '{"pi":{"harness":"pi","provider":"desktop-vllm","model":"glm-5.3-flash-spark-tp2-v14","thinking":"high"},' +
-        '"claude":{"harness":"claude-code","model":"opus"}}',
-      );
-      expect(request.modelProfile).toBe("refutation");
-    }
-    expect(prepared.panel.authority.findings).toEqual(FINDINGS);
-    expect(prepared.panel.authority.lenses).toEqual(LENSES);
-  });
-
-  it("issues the same panel a re-read of its own record parses, so issuance and history agree", () => {
+  it("refuses to mint over a receipt it cannot read", () => {
     const handle = runDirectory();
-    const issued = prepareRefutationVerifiers(plan(handle)).panel.authority;
-    expect(prepareRefutationVerifiers(plan(handle, { recorded: issued })).panel).toEqual({ kind: "recorded", authority: issued });
+    const ids = prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: null }, PANEL).inputs
+      .map(({ authority }) => authority.requestId);
+    const effectId = refutationBatchEffectId(LABEL, ids);
+    if (!effectId.ok) throw new Error(effectId.error.message);
+    const path = join(handle.runDirectory, "artifacts", publicationFile(effectId.value));
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, "{not json");
+
+    expect(() => prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: null }, PANEL))
+      .toThrow(/durable publication receipt is invalid JSON/);
   });
 
-  it("names the catalog's own reasons when a verifier request cannot be minted", () => {
+  it("throws the decision's refusal at the shell boundary", () => {
     const handle = runDirectory();
-    const malformed = plan(handle, {
-      // A forged packet: its digest is no Context Packet digest, so the catalog parse refuses it.
-      packet: (lens, requestId, attempt) =>
-        ({ ...plan(handle).packet(lens, requestId, attempt), digest: "not-a-digest" }) as unknown as ContextPacket,
-    });
-    const refusal = (): string => {
-      try {
-        prepareRefutationVerifiers(malformed);
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-      throw new Error("a verifier request with a malformed Context Packet digest must not mint");
-    };
-    // Both attempts' catalog violations are propagated verbatim, never collapsed
-    // into a bare "failed to derive".
-    const parsed = refusal().match(/^verifier slot (refutation-slot:[0-9a-f]+) cannot be minted: (.+)$/);
-    expect(parsed).not.toBeNull();
-    const reasons = parsed?.[2]?.split("; ") ?? [];
-    expect(reasons.length).toBeGreaterThanOrEqual(2);
-    expect(reasons.some((reason) => /digest/i.test(reason))).toBe(true);
-    expect(reasons.every((reason) => reason.length > 0 && reason !== "roster slot: invalid")).toBe(true);
-  });
-
-  it("refuses a record that lacks one of the panel's verifier slots", () => {
-    const handle = runDirectory();
-    const oneLens = prepareRefutationVerifiers(plan(handle, { lenses: ["reproduction"] })).panel.authority;
-    expect(() => prepareRefutationVerifiers(plan(handle, { recorded: recordedOn(oneLens, RETIRED) }))).toThrow(/lacks verifier request/);
+    expect(() => prepareRefutationVerifiers({ handle, label: LABEL, checkpointed: null }, {
+      ...PANEL, packet: () => ({ ok: false, error: { message: "no packet today" } }),
+    })).toThrow("no packet today");
   });
 });

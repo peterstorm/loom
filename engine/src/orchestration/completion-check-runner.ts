@@ -23,13 +23,8 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/digest";
-import {
-  describeGitOutcome,
-  gitCleanNegative,
-  gitExitedWith,
-  GIT_PROBE_OUTPUT_LIMIT,
-  spawnGit,
-} from "../utils/git-execution-policy";
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../utils/git-execution-policy";
+import { describeGitOutcome, gitCleanNegative, gitExitedWith } from "../utils/git-spawn-outcome";
 import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {

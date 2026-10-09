@@ -6,7 +6,7 @@
  */
 import { sameAgentRequestAuthority, type AgentRequestAuthority, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
 import { refutationRetryTask } from '../../../core/reviewer-retry';
-import type { PreparedVerifierRequest } from './refutation-verifiers';
+import type { PreparedVerifierRequest } from '../../../core/refutation-verifiers';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { durableCaptureRejection, durableRefutationRequests } from './durable-requests';
 import { publishLegacyInitialBatch } from './request-publication';

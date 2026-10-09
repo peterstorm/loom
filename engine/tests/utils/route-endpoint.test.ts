@@ -4,15 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PiBinding } from "../../src/core/model-profiles";
-import { parseModelRoutingConfig } from "../../src/core/model-routing";
 import {
   httpRouteProbe,
   observeRouteReachability,
-  observeSpawnRoutes,
   readRouteEndpoint,
   type RouteProbePort,
 } from "../../src/utils/route-endpoint";
-import { LOCAL_PI_BINDING, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_PROFILE } from "../fixtures/local-pi-binding";
+import { LOCAL_PI_BINDING } from "../fixtures/local-pi-binding";
 import { deadLoopbackPort } from "../fixtures/dead-loopback-port";
 
 const LOCAL: PiBinding = LOCAL_PI_BINDING;
@@ -139,49 +137,5 @@ describe("observeRouteReachability", () => {
   it("reports a malformed models.json", async () => {
     const probe: RouteProbePort = async () => { throw new Error("must not probe"); };
     expect(await observeRouteReachability([LOCAL], agentDir("[]"), probe)).toMatchObject({ ok: false });
-  });
-});
-
-describe("observeSpawnRoutes", () => {
-  const request = (pi: PiBinding) =>
-    ({ role: "code-reviewer", modelProfile: RETIRED_CLOUD_PROFILE, harnessBinding: { pi, claude: { harness: "claude-code", model: "sonnet" } } } as const);
-  const recording = (answer: Awaited<ReturnType<RouteProbePort>>) => {
-    const probed: string[] = [];
-    const probe: RouteProbePort = async (endpoint) => {
-      probed.push(endpoint.provider);
-      return answer;
-    };
-    return { probed, probe };
-  };
-
-  it("decides a retired recorded route without probing it", async () => {
-    const { probed, probe } = recording({ kind: "answered", status: 200, servedModels: [LOCAL.model] });
-    const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://vllm/v1" } } });
-    expect(await observeSpawnRoutes([request(RETIRED_CLOUD_PI_BINDING), request(LOCAL)], { agentDir: dir, routing: { parentRef: null, config: null }, probe }))
-      .toMatchObject({ ok: true, decisions: [
-        { kind: "retired", profile: RETIRED_CLOUD_PROFILE, recorded: RETIRED_CLOUD_PI_BINDING, current: LOCAL },
-        { kind: "reachable", route: LOCAL_PI_ROUTE },
-      ] });
-    expect(probed).toEqual([LOCAL.provider]);
-  });
-
-  it("probes the routed launch target, not the recorded binding", async () => {
-    const parsed = parseModelRoutingConfig({
-      schemaVersion: 1,
-      defaultClass: "cloud",
-      modelClasses: { local: [`${LOCAL.provider}/*`] },
-      targets: { muse: { model: "desktop-muse/qwen3.8-27b", thinkingLevel: "medium" } },
-      rules: [{ id: "local-uses-muse", when: { parentClass: "local" }, use: { kind: "named", target: "muse" } }],
-    });
-    if (!parsed.ok) throw new Error(parsed.error.message);
-    const { probed, probe } = recording({ kind: "answered", status: 200, servedModels: ["qwen3.8-27b"] });
-    const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://vllm/v1" }, "desktop-muse": { baseUrl: "http://muse/v1" } } });
-    const observed = await observeSpawnRoutes([request(LOCAL)], {
-      agentDir: dir,
-      routing: { parentRef: { provider: LOCAL.provider, model: LOCAL.model }, config: parsed.value },
-      probe,
-    });
-    expect(probed).toEqual(["desktop-muse"]);
-    expect(observed).toMatchObject({ ok: true, decisions: [{ kind: "reachable", route: "desktop-muse/qwen3.8-27b", served: { kind: "listed" } }] });
   });
 });

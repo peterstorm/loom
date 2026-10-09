@@ -40,9 +40,9 @@ export type RoutingConfigLoad =
  * the home agent dir. Absent → `{ ok: true, config: null }` (no routing).
  * Present but malformed → `{ ok: false, error }`.
  */
-export function loadModelRoutingConfig(dir: string = activeAgentDir()): RoutingConfigLoad {
+export function loadModelRoutingConfig(dir: string = activeAgentDir(), homeDir: string = homeAgentDir()): RoutingConfigLoad {
   const candidates = [join(dir, "model-routing.json")];
-  if (dir !== homeAgentDir()) candidates.push(join(homeAgentDir(), "model-routing.json"));
+  if (dir !== homeDir) candidates.push(join(homeDir, "model-routing.json"));
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     let raw: unknown;

@@ -28,6 +28,7 @@ import { frozenSet } from "./core/frozen";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe } from "./utils/git-probe";
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from "./utils/git-execution-policy";
 import {
   describeGitOutcome,
   diagnoseGitOutcome,
@@ -35,12 +36,9 @@ import {
   gitExitedWith,
   gitStderrText,
   gitStdoutText,
-  GIT_PROBE_OUTPUT_LIMIT,
-  spawnGit,
   type GitExit,
-  type GitSpawn,
   type GitSpawnOutcome,
-} from "./utils/git-execution-policy";
+} from "./utils/git-spawn-outcome";
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;

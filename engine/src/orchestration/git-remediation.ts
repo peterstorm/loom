@@ -66,7 +66,8 @@ import {
 import { compareCandidateRepositoryWitnesses } from "../core/defect-family-accounting";
 import { recaptureRemediationCandidateWorkspace } from "./remediation-candidate";
 import { confirmedEmptyPassthrough, observeGitProbe } from "../utils/git-probe";
-import { describeGitOutcome, gitExitedWith, spawnGit, type GitSpawn } from "../utils/git-execution-policy";
+import { spawnGit, type GitSpawn } from "../utils/git-execution-policy";
+import { describeGitOutcome, gitExitedWith } from "../utils/git-spawn-outcome";
 
 /** Fixed argument template. Nothing here is ever built from caller input. */
 const LITERAL_PATHSPECS = "--literal-pathspecs";

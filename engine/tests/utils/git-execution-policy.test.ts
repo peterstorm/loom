@@ -29,6 +29,7 @@ import {
   type RemediationCandidateCaptureInput,
 } from "../../src/orchestration/remediation-candidate";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../src/utils/declared-artifact-snapshot";
+import { runGit, spawnGit, type GitOutput } from "../../src/utils/git-execution-policy";
 import {
   describeGitOutcome,
   diagnoseGitOutcome,
@@ -37,12 +38,9 @@ import {
   gitExitedWith,
   gitStdoutText,
   parseGitSpawnResult,
-  runGit,
-  spawnGit,
-  type GitOutput,
   type GitSpawnOutcome,
   type RawGitSpawnResult,
-} from "../../src/utils/git-execution-policy";
+} from "../../src/utils/git-spawn-outcome";
 import {
   changedPaths,
   diffFilesAt,

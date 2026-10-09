@@ -6,15 +6,14 @@
  * Imperative shell — every classification rule lives in core/scope-classification.
  */
 import { devNull } from 'node:os';
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from '../../../utils/git-execution-policy';
 import {
   describeGitOutcome,
   gitCleanNegative,
   gitStderrText,
   gitStdoutText,
-  GIT_PROBE_OUTPUT_LIMIT,
-  spawnGit,
   type GitExit,
-} from '../../../utils/git-execution-policy';
+} from '../../../utils/git-spawn-outcome';
 import { observeGitProbe, type GitProbeObservation, type GitProbeStep } from '../../../utils/git-probe';
 import type { StandaloneReviewKind, StandaloneReviewMetadata } from '../../../core/standalone-review-scope';
 import { classifyScope, parseNumstatAdditions, reviewablePath } from '../../../core/scope-classification';
