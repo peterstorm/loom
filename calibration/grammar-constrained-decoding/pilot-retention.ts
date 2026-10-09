@@ -26,7 +26,6 @@
  *   sample as it lands: the script supplies only the live adapters.
  */
 
-import { match } from "ts-pattern";
 import type { CalibrationCase } from "../../engine/src/core/model-calibration";
 import { err, ok, type NonEmpty, type Result } from "../kernel";
 import { evaluatePilot, type PilotEvaluation, type ReleaseDecision } from "./pilot-core";
@@ -38,16 +37,16 @@ import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type Qualit
 import { rubricAssessment } from "./pilot-rubric";
 import { contentDigest, jsonText, parseJsonText } from "./pilot-vocabulary";
 import { blind, blindedPacket, dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
-import type { WindowEnding } from "./pilot-window-ending";
 import {
+  closeWindowRecord,
   DISPATCHED,
   encodeWindowRecord,
   parseRetainedWindow,
   type ClosedWindowRecord,
   type DispatchPlan,
-  type NotAttempted,
   type PreregistrationRef,
   type RetainedWindow,
+  type WindowClosing,
   type WindowRecord,
 } from "./pilot-window-record";
 import { resolveWindowInputs, WindowInputs, type ChangedPathsOf, type WorkloadFixtures } from "./pilot-workload";
@@ -320,17 +319,15 @@ function resolveDispatchInputs(run: WindowRun): Result<WindowInputs, string> {
   return inputs.ok ? inputs : err(`${cannotDispatch}: its preregistered case inputs do not resolve:${issueList(inputs.error)}`);
 }
 
-/** What an opened window's dispatch plan ran: nothing, or the matched dispatch and how it ended. */
+/** What an opened window's dispatch plan ran: nothing, or the matched
+ *  dispatch — every landed sample, the inputs it rendered, and how it ended.
+ *  Either is the `WindowClosing` the window record closes with. */
 type OpenedWindow =
-  | Readonly<{ kind: "not-attempted"; plan: NotAttempted }>
-  | Readonly<{ kind: "dispatched"; records: readonly SampleRecord[]; inputs: WindowInputs; ending: WindowEnding }>;
+  | Extract<WindowClosing, { kind: "not-attempted" }>
+  | (Extract<WindowClosing, { kind: "dispatched" }> & Readonly<{ records: readonly SampleRecord[]; inputs: WindowInputs }>);
 
-const closeWindow = (record: WindowRecord, opened: OpenedWindow, endedAt: string): ClosedWindowRecord => match(opened)
-  .returnType<ClosedWindowRecord>()
-  .with({ kind: "not-attempted" }, ({ plan }) => Object.freeze({ ...record, dispatch: plan, endedAt, observations: 0 as const }))
-  .with({ kind: "dispatched" }, ({ records, ending }) =>
-    Object.freeze({ ...record, dispatch: DISPATCHED, endedAt, observations: records.length, ending }))
-  .exhaustive();
+/** What a window that never dispatched hands the blinded packet and the decision. */
+const NOTHING_DISPATCHED: Readonly<{ records: readonly SampleRecord[]; inputs: WindowInputs }> = Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.EMPTY });
 
 /** Open the window record and run what its dispatch plan says — the one
  *  decision about whether the window dispatches. A dispatching window
@@ -388,15 +385,16 @@ export async function recordWindow(run: WindowRun): Promise<Result<RecordedWindo
   }
   const opened = await openAndDispatch(run);
   if (!opened.ok) return opened;
-  const window = closeWindow(record, opened.value, run.now());
+  const window = closeWindowRecord(record, opened.value, run.now());
   store.write(WINDOW_FILES.window, encodeWindowRecord(window));
-  const { records, inputs } = opened.value.kind === "dispatched" ? opened.value : { records: [], inputs: WindowInputs.EMPTY };
-  return ok(Object.freeze({ window, decision: decideClosedWindow(run, records, inputs) }));
+  return ok(Object.freeze({ window, decision: decideClosedWindow(run, opened.value) }));
 }
 
-/** A closed window's blinded packet, rubric assessment and decision. */
-function decideClosedWindow(run: WindowRun, records: readonly SampleRecord[], inputs: WindowInputs): Result<DecisionOutcome, string> {
+/** A closed window's blinded packet, rubric assessment and decision, over
+ *  what its dispatch plan ran (nothing, for a window that never dispatched). */
+function decideClosedWindow(run: WindowRun, opened: OpenedWindow): Result<DecisionOutcome, string> {
   const { store, record } = run;
+  const { records, inputs } = opened.kind === "dispatched" ? opened : NOTHING_DISPATCHED;
   const key = retainBlindedPacket(store, record, run.preregistration.prereg, records, inputs);
   if (!key.ok) return key;
   return decideAndRecord(store, {

@@ -8,14 +8,19 @@
  * and the ending cannot drift between what is written and what is read back.
  *
  * - The record opens as `WindowRecord` (schemaVersion
- *   `CURRENT_WINDOW_SCHEMA_VERSION`) and closes as `ClosedWindowRecord`, keyed
- *   on its dispatch plan: a dispatched window records how many samples it
- *   retained and its parsed `WindowEnding`; a window that never dispatched
- *   retained none and has no ending.
+ *   `CURRENT_WINDOW_SCHEMA_VERSION`) and closes as `ClosedWindowRecord`, made
+ *   only by `closeWindowRecord` from a `WindowClosing` (what the dispatch
+ *   plan ran): a dispatched window records its parsed `WindowEnding` and the
+ *   samples that ending retained — derived from it, two per dispatched pair
+ *   (`retainedSamplesOf`) — and a window that never dispatched retained none
+ *   and has no ending.
  * - `parseRetainedWindow` reads a retained record of either version back into
- *   `RetainedWindow`: its ending is parsed under the rules of the version that
- *   wrote it (`parseRetainedWindowEnding`), and a closed record's observation
- *   count must be exactly two samples per pair its ending dispatched.
+ *   `RetainedWindow` under the same rules: its ending is parsed under the
+ *   rules of the version that wrote it (`parseRetainedWindowEnding`), a
+ *   closed record's observation count must be the one `retainedSamplesOf`
+ *   derives, and a record carrying any closing field without its end time is
+ *   refused, never read as an interrupted window. A record the writer makes
+ *   always reads back as the closing it was made from.
  * - `describeWindowEnding` is the operator-facing line for an aborted window.
  *
  * The recorded `preflight` verdict is written for the reader of the file but
@@ -77,13 +82,43 @@ export type WindowRecord = DeepReadonly<z.infer<typeof windowOpeningSchema>> & R
   preflight: PreflightDecision;
 }>;
 
+/** How a window closed — what its dispatch plan ran: nothing, or a schedule
+ *  that ended (completed, or aborted by the route fail-fast and why). The
+ *  one closing both sides of the codec share: `closeWindowRecord` encodes it,
+ *  `parseRetainedWindow` decodes it back. */
+export type WindowClosing =
+  | Readonly<{ kind: "not-attempted"; plan: NotAttempted }>
+  | Readonly<{ kind: "dispatched"; ending: WindowEnding }>;
+
+/** The samples a window retained: two per pair its ending dispatched (one per
+ *  arm), none for a window that never dispatched — the one count the writer
+ *  records and the reader checks. */
+const retainedSamplesOf = (ending: RetainedWindowEnding | null): number =>
+  ending === null ? 0 : dispatchedPairsOf(ending) * PILOT_ARMS.length;
+
+declare const closedByCodec: unique symbol;
+
 /** `window.json` once the window has ended, keyed on its dispatch plan: a
  *  dispatched window records how many samples it retained and how its
- *  schedule ended (completed, or aborted by the route fail-fast and why); a
- *  window that never dispatched retained none and has no ending. */
-export type ClosedWindowRecord =
+ *  schedule ended; a window that never dispatched retained none and has no
+ *  ending. Branded: only `closeWindowRecord` makes one, so its observation
+ *  count is the one its ending implies — a record the reader would refuse
+ *  cannot be written. */
+export type ClosedWindowRecord = Readonly<{ [closedByCodec]: true }> & (
   | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: Dispatched; endedAt: string; observations: number; ending: WindowEnding }>)
-  | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: NotAttempted; endedAt: string; observations: 0 }>);
+  | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: NotAttempted; endedAt: string; observations: 0 }>)
+);
+
+/** The one constructor of a closed record: its dispatch plan and observation
+ *  count are derived from how it closed, never passed alongside it. */
+export function closeWindowRecord(record: WindowRecord, closing: WindowClosing, endedAt: string): ClosedWindowRecord {
+  const closed = match(closing)
+    .with({ kind: "not-attempted" }, ({ plan }) => ({ ...record, dispatch: plan, endedAt, observations: 0 as const }))
+    .with({ kind: "dispatched" }, ({ ending }) => ({ ...record, dispatch: DISPATCHED, endedAt, observations: retainedSamplesOf(ending), ending }))
+    .exhaustive();
+  // The brand is this module's proof that the count was derived from the closing.
+  return Object.freeze(closed) as ClosedWindowRecord;
+}
 
 /** `window.json`'s text, open or closed. */
 export const encodeWindowRecord = (record: WindowRecord | ClosedWindowRecord): string => jsonText(record);
@@ -134,27 +169,32 @@ const OPEN: RetainedEnding = Object.freeze({ kind: "open" });
 const NOT_DISPATCHED: RetainedEnding = Object.freeze({ kind: "not-dispatched" });
 const DISPATCHED_UNRECORDED: RetainedEnding = Object.freeze({ kind: "dispatched-unrecorded" });
 
-/** The retained ending, by closure, dispatch plan and schema version: an
- *  ending only on a closed dispatched window, required there from
- *  schemaVersion 2 on, and agreeing with the observation count recorded beside it. */
+/** The retained closing, decoded under the rules `closeWindowRecord` encodes:
+ *  every closing field (end time, observation count, ending) only on a closed
+ *  window; an ending only on a dispatched one, required there from
+ *  schemaVersion 2 on; and the observation count the closing implies. */
 function retainedEnding(window: RetainedRecord, label: string): Result<RetainedEnding, string> {
   const { schemaVersion, dispatch, endedAt, observations, ending } = window;
-  if (endedAt === undefined) return ending === undefined ? ok(OPEN) : err(`${label} records an ending but was never closed`);
+  if (endedAt === undefined) {
+    // The writer records every closing field with the end time: one without it is corrupt, not open.
+    if (ending !== undefined) return err(`${label} records an ending but was never closed`);
+    if (observations !== undefined) return err(`${label} records ${observations} observations but was never closed`);
+    return ok(OPEN);
+  }
   if (observations === undefined) return err(`${label} was closed without its observation count`);
   if (dispatch.kind === "not-attempted") {
     if (ending !== undefined) return err(`${label} never dispatched, yet records an ending`);
-    return observations === 0 ? ok(NOT_DISPATCHED) : err(`${label} never dispatched, yet records ${observations} observations`);
+    return observations === retainedSamplesOf(null) ? ok(NOT_DISPATCHED) : err(`${label} never dispatched, yet records ${observations} observations`);
   }
   if (ending === undefined) {
     return schemaVersion === 1 ? ok(DISPATCHED_UNRECORDED) : err(`${label} is a closed dispatched schemaVersion ${schemaVersion} window without its ending`);
   }
   const parsed = parseRetainedWindowEnding(ending, schemaVersion);
   if (!parsed.ok) return err(`${label} ${parsed.error}`);
-  const pairs = dispatchedPairsOf(parsed.value);
-  const samples = pairs * PILOT_ARMS.length;
+  const samples = retainedSamplesOf(parsed.value);
   return observations === samples
     ? ok(Object.freeze({ kind: "dispatched" as const, ending: parsed.value }))
-    : err(`${label} records ${observations} observations, but its ending dispatched ${pairs} pairs (${samples} samples)`);
+    : err(`${label} records ${observations} observations, but its ending dispatched ${dispatchedPairsOf(parsed.value)} pairs (${samples} samples)`);
 }
 
 /** A refused record, named by what is missing first: its preregistration, its

@@ -567,16 +567,18 @@ function measureCell(
     "provider-structural-retries": as004,
     "escaped-defect-severity": quality.value.guardrail,
   });
-  const seal = (measured: MeasuredCellOf<GuardrailVerdict>): MeasuredCell => Object.freeze(measured) as MeasuredCell;
   // One arm per qualification on purpose: TypeScript cannot carry the qualification/AS-004-verdict
   // correlation through a single generic arm, and merging them would trade that check for a cast.
-  return ok(match(structural)
-    .returnType<MeasuredCell>()
+  const measured: MeasuredCellOf<GuardrailVerdict> = match(structural)
+    .returnType<MeasuredCellOf<GuardrailVerdict>>()
     .with({ qualification: { kind: "constrained-emission" } }, ({ qualification: constrained, guardrail }) =>
-      seal({ kind: "measured", cell: cell.cell, qualification: constrained, measurement, guardrails: guardrailsWith(guardrail) }))
+      ({ kind: "measured", cell: cell.cell, qualification: constrained, measurement, guardrails: guardrailsWith(guardrail) }))
     .with({ qualification: { kind: "unconstrained-emission" } }, ({ qualification: unconstrained, guardrail }) =>
-      seal({ kind: "measured", cell: cell.cell, qualification: unconstrained, measurement, guardrails: guardrailsWith(guardrail) }))
-    .exhaustive());
+      ({ kind: "measured", cell: cell.cell, qualification: unconstrained, measurement, guardrails: guardrailsWith(guardrail) }))
+    .exhaustive();
+  // The brand's one construction site: it seals only the value the two checked arms above built
+  // from this call's own measurement — no helper can seal anything else.
+  return ok(Object.freeze(measured) as MeasuredCell);
 }
 
 function consistencyProblems(evidence: PilotEvidence, schedule: readonly ScheduledPair[]): readonly string[] {

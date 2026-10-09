@@ -1,14 +1,17 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { HERE, LOADED, testWindowRecord as windowRecord, UNREACHABLE_FACTS } from "./pilot-test-fixtures";
-import { CONSECUTIVE_OUTAGE_PAIR_LIMIT, parseWindowEnding, type WindowEnding } from "./pilot-window-ending";
+import { HERE, LOADED, READY_FACTS, testWindowRecord as windowRecord, UNREACHABLE_FACTS } from "./pilot-test-fixtures";
+import { CONSECUTIVE_OUTAGE_PAIR_LIMIT, dispatchedPairsOf, parseWindowEnding, type WindowEnding } from "./pilot-window-ending";
 import {
+  closeWindowRecord,
   DISPATCHED,
   describeWindowEnding,
   encodeWindowRecord,
   parseRetainedWindow,
   type ClosedWindowRecord,
+  type WindowClosing,
 } from "./pilot-window-record";
 
 /**
@@ -28,17 +31,17 @@ const ending = (raw: unknown): WindowEnding => {
 
 describe("parseRetainedWindow (the retained record read back)", () => {
   it("reads back a retained window's preregistration record and facts, and refuses one without them", () => {
-    const text = encodeWindowRecord(windowRecord(false));
+    const text = encodeWindowRecord(windowRecord(UNREACHABLE_FACTS));
     expect(parseRetainedWindow(text, "w.json")).toEqual({
       ok: true,
       value: { preregistration: LOADED.ref, facts: UNREACHABLE_FACTS, ending: { kind: "open" } },
     });
     expect(parseRetainedWindow(JSON.stringify({ preflightFacts: UNREACHABLE_FACTS }), "w.json")).toEqual({ ok: false, error: "w.json carries no preregistration record" });
-    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(false), preflightFacts: {} }), "w.json"))
+    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(UNREACHABLE_FACTS), preflightFacts: {} }), "w.json"))
       .toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json preflight facts: /) });
-    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(false), schemaVersion: 3 }), "w.json"))
+    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(UNREACHABLE_FACTS), schemaVersion: 3 }), "w.json"))
       .toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json is not a schemaVersion 1 or 2 window record: schemaVersion: /) });
-    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(false), dispatch: { kind: "maybe" } }), "w.json"))
+    expect(parseRetainedWindow(JSON.stringify({ ...windowRecord(UNREACHABLE_FACTS), dispatch: { kind: "maybe" } }), "w.json"))
       .toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json is not a schemaVersion 1 or 2 window record: dispatch/) });
     expect(parseRetainedWindow("{", "w.json")).toMatchObject({ ok: false, error: expect.stringMatching(/^w\.json: /) });
   });
@@ -53,7 +56,7 @@ describe("parseRetainedWindow (the retained record read back)", () => {
       return 2 * (shape?.kind === "completed" ? shape.pairs ?? 0 : shape?.afterPairs ?? 0);
     };
     const closed = (version: 1 | 2, dispatched: boolean, recorded?: unknown, observations = samplesOf(recorded)): string => JSON.stringify({
-      ...windowRecord(dispatched), schemaVersion: version, endedAt: "2026-10-05T09:00:00.000Z", observations, ...(recorded === undefined ? {} : { ending: recorded }),
+      ...windowRecord(dispatched ? READY_FACTS : UNREACHABLE_FACTS), schemaVersion: version, endedAt: "2026-10-05T09:00:00.000Z", observations, ...(recorded === undefined ? {} : { ending: recorded }),
     });
     const endingOf = (text: string) => {
       const parsed = parseRetainedWindow(text, "w.json");
@@ -76,7 +79,11 @@ describe("parseRetainedWindow (the retained record read back)", () => {
 
     it("refuses an ending where none can exist, and a corrupt or out-of-version ending", () => {
       expect(endingOf(closed(2, false, COMPLETED))).toEqual({ ok: false, error: "w.json never dispatched, yet records an ending" });
-      expect(endingOf(JSON.stringify({ ...windowRecord(true), ending: COMPLETED }))).toEqual({ ok: false, error: "w.json records an ending but was never closed" });
+      expect(endingOf(JSON.stringify({ ...windowRecord(READY_FACTS), ending: COMPLETED }))).toEqual({ ok: false, error: "w.json records an ending but was never closed" });
+      // A closing field without the end time is a corrupt record, never an interrupted (open) one.
+      expect(endingOf(JSON.stringify({ ...windowRecord(READY_FACTS), observations: 8 }))).toEqual({ ok: false, error: "w.json records 8 observations but was never closed" });
+      expect(endingOf(JSON.stringify({ ...windowRecord(UNREACHABLE_FACTS), observations: 0 }))).toEqual({ ok: false, error: "w.json records 0 observations but was never closed" });
+      expect(endingOf(JSON.stringify(windowRecord(READY_FACTS)))).toEqual({ kind: "open" });
       expect(endingOf(closed(2, true, LEGACY))).toMatchObject({ ok: false, error: expect.stringContaining("the consecutive-infrastructure-failures reason exists only in a schemaVersion 1 window") });
       expect(endingOf(closed(1, true, ABORTED))).toMatchObject({ ok: false, error: expect.stringContaining("the consecutive-outage-pairs reason exists only in a schemaVersion 2 window") });
       expect(endingOf(closed(2, true, { ...ABORTED, afterPairs: 5 }))).toMatchObject({ ok: false, error: expect.stringContaining("aborted after 5 of 4 scheduled pairs") });
@@ -114,22 +121,65 @@ describe("parseRetainedWindow (the retained record read back)", () => {
   });
 });
 
+const ENDED_AT = "2026-10-05T09:00:00.000Z";
+
+/** A blocked window's closing: its own not-attempted plan. */
+const blockedClosing = (): WindowClosing => {
+  const { dispatch } = windowRecord(UNREACHABLE_FACTS);
+  if (dispatch.kind !== "not-attempted") throw new Error("a blocked preflight never dispatches");
+  return { kind: "not-attempted", plan: dispatch };
+};
+
+describe("closeWindowRecord (the one closing the writer encodes and the reader decodes)", () => {
+  const endings = fc.oneof(
+    fc.nat({ max: 500 }).map((pairs) => ({ kind: "completed", pairs })),
+    fc.integer({ min: CONSECUTIVE_OUTAGE_PAIR_LIMIT + 1, max: 500 }).chain((scheduledPairs) => fc.record({
+      kind: fc.constant("aborted"),
+      afterPairs: fc.integer({ min: CONSECUTIVE_OUTAGE_PAIR_LIMIT, max: scheduledPairs - 1 }),
+      scheduledPairs: fc.constant(scheduledPairs),
+      reason: fc.oneof(
+        fc.string({ minLength: 1 }).map((reason) => ({ kind: "route-unreachable", reason })),
+        fc.constant({ kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT }),
+      ),
+    })),
+  ).map(ending);
+
+  it("writes a record that reads back as exactly the closing it was made from, with the observation count its ending implies (property)", () => {
+    fc.assert(fc.property(endings, (recorded) => {
+      const closed = closeWindowRecord(windowRecord(READY_FACTS), { kind: "dispatched", ending: recorded }, ENDED_AT);
+      expect(closed.observations).toBe(2 * dispatchedPairsOf(recorded));
+      expect(closed).toMatchObject({ dispatch: DISPATCHED, endedAt: ENDED_AT, ending: recorded });
+      const readBack = parseRetainedWindow(encodeWindowRecord(closed), "w.json");
+      expect(readBack).toEqual({ ok: true, value: { preregistration: LOADED.ref, facts: READY_FACTS, ending: { kind: "dispatched", ending: recorded } } });
+    }), { numRuns: 200 });
+    const blocked = closeWindowRecord(windowRecord(UNREACHABLE_FACTS), blockedClosing(), ENDED_AT);
+    expect(blocked).not.toHaveProperty("ending");
+    expect(blocked).toMatchObject({ dispatch: { kind: "not-attempted" }, observations: 0 });
+    expect(parseRetainedWindow(encodeWindowRecord(blocked), "w.json")).toMatchObject({ ok: true, value: { ending: { kind: "not-dispatched" } } });
+  });
+
+  it("closes over the opening record's own fields, and takes its dispatch plan from the closing", () => {
+    const opened = windowRecord(READY_FACTS);
+    const closed = closeWindowRecord(opened, { kind: "dispatched", ending: ending({ kind: "completed", pairs: 4 }) }, ENDED_AT);
+    const { dispatch: _plan, ...opening } = opened;
+    expect(closed).toEqual({ ...opening, dispatch: DISPATCHED, endedAt: ENDED_AT, observations: 8, ending: { kind: "completed", pairs: 4 } });
+  });
+});
+
 describe("describeWindowEnding (the operator-facing line)", () => {
-  const closedWith = (recorded: WindowEnding, observations: number): ClosedWindowRecord =>
-    ({ ...windowRecord(true), dispatch: DISPATCHED, endedAt: "2026-10-05T09:00:00.000Z", observations, ending: recorded });
+  const closedWith = (recorded: WindowEnding): ClosedWindowRecord =>
+    closeWindowRecord(windowRecord(READY_FACTS), { kind: "dispatched", ending: recorded }, ENDED_AT);
 
   it("names an aborted window's pairs and why the fail-fast stopped it", () => {
-    expect(describeWindowEnding(closedWith(ending({ kind: "aborted", afterPairs: 13, scheduledPairs: 408, reason: { kind: "route-unreachable", reason: "GET /v1/models: refused" } }), 26)))
+    expect(describeWindowEnding(closedWith(ending({ kind: "aborted", afterPairs: 13, scheduledPairs: 408, reason: { kind: "route-unreachable", reason: "GET /v1/models: refused" } }))))
       .toBe("pilot window ABORTED after 13/408 pairs: the route stopped answering: GET /v1/models: refused. Every landed sample is retained; the rest are unmeasured.");
     const outage = ending({ kind: "aborted", afterPairs: 5, scheduledPairs: 408, reason: { kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT } });
-    expect(describeWindowEnding(closedWith(outage, 10)))
+    expect(describeWindowEnding(closedWith(outage)))
       .toBe(`pilot window ABORTED after 5/408 pairs: ${CONSECUTIVE_OUTAGE_PAIR_LIMIT} consecutive pairs failed at the infrastructure or timed out. Every landed sample is retained; the rest are unmeasured.`);
   });
 
   it("says nothing for a completed schedule or a window that never dispatched (its decision says the rest)", () => {
-    expect(describeWindowEnding(closedWith(ending({ kind: "completed", pairs: 408 }), 816))).toBeNull();
-    const blocked = windowRecord(false);
-    if (blocked.dispatch.kind !== "not-attempted") throw new Error("a blocked preflight never dispatches");
-    expect(describeWindowEnding({ ...blocked, dispatch: blocked.dispatch, endedAt: "2026-10-05T09:00:00.000Z", observations: 0 })).toBeNull();
+    expect(describeWindowEnding(closedWith(ending({ kind: "completed", pairs: 408 })))).toBeNull();
+    expect(describeWindowEnding(closeWindowRecord(windowRecord(UNREACHABLE_FACTS), blockedClosing(), ENDED_AT))).toBeNull();
   });
 });

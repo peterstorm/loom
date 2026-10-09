@@ -188,7 +188,7 @@ describe("dispatchSchedule route fail-fast", () => {
     const probe = countingProbe({ kind: "reachable" });
     const { ending } = await runWindow(fakeRoute((request) => (request.arm === "emission-enabled" ? TIMEOUT : accepted(request))), () => {}, probe);
     expect(ending.kind).toBe("completed");
-    // Every pair but the last is re-probed: the last has no pair after it to protect (`judgesPair`).
+    // Every pair but the last is re-probed: the last has no pair after it to protect (`landPair`).
     expect(probe.calls()).toBe(schedule.length - 1);
   });
 
@@ -214,7 +214,13 @@ describe("dispatchSchedule route fail-fast", () => {
   it("fails closed on a probe that rejects or throws: the window ends route-unreachable with the error", async () => {
     const rejecting: RouteHealthProbe = async () => { throw new Error("fetch exploded"); };
     const throwing: RouteHealthProbe = () => { throw "not even an Error"; };
-    for (const [probe, reason] of [[rejecting, "the route probe failed: fetch exploded"], [throwing, "the route probe failed: not even an Error"]] as const) {
+    // A thrown value String() cannot render (a null-prototype object) still closes the window.
+    const unprintable: RouteHealthProbe = () => { throw Object.create(null); };
+    for (const [probe, reason] of [
+      [rejecting, "the route probe failed: fetch exploded"],
+      [throwing, "the route probe failed: not even an Error"],
+      [unprintable, "the route probe failed: an unprintable thrown object"],
+    ] as const) {
       const { ending, records } = await runWindow(fakeRoute(() => TIMEOUT), () => {}, probe);
       expect(ending).toEqual({ kind: "aborted", afterPairs: 1, scheduledPairs: schedule.length, reason: { kind: "route-unreachable", reason } });
       expect(records).toHaveLength(2);

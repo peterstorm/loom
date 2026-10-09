@@ -46,10 +46,6 @@ export const REPO_ROOT = join(HERE, "../..");
 
 export const WINDOW_ID = "fake-route-window";
 export const ATTEMPT_MS = 100;
-export const READY: PreflightDecision = {
-  kind: "ready",
-  runtime: { stagedRuntimeRevision: "sha256:abc", loadedRuntime: { kind: "unobserved" }, piVersion: "0.83.0" },
-};
 
 export const preregBytes = readFileSync(join(HERE, "preregistration.json"));
 /** The pilot-2 preregistration: pilot-1's workload under the per-route release policy. */
@@ -97,16 +93,39 @@ export const UNREACHABLE_FACTS: PreflightFacts = {
   route: { kind: "unreachable", reason: "connection refused" },
 };
 
-/** An opened `window.json` of this revision: a ready, dispatching window, or a blocked one. */
-export const testWindowRecord = (dispatched: boolean): WindowRecord => {
-  const preflight = dispatched ? READY : decidePreflight(PILOT_1, UNREACHABLE_FACTS);
+/** Preflight facts the retained pilot-1 preregistration dispatches behind:
+ *  every cell's frozen tool and schema staged, the pinned Pi and workload,
+ *  and the preregistered model served. */
+export const READY_FACTS: PreflightFacts = {
+  registry: { ...UNREACHABLE_FACTS.registry, ...Object.fromEntries(PILOT_1.cells.map((cell) => [cell.cell, { toolName: cell.toolName, schemaDigest: cell.schemaDigest }])) },
+  workloadFixturesDigest: PILOT_1.workloadFixturesDigest,
+  piVersion: PILOT_1.route.piVersion,
+  stagedRuntimeRevision: "sha256:abc",
+  loadedRuntimeRevision: null,
+  route: { kind: "reachable", servedModels: [PILOT_1.route.model] },
+};
+
+/** The preflight verdict over `READY_FACTS`, by the production decision; a
+ *  blocked one throws (the fixture itself would be wrong). */
+export const READY: PreflightDecision = (() => {
+  const decision = decidePreflight(PILOT_1, READY_FACTS);
+  if (decision.kind !== "ready") throw new Error(`READY_FACTS must pass the preflight: ${JSON.stringify(decision.blocks)}`);
+  return decision;
+})();
+
+/** An opened `window.json` of this revision over `facts`: its preflight
+ *  verdict and dispatch plan are DERIVED from those facts by the production
+ *  decisions, so the record cannot contradict itself — `READY_FACTS` open a
+ *  dispatching window, `UNREACHABLE_FACTS` a blocked one. */
+export const testWindowRecord = (facts: PreflightFacts): WindowRecord => {
+  const preflight = decidePreflight(PILOT_1, facts);
   return {
     schemaVersion: CURRENT_WINDOW_SCHEMA_VERSION,
     windowId: "test-window",
     preregistration: LOADED.ref,
     workloadFixtures: { path: "calibration/grammar-constrained-decoding/workload-fixtures.json", digest: PILOT_1.workloadFixturesDigest },
     startedAt: "2026-10-05T08:00:00.000Z",
-    preflightFacts: UNREACHABLE_FACTS,
+    preflightFacts: facts,
     preflight,
     dispatch: planDispatch(preflight, false),
   };
@@ -210,7 +229,7 @@ export function sample(pair: ScheduledPair, arm: PilotArm, ms: number, attempts:
   return parsed.value;
 }
 
-/** The first scheduled pair of the retained preregistration. */
+/** The first scheduled pair of the retained pilot-1 preregistration. */
 export const firstPair = (): ScheduledPair => buildPairSchedule(PILOT_1)[0] as ScheduledPair;
 
 type Outcome = AttemptObservation["outcome"];

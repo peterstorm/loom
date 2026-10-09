@@ -7,15 +7,16 @@
  * - `dispatchSchedule` walks the preregistered pair schedule, dispatching
  *   each pair's two arms in its scheduled order over ONE rendered task body
  *   (matched inputs), and hands every sample to the caller as it lands.
- * - Route fail-fast: the rule is pure and lives in `pilot-window-ending.ts`
- *   (`pairHealth`, `judgesPair`, `judgePair`); this shell only runs it. After
- *   a judged pair with an infrastructure failure or a timeout the window
- *   re-probes the preregistered route through the `RouteHealthProbe` port (a
- *   probe that throws counts as unreachable, and a blank unreachable reason
- *   is named), and stops when the rule says so, so an outage is recorded as
- *   an aborted window instead of being spent across the schedule as
- *   measurements. The `WindowEnding` it records is parsed evidence
- *   (`parseWindowEnding`).
+ * - Route fail-fast: the rule is ONE pure step in `pilot-window-ending.ts`
+ *   (`startSchedule`, `landPair`); this shell only runs it. When the step
+ *   asks (a pair, not the last, with an infrastructure failure or a timeout)
+ *   the window re-probes the preregistered route through the
+ *   `RouteHealthProbe` port (a probe that throws counts as unreachable, and a
+ *   blank unreachable reason is named) and hands the answer to the step's
+ *   `judge`, stopping when the step ends the schedule, so an outage is
+ *   recorded as an aborted window instead of being spent across the schedule
+ *   as measurements. Every `WindowEnding` the step returns is parsed
+ *   evidence (`parseWindowEnding`).
  * - Each arm runs attempt 1 and — only after a semantic rejection — the one
  *   fresh engine-issued attempt 2 (AD-9's shared request-slot budget). Wall
  *   clock runs from the initial dispatch through accepted ingestion.
@@ -36,15 +37,11 @@ import { mintCellBinding, pilotRequestId } from "./pilot-binding";
 import type { ArmDispatch, AttemptClassification } from "./pilot-dispatch";
 import { renderPilotPrompt, renderTaskBody, type WindowInputs, type WorkloadFixtures } from "./pilot-workload";
 import {
-  judgePair,
-  judgesPair,
-  observedRouteHealth,
-  pairHealth,
-  parseWindowEnding,
-  ROUTE_BREAKER_START,
+  landPair,
   routeProbeFailed,
-  type JudgedPair,
+  startSchedule,
   type RouteHealth,
+  type ScheduleProgress,
   type WindowEnding,
 } from "./pilot-window-ending";
 
@@ -68,11 +65,12 @@ function sampleRecord(sample: SampleObservation, last: AttemptClassification | u
 export type RouteHealthProbe = () => Promise<RouteHealth>;
 
 /** A probe that rejects or throws is itself the route failing to answer:
- *  the window fails CLOSED on it (recorded as unreachable, with the error),
+ *  the window fails CLOSED on it (recorded as unreachable, with the error —
+ *  `errorMessage` is total, so rendering what was thrown never throws),
  *  never left open by an exception between pairs. */
 async function observeRoute(probe: RouteHealthProbe): Promise<RouteHealth> {
   try {
-    return observedRouteHealth(await probe());
+    return await probe();
   } catch (error) {
     return routeProbeFailed(errorMessage(error));
   }
@@ -129,48 +127,34 @@ async function dispatchSample(window: WindowDispatch, pair: ScheduledPair, arm: 
 
 export type DispatchedSchedule = Readonly<{ records: readonly SampleRecord[]; ending: WindowEnding }>;
 
-/** A landed pair with the re-probe its health called for (none when it called for none). */
-async function observePair(window: WindowDispatch, pair: readonly SampleRecord[]): Promise<JudgedPair> {
-  const health = pairHealth(pair.map((record) => record.sample));
-  return health.kind === "none" ? health : Object.freeze({ ...health, route: await observeRoute(window.routeHealth) });
-}
-
-/** The ending `dispatchSchedule` reached; it is built from the loop's own
- *  counts, so a refusal is a defect in this module, never in the evidence. */
-function endingOf(raw: unknown): WindowEnding {
-  const ending = parseWindowEnding(raw);
-  if (!ending.ok) throw new Error(`the dispatched schedule produced an inconsistent ending: ${ending.error}`);
-  return ending.value;
-}
-
-/** Matched dispatch of the preregistered schedule, stopped early by the route
- *  fail-fast (`judgePair`) — always between pairs, so every landed pair keeps
- *  both arms, and never after the last one (`judgesPair`), so a schedule
- *  dispatched in full ends `completed`. */
+/** Matched dispatch of the preregistered schedule, stopped early by the pure
+ *  route fail-fast (`landPair`) — always between pairs, so every landed pair
+ *  keeps both arms. The step owns which pairs are judged and every ending it
+ *  returns; this shell only dispatches, re-probes when the step asks, and
+ *  hands the route's answer back. */
 export async function dispatchSchedule(window: WindowDispatch): Promise<DispatchedSchedule> {
   const records: SampleRecord[] = [];
   const schedule = buildPairSchedule(window.prereg);
-  let breaker = ROUTE_BREAKER_START;
+  let progress: ScheduleProgress = startSchedule(schedule.length);
   for (const [index, pair] of schedule.entries()) {
+    if (progress.kind === "ended") break;
     const input = window.inputs.caseInput(pair.cell, pair.caseId);
     if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
     const body = renderTaskBody(input, window.fixtures);
-    const pairStart = records.length;
+    const landed: SampleRecord[] = [];
     for (const arm of pair.armOrder) {
       const record = await dispatchSample(window, pair, arm, body);
+      landed.push(record);
       records.push(record);
       window.onSample(record);
     }
     window.onPair(index, schedule.length, pair);
-    if (!judgesPair(index + 1, schedule.length)) continue;
-    const judged = judgePair(breaker, await observePair(window, records.slice(pairStart)));
-    breaker = judged.breaker;
-    if (judged.abort !== null) {
-      const ending = endingOf({ kind: "aborted", afterPairs: index + 1, scheduledPairs: schedule.length, reason: judged.abort });
-      return Object.freeze({ records: Object.freeze(records), ending });
-    }
+    const step = landPair(progress.breaker, landed.map((record) => record.sample));
+    progress = step.kind === "probe-route" ? step.judge(await observeRoute(window.routeHealth)) : step;
   }
-  return Object.freeze({ records: Object.freeze(records), ending: endingOf({ kind: "completed", pairs: schedule.length }) });
+  // The step ends the schedule on its last pair at the latest, so a running one here is a defect.
+  if (progress.kind !== "ended") throw new Error(`the route fail-fast left a ${schedule.length}-pair schedule running after its last pair`);
+  return Object.freeze({ records: Object.freeze(records), ending: progress.ending });
 }
 
 export type BlindedEntry = Readonly<{ blindId: string; pairId: string; arm: PilotArm; cell: CellKey; caseId: string; payload: unknown }>;
