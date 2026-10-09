@@ -84,12 +84,14 @@ import { httpRouteProbe, observeRouteReachability, type RouteProbePort } from ".
 import { reportUnverifiedRoutes } from "../../core/route-reachability";
 import {
   gateEmission,
+  SESSION_VARIABLE,
+  type AnnouncedParent,
   type EmissionEnvironment,
-  type EmissionParent,
   type EmissionVerdict,
+  type GatedAction,
   type PiRouteGateFacts,
 } from "../../core/spawn-emission-gate";
-import { parseSpawnRequestAuthority } from "../../core/spawn-request-authority";
+import { parseSpawnBatch, type ParsedSpawnBatch } from "../../core/spawn-request-authority";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -957,52 +959,39 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
 }
 
 /**
- * The harness session a façade invocation publishes capture authority into:
- * an announced parent (`EmissionParent`, resolved once at the composition
- * root).
+ * Publish a spawn batch's SESSION RUN BINDING into the announced parent's
+ * session (`AnnouncedParent`, resolved once at the composition root). Each
+ * harness's subagent hooks learn which run a spawned agent belongs to from
+ * this durable binding, never from the environment of the agent itself;
+ * Claude Code's hooks receive the session id `CLAUDE_CODE_SESSION_ID` names as
+ * the payload `session_id`.
  *
- * Each harness's subagent hooks learn which run a spawned agent belongs to
- * from a durable SESSION RUN BINDING the façade publishes, never from the
- * environment of the agent itself. Pi announces its session as
- * `PI_SESSION_ID`; Claude Code exposes `CLAUDE_CODE_SESSION_ID` (with
- * `CLAUDECODE=1`) to the Bash commands its main agent runs, and its hooks
- * receive that same id as the payload `session_id`. Pi takes precedence: a Pi
- * process launched from inside Claude Code is still a Pi session.
+ * The binding is built from the batch's one parse (`batch`), so it records
+ * only authority the stored-request parser admits, never the in-memory value.
+ * Each request is checked in order — a request of another run before a later
+ * request that did not parse.
  */
-type BindingSession = Exclude<EmissionParent, Readonly<{ harness: "unannounced" }>>;
-
-/** The variable each harness announces its session id in, named when it is missing. */
-const SESSION_VARIABLE: Readonly<Record<BindingSession["harness"], string>> = Object.freeze({
-  "pi": "PI_SESSION_ID",
-  "claude-code": "CLAUDE_CODE_SESSION_ID",
-});
-
 async function publishSpawnBinding(
   bindingDir: string,
-  session: BindingSession,
+  session: AnnouncedParent,
   handle: RunDirHandle,
-  action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>,
+  batch: ParsedSpawnBatch,
 ): Promise<HookResult | null> {
   const { sessionId } = session;
   const label = HARNESS_LABEL[session.harness];
   if (sessionId === null) {
     return { kind: "error", message: `${label} orchestration spawn publication requires ${SESSION_VARIABLE[session.harness]}` };
   }
-  const requests = action.requests;
-  if (requests.length === 0) {
+  if (batch.ok && batch.requests.length === 0) {
     return { kind: "error", message: `${label} orchestration spawn action has no request authority` };
   }
-  const requestIds = [];
-  for (const [index, request] of requests.entries()) {
-    // Re-parsed at the capture-authority boundary: the binding records only
-    // authority the stored-request parser admits, never the in-memory value.
-    const parsed = parseSpawnRequestAuthority(label, index, request.authority);
-    if (!parsed.ok) return { kind: "error", message: parsed.message };
-    if (parsed.value.runId !== handle.runId) {
-      return { kind: "error", message: `${label} orchestration spawn request ${index} belongs to another run` };
-    }
-    requestIds.push(parsed.value.requestId);
+  const admitted = batch.ok ? batch.requests : batch.admitted;
+  const foreign = admitted.findIndex(({ runId }) => runId !== handle.runId);
+  if (foreign !== -1) {
+    return { kind: "error", message: `${label} orchestration spawn request ${foreign} belongs to another run` };
   }
+  if (!batch.ok) return { kind: "error", message: batch.message };
+  const requestIds = batch.requests.map(({ requestId }) => requestId);
   const registered = await registerSessionRunBinding(bindingDir, sessionId, Object.freeze({
     runId: handle.runId,
     runsRoot: dirname(handle.runDirectory),
@@ -1017,7 +1006,7 @@ async function publishSpawnBinding(
 
 async function publishCompletionBinding(
   bindingDir: string,
-  session: BindingSession,
+  session: AnnouncedParent,
   handle: RunDirHandle,
   action: Extract<FacadeAction, Readonly<{ kind: "done" }>>,
 ): Promise<HookResult | null> {
@@ -1048,17 +1037,21 @@ async function publishCompletionBinding(
     : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
 }
 
-/** Where an emitted action is printed (`stdout`) and its route events reported (`stderr`). */
+/**
+ * Where a run-advancing operation prints what it emits (`stdout`) — an
+ * action, or the receipt of an operation that advanced no program — and
+ * reports an emitted action's route events (`stderr`).
+ */
 export type EmissionOutput = Readonly<{ stdout: (text: string) => void; stderr: (text: string) => void }>;
 
 /**
  * What one façade invocation emits with: the environment resolved at the
  * composition root (`processEmission`), the reader of a Pi parent's
  * route-gate facts — called only when the gate asks for them, i.e. for a Pi
- * spawn batch whose requests parse — the route probe port and the output
- * channel. Tests construct each — a resolved environment, a fact reader, a
- * fake probe and a recording output — instead of mutating the process
- * environment or its streams.
+ * spawn batch whose requests parsed — the route probe port and the output
+ * channel every run-advancing operation prints through. Tests construct each
+ * — a resolved environment, a fact reader, a fake probe and a recording
+ * output — instead of mutating the process environment or its streams.
  */
 export type Emission = Readonly<{
   environment: EmissionEnvironment;
@@ -1086,13 +1079,8 @@ function processEmission(): Emission {
  * the only I/O here is the `model-routing.json` and `models.json` reads and
  * the probe.
  */
-async function gateEmittedAction(action: FacadeAction, emission: Emission): Promise<EmissionVerdict> {
-  const step = gateEmission(
-    action.kind === "spawn-batch"
-      ? { kind: "spawn-batch", authorities: action.requests.map(({ authority }) => authority) }
-      : { kind: "other" },
-    emission.environment.parent,
-  );
+async function gateEmittedAction(action: GatedAction, parent: AnnouncedParent, emission: Emission): Promise<EmissionVerdict> {
+  const step = gateEmission(action, parent.harness);
   if (step.kind === "decided") return step.verdict;
   const routed = step.gate(emission.routeGateFacts());
   return routed.kind === "decided"
@@ -1100,26 +1088,40 @@ async function gateEmittedAction(action: FacadeAction, emission: Emission): Prom
     : routed.decide(await observeRouteReachability(routed.launch, routed.agentDir, emission.probe));
 }
 
+/** Print one emitted value as the façade's JSON output. */
+function printed(output: EmissionOutput, value: unknown): HookResult {
+  output.stdout(`${JSON.stringify(value, null, 2)}\n`);
+  return { kind: "allow" };
+}
+
 /**
- * Emit one façade action: gate a Pi parent's spawn batch on its routes
- * (ADR-0023; nothing is published when the gate refuses, so a later `resume`
- * re-emits the same batch), publish the session binding, then print the
- * action — annotated with the routes the gate admitted unverified, which are
- * also reported on stderr as `loom-route-unverified` events.
+ * Emit one façade action. A process that announces no parent harness emits
+ * it as is: nothing gates it and it has no session to publish into. Under an
+ * announced parent a spawn batch's request authorities are parsed once
+ * (`parseSpawnBatch`) for both the gate and the session binding; a Pi
+ * parent's batch is gated on its routes (ADR-0023), the session binding is
+ * published, and only then is the action printed — annotated with the routes
+ * the gate admitted unverified, which are also reported on stderr as
+ * `loom-route-unverified` events. A gate refusal or a publication failure
+ * prints and reports nothing, so a later `resume` re-emits the same batch.
  */
 export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, emission: Emission): Promise<HookResult> {
-  const verdict = await gateEmittedAction(action, emission);
-  if (verdict.kind === "refuse") return { kind: "error", message: verdict.message };
-  for (const event of verdict.events) emission.output.stderr(`${JSON.stringify(event)}\n`);
   const { bindingDir, parent } = emission.environment;
-  if (parent.harness !== "unannounced") {
-    const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(bindingDir, parent, handle, action)
-      : action.kind === "done" ? await publishCompletionBinding(bindingDir, parent, handle, action)
-      : null;
-    if (failure !== null) return failure;
-  }
-  emission.output.stdout(`${JSON.stringify(reportUnverifiedRoutes(action, verdict.unverified), null, 2)}\n`);
-  return { kind: "allow" };
+  if (parent.harness === "unannounced") return printed(emission.output, action);
+  const gated: GatedAction = action.kind === "spawn-batch"
+    ? Object.freeze({
+        kind: "spawn-batch",
+        batch: parseSpawnBatch(HARNESS_LABEL[parent.harness], action.requests.map(({ authority }) => authority)),
+      })
+    : Object.freeze({ kind: "other" });
+  const verdict = await gateEmittedAction(gated, parent, emission);
+  if (verdict.kind === "refuse") return { kind: "error", message: verdict.message };
+  const failure = gated.kind === "spawn-batch" ? await publishSpawnBinding(bindingDir, parent, handle, gated.batch)
+    : action.kind === "done" ? await publishCompletionBinding(bindingDir, parent, handle, action)
+    : null;
+  if (failure !== null) return failure;
+  for (const event of verdict.events) emission.output.stderr(`${JSON.stringify(event)}\n`);
+  return printed(emission.output, reportUnverifiedRoutes(action, verdict.unverified));
 }
 
 const START_PROGRAMS = ["architecture", "refutation", "standalone-review", "wave-gate", "remediation", "standalone-disposition"] as const;
@@ -1379,12 +1381,11 @@ async function resumeOperation(args: readonly string[], emission: Emission): Pro
 
   // Historical run without a program registration: retain the read-only v1
   // compatibility response, but never manufacture lifecycle progress.
-  process.stdout.write(`${JSON.stringify({
+  return printed(emission.output, {
     kind: "resumed",
     runId: authority.value.runId,
     runDirectory: authority.value.runDirectory,
-  }, null, 2)}\n`);
-  return { kind: "allow" };
+  });
 }
 
 /**
@@ -1506,10 +1507,9 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
     const driven = await submitRegisteredPanelAttempt(handle, panelRegistration, reserved, capture.semanticRaw);
     return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
-  process.stdout.write(`${JSON.stringify(capture.alreadyCaptured
+  return printed(emission.output, capture.alreadyCaptured
     ? { kind: "already-captured", requestId, slotId: reserved.slotId, attempt: reserved.attempt }
-    : { kind: "captured", requestId, artifact: capture.artifact }, null, 2)}\n`);
-  return { kind: "allow" };
+    : { kind: "captured", requestId, artifact: capture.artifact });
 }
 
 /**
@@ -1710,49 +1710,55 @@ async function decideOperation(stdin: string, args: readonly string[], emission:
     const driven = await resumeWaveGateFacade(handle, registration);
     return driven.ok ? emitRunAction(handle, driven.action, emission) : { kind: "error", message: driven.message };
   }
-  process.stdout.write(`${JSON.stringify({ kind: "decision-recorded", decisionId }, null, 2)}\n`);
-  return { kind: "allow" };
+  return printed(emission.output, { kind: "decision-recorded", decisionId });
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-const handler: HookHandler = async (stdin, args) => {
-  const operation = parseOrchestrationOperation(args[0]);
-  if (operation === null) return usage();
-  const rest = args.slice(1);
+/**
+ * The façade's entry point, composed over how each run-advancing operation
+ * obtains its `Emission`: the process's own (`processEmission`) in
+ * production, a constructed one in tests.
+ */
+export function orchestrationHandler(emission: () => Emission): HookHandler {
+  return async (stdin, args) => {
+    const operation = parseOrchestrationOperation(args[0]);
+    if (operation === null) return usage();
+    const rest = args.slice(1);
 
-  switch (operation) {
-    case "status":
-      return argumentValue(rest, "--run") === null ? statusOperation(rest) : inspectOperation(rest);
-    case "inspect":
-      return inspectOperation(rest);
-    case "brief":
-      return briefOperation(rest);
-    case "abandon":
-      return abandonOperation(rest);
-    case "start":
-      return startOperation(stdin, rest, processEmission());
-    case "restart":
-      return restartOperation(rest, processEmission());
-    case "recover-orphan":
-      return recoverOrphanOperation(rest, processEmission());
-    case "resume":
-      return resumeOperation(rest, processEmission());
-    case "submit":
-      return submitOperation(stdin, rest, processEmission());
-    case "correlate":
-      return correlateOperation(rest);
-    case "complete":
-      return completeOperation(rest, processEmission());
-    case "decide":
-      return decideOperation(stdin, rest, processEmission());
-    case "remediate":
-      return remediateOperation(rest);
-    case "attest":
-      return attestOperation(rest);
-  }
-};
+    switch (operation) {
+      case "status":
+        return argumentValue(rest, "--run") === null ? statusOperation(rest) : inspectOperation(rest);
+      case "inspect":
+        return inspectOperation(rest);
+      case "brief":
+        return briefOperation(rest);
+      case "abandon":
+        return abandonOperation(rest);
+      case "start":
+        return startOperation(stdin, rest, emission());
+      case "restart":
+        return restartOperation(rest, emission());
+      case "recover-orphan":
+        return recoverOrphanOperation(rest, emission());
+      case "resume":
+        return resumeOperation(rest, emission());
+      case "submit":
+        return submitOperation(stdin, rest, emission());
+      case "correlate":
+        return correlateOperation(rest);
+      case "complete":
+        return completeOperation(rest, emission());
+      case "decide":
+        return decideOperation(stdin, rest, emission());
+      case "remediate":
+        return remediateOperation(rest);
+      case "attest":
+        return attestOperation(rest);
+    }
+  };
+}
 
-export default handler;
+export default orchestrationHandler(processEmission);

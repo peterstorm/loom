@@ -13,6 +13,9 @@
  * observe together with the pure continuation that decides once they are
  * observed. Every refusal it can make before a fact is read is made before
  * any is read, and every refusal it can make before a probe before any probe.
+ * A batch's request authorities arrive already parsed (`ParsedSpawnBatch`,
+ * parsed once at the façade's emission seam), so the gate and the session
+ * binding act on the one parse.
  */
 import { match } from "ts-pattern";
 import type { EffectivePiBinding } from "./model-routing";
@@ -25,7 +28,7 @@ import {
   type SpawnRouting,
   type UnverifiedRoute,
 } from "./route-reachability";
-import { parseSpawnRequestAuthority, type SpawnRequestParse } from "./spawn-request-authority";
+import type { ParsedSpawnBatch } from "./spawn-request-authority";
 
 /**
  * What a Pi parent's gate reads, as the shell resolved it for one gated batch:
@@ -41,10 +44,8 @@ export type PiRouteGateFacts = Readonly<{
 }>;
 
 /**
- * The harness parenting this façade invocation, as its environment announces
- * it, and the session it publishes capture authority into (`null` when the
- * harness announced none). Only a Pi parent's spawn batch asks for route-gate
- * facts, so a gated Claude Code parent is unrepresentable.
+ * A parent harness that announced itself, and the session it publishes
+ * capture authority into (`null` when it announced none).
  *
  * A Pi parent is exactly `PI_CODING_AGENT=true`: Pi's own entry points
  * (`dist/cli.js`, `dist/rpc-entry.js` of pi-coding-agent) assign it before
@@ -54,11 +55,16 @@ export type PiRouteGateFacts = Readonly<{
  * first and then refused by session publication. Only a process that strips
  * the variable stops announcing Pi, and that process is not a Pi parent to
  * any Loom seam (session binding, emission route, runtime handshake) either.
+ *
+ * Both harnesses share this one shape, so the type does not tell a Pi parent
+ * from a Claude Code one: that only a Pi parent's spawn batch is gated is a
+ * runtime check in `gateEmission`, which therefore never asks a Claude Code
+ * parent for route-gate facts.
  */
-export type EmissionParent =
-  | Readonly<{ harness: "pi"; sessionId: string | null }>
-  | Readonly<{ harness: "claude-code"; sessionId: string | null }>
-  | Readonly<{ harness: "unannounced" }>;
+export type AnnouncedParent = Readonly<{ harness: "pi" | "claude-code"; sessionId: string | null }>;
+
+/** The harness parenting this façade invocation, as its environment announces it. */
+export type EmissionParent = AnnouncedParent | Readonly<{ harness: "unannounced" }>;
 
 /** The immutable environment one façade invocation emits under. */
 export type EmissionEnvironment = Readonly<{
@@ -67,18 +73,21 @@ export type EmissionEnvironment = Readonly<{
   parent: EmissionParent;
 }>;
 
+/** The variable each announced harness names its session id in. */
+export const SESSION_VARIABLE: Readonly<Record<AnnouncedParent["harness"], string>> = Object.freeze({
+  "pi": "PI_SESSION_ID",
+  "claude-code": "CLAUDE_CODE_SESSION_ID",
+});
+
 /** The parent harness a process announces, read from its environment variables (Pi first: a Pi process launched from Claude Code is Pi). */
-export function announcedParentHarness(
-  env: Readonly<Record<string, string | undefined>>,
-): Readonly<{ harness: "pi" | "claude-code"; sessionId: string | null }> | null {
-  if (env.PI_CODING_AGENT === "true") return Object.freeze({ harness: "pi", sessionId: env.PI_SESSION_ID ?? null });
-  if (env.CLAUDECODE === "1") return Object.freeze({ harness: "claude-code", sessionId: env.CLAUDE_CODE_SESSION_ID ?? null });
-  return null;
+export function announcedParentHarness(env: Readonly<Record<string, string | undefined>>): AnnouncedParent | null {
+  const harness = env.PI_CODING_AGENT === "true" ? "pi" : env.CLAUDECODE === "1" ? "claude-code" : null;
+  return harness === null ? null : Object.freeze({ harness, sessionId: env[SESSION_VARIABLE[harness]] ?? null });
 }
 
-/** What the façade is about to emit, as far as the gate is concerned: a spawn batch's raw request authorities, or anything else. */
+/** What the façade is about to emit, as far as the gate is concerned: a spawn batch's parsed request authorities, or anything else. */
 export type GatedAction =
-  | Readonly<{ kind: "spawn-batch"; authorities: readonly unknown[] }>
+  | Readonly<{ kind: "spawn-batch"; batch: ParsedSpawnBatch }>
   | Readonly<{ kind: "other" }>;
 
 /** One stderr event the shell prints for an admitted action. */
@@ -106,7 +115,7 @@ export type RouteGateStep =
       decide: (observed: LaunchRouteObservation) => EmissionVerdict;
     }>;
 
-/** One step of the gate: a verdict, or — for a Pi parent's spawn batch whose requests parse — the pure gate over its route-gate facts. */
+/** One step of the gate: a verdict, or — for a Pi parent's spawn batch whose requests parsed — the pure gate over its route-gate facts. */
 export type EmissionGateStep =
   | Decided
   | Readonly<{ kind: "read-route-gate"; gate: (facts: PiRouteGateFacts) => RouteGateStep }>;
@@ -118,33 +127,23 @@ const decided = (verdict: EmissionVerdict): Decided => Object.freeze({ kind: "de
 const refuse = (message: string): Decided => decided(refusal(message));
 const unreadable = (cause: string): string => `cannot check Pi route reachability: ${cause}`;
 
-/** Every request authority as the stored-request parser admits it, or the refusal naming the first that does not parse. */
-function parsedRequests(authorities: readonly unknown[]): SpawnRequestParse<readonly AgentRequestAuthority[]> {
-  const requests: AgentRequestAuthority[] = [];
-  for (const [index, authority] of authorities.entries()) {
-    const parsed = parseSpawnRequestAuthority("Pi", index, authority);
-    if (!parsed.ok) return parsed;
-    requests.push(parsed.value);
-  }
-  return { ok: true, value: Object.freeze(requests) };
-}
-
 /**
- * Gate one action. Only a Pi parent's spawn batch is gated; every other
- * action is emitted as is, and no route-gate fact is read for it. A gated
- * batch is refused when a request authority does not parse (its route is
- * unknown) — before any fact is read — or, once the facts are read and before
+ * Gate one action of the parent announcing `harness`. Only a Pi parent's
+ * spawn batch is gated; every other action is emitted as is, and no
+ * route-gate fact is read for it. A gated batch is refused when a request
+ * authority did not parse (its route is unknown) — before any fact is read —
+ * or, once the facts are read and before
  * any route is probed, when the gate mode names no mode, the routing config
  * is malformed (the child may launch elsewhere than the declared route) or a
  * launch binding cannot be resolved; otherwise its launch routes are observed
  * and the batch is decided on them and on the retired routes it recorded
  * (`decideSpawnGate`).
  */
-export function gateEmission(action: GatedAction, parent: EmissionParent): EmissionGateStep {
-  if (parent.harness !== "pi" || action.kind !== "spawn-batch") return decided(UNGATED);
-  const requests = parsedRequests(action.authorities);
-  if (!requests.ok) return refuse(requests.message);
-  return Object.freeze({ kind: "read-route-gate", gate: (facts: PiRouteGateFacts) => gateRoutes(requests.value, facts) });
+export function gateEmission(action: GatedAction, harness: AnnouncedParent["harness"]): EmissionGateStep {
+  if (harness !== "pi" || action.kind !== "spawn-batch") return decided(UNGATED);
+  const { batch } = action;
+  if (!batch.ok) return refuse(batch.message);
+  return Object.freeze({ kind: "read-route-gate", gate: (facts: PiRouteGateFacts) => gateRoutes(batch.requests, facts) });
 }
 
 /** A Pi spawn batch's parsed requests, gated on its route-gate facts. */

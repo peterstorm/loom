@@ -6,12 +6,13 @@ import {
   announcedParentHarness,
   gateEmission,
   type EmissionGateStep,
-  type EmissionParent,
+  type AnnouncedParent,
   type EmissionVerdict,
   type GatedAction,
   type PiRouteGateFacts,
   type RouteGateStep,
 } from "../../src/core/spawn-emission-gate";
+import { parseSpawnBatch } from "../../src/core/spawn-request-authority";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import { LOCAL_PI_BINDING as LOCAL, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_ROUTE } from "../fixtures/local-pi-binding";
 
@@ -31,10 +32,11 @@ const GATE: PiRouteGateFacts = {
   mode: { ok: true, value: "admit-unverified" },
   routing: { ok: true, value: { parentRef: null, config: null } },
 };
-const PI: EmissionParent = { harness: "pi", sessionId: "session" };
+const PI: AnnouncedParent["harness"] = "pi";
 const facts = (overrides: Partial<PiRouteGateFacts> = {}): PiRouteGateFacts => ({ ...GATE, ...overrides });
 
-const batch = (...authorities: unknown[]): GatedAction => ({ kind: "spawn-batch", authorities });
+/** A spawn batch as the façade hands it to the gate: parsed once, as a Pi parent labels it. */
+const batch = (...authorities: unknown[]): GatedAction => ({ kind: "spawn-batch", batch: parseSpawnBatch("Pi", authorities) });
 const stored = (overrides: Record<string, unknown> = {}) => agentRequestAuthority(RUN_ID, overrides);
 const unparseable = () => ({ ...stored(), modelProfile: "no-such-profile" });
 const retired = () => stored({
@@ -57,8 +59,8 @@ const readingFacts = (step: EmissionGateStep): Extract<EmissionGateStep, { kind:
   return step;
 };
 /** A Pi parent's `action`, gated on `gateFacts`. */
-const gated = (action: GatedAction, gateFacts: PiRouteGateFacts = facts(), parent: EmissionParent = PI): RouteGateStep =>
-  readingFacts(gateEmission(action, parent)).gate(gateFacts);
+const gated = (action: GatedAction, gateFacts: PiRouteGateFacts = facts()): RouteGateStep =>
+  readingFacts(gateEmission(action, PI)).gate(gateFacts);
 const observing = (step: RouteGateStep): Extract<RouteGateStep, { kind: "observe" }> => {
   if (step.kind !== "observe") throw new Error(`expected an observe step, got ${JSON.stringify(step)}`);
   return step;
@@ -66,16 +68,11 @@ const observing = (step: RouteGateStep): Extract<RouteGateStep, { kind: "observe
 const UNGATED: EmissionVerdict = { kind: "emit", unverified: [], events: [] };
 
 describe("gateEmission: what it gates", () => {
-  const parents = fc.constantFrom<EmissionParent>(
-    { harness: "claude-code", sessionId: "s" },
-    { harness: "claude-code", sessionId: null },
-    { harness: "unannounced" },
-  );
   const actions = fc.constantFrom<GatedAction>(batch(stored()), batch(unparseable()), { kind: "other" });
 
-  it("emits every action of a parent that is not Pi, ungated, whatever its requests", () => {
-    fc.assert(fc.property(parents, actions, (parent, action) => {
-      expect(verdictOf(gateEmission(action, parent))).toEqual(UNGATED);
+  it("emits every action of a Claude Code parent ungated, whatever its requests", () => {
+    fc.assert(fc.property(actions, (action) => {
+      expect(verdictOf(gateEmission(action, "claude-code"))).toEqual(UNGATED);
     }));
   });
 
@@ -83,11 +80,9 @@ describe("gateEmission: what it gates", () => {
     expect(verdictOf(gateEmission({ kind: "other" }, PI))).toEqual(UNGATED);
   });
 
-  it("gates a Pi parent's spawn batch whether or not it announced a session", () => {
-    for (const sessionId of ["session", null]) {
-      const step = gated(batch(stored()), facts(), { harness: "pi", sessionId });
-      expect(observing(step).launch).toEqual([{ provider: LOCAL.provider, model: LOCAL.model, thinking: LOCAL.thinking }]);
-    }
+  it("gates a Pi parent's spawn batch on the route it launches on", () => {
+    expect(observing(gated(batch(stored()))).launch)
+      .toEqual([{ provider: LOCAL.provider, model: LOCAL.model, thinking: LOCAL.thinking }]);
   });
 });
 
