@@ -1,7 +1,8 @@
 /**
  * The Wave Gate drive's phase seam: the context every resume phase receives,
- * the blocked action every refusal reports, the uncaught-failure report, and
- * the phase result each resume phase returns to the reducer in wave-gate.ts.
+ * the blocked action every refusal reports, the uncaught-failure report, the
+ * re-derivation budget that bounds one invocation, and the phase result each
+ * resume phase returns to the reducer in wave-gate.ts.
  */
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -71,11 +72,41 @@ export function reportUncaughtWaveGateFailure(runId: string, error: unknown): st
 }
 
 /**
+ * Upper bound on same-invocation re-derivations of the Wave Gate reducer.
+ * Every legitimate re-derivation consumes durable progress (a captured retry
+ * applied, an accepted spec-check retry, a tally that retired a finding, an
+ * installed completion suite), each at most once per resume invocation, so
+ * exceeding this is a reducer defect, not a large run. The bound converts a
+ * hypothetical spin into a loud blocked diagnostic instead of an engine hang.
+ */
+const MAX_WAVE_GATE_REDERIVATIONS = 64;
+
+declare const WAVE_REDERIVATIONS: unique symbol;
+
+/**
+ * The re-derivations one resume invocation has made. An invocation starts
+ * with `NO_WAVE_REDERIVATIONS`, and `spendWaveRederivation` is the only way
+ * to make another, so no re-entry of the reducer can skip the bound.
+ */
+export type WaveRederivations = Readonly<{ made: number; readonly [WAVE_REDERIVATIONS]: true }>;
+
+export const NO_WAVE_REDERIVATIONS = Object.freeze({ made: 0 }) as WaveRederivations;
+
+/** Spend one re-derivation, or refuse with the spin diagnostic once the bound is spent. Pure and total. */
+export function spendWaveRederivation(
+  spent: WaveRederivations,
+): Readonly<{ ok: true; value: WaveRederivations }> | Readonly<{ ok: false; error: string }> {
+  return spent.made >= MAX_WAVE_GATE_REDERIVATIONS
+    ? { ok: false, error: `Wave Gate resume exceeded ${MAX_WAVE_GATE_REDERIVATIONS} re-derivations without durable progress; refusing to spin` }
+    : { ok: true, value: Object.freeze({ made: spent.made + 1 }) as WaveRederivations };
+}
+
+/**
  * What one resume phase decided:
  * - "settled" — the phase produced this invocation's answer (spawn, await,
  *   blocked, done, or a failed drive);
  * - "rederive" — the phase consumed durable progress, so the reducer must
- *   re-derive from the new protected state (bounded by the reducer's depth);
+ *   re-derive from the new protected state (bounded by `WaveRederivations`);
  * - "proceed" — nothing for this phase to do; continue with its value.
  */
 export type WavePhase<T = undefined> =
