@@ -266,6 +266,11 @@ export const failure = <T = never, E = never>(error: E): DomainResult<T, E> =>
   canonicalRecord({ ok: false, error });
 
 export type NonEmpty<T> = readonly [T, ...T[]];
+
+/** `values` as the non-empty list it is when it holds at least one entry: the one narrowing, so no caller re-spells it as a head/tail rebuild. */
+export const isNonEmpty = <Values extends readonly unknown[]>(values: Values): values is Values & NonEmpty<Values[number]> =>
+  values.length > 0;
+
 export type SemanticAttempt = 1 | 2;
 
 declare const RUN_ID: unique symbol;

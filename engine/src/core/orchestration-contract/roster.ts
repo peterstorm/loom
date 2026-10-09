@@ -708,7 +708,7 @@ export function authorityPairMismatches(
  * profile or binding still parses. The check against today's catalog happens
  * once, where each request is minted (`mintAgentRequestAuthority`), never
  * again when a roster is re-read from a checkpoint or registration; a slot
- * being ISSUED is built from minted requests by `issueAgentRosterSlot`.
+ * being ISSUED is minted by `mintAgentRosterSlot`.
  */
 export function parseAgentRosterSlot(
   rawFirst: unknown,
@@ -721,23 +721,13 @@ export function parseAgentRosterSlot(
 }
 
 /**
- * Issue one roster slot from two freshly minted requests. The pair checks are
- * exactly `parseAgentRosterSlot`'s; only the input differs — minted
- * authorities, so a slot cannot be issued from requests that skipped the
- * catalog check.
- */
-export function issueAgentRosterSlot(
-  first: MintedAgentRequestAuthority,
-  retry: MintedAgentRequestAuthority,
-): DomainResult<MintedAgentRosterSlot, AgentRosterSlotError> {
-  return pairRosterSlot<MintedAgentRequestAuthority>(authorityForAttempt(first, 1), authorityForAttempt(retry, 2));
-}
-
-/**
- * Mint one roster slot from the identities of its two requests: each request
- * is minted (`mintAgentRequestAuthority`) and the pair is checked exactly as
- * `issueAgentRosterSlot` checks it. Every issuer of a fresh slot goes through
- * here; each frames a refusal in its own words (`rosterSlotErrorMessages`).
+ * Mint one roster slot from the identities of its two requests — the one
+ * issuing seam of a fresh slot: each request is minted
+ * (`mintAgentRequestAuthority`) and the pair is checked exactly as
+ * `parseAgentRosterSlot` checks a recorded one, so a slot cannot be issued
+ * from requests that skipped the catalog check. Every issuer of a fresh slot
+ * goes through here; each frames a refusal in its own words
+ * (`rosterSlotErrorMessages`).
  */
 export function mintAgentRosterSlot(
   first: AgentRequestIdentity<1>,
@@ -765,15 +755,25 @@ export function mintAgentRosterSlotAsOf(
 }
 
 /**
- * Why a slot could not be minted or paired, one line per violation: a
- * request's own authority violations verbatim (the catalog's reason), and
- * `roster slot: <kind>` for a pair violation.
+ * Why a slot could not be minted, paired or read back, one line per
+ * violation: a request's own authority violations verbatim (the catalog's
+ * reason), and `roster slot: <kind>` for a pair violation, naming what the
+ * pair disagrees on — `(<field>)` for an attempt-pair mismatch, `(<path>)`
+ * for an output path both attempts claim.
  */
 export function rosterSlotErrorMessages(error: AgentRosterSlotError): NonEmpty<string> {
-  const [head, ...rest] = error.violations.flatMap((entry): readonly string[] =>
-    entry.kind === "malformed-attempt-authority"
-      ? entry.authorityViolations.map(({ message }) => message)
-      : [`roster slot: ${entry.kind}`]);
+  const [head, ...rest] = error.violations.flatMap((entry): readonly string[] => {
+    switch (entry.kind) {
+      case "malformed-attempt-authority":
+        return entry.authorityViolations.map(({ message }) => message);
+      case "attempt-pair-mismatch":
+        return [`roster slot: ${entry.kind} (${entry.field})`];
+      case "duplicate-output-path":
+        return [`roster slot: ${entry.kind} (${entry.path})`];
+      default:
+        return [`roster slot: ${entry.kind}`];
+    }
+  });
   return Object.freeze([head ?? "roster slot: invalid", ...rest]) as NonEmpty<string>;
 }
 

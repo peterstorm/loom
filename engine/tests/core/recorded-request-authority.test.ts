@@ -15,7 +15,7 @@ import {
   type RecordedLlmProfileId,
 } from "../../src/core/model-profiles";
 import {
-  issueAgentRosterSlot,
+  issueExactRoster,
   mintAgentRequestAuthority,
   mintAgentRosterSlot,
   mintAgentRosterSlotAsOf,
@@ -23,7 +23,6 @@ import {
   parseAgentRosterSlot,
   parseOrchestrationRunId,
   parseStoredAgentRequestAuthority,
-  type AgentRequestAuthority,
   type AgentRosterSlot,
   type MintedAgentRequestAuthority,
   type MintedAgentRosterSlot,
@@ -195,41 +194,39 @@ describe("issued request authority is today's catalog", () => {
 });
 
 describe("a minted authority is the only thing an issuing seam accepts", () => {
+  const identity = <Attempt extends 1 | 2>(attempt: Attempt) => ({
+    runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
+    program: "standalone-review" as const, role: "code-reviewer" as const, attempt, contextDigest: String(attempt).repeat(64),
+    outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
+  });
   const mint = (attempt: 1 | 2): MintedAgentRequestAuthority => {
-    const minted = mintAgentRequestAuthority({
-      runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
-      program: "standalone-review", role: "code-reviewer", attempt, contextDigest: String(attempt).repeat(64),
-      outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
-    });
+    const minted = mintAgentRequestAuthority(identity(attempt));
     if (!minted.ok) throw new Error(JSON.stringify(minted.error));
     return minted.value;
   };
 
-  it("issues the same slot a stored read of the same requests parses", () => {
-    const issued = issueAgentRosterSlot(mint(1), mint(2));
+  it("mints the same slot a stored read of the same minted requests parses", () => {
+    const issued = mintAgentRosterSlot(identity(1), identity(2));
     const stored = parseAgentRosterSlot(mint(1), mint(2));
     expect(issued).toEqual(stored);
     expect(issued.ok).toBe(true);
   });
 
-  it("refuses a slot whose minted requests are out of attempt order", () => {
-    const swapped = issueAgentRosterSlot(mint(2), mint(1));
+  it("refuses, at compile time and at run time, identities out of attempt order", () => {
+    // @ts-expect-error the first identity of a slot authorizes attempt 1
+    const swapped = mintAgentRosterSlot(identity(2), identity(1));
     expect(swapped.ok).toBe(false);
-    if (!swapped.ok) {
-      expect(swapped.error.violations.map((v) => v.kind)).toEqual(["malformed-attempt-authority", "malformed-attempt-authority"]);
-    }
+    if (!swapped.ok) expect(swapped.error.violations.map(({ kind }) => kind)).toContain("attempt-pair-mismatch");
   });
 
-  it("rejects, at compile time, a stored authority or roster slot handed to an issuing seam", () => {
-    const stored = parseStoredAgentRequestAuthority(request("general-review", SOL));
-    if (!stored.ok) throw new Error("stored authority must parse");
-    const recorded: AgentRequestAuthority = stored.value;
-    // @ts-expect-error a stored authority never passed the catalog check
-    expect(issueAgentRosterSlot(recorded, recorded).ok).toBe(false);
-
+  it("rejects, at compile time, a recorded roster slot handed to an issuing seam", () => {
     const slot = parseAgentRosterSlot(mint(1), mint(2));
     if (!slot.ok) throw new Error("slot must parse");
     const storedSlots: readonly AgentRosterSlot[] = [slot.value];
+    // @ts-expect-error a recorded roster slot never passed the catalog check
+    const issueRecorded = () => issueExactRoster(storedSlots);
+    // The minted brand is phantom: it closes the forgetting path at compile time, not at run time.
+    expect(issueRecorded().ok).toBe(true);
     const panel = () => issueRefutationPanelAuthority({
       runId: "run:recorded-authority",
       findings: [],
@@ -363,11 +360,13 @@ describe("the catalog mints a request from its identity alone", () => {
       .toEqual(mintAgentRosterSlot(untouched(1), untouched(2)));
   });
 
-  it("keeps the attempt it was asked to mint, so a minted pair issues a slot", () => {
+  it("keeps the attempt it was asked to mint, so a slot mints from the same pair", () => {
+    const retryIdentity = { ...identity("code-reviewer", 2), requestId: "request:minted-retry" };
     const first = mintAgentRequestAuthority(identity("code-reviewer", 1));
-    const retry = mintAgentRequestAuthority({ ...identity("code-reviewer", 2), requestId: "request:minted-retry" });
+    const retry = mintAgentRequestAuthority(retryIdentity);
     if (!first.ok || !retry.ok) throw new Error("mint failed");
-    expect(issueAgentRosterSlot(first.value, retry.value).ok).toBe(true);
+    expect([first.value.attempt, retry.value.attempt]).toEqual([1, 2]);
+    expect(mintAgentRosterSlot(identity("code-reviewer", 1), retryIdentity)).toEqual(parseAgentRosterSlot(first.value, retry.value));
   });
 
   it("refuses an identity whose own fields do not parse", () => {
@@ -396,21 +395,17 @@ describe("an issued refutation panel keeps its minted roster", () => {
     if (!runId.ok || findingId === null) throw new Error("fixture identities must parse");
     const binding = deriveRefutationVerifierBinding(runId.value, "reproduction", [findingId]);
     if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const mint = <Attempt extends 1 | 2>(attempt: Attempt) => {
-      const minted = mintAgentRequestAuthority({
-        runId: runId.value,
-        requestId: binding.value.requestIds[attempt - 1]!,
-        slotId: binding.value.slotId,
-        program: "refutation-panel",
-        role: "review-verifier-agent",
-        attempt,
-        contextDigest: String(attempt).repeat(64),
-        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
-      });
-      if (!minted.ok) throw new Error(JSON.stringify(minted.error));
-      return minted.value;
-    };
-    const slot = issueAgentRosterSlot(mint(1), mint(2));
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => ({
+      runId: runId.value,
+      requestId: binding.value.requestIds[attempt - 1]!,
+      slotId: binding.value.slotId,
+      program: "refutation-panel" as const,
+      role: "review-verifier-agent" as const,
+      attempt,
+      contextDigest: String(attempt).repeat(64),
+      outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
+    });
+    const slot = mintAgentRosterSlot(identity(1), identity(2));
     if (!slot.ok) throw new Error("slot must issue");
     const input = {
       runId: runId.value,
