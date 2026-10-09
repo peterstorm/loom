@@ -29,9 +29,9 @@ process.stdout.write(server.port + "\\n");
 declare const ROUTE_STUB_PORT: unique symbol;
 
 /** A TCP port the stub announced: an integer in 1..65535. */
-export type RouteStubPort = number & { readonly [ROUTE_STUB_PORT]: true };
+type RouteStubPort = number & { readonly [ROUTE_STUB_PORT]: true };
 
-export type RouteStubPortParse =
+type RouteStubPortParse =
   | Readonly<{ ok: true; value: RouteStubPort }>
   | Readonly<{ ok: false; error: string }>;
 
@@ -44,7 +44,7 @@ export function parseRouteStubPort(line: string): RouteStubPortParse {
 }
 
 /** A listening stub: the port it serves `/v1/models` on, and how to stop it. */
-export type RouteStub = Readonly<{ port: RouteStubPort; stop: () => void }>;
+type RouteStub = Readonly<{ port: RouteStubPort; stop: () => void }>;
 
 /**
  * Start the stub serving exactly `model` at `GET /v1/models`. Resolves once
