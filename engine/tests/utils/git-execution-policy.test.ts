@@ -15,6 +15,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, wr
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { observeTaskGraphProjectBoundary } from "../../src/config";
+import { prepareDefectFamilyAccounting, prepareDefectFamilyVerification } from "../../src/core/defect-family-accounting";
 import { parseRepositorySnapshotWitness, type RepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import { baselineBlob, deriveChangedPaths } from "../../src/handlers/helpers/programs/changed-paths";
 import { calibrationRevisionPaths } from "../../src/handlers/helpers/model-calibration";
@@ -45,6 +46,8 @@ import { gitOutput, worktreeVisibleLeafPaths } from "../../src/utils/git-leaves"
 import { observeWorkspaceDigest } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { git, pathspecContract, write } from "../fixtures/git-repository";
+import { value } from "../fixtures/parse-result";
+import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
 
 const REAL_GIT = execFileSync("which", ["git"], { encoding: "utf-8" }).trim();
 const AMBIENT_ATTACK: Readonly<Record<string, string>> = Object.freeze({
@@ -112,17 +115,6 @@ function withCwd<T>(directory: string, run: () => T): T {
     return run();
   } finally {
     process.chdir(previous);
-  }
-}
-
-/** Root resolution answers CLAUDE_PROJECT_DIR before Git; unset it so Git answers. */
-function withoutProjectDirectory<T>(run: () => T): T {
-  const previous = process.env.CLAUDE_PROJECT_DIR;
-  delete process.env.CLAUDE_PROJECT_DIR;
-  try {
-    return run();
-  } finally {
-    if (previous !== undefined) process.env.CLAUDE_PROJECT_DIR = previous;
   }
 }
 
@@ -408,15 +400,21 @@ function repositoryWitness(root: string): RepositorySnapshotWitness {
   return witness.value;
 }
 
-/** Capture reads only the verification plan's kind; a minted plan would need a
- *  full source inventory these routes never exercise. */
-const NOT_REQUIRED_VERIFICATION = { kind: "not-required" } as unknown as RemediationCandidateCaptureInput["verification"];
+/** A not-required verification plan, minted the way the shell mints one: the
+ *  production accounting and verification parsers over a clean standalone
+ *  review (no surviving critical Finding). Capture reads only its kind. */
+function notRequiredVerification(): RemediationCandidateCaptureInput["verification"] {
+  const accounting = value(prepareDefectFamilyAccounting(standaloneFixture(["tracked.txt"]).input.standaloneResult, { kind: "not-required" }));
+  const plan = value(prepareDefectFamilyVerification(accounting, null));
+  if (plan.kind !== "not-required") throw new Error(`a clean source minted a ${plan.kind} verification plan`);
+  return plan;
+}
 
 /** Capture the remediation candidate workspace for `tracked.txt` into `runDirectory`. */
 function captureTrackedCandidate(root: string, runDirectory: string, witness: RepositorySnapshotWitness) {
   return captureRemediationCandidateWorkspace({
     repositoryStartPath: root,
-    verification: NOT_REQUIRED_VERIFICATION,
+    verification: notRequiredVerification(),
     pathSources: { reviewedPaths: ["tracked.txt"], supportPaths: [], siblingPaths: [], inputSourcePaths: [] },
     runDirectory,
   }, witness);
@@ -495,7 +493,8 @@ describe("every engine Git route runs under the policy", () => {
     const shim = recordingGit("real");
     const spawns = routeSpawns(shim);
     let temporaryIndex: string | null = null;
-    const staging = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => withCwd(root, () => withoutProjectDirectory(() => {
+    // Root resolution answers CLAUDE_PROJECT_DIR before Git; it is unset so Git answers.
+    const staging = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path, CLAUDE_PROJECT_DIR: undefined }, () => withCwd(root, () => {
       spawns("repository root", () => expect(resolveRepositoryRoot("policy route test")).toBe(root));
       spawns("repository context", () => expect(repositoryContext(root)).toEqual({ ok: true, root, headSha: head }));
       spawns("exact HEAD", () => expect(observeExactHead(root)).toEqual({ ok: true, headSha: head }));
@@ -517,7 +516,7 @@ describe("every engine Git route runs under the policy", () => {
           discardTemporaryIndex(temporary.value);
         }
       });
-    })));
+    }));
 
     for (const invocation of shim.invocations()) expectHardened(invocation, shim.path);
     // Remediation staging relocates only the index, through the closed index

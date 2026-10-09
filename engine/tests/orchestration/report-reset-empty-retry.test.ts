@@ -27,42 +27,10 @@ import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const scripted = vi.hoisted(() => ({
-  queue: [] as SpawnAnswer[],
-  calls: [] as string[][],
-  passthrough: true,
-}));
+vi.mock("node:child_process", async (importOriginal) =>
+  (await import("../fixtures/scripted-git")).scriptedChildProcess(await importOriginal()));
 
-/** A scripted raw `spawnSync` result. A spawn that started no child hands back
- *  null streams, as both runtimes do; a child that ran hands back strings. */
-type SpawnAnswer = {
-  error?: Error;
-  status: number | null;
-  stdout: string | null;
-  stderr: string | null;
-};
-
-const answered = (stdout: string): SpawnAnswer => ({ status: 0, stdout, stderr: "" });
-
-vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
-  const { logicalGitArgs } = await import("../fixtures/policy-bound-git-argv");
-  const realSpawnSync = actual.spawnSync;
-  return {
-    ...actual,
-    spawnSync: (
-      file: string,
-      args: readonly string[],
-      options: import("node:child_process").SpawnSyncOptions,
-    ) => {
-      if (scripted.passthrough) return realSpawnSync(file, args, options);
-      scripted.calls.push([file, ...logicalGitArgs(args)]);
-      const next = scripted.queue.shift();
-      if (next === undefined) throw new Error("fixture ran past its scripted Git responses");
-      return next;
-    },
-  };
-});
+import { answered, failedToStart, scriptedGit, scriptGit } from "../fixtures/scripted-git";
 
 import {
   runRemediationCheck,
@@ -123,17 +91,15 @@ function refusalText(result: { readonly ok: false; readonly error: unknown }): s
 }
 
 const lsFilesCalls = (): number =>
-  scripted.calls.filter((entry) => entry[1] === "--literal-pathspecs" && entry[2] === "ls-files").length;
+  scriptedGit.calls.filter(({ args }) => args[0] === "--literal-pathspecs" && args[1] === "ls-files").length;
 
 afterEach(() => {
-  scripted.passthrough = true;
   vi.restoreAllMocks();
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
 beforeEach(() => {
-  scripted.calls.length = 0;
-  scripted.queue.length = 0;
+  scriptGit([], true); // fixture setup runs the real Git until a case scripts it
 });
 
 describe("remediation report reset agrees with the remediation candidate's ignore audit", () => {
@@ -175,10 +141,9 @@ describe("remediation report reset survives the transient empty tracked-state ob
     expect(spawnSync("git", ["add", "-f", REPORT_PATH], { cwd: root }).status).toBe(0);
     const index = readFileSync(join(root, ".git", "index"));
 
-    scripted.passthrough = false;
-    scripted.queue = [
+    scriptGit([
       answered(""), answered(""), answered("reset.xml\0"), // transient empties, then the tracked truth
-    ];
+    ]);
     const result: RemediationCheckRunnerResult = await runRemediationCheck(
       remediationCheck(root, "tracked-transient"), root,
     );
@@ -200,11 +165,10 @@ describe("remediation report reset survives the transient empty tracked-state ob
     const root = fixtureRoot();
     writeStaleReport(root, "stale untracked content");
 
-    scripted.passthrough = false;
-    scripted.queue = [
+    scriptGit([
       answered(""), answered(""), answered(""), // confirmed-empty: legitimately untracked
       answered(""), // check-ignore -q: ignored
-    ];
+    ]);
     const result = (await runRemediationCheck(remediationCheck(root, "confirmed-empty"), root));
     expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
     if (!result.ok) throw new Error("confirmed-empty reset refused");
@@ -221,10 +185,9 @@ describe("remediation report reset survives the transient empty tracked-state ob
     const root = fixtureRoot();
     const report = writeStaleReport(root, "stale");
 
-    scripted.passthrough = false;
-    scripted.queue = [
-      { error: new Error("spawn git ENOENT"), status: null, stdout: null, stderr: null },
-    ];
+    scriptGit([
+      failedToStart("spawn git ENOENT"),
+    ]);
     const result = await runRemediationCheck(remediationCheck(root, "failed-probe"), root);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("failed probe was not refused");

@@ -40,7 +40,7 @@ temporaryRoots.push(transportRoot);
 const piAgentDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-pi-agent-")));
 temporaryRoots.push(piAgentDir);
 writeFileSync(join(piAgentDir, "models.json"), `${JSON.stringify({
-  providers: { [DESKTOP_VLLM_ROUTE.provider]: { baseUrl: `http://127.0.0.1:${routeStub.port}/v1` } },
+  providers: { [DESKTOP_VLLM_ROUTE.provider]: { baseUrl: routeStub.baseUrl } },
 }, null, 2)}\n`);
 
 type Authority = Readonly<{

@@ -4,9 +4,12 @@
  * derive the canonical unstaged/staged/committed path sets, the paths this
  * change created, and the added-line count a frozen scope classifies with.
  * Imperative shell — every classification rule lives in core/scope-classification.
+ * Every probe reaches Git through the `GitSpawn` port: each exported entry
+ * point defaults it to the policy-bound `spawnGit`, and tests pass a scripted
+ * fake returning `GitSpawnOutcome` values.
  */
 import { devNull } from 'node:os';
-import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from '../../../utils/git-execution-policy';
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from '../../../utils/git-execution-policy';
 import {
   describeGitOutcome,
   gitCleanNegative,
@@ -60,16 +63,16 @@ function exitRefusal(exit: GitExit, fallback: string): Readonly<{ ok: false; err
  *  the NUL separators split on byte boundaries before any decoding. */
 function decodeListedPaths(stdout: Buffer): GitProbeStep<readonly string[], Error> {
   const chunks = stdout.toString("binary").split("\0");
-  const decoded: string[] = [];
+  const paths: string[] = [];
   for (const [index, binary] of chunks.entries()) {
     if (binary === "") continue;
     try {
-      decoded.push(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(binary, "binary")));
+      paths.push(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(binary, "binary")));
     } catch (cause) {
       return { ok: false as const, error: new Error(`git path ${index} is not UTF-8: ${cause instanceof Error ? cause.message : String(cause)}`) };
     }
   }
-  return { ok: true as const, value: Object.freeze(decoded.sort()) };
+  return { ok: true as const, value: Object.freeze(paths.sort()) };
 }
 
 /** The one scope-authority refusal for a confirmed-empty Git observation,
@@ -109,14 +112,16 @@ function resolveObservation<T, R>(
  *  derived under the same ignore rules and config as every other observer.
  *  Only an `exited` outcome reaches `classify`; a child that never started,
  *  faulted, timed out, outgrew its budget or was signalled refuses here with
- *  its rendered outcome. */
+ *  its rendered outcome. `spawn` is the status-returning port the module's
+ *  entry points were handed. */
 function gitSpawnProbe<T>(
+  spawn: GitSpawn,
   args: readonly string[],
   maxBuffer: number,
   classify: (exit: GitExit) => GitProbeStep<T, Error>,
 ): () => GitProbeStep<T, Error> {
   return () => {
-    const outcome = spawnGit(args, { maxBuffer });
+    const outcome = spawn(args, { maxBuffer });
     if (outcome.kind !== "exited") {
       return { ok: false as const, error: new Error(`git ${args[0]} ${describeGitOutcome(outcome)}`) };
     }
@@ -124,25 +129,26 @@ function gitSpawnProbe<T>(
   };
 }
 
-/** `gitSpawnProbe` for the probes whose protocol accepts only status 0: any
+/** `gitSpawnProbe` for the probes whose protocol accepts only status 0: every
  *  other exit refuses through `exitRefusal` with `failure` as its fallback
  *  label, and `decode` reads the accepted exit. */
 function gitZeroExitProbe<T>(
+  spawn: GitSpawn,
   args: readonly string[],
   maxBuffer: number,
   failure: string,
   decode: (exit: GitExit<0>) => GitProbeStep<T, Error>,
 ): () => GitProbeStep<T, Error> {
-  return gitSpawnProbe(args, maxBuffer, (exit) => gitExitedWith(exit, [0]) ? decode(exit) : exitRefusal(exit, failure));
+  return gitSpawnProbe(spawn, args, maxBuffer, (exit) => gitExitedWith(exit, [0]) ? decode(exit) : exitRefusal(exit, failure));
 }
 
 const decoded = <T>(value: T): GitProbeStep<T, Error> => ({ ok: true as const, value });
 
-function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly string[] {
+function gitPaths(spawn: GitSpawn, args: readonly string[], empty: GitEmptyDecision): readonly string[] {
   const frozenPaths = (paths: readonly string[]): readonly string[] => Object.freeze([...paths]);
   return resolveObservation(
     observeGitProbe(
-      gitZeroExitProbe(args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decodeListedPaths(exit.stdout)),
+      gitZeroExitProbe(spawn, args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decodeListedPaths(exit.stdout)),
       (paths) => paths.length === 0,
     ),
     (confirmed) => {
@@ -159,10 +165,10 @@ function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly st
  * (see `GitEmptyDecision`) and is required at every call site so the policy
  * for text authority is visible where the value is consumed, never defaulted.
  */
-export function gitText(args: readonly string[], empty: GitEmptyDecision): string {
+export function gitText(args: readonly string[], empty: GitEmptyDecision, spawn: GitSpawn = spawnGit): string {
   return resolveObservation(
     observeGitProbe(
-      gitZeroExitProbe(args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decoded(gitStdoutText(exit).trim())),
+      gitZeroExitProbe(spawn, args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decoded(gitStdoutText(exit).trim())),
       (value) => value === "",
     ),
     (confirmed) => {
@@ -194,10 +200,10 @@ export type DerivedChangedPaths = Readonly<{
   created: ReadonlySet<string>;
 }>;
 
-function candidateReference(candidate: string): CandidateReference {
+function candidateReference(spawn: GitSpawn, candidate: string): CandidateReference {
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
+      gitSpawnProbe<CandidateReference>(spawn, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
         GIT_PROBE_OUTPUT_LIMIT, (exit) => {
           if (gitCleanNegative(exit)) return { ok: true, value: { kind: "missing" } };
           if (exit.status !== 0) return exitRefusal(exit, `git cannot observe candidate ${candidate}`);
@@ -210,10 +216,10 @@ function candidateReference(candidate: string): CandidateReference {
   );
 }
 
-function candidateMergeBase(candidate: string, head: string): MergeBaseCandidate {
+function candidateMergeBase(spawn: GitSpawn, candidate: string, head: string): MergeBaseCandidate {
   return resolveObservation(
     observeGitProbe(
-      gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], GIT_PROBE_OUTPUT_LIMIT, (exit) => {
+      gitSpawnProbe<MergeBaseCandidate>(spawn, ["merge-base", candidate, head], GIT_PROBE_OUTPUT_LIMIT, (exit) => {
         if (gitCleanNegative(exit)) return { ok: true, value: { kind: "no-base" } };
         if (exit.status !== 0) return exitRefusal(exit, `git merge-base failed for ${candidate}`);
         return { ok: true, value: { kind: "base", revision: gitStdoutText(exit).trim() } };
@@ -225,31 +231,31 @@ function candidateMergeBase(candidate: string, head: string): MergeBaseCandidate
   );
 }
 
-export function deriveChangedPaths(): DerivedChangedPaths {
+export function deriveChangedPaths(spawn: GitSpawn = spawnGit): DerivedChangedPaths {
   // A HEAD revision can never legitimately be empty: a confirmed-empty answer
   // after the bounded retry refuses instead of freezing `head_revision: ""`.
-  const head = gitText(["rev-parse", "HEAD"], "refuse");
+  const head = gitText(["rev-parse", "HEAD"], "refuse", spawn);
   let base: string | null = null;
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
     // A missing ref is distinct from an error: real temporary repositories
     // often have no origin/main, and merge-base reports that absence as 128.
-    if (candidateReference(candidate).kind === "missing") continue;
-    const observed = candidateMergeBase(candidate, head);
+    if (candidateReference(spawn, candidate).kind === "missing") continue;
+    const observed = candidateMergeBase(spawn, candidate, head);
     if (observed.kind === "no-base") continue;
     base = observed.revision;
     break;
   }
-  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"], "legitimate").filter(reviewablePath);
-  const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath);
-  const stagedAdded = gitPaths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"], "legitimate").filter(reviewablePath);
+  const untracked = gitPaths(spawn, ["ls-files", "--others", "--exclude-standard", "-z", "--"], "legitimate").filter(reviewablePath);
+  const trackedUnstaged = gitPaths(spawn, ["diff", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath);
+  const stagedAdded = gitPaths(spawn, ["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"], "legitimate").filter(reviewablePath);
   const committedAdded = base === null
     ? []
-    : gitPaths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath);
+    : gitPaths(spawn, ["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath);
   return Object.freeze({
     authority: Object.freeze({
       unstaged: Object.freeze([...new Set([...trackedUnstaged, ...untracked])].sort()),
-      staged: gitPaths(["diff", "--cached", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath),
-      committed: base === null ? Object.freeze([]) : gitPaths(["diff", "--name-only", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath),
+      staged: gitPaths(spawn, ["diff", "--cached", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath),
+      committed: base === null ? Object.freeze([]) : gitPaths(spawn, ["diff", "--name-only", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath),
       base_revision: base,
       head_revision: head,
     }),
@@ -258,11 +264,11 @@ export function deriveChangedPaths(): DerivedChangedPaths {
   });
 }
 
-function trackedAdditions(baseline: string, paths: readonly string[]): number {
+function trackedAdditions(spawn: GitSpawn, baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
   return resolveObservation(
     observeGitProbe(
-      gitZeroExitProbe(["diff", "--numstat", baseline, "--", ...paths], GIT_PROBE_OUTPUT_LIMIT, "git diff --numstat failed",
+      gitZeroExitProbe(spawn, ["diff", "--numstat", baseline, "--", ...paths], GIT_PROBE_OUTPUT_LIMIT, "git diff --numstat failed",
         (exit) => decoded(gitStdoutText(exit))),
       (output) => output === "",
     ),
@@ -274,11 +280,11 @@ function trackedAdditions(baseline: string, paths: readonly string[]): number {
   );
 }
 
-function untrackedAdditions(paths: readonly string[]): number {
+function untrackedAdditions(spawn: GitSpawn, paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
     return sum + resolveObservation(
       observeGitProbe(
-        gitSpawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], GIT_PROBE_OUTPUT_LIMIT, (exit) => {
+        gitSpawnProbe(spawn, ["diff", "--no-index", "--numstat", "--", devNull, path], GIT_PROBE_OUTPUT_LIMIT, (exit) => {
           if ((exit.status !== 0 && exit.status !== 1) || gitStderrText(exit) !== "") {
             return exitRefusal(exit, `cannot measure untracked additions for ${path}`);
           }
@@ -314,11 +320,11 @@ const TREE_ENTRY = /^[0-7]{6} ([a-z]+) ([0-9a-f]+)\t([^\0]*)\0$/;
  * attribution, so an unreadable base can never become an "added file" diff.
  * Both probes go through the module's `gitSpawnProbe`/`observeGitProbe` seam.
  */
-export function baselineBlob(revision: string, path: string): Uint8Array | null {
+export function baselineBlob(revision: string, path: string, spawn: GitSpawn = spawnGit): Uint8Array | null {
   const object = `${revision}:${path}`;
   const listing = resolveObservation(
     observeGitProbe(
-      gitZeroExitProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT, `git ls-tree failed for ${object}`,
+      gitZeroExitProbe(spawn, ["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT, `git ls-tree failed for ${object}`,
         (exit) => decoded(gitStdoutText(exit))),
       (entry) => entry === "",
     ),
@@ -333,7 +339,7 @@ export function baselineBlob(revision: string, path: string): Uint8Array | null 
   if (type !== "blob") throw new Error(`${object} is a ${type}, not a file`);
   return resolveObservation(
     observeGitProbe(
-      gitZeroExitProbe(["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, `git cat-file blob failed for ${object}`,
+      gitZeroExitProbe(spawn, ["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, `git cat-file blob failed for ${object}`,
         (exit) => decoded(new Uint8Array(exit.stdout))),
       (bytes) => bytes.length === 0,
     ),
@@ -347,10 +353,11 @@ export function metadata(
   kind: StandaloneReviewKind,
   scope: readonly string[],
   changed: DerivedChangedPaths,
+  spawn: GitSpawn = spawnGit,
 ): StandaloneReviewMetadata {
   const scopedUntracked = new Set(changed.untracked.filter((path) => scope.includes(path)));
   const trackedScope = scope.filter((path) => !scopedUntracked.has(path));
   const baseline = reviewBaseline(changed);
-  const additions = trackedAdditions(baseline, trackedScope) + untrackedAdditions([...scopedUntracked].sort());
+  const additions = trackedAdditions(spawn, baseline, trackedScope) + untrackedAdditions(spawn, [...scopedUntracked].sort());
   return classifyScope(kind, scope, changed.created, additions);
 }
