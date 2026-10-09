@@ -16,3 +16,14 @@ export const COMMAND_SCOPE_CONFIG: readonly (readonly [key: string, value: strin
 export const COMMAND_SCOPE_ARGV: readonly string[] = Object.freeze(
   COMMAND_SCOPE_CONFIG.flatMap(([key, value]) => ["-c", `${key}=${value}`]),
 );
+
+/**
+ * The argv a policy-bound Git child receives for the logical command `args`:
+ * the command-scope prefix, then `args` unchanged. The one composition of the
+ * prefix — the execution policy spawns with it, and a test double that stands
+ * in for the `git` executable reads the prefix length from it rather than
+ * hard-coding argv positions.
+ */
+export function policyBoundGitArgv(args: readonly string[]): readonly string[] {
+  return Object.freeze([...COMMAND_SCOPE_ARGV, ...args]);
+}

@@ -396,16 +396,12 @@ describe("the issued emission route on the standalone program path (T6)", () => 
   }, 120_000);
 
   it("keeps the archived v1 contract extraction-only under a Pi parent on the emission-qualified route (AD-7)", async () => {
-    const legacyProject = () => {
-      const p = project();
-      mkdirSync(join(p.root, "src"), { recursive: true });
-      writeFileSync(join(p.root, "src", "repair.mjs"), "export const repair = 1;\n");
-      writeFileSync(join(p.root, "src", "types.ts"), "export type Fixture = string;\n");
-      git(p.root, ["add", "src/repair.mjs", "src/types.ts"]);
-      git(p.root, ["commit", "-qm", "fixture legacy scope"]);
-      return p;
-    };
-    const p = legacyProject();
+    const p = project();
+    mkdirSync(join(p.root, "src"), { recursive: true });
+    writeFileSync(join(p.root, "src", "repair.mjs"), "export const repair = 1;\n");
+    writeFileSync(join(p.root, "src", "types.ts"), "export type Fixture = string;\n");
+    git(p.root, ["add", "src/repair.mjs", "src/types.ts"]);
+    git(p.root, ["commit", "-qm", "fixture legacy scope"]);
     const legacy = await withFixturePiSession(p.root, async () => {
       const handle = value(createRunDirectory(p.runsRoot, "run.legacy"));
       const started = await startNativeLegacyReview(handle);

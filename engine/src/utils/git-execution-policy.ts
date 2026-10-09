@@ -75,7 +75,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { match } from "ts-pattern";
-import { COMMAND_SCOPE_ARGV, COMMAND_SCOPE_CONFIG } from "./git-command-scope";
+import { COMMAND_SCOPE_CONFIG, policyBoundGitArgv } from "./git-command-scope";
 
 /** Passed to every Git child exactly when the engine's own process has them. */
 const INHERITED_LAUNCH_ESSENTIALS = [
@@ -129,7 +129,7 @@ function hardenedGitInvocation(
     [`GIT_CONFIG_VALUE_${index}`, value],
   ]));
   return Object.freeze({
-    argv: Object.freeze([...COMMAND_SCOPE_ARGV, ...args]),
+    argv: policyBoundGitArgv(args),
     env: Object.freeze({
       ...env,
       LANG: "C",

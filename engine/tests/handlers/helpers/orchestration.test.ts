@@ -33,7 +33,8 @@ import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-comple
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, withFixturePiSession } from "../../fixtures/pi-session";
-import { facadeParentEnvironment, type FacadeParent } from "../../fixtures/facade-parent";
+import { facadeParentEnvironment, parentAnnouncement, type FacadeParent } from "../../fixtures/facade-parent";
+import { normalizeRunRoot } from "../../fixtures/emission-route-delta";
 import { fixturePiAgentDirectory } from "../../fixtures/fixture-pi-agent-directory";
 import { DESKTOP_VLLM_ROUTE } from "../../../src/core/model-profiles";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
@@ -1701,14 +1702,10 @@ describe("orchestration CLI", () => {
     })] });
   }, 30_000);
 
-  // Claude Code: CLAUDECODE=1 plus CLAUDE_CODE_SESSION_ID, as Claude Code
-  // exposes them to the main agent's Bash commands, and no Pi announcement.
+  // A Claude Code parent's announcement of `sessionId`, with no ambient run
+  // directory and its session bindings in `bindingDir`.
   const claudeCodeEnvironment = (sessionId: string | undefined, bindingDir: string) => ({
-    PI_CODING_AGENT: undefined,
-    PI_SESSION_ID: undefined,
-    PI_SESSION_FILE: undefined,
-    CLAUDECODE: "1",
-    CLAUDE_CODE_SESSION_ID: sessionId,
+    ...parentAnnouncement("claude-code", sessionId),
     LOOM_ORCHESTRATION_RUNS_ROOT: undefined,
     LOOM_ORCHESTRATION_RUN_DIR: undefined,
     LOOM_SUBAGENT_DIR: bindingDir,
@@ -1936,7 +1933,6 @@ describe("orchestration CLI", () => {
     // AD-6: the panel verdict slots are not this feature's emission route —
     // every panel task advertises no tool and is byte-identical across the
     // two parents (modulo the project-local run-directory path).
-    const normalize = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
     expect(emission.panel.requests.length).toBeGreaterThan(0);
     expect(emission.panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
     expect(emission.panel.requests.map(({ authority }) => authority.role))
@@ -1947,7 +1943,7 @@ describe("orchestration CLI", () => {
         expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
         expect(parseEmissionDescriptor(task).kind).toBe("absent");
       }
-      expect(normalize(emissionRequest.task, emission.root)).toBe(normalize(extractionRequest.task, extraction.root));
+      expect(normalizeRunRoot(emissionRequest.task, emission.root)).toBe(normalizeRunRoot(extractionRequest.task, extraction.root));
     }
   }, 60_000);
 

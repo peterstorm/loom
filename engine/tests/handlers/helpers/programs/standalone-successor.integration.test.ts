@@ -12,6 +12,7 @@ import type { AgentRequestAuthority } from "../../../../src/core/orchestration-c
 import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
+import { shellQuote, withGitShim } from "../../../fixtures/git-path-shim";
 import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
@@ -188,24 +189,27 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       expect(committed.status, committed.stderr).toBe(0);
       const concurrentHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
       expect(spawnSync("git", ["update-ref", "HEAD", originalHead], { cwd: root }).status).toBe(0);
-      const shim = join(root, "git-shim"); mkdirSync(shim);
-      const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const shim = join(root, "git-shim");
       const marker = join(shim, "advanced");
-      // The engine's Git children run under the shared execution policy: the
-      // argv opens with `-c core.fsmonitor=false` and the environment is
-      // allow-listed, so the shim matches past that prefix and carries its
-      // own paths rather than reading them from the (scrubbed) environment.
-      writeFileSync(join(shim, "git"), `#!/bin/sh\nif [ "$1" = -c ] && [ "$3" = rev-parse ] && [ "$4" = HEAD ] && [ ! -e '${marker}' ]; then\n  '${realGit}' "$@"\n  status=$?\n  : > '${marker}'\n  '${realGit}' update-ref HEAD '${concurrentHead}'\n  exit $status\nfi\nexec '${realGit}' "$@"\n`);
-      chmodSync(join(shim, "git"), 0o755);
-      const previousPath = process.env.PATH;
-      Object.assign(process.env, { PATH: `${shim}:${previousPath ?? ""}` });
+      // The first policy-bound `rev-parse HEAD` answers the original HEAD, and
+      // the shim then advances HEAD once: the observation sees authority drift.
+      const advanceHeadOnce = { command: ["rev-parse", "HEAD"], script: [
+        `if [ ! -e ${shellQuote(marker)} ]; then`,
+        `  policy_git "$@"`,
+        "  status=$?",
+        `  : > ${shellQuote(marker)}`,
+        `  real_git update-ref HEAD ${shellQuote(concurrentHead)}`,
+        "  exit $status",
+        "fi",
+      ].join("\n") };
       try {
-        const drifting = await f.shell.prepareStandaloneSuccessorFacadeStart(join(root, "runs"), "head-drift", validInput);
-        expect(drifting).toEqual({ ok: false,
-          message: "successor source unavailable: successor Git/reviewer authority changed during observation" });
-        expect(existsSync(join(root, "runs/head-drift"))).toBe(false);
+        await withGitShim(shim, advanceHeadOnce, async () => {
+          const drifting = await f.shell.prepareStandaloneSuccessorFacadeStart(join(root, "runs"), "head-drift", validInput);
+          expect(drifting).toEqual({ ok: false,
+            message: "successor source unavailable: successor Git/reviewer authority changed during observation" });
+          expect(existsSync(join(root, "runs/head-drift"))).toBe(false);
+        });
       } finally {
-        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
         expect(spawnSync("git", ["update-ref", "HEAD", originalHead], { cwd: root }).status).toBe(0);
       }
 
@@ -217,24 +221,16 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
   it("refuses three empty-success Git status witnesses before registering a successor", async () => {
     const root = project(); await ownedSession(root, async () => {
       const f = await predecessor(root); const p = await policy(root, "source", "policy-zero", f.publisher);
-      const shim = join(root, "empty-status-git"); mkdirSync(shim);
-      const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
       const trace = join(root, "status-attempts");
-      // Policy-bound argv (`-c core.fsmonitor=false` first) and an allow-listed
-      // environment: the shim matches past the prefix and embeds its paths.
-      writeFileSync(join(shim, "git"), `#!/bin/sh\nif [ "$1" = -c ] && [ "$3" = status ] && [ "$4" = --porcelain=v2 ]; then\n  echo attempt >> '${trace}'\n  exit 0\nfi\nexec '${realGit}' "$@"\n`);
-      chmodSync(join(shim, "git"), 0o755);
-      const previousPath = process.env.PATH;
-      Object.assign(process.env, { PATH: `${shim}:${previousPath ?? ""}` });
-      try {
+      // Every policy-bound `status --porcelain=v2` succeeds with empty output.
+      const emptyStatus = { command: ["status", "--porcelain=v2"], script: `echo attempt >> ${shellQuote(trace)}\nexit 0` };
+      await withGitShim(join(root, "empty-status-git"), emptyStatus, async () => {
         const refused = await invoke(root, ["start", "standalone-review", ...flags(root, "empty-status")], json(input(p)));
         expect(refused.code).not.toBe(0);
         expect(refused.stderr).toContain("git status --porcelain=v2 --branch -z --untracked-files=all returned empty output after bounded retries");
         expect(readFileSync(trace, "utf8").trim().split("\n")).toHaveLength(3);
         expect(existsSync(join(root, "runs", "empty-status"))).toBe(false);
-      } finally {
-        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
-      }
+      });
     });
   });
 
