@@ -18,12 +18,12 @@ import {
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
-import { DECISION_RECORD_AGENT, lowerModelProfile, resolveAgentProfile } from "./model-profiles";
+import { DECISION_RECORD_AGENT } from "./model-profiles";
 import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import {
   AGENT_REQUIRED_SKILLS,
   canonicalRecord,
-  parseAgentRequestAuthority,
+  mintAgentRequestAuthority,
   parseArtifactDigest,
   canonicalStructuralEquals,
   parseOrchestrationRunId,
@@ -890,8 +890,8 @@ export function prepareWaveReviewBatch(
     const requestId = parseRequestId(`wave-request:${hash.slice(0, 32)}:${attempt}`);
     if (!slotId.ok) return failure(slotId.error.message);
     if (!requestId.ok) return failure(requestId.error.message);
-    const profile = resolveAgentProfile(subject.role);
-    if (!profile.ok) return failure(profile.error.message);
+    // The packet names the role's Skill for the Agent to read; the request's
+    // own profile, bindings and Skill are minted from the catalog below.
     const requiredSkill = AGENT_REQUIRED_SKILLS[subject.role];
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
     const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
@@ -951,19 +951,13 @@ export function prepareWaveReviewBatch(
       ? buildReviewerContextPacket(packetInput)
       : buildContextPacket(packetInput);
     if (!packet.ok) return failure(packet.error.message);
-    const authority = parseAgentRequestAuthority({
+    const authority = mintAgentRequestAuthority({
       runId,
       requestId: requestId.value,
       slotId: slotId.value,
       program: "wave-gate",
       role: subject.role,
       attempt,
-      modelProfile: profile.value.id,
-      harnessBinding: {
-        pi: lowerModelProfile(profile.value, "pi"),
-        claude: lowerModelProfile(profile.value, "claude-code"),
-      },
-      requiredSkill,
       contextDigest: packet.value.digest,
       outputSlot: `transcripts/${slotId.value}/attempt-${attempt}.raw`,
     });

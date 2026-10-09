@@ -11,12 +11,12 @@
 
 import type { Task, WaveGateNextAction } from "../types";
 import { sha256Bytes, sha256Hex } from "./digest";
-import { lowerModelProfile, resolveAgentProfile, type LoomAgentName } from "./model-profiles";
+import type { LoomAgentName } from "./model-profiles";
 import {
   awaitUserAction,
   canonicalRecord,
   issueAgentRosterSlot,
-  parseAgentRequestAuthority,
+  mintAgentRequestAuthority,
   parseArtifactByteLength,
   parseArtifactDigest,
   parseArtifactRef,
@@ -110,44 +110,35 @@ export type WaveRefutationAuthorityClaims = Readonly<{
   verifierSlots?: readonly AgentRosterSlot[];
 }>;
 
-/** The Refutation Panel verifier role. Its model profile and both harness
- *  bindings are resolved through the catalog, never spelled here, so a catalog
- *  change re-routes Wave verifiers exactly as it re-routes every other role. */
+/** The Refutation Panel verifier role. Its model profile, both harness
+ *  bindings and required Skill are minted from the catalog, never spelled
+ *  here, so a catalog change re-routes Wave verifiers exactly as it re-routes
+ *  every other role. */
 const WAVE_REFUTATION_VERIFIER_ROLE = "review-verifier-agent" satisfies LoomAgentName;
 
 function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResult<NonEmpty<MintedAgentRosterSlot>, WavePreparationError> {
-  const profile = resolveAgentProfile(WAVE_REFUTATION_VERIFIER_ROLE);
-  if (!profile.ok) return preparationFailure(profile.error.message);
-  const panelBindings = canonicalRecord({
-    pi: lowerModelProfile(profile.value, "pi"),
-    claude: lowerModelProfile(profile.value, "claude-code"),
-  });
   const slots: MintedAgentRosterSlot[] = [];
   const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
   for (const lens of plan.lenses) {
     const binding = deriveRefutationVerifierBinding(plan.runId, lens, findingIds);
     if (!binding.ok) return preparationFailure(binding.errors.join("; "));
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = binding.value.requestIds[attempt - 1];
-      const contextDigest = parseContextDigest(sha256Hex(JSON.stringify([binding.value.slotId, attempt])));
-      if (!contextDigest.ok) return null;
-      const authority = parseAgentRequestAuthority({
+    const mint = (attempt: 1 | 2) => {
+      const authority = mintAgentRequestAuthority({
         runId: plan.runId,
-        requestId,
+        requestId: binding.value.requestIds[attempt - 1],
         slotId: binding.value.slotId,
         program: "refutation-panel",
         role: WAVE_REFUTATION_VERIFIER_ROLE,
         attempt,
-        modelProfile: profile.value.id,
-        harnessBinding: panelBindings,
-        requiredSkill: null,
-        contextDigest: contextDigest.value,
+        contextDigest: sha256Hex(JSON.stringify([binding.value.slotId, attempt])),
         outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
       });
       return authority.ok ? authority.value : null;
-    });
-    if (attempts[0] === null || attempts[1] === null) return preparationFailure(`failed to derive verifier authority for lens ${lens}`);
-    const slot = issueAgentRosterSlot(attempts[0], attempts[1]);
+    };
+    const first = mint(1);
+    const retry = mint(2);
+    if (first === null || retry === null) return preparationFailure(`failed to derive verifier authority for lens ${lens}`);
+    const slot = issueAgentRosterSlot(first, retry);
     if (!slot.ok) return preparationFailure(`derived verifier slot for lens ${lens} is invalid`);
     slots.push(slot.value);
   }

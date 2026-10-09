@@ -66,7 +66,7 @@ import {
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId } from "../../src/core/model-profiles";
-import { value } from "../fixtures/parse-result";
+import { value as unwrap } from "../fixtures/parse-result";
 
 type Result<T, E = unknown> =
   | Readonly<{ ok: true; value: T }>
@@ -102,9 +102,9 @@ function publicationIdentity(receipt: BatchPublishedReceipt): BatchPublicationId
 }
 
 function registerPublication(rawReceipt: unknown): RegisteredBatchPublicationAuthority {
-  const receipt = value(parseBatchPublishedReceipt(rawReceipt));
+  const receipt = unwrap(parseBatchPublishedReceipt(rawReceipt));
   registeredPublicationBytes.set(registrationKey(receipt), encodeJson(receipt));
-  return value(publicationResolver(publicationIdentity(receipt)));
+  return unwrap(publicationResolver(publicationIdentity(receipt)));
 }
 
 
@@ -215,12 +215,12 @@ function parseCompleteRoster<T>(
 }
 
 const digest = (n: number): string => n.toString(16).padStart(64, "0").slice(-64);
-const runId = (suffix = "1"): OrchestrationRunId => value(parseOrchestrationRunId(`run.contract-${suffix}`));
-const requestId = (suffix: string): RequestId => value(parseRequestId(`request:${suffix}`));
-const slotId = (suffix: string): SlotId => value(parseSlotId(`slot:${suffix}`));
-const contextDigest = (n: number): ContextDigest => value(parseContextDigest(digest(n)));
-const artifactDigest = (n: number): ArtifactDigest => value(parseArtifactDigest(digest(n)));
-const effectId = (suffix: string): EffectId => value(parseEffectId(`effect:${suffix}`));
+const runId = (suffix = "1"): OrchestrationRunId => unwrap(parseOrchestrationRunId(`run.contract-${suffix}`));
+const requestId = (suffix: string): RequestId => unwrap(parseRequestId(`request:${suffix}`));
+const slotId = (suffix: string): SlotId => unwrap(parseSlotId(`slot:${suffix}`));
+const contextDigest = (n: number): ContextDigest => unwrap(parseContextDigest(digest(n)));
+const artifactDigest = (n: number): ArtifactDigest => unwrap(parseArtifactDigest(digest(n)));
+const effectId = (suffix: string): EffectId => unwrap(parseEffectId(`effect:${suffix}`));
 
 const implementationBindings = {
   pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
@@ -229,7 +229,7 @@ const implementationBindings = {
 
 /** The binding the catalog issues `profileId` under today. */
 const catalogBindings = (profileId: LlmProfileId) => {
-  const profile = value(resolveModelProfile(profileId));
+  const profile = unwrap(resolveModelProfile(profileId));
   return { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") };
 };
 
@@ -266,18 +266,18 @@ function rawAuthority(
 }
 
 function authority(slot: number, attempt: 1 | 2): AgentRequestAuthority {
-  return value(parseAgentRequestAuthority(rawAuthority(slot, attempt)));
+  return unwrap(parseAgentRequestAuthority(rawAuthority(slot, attempt)));
 }
 
 function rosterSlot(slot: number, firstOverrides = {}, retryOverrides = {}): AgentRosterSlot {
-  return value(parseAgentRosterSlot(
+  return unwrap(parseAgentRosterSlot(
     rawAuthority(slot, 1, firstOverrides),
     rawAuthority(slot, 2, retryOverrides),
   ));
 }
 
 function roster(size: number): ExactRoster {
-  return value(parseExactRoster(Array.from({ length: size }, (_, index) => rosterSlot(index + 1))));
+  return unwrap(parseExactRoster(Array.from({ length: size }, (_, index) => rosterSlot(index + 1))));
 }
 
 function contextFor(request: AgentRequestAuthority): Readonly<Record<string, unknown>> {
@@ -343,7 +343,7 @@ function rawBatchReceipt(
 }
 
 function issueRequests(requests: readonly AgentRequestAuthority[]): readonly SpawnRequest[] {
-  return value(spawnBatchAction(rawBatchReceipt(requests), requests.map(rawSpawnRequest))).requests;
+  return unwrap(spawnBatchAction(rawBatchReceipt(requests), requests.map(rawSpawnRequest))).requests;
 }
 
 function issuedRequest(request: AgentRequestAuthority): SpawnRequest {
@@ -353,7 +353,7 @@ function issuedRequest(request: AgentRequestAuthority): SpawnRequest {
 function acceptedResults(exact: ExactRoster): readonly AcceptedAgentResult<string>[] {
   const selected = exact.orderedSlots.map((slot, index) => index % 2 === 0 ? slot.attempts[0] : slot.attempts[1]);
   const issued = issueRequests(selected);
-  return issued.map((request, index) => value(acceptedAgentResult(request, `result-${index + 1}`)));
+  return issued.map((request, index) => unwrap(acceptedAgentResult(request, `result-${index + 1}`)));
 }
 
 const parseStringPayload = (raw: unknown): Result<string, Readonly<{ message: string }>> =>
@@ -382,7 +382,7 @@ function artifact(
   length = n,
   contentDigest = artifactDigest(100 + n),
 ): ArtifactRef {
-  return value(parseArtifactRef({
+  return unwrap(parseArtifactRef({
     runId: run,
     slot: path,
     digest: contentDigest,
@@ -516,7 +516,7 @@ describe("orchestration authority parsers", () => {
     expect(parseAgentRequestAuthority(drifted).ok).toBe(false);
 
     // Reading it back succeeds, and returns the recorded facts verbatim.
-    const stored = value(parseStoredAgentRequestAuthority(drifted));
+    const stored = unwrap(parseStoredAgentRequestAuthority(drifted));
     expect(stored.modelProfile).toBe("focused-review");
     expect(stored.requiredSkill).toBe("code-implementer");
     expect(stored.harnessBinding.pi.model).toBe("gpt-5.5");
@@ -525,7 +525,7 @@ describe("orchestration authority parsers", () => {
     // A stored Skill that no longer matches today's table is likewise history.
     const driftedSkill = rawAuthority(1, 1, { requiredSkill: "review-and-fix" });
     expect(parseAgentRequestAuthority(driftedSkill).ok).toBe(false);
-    expect(value(parseStoredAgentRequestAuthority(driftedSkill)).requiredSkill).toBe("review-and-fix");
+    expect(unwrap(parseStoredAgentRequestAuthority(driftedSkill)).requiredSkill).toBe("review-and-fix");
 
     // TAMPER CHECK — unchanged. The binding must still agree with the profile the
     // record itself claims, so a rewritten harnessBinding cannot slip through.
@@ -549,7 +549,7 @@ describe("orchestration authority parsers", () => {
   });
 
   it("proves model and required Skill against resolved Agent policy", () => {
-    const parsed = value(parseAgentRequestAuthority(rawAuthority(1, 1)));
+    const parsed = unwrap(parseAgentRequestAuthority(rawAuthority(1, 1)));
     expect(parsed.role).toBe("code-implementer-agent");
     expect(parsed.modelProfile).toBe("implementation");
     expect(parsed.requiredSkill).toBe("code-implementer");
@@ -616,7 +616,7 @@ describe("orchestration authority parsers", () => {
       pi: { ...implementationBindings.pi },
       claude: { ...implementationBindings.claude },
     };
-    const canonical = value(parseAgentRequestAuthority(rawAuthority(1, 1, { harnessBinding: callerBinding })));
+    const canonical = unwrap(parseAgentRequestAuthority(rawAuthority(1, 1, { harnessBinding: callerBinding })));
     expect(canonical.harnessBinding).not.toBe(callerBinding);
     expect(canonical.harnessBinding.pi).not.toBe(callerBinding.pi);
     expect(Object.keys(canonical.harnessBinding.pi)).toEqual(["harness", "provider", "model", "thinking"]);
@@ -753,7 +753,7 @@ describe("orchestration authority parsers", () => {
   it("hashes only canonical raw transcript bytes", () => {
     fc.assert(fc.property(fc.uint8Array(), (bytes) => {
       const asNumbers = [...bytes];
-      expect(value(digestRawTranscriptBytes(asNumbers))).toBe(value(digestRawTranscriptBytes([...asNumbers])));
+      expect(unwrap(digestRawTranscriptBytes(asNumbers))).toBe(unwrap(digestRawTranscriptBytes([...asNumbers])));
     }));
     for (const invalid of [[0, 256], [0, 1.5], "not bytes", [1n], cyclicObject()]) {
       expect(() => digestRawTranscriptBytes(invalid)).not.toThrow();
@@ -850,7 +850,7 @@ describe("orchestration authority parsers", () => {
           const [intent, receipt] = effectPairs()[0]!;
           result = reconcileEffectReceipt(new Proxy({ ...intent }, proxyHandler), receipt);
         } else {
-          const diagnostic = value(infrastructureRetryDiagnostic({
+          const diagnostic = unwrap(infrastructureRetryDiagnostic({
             category: "infrastructure-failure",
             runId: runId(),
             effectId: effectId("generated-hostile-boundary"),
@@ -987,7 +987,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       const retry = rawAuthority(slot, 2, drift);
       expect(parseAgentRequestAuthority(first).ok).toBe(false);
       expect(parseAgentRequestAuthority(retry).ok).toBe(false);
-      const parsed = value(parseAgentRosterSlot(first, retry));
+      const parsed = unwrap(parseAgentRosterSlot(first, retry));
       for (const [attempt, raw] of [[parsed.attempts[0], first], [parsed.attempts[1], retry]] as const) {
         expect(attempt.role).toBe(raw.role);
         expect(attempt.modelProfile).toBe(raw.modelProfile);
@@ -1091,7 +1091,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
 
   it("returns only the canonical roster slot type", () => {
     type EnrichedSlot = AgentRosterSlot & Readonly<{ reviewer: "claimed-by-caller" }>;
-    const canonical = value(parseExactRoster([rosterSlot(1)]));
+    const canonical = unwrap(parseExactRoster([rosterSlot(1)]));
     // @ts-expect-error parseExactRoster never constructs caller-selected subtype fields.
     const unsound: ExactRoster<EnrichedSlot> = canonical;
     expect("reviewer" in unsound.orderedSlots[0]).toBe(false);
@@ -1100,7 +1100,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
   it("keeps exact and complete roster proofs module-private and rejects spread or tampered exact rosters", () => {
     const exact = roster(2);
     const results = acceptedResults(exact);
-    const complete = value(parseCompleteRoster(exact, results, parseStringPayload));
+    const complete = unwrap(parseCompleteRoster(exact, results, parseStringPayload));
 
     expect(Reflect.ownKeys(exact).filter((key) => typeof key === "symbol")).toEqual([]);
     expect(Reflect.ownKeys(complete).filter((key) => typeof key === "symbol")).toEqual([]);
@@ -1147,7 +1147,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       ([size, keys]) => {
         const exact = roster(size);
         const submitted = permute(acceptedResults(exact), keys);
-        const complete = value(parseCompleteRoster(exact, submitted, parseStringPayload));
+        const complete = unwrap(parseCompleteRoster(exact, submitted, parseStringPayload));
         expect(complete.ordered.map(({ authority: request }) => request.slotId))
           .toEqual(exact.orderedSlots.map(({ slotId: id }) => id));
         expect(complete.ordered.map(({ value }) => value))
@@ -1216,8 +1216,8 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       summary: "before",
       nested: { findings: [{ message: "original" }] },
     };
-    const accepted = value(acceptedAgentResult(issuedRequest(exact.orderedSlots[0]!.attempts[0]), mutable));
-    const complete = value(parseCompleteRoster(exact, [accepted], parseObjectPayload<typeof mutable>));
+    const accepted = unwrap(acceptedAgentResult(issuedRequest(exact.orderedSlots[0]!.attempts[0]), mutable));
+    const complete = unwrap(parseCompleteRoster(exact, [accepted], parseObjectPayload<typeof mutable>));
     const proven = complete.ordered[0]!.value;
 
     expect(proven).not.toBe(mutable);
@@ -1246,7 +1246,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       const canonicalizationTrap = new Proxy({}, {
         ownKeys: () => { throw new Error(trapMessage); },
       });
-      const acceptedTrap = value(acceptedAgentResult(request, canonicalizationTrap));
+      const acceptedTrap = unwrap(acceptedAgentResult(request, canonicalizationTrap));
       const canonicalizationResult = parseCompleteRoster(
         exact,
         [acceptedTrap],
@@ -1265,7 +1265,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       const hostileCause = new Proxy({}, {
         getOwnPropertyDescriptor: () => { throw new Error(trapMessage); },
       });
-      const safeAccepted = value(acceptedAgentResult(request, { safe: true }));
+      const safeAccepted = unwrap(acceptedAgentResult(request, { safe: true }));
       const parserResult = parseCompleteRoster(exact, [safeAccepted], () => { throw hostileCause; });
       expect(parserResult.ok).toBe(false);
       if (!parserResult.ok) {
@@ -1299,11 +1299,11 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       { createdAt: new Date() },
     ];
     for (const payload of unsafe) {
-      const accepted = value(acceptedAgentResult(request, payload));
+      const accepted = unwrap(acceptedAgentResult(request, payload));
       expect(() => parseCompleteRoster(exact, [accepted], parseObjectPayload)).not.toThrow();
       expect(parseCompleteRoster(exact, [accepted], parseObjectPayload).ok).toBe(false);
     }
-    const accepted = value(acceptedAgentResult(request, { safe: true }));
+    const accepted = unwrap(acceptedAgentResult(request, { safe: true }));
     expect(() => parseCompleteRoster(exact, [accepted], () => { throw new Error("parser failure"); })).not.toThrow();
     const parserFailure = parseCompleteRoster(exact, [accepted], () => { throw new Error("parser failure"); });
     expect(parserFailure.ok).toBe(false);
@@ -1324,7 +1324,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
 
   it("never resolves accepted-result envelope fields through Object.prototype pollution", () => {
     const exact = roster(1);
-    const accepted = value(acceptedAgentResult(
+    const accepted = unwrap(acceptedAgentResult(
       issuedRequest(exact.orderedSlots[0]!.attempts[0]),
       "safe",
     ));
@@ -1339,7 +1339,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
 
   it("rejects inherited, accessor, symbol, throwing, and revoked accepted-result envelopes", () => {
     const exact = roster(1);
-    const accepted = value(acceptedAgentResult(issuedRequest(exact.orderedSlots[0]!.attempts[0]), "safe"));
+    const accepted = unwrap(acceptedAgentResult(issuedRequest(exact.orderedSlots[0]!.attempts[0]), "safe"));
     let reads = 0;
     const accessor = { ...accepted } as Record<string, unknown>;
     delete accessor.kind;
@@ -1380,8 +1380,8 @@ describe("ExactRoster and CompleteRoster conservation", () => {
   it("canonicalizes arbitrary JSON semantic payloads", () => {
     fc.assert(fc.property(fc.jsonValue(), (payload) => {
       const exact = roster(1);
-      const accepted = value(acceptedAgentResult(issuedRequest(exact.orderedSlots[0]!.attempts[0]), payload));
-      const complete = value(parseCompleteRoster(exact, [accepted], (raw) => ({ ok: true, value: raw })));
+      const accepted = unwrap(acceptedAgentResult(issuedRequest(exact.orderedSlots[0]!.attempts[0]), payload));
+      const complete = unwrap(parseCompleteRoster(exact, [accepted], (raw) => ({ ok: true, value: raw })));
       expect(complete.ordered[0]!.value).toEqual(payload);
       if (typeof payload === "object" && payload !== null) {
         expect(complete.ordered[0]!.value).not.toBe(payload);
@@ -1402,7 +1402,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
         throw new Error("oversized semantic ownKeys must not run");
       },
     });
-    const oversizedAccepted = value(acceptedAgentResult(request, hostile));
+    const oversizedAccepted = unwrap(acceptedAgentResult(request, hostile));
     const rejected = parseCompleteRoster(
       exact,
       [oversizedAccepted],
@@ -1427,8 +1427,8 @@ describe("ExactRoster and CompleteRoster conservation", () => {
     expect(ownKeyReads).toBe(0);
 
     const boundary = new Array<null>(MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH).fill(null);
-    const boundaryAccepted = value(acceptedAgentResult(request, boundary));
-    const complete = value(parseCompleteRoster(
+    const boundaryAccepted = unwrap(acceptedAgentResult(request, boundary));
+    const complete = unwrap(parseCompleteRoster(
       exact,
       [boundaryAccepted],
       (raw) => ({ ok: true, value: raw }),
@@ -1453,7 +1453,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
       expect(parseCompleteRoster(exact, valid.slice(1), parseStringPayload).ok).toBe(false);
       expect(parseCompleteRoster(exact, [valid[0]!, valid[0]!, ...valid.slice(2)], parseStringPayload).ok).toBe(false);
       const foreignIssued = issuedRequest(authority(size + 1, 1));
-      const foreign = value(acceptedAgentResult(foreignIssued, "surplus"));
+      const foreign = unwrap(acceptedAgentResult(foreignIssued, "surplus"));
       expect(parseCompleteRoster(exact, [...valid, foreign], parseStringPayload).ok).toBe(false);
       expect(parseCompleteRoster(exact, [{ nonsense: true }, ...valid.slice(1)], parseStringPayload).ok).toBe(false);
       expect(parseCompleteRoster(exact, null, parseStringPayload).ok).toBe(false);
@@ -1482,7 +1482,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
     }
 
     const issuedRetry = issuedRequest(retry);
-    const acceptedRetry = value(acceptedAgentResult(issuedRetry, "issued retry"));
+    const acceptedRetry = unwrap(acceptedAgentResult(issuedRetry, "issued retry"));
     expect(parseCompleteRoster(exact, [acceptedRetry], parseStringPayload).ok).toBe(true);
 
     const copiedProof = { authority: issuedRetry.authority, context: issuedRetry.context } as Record<PropertyKey, unknown>;
@@ -1493,7 +1493,7 @@ describe("ExactRoster and CompleteRoster conservation", () => {
 
     const initial = issuedRequest(exact.orderedSlots[0]!.attempts[0]);
     const reusedAttemptIdentity = {
-      ...value(acceptedAgentResult(initial, "reused")),
+      ...unwrap(acceptedAgentResult(initial, "reused")),
       authority: retry,
     };
     expect(parseCompleteRoster(exact, [reusedAttemptIdentity], parseStringPayload).ok).toBe(false);
@@ -1539,7 +1539,7 @@ describe("spawn and external action authority", () => {
   it("parses every batch receipt field and rejects unknown or duplicate authority", () => {
     const request = authority(1, 1);
     const valid = rawBatchReceipt([request]);
-    const canonical = value(parseBatchPublishedReceipt(valid));
+    const canonical = unwrap(parseBatchPublishedReceipt(valid));
     expect(Object.isFrozen(canonical)).toBe(true);
     expect(Object.isFrozen(canonical.requestIds)).toBe(true);
     expect(Object.isFrozen(canonical.contextDigests)).toBe(true);
@@ -1561,7 +1561,7 @@ describe("spawn and external action authority", () => {
   it("keeps structural receipt parsing separate from registered publication authority", () => {
     const forgedRequest = authority(77, 1);
     const selfConsistentRawReceipt = rawBatchReceipt([forgedRequest]);
-    const structuralReceipt = value(parseBatchPublishedReceipt(selfConsistentRawReceipt));
+    const structuralReceipt = unwrap(parseBatchPublishedReceipt(selfConsistentRawReceipt));
 
     expect(orchestrationContract).not.toHaveProperty("parseRegisteredBatchPublicationAuthority");
     expect(orchestrationContract).not.toHaveProperty("reconcileInitialBatchPublication");
@@ -1582,13 +1582,13 @@ describe("spawn and external action authority", () => {
   it("claims the prepared identity before rejecting mismatched independently returned publication bytes", () => {
     const expectedRequest = authority(80, 1);
     const forgedRequest = authority(81, 1);
-    const expectedReceipt = value(parseBatchPublishedReceipt(rawBatchReceipt([expectedRequest])));
+    const expectedReceipt = unwrap(parseBatchPublishedReceipt(rawBatchReceipt([expectedRequest])));
     const forgedReceipt = rawBatchReceiptForIdentity(
       [forgedRequest],
       expectedReceipt.effectId,
       expectedReceipt.runId,
     );
-    const intent = value(prepareIntentFromReceipt(expectedReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(expectedReceipt));
     const durableClaims: DurableInitialPublicationClaims = new Map();
     let claimCalls = 0;
     const reconciler = createInitialBatchPublicationReconciler(
@@ -1606,7 +1606,7 @@ describe("spawn and external action authority", () => {
   it("recovers when the claim commits and throws before the publication effect", () => {
     const request = authority(82, 1);
     const rawReceipt = rawBatchReceipt([request]);
-    const intent = value(prepareIntentFromReceipt(rawReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(rawReceipt));
     const durableClaims: DurableInitialPublicationClaims = new Map();
     const durableClaim = atomicInitialPublicationClaim(durableClaims);
     let crashAfterFirstCommit = true;
@@ -1634,14 +1634,14 @@ describe("spawn and external action authority", () => {
     expect(effectCalls).toBe(0);
     if (!interrupted.ok) expect(interrupted.error.message).toContain("simulated crash after durable claim commit");
 
-    const restartedIntent = value(prepareIntentFromReceipt(rawReceipt));
+    const restartedIntent = unwrap(prepareIntentFromReceipt(rawReceipt));
     const restartedReconciler = createInitialBatchPublicationReconciler(
       createInitialPublicationEffectPort(effect),
       createAtomicInitialPublicationClaimPort(atomicInitialPublicationClaim(durableClaims)),
     );
-    const recoveredIssuance = value(restartedReconciler(restartedIntent));
+    const recoveredIssuance = unwrap(restartedReconciler(restartedIntent));
     expect(effectCalls).toBe(1);
-    const recoveredAction = value(spawnBatchActionWithAuthority(
+    const recoveredAction = unwrap(spawnBatchActionWithAuthority(
       recoveredIssuance,
       [rawSpawnRequest(request)],
     ));
@@ -1655,7 +1655,7 @@ describe("spawn and external action authority", () => {
   it("reinvokes the publication effect after a matching claimed failure", () => {
     const request = authority(85, 1);
     const rawReceipt = rawBatchReceipt([request]);
-    const intent = value(prepareIntentFromReceipt(rawReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(rawReceipt));
     const durableClaims: DurableInitialPublicationClaims = new Map();
     let effectCalls = 0;
     const effect: InitialPublicationEffectExecutor = () => {
@@ -1675,10 +1675,10 @@ describe("spawn and external action authority", () => {
     expect(durableClaims.size).toBe(1);
     if (!failed.ok) expect(failed.error.message).toContain("temporary publication failure");
 
-    const recovered = value(reconciler(intent));
+    const recovered = unwrap(reconciler(intent));
     expect(effectCalls).toBe(2);
-    expect(value(spawnBatchActionWithAuthority(recovered, [rawSpawnRequest(request)])).receipt)
-      .toEqual(value(parseBatchPublishedReceipt(rawReceipt)));
+    expect(unwrap(spawnBatchActionWithAuthority(recovered, [rawSpawnRequest(request)])).receipt)
+      .toEqual(unwrap(parseBatchPublishedReceipt(rawReceipt)));
   });
 
   it("recovers after a post-effect crash without rewriting any durable publication bytes", () => {
@@ -1686,7 +1686,7 @@ describe("spawn and external action authority", () => {
     const rawReceipt = rawBatchReceipt([request]);
     const exactPublicationBytes = Object.freeze(encodeJson(rawReceipt));
     const divergentBytes = Object.freeze([...new TextEncoder().encode("divergent bytes must remain untouched")]);
-    const identity = publicationIdentity(value(parseBatchPublishedReceipt(rawReceipt)));
+    const identity = publicationIdentity(unwrap(parseBatchPublishedReceipt(rawReceipt)));
     const canonicalKey = `publication:${registrationKey(identity)}`;
     const divergentKey = `divergent:${registrationKey(identity)}`;
     const durablePublications = new Map<string, readonly number[]>([[divergentKey, divergentBytes]]);
@@ -1719,7 +1719,7 @@ describe("spawn and external action authority", () => {
       createInitialPublicationEffectPort(safeExactWriteEffect),
       createAtomicInitialPublicationClaimPort(atomicInitialPublicationClaim(durableClaims)),
     );
-    const interrupted = firstProcess(value(prepareIntentFromReceipt(rawReceipt)));
+    const interrupted = firstProcess(unwrap(prepareIntentFromReceipt(rawReceipt)));
     expect(interrupted.ok).toBe(false);
     if (!interrupted.ok) expect(interrupted.error.message).toContain("simulated crash after exact publication write");
     expect(effectCalls).toBe(1);
@@ -1731,8 +1731,8 @@ describe("spawn and external action authority", () => {
       createInitialPublicationEffectPort(safeExactWriteEffect),
       createAtomicInitialPublicationClaimPort(atomicInitialPublicationClaim(durableClaims)),
     );
-    const reconstructedAuthority = value(restartedProcess(value(prepareIntentFromReceipt(rawReceipt))));
-    const reconstructedAction = value(spawnBatchActionWithAuthority(
+    const reconstructedAuthority = unwrap(restartedProcess(unwrap(prepareIntentFromReceipt(rawReceipt))));
+    const reconstructedAction = unwrap(spawnBatchActionWithAuthority(
       reconstructedAuthority,
       [rawSpawnRequest(request)],
     ));
@@ -1745,8 +1745,8 @@ describe("spawn and external action authority", () => {
       createInitialPublicationEffectPort(safeExactWriteEffect),
       createAtomicInitialPublicationClaimPort(atomicInitialPublicationClaim(durableClaims)),
     );
-    const replayAuthority = value(secondRestart(value(prepareIntentFromReceipt(rawReceipt))));
-    const replayAction = value(spawnBatchActionWithAuthority(replayAuthority, [rawSpawnRequest(request)]));
+    const replayAuthority = unwrap(secondRestart(unwrap(prepareIntentFromReceipt(rawReceipt))));
+    const replayAction = unwrap(spawnBatchActionWithAuthority(replayAuthority, [rawSpawnRequest(request)]));
     expect(replayAction).toEqual(reconstructedAction);
     expect(JSON.stringify(replayAction)).toBe(JSON.stringify(reconstructedAction));
     expect(durablePublications).toEqual(bytesAfterCrash);
@@ -1755,7 +1755,7 @@ describe("spawn and external action authority", () => {
   it("preserves bounded hostile causes and exact fields from all malformed failure envelopes", () => {
     const request = authority(92, 1);
     const rawReceipt = rawBatchReceipt([request]);
-    const intent = value(prepareIntentFromReceipt(rawReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(rawReceipt));
 
     const effectFailure = createInitialBatchPublicationReconciler(
       createInitialPublicationEffectPort(() =>
@@ -1774,7 +1774,7 @@ describe("spawn and external action authority", () => {
     const loaderResolver = createPublicationAuthorityResolver(() =>
       hostileMalformedFailureEnvelope("loader-envelope-cause") as ReturnType<TrustedPublicationRegistrationLoader>
     );
-    const loaderFailure = loaderResolver(publicationIdentity(value(parseBatchPublishedReceipt(rawReceipt))));
+    const loaderFailure = loaderResolver(publicationIdentity(unwrap(parseBatchPublishedReceipt(rawReceipt))));
 
     const persisted = JSON.parse(JSON.stringify(issuedRequest(request))) as unknown;
     const malformedResolver: PublicationAuthorityResolver = () =>
@@ -1802,19 +1802,19 @@ describe("spawn and external action authority", () => {
   it("returns a structurally stable action for every matching durable replay", () => {
     const requests = [authority(86, 1), authority(87, 1)];
     const rawReceipt = rawBatchReceipt(requests);
-    const intent = value(prepareIntentFromReceipt(rawReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(rawReceipt));
     const durableClaims: DurableInitialPublicationClaims = new Map();
     const reconciler = createInitialBatchPublicationReconciler(
       createInitialPublicationEffectPort(publicationEffect(rawReceipt)),
       createAtomicInitialPublicationClaimPort(atomicInitialPublicationClaim(durableClaims)),
     );
 
-    const firstIssuance = value(reconciler(intent));
-    const firstAction = value(spawnBatchActionWithAuthority(firstIssuance, requests.map(rawSpawnRequest)));
+    const firstIssuance = unwrap(reconciler(intent));
+    const firstAction = unwrap(spawnBatchActionWithAuthority(firstIssuance, requests.map(rawSpawnRequest)));
     expect(spawnBatchActionWithAuthority(firstIssuance, requests.map(rawSpawnRequest)).ok).toBe(false);
 
-    const replayIssuance = value(reconciler(intent));
-    const replayAction = value(spawnBatchActionWithAuthority(replayIssuance, requests.map(rawSpawnRequest)));
+    const replayIssuance = unwrap(reconciler(intent));
+    const replayAction = unwrap(spawnBatchActionWithAuthority(replayIssuance, requests.map(rawSpawnRequest)));
     expect(replayAction).toEqual(firstAction);
     expect(JSON.stringify(replayAction)).toBe(JSON.stringify(firstAction));
     expect(replayAction.requests.map(({ authority: issued }) => issued.requestId))
@@ -1865,9 +1865,9 @@ describe("spawn and external action authority", () => {
           return { ok: true, value: bytes };
         }),
         createAtomicInitialPublicationClaimPort(claim),
-      )(value(prepareIntentFromReceipt(contenders[index].receipt)));
+      )(unwrap(prepareIntentFromReceipt(contenders[index].receipt)));
 
-      const winner = value(reconcile(order[0]));
+      const winner = unwrap(reconcile(order[0]));
       expect(reconcile(order[0]).ok).toBe(true);
       const storeBeforeConflict = new Map(publicationStore);
       const conflict = reconcile(order[1]);
@@ -1882,7 +1882,7 @@ describe("spawn and external action authority", () => {
       expect(durableClaims.size).toBe(1);
       expect(publicationStore.size).toBe(1);
       const stored = [...durableClaims.values()][0]!;
-      const winnerAction = value(spawnBatchActionWithAuthority(
+      const winnerAction = unwrap(spawnBatchActionWithAuthority(
         winner,
         [rawSpawnRequest(contenders[order[0]].request)],
       ));
@@ -1894,7 +1894,7 @@ describe("spawn and external action authority", () => {
   it("fails closed when the atomic claim returns a foreign key or identity", () => {
     const request = authority(90, 1);
     const rawReceipt = rawBatchReceipt([request]);
-    const intent = value(prepareIntentFromReceipt(rawReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(rawReceipt));
     const foreignIdentityClaim: AtomicInitialPublicationClaim = (claimRequest) => ({
       ok: true,
       value: {
@@ -1930,18 +1930,18 @@ describe("spawn and external action authority", () => {
     const rawReceipt = rawBatchReceipt([request]);
     const durableClaims: DurableInitialPublicationClaims = new Map();
 
-    const issueAuthority = value(reconcileTrustedInitialPublication(rawReceipt, undefined, durableClaims));
+    const issueAuthority = unwrap(reconcileTrustedInitialPublication(rawReceipt, undefined, durableClaims));
     expect(issueInitialSpawnRequests(issueAuthority, [null]).ok).toBe(false);
     expect(issueInitialSpawnRequests(issueAuthority, [rawSpawnRequest(request)]).ok).toBe(true);
     expect(issueInitialSpawnRequests(issueAuthority, [rawSpawnRequest(request)]).ok).toBe(false);
 
-    const actionAuthority = value(reconcileTrustedInitialPublication(rawReceipt, undefined, durableClaims));
+    const actionAuthority = unwrap(reconcileTrustedInitialPublication(rawReceipt, undefined, durableClaims));
     expect(spawnBatchActionWithAuthority(actionAuthority, [{ authority: request }]).ok).toBe(false);
-    const action = value(spawnBatchActionWithAuthority(actionAuthority, [rawSpawnRequest(request)]));
+    const action = unwrap(spawnBatchActionWithAuthority(actionAuthority, [rawSpawnRequest(request)]));
     expect(spawnBatchActionWithAuthority(actionAuthority, [rawSpawnRequest(request)]).ok).toBe(false);
 
-    const replayAuthority = value(reconcileTrustedInitialPublication(rawReceipt, undefined, durableClaims));
-    const replayAction = value(spawnBatchActionWithAuthority(replayAuthority, [rawSpawnRequest(request)]));
+    const replayAuthority = unwrap(reconcileTrustedInitialPublication(rawReceipt, undefined, durableClaims));
+    const replayAction = unwrap(spawnBatchActionWithAuthority(replayAuthority, [rawSpawnRequest(request)]));
     expect(replayAction).toEqual(action);
     expect(replayAction.idempotencyKey).toEqual(action.idempotencyKey);
   });
@@ -1949,7 +1949,7 @@ describe("spawn and external action authority", () => {
   it("does not accept restart resolver authority as the initial publication effect port", () => {
     const request = authority(83, 1);
     const rawReceipt = rawBatchReceipt([request]);
-    const intent = value(prepareIntentFromReceipt(rawReceipt));
+    const intent = unwrap(prepareIntentFromReceipt(rawReceipt));
     const claimPort = createAtomicInitialPublicationClaimPort(atomicInitialPublicationClaim(new Map()));
     if (false) {
       // @ts-expect-error Restart resolvers are nominally incompatible with initial publication effect ports.
@@ -1965,7 +1965,7 @@ describe("spawn and external action authority", () => {
   it("separates single-use initial issuance from restart registration authority", () => {
     const request = authority(78, 1);
     const rawReceipt = rawBatchReceipt([request]);
-    const initial = value(reconcileTrustedInitialPublication(rawReceipt));
+    const initial = unwrap(reconcileTrustedInitialPublication(rawReceipt));
     const registered = registerPublication(rawReceipt);
 
     expect(initial.kind).toBe("initial-publication-issuance-authority");
@@ -1981,12 +1981,12 @@ describe("spawn and external action authority", () => {
       [rawSpawnRequest(request)],
     ).ok).toBe(false);
 
-    const issued = value(issueInitialSpawnRequests(initial, [rawSpawnRequest(request)]));
+    const issued = unwrap(issueInitialSpawnRequests(initial, [rawSpawnRequest(request)]));
     expect(issued).toHaveLength(1);
     expect(issueInitialSpawnRequests(initial, [rawSpawnRequest(request)]).ok).toBe(false);
     expect(spawnBatchActionWithAuthority(initial, [rawSpawnRequest(request)]).ok).toBe(false);
 
-    const copiedInitial = { ...value(reconcileTrustedInitialPublication(rawReceipt)) };
+    const copiedInitial = { ...unwrap(reconcileTrustedInitialPublication(rawReceipt)) };
     if (false) {
       // @ts-expect-error Object spread cannot retain module-private initial issuance membership.
       issueInitialSpawnRequests(copiedInitial, [rawSpawnRequest(request)]);
@@ -2043,7 +2043,7 @@ describe("spawn and external action authority", () => {
       ([size, duplicateIndex]) => {
         const requests = Array.from({ length: size }, (_, index) => authority(index + 1, 1));
         const first = requests[0]!;
-        requests[duplicateIndex] = value(parseAgentRequestAuthority(rawAuthority(duplicateIndex + 1, 1, {
+        requests[duplicateIndex] = unwrap(parseAgentRequestAuthority(rawAuthority(duplicateIndex + 1, 1, {
           outputSlot: first.outputSlot.path,
         })));
         const duplicate = requests[duplicateIndex]!;
@@ -2111,8 +2111,8 @@ describe("spawn and external action authority", () => {
     expect(parseBatchPublishedReceipt(sameBatch).ok).toBe(false);
     expect(spawnBatchAction(sameBatch, pair.map(rawSpawnRequest)).ok).toBe(false);
 
-    const firstAction = value(spawnBatchAction(rawBatchReceipt([pair[0]]), [rawSpawnRequest(pair[0])]));
-    const retryAction = value(spawnBatchAction(rawBatchReceipt([pair[1]]), [rawSpawnRequest(pair[1])]));
+    const firstAction = unwrap(spawnBatchAction(rawBatchReceipt([pair[0]]), [rawSpawnRequest(pair[0])]));
+    const retryAction = unwrap(spawnBatchAction(rawBatchReceipt([pair[1]]), [rawSpawnRequest(pair[1])]));
     expect(firstAction.requests).toHaveLength(1);
     expect(firstAction.requests[0].authority.attempt).toBe(1);
     expect(retryAction.requests).toHaveLength(1);
@@ -2135,7 +2135,7 @@ describe("spawn and external action authority", () => {
       issuedRequests: requests.map(rawSpawnRequest),
       publicationDigest: canonicalPublicationDigest(requests, mutableEffectId, mutableRunId),
     };
-    const action = value(spawnBatchAction(mutable, requests.map(rawSpawnRequest)));
+    const action = unwrap(spawnBatchAction(mutable, requests.map(rawSpawnRequest)));
     expect(action.receipt).not.toBe(mutable);
     expect(action.receipt.requestIds).not.toBe(requestIds);
     expect(action.receipt.contextDigests).not.toBe(contextDigests);
@@ -2154,7 +2154,7 @@ describe("spawn and external action authority", () => {
   it("rehydrates a legitimately registered batch after JSON round-trip with identity-only proofs", () => {
     const exact = roster(3);
     const selected = exact.orderedSlots.map((slot) => slot.attempts[0]);
-    const original = value(spawnBatchAction(
+    const original = unwrap(spawnBatchAction(
       rawBatchReceipt(selected),
       selected.map(rawSpawnRequest),
     ));
@@ -2184,14 +2184,14 @@ describe("spawn and external action authority", () => {
     }
 
     // JSON parsing creates fresh identities; only the independent registration restores proof.
-    const rehydrated = value(rehydrateIssuedSpawnRequests(publicationResolver, persistedRequests));
+    const rehydrated = unwrap(rehydrateIssuedSpawnRequests(publicationResolver, persistedRequests));
     expect(rehydrated).toHaveLength(3);
     for (let index = 0; index < rehydrated.length; index++) {
       const request = rehydrated[index]!;
-      expect(value(parseIssuedSpawnRequest(
+      expect(unwrap(parseIssuedSpawnRequest(
         JSON.parse(JSON.stringify(request)) as unknown,
       ))).toEqual(request);
-      expect(value(acceptedAgentResult(request, `replayed-${index + 1}`)).authority)
+      expect(unwrap(acceptedAgentResult(request, `replayed-${index + 1}`)).authority)
         .toEqual(selected[index]);
     }
 
@@ -2202,9 +2202,9 @@ describe("spawn and external action authority", () => {
     expect(acceptedAgentResult(missingProof as unknown as SpawnRequest, "missing proof").ok).toBe(false);
 
     const serializedAccepted = rehydrated.map((request, index) =>
-      JSON.parse(JSON.stringify(value(acceptedAgentResult(request, `replayed-${index + 1}`)))) as unknown
+      JSON.parse(JSON.stringify(unwrap(acceptedAgentResult(request, `replayed-${index + 1}`)))) as unknown
     );
-    const complete = value(parseCompleteRoster(exact, serializedAccepted, parseStringPayload));
+    const complete = unwrap(parseCompleteRoster(exact, serializedAccepted, parseStringPayload));
     expect(complete.ordered.map(({ authority: request }) => request.requestId))
       .toEqual(selected.map(({ requestId: id }) => id));
     expect(complete.ordered.map(({ value }) => value))
@@ -2219,19 +2219,19 @@ describe("spawn and external action authority", () => {
     const sharedRun = exact.runId;
     const firstReceipt = rawBatchReceiptForIdentity([firstRequest], sharedEffect, sharedRun);
     const secondReceipt = rawBatchReceiptForIdentity([secondRequest], sharedEffect, sharedRun);
-    const firstAction = value(spawnBatchActionWithAuthority(
-      value(reconcileTrustedInitialPublication(firstReceipt)),
+    const firstAction = unwrap(spawnBatchActionWithAuthority(
+      unwrap(reconcileTrustedInitialPublication(firstReceipt)),
       [rawSpawnRequest(firstRequest)],
     ));
-    const secondAction = value(spawnBatchActionWithAuthority(
-      value(reconcileTrustedInitialPublication(secondReceipt)),
+    const secondAction = unwrap(spawnBatchActionWithAuthority(
+      unwrap(reconcileTrustedInitialPublication(secondReceipt)),
       [rawSpawnRequest(secondRequest)],
     ));
     expect(firstAction.receipt.publicationDigest).not.toBe(secondAction.receipt.publicationDigest);
 
     const results = [
-      JSON.parse(JSON.stringify(value(acceptedAgentResult(firstAction.requests[0], "first")))) as unknown,
-      JSON.parse(JSON.stringify(value(acceptedAgentResult(secondAction.requests[0], "second")))) as unknown,
+      JSON.parse(JSON.stringify(unwrap(acceptedAgentResult(firstAction.requests[0], "first")))) as unknown,
+      JSON.parse(JSON.stringify(unwrap(acceptedAgentResult(secondAction.requests[0], "second")))) as unknown,
     ];
     let calls = 0;
     const statefulLoader: TrustedPublicationRegistrationLoader = () => {
@@ -2264,9 +2264,9 @@ describe("spawn and external action authority", () => {
   it("retains bounded resolver and issued-request causes in unissued-result violations", () => {
     const exact = roster(1);
     const request = exact.orderedSlots[0]!.attempts[0];
-    const action = value(spawnBatchAction(rawBatchReceipt([request]), [rawSpawnRequest(request)]));
+    const action = unwrap(spawnBatchAction(rawBatchReceipt([request]), [rawSpawnRequest(request)]));
     const accepted = JSON.parse(JSON.stringify(
-      value(acceptedAgentResult(action.requests[0], "payload")),
+      unwrap(acceptedAgentResult(action.requests[0], "payload")),
     )) as Record<string, unknown>;
     const hostile = "resolver-cause:" + "x".repeat(MAX_DIAGNOSTIC_MESSAGE_LENGTH * 2);
     const unavailable: PublicationAuthorityResolver = () => ({
@@ -2311,7 +2311,7 @@ describe("spawn and external action authority", () => {
 
   it("uses one frozen trusted-loader snapshot for every request in a rehydrated batch", () => {
     const requests = [authority(31, 1), authority(32, 1), authority(33, 1)];
-    const action = value(spawnBatchAction(rawBatchReceipt(requests), requests.map(rawSpawnRequest)));
+    const action = unwrap(spawnBatchAction(rawBatchReceipt(requests), requests.map(rawSpawnRequest)));
     const persisted = JSON.parse(JSON.stringify(action.requests)) as unknown;
     const validBytes = encodeJson(action.receipt);
     const divergent = JSON.parse(JSON.stringify(action.receipt)) as Record<string, unknown>;
@@ -2339,7 +2339,7 @@ describe("spawn and external action authority", () => {
 
   it("fails closed for missing, foreign, divergent, and stale trusted registrations", () => {
     const requests = [authority(41, 1), authority(42, 1)];
-    const action = value(spawnBatchAction(rawBatchReceipt(requests), requests.map(rawSpawnRequest)));
+    const action = unwrap(spawnBatchAction(rawBatchReceipt(requests), requests.map(rawSpawnRequest)));
     const persisted = JSON.parse(JSON.stringify(action.requests)) as Array<Record<string, unknown>>;
     const identity = publicationIdentity(action.receipt);
 
@@ -2350,7 +2350,7 @@ describe("spawn and external action authority", () => {
     expect(rehydrateIssuedSpawnRequests(missing, persisted).ok).toBe(false);
 
     const foreignRequest = authority(43, 1);
-    const foreignReceipt = value(parseBatchPublishedReceipt(rawBatchReceipt([foreignRequest])));
+    const foreignReceipt = unwrap(parseBatchPublishedReceipt(rawBatchReceipt([foreignRequest])));
     const foreign = createPublicationAuthorityResolver(() => ({ ok: true, value: encodeJson(foreignReceipt) }));
     expect(rehydrateIssuedSpawnRequests(foreign, persisted).ok).toBe(false);
 
@@ -2382,7 +2382,7 @@ describe("spawn and external action authority", () => {
   it("fails closed without registration and for forged proof, resolver, order, surplus, and every authority drift", () => {
     const authorities = [authority(1, 1), authority(2, 1)];
     const receipt = rawBatchReceipt(authorities);
-    const action = value(spawnBatchAction(receipt, authorities.map(rawSpawnRequest)));
+    const action = unwrap(spawnBatchAction(receipt, authorities.map(rawSpawnRequest)));
     const persistedRequests = JSON.parse(JSON.stringify(action.requests)) as Array<Record<string, unknown>>;
     const roundTrip = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
     const missingResolver: PublicationAuthorityResolver = () => ({
@@ -2420,7 +2420,7 @@ describe("spawn and external action authority", () => {
     const foreignResolver: PublicationAuthorityResolver = () => ({ ok: true, value: foreignRegistration });
     expect(rehydrateIssuedSpawnRequests(foreignResolver, persistedRequests).ok).toBe(false);
 
-    const changedRegisteredRequest = value(parseAgentRequestAuthority(rawAuthority(1, 1, {
+    const changedRegisteredRequest = unwrap(parseAgentRequestAuthority(rawAuthority(1, 1, {
       requestId: requestId("resolver-forgery"),
     })));
     const resolverForgeryReceipt = {
@@ -2478,7 +2478,7 @@ describe("spawn and external action authority", () => {
       context: { digest: context, slot: `contexts/${context}.json` },
       advisories: [artifact(run, 1)],
     };
-    const action = value(awaitUserAction(raw));
+    const action = unwrap(awaitUserAction(raw));
     expect(action.kind).toBe("await-user");
     expect(Object.isFrozen(action)).toBe(true);
     expect(Object.isFrozen(action.request)).toBe(true);
@@ -2501,17 +2501,17 @@ describe("spawn and external action authority", () => {
 
   it("exposes only the four external action tags", () => {
     const run = runId();
-    const diagnostic = value(terminalBlockedDiagnostic({ category: "invalid-authority", runId: run, message: "invalid" }));
-    const done = value(doneAction(run, artifact(run, 1)));
-    const awaitUser = value(awaitUserAction({
+    const diagnostic = unwrap(terminalBlockedDiagnostic({ category: "invalid-authority", runId: run, message: "invalid" }));
+    const done = unwrap(doneAction(run, artifact(run, 1)));
+    const awaitUser = unwrap(awaitUserAction({
       kind: "advisory-triage",
       requestId: requestId("decision"),
       runId: run,
       context: { digest: contextDigest(700), slot: `contexts/${contextDigest(700)}.json` },
       advisories: [artifact(run, 2)],
     }));
-    const spawn = value(spawnBatchAction(rawBatchReceipt([authority(1, 1)]), [rawSpawnRequest(authority(1, 1))]));
-    expect(new Set([value(blockedAction(diagnostic)).kind, done.kind, awaitUser.kind, spawn.kind]))
+    const spawn = unwrap(spawnBatchAction(rawBatchReceipt([authority(1, 1)]), [rawSpawnRequest(authority(1, 1))]));
+    expect(new Set([unwrap(blockedAction(diagnostic)).kind, done.kind, awaitUser.kind, spawn.kind]))
       .toEqual(new Set(["spawn-batch", "await-user", "blocked", "done"]));
   });
 });
@@ -2540,7 +2540,7 @@ function effectPairs(): readonly (readonly [EffectIntent, EffectReceipt])[] {
         effectId: effectId("capture"),
         runId: run,
         requestId: request.requestId,
-        artifact: artifact(run, 1, request.outputSlot.path, 3, value(digestRawTranscriptBytes([0, 1, 255]))),
+        artifact: artifact(run, 1, request.outputSlot.path, 3, unwrap(digestRawTranscriptBytes([0, 1, 255]))),
       },
     ],
     [
@@ -2569,7 +2569,7 @@ describe("effect receipt reconciliation", () => {
     const pairs = effectPairs();
     for (let index = 0; index < pairs.length; index++) {
       const [intent, receipt] = pairs[index]!;
-      const reconciled = value(reconcileEffectReceipt(intent, receipt));
+      const reconciled = unwrap(reconcileEffectReceipt(intent, receipt));
       expect(Object.isFrozen(reconciled)).toBe(true);
       const wrongReceipt = pairs[(index + 1) % pairs.length]![1];
       expectReceiptField(intent, wrongReceipt, "receipt.effectId");
@@ -2850,7 +2850,7 @@ describe("effect receipt reconciliation", () => {
     const [intent, receipt] = effectPairs()[0]!;
     const mutableArtifacts = [...(receipt as Extract<EffectReceipt, { kind: "artifact-set-published" }>).artifacts];
     const mutable = { ...receipt, artifacts: mutableArtifacts };
-    const canonical = value(reconcileEffectReceipt(intent, mutable));
+    const canonical = unwrap(reconcileEffectReceipt(intent, mutable));
     expect(canonical).not.toBe(mutable);
     if (canonical.kind === "artifact-set-published") {
       expect(canonical.artifacts).not.toBe(mutableArtifacts);
@@ -2867,23 +2867,23 @@ describe("canonical null-prototype records", () => {
     withObjectPrototypePollution({ pollutedAuthority: "inherited", kind: "forged-kind" }, () => {
       const exact = roster(1);
       const requestAuthority = exact.orderedSlots[0]!.attempts[0];
-      const action = value(spawnBatchAction(
+      const action = unwrap(spawnBatchAction(
         rawBatchReceipt([requestAuthority]),
         [rawSpawnRequest(requestAuthority)],
       ));
       const registeredPublication = registerPublication(action.receipt);
-      const accepted = value(acceptedAgentResult(action.requests[0], "safe"));
-      const complete = value(parseCompleteRoster(exact, [accepted], parseStringPayload));
-      const diagnostic = value(infrastructureRetryDiagnostic({
+      const accepted = unwrap(acceptedAgentResult(action.requests[0], "safe"));
+      const complete = unwrap(parseCompleteRoster(exact, [accepted], parseStringPayload));
+      const diagnostic = unwrap(infrastructureRetryDiagnostic({
         category: "infrastructure-failure",
         runId: runId(),
         effectId: effectId("null-prototype"),
         message: "publication failed",
       }));
-      const blocked = value(blockedAction(diagnostic));
-      const done = value(doneAction(runId(), artifact(runId(), 1)));
+      const blocked = unwrap(blockedAction(diagnostic));
+      const done = unwrap(doneAction(runId(), artifact(runId(), 1)));
       const [intent, rawReceipt] = effectPairs()[0]!;
-      const effectReceipt = value(reconcileEffectReceipt(intent, rawReceipt));
+      const effectReceipt = unwrap(reconcileEffectReceipt(intent, rawReceipt));
 
       const records: readonly object[] = [
         requestAuthority,
@@ -2941,13 +2941,13 @@ describe("retry diagnostics", () => {
   it("distinguishes semantic retry consumption from infrastructure retry", () => {
     const run = runId();
     const slot = rosterSlot(1);
-    const semantic = value(semanticRetryDiagnostic({
+    const semantic = unwrap(semanticRetryDiagnostic({
       category: "malformed-result",
       failedRequest: slot.attempts[0],
       retryRequest: slot.attempts[1],
       message: "result is malformed",
     }));
-    const infrastructure = value(infrastructureRetryDiagnostic({
+    const infrastructure = unwrap(infrastructureRetryDiagnostic({
       category: "partial-publication",
       runId: run,
       effectId: effectId("publish"),
@@ -2972,7 +2972,7 @@ describe("retry diagnostics", () => {
   it("derives semantic identities only from the parsed canonical attempt pair", () => {
     const failed = { ...rawAuthority(1, 1) };
     const retry = { ...rawAuthority(1, 2) };
-    const diagnostic = value(semanticRetryDiagnostic({
+    const diagnostic = unwrap(semanticRetryDiagnostic({
       category: "missing-result",
       failedRequest: failed as unknown as AgentRequestAuthority<1>,
       retryRequest: retry as unknown as AgentRequestAuthority<2>,
@@ -3087,7 +3087,7 @@ describe("retry diagnostics", () => {
   it("requires a distinct attempt-2 recovery request and exact blocked slot authority", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 100 }), (slotNumber) => {
       const slot = rosterSlot(slotNumber);
-      const canonical = value(semanticRetryDiagnostic({
+      const canonical = unwrap(semanticRetryDiagnostic({
         category: "missing-result",
         failedRequest: slot.attempts[0],
         retryRequest: slot.attempts[1],
@@ -3118,7 +3118,7 @@ describe("retry diagnostics", () => {
       if (!wrongSlot.ok) expect(wrongSlot.error.field).toBe("recovery.slotId");
 
       const serialized = JSON.parse(JSON.stringify(canonical)) as unknown;
-      const replayed = value(blockedAction(serialized));
+      const replayed = unwrap(blockedAction(serialized));
       expect(replayed.diagnostic).toEqual(canonical);
       expect(Object.isFrozen(replayed.diagnostic)).toBe(true);
       if (replayed.diagnostic.kind === "request-blocked") {
@@ -3126,7 +3126,7 @@ describe("retry diagnostics", () => {
         expect(Object.isFrozen(replayed.diagnostic.attemptPair)).toBe(true);
       }
 
-      const reparsed = value(parseBlockedDiagnostic(canonical));
+      const reparsed = unwrap(parseBlockedDiagnostic(canonical));
       expect(reparsed.kind).toBe("request-blocked");
       if (reparsed.kind === "request-blocked") {
         expect(reparsed.requestId).toBe(slot.attempts[0].requestId);
@@ -3139,7 +3139,7 @@ describe("retry diagnostics", () => {
 
   it("terminal diagnostics do not resolve request authority through Object.prototype pollution", () => {
     const blockedRequestId = requestId("duplicate");
-    const canonical = value(terminalBlockedDiagnostic({
+    const canonical = unwrap(terminalBlockedDiagnostic({
       category: "duplicate-result",
       runId: runId(),
       requestId: blockedRequestId,
@@ -3157,7 +3157,7 @@ describe("retry diagnostics", () => {
 
   it("terminally blocks each exhausted attempt-2 result category with canonical attribution", () => {
     const attemptPair = rosterSlot(3);
-    const initialRetry = value(semanticRetryDiagnostic({
+    const initialRetry = unwrap(semanticRetryDiagnostic({
       category: "missing-result",
       failedRequest: attemptPair.attempts[0],
       retryRequest: attemptPair.attempts[1],
@@ -3167,7 +3167,7 @@ describe("retry diagnostics", () => {
     expect(initialRetry.recovery.requestId).toBe(failed.requestId);
     expect(initialRetry.recovery.slotId).toBe(failed.slotId);
     for (const category of ["missing-result", "malformed-result", "result-binding-mismatch"] as const) {
-      const diagnostic = value(terminalBlockedDiagnostic({
+      const diagnostic = unwrap(terminalBlockedDiagnostic({
         category,
         failedRequest: failed as unknown as AgentRequestAuthority<2>,
         message: `attempt 2 cannot recover from ${category}`,
@@ -3183,7 +3183,7 @@ describe("retry diagnostics", () => {
         retry: { kind: "not-retryable", eligible: false },
         recovery: { kind: "inspect-run-and-stop" },
       });
-      const action = value(blockedAction(diagnostic));
+      const action = unwrap(blockedAction(diagnostic));
       expect(action.runId).toBe(runId());
       expect(action.diagnostic).toEqual(diagnostic);
     }
@@ -3203,7 +3203,7 @@ describe("retry diagnostics", () => {
     // The failed request was issued earlier; today's catalog no longer mints it.
     const historical = rawAuthority(3, 2, { modelProfile: "focused-review", harnessBinding: retiredFocusedBindings });
     expect(parseAgentRequestAuthority(historical).ok).toBe(false);
-    expect(value(terminalBlockedDiagnostic({
+    expect(unwrap(terminalBlockedDiagnostic({
       category: "missing-result",
       failedRequest: historical as unknown as AgentRequestAuthority<2>,
       message: "attempt 2 result was not captured",
@@ -3244,19 +3244,19 @@ describe("retry diagnostics", () => {
 
     const pair = rosterSlot(1);
     const messages = [
-      value(semanticRetryDiagnostic({
+      unwrap(semanticRetryDiagnostic({
         category: "malformed-result",
         failedRequest: pair.attempts[0],
         retryRequest: pair.attempts[1],
         message: hostile,
       })).message,
-      value(infrastructureRetryDiagnostic({
+      unwrap(infrastructureRetryDiagnostic({
         category: "infrastructure-failure",
         runId: runId(),
         effectId: effectId("bounded-message"),
         message: hostile,
       })).message,
-      value(terminalBlockedDiagnostic({
+      unwrap(terminalBlockedDiagnostic({
         category: "invalid-authority",
         runId: runId(),
         message: hostile,
@@ -3298,7 +3298,7 @@ describe("retry diagnostics", () => {
       effectId: effectId("infra"),
       message: "filesystem operation failed",
     } as const;
-    const infrastructure = value(infrastructureRetryDiagnostic(infrastructureInput));
+    const infrastructure = unwrap(infrastructureRetryDiagnostic(infrastructureInput));
     expect(infrastructure).not.toBe(infrastructureInput);
     expect(Object.keys(infrastructure)).toEqual([
       "kind", "category", "runId", "effectId", "message", "retry", "recovery",
@@ -3312,7 +3312,7 @@ describe("retry diagnostics", () => {
       slotId: slotId("1"),
       message: "a second result targeted an accepted slot",
     } as const;
-    const terminal = value(terminalBlockedDiagnostic(terminalInput));
+    const terminal = unwrap(terminalBlockedDiagnostic(terminalInput));
     expect(terminal).not.toBe(terminalInput);
     expect(Object.keys(terminal)).toEqual([
       "kind", "category", "runId", "requestId", "slotId", "message", "retry", "recovery",
@@ -3328,7 +3328,7 @@ describe("retry diagnostics", () => {
   });
 
   it("parses and deep-freezes blocked diagnostics without retaining nested recovery data", () => {
-    const canonical = value(infrastructureRetryDiagnostic({
+    const canonical = unwrap(infrastructureRetryDiagnostic({
       category: "partial-publication",
       runId: runId(),
       effectId: effectId("publish"),
@@ -3337,7 +3337,7 @@ describe("retry diagnostics", () => {
     const retry = { ...canonical.retry };
     const recovery = { ...canonical.recovery };
     const callerOwned = { ...canonical, retry, recovery };
-    const action = value(blockedAction(callerOwned));
+    const action = unwrap(blockedAction(callerOwned));
 
     expect(action.diagnostic).not.toBe(callerOwned);
     expect(action.diagnostic.retry).not.toBe(retry);
@@ -3355,7 +3355,7 @@ describe("retry diagnostics", () => {
   });
 
   it("rejects a nested blocked-action hidden field independently of every identity mismatch", () => {
-    const canonical = value(infrastructureRetryDiagnostic({
+    const canonical = unwrap(infrastructureRetryDiagnostic({
       category: "partial-publication",
       runId: runId(),
       effectId: effectId("hidden-field"),
@@ -3396,7 +3396,7 @@ describe("terminal blocked diagnostics cover every declared category", () => {
 
   it.each(RUN_SCOPED)("constructs the run-scoped category %s from a runId alone", (category) => {
     const run = runId();
-    const diagnostic = value(terminalBlockedDiagnostic({ category, runId: run, message: `${category} occurred` }));
+    const diagnostic = unwrap(terminalBlockedDiagnostic({ category, runId: run, message: `${category} occurred` }));
     expect(diagnostic).toMatchObject({
       kind: "terminal-blocked",
       category,
@@ -3416,7 +3416,7 @@ describe("terminal blocked diagnostics cover every declared category", () => {
 
   it.each(REQUEST_SCOPED)("constructs the request-scoped category %s with its request identity", (category) => {
     const run = runId();
-    const diagnostic = value(terminalBlockedDiagnostic({
+    const diagnostic = unwrap(terminalBlockedDiagnostic({
       category, runId: run, requestId: requestId(category), slotId: slotId(category), message: `${category} occurred`,
     }));
     expect(diagnostic).toMatchObject({
@@ -3435,7 +3435,7 @@ describe("terminal blocked diagnostics cover every declared category", () => {
 
   it.each(EXHAUSTED)("constructs the exhausted-result category %s from a complete attempt-2 authority", (category) => {
     const failedRequest = authority(1, 2);
-    const diagnostic = value(terminalBlockedDiagnostic({
+    const diagnostic = unwrap(terminalBlockedDiagnostic({
       category, failedRequest, message: `${category} occurred`,
     } as never));
     expect(diagnostic).toMatchObject({

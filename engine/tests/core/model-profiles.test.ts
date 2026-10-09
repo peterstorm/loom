@@ -15,6 +15,7 @@ import {
   parseLlmProfile,
   parseLlmProfileId,
   parseRecordedLlmProfileId,
+  piHistoryViolations,
   piModelPattern,
   resolveAgentPolicy,
   resolveAgentProfile,
@@ -168,6 +169,57 @@ describe("recorded profile bindings", () => {
     expect(parseLlmProfileId("qualified-local-review").ok).toBe(false);
     expect(resolveModelProfile("qualified-local-review").ok).toBe(false);
     expect(parseRecordedLlmProfileId("current").ok).toBe(false);
+  });
+
+  it("parses exactly the catalog and retired ids as recorded, naming both in one refusal", () => {
+    fc.assert(fc.property(fc.oneof(fc.constantFrom(...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS), fc.string(), fc.anything()), (raw) => {
+      const recorded = ([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as readonly unknown[]).includes(raw);
+      const parsed = parseRecordedLlmProfileId(raw);
+      expect(parsed.ok).toBe(recorded);
+      if (!parsed.ok) {
+        for (const id of [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]) expect(parsed.error.message).toContain(id);
+      }
+    }));
+  });
+
+  it("holds the history invariant on every recorded row: no repeat, never the current target", () => {
+    for (const id of LLM_PROFILE_IDS) {
+      const [current, ...history] = recordedProfileBindings(id).pi;
+      expect(piHistoryViolations(id, current!, history), id).toEqual([]);
+    }
+    for (const id of RETIRED_LLM_PROFILE_IDS) {
+      expect(piHistoryViolations(id, null, recordedProfileBindings(id).pi), id).toEqual([]);
+    }
+  });
+
+  it("names a history entry equal to the profile's current target, and every repeated entry", () => {
+    const local = currentProfileBindings("refutation").pi;
+    const sol = { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" } as const;
+    const mini = { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" } as const;
+    expect(piHistoryViolations("refutation", local, [sol, local, mini, sol, sol])).toEqual([
+      { kind: "current-target-in-history", profileId: "refutation", target: piModelPattern(local) },
+      { kind: "duplicate-history-target", profileId: "refutation", target: piModelPattern(sol) },
+      { kind: "duplicate-history-target", profileId: "refutation", target: piModelPattern(sol) },
+    ]);
+    expect(piHistoryViolations("qualified-local-review", null, [local, local])).toEqual([
+      { kind: "duplicate-history-target", profileId: "qualified-local-review", target: piModelPattern(local) },
+    ]);
+  });
+
+  it("property: a history of distinct non-current targets has no violation, and appending any of its entries adds exactly one", () => {
+    const targets = [
+      { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+      { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
+      { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
+      { provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" },
+    ] as const;
+    const current = currentProfileBindings("general-review").pi;
+    fc.assert(fc.property(fc.shuffledSubarray([...targets], { minLength: 1 }), fc.nat(), (history, pick) => {
+      expect(piHistoryViolations("general-review", current, history)).toEqual([]);
+      const repeated = history[pick % history.length]!;
+      expect(piHistoryViolations("general-review", current, [...history, repeated]))
+        .toEqual([{ kind: "duplicate-history-target", profileId: "general-review", target: piModelPattern(repeated) }]);
+    }));
   });
 });
 

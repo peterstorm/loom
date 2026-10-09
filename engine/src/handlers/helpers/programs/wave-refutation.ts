@@ -4,49 +4,45 @@
  * recover verifier requests, replay captured verdicts and terminal capture
  * rejections, then commit refuted outcomes under exact active authority.
  */
-import { issueAgentRosterSlot, parseAgentRequestAuthority, type InitialSpawnRequestInput, type MintedAgentRosterSlot } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold, type FindingOutcome } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, panelRequestIdentity, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/persistent-panel';
-import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority } from '../../../core/panel-authority';
-import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
+import { buildContextPacket, encodeByteSection } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { deriveWaveRefutationPlan } from '../../../core/wave-gate-preparation';
 import { applyFindingOutcomes } from '../../../core/findings';
 import { reconcileWaveBlock } from '../../../core/wave-gate-model';
-import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { decideRefutationTranscriptRead, refutationRejectionDiagnostic } from '../../../core/reviewer-retry';
 import { waveRefutationCommitProblem } from '../../../core/wave-gate-membership';
 import { durableCaptureRejection, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { failed } from './program-result';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
+import { prepareRefutationVerifiers } from './refutation-verifiers';
 import { publishLegacyInitialBatch } from './request-publication';
 import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 
 type WaveReadiness = Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"];
 
+/**
+ * The current Wave's Refutation Panel. Its verifier requests are read from
+ * the durable attempt-1 batch receipt when one exists and minted from today's
+ * catalog only when none does (`prepareRefutationVerifiers`), so resuming a
+ * panel issued under an older catalog compares recorded history with itself.
+ */
 function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: WaveReadiness,
 ) {
   const plan = deriveWaveRefutationPlan(readiness);
   if (!plan.ok) throw new Error(plan.error.message);
-  const profile = resolveModelProfile("refutation");
-  if (!profile.ok) throw new Error(profile.error.message);
-  const slots: MintedAgentRosterSlot[] = [];
-  const packets: ContextPacket[] = [];
-  const inputs: InitialSpawnRequestInput[] = [];
-  const retryInputs: Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[] = [];
-  for (const lens of plan.value.lenses) {
-    const binding = deriveRefutationVerifierBinding(
-      plan.value.runId,
-      lens,
-      [plan.value.findings[0].id, ...plan.value.findings.slice(1).map(({ id }) => id)],
-    );
-    if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = binding.value.requestIds[attempt - 1];
+  const verifiers = prepareRefutationVerifiers({
+    handle,
+    label: "wave-refutation",
+    identityRunId: plan.value.runId,
+    findings: plan.value.findings,
+    lenses: plan.value.lenses,
+    packet: (lens, requestId, attempt) => {
       const section = encodeByteSection("wave-refutation-authority", JSON.stringify({
         panelRunId: plan.value.runId, lens, findings: plan.value.findings, attempt,
       }));
@@ -55,31 +51,10 @@ function waveRefutationPreparation(
         outputContract: `Adjudicate every Wave Finding through lens '${lens}' and emit exact refutation verdict JSON.`,
         fixedContext: [section.value], variableContext: [] });
       if (!packet.ok) throw new Error(packet.error.message);
-      if (attempt === 1) packets.push(packet.value);
-      const authority = parseAgentRequestAuthority({ runId: handle.runId, requestId, slotId: binding.value.slotId,
-        program: "refutation-panel", role: "review-verifier-agent", attempt, modelProfile: profile.value.id,
-        harnessBinding: { pi: lowerModelProfile(profile.value, "pi"), claude: lowerModelProfile(profile.value, "claude-code") },
-        requiredSkill: null, contextDigest: packet.value.digest, outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw` });
-      if (!authority.ok) throw new Error(authority.error.violations.map(({ message }) => message).join("; "));
-      const input = { authority: authority.value, context: { digest: packet.value.digest,
-        slot: { kind: "fixed-artifact-slot" as const, path: `contexts/${packet.value.digest}.json` } } };
-      if (attempt === 1) inputs.push(input);
-      else retryInputs.push(Object.freeze({ input: Object.freeze(input), packet: packet.value }));
-      return authority.value;
-    });
-    const slot = issueAgentRosterSlot(attempts[0], attempts[1]);
-    if (!slot.ok) throw new Error(`verifier slot ${binding.value.slotId} is invalid: ${slot.error.violations.map(({ kind }) => kind).join(", ")}`);
-    slots.push(slot.value);
-  }
-  const panel = issueRefutationPanelAuthority({
-    runId: handle.runId,
-    identityRunId: plan.value.runId,
-    findings: plan.value.findings,
-    lenses: plan.value.lenses,
-    verifierSlots: slots,
+      return packet.value;
+    },
   });
-  if (!panel.ok) throw new Error(panel.error.message);
-  return { panel: panel.value, inputs, packets, retryInputs, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
+  return { ...verifiers, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
 }
 
 /**

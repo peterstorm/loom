@@ -132,14 +132,18 @@ export function durablePublicationDigest(
   return receipt.kind === "found" ? { kind: "found", digest: receipt.digest } : receipt;
 }
 
+/** The durable effect of one refutation batch: its label and the ordered request ids it publishes. */
+export function refutationBatchEffectId(label: string, requestIds: readonly string[]): ReturnType<typeof parseEffectId> {
+  return parseEffectId(`effect:${label}:${createHash("sha256").update(requestIds.join("|")).digest("hex")}`);
+}
+
 export function durableRefutationRequests(
   handle: RunDirHandle,
   inputs: readonly InitialSpawnRequestInput[],
   resolver: PublicationAuthorityResolver,
   label = "standalone-refutation",
 ): DurableRequestRecovery {
-  const effectId = parseEffectId(`effect:${label}:${createHash("sha256").update(inputs.map((input) =>
-    (input.authority as AgentRequestAuthority).requestId).join("|")).digest("hex")}`);
+  const effectId = refutationBatchEffectId(label, inputs.map((input) => (input.authority as AgentRequestAuthority).requestId));
   if (!effectId.ok) return { kind: "corrupt", message: effectId.error.message };
   const publication = durablePublicationDigest(handle, effectId.value);
   if (publication.kind !== "found") return publication;

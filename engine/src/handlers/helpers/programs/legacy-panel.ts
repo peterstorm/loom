@@ -30,7 +30,7 @@
 import { createHash } from "node:crypto";
 import {
   AGENT_REQUIRED_SKILLS,
-  parseAgentRequestAuthority,
+  mintAgentRequestAuthority,
   parseEffectId,
   parseFixedArtifactSlot,
   parseRequestId,
@@ -42,7 +42,7 @@ import {
 import type { PanelVerdictSource, PanelVerdictSourceRecord } from "../../../core/panel-verdict-source";
 import { captureKey } from "../../../core/harness-capture";
 import type { NextPanelProgramAction, PanelProgramAction, SpawnRequest as PanelSpawnRequest } from "../../../core/panel-program";
-import { lowerModelProfile, resolveModelProfile } from "../../../core/model-profiles";
+import { resolveAgentPolicy } from "../../../core/model-profiles";
 import {
   describePanelJournalReplayError,
   executeDeterministicPanelOperation,
@@ -232,14 +232,21 @@ function materializePanelRequest(
     request.attempt === 1 ? request.id : `${request.id}:attempt-${request.attempt}`,
   );
   const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
-  const profile = resolveModelProfile(request.modelProfile);
   const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
   if (!requestId.ok) return { ok: false, message: requestId.error.message };
   if (!slotId.ok) return { ok: false, message: slotId.error.message };
-  if (!profile.ok) return { ok: false, message: profile.error.message };
   if (!Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
     return { ok: false, message: `unknown panel agent ${request.agent}` };
   }
+  // The panel program names the profile it expects; the catalog decides the
+  // request's actual profile, so a disagreement is refused, never resolved.
+  const catalogProfile = resolveAgentPolicy(role);
+  if (!catalogProfile.ok) return { ok: false, message: catalogProfile.error.message };
+  if (catalogProfile.value.profile !== request.modelProfile) {
+    return { ok: false, message: `panel request ${request.id} names profile '${String(request.modelProfile)}', but role '${role}' is issued under '${catalogProfile.value.profile}'` };
+  }
+  // The packet names the role's Skill for the Agent to read; the request's own
+  // Skill is minted from the catalog below.
   const requiredSkill = AGENT_REQUIRED_SKILLS[role];
   const authoritySection = encodeByteSection("panel-authority", JSON.stringify({
     panel: registration.kind,
@@ -269,19 +276,13 @@ function materializePanelRequest(
     `transcripts/${slotId.value}/attempt-${request.attempt}.raw`,
   );
   if (!outputSlot.ok) return { ok: false, message: outputSlot.error.message };
-  const authority = parseAgentRequestAuthority({
+  const authority = mintAgentRequestAuthority({
     runId: handle.runId,
     requestId: requestId.value,
     slotId: slotId.value,
     program: registration.kind === "architecture" ? "architecture-panel" : "refutation-panel",
     role,
     attempt: request.attempt,
-    modelProfile: profile.value.id,
-    harnessBinding: {
-      pi: lowerModelProfile(profile.value, "pi"),
-      claude: lowerModelProfile(profile.value, "claude-code"),
-    },
-    requiredSkill,
     contextDigest: packet.value.digest,
     outputSlot: outputSlot.value,
   });

@@ -1073,6 +1073,18 @@ describe("fresh preparation and request-bound byte capture", () => {
     }
   });
 
+  it("refuses a reviewer context digest that is not a string before minting its requests", () => {
+    const fresh = prepareFreshStandaloneReview({
+      ...preparationInput(),
+      reviewerContexts: [
+        { attempts: ["a".repeat(64), "b".repeat(64)] as const },
+        { attempts: ["c".repeat(64), 7] as const },
+      ],
+    });
+    expect(fresh.ok).toBe(false);
+    if (!fresh.ok) expect(fresh.error.errors).toEqual(["type-design-analyzer: attempt context digests must be strings"]);
+  });
+
   it("resolves all attribution internally from an issued request identity", () => {
     const authority = preparedAuthority();
     const complete = completeCapturedRoster(authority, [transcript(), transcript()]);
