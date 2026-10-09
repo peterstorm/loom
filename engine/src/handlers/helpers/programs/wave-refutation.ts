@@ -25,10 +25,12 @@ import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResum
 type WaveReadiness = Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"];
 
 /**
- * The current Wave's Refutation Panel. Its verifier requests are read from
- * the durable attempt-1 batch receipt when one exists and minted from today's
- * catalog only when none does (`prepareRefutationVerifiers`), so resuming a
- * panel issued under an older catalog compares recorded history with itself.
+ * The current Wave's Refutation Panel. The Wave Gate checkpoints no panel
+ * authority, so its record is the durable attempt-1 batch receipt: its
+ * verifier requests are read from that receipt when one exists and minted
+ * from today's catalog only when none does (`prepareRefutationVerifiers`), so
+ * resuming a panel issued under an older catalog compares recorded history
+ * with itself.
  */
 function waveRefutationPreparation(
   handle: RunDirHandle,
@@ -36,9 +38,7 @@ function waveRefutationPreparation(
 ) {
   const plan = deriveWaveRefutationPlan(readiness);
   if (!plan.ok) throw new Error(plan.error.message);
-  const verifiers = prepareRefutationVerifiers({
-    handle,
-    label: "wave-refutation",
+  const verifiers = prepareRefutationVerifiers({ handle, label: "wave-refutation", checkpointed: null }, {
     identityRunId: plan.value.runId,
     findings: plan.value.findings,
     lenses: plan.value.lenses,
@@ -46,12 +46,11 @@ function waveRefutationPreparation(
       const section = encodeByteSection("wave-refutation-authority", JSON.stringify({
         panelRunId: plan.value.runId, lens, findings: plan.value.findings, attempt,
       }));
-      if (!section.ok) throw new Error(section.error.message);
-      const packet = buildContextPacket({ requestId, role: "review-verifier-agent", requiredSkill: "none",
-        outputContract: `Adjudicate every Wave Finding through lens '${lens}' and emit exact refutation verdict JSON.`,
-        fixedContext: [section.value], variableContext: [] });
-      if (!packet.ok) throw new Error(packet.error.message);
-      return packet.value;
+      return section.ok
+        ? buildContextPacket({ requestId, role: "review-verifier-agent", requiredSkill: "none",
+            outputContract: `Adjudicate every Wave Finding through lens '${lens}' and emit exact refutation verdict JSON.`,
+            fixedContext: [section.value], variableContext: [] })
+        : section;
     },
   });
   return { ...verifiers, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
@@ -105,7 +104,7 @@ export async function driveWaveRefutation(
       action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, reissues, false) },
     });
   }
-  let panelState = startPersistentRefutationPanel(preparation.panel.authority).state;
+  let panelState = startPersistentRefutationPanel(preparation.refutationAuthority).state;
   for (const request of requests) {
     const transcript = decideRefutationTranscriptRead(
       handle.readTranscriptBytes(request.authority),
@@ -180,7 +179,7 @@ export async function driveWaveRefutation(
         locked,
         registration,
         current.registration,
-        preparation.panel.authority,
+        preparation.refutationAuthority,
       );
       if (authorityProblem !== null) throw new Error(authorityProblem);
       const tasks = locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes));

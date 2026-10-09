@@ -25,7 +25,7 @@ import {
   type MintedAgentRosterSlot,
   type MintedHarnessBinding,
 } from "../../src/core/orchestration-contract";
-import { parseProfileAuthority, samePiBinding } from "../../src/core/orchestration-contract/roster";
+import { samePiBinding } from "../../src/core/orchestration-contract/roster";
 import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
@@ -238,36 +238,39 @@ describe("a minted authority is the only thing an issuing seam accepts", () => {
 });
 
 describe("the profile authority admits a Pi binding by its origin's strategy", () => {
-  const profileAuthority = (profile: RecordedLlmProfileId, origin: "issue" | "stored") => {
-    const parsed = parseProfileAuthority(profile, origin);
-    if (!parsed.ok) throw new Error(parsed.error.message);
-    return parsed.value;
-  };
+  // The strategy is private to the roster volume, so it is observed through
+  // the two parsers that select it: its contribution is the request's
+  // `harnessBinding.pi` violations.
+  const roleIssuing = (profile: LlmProfileId): string =>
+    AGENT_POLICIES.find((policy) => policy.profile === profile)?.agent ?? "code-reviewer";
+  const stored = (profile: RecordedLlmProfileId, pi: unknown) =>
+    parseStoredAgentRequestAuthority(request(profile, pi as PiBinding));
+  const issued = (profile: LlmProfileId, pi: unknown) =>
+    parseAgentRequestAuthority(request(profile, pi as PiBinding, roleIssuing(profile)));
 
   it("admits a recorded binding exactly when the recorded profile has issued it, returning that binding", () => {
     fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
-      const admitted = profileAuthority(profile, "stored").admitPi({ ...pi });
+      const admitted = stored(profile, { ...pi });
       expect(admitted.ok, `${profile} ${piModelPattern(pi)}`).toBe(issuedBy(profile, pi));
-      if (admitted.ok) expect(admitted.value).toEqual(pi);
-      else expect(admitted.error.map(({ field }) => field)).toEqual(["harnessBinding.pi"]);
+      if (admitted.ok) expect(admitted.value.harnessBinding.pi).toEqual(pi);
+      else expect(admitted.error.violations.map(({ field }) => field)).toEqual(["harnessBinding.pi"]);
     }));
   });
 
   it("admits at issuance only the catalog profile's current binding, naming each differing field", () => {
     fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
       const current = currentProfileBindings(profile).pi;
-      const admitted = profileAuthority(profile, "issue").admitPi({ ...pi });
-      expect(admitted.ok).toBe(samePiBinding(pi, current));
-      if (admitted.ok) expect(admitted.value).toEqual(current);
-      else expect(admitted.error.map(({ field }) => field))
+      const admitted = issued(profile, { ...pi });
+      expect(piViolations(admitted).map(({ field }) => field))
         .toEqual(PI_FIELDS.filter((key) => pi[key] !== current[key]).map((key) => `harnessBinding.pi.${key}`));
+      if (admitted.ok) expect(admitted.value.harnessBinding.pi).toEqual(current);
     }));
   });
 
   it("admits at issuance a subset of what the same profile admits as history", () => {
     fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
-      fc.pre(profileAuthority(profile, "issue").admitPi(pi).ok);
-      expect(profileAuthority(profile, "stored").admitPi(pi).ok).toBe(true);
+      fc.pre(piViolations(issued(profile, pi)).length === 0);
+      expect(stored(profile, pi).ok).toBe(true);
     }));
   });
 
@@ -277,20 +280,20 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
       fc.dictionary(fc.string(), fc.string()),
       fc.constantFrom(...VOCABULARY).map((pi) => ({ ...pi, extra: true })),
     );
-    const origins = fc.constantFrom("issue" as const, "stored" as const);
-    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), origins, shapes, (profile, origin, raw) => {
-      const admitted = profileAuthority(profile, origin).admitPi(raw);
-      expect(admitted.ok).toBe(false);
-      if (!admitted.ok) expect(admitted.error.length).toBeGreaterThan(0);
+    const origins = fc.constantFrom(issued, stored);
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), origins, shapes, (profile, parse, raw) => {
+      expect(piViolations(parse(profile, raw)).length).toBeGreaterThan(0);
     }));
   });
 
   it("names no retired profile at issuance and every recorded one in history", () => {
     for (const profile of RETIRED_LLM_PROFILE_IDS) {
-      expect(parseProfileAuthority(profile, "issue").ok).toBe(false);
-      expect(parseProfileAuthority(profile, "stored").ok).toBe(true);
+      const pi = recordedProfileBindings(profile).pi[0];
+      expect(kinds(parseAgentRequestAuthority(request(profile, pi)))).toContain("invalid-agent-request-field:modelProfile");
+      expect(stored(profile, pi).ok).toBe(true);
     }
-    expect(parseProfileAuthority(7, "stored")).toMatchObject({ ok: false });
+    expect(kinds(parseStoredAgentRequestAuthority({ ...request("general-review", LOCAL), modelProfile: 7 })))
+      .toContain("invalid-agent-request-field:modelProfile");
   });
 });
 

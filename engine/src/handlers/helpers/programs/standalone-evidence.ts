@@ -66,16 +66,19 @@ function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandalon
 /**
  * The standalone Refutation Panel for `aggregate`'s current criticals. Its
  * verifier requests are read from the panel's record when one exists — the
- * `recorded` panel the run checkpointed, else the durable attempt-1 batch
+ * `checkpointed` panel the run holds, else the durable attempt-1 batch
  * receipt — and minted from today's catalog only when none does
  * (`prepareRefutationVerifiers`), so resuming or replaying a panel issued
  * under an older catalog compares recorded history with recorded history.
+ * `checkpointed` is `null` where the caller holds no panel checkpoint: first
+ * aggregation (written only after this preparation) and the
+ * checkpoint-independent evidence replay.
  */
 export function standaloneRefutationPreparation(
   handle: RunDirHandle,
   authority: FrozenStandaloneReviewAuthority,
   aggregate: import("../../../core/standalone-review-model").StandaloneReviewAggregate,
-  recorded?: RefutationPanelAuthority,
+  checkpointed: RefutationPanelAuthority | null,
 ) {
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });
   const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
@@ -86,32 +89,28 @@ export function standaloneRefutationPreparation(
   if (firstFinding === undefined) throw new Error("standalone refutation requires a non-empty critical Finding set");
   if (firstLens === undefined) throw new Error("standalone refutation requires at least one review lens");
   const sources = standalonePanelSources(handle, authority);
-  const verifiers = prepareRefutationVerifiers({
-    handle,
-    label: "standalone-refutation",
+  const verifiers = prepareRefutationVerifiers({ handle, label: "standalone-refutation", checkpointed }, {
     findings: [firstFinding, ...otherFindings],
     lenses: [firstLens, ...otherLenses],
-    ...(recorded === undefined ? {} : { recorded }),
     packet: (lens, requestId, attempt) => {
       const section = encodeByteSection("refutation-authority", JSON.stringify({
         runId: handle.runId, lens, findings: brief.findings, attempt,
         ...(aggregate.schemaVersion === 3 ? { successorEvidence: { lineageDigest: aggregate.successor.lineageDigest,
           snapshotDigest: aggregate.successor.snapshotDigest, reports: aggregate.lineage.reports } } : {}),
       }));
-      if (!section.ok) throw new Error(section.error.message);
-      const packet = buildContextPacket({
-        requestId,
-        role: "review-verifier-agent",
-        requiredSkill: "none",
-        outputContract: `Adjudicate every Finding through lens '${lens}' and emit the exact refutation verdict JSON contract.`,
-        fixedContext: Object.freeze([section.value, ...sources.fixed]), variableContext: Object.freeze(sources.variable),
-      });
-      if (!packet.ok) throw new Error(packet.error.message);
-      return packet.value;
+      return section.ok
+        ? buildContextPacket({
+            requestId,
+            role: "review-verifier-agent",
+            requiredSkill: "none",
+            outputContract: `Adjudicate every Finding through lens '${lens}' and emit the exact refutation verdict JSON contract.`,
+            fixedContext: Object.freeze([section.value, ...sources.fixed]), variableContext: Object.freeze(sources.variable),
+          })
+        : section;
     },
   });
   const threshold = defaultRefutationThreshold(lenses.length);
-  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: verifiers.panel.authority, threshold });
+  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: verifiers.refutationAuthority, threshold });
   if (!frozen.ok) throw new Error(frozen.error.message);
   return { brief, lenses, frozen: frozen.value, threshold, ...verifiers };
 }
@@ -508,12 +507,13 @@ export function replayStandaloneResultFromEvidence(
       }
       ready = reduced.value;
     } else {
-      const preparation = standaloneRefutationPreparation(handle, authority, aggregated.value.aggregate);
+      // Checkpoint-independent by contract: the panel is proved from its receipt, never the checkpoint.
+      const preparation = standaloneRefutationPreparation(handle, authority, aggregated.value.aggregate, null);
       reduced = reduceStandaloneReviewMachine(reduced.value, {
         kind: "aggregate-has-criticals",
         aggregate: aggregated.value.aggregate,
         panelAuthority: preparation.frozen,
-        refutationAuthority: preparation.panel.authority,
+        refutationAuthority: preparation.refutationAuthority,
       });
       if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") {
         return failed(reduced.ok ? "critical standalone replay did not reach refutation" : reduced.error.message);
@@ -522,7 +522,7 @@ export function replayStandaloneResultFromEvidence(
       if (durablePanel.kind !== "found") {
         return failed(durablePanel.kind === "absent" ? "standalone refutation publication authority is absent" : durablePanel.message);
       }
-      let panelState = startPersistentRefutationPanel(preparation.panel.authority).state;
+      let panelState = startPersistentRefutationPanel(preparation.refutationAuthority).state;
       const panelEvents: PersistentRefutationPanelEvent[] = [];
       for (const request of durablePanel.requests) {
         if (request.authority.attempt !== 1) {

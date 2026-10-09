@@ -1,22 +1,10 @@
 /**
  * The ONE execution policy every engine Git child runs under, and the ONE
  * place in the engine and Pi sources where `git` is spawned: `runGit`
- * (throwing) and `spawnGit` (returning a closed `GitSpawnOutcome`).
- * `tests/utils/git-spawn-seam-guard.test.ts` fails on any other spawn. Callers
- * are `utils/git.ts` (root/HEAD/authority probes and, through its shadow
- * administration directory, every diff, content-hashing listing and tracking
- * probe), `utils/git-leaves.ts` (`gitOutput`: the single leaf enumerator and
- * every revision read that the snapshot hasher, reviewed workspace, Review
- * Packet, Wave lint and task-local diff share), `utils/workspace-digest.ts`
- * (the workspace roster and root), `utils/declared-artifact-snapshot.ts`
- * (commit existence), `config.ts` (the task-graph boundary root),
- * `orchestration/remediation-candidate.ts` (tracking and ignore audits),
- * `orchestration/completion-check-runner.ts` (the report reset's tracking and
- * ignore probes, which must agree with those audits),
- * `orchestration/git-remediation.ts` (witness, temporary-index staging), and
- * the helper shells: review scope (`programs/changed-paths.ts`), Review
- * Packet, model calibration, task-graph population and implementation-proof
- * reconciliation.
+ * (throwing) and `spawnGit` (returning a closed `GitSpawnOutcome`, the pure
+ * outcome core in `git-spawn-outcome.ts`).
+ * `tests/utils/git-spawn-seam-guard.test.ts` fails on any other spawn, so it —
+ * not a list here — is the authority on who reaches Git.
  *
  * Moving a caller here intentionally drops the operator's system and global
  * config for it: `core.excludesFile`, `safe.directory`, `core.quotePath`,
@@ -66,16 +54,10 @@
  * shadow directory has no `info/exclude` and no repository
  * `core.excludesFile`, which the enumerator's ignore rules must honour, and
  * `ls-files`/`ls-tree` run no filter or diff driver.
- *
- * A status-returning run never loses what the child said: `spawnGit` parses
- * the raw spawn result into a closed `GitSpawnOutcome` whose every arm that
- * ran a child carries both captured streams, and `diagnoseGitOutcome` renders
- * any arm — including a fatal exit whose stderr arrived empty, which Git
- * itself never produces — as a self-explaining diagnostic.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { match } from "ts-pattern";
 import { COMMAND_SCOPE_CONFIG, policyBoundGitArgv } from "./git-command-scope";
+import { parseGitSpawnResult, type GitSpawnBounds, type GitSpawnOutcome } from "./git-spawn-outcome";
 
 /** Passed to every Git child exactly when the engine's own process has them. */
 const INHERITED_LAUNCH_ESSENTIALS = [
@@ -216,86 +198,23 @@ export function runGit<K extends GitOutput>(args: readonly string[], run: GitRun
 /** One status-returning run. `input`, when present, is piped as the child's
  *  whole stdin (otherwise stdin is ignored); `timeout` bounds the child's wall
  *  time; `location` relocates only through the closed overlays above. */
-export type SpawnGitRun = Readonly<{
+export type SpawnGitRun = GitSpawnBounds & Readonly<{
   cwd?: string;
-  maxBuffer: number;
   input?: Uint8Array;
-  timeout?: number;
   location?: GitLocation;
 }>;
-
-/** What a child that ran said: both streams, as captured bytes. */
-export type GitCapture = Readonly<{ stdout: Buffer; stderr: Buffer }>;
-
-/**
- * Every way one status-returning Git run can end, closed. Each arm in which a
- * child ran carries both captured streams, so no consumer can be handed an
- * outcome whose diagnostic was dropped on the way:
- *
- * - `spawn-failed` — no child ran (missing executable, bad cwd, …): the
- *   spawn error's code and message.
- * - `timed-out` — the child outlived `SpawnGitRun.timeout` and was killed.
- * - `over-budget` — a stream outgrew `SpawnGitRun.maxBuffer`; the child was
- *   killed and its captures are truncated.
- * - `signalled` — the child was terminated by a signal it did not ask for.
- * - `exited` — the child exited with `status`; this is the only arm a status
- *   protocol (`0` answered, `1` the clean negative answer) ever reads.
- */
-export type GitSpawnOutcome =
-  | Readonly<{ kind: "spawn-failed"; code: string | null; message: string }>
-  | GitCapture & Readonly<{ kind: "timed-out"; timeoutMs: number | null; signal: NodeJS.Signals | null }>
-  | GitCapture & Readonly<{ kind: "over-budget"; maxBuffer: number }>
-  | GitCapture & Readonly<{ kind: "signalled"; signal: NodeJS.Signals }>
-  | GitCapture & Readonly<{ kind: "exited"; status: number }>;
-
-/** An outcome that exited with one of the statuses its caller's protocol accepts. */
-export type GitExit<S extends number = number> = Extract<GitSpawnOutcome, { kind: "exited" }> & Readonly<{ status: S }>;
 
 /** The status-returning seam as a port: production passes `spawnGit`, tests
  *  pass a fake returning `GitSpawnOutcome` values — no process, no mock of
  *  `node:child_process`, and the fake sees the caller's logical argv. */
 export type GitSpawn = (args: readonly string[], run: SpawnGitRun) => GitSpawnOutcome;
 
-/** The raw result a `spawnSync` implementation hands back, as loosely as Node
- *  and Bun actually shape it: Bun answers a missing executable with neither
- *  `status` nor captured streams, and a scripted test double may hand back
- *  strings. Everything past `parseGitSpawnResult` sees only the closed ADT. */
-export type RawGitSpawnResult = Readonly<{
-  error?: (Error & { code?: unknown }) | null;
-  status?: number | null;
-  signal?: NodeJS.Signals | null;
-  stdout?: Buffer | string | null;
-  stderr?: Buffer | string | null;
-}>;
-
-const captured = (stream: Buffer | string | null | undefined): Buffer =>
-  stream === null || stream === undefined ? Buffer.alloc(0) : Buffer.from(stream);
-
-/** Parse one raw spawn result into its closed outcome. Pure: the run supplies
- *  the bounds a timed-out or over-budget arm names. */
-export function parseGitSpawnResult(raw: RawGitSpawnResult, run: Pick<SpawnGitRun, "maxBuffer" | "timeout">): GitSpawnOutcome {
-  const capture: GitCapture = Object.freeze({ stdout: captured(raw.stdout), stderr: captured(raw.stderr) });
-  const signal = raw.signal ?? null;
-  const error = raw.error ?? null;
-  const code = error !== null && typeof error.code === "string" ? error.code : null;
-  if (code === "ETIMEDOUT") return Object.freeze({ kind: "timed-out", timeoutMs: run.timeout ?? null, signal, ...capture });
-  if (code === "ENOBUFS") return Object.freeze({ kind: "over-budget", maxBuffer: run.maxBuffer, ...capture });
-  if (error !== null) return Object.freeze({ kind: "spawn-failed", code, message: error.message });
-  if (signal !== null) return Object.freeze({ kind: "signalled", signal, ...capture });
-  if (typeof raw.status === "number") return Object.freeze({ kind: "exited", status: raw.status, ...capture });
-  return Object.freeze({
-    kind: "spawn-failed",
-    code: null,
-    message: "the spawn reported no exit status, no signal and no error",
-  });
-}
-
 /**
  * Run one Git command under the policy without throwing on its exit status:
  * for callers whose protocol reads `status` itself (`check-ignore`'s 0/1,
  * `ls-files --error-unmatch`, `merge-base`'s 0/1). Every ending — including a
  * spawn failure, a timeout and an over-budget capture — arrives as one arm of
- * the closed `GitSpawnOutcome`.
+ * the closed `GitSpawnOutcome` (`git-spawn-outcome.ts`).
  */
 export function spawnGit(args: readonly string[], run: SpawnGitRun): GitSpawnOutcome {
   const { argv, base } = policyBoundSpawn(args, run);
@@ -306,74 +225,4 @@ export function spawnGit(args: readonly string[], run: SpawnGitRun): GitSpawnOut
     ...(run.input === undefined ? { stdio: ["ignore", "pipe", "pipe"] } : { input: run.input, stdio: ["pipe", "pipe", "pipe"] }),
     windowsHide: true,
   }), run);
-}
-
-/** Whether the outcome is an exit its caller's status protocol accepts. */
-export function gitExitedWith<S extends number>(outcome: GitSpawnOutcome, accepted: readonly S[]): outcome is GitExit<S> {
-  return outcome.kind === "exited" && (accepted as readonly number[]).includes(outcome.status);
-}
-
-/** The clean negative answer of a 0/1 status protocol (`check-ignore -q`,
- *  `rev-parse --verify --quiet`, `merge-base`): exit 1 with nothing on either
- *  stream. An exit 1 that wrote anything is an error, never a "no". */
-export function gitCleanNegative(outcome: GitSpawnOutcome): outcome is GitExit<1> {
-  return gitExitedWith(outcome, [1]) && gitStdoutText(outcome).trim() === "" && gitStderrText(outcome) === "";
-}
-
-/** A captured stdout as UTF-8 text, untrimmed. */
-export const gitStdoutText = (capture: GitCapture): string => capture.stdout.toString("utf-8");
-
-/** A captured stderr as trimmed UTF-8 text: the diagnostic, or `""`. */
-export const gitStderrText = (capture: GitCapture): string => capture.stderr.toString("utf-8").trim();
-
-/** A rendered outcome: `head` names the ending ("exited 128", "terminated on
- *  signal SIGKILL", …); `detail` is Git's own stderr, the spawn error, or the
- *  explanation of a silence — `null` only when the ending itself says it all. */
-export type GitDiagnosis = Readonly<{ head: string; detail: string | null }>;
-
-const FATAL_EXIT_STATUS = 128;
-
-/** Whether the outcome is a FATAL exit whose stderr arrived empty. Git writes
- *  a diagnostic for every fatal exit (`die()` exits 128, usage errors 129), so
- *  this is a capture lost between the child and this process — never Git's
- *  own silence, and never an answer a caller may classify. */
-export function gitDiagnosticLost(outcome: GitSpawnOutcome): outcome is GitExit {
-  return outcome.kind === "exited" && outcome.status >= FATAL_EXIT_STATUS && gitStderrText(outcome) === "";
-}
-
-function silentExitDetail(outcome: GitExit): string {
-  const bytes = `stderr empty, stdout ${outcome.stdout.byteLength} bytes`;
-  return gitDiagnosticLost(outcome)
-    ? `${bytes} — Git writes a diagnostic for every fatal exit, so the child's stderr was lost before it reached the engine`
-    : bytes;
-}
-
-/** Render any outcome so a failure names its own cause. Pure. */
-export function diagnoseGitOutcome(outcome: GitSpawnOutcome): GitDiagnosis {
-  const stderrOr = (capture: GitCapture, silent: string | null): string | null => {
-    const diagnostic = gitStderrText(capture);
-    return diagnostic === "" ? silent : diagnostic;
-  };
-  return Object.freeze(match(outcome)
-    .with({ kind: "spawn-failed" }, ({ message }) => ({ head: "could not start", detail: message }))
-    .with({ kind: "timed-out" }, (timedOut) => ({
-      head: timedOut.timeoutMs === null ? "timed out" : `timed out after ${timedOut.timeoutMs} ms`,
-      detail: stderrOr(timedOut, null),
-    }))
-    .with({ kind: "over-budget" }, (overBudget) => ({
-      head: `exceeded its ${overBudget.maxBuffer}-byte output budget`,
-      detail: stderrOr(overBudget, null),
-    }))
-    .with({ kind: "signalled" }, (signalled) => ({ head: `terminated on signal ${signalled.signal}`, detail: stderrOr(signalled, null) }))
-    .with({ kind: "exited" }, (exited) => ({
-      head: `exited ${exited.status}`,
-      detail: stderrOr(exited, exited.status === 0 ? null : silentExitDetail(exited)),
-    }))
-    .exhaustive());
-}
-
-/** `diagnoseGitOutcome` as one line: `head` or `head: detail`. */
-export function describeGitOutcome(outcome: GitSpawnOutcome): string {
-  const { head, detail } = diagnoseGitOutcome(outcome);
-  return detail === null ? head : `${head}: ${detail}`;
 }

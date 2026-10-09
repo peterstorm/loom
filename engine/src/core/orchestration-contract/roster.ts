@@ -110,7 +110,7 @@ export function exactBindingViolations(
  * profile admits is the origin's strategy (`issuedProfile`,
  * `recordedProfile`), so a caller never knows it.
  */
-export type ProfileAuthority = Readonly<{
+type ProfileAuthority = Readonly<{
   profileId: RecordedLlmProfileId;
   claude: ClaudeCodeBinding;
   admitPi: (raw: unknown) => DomainResult<PiBinding, NonEmpty<AgentRequestAuthorityViolation>>;
@@ -120,6 +120,14 @@ const nonEmptyViolations = (
   head: AgentRequestAuthorityViolation,
   rest: readonly AgentRequestAuthorityViolation[],
 ): NonEmpty<AgentRequestAuthorityViolation> => Object.freeze([head, ...rest]) as NonEmpty<AgentRequestAuthorityViolation>;
+
+/** Exactly one violation, as the non-empty list a refusal carries. */
+const oneViolation = (only: AgentRequestAuthorityViolation): NonEmpty<AgentRequestAuthorityViolation> =>
+  Object.freeze([only]) as NonEmpty<AgentRequestAuthorityViolation>;
+
+/** An authority error carrying exactly one violation. */
+const singleViolationError = (only: AgentRequestAuthorityViolation): AgentRequestAuthorityError =>
+  canonicalRecord({ kind: "invalid-agent-request-authority", violations: oneViolation(only) });
 
 /** Issuance: a catalog profile admits exactly its ONE current lowering, and each differing field is named. */
 function issuedProfile(profileId: LlmProfileId): ProfileAuthority {
@@ -148,13 +156,13 @@ function recordedProfile(profileId: RecordedLlmProfileId): ProfileAuthority {
       const matched = pi.find((candidate) => samePiBinding(raw, candidate));
       if (matched !== undefined) return success(matched);
       const parsed = readExactDataRecord(raw, PI_BINDING_KEYS, "harnessBinding.pi");
-      return failure(nonEmptyViolations(parsed.ok
+      return failure(oneViolation(parsed.ok
         ? violation(
             "model-binding-mismatch",
             "harnessBinding.pi",
             `harnessBinding.pi must be a binding profile '${profileId}' has issued: ${pi.map(piModelPattern).join(", ")}`,
           )
-        : authorityBoundaryViolation(parsed.error, "harnessBinding.pi", "model-binding-mismatch"), []));
+        : authorityBoundaryViolation(parsed.error, "harnessBinding.pi", "model-binding-mismatch")));
     },
   });
 }
@@ -230,19 +238,19 @@ const ORIGIN_STRATEGIES: Readonly<Record<AgentRequestAuthorityOrigin, OriginStra
 });
 
 /**
- * The profile authority `raw` names in `origin`: the seam where a Pi binding
- * is admitted. An issued authority names a catalog profile and admits its
- * current lowering; a stored one may name a retired profile and admits any
- * binding it has issued.
+ * The profile authority `raw` names under an origin's `strategy`: the seam
+ * where a Pi binding is admitted. An issued authority names a catalog profile
+ * and admits its current lowering; a stored one may name a retired profile
+ * and admits any binding it has issued.
  */
-export function parseProfileAuthority(
+function parseProfileAuthority(
   raw: unknown,
-  origin: AgentRequestAuthorityOrigin,
+  strategy: OriginStrategy,
 ): DomainResult<ProfileAuthority, Readonly<{ message: string }>> {
   if (typeof raw !== "string") {
     return failure(canonicalRecord({ message: `model profile must be a string; received ${describeUnknown(raw)}` }));
   }
-  return ORIGIN_STRATEGIES[origin].profile(raw);
+  return strategy.profile(raw);
 }
 
 
@@ -328,14 +336,7 @@ function parseAgentRequestAuthorityInMode(
   origin: AgentRequestAuthorityOrigin,
 ): DomainResult<AgentRequestAuthority, AgentRequestAuthorityError> {
   const request = readExactDataRecord(raw, AGENT_REQUEST_KEYS, "agent request authority");
-  if (!request.ok) {
-    return failure(canonicalRecord({
-      kind: "invalid-agent-request-authority",
-      violations: Object.freeze([
-        authorityBoundaryViolation(request.error, "request"),
-      ]) as NonEmpty<AgentRequestAuthorityViolation>,
-    }));
-  }
+  if (!request.ok) return failure(singleViolationError(authorityBoundaryViolation(request.error, "request")));
 
   const fields = request.value;
   const violations: AgentRequestAuthorityViolation[] = [];
@@ -349,10 +350,10 @@ function parseAgentRequestAuthorityInMode(
   const role: DomainResult<LoomAgentName, Readonly<{ message: string }>> = typeof fields.role === "string"
     ? parseAgentName(fields.role)
     : failure(canonicalRecord({ message: `agent role must be a string; received ${describeUnknown(fields.role)}` }));
+  const strategy = ORIGIN_STRATEGIES[origin];
   // An issued authority names a profile the catalog issues today; a stored one
   // may name a profile the catalog has since retired.
-  const profile = parseProfileAuthority(fields.modelProfile, origin);
-  const strategy = ORIGIN_STRATEGIES[origin];
+  const profile = parseProfileAuthority(fields.modelProfile, strategy);
 
   if (!runId.ok) violations.push(violation("invalid-agent-request-field", "runId", runId.error.message));
   if (!requestId.ok) violations.push(violation("invalid-agent-request-field", "requestId", requestId.error.message));
@@ -407,12 +408,9 @@ function parseAgentRequestAuthorityInMode(
     !attempt.ok || !skill.ok || !role.ok || !profile.ok ||
     program === null || resolvedBinding === null
   ) {
-    return failure(canonicalRecord({
-      kind: "invalid-agent-request-authority",
-      violations: Object.freeze([
-        violation("policy-resolution-failed", "request", "request policy could not be completely resolved"),
-      ]) as NonEmpty<AgentRequestAuthorityViolation>,
-    }));
+    return failure(singleViolationError(
+      violation("policy-resolution-failed", "request", "request policy could not be completely resolved"),
+    ));
   }
 
   return success(canonicalRecord({
@@ -506,14 +504,11 @@ export function mintAgentRequestAuthority<Attempt extends SemanticAttempt>(
 ): DomainResult<MintedAgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
   const policy = resolveAgentPolicy(identity.role);
   if (!policy.ok) {
-    return failure(canonicalRecord({
-      kind: "invalid-agent-request-authority",
-      violations: nonEmptyViolations(violation(
-        "policy-resolution-failed",
-        "role",
-        `cannot resolve policy for role '${identity.role}': ${policy.error.message}`,
-      ), []),
-    }));
+    return failure(singleViolationError(violation(
+      "policy-resolution-failed",
+      "role",
+      `cannot resolve policy for role '${identity.role}': ${policy.error.message}`,
+    )));
   }
   const bindings = currentProfileBindings(policy.value.profile);
   const parsed = parseAgentRequestAuthority({
@@ -569,14 +564,11 @@ function authorityForAttempt<Authority extends AgentRequestAuthority, Attempt ex
 ): DomainResult<Authority & AgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
   return authority.attempt === expectedAttempt
     ? success(authority as Authority & AgentRequestAuthority<Attempt>)
-    : failure(canonicalRecord({
-        kind: "invalid-agent-request-authority",
-        violations: Object.freeze([violation(
-          "invalid-agent-request-field",
-          "attempt",
-          `request must authorize semantic attempt ${expectedAttempt}, received ${authority.attempt}`,
-        )]) as NonEmpty<AgentRequestAuthorityViolation>,
-      }));
+    : failure(singleViolationError(violation(
+        "invalid-agent-request-field",
+        "attempt",
+        `request must authorize semantic attempt ${expectedAttempt}, received ${authority.attempt}`,
+      )));
 }
 
 /** Read back a stored authority that must authorize `expectedAttempt`. */
