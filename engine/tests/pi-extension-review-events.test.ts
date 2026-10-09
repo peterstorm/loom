@@ -307,13 +307,27 @@ const reviewResult = (
 });
 
 /**
- * How the fixture request authority was issued: under today's catalog
- * ("catalog", minted in issue mode), or as HISTORY recorded under the retired
- * `qualified-local-review` profile ("retired-qualified-local", read back in
- * stored mode — the catalog no longer issues it, but runs already on disk
- * carry it).
+ * How the fixture request authority was issued, each with its profile, Pi
+ * binding and parser: under today's catalog ("catalog", minted in issue
+ * mode), or as HISTORY recorded under the retired `qualified-local-review`
+ * profile ("retired-qualified-local", read back in stored mode — the catalog
+ * no longer issues it, but runs already on disk carry it).
  */
-type FixtureIssuance = "catalog" | "retired-qualified-local";
+const FIXTURE_ISSUANCE = Object.freeze({
+  "catalog": Object.freeze({
+    profile: () => {
+      const resolved = resolveModelProfile("general-review");
+      if (!resolved.ok) throw new Error(resolved.error.message);
+      return { id: resolved.value.id, pi: lowerModelProfile(resolved.value, "pi") };
+    },
+    parse: parseAgentRequestAuthority,
+  }),
+  "retired-qualified-local": Object.freeze({
+    profile: () => ({ id: "qualified-local-review", pi: recordedProfileBindings("qualified-local-review").pi[0] }),
+    parse: parseStoredAgentRequestAuthority,
+  }),
+});
+type FixtureIssuance = keyof typeof FIXTURE_ISSUANCE;
 
 async function piCaptureRun(runSuffix: string, contextText = "Pi capture context", issuance: FixtureIssuance = "catalog"): Promise<Readonly<{
   runsRoot: string;
@@ -356,12 +370,7 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
     if (!packet.ok) throw new Error(packet.error.message);
     const published = await opened.value.publishContext(packet.value);
     if (!published.ok) throw new Error(published.error.message);
-    const resolved = resolveModelProfile("general-review");
-    if (!resolved.ok) throw new Error(resolved.error.message);
-    const profile = issuance === "retired-qualified-local" ? "qualified-local-review" : resolved.value.id;
-    const lowered = issuance === "retired-qualified-local"
-      ? recordedProfileBindings("qualified-local-review").pi[0]
-      : lowerModelProfile(resolved.value, "pi");
+    const profile = FIXTURE_ISSUANCE[issuance].profile();
     const request = {
       runId: `run.${runSuffix}`,
       requestId,
@@ -369,16 +378,16 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
       program: "wave-gate",
       role: "code-reviewer",
       attempt: 1,
-      modelProfile: profile,
+      modelProfile: profile.id,
       harnessBinding: {
-        pi: lowered,
+        pi: profile.pi,
         claude: { harness: "claude-code", model: "sonnet" },
       },
       requiredSkill: null,
       contextDigest: packet.value.digest,
       outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
     } as AgentRequestAuthority;
-    await publishPiFixtureRequest(opened.value, request, issuance === "catalog" ? "issue" : "stored");
+    await publishPiFixtureRequest(opened.value, request, issuance);
     return { runsRoot, runDir, request, handle: opened.value };
   } finally {
     process.chdir(previousCwd);
@@ -388,9 +397,9 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
 async function publishPiFixtureRequest(
   handle: RunDirHandle,
   raw: AgentRequestAuthority,
-  origin: "issue" | "stored" = "issue",
+  issuance: FixtureIssuance = "catalog",
 ): Promise<void> {
-  const request = (origin === "issue" ? parseAgentRequestAuthority : parseStoredAgentRequestAuthority)(raw);
+  const request = FIXTURE_ISSUANCE[issuance].parse(raw);
   if (!request.ok) throw new Error(JSON.stringify(request.error));
   const packet = handle.readContext(request.value.contextDigest);
   if (!packet.ok) throw new Error(packet.error.message);
