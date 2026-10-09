@@ -23,7 +23,7 @@ import { readSessionRunBindings } from "../../../src/orchestration/session-run-b
 import type { FacadeAction } from "../../../src/handlers/helpers/programs/program-result";
 import type { RouteProbePort } from "../../../src/utils/route-endpoint";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
-import { FIXTURE_CLAUDE_CODE_SESSION_ID, PI_PARENT_VARIABLES } from "../../fixtures/facade-parent";
+import { FIXTURE_CLAUDE_CODE_SESSION_ID, stubParentAnnouncement } from "../../fixtures/facade-parent";
 import {
   LOCAL_PI_BINDING,
   LOCAL_PI_ROUTE,
@@ -91,12 +91,11 @@ afterEach(() => {
 
 const sessionId = (): string => `019ff290-ffee-7e86-8ed0-${String(counter).padStart(12, "0")}`;
 
+/** A Pi parent announcing this case's session, optionally on a parent model, stubbed into this process. */
 function piParent(parent: Readonly<{ provider: string; model: string }> | null = null): string {
   const id = sessionId();
-  vi.stubEnv("PI_CODING_AGENT", "true");
-  vi.stubEnv("PI_SESSION_ID", id);
+  stubParentAnnouncement("pi", id);
   vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
-  vi.stubEnv("CLAUDECODE", undefined);
   vi.stubEnv("PI_PROVIDER", parent?.provider);
   vi.stubEnv("PI_MODEL", parent?.model);
   return id;
@@ -104,10 +103,8 @@ function piParent(parent: Readonly<{ provider: string; model: string }> | null =
 
 /** A Claude Code parent, as `claudeCodeParentEnvironment` defines one, stubbed into this process. */
 function claudeCodeParent(): string {
-  for (const variable of PI_PARENT_VARIABLES) vi.stubEnv(variable, undefined);
+  stubParentAnnouncement("claude-code", FIXTURE_CLAUDE_CODE_SESSION_ID);
   vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
-  vi.stubEnv("CLAUDECODE", "1");
-  vi.stubEnv("CLAUDE_CODE_SESSION_ID", FIXTURE_CLAUDE_CODE_SESSION_ID);
   return FIXTURE_CLAUDE_CODE_SESSION_ID;
 }
 

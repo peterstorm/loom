@@ -13,6 +13,7 @@ import {
   type RouteProbePort,
 } from "../../src/utils/route-endpoint";
 import { LOCAL_PI_BINDING, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_PROFILE, RETIRED_CLOUD_ROUTE } from "../fixtures/local-pi-binding";
+import { deadLoopbackPort } from "../fixtures/dead-loopback-port";
 
 const LOCAL: PiBinding = LOCAL_PI_BINDING;
 
@@ -111,8 +112,8 @@ describe("httpRouteProbe against a real loopback server", () => {
   });
 
   it("is refused when nothing listens", async () => {
-    // Port 9 (discard) on loopback: refused immediately, never a model server.
-    expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl: "http://127.0.0.1:9/v1" })).toMatchObject({ kind: "refused" });
+    const baseUrl = `http://127.0.0.1:${await deadLoopbackPort()}/v1`;
+    expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl })).toMatchObject({ kind: "refused" });
   });
 });
 

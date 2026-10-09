@@ -222,17 +222,13 @@ const contextDigest = (n: number): ContextDigest => unwrap(parseContextDigest(di
 const artifactDigest = (n: number): ArtifactDigest => unwrap(parseArtifactDigest(digest(n)));
 const effectId = (suffix: string): EffectId => unwrap(parseEffectId(`effect:${suffix}`));
 
-const implementationBindings = {
-  pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
-  claude: { harness: "claude-code", model: "opus" },
-} as const;
-
 /** The binding the catalog issues `profileId` under today. */
 const catalogBindings = (profileId: LlmProfileId) => {
   const profile = unwrap(resolveModelProfile(profileId));
   return { pi: lowerModelProfile(profile, "pi"), claude: lowerModelProfile(profile, "claude-code") };
 };
 
+const implementationBindings = catalogBindings("implementation");
 const focusedBindings = catalogBindings("focused-review");
 const generalReviewBindings = catalogBindings("general-review");
 

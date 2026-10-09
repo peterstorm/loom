@@ -29,6 +29,7 @@ import { parseProfileAuthority, samePiBinding } from "../../src/core/orchestrati
 import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
+import { LOCAL_PI_BINDING, RETIRED_CLOUD_PI_BINDING } from "../fixtures/local-pi-binding";
 
 /**
  * A request authority is issued against today's catalog and read back as
@@ -38,10 +39,8 @@ import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-p
  */
 
 const RECORDED_IDS: readonly RecordedLlmProfileId[] = [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS];
-const LOCAL: PiBinding = Object.freeze({
-  harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high",
-});
-const SOL: PiBinding = Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
+const LOCAL: PiBinding = LOCAL_PI_BINDING;
+const SOL: PiBinding = RETIRED_CLOUD_PI_BINDING;
 const PI_FIELDS = ["harness", "provider", "model", "thinking"] as const;
 
 /** Every Pi binding the vocabulary can record, across all profiles, keyed by its model pattern. */
