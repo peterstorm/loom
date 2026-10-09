@@ -14,13 +14,13 @@ import { parseRefutationPanelAuthority, type RefutationPanelAuthority } from "..
 import { parseWaveFindingId, type BriefFinding, type ReviewLens } from "../../../../src/core/review-panel";
 import { prepareRefutationVerifiers, type RefutationVerifierPlan } from "../../../../src/handlers/helpers/programs/refutation-verifiers";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
+import { RETIRED_REFUTATION_PI_BINDING as RETIRED } from "../../../fixtures/local-pi-binding";
 
 /**
  * A refutation panel's verifier requests are minted from today's catalog only
  * when the panel has no record; a recorded panel is read back as history.
  */
 
-const RETIRED: PiBinding = Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
 

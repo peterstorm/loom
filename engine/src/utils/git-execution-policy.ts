@@ -108,6 +108,9 @@ export type GitRepositoryLocation = Readonly<{
  *  stages into one so the real index is untouched until a verified install. */
 export type GitIndexLocation = Readonly<{ GIT_INDEX_FILE: string }>;
 
+/** Every relocation a policy-bound child accepts: only these closed overlays. */
+type GitLocation = GitRepositoryLocation | GitIndexLocation;
+
 type HardenedGitInvocation = Readonly<{
   argv: readonly string[];
   env: NodeJS.ProcessEnv;
@@ -117,7 +120,7 @@ type HardenedGitInvocation = Readonly<{
  *  `-c` prefix, and the allow-listed environment read fresh from the process. */
 function hardenedGitInvocation(
   args: readonly string[],
-  location?: GitRepositoryLocation | GitIndexLocation,
+  location?: GitLocation,
 ): HardenedGitInvocation {
   const env: NodeJS.ProcessEnv = {};
   for (const name of INHERITED_LAUNCH_ESSENTIALS) {
@@ -157,7 +160,7 @@ type SpawnBase = Readonly<{ cwd?: string; env: NodeJS.ProcessEnv; maxBuffer?: nu
 
 function policyBoundSpawn(
   args: readonly string[],
-  run: Readonly<{ cwd?: string; location?: GitRepositoryLocation | GitIndexLocation; maxBuffer?: number }>,
+  run: Readonly<{ cwd?: string; location?: GitLocation; maxBuffer?: number }>,
 ): PolicyBoundSpawn {
   const { argv, env } = hardenedGitInvocation(args, run.location);
   return Object.freeze({
@@ -218,7 +221,7 @@ export type SpawnGitRun = Readonly<{
   maxBuffer: number;
   input?: Uint8Array;
   timeout?: number;
-  location?: GitRepositoryLocation | GitIndexLocation;
+  location?: GitLocation;
 }>;
 
 /** What a child that ran said: both streams, as captured bytes. */

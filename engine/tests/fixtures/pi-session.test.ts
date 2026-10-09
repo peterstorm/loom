@@ -20,17 +20,6 @@ const PARENT_MODEL_ENV = Object.freeze({
 const AMBIENT_PI_PARENT: Readonly<Record<(typeof PI_PARENT_VARIABLES)[number], string>> =
   Object.freeze({ PI_CODING_AGENT: "true", PI_SESSION_ID: "ambient-pi", PI_SESSION_FILE: "/ambient/session.jsonl" });
 
-/** Run `operation`, then restore the process environment exactly: variables it added are removed, and every prior value returns. */
-async function withProcessEnvRestored<T>(operation: () => T | Promise<T>): Promise<T> {
-  const previous = { ...process.env };
-  try {
-    return await operation();
-  } finally {
-    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
-    Object.assign(process.env, previous);
-  }
-}
-
 const roots: string[] = [];
 const directory = () => { const root = canonicalTempDir("loom-session-test-"); roots.push(root); return root; };
 afterEach(() => {
@@ -40,7 +29,7 @@ afterEach(() => {
 
 const identityKeys = ["PI_SESSION_ID", "PI_SESSION_FILE", "LOOM_SUBAGENT_DIR"] as const;
 describe("fixture-owned Pi session scopes", () => {
-  it.each(["absent", "poisoned"] as const)("owns identity/transport with an %s parent and restores async rejection exactly", (parent) => withProcessEnvRestored(async () => {
+  it.each(["absent", "poisoned"] as const)("owns identity/transport with an %s parent and restores async rejection exactly", async (parent) => {
     const cwd = process.cwd();
     const poison = directory();
     const sessionFile = join(poison, "parent.jsonl");
@@ -49,35 +38,38 @@ describe("fixture-owned Pi session scopes", () => {
     mkdirSync(transport);
     const sentinel = join(transport, "parent.run-bindings.json");
     writeFileSync(sentinel, "invalid parent authority; never use this\n");
-    if (parent === "absent") for (const key of identityKeys) delete process.env[key];
-    else Object.assign(process.env, { PI_SESSION_ID: "poison-parent", PI_SESSION_FILE: sessionFile, LOOM_SUBAGENT_DIR: transport });
-    const before = { ...process.env };
-    const root = directory();
-    const session = fixtureSession(root);
-    expect(relative(root, session.directory).startsWith("..")).toBe(true);
-    const env = fixturePiEnvironment(root);
-    expect(process.env).toEqual(before);
-    expect(env.PI_CODING_AGENT).toBe("true");
-    expect(env.PI_SESSION_ID).toBe(session.sessionId);
-    expect(env.PI_SESSION_FILE).toBe(session.sessionFile);
-    expect(env.LOOM_SUBAGENT_DIR).toBe(session.transport);
-    const runtime = captureLoomRuntimeIdentity(env[PI_EXTENSION_RUNTIME_ROOT_ENV]!);
-    expect(env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(runtime.revision);
-    const failure = new Error("fixture async failure");
-    await expect(withFixturePiSession(root, async () => {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(process.cwd()).toBe(root);
-      expect(process.env.PI_SESSION_ID).toBe(session.sessionId);
-      throw failure;
-    })).rejects.toBe(failure);
-    expect(process.cwd()).toBe(cwd);
-    expect(process.env).toEqual(before);
-    expect(readFileSync(sessionFile, "utf8")).toBe("not a session; never read this\n");
-    expect(readFileSync(sentinel, "utf8")).toBe("invalid parent authority; never use this\n");
-    disposeFixturePiSessions();
-    expect(existsSync(session.directory)).toBe(false);
-    expect(existsSync(poison)).toBe(true);
-  }));
+    const parentIdentity: Readonly<Record<(typeof identityKeys)[number], string | undefined>> = parent === "absent"
+      ? { PI_SESSION_ID: undefined, PI_SESSION_FILE: undefined, LOOM_SUBAGENT_DIR: undefined }
+      : { PI_SESSION_ID: "poison-parent", PI_SESSION_FILE: sessionFile, LOOM_SUBAGENT_DIR: transport };
+    await withEnvOverlay(parentIdentity, async () => {
+      const before = { ...process.env };
+      const root = directory();
+      const session = fixtureSession(root);
+      expect(relative(root, session.directory).startsWith("..")).toBe(true);
+      const env = fixturePiEnvironment(root);
+      expect(process.env).toEqual(before);
+      expect(env.PI_CODING_AGENT).toBe("true");
+      expect(env.PI_SESSION_ID).toBe(session.sessionId);
+      expect(env.PI_SESSION_FILE).toBe(session.sessionFile);
+      expect(env.LOOM_SUBAGENT_DIR).toBe(session.transport);
+      const runtime = captureLoomRuntimeIdentity(env[PI_EXTENSION_RUNTIME_ROOT_ENV]!);
+      expect(env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(runtime.revision);
+      const failure = new Error("fixture async failure");
+      await expect(withFixturePiSession(root, async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(process.cwd()).toBe(root);
+        expect(process.env.PI_SESSION_ID).toBe(session.sessionId);
+        throw failure;
+      })).rejects.toBe(failure);
+      expect(process.cwd()).toBe(cwd);
+      expect(process.env).toEqual(before);
+      expect(readFileSync(sessionFile, "utf8")).toBe("not a session; never read this\n");
+      expect(readFileSync(sentinel, "utf8")).toBe("invalid parent authority; never use this\n");
+      disposeFixturePiSessions();
+      expect(existsSync(session.directory)).toBe(false);
+      expect(existsSync(poison)).toBe(true);
+    });
+  });
 
   it("serializes overlapping async native scopes with separate persistent identities", async () => {
     const first = directory();
@@ -113,14 +105,12 @@ describe("fixture-owned Pi session scopes", () => {
     for (const key of Object.keys(NO_PARENT_MODEL_ENV)) expect(process.env[key], key).toBeUndefined();
   });
 
-  it("the setup's scrub clears a leaked ambient parent model", () => withProcessEnvRestored(() => {
-    Object.assign(process.env, PARENT_MODEL_ENV);
+  it("the setup's scrub clears a leaked ambient parent model", () => withEnvOverlay(PARENT_MODEL_ENV, () => {
     scrubAmbientParentModel();
     for (const key of Object.keys(NO_PARENT_MODEL_ENV)) expect(process.env[key], key).toBeUndefined();
   }));
 
-  it("a Claude Code parent environment carries the Claude session and no Pi announcement, without touching the process environment", () => withProcessEnvRestored(() => {
-    Object.assign(process.env, AMBIENT_PI_PARENT);
+  it("a Claude Code parent environment carries the Claude session and no Pi announcement, without touching the process environment", () => withEnvOverlay(AMBIENT_PI_PARENT, () => {
     const before = { ...process.env };
     const root = directory();
     const env = claudeCodeParentEnvironment(root);
@@ -146,8 +136,7 @@ describe("fixture-owned Pi session scopes", () => {
     expect(Object.keys(overlay).sort()).toEqual([...PI_PARENT_VARIABLES, ...CLAUDE_CODE_PARENT_VARIABLES].sort());
   });
 
-  it("the in-process adapters apply the same announcement and restore the environment", () => withProcessEnvRestored(async () => {
-    Object.assign(process.env, AMBIENT_PI_PARENT);
+  it("the in-process adapters apply the same announcement and restore the environment", () => withEnvOverlay(AMBIENT_PI_PARENT, async () => {
     const before = { ...process.env };
     const announced = (): Readonly<Record<string, string | undefined>> => Object.fromEntries(
       [...PI_PARENT_VARIABLES, ...CLAUDE_CODE_PARENT_VARIABLES].map((key) => [key, process.env[key]]));
@@ -171,8 +160,7 @@ describe("fixture-owned Pi session scopes", () => {
     expect(facadeParentEnvironment("claude-code", root).CLAUDECODE).toBe("1");
   });
 
-  it("importing the session fixture has no side effect on the process environment", () => withProcessEnvRestored(async () => {
-    Object.assign(process.env, PARENT_MODEL_ENV);
+  it("importing the session fixture has no side effect on the process environment", () => withEnvOverlay(PARENT_MODEL_ENV, async () => {
     const before = { ...process.env };
     vi.resetModules();
     await import("./pi-session");

@@ -37,6 +37,8 @@ import { facadeParentEnvironment, parentAnnouncement, type FacadeParent } from "
 import { normalizeRunRoot } from "../../fixtures/emission-route-delta";
 import { fixturePiAgentDirectory } from "../../fixtures/fixture-pi-agent-directory";
 import { DESKTOP_VLLM_ROUTE } from "../../../src/core/model-profiles";
+import { RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING, underRetiredPiCatalog } from "../../fixtures/local-pi-binding";
+import { deadLoopbackPort } from "../../fixtures/dead-loopback-port";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
 import {
   replayStandaloneResultFromEvidence,
@@ -824,37 +826,10 @@ describe("orchestration CLI", () => {
     });
   }
 
-  /** The Pi target the `refutation` profile lowered to before every profile moved to the local route. */
-  const RETIRED_REFUTATION_PI = Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" } as const);
-
-  /**
-   * Run `drive` against the catalog as it stood BEFORE the 2026-10-08
-   * retargeting: the `refutation` profile still lowers its Pi binding to its
-   * retired cloud target. Everything `drive` imports is loaded fresh under that
-   * catalog, so the engine itself writes a run whose recorded refutation
-   * authorities carry the retired binding; afterwards today's catalog is back.
-   */
-  async function underRetiredRefutationCatalog<T>(drive: () => Promise<T>): Promise<T> {
-    vi.resetModules();
-    vi.doMock("../../../src/core/model-profiles", async (importOriginal) => {
-      const actual = await importOriginal<typeof import("../../../src/core/model-profiles")>();
-      return {
-        ...actual,
-        currentProfileBindings: (profileId: Parameters<typeof actual.currentProfileBindings>[0]) => {
-          const current = actual.currentProfileBindings(profileId);
-          return profileId === "refutation" ? Object.freeze({ ...current, pi: RETIRED_REFUTATION_PI }) : current;
-        },
-        lowerModelProfile: (profile: Parameters<typeof actual.lowerModelProfile>[0], harness: "pi" | "claude-code") =>
-          profile.id === "refutation" && harness === "pi" ? RETIRED_REFUTATION_PI : actual.lowerModelProfile(profile, harness),
-      };
-    });
-    try {
-      return await drive();
-    } finally {
-      vi.doUnmock("../../../src/core/model-profiles");
-      vi.resetModules();
-    }
-  }
+  /** Run `drive` against the catalog as it stood before the 2026-10-08
+   *  retargeting, when the `refutation` profile still lowered to its retired cloud binding. */
+  const underRetiredRefutationCatalog = <T>(drive: () => Promise<T>): Promise<T> =>
+    underRetiredPiCatalog({ refutation: RETIRED_REFUTATION_PI_BINDING }, drive);
 
   it("prints a status even when no state file exists", async () => {
     const result = (await runCli(["status"], "", project()));
@@ -1514,7 +1489,7 @@ describe("orchestration CLI", () => {
       attempt: 1,
       modelProfile: "general-review",
       harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+        pi: RETIRED_CLOUD_PI_BINDING,
         claude: { harness: "claude-code", model: "sonnet" },
       },
       requiredSkill: null,
@@ -1689,13 +1664,13 @@ describe("orchestration CLI", () => {
     mkdirSync(runDir, { recursive: true });
     mkdirSync(bindingDir);
     // A Pi agent dir whose models.json points the catalog's local route at a
-    // port nothing listens on (9, discard): the route is configured but down.
+    // loopback port nothing listens on: the route is configured but down.
     const downAgentDir = join(root, "pi-agent-route-down");
     mkdirSync(downAgentDir);
     writeFileSync(join(downAgentDir, "models.json"), JSON.stringify({
       providers: {
         [DESKTOP_VLLM_ROUTE.provider]: {
-          baseUrl: "http://127.0.0.1:9/v1",
+          baseUrl: `http://127.0.0.1:${await deadLoopbackPort()}/v1`,
           api: "openai-completions",
           models: [{ id: DESKTOP_VLLM_ROUTE.model }],
         },
@@ -4087,7 +4062,7 @@ describe("orchestration CLI", () => {
     expect(panel.kind).toBe("spawn-batch");
     expect(panel.requests).toHaveLength(3);
     expect(panel.requests.every(({ authority }) => authority.program === "refutation-panel" &&
-      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI))).toBe(true);
+      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI_BINDING))).toBe(true);
     return { root, runsRoot, runDir, opened: opened.value, panel };
   }
 
@@ -4110,7 +4085,7 @@ describe("orchestration CLI", () => {
     // recorded profile's Claude model, so the run completes there.
     const piResume = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(piResume.status).not.toBe(0);
-    expect(piResume.stderr).toContain("openai-codex/gpt-5.6-sol");
+    expect(piResume.stderr).toContain(`${RETIRED_REFUTATION_PI_BINDING.provider}/${RETIRED_REFUTATION_PI_BINDING.model}`);
     expect(piResume.stderr).toContain("is retired");
     expect(piResume.stderr).not.toContain("durable refutation request is invalid");
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
@@ -4121,7 +4096,7 @@ describe("orchestration CLI", () => {
     // The retry is the recorded slot's second attempt: issued with the slot, under its recorded binding.
     expect(retry.requests[0]?.authority).toMatchObject({
       attempt: 2, program: "refutation-panel", slotId: panel.requests[0]!.authority.slotId,
-      modelProfile: "refutation", harnessBinding: { pi: RETIRED_REFUTATION_PI },
+      modelProfile: "refutation", harnessBinding: { pi: RETIRED_REFUTATION_PI_BINDING },
     });
 
     const valid = refutationVerdicts(opened, retry.requests[0]!.authority, "upheld");
@@ -4190,7 +4165,7 @@ describe("orchestration CLI", () => {
     expect(action.kind).toBe("spawn-batch");
     expect(action.requests).toHaveLength(3);
     expect(action.requests.every(({ authority }) => authority.program === "refutation-panel" &&
-      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI))).toBe(true);
+      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI_BINDING))).toBe(true);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of action.requests) {
