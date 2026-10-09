@@ -12,7 +12,12 @@ import {
   prereg as retainedPrereg,
   READY,
   sample,
+  constrainedCells,
+  extractionOnlyCell,
+  PILOT_1,
+  PILOT_2,
   testPreregistration,
+  type PreregistrationEdit,
   type AttemptSpec,
 } from "./pilot-test-fixtures";
 import { CELL_KEYS, type CellKey, type PilotArm } from "./pilot-vocabulary";
@@ -146,7 +151,7 @@ describe("capable-route gap (folded into the done evidence)", () => {
 
 describe("release decision", () => {
   it("allows done only for a complete, all-passing window on a qualified capable route", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, matchedArms));
     expect(result.decision.kind).toBe("done-allowed");
     if (result.decision.kind !== "done-allowed") return;
@@ -180,7 +185,7 @@ describe("release decision", () => {
   });
 
   it("never lets one capable cell carry a measured unconstrained cell to done (capability is per cell)", () => {
-    const prereg = testPreregistration({ constrained: true, unconstrained: "judge-verdict/v1" });
+    const prereg = testPreregistration(PILOT_1, constrainedCells("judge-verdict/v1"));
     const result = evaluate(prereg, fullWindow(prereg, matchedArms));
     expect(measured(result.cells, "judge-verdict/v1").guardrails["provider-structural-retries"].verdict).toBe("not-applicable");
     expect(result.decision.kind).toBe("incomplete-missing-measurement");
@@ -209,7 +214,7 @@ describe("release decision", () => {
   });
 
   it("AS-015: blocks done when emission p95 exceeds the +25% bound", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, (pair, arm) => ({
       ms: (arm === "emission-enabled" ? 20_000 : 10_000) + pair.repeat,
       attempts: [arm === "emission-enabled" ? ACCEPT_EMISSION : ACCEPT_EXTRACTION],
@@ -221,7 +226,7 @@ describe("release decision", () => {
   });
 
   it("treats an interval crossing the bound as inconclusive, which is not a pass", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     // Exactly 5 slow emission samples per cell: the observed p95 (nearest
     // rank) is 12 000 ms = 1.2x, but resamples with more than 5% slow
     // samples push p95 to 20 000 ms, so the interval crosses 1.25.
@@ -239,7 +244,7 @@ describe("release decision", () => {
   });
 
   it("retains terminal failures separately and blocks on any increase", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     let failures = 0;
     const result = evaluate(prereg, fullWindow(prereg, (pair, arm) => {
       if (arm === "emission-enabled" && pair.cell === "judge-verdict/v1" && failures < 1) {
@@ -255,7 +260,7 @@ describe("release decision", () => {
   });
 
   it("blocks on a retry caused by a constraint the route was verified to enforce (AS-004)", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     let injected = false;
     const result = evaluate(prereg, fullWindow(prereg, (pair, arm) => {
       if (!injected && arm === "emission-enabled" && pair.cell === "refutation-verdict/v1") {
@@ -270,7 +275,7 @@ describe("release decision", () => {
   });
 
   it("reports engine-only refusals, duplicates and non-emission as their own series", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, (pair, arm) => {
       if (arm !== "emission-enabled" || pair.cell !== "reviewer-payload/v2") return matchedArms(pair, arm);
       return match3(pair.repeat % 3);
@@ -290,7 +295,7 @@ describe("release decision", () => {
   });
 
   it("keeps a partial window not-measured with its partial count, never extrapolated", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const window = fullWindow(prereg, matchedArms);
     const partial = { ...window, observations: window.observations.filter((observation) => !(observation.cell === "judge-verdict/v1" && observation.caseId === "judge-hard-readiness-barrier")) };
     const result = evaluate(prereg, partial);
@@ -300,7 +305,7 @@ describe("release decision", () => {
   });
 
   it("keeps an extraction-only-qualified cell as an explicit qualification outcome", () => {
-    const prereg = testPreregistration({ constrained: true, extractionOnly: "reviewer-payload/v3" });
+    const prereg = testPreregistration(PILOT_1, constrainedCells(), extractionOnlyCell("reviewer-payload/v3"));
     const result = evaluate(prereg, fullWindow(prereg, matchedArms));
     expect(result.cells.find((cell) => cell.cell === "reviewer-payload/v3")?.kind).toBe("qualification-only");
     expect(result.decision.kind).toBe("done-allowed");
@@ -308,7 +313,7 @@ describe("release decision", () => {
   });
 
   it("refuses inconsistent evidence instead of repairing it", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const window = fullWindow(prereg, matchedArms);
     const problems = (observations: readonly SampleObservation[], preflight: PreflightDecision = READY) => {
       const evaluated = evaluatePilot({ preregistration: prereg, preflight, observations, quality: { key: window.key, assessments: window.assessments } });
@@ -327,14 +332,14 @@ describe("escaped-defect severity (AS-016)", () => {
     prereg.cells.find((cell) => cell.cell === pair.cell)?.workload.cases.find((entry) => entry.caseId === pair.caseId)?.knownDefects ?? [];
 
   it("is not measured with fewer than the preregistered blinded assessors", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, matchedArms, () => [], ["rubric-v1"]));
     expect(measured(result.cells, "judge-verdict/v1").guardrails["escaped-defect-severity"].verdict).toBe("not-measured");
     expect(result.decision.kind).toBe("incomplete-missing-measurement");
   });
 
   it("blocks when the emission arm lets more severe defects escape than the PR #52-only baseline", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, matchedArms, (pair, arm) =>
       arm === "emission-enabled" ? knownDefectOf(pair, prereg).map((defect) => ({ ...defect })) : []));
     const judge = measured(result.cells, "judge-verdict/v1");
@@ -344,7 +349,7 @@ describe("escaped-defect severity (AS-016)", () => {
   });
 
   it("preserves assessor disagreements and adjudicates conservatively for both arms", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, matchedArms, (pair, _arm, assessor) =>
       assessor === "human-blind-1" && pair.cell === "refutation-verdict/v1" && pair.repeat === 1
         ? knownDefectOf(pair, prereg).map((defect) => ({ ...defect }))
@@ -356,7 +361,7 @@ describe("escaped-defect severity (AS-016)", () => {
   });
 
   it("counts every known defect as escaped when no payload was accepted", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const result = evaluate(prereg, fullWindow(prereg, (pair, arm) =>
       arm === "emission-enabled" && pair.cell === "judge-verdict/v1"
         ? { ms: 5_000, attempts: [{ outcome: { kind: "startup-refused", reason: "readiness refused" } }] }
@@ -366,7 +371,7 @@ describe("escaped-defect severity (AS-016)", () => {
   });
 
   it("refuses an assessment naming a defect the case does not have", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     const window = fullWindow(prereg, matchedArms, (pair) => (pair.cell === "judge-verdict/v1" && pair.repeat === 1 ? [{ defectId: "invented", severity: "minor" }] : []));
     const evaluated = evaluatePilot({ preregistration: prereg, preflight: READY, observations: window.observations, quality: { key: window.key, assessments: window.assessments } });
     expect(evaluated.ok).toBe(false);
@@ -375,7 +380,7 @@ describe("escaped-defect severity (AS-016)", () => {
 
 describe("decision soundness (properties)", () => {
   it("done-allowed implies every measured guardrail passed; any violation blocks done", () => {
-    const prereg = testPreregistration({ constrained: true });
+    const prereg = testPreregistration(PILOT_1, constrainedCells());
     fc.assert(fc.property(
       fc.double({ min: 0.5, max: 2, noNaN: true }),
       fc.nat({ max: 3 }),
@@ -403,7 +408,7 @@ describe("decision soundness (properties)", () => {
 });
 
 describe("per-route release policy (pilot-2: unconstrained emission, engine-authoritative)", () => {
-  const perRoute = (options: Parameters<typeof testPreregistration>[0] = {}) => testPreregistration({ ...options, perRoute: true });
+  const perRoute = (...edits: readonly PreregistrationEdit[]) => testPreregistration(PILOT_2, ...edits);
 
   it("releases a complete, all-passing unconstrained window as unconstrained-engine-authoritative, AS-004 not applicable", () => {
     const prereg = perRoute();
@@ -421,7 +426,7 @@ describe("per-route release policy (pilot-2: unconstrained emission, engine-auth
   });
 
   it("states each released cell's class: constrained cells keep AS-004 beside engine-authoritative ones", () => {
-    const prereg = perRoute({ constrained: true, unconstrained: "judge-verdict/v1" });
+    const prereg = perRoute(constrainedCells("judge-verdict/v1"));
     const result = evaluate(prereg, fullWindow(prereg, matchedArms));
     expect(result.decision.kind).toBe("done-allowed");
     if (result.decision.kind !== "done-allowed") return;
@@ -434,7 +439,7 @@ describe("per-route release policy (pilot-2: unconstrained emission, engine-auth
   });
 
   it("still blocks a constrained cell's provider-structural retry (AS-004 applies to constrained cells)", () => {
-    const prereg = perRoute({ constrained: true });
+    const prereg = perRoute(constrainedCells());
     let injected = false;
     const result = evaluate(prereg, fullWindow(prereg, (pair, arm) => {
       if (!injected && arm === "emission-enabled" && pair.cell === "refutation-verdict/v1") {
@@ -508,7 +513,7 @@ describe("per-route release policy (pilot-2: unconstrained emission, engine-auth
     expectTypeOf<Extract<PassedCellEvidence, { releaseClass: "unconstrained-engine-authoritative" }>["guardrails"]["provider-structural-retries"]["verdict"]>()
       .toEqualTypeOf<"not-applicable">();
 
-    const prereg = perRoute({ constrained: true, unconstrained: "judge-verdict/v1" });
+    const prereg = perRoute(constrainedCells("judge-verdict/v1"));
     const { cells } = evaluate(prereg, fullWindow(prereg, matchedArms));
     expect(measured(cells, "judge-verdict/v1").guardrails["provider-structural-retries"].verdict).toBe("not-applicable");
     expect(measured(cells, "reviewer-payload/v2").guardrails["provider-structural-retries"].verdict).toBe("pass");
@@ -549,7 +554,7 @@ describe("release policy soundness (properties)", () => {
   });
 
   it("per-route: a complete unconstrained matrix is done-allowed exactly when every guardrail passes; any violation blocks", () => {
-    const prereg = testPreregistration({ perRoute: true });
+    const prereg = testPreregistration(PILOT_2);
     fc.assert(fc.property(...arbitraryWindow, (slowdown, emissionTimeouts) => {
       const result = perturbed(prereg, slowdown, emissionTimeouts);
       const verdicts = verdictsOf(result);
@@ -563,7 +568,7 @@ describe("release policy soundness (properties)", () => {
   });
 
   it("per-route, mixed matrix: AS-004 reads only its qualification's verdicts, and every passing cell is released in its class (no per-cell gap)", () => {
-    const prereg = testPreregistration({ perRoute: true, constrained: true, unconstrained: "judge-verdict/v1" });
+    const prereg = testPreregistration(PILOT_2, constrainedCells("judge-verdict/v1"));
     const RELEASE_CLASS = { "constrained-emission": "constrained", "unconstrained-emission": "unconstrained-engine-authoritative" } as const;
     const AS004_VERDICTS = { "constrained-emission": ["pass", "violated"], "unconstrained-emission": ["not-applicable"] } as const;
     fc.assert(fc.property(

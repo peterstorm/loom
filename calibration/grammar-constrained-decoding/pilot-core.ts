@@ -646,24 +646,28 @@ const NO_RELEASED_CELL: MissingMeasurement = Object.freeze({
  */
 function releaseUnderPolicy(policy: ReleasePolicy, cells: readonly CellOutcome[]): PolicyRelease {
   const passed = cells.flatMap((cell) => (cell.kind === "measured" && allPassing(cell) ? [releaseEvidence(cell)] : []));
-  const releasedOr = (released: readonly PassedCellEvidence[], gap: MissingMeasurement): PolicyRelease["release"] => {
-    const nonEmptyRelease = nonEmpty(released);
-    return nonEmptyRelease === null ? err(gap) : ok(nonEmptyRelease);
-  };
-  const qualified = (kind: RouteQualification["kind"]): readonly CellKey[] =>
-    cells.filter((cell) => cell.qualification.kind === kind).map((cell) => cell.cell);
   return match(policy)
     .returnType<PolicyRelease>()
     .with({ kind: "capable-route-required" }, () => ({
-      routeGaps: capableRouteGaps(qualified("constrained-emission"), qualified("unconstrained-emission")),
+      routeGaps: capableRouteGaps(cells),
       release: releasedOr(passed.filter((evidence) => evidence.releaseClass === "constrained"), NO_CAPABLE_ROUTE),
     }))
     .with({ kind: "per-route-engine-authoritative" }, () => ({ routeGaps: [], release: releasedOr(passed, NO_RELEASED_CELL) }))
     .exhaustive();
 }
 
+/** The cells a policy releases, or — when it releases none — its gap. */
+function releasedOr(released: readonly PassedCellEvidence[], gap: MissingMeasurement): PolicyRelease["release"] {
+  const nonEmptyRelease = nonEmpty(released);
+  return nonEmptyRelease === null ? err(gap) : ok(nonEmptyRelease);
+}
+
 /** `capable-route-required`'s own gaps: the absent capable route, or the cells left unconstrained beside one. */
-function capableRouteGaps(constrained: readonly CellKey[], unconstrained: readonly CellKey[]): readonly MissingMeasurement[] {
+function capableRouteGaps(cells: readonly CellOutcome[]): readonly MissingMeasurement[] {
+  const qualified = (kind: RouteQualification["kind"]): readonly CellKey[] =>
+    cells.filter((cell) => cell.qualification.kind === kind).map((cell) => cell.cell);
+  const constrained = qualified("constrained-emission");
+  const unconstrained = qualified("unconstrained-emission");
   if (constrained.length === 0) return [NO_CAPABLE_ROUTE];
   if (unconstrained.length === 0) return [];
   return [Object.freeze({

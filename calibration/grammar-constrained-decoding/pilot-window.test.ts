@@ -29,11 +29,13 @@ import {
 import {
   blind,
   blindedPacket,
-  CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT,
+  CONSECUTIVE_OUTAGE_PAIR_LIMIT,
   dispatchSchedule,
   judgePair,
-  pairNeedsRouteProbe,
+  pairHealth,
+  parseWindowEnding,
   ROUTE_BREAKER_START,
+  type JudgedPair,
   type RouteBreaker,
   type RouteHealth,
   type RouteHealthProbe,
@@ -104,10 +106,13 @@ describe("dispatchSchedule (matched dispatch over the ArmDispatch port)", () => 
     expect(exhausted.requests).toHaveLength(schedule.length * 4);
     expect(rejected.records.every((record) => record.sample.attempts.length === 2 && record.kind === "terminal")).toBe(true);
 
-    const timedOut = fakeRoute(() => TIMEOUT);
+    // One arm times out on every pair (the other answers, so no pair is an all-outage pair and the schedule completes).
+    const timedOut = fakeRoute((request) => (request.arm === "emission-enabled" ? TIMEOUT : accepted(request)));
     const terminal = await runWindow(timedOut);
     expect(timedOut.requests).toHaveLength(schedule.length * 2);
-    for (const record of terminal.records) {
+    const timeouts = terminal.records.filter((record) => record.sample.arm === "emission-enabled");
+    expect(timeouts).toHaveLength(schedule.length);
+    for (const record of timeouts) {
       expect(record.sample.attempts.map((attempt) => attempt.outcome.kind)).toEqual(["timeout"]);
       expect(record.sample.dispatchToIngestionMs).toBe(ATTEMPT_MS);
       expect(record.kind).toBe("terminal");
@@ -189,27 +194,46 @@ describe("dispatchSchedule route fail-fast", () => {
     expect(route.requests.slice(outageFrom * 2).every((request) => request.attempt === 1)).toBe(true);
   });
 
-  it("re-probes after a timed-out pair but keeps going while the route answers", async () => {
+  it("re-probes after a pair with one timed-out sample but keeps going while the route answers", async () => {
     const probe = countingProbe({ kind: "reachable" });
-    const { ending } = await runWindow(fakeRoute(() => TIMEOUT), () => {}, probe);
+    const { ending } = await runWindow(fakeRoute((request) => (request.arm === "emission-enabled" ? TIMEOUT : accepted(request))), () => {}, probe);
     expect(ending.kind).toBe("completed");
     expect(probe.calls()).toBe(schedule.length);
   });
 
-  it(`stops after ${CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT} consecutive all-infrastructure pairs even while the route answers its listing`, async () => {
-    const probe = countingProbe({ kind: "reachable" });
-    const { ending, records } = await runWindow(fakeRoute(() => INFRASTRUCTURE), () => {}, probe);
-    expect(ending).toEqual({
-      kind: "aborted", afterPairs: CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT, scheduledPairs: schedule.length,
-      reason: { kind: "consecutive-infrastructure-failures", pairs: CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT },
-    });
-    expect(records).toHaveLength(CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT * 2);
+  it(`stops after ${CONSECUTIVE_OUTAGE_PAIR_LIMIT} consecutive all-outage pairs even while the route answers its listing`, async () => {
+    for (const outage of [INFRASTRUCTURE, TIMEOUT]) {
+      const probe = countingProbe({ kind: "reachable" });
+      const { ending, records } = await runWindow(fakeRoute(() => outage), () => {}, probe);
+      expect(ending, outage.kind).toEqual({
+        kind: "aborted", afterPairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT, scheduledPairs: schedule.length,
+        reason: { kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT },
+      });
+      expect(records).toHaveLength(CONSECUTIVE_OUTAGE_PAIR_LIMIT * 2);
+      expect(probe.calls()).toBe(CONSECUTIVE_OUTAGE_PAIR_LIMIT);
+    }
+  });
+
+  it("stops a window whose route hangs inference: every pair times out while the listing answers (timeout-only outage)", async () => {
+    // One arm infrastructure, the other a timeout: still an all-outage pair.
+    const { ending } = await runWindow(fakeRoute((request) => (request.arm === "emission-enabled" ? TIMEOUT : INFRASTRUCTURE)), () => {}, countingProbe({ kind: "reachable" }));
+    expect(ending).toMatchObject({ kind: "aborted", reason: { kind: "consecutive-outage-pairs" } });
+  });
+
+  it("fails closed on a probe that rejects or throws: the window ends route-unreachable with the error", async () => {
+    const rejecting: RouteHealthProbe = async () => { throw new Error("fetch exploded"); };
+    const throwing: RouteHealthProbe = () => { throw "not even an Error"; };
+    for (const [probe, reason] of [[rejecting, "the route probe failed: fetch exploded"], [throwing, "the route probe failed: not even an Error"]] as const) {
+      const { ending, records } = await runWindow(fakeRoute(() => TIMEOUT), () => {}, probe);
+      expect(ending).toEqual({ kind: "aborted", afterPairs: 1, scheduledPairs: schedule.length, reason: { kind: "route-unreachable", reason } });
+      expect(records).toHaveLength(2);
+    }
   });
 });
 
-type PairKind = "accepted" | "rejected" | "timeout" | "infrastructure" | "mixed-infrastructure";
+type PairKind = "accepted" | "rejected" | "timeout" | "infrastructure" | "mixed-outage" | "mixed-infrastructure" | "mixed-timeout" | "rejected-and-timeout";
 
-/** A landed pair of one kind: both arms, or (mixed) one infrastructure failure beside an accepted sample. */
+/** A landed pair of one kind: both arms alike, or two different outcomes. */
 function landedPair(kind: PairKind): readonly SampleRecord[] {
   const pair = schedule[0] as (typeof schedule)[number];
   const terminal = (arm: "emission-enabled" | "extraction-only", outcome: Record<string, unknown>): SampleRecord =>
@@ -222,35 +246,101 @@ function landedPair(kind: PairKind): readonly SampleRecord[] {
     case "rejected": return both((arm) => terminal(arm, REJECTED));
     case "timeout": return both((arm) => terminal(arm, TIMEOUT));
     case "infrastructure": return both((arm) => terminal(arm, INFRASTRUCTURE));
+    case "mixed-outage": return [terminal("emission-enabled", INFRASTRUCTURE), terminal("extraction-only", TIMEOUT)];
     case "mixed-infrastructure": return [terminal("emission-enabled", INFRASTRUCTURE), acceptedRecord("extraction-only")];
+    case "mixed-timeout": return [acceptedRecord("emission-enabled"), terminal("extraction-only", TIMEOUT)];
+    case "rejected-and-timeout": return [terminal("emission-enabled", REJECTED), terminal("extraction-only", TIMEOUT)];
   }
 }
 
-describe("judgePair (the fail-fast rule)", () => {
-  const pairKinds = fc.constantFrom<PairKind>("accepted", "rejected", "timeout", "infrastructure", "mixed-infrastructure");
+/** The pair health each kind must have: outage-like = infrastructure or timeout, never a rejection. */
+const EXPECTED_HEALTH: Readonly<Record<PairKind, ReturnType<typeof pairHealth>["kind"]>> = {
+  "accepted": "none",
+  "rejected": "none",
+  "timeout": "all-outage",
+  "infrastructure": "all-outage",
+  "mixed-outage": "all-outage",
+  "mixed-infrastructure": "needs-probe",
+  "mixed-timeout": "needs-probe",
+  "rejected-and-timeout": "needs-probe",
+};
 
-  it("aborts exactly on an unreachable re-probe or the consecutive all-infrastructure limit, and never on model behaviour (property)", () => {
+describe("pairHealth (what an outage looks like from inside the window)", () => {
+  const terminalOutcomes = fc.constantFrom("accepted", "rejected", "timeout", "infrastructure");
+
+  it("is none with no outage-like sample, all-outage when every sample is one, needs-probe otherwise (property)", () => {
+    const pair = schedule[0] as (typeof schedule)[number];
+    fc.assert(fc.property(fc.array(fc.record({ arm: fc.constantFrom("emission-enabled" as const, "extraction-only" as const), outcome: terminalOutcomes }), { maxLength: 4 }), (specs) => {
+      const records = specs.map(({ arm, outcome }): SampleRecord => outcome === "accepted"
+        ? { kind: "accepted", sample: sample(pair, arm, 10, [arm === "emission-enabled" ? ACCEPT_EMISSION : ACCEPT_EXTRACTION]), acceptedPayload: {} }
+        : outcome === "rejected"
+          // A semantic rejection spends the attempt-2 retry before it is terminal.
+          ? { kind: "terminal", sample: sample(pair, arm, 10, [{ outcome: REJECTED }, { outcome: REJECTED }]) }
+          : { kind: "terminal", sample: sample(pair, arm, 10, [{ outcome: outcome === "timeout" ? TIMEOUT : INFRASTRUCTURE }]) });
+      const outageLike = specs.filter(({ outcome }) => outcome === "timeout" || outcome === "infrastructure").length;
+      const expected = outageLike === 0 ? "none" : outageLike === specs.length ? "all-outage" : "needs-probe";
+      expect(pairHealth(records)).toEqual({ kind: expected });
+    }), { numRuns: 200 });
+  });
+
+  it("classifies each landed pair kind", () => {
+    for (const [kind, health] of Object.entries(EXPECTED_HEALTH)) expect(pairHealth(landedPair(kind as PairKind)), kind).toEqual({ kind: health });
+  });
+});
+
+describe("judgePair (the fail-fast rule)", () => {
+  const pairKinds = fc.constantFrom<PairKind>(...(Object.keys(EXPECTED_HEALTH) as PairKind[]));
+
+  const judged = (kind: PairKind, routeDown: boolean): JudgedPair => {
+    const health = pairHealth(landedPair(kind));
+    return health.kind === "none" ? health : { ...health, route: routeDown ? DOWN : { kind: "reachable" } };
+  };
+
+  it("aborts exactly on an unreachable re-probe or the consecutive all-outage limit, and never on model behaviour (property)", () => {
     fc.assert(fc.property(
       fc.array(fc.record({ kind: pairKinds, routeDown: fc.boolean() }), { maxLength: 12 }),
       (steps) => {
         let breaker: RouteBreaker = ROUTE_BREAKER_START;
         let streak = 0;
         for (const { kind, routeDown } of steps) {
-          const pair = landedPair(kind);
-          const probes = pairNeedsRouteProbe(pair);
-          expect(probes).toBe(kind === "timeout" || kind === "infrastructure" || kind === "mixed-infrastructure");
-          const judged = judgePair(breaker, pair, probes ? (routeDown ? DOWN : { kind: "reachable" }) : null);
-          streak = kind === "infrastructure" ? streak + 1 : 0;
-          expect(judged.breaker.consecutiveInfrastructurePairs).toBe(streak);
+          const probes = EXPECTED_HEALTH[kind] !== "none";
+          const result = judgePair(breaker, judged(kind, routeDown));
+          streak = EXPECTED_HEALTH[kind] === "all-outage" ? streak + 1 : 0;
+          expect(result.breaker.consecutiveOutagePairs).toBe(streak);
           const expected = probes && routeDown
             ? { kind: "route-unreachable", reason: DOWN.reason }
-            : streak >= CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT ? { kind: "consecutive-infrastructure-failures", pairs: streak } : null;
-          expect(judged.abort).toEqual(expected);
-          if (judged.abort !== null) return;
-          breaker = judged.breaker;
+            : streak >= CONSECUTIVE_OUTAGE_PAIR_LIMIT ? { kind: "consecutive-outage-pairs", pairs: streak } : null;
+          expect(result.abort).toEqual(expected);
+          // A pair the model answered (accepted or rejected) never stops the window.
+          if (kind === "accepted" || kind === "rejected") expect(result.abort).toBeNull();
+          if (result.abort !== null) return;
+          breaker = result.breaker;
         }
       },
-    ), { numRuns: 200 });
+    ), { numRuns: 300 });
+  });
+});
+
+describe("parseWindowEnding (the one WindowEnding constructor)", () => {
+  const reasons = fc.oneof(
+    fc.string({ minLength: 1 }).map((reason) => ({ kind: "route-unreachable", reason })),
+    fc.integer({ min: 1, max: 12 }).map((pairs) => ({ kind: "consecutive-outage-pairs", pairs })),
+  );
+
+  it("admits an aborted ending exactly when 1 ≤ afterPairs ≤ scheduledPairs and the reason's streak fits the pairs dispatched (property)", () => {
+    fc.assert(fc.property(fc.integer({ min: -2, max: 12 }), fc.integer({ min: -2, max: 12 }), reasons, (afterPairs, scheduledPairs, reason) => {
+      const parsed = parseWindowEnding({ kind: "aborted", afterPairs, scheduledPairs, reason });
+      const streakFits = reason.kind === "route-unreachable" || (reason as { pairs: number }).pairs <= afterPairs;
+      expect(parsed.ok).toBe(afterPairs >= 1 && afterPairs <= scheduledPairs && streakFits);
+      if (parsed.ok) expect(parsed.value).toEqual({ kind: "aborted", afterPairs, scheduledPairs, reason });
+    }), { numRuns: 300 });
+  });
+
+  it("admits a completed ending over any non-negative pair count, and refuses the legacy reason and unknown fields", () => {
+    expect(parseWindowEnding({ kind: "completed", pairs: 0 })).toEqual({ ok: true, value: { kind: "completed", pairs: 0 } });
+    expect(parseWindowEnding({ kind: "completed", pairs: -1 }).ok).toBe(false);
+    expect(parseWindowEnding({ kind: "completed", pairs: 4, extra: true }).ok).toBe(false);
+    expect(parseWindowEnding({ kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-infrastructure-failures", pairs: 3 } }).ok).toBe(false);
   });
 });
 

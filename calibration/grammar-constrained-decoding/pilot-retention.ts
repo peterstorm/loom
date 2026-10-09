@@ -14,16 +14,19 @@
  *   preregistered case input first, so an unloadable or unresolvable
  *   workload is refused before anything is written, while a window that
  *   will not dispatch loads nothing and is always retained; the window
- *   record is written before dispatch and CLOSED (end time and observation
- *   count) before the blinded packet is derived, so a
- *   window whose rubric cannot assess it still records how it ended; every
- *   decision is the current `release-decision.json` AND an append-only log
- *   line.
+ *   record is written before dispatch and CLOSED (end time, observation
+ *   count and — for a dispatched window — its parsed `WindowEnding`) before
+ *   the blinded packet is derived, so a window whose rubric cannot assess it
+ *   still records how it ended; `recordWindow` returns that closed record
+ *   beside the decision, and `parseRetainedWindow` reads the ending back;
+ *   every decision is the current `release-decision.json` AND an append-only
+ *   log line.
  * - `recordWindow` runs the matched dispatch itself (`pilot-window.ts`) over
  *   the `ArmDispatch` port and an injected monotonic clock, persisting every
  *   sample as it lands: the script supplies only the live adapters.
  */
 
+import { match } from "ts-pattern";
 import { z } from "zod";
 import type { CalibrationCase } from "../../engine/src/core/model-calibration";
 import { err, ok, type NonEmpty, type Result } from "../kernel";
@@ -35,7 +38,16 @@ import { parsePreregistration, type Preregistration, type ScheduledPair } from "
 import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type QualityAssessment } from "./pilot-quality";
 import { rubricAssessment } from "./pilot-rubric";
 import { contentDigest } from "./pilot-vocabulary";
-import { blind, blindedPacket, dispatchSchedule, type RouteHealthProbe, type SampleRecord, type WindowEnding } from "./pilot-window";
+import {
+  blind,
+  blindedPacket,
+  dispatchSchedule,
+  parseRetainedWindowEnding,
+  type RetainedWindowEnding,
+  type RouteHealthProbe,
+  type SampleRecord,
+  type WindowEnding,
+} from "./pilot-window";
 import { resolveWindowInputs, WindowInputs, type ChangedPathsOf, type WorkloadFixtures } from "./pilot-workload";
 
 // ---------------------------------------------------------------------------
@@ -113,9 +125,13 @@ export function planDispatch(preflight: PreflightDecision, preflightOnly: boolea
   return { kind: "dispatched" };
 }
 
-/** `window.json` as written when the window opens. */
+/**
+ * `window.json` as written when the window opens. schemaVersion 2 records the
+ * schedule's ending once a dispatched window closes; schemaVersion 1 windows
+ * were retained before that field existed (`parseRetainedWindow`).
+ */
 export type WindowRecord = Readonly<{
-  schemaVersion: 1;
+  schemaVersion: 2;
   windowId: string;
   preregistration: PreregistrationRef;
   workloadFixtures: Readonly<{ path: string; digest: string }>;
@@ -125,21 +141,67 @@ export type WindowRecord = Readonly<{
   dispatch: DispatchPlan;
 }>;
 
-/** `window.json` once the window has ended: how it ended and how many samples
- *  it retained; a dispatched window also records how its schedule ended
- *  (completed, or aborted by the route fail-fast and why). */
-type ClosedWindowRecord = WindowRecord & Readonly<{ endedAt: string; observations: number; ending?: WindowEnding }>;
+type Dispatched = Extract<DispatchPlan, { kind: "dispatched" }>;
+type NotAttempted = Extract<DispatchPlan, { kind: "not-attempted" }>;
+const DISPATCHED: Dispatched = Object.freeze({ kind: "dispatched" });
 
-const closeWindow = (record: WindowRecord, endedAt: string, observations: number, ending: WindowEnding | null): ClosedWindowRecord =>
-  Object.freeze({ ...record, endedAt, observations, ...(ending === null ? {} : { ending }) });
+/** `window.json` once the window has ended, keyed on its dispatch plan: a
+ *  dispatched window records how many samples it retained and how its
+ *  schedule ended (completed, or aborted by the route fail-fast and why); a
+ *  window that never dispatched retained none and has no ending. */
+export type ClosedWindowRecord =
+  | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: Dispatched; endedAt: string; observations: number; ending: WindowEnding }>)
+  | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: NotAttempted; endedAt: string; observations: 0 }>);
+
+/** How a re-decision reads a retained window's ending back. */
+export type RetainedEnding =
+  /** Opened and never closed: the run was interrupted mid-window. */
+  | Readonly<{ kind: "open" }>
+  | Readonly<{ kind: "not-dispatched" }>
+  | Readonly<{ kind: "dispatched"; ending: RetainedWindowEnding }>
+  /** A schemaVersion 1 dispatched window closed before endings were recorded. */
+  | Readonly<{ kind: "dispatched-unrecorded" }>;
 
 /** What a re-decision reads back from a retained `window.json`. */
-export type RetainedWindow = Readonly<{ preregistration: Readonly<{ path: string; digest: string }>; facts: PreflightFacts }>;
+export type RetainedWindow = Readonly<{
+  preregistration: Readonly<{ path: string; digest: string }>;
+  facts: PreflightFacts;
+  ending: RetainedEnding;
+}>;
 
 const retainedWindowSchema = z.object({
   preregistration: z.object({ path: z.string(), digest: z.string() }),
   preflightFacts: z.unknown(),
 });
+
+const retainedClosureSchema = z.object({
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  dispatch: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("not-attempted"), reason: z.string() }).strict(),
+    z.object({ kind: z.literal("dispatched") }).strict(),
+  ]),
+  endedAt: z.string().optional(),
+  ending: z.unknown().optional(),
+});
+
+/** The retained ending, by dispatch plan and schema version: an ending only on
+ *  a closed dispatched window, required there from schemaVersion 2 on. */
+function retainedEnding(closure: z.infer<typeof retainedClosureSchema>, label: string): Result<RetainedEnding, string> {
+  const { schemaVersion, dispatch, endedAt, ending } = closure;
+  if (endedAt === undefined) {
+    return ending === undefined ? ok(Object.freeze({ kind: "open" as const })) : err(`${label} records an ending but was never closed`);
+  }
+  if (dispatch.kind === "not-attempted") {
+    return ending === undefined ? ok(Object.freeze({ kind: "not-dispatched" as const })) : err(`${label} never dispatched, yet records an ending`);
+  }
+  if (ending === undefined) {
+    return schemaVersion === 1
+      ? ok(Object.freeze({ kind: "dispatched-unrecorded" as const }))
+      : err(`${label} is a closed dispatched schemaVersion 2 window without its ending`);
+  }
+  const parsed = parseRetainedWindowEnding(ending, schemaVersion === 1);
+  return parsed.ok ? ok(Object.freeze({ kind: "dispatched" as const, ending: parsed.value })) : err(`${label} ${parsed.error}`);
+}
 
 export function parseRetainedWindow(text: string, label: string): Result<RetainedWindow, string> {
   const raw = parseJson(text, label);
@@ -148,7 +210,11 @@ export function parseRetainedWindow(text: string, label: string): Result<Retaine
   if (!window.success) return err(`${label} carries no preregistration record`);
   const facts = parsePreflightFacts(window.data.preflightFacts);
   if (!facts.ok) return err(`${label} preflight facts: ${facts.error.join("; ")}`);
-  return ok(Object.freeze({ preregistration: window.data.preregistration, facts: facts.value }));
+  const closure = retainedClosureSchema.safeParse(raw.value);
+  if (!closure.success) return err(`${label} carries no schemaVersion 1 or 2 dispatch record`);
+  const ending = retainedEnding(closure.data, label);
+  if (!ending.ok) return ending;
+  return ok(Object.freeze({ preregistration: window.data.preregistration, facts: facts.value, ending: ending.value }));
 }
 
 /** A window is re-decided only against the exact preregistration it recorded. */
@@ -342,8 +408,6 @@ export type WindowRun = Readonly<{
   monotonicNow: () => number;
   /** Receives each completed pair (0-based index of `total`). */
   onPair: (index: number, total: number, pair: ScheduledPair) => void;
-  /** Receives how a dispatched window's schedule ended, before it is decided. */
-  onEnding: (ending: WindowEnding) => void;
   externalAssessments: readonly ExternalAssessment[];
   /** ISO-8601 wall clock. */
   now: () => string;
@@ -360,7 +424,17 @@ function resolveDispatchInputs(run: WindowRun): Result<WindowInputs, string> {
   return inputs.ok ? inputs : err(`${cannotDispatch}: its preregistered case inputs do not resolve:${issueList(inputs.error)}`);
 }
 
-type OpenedWindow = Readonly<{ records: readonly SampleRecord[]; inputs: WindowInputs; ending: WindowEnding | null }>;
+/** What an opened window's dispatch plan ran: nothing, or the matched dispatch and how it ended. */
+type OpenedWindow =
+  | Readonly<{ kind: "not-attempted"; plan: NotAttempted }>
+  | Readonly<{ kind: "dispatched"; records: readonly SampleRecord[]; inputs: WindowInputs; ending: WindowEnding }>;
+
+const closeWindow = (record: WindowRecord, opened: OpenedWindow, endedAt: string): ClosedWindowRecord => match(opened)
+  .returnType<ClosedWindowRecord>()
+  .with({ kind: "not-attempted" }, ({ plan }) => Object.freeze({ ...record, dispatch: plan, endedAt, observations: 0 as const }))
+  .with({ kind: "dispatched" }, ({ records, ending }) =>
+    Object.freeze({ ...record, dispatch: DISPATCHED, endedAt, observations: records.length, ending }))
+  .exhaustive();
 
 /** Open the window record and run what its dispatch plan says — the one
  *  decision about whether the window dispatches. A dispatching window
@@ -372,7 +446,7 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
   const open = (): void => store.write(WINDOW_FILES.window, jsonText(record));
   if (record.dispatch.kind !== "dispatched") {
     open();
-    return ok(Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.EMPTY, ending: null }));
+    return ok(Object.freeze({ kind: "not-attempted" as const, plan: record.dispatch }));
   }
   const inputs = resolveDispatchInputs(run);
   if (!inputs.ok) return inputs;
@@ -394,9 +468,13 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
     },
     onPair: run.onPair,
   });
-  run.onEnding(ending);
-  return ok(Object.freeze({ records, inputs: inputs.value, ending }));
+  return ok(Object.freeze({ kind: "dispatched" as const, records, inputs: inputs.value, ending }));
 }
+
+/** A recorded window: its closed record (the one source of how it ended),
+ *  and the decision over it — which can still be refused (an unassessable
+ *  rubric, a conflicting assessment) after the window itself was recorded. */
+export type RecordedWindow = Readonly<{ window: ClosedWindowRecord; decision: Result<DecisionOutcome, string> }>;
 
 /**
  * One `--pilot` window: open it (never over a retained one; a dispatching
@@ -404,17 +482,25 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
  * the matched dispatch with every sample persisted as it lands (an
  * interrupted window keeps everything observed; a route outage stops it early
  * through the fail-fast and is recorded as its ending), close the window record,
- * retain the blinding key, packet and rubric assessment, then decide.
+ * retain the blinding key, packet and rubric assessment, then decide. An
+ * error result means nothing was written.
  */
-export async function recordWindow(run: WindowRun): Promise<Result<DecisionOutcome, string>> {
+export async function recordWindow(run: WindowRun): Promise<Result<RecordedWindow, string>> {
   const { store, record } = run;
   if (store.read(WINDOW_FILES.window) !== null) {
     return err(`window ${store.locate("")} already exists; a retained window is never overwritten`);
   }
   const opened = await openAndDispatch(run);
   if (!opened.ok) return opened;
-  const { records, inputs, ending } = opened.value;
-  store.write(WINDOW_FILES.window, jsonText(closeWindow(record, run.now(), records.length, ending)));
+  const window = closeWindow(record, opened.value, run.now());
+  store.write(WINDOW_FILES.window, jsonText(window));
+  const { records, inputs } = opened.value.kind === "dispatched" ? opened.value : { records: [], inputs: WindowInputs.EMPTY };
+  return ok(Object.freeze({ window, decision: decideClosedWindow(run, records, inputs) }));
+}
+
+/** A closed window's blinded packet, rubric assessment and decision. */
+function decideClosedWindow(run: WindowRun, records: readonly SampleRecord[], inputs: WindowInputs): Result<DecisionOutcome, string> {
+  const { store, record } = run;
   const key = retainBlindedPacket(store, record, run.preregistration.prereg, records, inputs);
   if (!key.ok) return key;
   return decideAndRecord(store, {
