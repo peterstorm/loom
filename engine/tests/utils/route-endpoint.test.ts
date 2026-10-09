@@ -12,8 +12,9 @@ import {
   readRouteEndpoint,
   type RouteProbePort,
 } from "../../src/utils/route-endpoint";
+import { LOCAL_PI_BINDING, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_PROFILE, RETIRED_CLOUD_ROUTE } from "../fixtures/local-pi-binding";
 
-const LOCAL: PiBinding = { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
+const LOCAL: PiBinding = LOCAL_PI_BINDING;
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -51,19 +52,19 @@ const json = (body: unknown): string => JSON.stringify(body);
 
 describe("readRouteEndpoint", () => {
   it("reads only the provider's baseUrl", () => {
-    const dir = agentDir({ providers: { "desktop-vllm": { baseUrl: "http://h:8000/v1", apiKey: "never-read", models: [] } } });
-    expect(readRouteEndpoint(dir, "desktop-vllm")).toEqual({ ok: true, endpoint: { provider: "desktop-vllm", baseUrl: "http://h:8000/v1" } });
+    const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://h:8000/v1", apiKey: "never-read", models: [] } } });
+    expect(readRouteEndpoint(dir, LOCAL.provider)).toEqual({ ok: true, endpoint: { provider: LOCAL.provider, baseUrl: "http://h:8000/v1" } });
   });
 
   it("has no endpoint for an absent file, provider or baseUrl", () => {
-    expect(readRouteEndpoint(agentDir(undefined), "desktop-vllm")).toEqual({ ok: true, endpoint: null });
-    expect(readRouteEndpoint(agentDir({ providers: {} }), "desktop-vllm")).toEqual({ ok: true, endpoint: null });
-    expect(readRouteEndpoint(agentDir({ providers: { "desktop-vllm": {} } }), "desktop-vllm")).toEqual({ ok: true, endpoint: null });
+    expect(readRouteEndpoint(agentDir(undefined), LOCAL.provider)).toEqual({ ok: true, endpoint: null });
+    expect(readRouteEndpoint(agentDir({ providers: {} }), LOCAL.provider)).toEqual({ ok: true, endpoint: null });
+    expect(readRouteEndpoint(agentDir({ providers: { [LOCAL.provider]: {} } }), LOCAL.provider)).toEqual({ ok: true, endpoint: null });
   });
 
   it("reports a malformed models.json instead of reading it as no endpoint", () => {
-    expect(readRouteEndpoint(agentDir("{not json"), "desktop-vllm")).toMatchObject({ ok: false, error: expect.stringContaining("cannot parse") });
-    expect(readRouteEndpoint(agentDir({ providers: { "desktop-vllm": { baseUrl: 7 } } }), "desktop-vllm"))
+    expect(readRouteEndpoint(agentDir("{not json"), LOCAL.provider)).toMatchObject({ ok: false, error: expect.stringContaining("cannot parse") });
+    expect(readRouteEndpoint(agentDir({ providers: { [LOCAL.provider]: { baseUrl: 7 } } }), LOCAL.provider))
       .toMatchObject({ ok: false, error: expect.stringContaining("invalid") });
   });
 });
@@ -71,24 +72,24 @@ describe("readRouteEndpoint", () => {
 describe("httpRouteProbe against a real loopback server", () => {
   it("returns the served model ids from a 2xx list", async () => {
     const baseUrl = await server(200, json({ object: "list", data: [{ id: LOCAL.model, object: "model" }] }));
-    expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl }))
+    expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl }))
       .toEqual({ kind: "answered", status: 200, servedModels: [LOCAL.model] });
   });
 
   it("returns the status, without a list, when the server refuses authentication", async () => {
     const baseUrl = await server(401, json({ error: "Unauthorized" }));
-    expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl })).toEqual({ kind: "answered", status: 401, servedModels: null });
+    expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl })).toEqual({ kind: "answered", status: 401, servedModels: null });
   });
 
   it("answers without a list when a 2xx body is not JSON (a proxy or captive page)", async () => {
     const baseUrl = await server(200, "<html><body>Sign in to the network</body></html>", "text/html");
-    expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl })).toEqual({ kind: "answered", status: 200, servedModels: null });
+    expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl })).toEqual({ kind: "answered", status: 200, servedModels: null });
   });
 
   it("answers without a list when a 2xx JSON body is not an OpenAI-style model list", async () => {
     for (const body of [json({ models: [LOCAL.model] }), json([{ id: LOCAL.model }]), json({ data: [{ name: LOCAL.model }] }), "null"]) {
       const baseUrl = await server(200, body);
-      expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl }), body)
+      expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl }), body)
         .toEqual({ kind: "answered", status: 200, servedModels: null });
     }
   });
@@ -96,7 +97,7 @@ describe("httpRouteProbe against a real loopback server", () => {
   it("is refused when the server accepts the connection but never answers", async () => {
     const baseUrl = await rawServer(() => undefined);
     const started = Date.now();
-    expect(await httpRouteProbe(150)({ provider: "desktop-vllm", baseUrl })).toMatchObject({ kind: "refused" });
+    expect(await httpRouteProbe(150)({ provider: LOCAL.provider, baseUrl })).toMatchObject({ kind: "refused" });
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
@@ -105,13 +106,13 @@ describe("httpRouteProbe against a real loopback server", () => {
       response.writeHead(200, { "content-type": "application/json" });
       response.write("{\"data\": [");
     });
-    expect(await httpRouteProbe(150)({ provider: "desktop-vllm", baseUrl }))
+    expect(await httpRouteProbe(150)({ provider: LOCAL.provider, baseUrl }))
       .toMatchObject({ kind: "refused", reason: expect.stringContaining("HTTP 200 body did not arrive") });
   });
 
   it("is refused when nothing listens", async () => {
     // Port 9 (discard) on loopback: refused immediately, never a model server.
-    expect(await httpRouteProbe()({ provider: "desktop-vllm", baseUrl: "http://127.0.0.1:9/v1" })).toMatchObject({ kind: "refused" });
+    expect(await httpRouteProbe()({ provider: LOCAL.provider, baseUrl: "http://127.0.0.1:9/v1" })).toMatchObject({ kind: "refused" });
   });
 });
 
@@ -123,7 +124,7 @@ describe("observeRouteReachability", () => {
       probed.push(endpoint.baseUrl);
       return httpRouteProbe()(endpoint);
     };
-    const observed = await observeRouteReachability([LOCAL, LOCAL], agentDir({ providers: { "desktop-vllm": { baseUrl } } }), probe);
+    const observed = await observeRouteReachability([LOCAL, LOCAL], agentDir({ providers: { [LOCAL.provider]: { baseUrl } } }), probe);
     expect(probed).toEqual([baseUrl]);
     expect(observed).toMatchObject({ ok: true, decisions: [{ kind: "reachable", served: { kind: "listed" } }] });
   });
@@ -142,8 +143,7 @@ describe("observeRouteReachability", () => {
 
 describe("observeSpawnRoutes", () => {
   const request = (pi: PiBinding) =>
-    ({ role: "code-reviewer", modelProfile: "general-review", harnessBinding: { pi, claude: { harness: "claude-code", model: "sonnet" } } } as const);
-  const retired: PiBinding = { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" };
+    ({ role: "code-reviewer", modelProfile: RETIRED_CLOUD_PROFILE, harnessBinding: { pi, claude: { harness: "claude-code", model: "sonnet" } } } as const);
   const recording = (answer: Awaited<ReturnType<RouteProbePort>>) => {
     const probed: string[] = [];
     const probe: RouteProbePort = async (endpoint) => {
@@ -155,29 +155,29 @@ describe("observeSpawnRoutes", () => {
 
   it("decides a retired recorded route without probing it", async () => {
     const { probed, probe } = recording({ kind: "answered", status: 200, servedModels: [LOCAL.model] });
-    const dir = agentDir({ providers: { "desktop-vllm": { baseUrl: "http://vllm/v1" } } });
-    expect(await observeSpawnRoutes([request(retired), request(LOCAL)], { agentDir: dir, routing: { parentRef: null, config: null }, probe }))
+    const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://vllm/v1" } } });
+    expect(await observeSpawnRoutes([request(RETIRED_CLOUD_PI_BINDING), request(LOCAL)], { agentDir: dir, routing: { parentRef: null, config: null }, probe }))
       .toMatchObject({ ok: true, decisions: [
-        { kind: "retired", route: "openai-codex/gpt-5.6-sol", profile: "general-review" },
-        { kind: "reachable", route: "desktop-vllm/glm-5.3-flash-spark-tp2-v14" },
+        { kind: "retired", route: RETIRED_CLOUD_ROUTE, profile: RETIRED_CLOUD_PROFILE },
+        { kind: "reachable", route: LOCAL_PI_ROUTE },
       ] });
-    expect(probed).toEqual(["desktop-vllm"]);
+    expect(probed).toEqual([LOCAL.provider]);
   });
 
   it("probes the routed launch target, not the recorded binding", async () => {
     const parsed = parseModelRoutingConfig({
       schemaVersion: 1,
       defaultClass: "cloud",
-      modelClasses: { local: ["desktop-vllm/*"] },
+      modelClasses: { local: [`${LOCAL.provider}/*`] },
       targets: { muse: { model: "desktop-muse/qwen3.8-27b", thinkingLevel: "medium" } },
       rules: [{ id: "local-uses-muse", when: { parentClass: "local" }, use: { kind: "named", target: "muse" } }],
     });
     if (!parsed.ok) throw new Error(parsed.error.message);
     const { probed, probe } = recording({ kind: "answered", status: 200, servedModels: ["qwen3.8-27b"] });
-    const dir = agentDir({ providers: { "desktop-vllm": { baseUrl: "http://vllm/v1" }, "desktop-muse": { baseUrl: "http://muse/v1" } } });
+    const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://vllm/v1" }, "desktop-muse": { baseUrl: "http://muse/v1" } } });
     const observed = await observeSpawnRoutes([request(LOCAL)], {
       agentDir: dir,
-      routing: { parentRef: { provider: "desktop-vllm", model: LOCAL.model }, config: parsed.value },
+      routing: { parentRef: { provider: LOCAL.provider, model: LOCAL.model }, config: parsed.value },
       probe,
     });
     expect(probed).toEqual(["desktop-muse"]);

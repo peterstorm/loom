@@ -15,9 +15,10 @@
  */
 
 import { match } from "ts-pattern";
-import { recordedProfileBindings, type PiBinding, type PolicyResult, type RecordedLlmProfileId } from "./model-profiles";
+import { recordedProfileBindings, type PolicyResult, type RecordedLlmProfileId } from "./model-profiles";
 import { resolveAgentLaunchBinding, type EffectivePiBinding, type ModelRef, type ModelRoutingConfig } from "./model-routing";
 import type { AgentRequestAuthority } from "./orchestration-contract";
+import { samePiBinding } from "./orchestration-contract/roster";
 
 /** The provider's configured endpoint, as Pi's `models.json` declares it. */
 export type RouteEndpoint = Readonly<{ provider: string; baseUrl: string }>;
@@ -106,9 +107,6 @@ export type SpawnRouting = Readonly<{ parentRef: ModelRef | null; config: ModelR
 /** The routes a Pi spawn batch needs: what its children launch on, and the retired routes it recorded. */
 export type SpawnRoutePlan = Readonly<{ launch: readonly EffectivePiBinding[]; retired: readonly RetiredRoute[] }>;
 
-const samePiBinding = (left: PiBinding, right: PiBinding): boolean =>
-  left.provider === right.provider && left.model === right.model && left.thinking === right.thinking;
-
 /**
  * Plan a batch's routes. A request whose recorded Pi binding is not its
  * profile's current one was issued on a route the catalog has retired; every
@@ -183,33 +181,81 @@ export function unreachableReason(cause: UnreachableCause): string {
     .exhaustive();
 }
 
-/** The reachable routes whose served model went unconfirmed — evidence the shell reports, never a refusal. */
-export function unverifiedRoutes(decisions: readonly SpawnRouteDecision[]): readonly UnverifiedRoute[] {
-  return Object.freeze(decisions.flatMap((decision): UnverifiedRoute[] =>
-    decision.kind === "reachable" && decision.served.kind === "unlisted"
-      ? [Object.freeze({ route: decision.route, url: decision.url, cause: decision.served.cause, status: decision.served.status })]
-      : []));
-}
+/**
+ * How the gate treats a reachable route whose served model went unconfirmed
+ * (401/403, or a 2xx without a readable model list):
+ * - `admit-unverified` (the default, ADR-0023) admits it, and the shell
+ *   reports it on stderr as a `loom-route-unverified` event;
+ * - `strict` refuses it, for an operator whose authenticating gateway can
+ *   answer while the model server behind it is down.
+ */
+export type RouteGateMode = "admit-unverified" | "strict";
+
+/** The environment variable through which an operator chooses the {@link RouteGateMode}. */
+export const ROUTE_GATE_VARIABLE = "LOOM_ROUTE_GATE";
+
+const ROUTE_GATE_MODES: readonly RouteGateMode[] = Object.freeze(["admit-unverified", "strict"]);
 
 /**
- * The refusal text for every route that cannot run, or null when all can.
- * Each failure carries its own remedy: a down route is brought up and the
- * run resumed; an unconfigured one (often a routing rule naming a provider
- * `models.json` does not declare) is declared or routed elsewhere, then
- * resumed; a retired route never comes back, so the run is restarted.
+ * Parse the operator's {@link ROUTE_GATE_VARIABLE}. Unset or empty is the
+ * default; a value naming no mode is an error, never the default, so a
+ * misspelt `strict` cannot quietly admit unverified routes.
  */
-const REMEDY_ORDER = ["resume", "configure", "restart"] as const;
+export function parseRouteGateMode(
+  raw: string | undefined,
+): Readonly<{ ok: true; value: RouteGateMode }> | Readonly<{ ok: false; error: string }> {
+  if (raw === undefined || raw === "") return { ok: true, value: "admit-unverified" };
+  const mode = ROUTE_GATE_MODES.find((candidate) => candidate === raw);
+  return mode === undefined
+    ? { ok: false, error: `${ROUTE_GATE_VARIABLE} must be unset, 'admit-unverified' or 'strict', not '${raw}'` }
+    : { ok: true, value: mode };
+}
+
+/** The gate's verdict on a batch: admitted (with the unverified routes the shell reports), or refused. */
+export type SpawnGateVerdict =
+  | Readonly<{ kind: "admitted"; unverified: readonly UnverifiedRoute[] }>
+  | Readonly<{ kind: "refused"; message: string }>;
+
+/** The operator-facing reason a live server's model list could not confirm its model. */
+function unlistedReason(cause: UnlistedCause, status: number): string {
+  return match(cause)
+    .with("auth-refused", () => `GET /models answered HTTP ${status}, so its served models cannot be listed without credentials`)
+    .with("unreadable-listing", () => `GET /models answered HTTP ${status} without an OpenAI-style model list`)
+    .exhaustive();
+}
+
+/** Remedy kinds, in the order a refusal reports them. */
+const REMEDY_ORDER = ["resume", "verify", "configure", "restart"] as const;
 type Remedy = (typeof REMEDY_ORDER)[number];
 const REMEDIES: Readonly<Record<Remedy, string>> = Object.freeze({
   resume: "bring the route up, then resume the run",
+  verify: `make the route list its models at GET /models without credentials, or unset ${ROUTE_GATE_VARIABLE} to admit unverified routes, then resume the run`,
   configure: "declare the provider's baseUrl in Pi's models.json or route the child elsewhere in model-routing.json, then resume the run",
   restart: "this run predates local-only routing and can never resume its retired routes, so start a fresh run",
 });
 
-export function reachabilityRefusal(decisions: readonly SpawnRouteDecision[]): string | null {
+/**
+ * Decide a batch from its route decisions: refused, naming every route that
+ * cannot run, when any cannot; otherwise admitted with the reachable routes
+ * whose served model went unconfirmed. Each refused route carries its own
+ * remedy: a down route is brought up and the run resumed; an unverified
+ * route — refused only under `strict` — is made to list its models or the
+ * gate relaxed, then resumed; an unconfigured one (often a routing rule
+ * naming a provider `models.json` does not declare) is declared or routed
+ * elsewhere, then resumed; a retired route never comes back, so the run is
+ * restarted.
+ */
+export function decideSpawnGate(decisions: readonly SpawnRouteDecision[], mode: RouteGateMode): SpawnGateVerdict {
   type Refusal = Readonly<{ remedy: Remedy; text: string }>;
+  const unverified = decisions.flatMap((decision): UnverifiedRoute[] =>
+    decision.kind === "reachable" && decision.served.kind === "unlisted"
+      ? [Object.freeze({ route: decision.route, url: decision.url, cause: decision.served.cause, status: decision.served.status })]
+      : []);
   const refusals = decisions.flatMap((decision) => match(decision)
     .returnType<readonly Refusal[]>()
+    .with({ kind: "reachable", served: { kind: "unlisted" } }, ({ route, url, served: { cause, status } }) => mode === "strict"
+      ? [{ remedy: "verify", text: `route ${route} is unverified at ${url} (${ROUTE_GATE_VARIABLE}=strict): ${unlistedReason(cause, status)}` }]
+      : [])
     .with({ kind: "reachable" }, () => [])
     .with({ kind: "unreachable" }, ({ route, url, cause }) => [
       { remedy: "resume", text: `route ${route} is unreachable at ${url}: ${unreachableReason(cause)}` },
@@ -221,8 +267,11 @@ export function reachabilityRefusal(decisions: readonly SpawnRouteDecision[]): s
       { remedy: "restart", text: `route ${route} (recorded under profile '${profile}') is retired: Pi runs on the local route only since ADR-0023` },
     ])
     .exhaustive());
-  if (refusals.length === 0) return null;
+  if (refusals.length === 0) return Object.freeze({ kind: "admitted", unverified: Object.freeze(unverified) });
   const needed = new Set(refusals.map(({ remedy }) => remedy));
   const remedies = REMEDY_ORDER.filter((remedy) => needed.has(remedy)).map((remedy) => REMEDIES[remedy]);
-  return `refusing to spawn: ${refusals.map(({ text }) => text).join("; ")}. To proceed, ${remedies.join("; ")}. Nothing was spawned.`;
+  return Object.freeze({
+    kind: "refused",
+    message: `refusing to spawn: ${refusals.map(({ text }) => text).join("; ")}. To proceed, ${remedies.join("; ")}. Nothing was spawned.`,
+  });
 }

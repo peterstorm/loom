@@ -1,32 +1,39 @@
 /**
  * The Pi route gate at the façade's emission seam (`emitRunAction`): which
- * actions it gates, that a refusal publishes nothing, and that it probes the
- * route the child will actually launch on. The route probe port is
- * substituted by a recording fake keyed by provider; everything else — the
- * agent directory's `models.json` and `model-routing.json`, the session
- * binding registry — is real files in a scratch directory.
+ * actions it gates, that a refusal publishes nothing, that it probes the
+ * route the child will actually launch on, and that every input it cannot
+ * read refuses rather than passing. The route probe port is substituted by
+ * a recording fake keyed by provider; everything else — the agent
+ * directory's `models.json` and `model-routing.json`, the session binding
+ * registry — is real files in a scratch directory.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { DESKTOP_VLLM_ROUTE, type PiBinding } from "../../../src/core/model-profiles";
 import {
   parseArtifactRef,
   parseFixedArtifactSlot,
   parseStoredAgentRequestAuthority,
   type AgentRequestAuthority,
 } from "../../../src/core/orchestration-contract";
-import type { RouteProbe } from "../../../src/core/route-reachability";
+import { ROUTE_GATE_VARIABLE, type RouteProbe } from "../../../src/core/route-reachability";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
 import type { FacadeAction } from "../../../src/handlers/helpers/programs/program-result";
 import type { RouteProbePort } from "../../../src/utils/route-endpoint";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
+import { FIXTURE_CLAUDE_CODE_SESSION_ID, PI_PARENT_VARIABLES } from "../../fixtures/facade-parent";
+import {
+  LOCAL_PI_BINDING,
+  LOCAL_PI_ROUTE,
+  RETIRED_CLOUD_PI_BINDING,
+  RETIRED_CLOUD_PROFILE,
+  RETIRED_CLOUD_ROUTE,
+} from "../../fixtures/local-pi-binding";
 
-const LOCAL_ROUTE = `${DESKTOP_VLLM_ROUTE.provider}/${DESKTOP_VLLM_ROUTE.model}`;
+const LOCAL = LOCAL_PI_BINDING;
 const MUSE = { provider: "desktop-muse", model: "qwen3.8-27b" } as const;
-const RETIRED_SOL: PiBinding = { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" };
 const RUN_ID = "run.route-gate";
 
 const scratch = mkdtempSync(join(tmpdir(), "loom-route-gate-"));
@@ -59,9 +66,11 @@ beforeEach(() => {
   // A hermetic home: the routing loader falls back to ~/.pi/agent, which must
   // never be the operator's.
   vi.stubEnv("HOME", join(caseDir, "home"));
+  // The default gate mode unless a case opts in: never the operator's.
+  vi.stubEnv(ROUTE_GATE_VARIABLE, undefined);
   writeFileSync(join(agentDir, "models.json"), JSON.stringify({
     providers: {
-      [DESKTOP_VLLM_ROUTE.provider]: { baseUrl: "http://vllm.test/v1", api: "openai-completions", models: [{ id: DESKTOP_VLLM_ROUTE.model }] },
+      [LOCAL.provider]: { baseUrl: "http://vllm.test/v1", api: "openai-completions", models: [{ id: LOCAL.model }] },
       [MUSE.provider]: { baseUrl: "http://muse.test/v1", api: "openai-completions", models: [{ id: MUSE.model }] },
     },
   }));
@@ -93,14 +102,13 @@ function piParent(parent: Readonly<{ provider: string; model: string }> | null =
   return id;
 }
 
+/** A Claude Code parent, as `claudeCodeParentEnvironment` defines one, stubbed into this process. */
 function claudeCodeParent(): string {
-  const id = "8a510c9a-c1fb-4b89-b61f-08ef6a007c7b";
-  vi.stubEnv("PI_CODING_AGENT", undefined);
-  vi.stubEnv("PI_SESSION_ID", undefined);
+  for (const variable of PI_PARENT_VARIABLES) vi.stubEnv(variable, undefined);
   vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
   vi.stubEnv("CLAUDECODE", "1");
-  vi.stubEnv("CLAUDE_CODE_SESSION_ID", id);
-  return id;
+  vi.stubEnv("CLAUDE_CODE_SESSION_ID", FIXTURE_CLAUDE_CODE_SESSION_ID);
+  return FIXTURE_CLAUDE_CODE_SESSION_ID;
 }
 
 /** A recording probe fake: each provider answers as configured; unlisted providers refuse. */
@@ -117,6 +125,7 @@ function probeFake(answers: Readonly<Record<string, RouteProbe>>): Readonly<{ pr
 
 const listing = (...served: string[]): RouteProbe => ({ kind: "answered", status: 200, servedModels: served });
 const DOWN: RouteProbe = { kind: "refused", reason: "fetch failed (connect ECONNREFUSED)" };
+const AUTH_REFUSED: RouteProbe = { kind: "answered", status: 401, servedModels: null };
 
 function storedAuthority(overrides: Record<string, unknown> = {}): AgentRequestAuthority {
   const parsed = parseStoredAgentRequestAuthority(agentRequestAuthority(RUN_ID, overrides));
@@ -138,39 +147,62 @@ function spawnBatch(authorities: readonly AgentRequestAuthority[]): FacadeAction
   };
 }
 
+/**
+ * A stored authority the parser no longer admits. The in-memory type cannot
+ * express it, which is exactly why the gate re-parses.
+ */
+const unparseable = (authority: AgentRequestAuthority): AgentRequestAuthority =>
+  ({ ...authority, modelProfile: "no-such-profile" }) as unknown as AgentRequestAuthority;
+
 const retiredAuthority = (): AgentRequestAuthority => storedAuthority({
   requestId: "request:reviewer:retired",
-  harnessBinding: { pi: RETIRED_SOL, claude: { harness: "claude-code", model: "sonnet" } },
+  harnessBinding: { pi: RETIRED_CLOUD_PI_BINDING, claude: { harness: "claude-code", model: "sonnet" } },
 });
 
 const piBindings = (id: string) => readSessionRunBindings(bindingDir, id, "pi");
+
+const unverifiedEvents = (): readonly unknown[] =>
+  stderr.join("").trim().split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
 
 function routeConfig(use: unknown, targets: Readonly<Record<string, unknown>> = {}): void {
   writeFileSync(join(agentDir, "model-routing.json"), JSON.stringify({
     schemaVersion: 1,
     defaultClass: "cloud",
-    modelClasses: { local: ["desktop-vllm/*", "desktop-muse/*"] },
+    modelClasses: { local: [`${LOCAL.provider}/*`, `${MUSE.provider}/*`] },
     targets,
     rules: [{ id: "local-parent-routing", when: { parentClass: "local" }, use }],
   }));
 }
 
+/** Expect a refusal that probed nothing, printed nothing and published nothing. */
+function expectRefusedUntouched(
+  result: Awaited<ReturnType<typeof emitRunAction>>,
+  id: string,
+  probed: readonly string[],
+  message: string,
+): void {
+  expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(message) });
+  expect(probed).toEqual([]);
+  expect(stdout).toEqual([]);
+  expect(piBindings(id)).toEqual({ ok: true, value: [] });
+}
+
 describe("emitRunAction: Pi route gate wiring", () => {
   it("refuses a Pi spawn batch whose route is down and publishes nothing", async () => {
     const id = piParent();
-    const { probe, probed } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: DOWN });
+    const { probe, probed } = probeFake({ [LOCAL.provider]: DOWN });
 
     const result = await emitRunAction(handle, spawnBatch([storedAuthority()]), probe);
 
-    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`refusing to spawn: route ${LOCAL_ROUTE} is unreachable at http://vllm.test/v1/models`) });
-    expect(probed).toEqual([DESKTOP_VLLM_ROUTE.provider]);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`refusing to spawn: route ${LOCAL_PI_ROUTE} is unreachable at http://vllm.test/v1/models`) });
+    expect(probed).toEqual([LOCAL.provider]);
     expect(stdout).toEqual([]);
     expect(piBindings(id)).toEqual({ ok: true, value: [] });
   });
 
   it("admits a Pi spawn batch whose route lists the model, then publishes the binding and prints the action", async () => {
     const id = piParent();
-    const { probe } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: listing(DESKTOP_VLLM_ROUTE.model) });
+    const { probe } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
     const authority = storedAuthority();
 
     expect(await emitRunAction(handle, spawnBatch([authority]), probe)).toEqual({ kind: "allow" });
@@ -182,48 +214,15 @@ describe("emitRunAction: Pi route gate wiring", () => {
 
   it("refuses a batch recorded on a retired route with the restart remedy, without probing it", async () => {
     const id = piParent();
-    const { probe, probed } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: listing(DESKTOP_VLLM_ROUTE.model) });
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
 
     const result = await emitRunAction(handle, spawnBatch([retiredAuthority()]), probe);
 
-    expect(result.kind).toBe("error");
+    expectRefusedUntouched(result, id, probed, `route ${RETIRED_CLOUD_ROUTE} (recorded under profile '${RETIRED_CLOUD_PROFILE}') is retired`);
     const message = result.kind === "error" ? result.message : "";
-    expect(message).toContain("route openai-codex/gpt-5.6-sol (recorded under profile 'general-review') is retired");
     expect(message).toContain("start a fresh run");
     expect(message).not.toContain("unconfigured");
     expect(message).not.toContain("bring the route up");
-    expect(probed).toEqual([]);
-    expect(stdout).toEqual([]);
-    expect(piBindings(id)).toEqual({ ok: true, value: [] });
-  });
-
-  it("admits a reachable route whose list is unobservable and reports it on stderr", async () => {
-    const id = piParent();
-    const { probe } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: { kind: "answered", status: 401, servedModels: null } });
-
-    expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe)).toEqual({ kind: "allow" });
-
-    const events = stderr.join("").trim().split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
-    expect(events).toEqual([{
-      event: "loom-route-unverified", route: LOCAL_ROUTE, url: "http://vllm.test/v1/models", cause: "auth-refused", status: 401,
-    }]);
-    expect(piBindings(id)).toMatchObject({ ok: true, value: [{ runId: RUN_ID }] });
-  });
-
-  it("leaves an unparseable request authority to the binding publication, which reports it", async () => {
-    piParent();
-    const { probe, probed } = probeFake({});
-    const action = spawnBatch([storedAuthority()]);
-    // A stored authority the parser no longer admits: the in-memory type
-    // cannot express it, which is exactly why the gate re-parses.
-    const broken: FacadeAction = action.kind === "spawn-batch"
-      ? { ...action, requests: action.requests.map((request) => ({ ...request, authority: { ...request.authority, modelProfile: "no-such-profile" } as unknown as AgentRequestAuthority })) }
-      : action;
-
-    const result = await emitRunAction(handle, broken, probe);
-
-    expect(probed).toEqual([]);
-    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("Pi orchestration spawn request 0") });
   });
 
   it("never gates a Claude Code parent, even when every route is down", async () => {
@@ -257,14 +256,115 @@ describe("emitRunAction: Pi route gate wiring", () => {
   });
 });
 
+describe("emitRunAction: the gate refuses every input it cannot read", () => {
+  it("refuses a batch whose every request authority is unparseable — never a vacuous pass", async () => {
+    const id = piParent();
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+    const batch = spawnBatch([unparseable(storedAuthority())]);
+
+    expectRefusedUntouched(await emitRunAction(handle, batch, probe), id, probed, "Pi orchestration spawn request 0");
+  });
+
+  it("refuses a batch with one unparseable authority among checkable ones, naming it, before probing any route", async () => {
+    const id = piParent();
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+    const batch = spawnBatch([storedAuthority(), unparseable(storedAuthority({ requestId: "request:reviewer:broken" }))]);
+
+    expectRefusedUntouched(await emitRunAction(handle, batch, probe), id, probed, "Pi orchestration spawn request 1");
+  });
+
+  it("refuses when model-routing.json is malformed, since the child may launch elsewhere than the declared route", async () => {
+    const id = piParent({ provider: LOCAL.provider, model: LOCAL.model });
+    writeFileSync(join(agentDir, "model-routing.json"), "{not json");
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+
+    const result = await emitRunAction(handle, spawnBatch([storedAuthority()]), probe);
+
+    expectRefusedUntouched(result, id, probed, `cannot check Pi route reachability: cannot parse routing config ${join(agentDir, "model-routing.json")}`);
+    expect(stderr.join("")).not.toContain("warning");
+  });
+
+  it("refuses when model-routing.json parses but is invalid", async () => {
+    const id = piParent({ provider: LOCAL.provider, model: LOCAL.model });
+    writeFileSync(join(agentDir, "model-routing.json"), JSON.stringify({ schemaVersion: 99 }));
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+
+    expectRefusedUntouched(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe), id, probed, "cannot check Pi route reachability: invalid routing config");
+  });
+
+  it("refuses when models.json is malformed", async () => {
+    const id = piParent();
+    writeFileSync(join(agentDir, "models.json"), "[]");
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+
+    expectRefusedUntouched(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe), id, probed, "cannot check Pi route reachability: invalid");
+  });
+
+  it(`refuses when ${ROUTE_GATE_VARIABLE} names no mode, rather than reading it as the default`, async () => {
+    const id = piParent();
+    vi.stubEnv(ROUTE_GATE_VARIABLE, "Strict");
+    const { probe, probed } = probeFake({ [LOCAL.provider]: AUTH_REFUSED });
+
+    expectRefusedUntouched(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe), id, probed,
+      `cannot check Pi route reachability: ${ROUTE_GATE_VARIABLE} must be unset, 'admit-unverified' or 'strict', not 'Strict'`);
+  });
+});
+
+describe("emitRunAction: unverified routes under each gate mode", () => {
+  it("admits a reachable route whose list is unobservable by default and reports it on stderr", async () => {
+    const id = piParent();
+    const { probe } = probeFake({ [LOCAL.provider]: AUTH_REFUSED });
+
+    expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe)).toEqual({ kind: "allow" });
+
+    expect(unverifiedEvents()).toEqual([{
+      event: "loom-route-unverified", route: LOCAL_PI_ROUTE, url: "http://vllm.test/v1/models", cause: "auth-refused", status: 401,
+    }]);
+    expect(piBindings(id)).toMatchObject({ ok: true, value: [{ runId: RUN_ID }] });
+  });
+
+  it("admits the same route under an explicit admit-unverified mode", async () => {
+    piParent();
+    vi.stubEnv(ROUTE_GATE_VARIABLE, "admit-unverified");
+    const { probe } = probeFake({ [LOCAL.provider]: AUTH_REFUSED });
+
+    expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe)).toEqual({ kind: "allow" });
+    expect(unverifiedEvents()).toHaveLength(1);
+  });
+
+  it("refuses the same route under strict, with its own remedy, publishing and reporting nothing", async () => {
+    const id = piParent();
+    vi.stubEnv(ROUTE_GATE_VARIABLE, "strict");
+    const { probe, probed } = probeFake({ [LOCAL.provider]: AUTH_REFUSED });
+
+    const result = await emitRunAction(handle, spawnBatch([storedAuthority()]), probe);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`route ${LOCAL_PI_ROUTE} is unverified at http://vllm.test/v1/models (${ROUTE_GATE_VARIABLE}=strict)`) });
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining(`or unset ${ROUTE_GATE_VARIABLE} to admit unverified routes`) });
+    expect(probed).toEqual([LOCAL.provider]);
+    expect(stdout).toEqual([]);
+    expect(unverifiedEvents()).toEqual([]);
+    expect(piBindings(id)).toEqual({ ok: true, value: [] });
+  });
+
+  it("admits a route that lists its model under strict", async () => {
+    const id = piParent();
+    vi.stubEnv(ROUTE_GATE_VARIABLE, "strict");
+    const { probe } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+
+    expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe)).toEqual({ kind: "allow" });
+    expect(piBindings(id)).toMatchObject({ ok: true, value: [{ runId: RUN_ID }] });
+  });
+});
+
 describe("emitRunAction: the gate probes the route the child launches on", () => {
-  const LOCAL_PARENT = { provider: DESKTOP_VLLM_ROUTE.provider, model: DESKTOP_VLLM_ROUTE.model };
+  const LOCAL_PARENT = { provider: LOCAL.provider, model: LOCAL.model };
   const MUSE_TARGET = { muse: { model: `${MUSE.provider}/${MUSE.model}`, thinkingLevel: "medium" } };
 
   it("admits when routing sends the child to a live target although the declared route is down", async () => {
     piParent(LOCAL_PARENT);
     routeConfig({ kind: "named", target: "muse" }, MUSE_TARGET);
-    const { probe, probed } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: DOWN, [MUSE.provider]: listing(MUSE.model) });
+    const { probe, probed } = probeFake({ [LOCAL.provider]: DOWN, [MUSE.provider]: listing(MUSE.model) });
 
     expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe)).toEqual({ kind: "allow" });
     expect(probed).toEqual([MUSE.provider]);
@@ -273,7 +373,7 @@ describe("emitRunAction: the gate probes the route the child launches on", () =>
   it("refuses when routing sends the child to a down target although the declared route is up", async () => {
     const id = piParent(LOCAL_PARENT);
     routeConfig({ kind: "named", target: "muse" }, MUSE_TARGET);
-    const { probe, probed } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: listing(DESKTOP_VLLM_ROUTE.model), [MUSE.provider]: DOWN });
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model), [MUSE.provider]: DOWN });
 
     const result = await emitRunAction(handle, spawnBatch([storedAuthority()]), probe);
 
@@ -283,11 +383,11 @@ describe("emitRunAction: the gate probes the route the child launches on", () =>
   });
 
   it("probes the declared route when the parent is not local, so no rule applies", async () => {
-    piParent({ provider: "openai-codex", model: "gpt-5.6-sol" });
+    piParent({ provider: RETIRED_CLOUD_PI_BINDING.provider, model: RETIRED_CLOUD_PI_BINDING.model });
     routeConfig({ kind: "named", target: "muse" }, MUSE_TARGET);
-    const { probe, probed } = probeFake({ [DESKTOP_VLLM_ROUTE.provider]: listing(DESKTOP_VLLM_ROUTE.model) });
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
 
     expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), probe)).toEqual({ kind: "allow" });
-    expect(probed).toEqual([DESKTOP_VLLM_ROUTE.provider]);
+    expect(probed).toEqual([LOCAL.provider]);
   });
 });
