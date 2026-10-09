@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline";
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +11,8 @@ import { CONTEXT_PACKET_BOUNDS, readStoredContextPacketFile } from "../engine/sr
 import { readWaveReviewContext } from "../engine/src/core/wave-review-authority";
 import type { ReviewerDraftV2 } from "../engine/src/core/reviewer-contract";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
+import { PI_AGENT_DIRECTORY_VARIABLE } from "../engine/src/core/pi-agent-directory";
+import { DESKTOP_VLLM_ROUTE } from "../engine/src/core/model-profiles";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(ROOT, "engine", "src", "cli.ts");
@@ -24,7 +27,44 @@ const temporaryRoots: string[] = [];
 const transportRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-transport-")));
 temporaryRoots.push(transportRoot);
 
+// A Pi parent's spawn batches pass the route gate (ADR-0023), which reads the
+// provider endpoint from Pi's models.json and probes `GET {baseUrl}/models`.
+// The smoke owns both edges: its own agent directory, and a stub route server
+// in a separate process (every CLI call below is a blocking spawnSync, so an
+// in-process server could never answer the probe). Nothing is inherited from
+// the operator's ~/.pi, and no vLLM host has to be reachable.
+const ROUTE_STUB_SOURCE = `
+const served = JSON.stringify({ object: "list", data: [{ id: process.env.STUB_MODEL, object: "model" }] });
+const server = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  fetch: (request) => new URL(request.url).pathname === "/v1/models"
+    ? new Response(served, { headers: { "content-type": "application/json" } })
+    : new Response("not found", { status: 404 }),
+});
+process.stdout.write(server.port + "\\n");
+`;
+const routeStub = spawn("bun", ["-e", ROUTE_STUB_SOURCE], {
+  env: { ...process.env, STUB_MODEL: DESKTOP_VLLM_ROUTE.model },
+  stdio: ["ignore", "pipe", "inherit"],
+});
+const routeStubPort = await new Promise<number>((resolve, reject) => {
+  routeStub.once("error", reject);
+  routeStub.once("exit", (code) => reject(new Error(`route stub exited before listening (code ${code})`)));
+  createInterface({ input: routeStub.stdout }).once("line", (line) => resolve(Number(line)));
+});
+// The port is all the smoke needs from the stub: release its handles so they
+// cannot hold the event loop open, and let the exit hook below stop it.
+routeStub.stdout.destroy();
+routeStub.unref();
+const piAgentDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-pi-agent-")));
+temporaryRoots.push(piAgentDir);
+writeFileSync(join(piAgentDir, "models.json"), `${JSON.stringify({
+  providers: { [DESKTOP_VLLM_ROUTE.provider]: { baseUrl: `http://127.0.0.1:${routeStubPort}/v1` } },
+}, null, 2)}\n`);
+
 process.on("exit", () => {
+  routeStub.kill();
   for (const path of temporaryRoots) rmSync(path, { recursive: true, force: true });
 });
 
@@ -77,6 +117,7 @@ function invokeOrchestrationCli(cwd: string, args: readonly string[], stdin: str
       ...process.env,
       PI_CODING_AGENT: "true",
       PI_SESSION_ID: "facade-smoke-fixture",
+      [PI_AGENT_DIRECTORY_VARIABLE]: piAgentDir,
       LOOM_SUBAGENT_DIR: transportRoot,
       [PI_EXTENSION_RUNTIME_ROOT_ENV]: runtimeIdentity.packageRoot,
       [PI_EXTENSION_RUNTIME_REVISION_ENV]: runtimeIdentity.revision,
