@@ -63,7 +63,7 @@ import {
   success,
   type ContextDigest,
 } from "../../src/core/orchestration-contract/identity";
-import { withEnvOverlay, type EnvironmentOverlay } from "./issue-route-env";
+import { withEnvOverlay, type EnvironmentOverlay } from "./env-overlay";
 import type { PiSubagentLaunchReply } from "../../../pi/emission-launch-bridge";
 import { canonicalTempDir } from "./canonical-temp-dir";
 import { mintedBindingFor, type RegistryCell } from "./emission-registry-cells";

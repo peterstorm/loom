@@ -20,10 +20,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { git } from "../../../fixtures/git-repository";
-import { fixturePiEnvironment } from "../../../fixtures/pi-session";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { OTHER_CONTEXT_DIGEST, REVIEWER_V2 } from "../../../fixtures/issued-emission";
-import { claudeCodeParentEnvironment, withEnvOverlay } from "../../../fixtures/issue-route-env";
+import { withEnvOverlay } from "../../../fixtures/env-overlay";
+import { LOCAL_PI_BINDING } from "../../../fixtures/local-pi-binding";
 import { value } from "../../../fixtures/parse-result";
 import { catalogAuthority, mustAuthority, reviewerAuthority } from "../../../fixtures/reviewer-request";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
@@ -161,10 +162,6 @@ function standaloneEmissionProject(): { root: string; runsRoot: string } {
   return { root, runsRoot: join(root, "runs") };
 }
 
-/** The harness that runs the facade CLI: the parent whose payload agents the
- *  issued reviewers are spawned as. */
-type FacadeParent = "pi" | "claude-code";
-
 /** A Pi parent running a cloud model itself: issuance must not read it — every
  *  reviewer still lands on the catalog's local emission route. */
 const CLOUD_PI_PARENT_MODEL_ENV = Object.freeze({
@@ -172,9 +169,6 @@ const CLOUD_PI_PARENT_MODEL_ENV = Object.freeze({
   PI_MODEL: "gpt-5.6-sol",
   PI_REASONING_LEVEL: "high",
 });
-
-const parentEnvironment = (parent: FacadeParent, root: string): NodeJS.ProcessEnv =>
-  parent === "pi" ? fixturePiEnvironment(root) : claudeCodeParentEnvironment(root);
 
 /** In-process renders read the Pi parent flag from this process: pin it to the
  *  non-Pi parent the extraction arm runs under, whatever the ambient worker. */
@@ -192,7 +186,7 @@ const startFacadeProgram = (
   new Promise((resolve, reject) => {
     const child = spawn("bun", [waveCli, "helper", "orchestration", "start", program,
       "--runs-root", project.runsRoot, "--run", runId],
-      { cwd: project.root, env: { ...parentEnvironment(parent, project.root), ...environment } });
+      { cwd: project.root, env: { ...facadeParentEnvironment(parent, project.root), ...environment } });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
@@ -289,7 +283,7 @@ describe("positive program-path issuance through a Pi parent (T6)", () => {
     await withEnvOverlay({ [RUNS_ROOT_ENV]: project.runsRoot, [RUN_DIR_ENV]: join(project.runsRoot, "run.local-wave") }, () => {
       for (const { authority, task } of requests.filter(({ authority }) => authority.role !== "spec-check-invoker")) {
         expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
-        expect(authority.harnessBinding.pi).toMatchObject({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+        expect(authority.harnessBinding.pi).toMatchObject(LOCAL_PI_BINDING);
         const descriptor = parseEmissionDescriptor(task);
         expect(descriptor.kind).toBe("issued");
         if (descriptor.kind !== "issued") continue;
@@ -311,7 +305,7 @@ describe("positive program-path issuance through a Pi parent (T6)", () => {
     expect(requests.find(({ authority }) => authority.role === "code-reviewer")?.authority.modelProfile).toBe("general-review");
     for (const { authority, task } of requests) {
       expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
-      expect(authority.harnessBinding.pi).toMatchObject({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+      expect(authority.harnessBinding.pi).toMatchObject(LOCAL_PI_BINDING);
       expect(parseEmissionDescriptor(task)).toMatchObject({
         kind: "issued", contextDigest: authority.contextDigest,
         binding: { requestId: authority.requestId, version: "v2" },
@@ -405,7 +399,7 @@ describe("the standalone successor v3 program path projects the issued route (T6
     }));
     const authority = reviewerAuthority("standalone-review", requestId, packet.digest);
     expect(authority.modelProfile).toBe("general-review");
-    expect(authority.harnessBinding.pi).toMatchObject({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+    expect(authority.harnessBinding.pi).toMatchObject(LOCAL_PI_BINDING);
     await withEnvOverlay({ PI_CODING_AGENT: "true" }, async () => {
       const published = await publishReviewInitialBatch(handle, [{ authority, context: {
         digest: packet.digest, slot: { kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` },

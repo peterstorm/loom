@@ -15,6 +15,7 @@ import {
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { LOCAL_PI_MODEL_ARGUMENT } from "../../fixtures/local-pi-binding";
 import { afterEach, describe, expect, it } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../../src/runtime-compatibility";
 import { readReviewPacketPostimage } from "../../../src/handlers/helpers/review-packet";
@@ -280,12 +281,12 @@ describe("quality-program helper boundaries", () => {
     // Pi runs local models only: general-review and focused-review, once two
     // distinct cloud targets, now lower to the one local route.
     expect(renderedReviewer).toMatch(/^model-profile: general-review$/m);
-    expect(renderedReviewer).toMatch(/^model: desktop-vllm\/glm-5\.3-flash-spark-tp2-v14:high$/m);
+    expect(renderedReviewer.split("\n")).toContain(`model: ${LOCAL_PI_MODEL_ARGUMENT}`);
     expect(renderedReviewer).toContain(`${ROOT}/rules/architecture.md`);
     expect(renderedReviewer).not.toContain("CLAUDE_PLUGIN_ROOT");
     const commentAnalyzer = readFileSync(join(output, "comment-analyzer.md"), "utf-8");
     expect(commentAnalyzer).toMatch(/^model-profile: focused-review$/m);
-    expect(commentAnalyzer).toMatch(/^model: desktop-vllm\/glm-5\.3-flash-spark-tp2-v14:high$/m);
+    expect(commentAnalyzer.split("\n")).toContain(`model: ${LOCAL_PI_MODEL_ARGUMENT}`);
     for (const rendered of readdirSync(output).filter((entry) => entry.endsWith(".md"))) {
       expect(readFileSync(join(output, rendered), "utf-8")).not.toMatch(/^model: (?:openai-codex|github-copilot)\//m);
     }

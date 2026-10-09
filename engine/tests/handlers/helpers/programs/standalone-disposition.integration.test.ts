@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { claudeCodeParentEnvironment } from "../../../fixtures/issue-route-env";
-import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
+import { disposeFixturePiSessions, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
 import { standaloneOriginReference } from "../../../../src/core/standalone-finding-origin";
 import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-review";
 import { type StandaloneDispositionPublicationReference } from "../../../../src/core/standalone-review-model";
@@ -51,11 +51,8 @@ function project() {
   writeFileSync(join(root, "README.md"), "# Reviewed\n");
   return root;
 }
-/** The harness that parents the facade CLI child: a Pi parent issues reviewers
- *  the emission route; a Claude Code parent keeps them extraction-only. */
-type FacadeParent = "pi" | "claude-code";
 async function invoke(root: string, args: readonly string[], input = "", skew = false, parent: FacadeParent = "pi") {
-  const env = parent === "pi" ? fixturePiEnvironment(root) : claudeCodeParentEnvironment(root);
+  const env = facadeParentEnvironment(parent, root);
   if (skew) env.LOOM_PI_EXTENSION_RUNTIME_REVISION = `sha256:${"0".repeat(64)}`;
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: root, env });

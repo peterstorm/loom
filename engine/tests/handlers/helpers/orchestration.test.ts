@@ -32,8 +32,9 @@ import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
-import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
-import { FIXTURE_PI_AGENT_DIR_ENV } from "../../setup/fixture-pi-route";
+import { disposeFixturePiSessions, withFixturePiSession } from "../../fixtures/pi-session";
+import { facadeParentEnvironment, type FacadeParent } from "../../fixtures/facade-parent";
+import { fixturePiAgentDirectory } from "../../fixtures/fixture-pi-agent-directory";
 import { DESKTOP_VLLM_ROUTE } from "../../../src/core/model-profiles";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
 import {
@@ -263,9 +264,10 @@ function runCli(
   stdin = "",
   cwd = ENGINE,
   envOverrides: Readonly<Record<string, string | undefined>> = {},
+  parent: FacadeParent = "pi",
 ) {
   const env: NodeJS.ProcessEnv = {
-    ...fixturePiEnvironment(cwd),
+    ...facadeParentEnvironment(parent, cwd),
     ...envOverrides,
   };
   // The ambient session's own runtime handshake must not leak into the spawned
@@ -1665,8 +1667,6 @@ describe("orchestration CLI", () => {
         },
       },
     }));
-    const fixtureAgentDir = process.env[FIXTURE_PI_AGENT_DIR_ENV];
-    if (fixtureAgentDir === undefined) throw new Error(`${FIXTURE_PI_AGENT_DIR_ENV} is unset: tests/setup/fixture-pi-route.ts did not run`);
     const piEnv = (agentDir: string) => ({
       PI_CODING_AGENT: "true",
       PI_CODING_AGENT_DIR: agentDir,
@@ -1686,7 +1686,7 @@ describe("orchestration CLI", () => {
     // Fail closed: no session spawn binding was registered for the refused batch.
     expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toEqual({ ok: true, value: [] });
 
-    const resumed = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv(fixtureAgentDir));
+    const resumed = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv(fixturePiAgentDirectory()));
 
     expect(resumed.status, resumed.stderr).toBe(0);
     const action = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
@@ -1894,22 +1894,17 @@ describe("orchestration CLI", () => {
   }, 15_000);
 
   it("keeps the refutation panel spawn tool-free under an emission-capable Pi parent (FR-001/AD-6)", async () => {
-    // runCli's envOverrides override (and undefined-delete) the fixture env,
-    // so each arm pins its own parent harness explicitly: the fixture Pi
-    // session (every reviewer on the emission route) against a Claude Code
-    // parent (every reviewer extraction-only).
-    const PI_PARENT_ENV = {} as const;
-    const claudeBindings = canonicalTempDir("loom-panel-route-claude-bindings-");
-    cleanup.push(claudeBindings);
-    const CLAUDE_CODE_PARENT_ENV = claudeCodeEnvironment("8a510c9a-c1fb-4b89-b61f-08ef6a007c7a", join(claudeBindings, "bindings"));
-    const runThroughPanel = async (routeEnv: Readonly<Record<string, string | undefined>>) => {
+    // Each arm runs under its own parent harness: the fixture Pi session
+    // (every reviewer on the emission route) against a Claude Code parent
+    // (every reviewer extraction-only).
+    const runThroughPanel = async (parent: FacadeParent) => {
       const root = repository();
       writeFileSync(join(root, "README.md"), "fixture\npanel defect\n");
       const runsRoot = join(root, ".claude", "reviews", "review-and-fix-runs");
       const runDir = join(runsRoot, "run.panel-route");
       mkdirSync(runDir, { recursive: true });
       const startedResponse = await runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", runDir],
-        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, routeEnv);
+        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, {}, parent);
       expect(startedResponse.status, startedResponse.stderr).toBe(0);
       const started = JSON.parse(startedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
       const opened = openRunDirectory(runsRoot, runDir);
@@ -1919,13 +1914,13 @@ describe("orchestration CLI", () => {
       for (const [index, { authority }] of started.requests.entries()) {
         expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
       }
-      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, routeEnv);
+      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, parent);
       expect(resumedResponse.status, resumedResponse.stderr).toBe(0);
       const panel = JSON.parse(resumedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
       return { root, started, panel };
     };
-    const extraction = await runThroughPanel(CLAUDE_CODE_PARENT_ENV);
-    const emission = await runThroughPanel(PI_PARENT_ENV);
+    const extraction = await runThroughPanel("claude-code");
+    const emission = await runThroughPanel("pi");
 
     // The Pi parent is genuinely emission-capable: its reviewer slots issue
     // descriptors, the Claude Code parent's do not.

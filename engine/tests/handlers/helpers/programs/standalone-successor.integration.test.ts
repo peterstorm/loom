@@ -7,13 +7,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureStandaloneCliEvidence } from "../../../fixtures/standalone-cli-capture";
-import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
+import { disposeFixturePiSessions, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
-import { claudeCodeParentEnvironment } from "../../../fixtures/issue-route-env";
-import { resolveAgentPolicy } from "../../../../src/core/model-profiles";
-import { withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
+import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
+import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
@@ -46,13 +45,9 @@ function project() {
   }
   writeFileSync(join(root, "a.ts"), "export const value = 1;\n"); return root;
 }
-/** The harness that parents the facade CLI child: a Pi parent issues reviewers
- *  the emission route; a Claude Code parent keeps them extraction-only. */
-type FacadeParent = "pi" | "claude-code";
 async function invoke(root: string, args: readonly string[], input = "", parent: FacadeParent = "pi") {
-  const env = parent === "pi" ? fixturePiEnvironment(root) : claudeCodeParentEnvironment(root);
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: root, env });
+    const child = spawn("bun", [cli, "helper", "orchestration", ...args], { cwd: root, env: facadeParentEnvironment(parent, root) });
     let stdout = ""; let stderr = ""; let failure: Error | null = null;
     child.stdout.setEncoding("utf8").on("data", (text: string) => { stdout += text; });
     child.stderr.setEncoding("utf8").on("data", (text: string) => { stderr += text; });
@@ -560,18 +555,12 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const emission = await successor(root, "route-emission", p, f, "pi");
 
       // Both runs freeze the same successor v3 program shape (schemaVersion
-      // 3, same lineage), and issuance is parent-independent: every reviewer
-      // carries its catalog profile and the identical frozen binding.
+      // 3, same lineage), and issuance is parent-independent.
       for (const run of [extraction, emission]) {
         expect(run.registration.schemaVersion).toBe(3);
         expect(run.started.requests.map(({ authority }) => authority.role)).toEqual(["code-reviewer", "type-design-analyzer"]);
       }
-      const issuance = ({ authority }: { authority: AgentRequestAuthority }) => ({ role: authority.role,
-        modelProfile: authority.modelProfile, harnessBinding: authority.harnessBinding, requiredSkill: authority.requiredSkill });
-      expect(emission.started.requests.map(issuance)).toEqual(extraction.started.requests.map(issuance));
-      for (const { authority } of emission.started.requests) {
-        expect(authority.modelProfile).toBe(value(resolveAgentPolicy(authority.role)).profile);
-      }
+      expectParentIndependentIssuance(emission.started.requests, extraction.started.requests);
 
       // The successor's frozen packet content is route-independent: the v3
       // packet digests embed each run's request identity, but the lineage and
