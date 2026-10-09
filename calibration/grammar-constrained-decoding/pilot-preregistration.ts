@@ -167,6 +167,15 @@ export type WorkloadCase = CellPreregistration["workload"]["cases"][number];
 
 export const parsePreregistration: (raw: unknown) => Result<Preregistration, readonly string[]> = parserOf(preregistrationSchema);
 
+/** The record a preregistration is written as — `parsePreregistration`'s
+ *  inverse. A schemaVersion 1 record never carries its policy (the version
+ *  implies it), so the parsed value's `releasePolicy` is left out of it. */
+export function encodePreregistration(prereg: Preregistration): DeepReadonly<z.input<typeof preregistrationSchema>> {
+  if (prereg.schemaVersion === 2) return prereg;
+  const { releasePolicy: _implied, ...record } = prereg;
+  return record;
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic paired schedule (matched requests, counterbalanced order)
 // ---------------------------------------------------------------------------

@@ -123,16 +123,48 @@ export type EmissionArmRates = Readonly<{
   acceptedViaEmissionRate: number | null;
 }>;
 
-/** The provider-enforced retry count a route's qualification admits: a count
- *  on a constrained route, `not-applicable` on a route that enforces nothing. */
-type ProviderEnforcedRetriesOn = Readonly<{ "constrained-emission": number; "unconstrained-emission": "not-applicable" }>;
+type EmissionKind = EmissionRouteQualification["kind"];
+/** The `K` arm of an emission route's qualification. */
+type QualificationOn<K extends EmissionKind> = Extract<EmissionRouteQualification, { kind: K }>;
+
+/**
+ * What a cell's emission qualification fixes — the ONE owner of the
+ * qualification/AS-004 correlation. Every per-qualification type below reads
+ * its terms from here (`TermOn`), and `QUALIFICATION_RULES` is its one
+ * implementation:
+ *
+ * - `providerEnforcedRetries`: a count on a constrained route; `not-applicable`
+ *   on a route that enforces nothing.
+ * - `as004`: the AS-004 verdicts the route can yield — on a constrained route
+ *   the provider-enforced retries pass or violate it; an unconstrained route
+ *   enforces nothing, so AS-004 is not applicable there.
+ * - `releaseClass`: the class a passing cell is released in.
+ */
+type QualificationTerms = Readonly<{
+  "constrained-emission": Readonly<{ providerEnforcedRetries: number; as004: "pass" | "violated"; releaseClass: "constrained" }>;
+  "unconstrained-emission": Readonly<{
+    providerEnforcedRetries: "not-applicable";
+    as004: "not-applicable";
+    releaseClass: "unconstrained-engine-authoritative";
+  }>;
+}>;
+
+// Exactly one entry per emission qualification: a missing or extra one does not compile.
+true satisfies [Exclude<EmissionKind, keyof QualificationTerms> | Exclude<keyof QualificationTerms, EmissionKind>] extends [never] ? true : never;
+
+/** Term `T` of a `K`-qualified cell. Always read through this mapped access,
+ *  never as `QualificationTerms[K][T]`: a value written for a generic `K` is
+ *  then checked against EVERY qualification's term, not against their union,
+ *  so a single generic constructor cannot write one qualification's term into
+ *  another's cell. */
+type TermOn<T extends keyof QualificationTerms[EmissionKind], K extends EmissionKind> = { [Q in EmissionKind]: QualificationTerms[Q][T] }[K];
 
 /** The structural series of a cell on a `K`-qualified route. */
 type StructuralSeriesOn<K extends EmissionKind> = Readonly<{
   qualification: K;
   /** Retries attributed to constraints the route was VERIFIED to enforce;
    *  not-applicable on a route that enforces nothing. */
-  providerEnforcedStructuralRetries: ProviderEnforcedRetriesOn[K];
+  providerEnforcedStructuralRetries: TermOn<"providerEnforcedRetries", K>;
   unenforcedSchemaViolationRetries: number;
   engineOnlyRefusalRetries: number;
   unclassifiedToolErrorRetries: number;
@@ -149,9 +181,10 @@ type StructuralSeriesOn<K extends EmissionKind> = Readonly<{
 /** A cell's structural series. Its qualification fixes what its
  *  provider-enforced retry count can be, so a constrained series reading
  *  `not-applicable`, or an unconstrained one carrying a count, is unrepresentable. */
-export type StructuralSeries = StructuralSeriesOn<"constrained-emission"> | StructuralSeriesOn<"unconstrained-emission">;
+export type StructuralSeries = { [K in EmissionKind]: StructuralSeriesOn<K> }[EmissionKind];
 
-export type CellMeasurement = Readonly<{
+/** A cell's measurement on a `K`-qualified route: its structural series is that route's. */
+type CellMeasurementOn<K extends EmissionKind> = Readonly<{
   scheduledPairs: number;
   observedPairs: number;
   arms: Readonly<Record<PilotArm, ArmSummary>>;
@@ -171,27 +204,19 @@ export type CellMeasurement = Readonly<{
     interval: JsonInterval;
   }>;
   emissionRates: EmissionArmRates;
-  structural: StructuralSeries;
+  structural: StructuralSeriesOn<K>;
   byDifficulty: Readonly<Record<"easy" | "hard", Readonly<Record<PilotArm, Readonly<{ samples: number; accepted: number; p95: LatencyQuantile }>>>>>;
   quality: QualityComparison | null;
 }>;
 
+export type CellMeasurement = { [K in EmissionKind]: CellMeasurementOn<K> }[EmissionKind];
+
 declare const derivedFromMeasurement: unique symbol;
 
-type EmissionKind = EmissionRouteQualification["kind"];
-/** The `K` arm of an emission route's qualification. */
-type QualificationOn<K extends EmissionKind> = Extract<EmissionRouteQualification, { kind: K }>;
-
-/**
- * The AS-004 verdicts a route's qualification can yield: on a constrained
- * route the provider-enforced retries pass or violate it; an unconstrained
- * route enforces nothing, so AS-004 is not applicable there.
- */
-type StructuralVerdictOn = Readonly<{ "constrained-emission": "pass" | "violated"; "unconstrained-emission": "not-applicable" }>;
-
-/** A guardrail record whose AS-004 verdict is `Structural` and every other verdict is `Other`. */
-type CellGuardrails<Structural extends GuardrailVerdict, Other extends GuardrailVerdict = GuardrailVerdict> = Readonly<{
-  [G in GuardrailId]: GuardrailOutcome<G extends "provider-structural-retries" ? Structural : Other, G>;
+/** A `K`-qualified cell's guardrail record whose verdicts lie in `V`: AS-004's
+ *  is also one its qualification can yield. */
+type CellGuardrails<K extends EmissionKind, V extends GuardrailVerdict> = Readonly<{
+  [G in GuardrailId]: GuardrailOutcome<G extends "provider-structural-retries" ? TermOn<"as004", K> & V : V, G>;
 }>;
 
 /** A measured cell on a `K`-qualified route whose verdicts lie in `V`. */
@@ -199,10 +224,11 @@ type MeasuredOn<K extends EmissionKind, V extends GuardrailVerdict> = Readonly<{
   kind: "measured";
   cell: CellKey;
   qualification: QualificationOn<K>;
-  measurement: CellMeasurement;
-  guardrails: CellGuardrails<Extract<StructuralVerdictOn[K], V>, V>;
+  measurement: CellMeasurementOn<K>;
+  guardrails: CellGuardrails<K, V>;
 }>;
-type MeasuredCellOf<V extends GuardrailVerdict> = MeasuredOn<"constrained-emission", V> | MeasuredOn<"unconstrained-emission", V>;
+/** `MeasuredOn` over the qualifications `K` (all of them by default), as their union. */
+type MeasuredCellOf<V extends GuardrailVerdict, K extends EmissionKind = EmissionKind> = { [Q in K]: MeasuredOn<Q, V> }[K];
 type Sealed<T> = T & Readonly<{ [derivedFromMeasurement]: true }>;
 
 /**
@@ -240,8 +266,8 @@ export type CellOutcome =
 // Release decision (AS-017): illegal "done" states are unrepresentable
 // ---------------------------------------------------------------------------
 
-/** A released cell's guardrails: every verdict passing, AS-004's fixed by its release class. */
-type ReleasedGuardrails<Structural extends PassingVerdict> = CellGuardrails<Structural, PassingVerdict>;
+/** A `K`-qualified cell released: every verdict passing, AS-004's the one its class carries. */
+type PassedOn<K extends EmissionKind> = Readonly<{ cell: CellKey; releaseClass: TermOn<"releaseClass", K>; guardrails: CellGuardrails<K, PassingVerdict> }>;
 
 /**
  * How a cell is released. `constrained`: the route was verified to enforce the
@@ -250,9 +276,7 @@ type ReleasedGuardrails<Structural extends PassingVerdict> = CellGuardrails<Stru
  * is not applicable and the engine's validation of every payload is the
  * authority; AS-015 and AS-016 passed all the same.
  */
-export type PassedCellEvidence =
-  | Readonly<{ cell: CellKey; releaseClass: "constrained"; guardrails: ReleasedGuardrails<"pass"> }>
-  | Readonly<{ cell: CellKey; releaseClass: "unconstrained-engine-authoritative"; guardrails: ReleasedGuardrails<"not-applicable"> }>;
+export type PassedCellEvidence = { [K in EmissionKind]: PassedOn<K> }[EmissionKind];
 
 export type GuardrailViolation = Readonly<{ cell: CellKey; guardrail: GuardrailId; requirement: string; detail: string }>;
 
@@ -360,42 +384,53 @@ function emissionRates(samples: readonly SampleObservation[]): EmissionArmRates 
   });
 }
 
-type StructuralGuardrail<K extends EmissionKind> = GuardrailOutcome<StructuralVerdictOn[K], "provider-structural-retries">;
+/** A `K`-qualified emission qualification, its `kind` carried as `K` so the
+ *  rules table can be indexed by it (the correlated-union form). */
+type Qualified<K extends EmissionKind> = QualificationOn<K> & Readonly<{ kind: K }>;
 
-/** A `K`-qualified cell's AS-004 series and verdict, derived together from its qualification. */
-type StructuralEvidenceOn<K extends EmissionKind> = Readonly<{ qualification: QualificationOn<K>; series: StructuralSeriesOn<K>; guardrail: StructuralGuardrail<K> }>;
-type StructuralEvidence = StructuralEvidenceOn<"constrained-emission"> | StructuralEvidenceOn<"unconstrained-emission">;
+/** What one emission qualification makes of a cell. */
+type QualificationRulesOn<K extends EmissionKind> = Readonly<{
+  releaseClass: TermOn<"releaseClass", K>;
+  /** AS-004 read from the emission arm's retry causes: the provider-enforced
+   *  retry count the route admits, and the verdict read from it. */
+  structural: (causes: RetryTally["causes"], qualification: QualificationOn<K>) => Readonly<{
+    providerEnforcedStructuralRetries: TermOn<"providerEnforcedRetries", K>;
+    guardrail: GuardrailOutcome<TermOn<"as004", K>, "provider-structural-retries">;
+  }>;
+}>;
 
-function structuralEvidence(samples: readonly SampleObservation[], qualification: EmissionRouteQualification): StructuralEvidence {
-  const { causes } = tallyRetries(samples, qualification);
-  return match(qualification)
-    .returnType<StructuralEvidence>()
-    .with({ kind: "constrained-emission" }, (constrained) => {
+/** `QualificationTerms`' one implementation: every per-qualification value
+ *  the decision reads — and the only place a qualification is told apart. */
+const QUALIFICATION_RULES = Object.freeze<Readonly<{ [K in EmissionKind]: QualificationRulesOn<K> }>>({
+  "constrained-emission": {
+    releaseClass: "constrained",
+    structural: (causes) => {
       const retries = causes["provider-structural"];
       return Object.freeze({
-        qualification: constrained,
-        series: structuralSeries(samples, constrained.kind, causes, retries),
+        providerEnforcedStructuralRetries: retries,
         guardrail: retries === 0
           ? guardrailOutcome("provider-structural-retries", "pass", "zero retries attributed to provider-enforced constraint violations")
           : guardrailOutcome("provider-structural-retries", "violated", `${retries} retries attributed to violations of constraints the route was verified to enforce`),
       });
-    })
-    .with({ kind: "unconstrained-emission" }, (unconstrained) => Object.freeze({
-      qualification: unconstrained,
-      series: structuralSeries(samples, unconstrained.kind, causes, "not-applicable"),
+    },
+  },
+  "unconstrained-emission": {
+    releaseClass: "unconstrained-engine-authoritative",
+    structural: (causes, unconstrained) => Object.freeze({
+      providerEnforcedStructuralRetries: "not-applicable",
       guardrail: guardrailOutcome("provider-structural-retries", "not-applicable",
         `route qualified ${unconstrained.kind}: it was verified to enforce no JSON Schema constraint; ` +
         `${causes["unenforced-schema-violation"]} unenforced schema-violation retries and ${causes["engine-only-refusal"]} engine-only refusal retries reported separately`),
-    }))
-    .exhaustive();
-}
+    }),
+  },
+});
 
 /** The structural series on a `K`-qualified route, given the provider-enforced retry count `K` admits. */
 function structuralSeries<K extends EmissionKind>(
   samples: readonly SampleObservation[],
   qualification: K,
   causes: RetryTally["causes"],
-  providerEnforcedStructuralRetries: ProviderEnforcedRetriesOn[K],
+  providerEnforcedStructuralRetries: TermOn<"providerEnforcedRetries", K>,
 ): StructuralSeriesOn<K> {
   const rejections = (kind: RejectionCause["kind"]): number => samples.reduce((sum, sample) =>
     sum + sample.attempts.filter((attempt) => attempt.outcome.kind === "rejected" && attempt.outcome.cause.kind === kind).length, 0);
@@ -541,54 +576,57 @@ function evaluateCell(
   return measureCell(cell, qualification, scheduled.length, pairs, evidence);
 }
 
-/** The one constructor of a `MeasuredCell`: every measurement value and the
- *  guardrail verdict read from it come from the same complete set of pairs. */
-function measureCell(
+/**
+ * The one constructor of a `MeasuredCell`: every measurement value and the
+ * guardrail verdict read from it come from the same complete set of pairs.
+ * Generic over the qualification `K` (called with the union, it returns the
+ * union of its arms): the AS-004 series and verdict come from
+ * `QUALIFICATION_RULES[K]`, and a value of another qualification's terms does
+ * not compile here (`TermOn`), so no per-qualification arm is needed.
+ */
+function measureCell<K extends EmissionKind>(
   cell: CellPreregistration,
-  qualification: EmissionRouteQualification,
+  qualification: Qualified<K>,
   scheduledPairs: number,
   pairs: readonly ObservedPair[],
   evidence: PilotEvidence,
-): Result<MeasuredCell, readonly string[]> {
+): Result<Sealed<MeasuredCellOf<GuardrailVerdict, K>>, readonly string[]> {
   const latency = latencyGuardrail(pairs, evidence.preregistration);
   const terminal = terminalGuardrail(pairs, evidence.preregistration);
   const emissionSamples = pairs.map((pair) => pair.emission);
-  const structural = structuralEvidence(emissionSamples, qualification);
+  const { causes } = tallyRetries(emissionSamples, qualification);
+  const structural = QUALIFICATION_RULES[qualification.kind].structural(causes, qualification);
   const quality = compareQuality(cell, pairs, evidence.preregistration, evidence.quality);
   if (!quality.ok) return quality;
-  const measurement: CellMeasurement = Object.freeze({
-    scheduledPairs,
-    observedPairs: pairs.length,
-    arms: Object.freeze({
-      "emission-enabled": summarizeArm(emissionSamples, qualification),
-      "extraction-only": summarizeArm(pairs.map((pair) => pair.extraction), qualification),
+  const measured: MeasuredOn<K, GuardrailVerdict> = Object.freeze({
+    kind: "measured" as const,
+    cell: cell.cell,
+    qualification,
+    measurement: Object.freeze({
+      scheduledPairs,
+      observedPairs: pairs.length,
+      arms: Object.freeze({
+        "emission-enabled": summarizeArm(emissionSamples, qualification),
+        "extraction-only": summarizeArm(pairs.map((pair) => pair.extraction), qualification),
+      }),
+      latency: latency.measurement,
+      terminal: terminal.measurement,
+      emissionRates: emissionRates(emissionSamples),
+      structural: structuralSeries(emissionSamples, qualification.kind, causes, structural.providerEnforcedStructuralRetries),
+      byDifficulty: byDifficulty(pairs),
+      quality: quality.value.comparison,
     }),
-    latency: latency.measurement,
-    terminal: terminal.measurement,
-    emissionRates: emissionRates(emissionSamples),
-    structural: structural.series,
-    byDifficulty: byDifficulty(pairs),
-    quality: quality.value.comparison,
+    guardrails: Object.freeze({
+      "measurement-complete": guardrailOutcome("measurement-complete", "pass", `${pairs.length}/${scheduledPairs} preregistered pairs observed in both arms`),
+      "latency-p95": latency.guardrail,
+      "terminal-failure-non-increase": terminal.guardrail,
+      "provider-structural-retries": structural.guardrail,
+      "escaped-defect-severity": quality.value.guardrail,
+    }),
   });
-  const guardrailsWith = <S extends GuardrailVerdict>(as004: GuardrailOutcome<S, "provider-structural-retries">): CellGuardrails<S> => Object.freeze({
-    "measurement-complete": guardrailOutcome("measurement-complete", "pass", `${pairs.length}/${scheduledPairs} preregistered pairs observed in both arms`),
-    "latency-p95": latency.guardrail,
-    "terminal-failure-non-increase": terminal.guardrail,
-    "provider-structural-retries": as004,
-    "escaped-defect-severity": quality.value.guardrail,
-  });
-  // One arm per qualification on purpose: TypeScript cannot carry the qualification/AS-004-verdict
-  // correlation through a single generic arm, and merging them would trade that check for a cast.
-  const measured: MeasuredCellOf<GuardrailVerdict> = match(structural)
-    .returnType<MeasuredCellOf<GuardrailVerdict>>()
-    .with({ qualification: { kind: "constrained-emission" } }, ({ qualification: constrained, guardrail }) =>
-      ({ kind: "measured", cell: cell.cell, qualification: constrained, measurement, guardrails: guardrailsWith(guardrail) }))
-    .with({ qualification: { kind: "unconstrained-emission" } }, ({ qualification: unconstrained, guardrail }) =>
-      ({ kind: "measured", cell: cell.cell, qualification: unconstrained, measurement, guardrails: guardrailsWith(guardrail) }))
-    .exhaustive();
-  // The brand's one construction site: it seals only the value the two checked arms above built
-  // from this call's own measurement — no helper can seal anything else.
-  return ok(Object.freeze(measured) as MeasuredCell);
+  // The brand's one construction site: it seals only the value built above from this call's own
+  // measurement — no helper can seal anything else.
+  return ok(measured as Sealed<MeasuredCellOf<GuardrailVerdict, K>>);
 }
 
 function consistencyProblems(evidence: PilotEvidence, schedule: readonly ScheduledPair[]): readonly string[] {
@@ -615,17 +653,18 @@ const allPassing = (measured: MeasuredCell): measured is PassingCell => GUARDRAI
 
 /**
  * A passing cell's release evidence. Total: the qualification fixes both the
- * release class and its AS-004 verdict (`constrained` carries `pass`,
- * `unconstrained-engine-authoritative` carries `not-applicable`), so a passing
- * cell whose verdict and class disagree cannot reach here.
+ * release class (`QUALIFICATION_RULES`) and its AS-004 verdict (`constrained`
+ * carries `pass`, `unconstrained-engine-authoritative` carries
+ * `not-applicable`), so a passing cell whose verdict and class disagree
+ * cannot reach here.
  */
-const releaseEvidence = (passing: PassingCell): PassedCellEvidence => match(passing)
-  .returnType<PassedCellEvidence>()
-  .with({ qualification: { kind: "constrained-emission" } }, ({ cell, guardrails }) =>
-    Object.freeze({ cell, releaseClass: "constrained" as const, guardrails }))
-  .with({ qualification: { kind: "unconstrained-emission" } }, ({ cell, guardrails }) =>
-    Object.freeze({ cell, releaseClass: "unconstrained-engine-authoritative" as const, guardrails }))
-  .exhaustive();
+const releaseEvidence = <K extends EmissionKind>(
+  passing: MeasuredOn<K, PassingVerdict> & Readonly<{ qualification: Readonly<{ kind: K }> }>,
+): { [Q in K]: PassedOn<Q> }[K] => Object.freeze({
+  cell: passing.cell,
+  releaseClass: QUALIFICATION_RULES[passing.qualification.kind].releaseClass,
+  guardrails: passing.guardrails,
+});
 
 /** What the preregistered release policy makes of a window's cells. */
 type PolicyRelease = Readonly<{

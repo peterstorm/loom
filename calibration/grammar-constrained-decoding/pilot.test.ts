@@ -508,6 +508,11 @@ describe("per-route release policy (pilot-2: unconstrained emission, engine-auth
       Extract<MeasuredCell, { qualification: { kind: K } }>["guardrails"]["provider-structural-retries"]["verdict"];
     expectTypeOf<As004Of<"constrained-emission">>().toEqualTypeOf<"pass" | "violated">();
     expectTypeOf<As004Of<"unconstrained-emission">>().toEqualTypeOf<"not-applicable">();
+    // The cell's own structural series is its qualification's, too.
+    type ProviderEnforcedOf<K extends MeasuredCell["qualification"]["kind"]> =
+      Extract<MeasuredCell, { qualification: { kind: K } }>["measurement"]["structural"]["providerEnforcedStructuralRetries"];
+    expectTypeOf<ProviderEnforcedOf<"constrained-emission">>().toEqualTypeOf<number>();
+    expectTypeOf<ProviderEnforcedOf<"unconstrained-emission">>().toEqualTypeOf<"not-applicable">();
     expectTypeOf<Extract<PassedCellEvidence, { releaseClass: "constrained" }>["guardrails"]["provider-structural-retries"]["verdict"]>().toEqualTypeOf<"pass">();
     expectTypeOf<Extract<PassedCellEvidence, { releaseClass: "unconstrained-engine-authoritative" }>["guardrails"]["provider-structural-retries"]["verdict"]>()
       .toEqualTypeOf<"not-applicable">();
