@@ -23,7 +23,9 @@ import {
   type WindowRun,
   type WindowStore,
 } from "./pilot-retention";
-import { accepted, ATTEMPT_MS, fakeRoute, HERE, prereg, READY, REPO_ROOT, runWindow, WORKLOAD, type FakeRoute } from "./pilot-test-fixtures";
+import {
+  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, pilot2PreregBytes, prereg, READY, REPO_ROOT, runWindow, WORKLOAD, type FakeRoute,
+} from "./pilot-test-fixtures";
 import { contentDigest } from "./pilot-vocabulary";
 
 /**
@@ -96,8 +98,10 @@ const json = (store: MemoryStore, name: string): Record<string, unknown> => JSON
 const windowRun = (store: MemoryStore, record: WindowRecord, overrides: Partial<WindowRun> = {}, route?: FakeRoute): WindowRun => ({
   store, record, preregistration: LOADED, workload: WORKLOAD,
   dispatch: route?.dispatch ?? (() => { throw new Error("a window that does not dispatch never reaches the route"); }),
+  routeHealth: route === undefined ? () => { throw new Error("a window that does not dispatch never probes the route"); } : HEALTHY_ROUTE,
   monotonicNow: route?.now ?? (() => { throw new Error("a window that does not dispatch reads no monotonic clock"); }),
   onPair: () => {},
+  onEnding: () => {},
   externalAssessments: [], now: clock,
   ...overrides,
 });
@@ -270,9 +274,39 @@ describe("recordWindow (--pilot)", () => {
     expect(route.requests).toHaveLength(0);
   });
 
+  it("records a window the route fail-fast stopped: its ending in window.json, every landed sample, and an incomplete decision", async () => {
+    const store = memoryStore();
+    const endings: unknown[] = [];
+    const run = windowRun(store, windowRecord(true), {
+      routeHealth: async () => ({ kind: "unreachable", reason: "fetch failed (connect ECONNREFUSED)" }),
+      onEnding: (ending) => { endings.push(ending); },
+    }, fakeRoute(() => INFRASTRUCTURE));
+    const outcome = decided(await recordWindow(run));
+    expect(outcome.decision).toBe("incomplete-missing-measurement");
+    const ending = {
+      kind: "aborted", afterPairs: 1, scheduledPairs: expect.any(Number),
+      reason: { kind: "route-unreachable", reason: "fetch failed (connect ECONNREFUSED)" },
+    };
+    expect(endings).toEqual([ending]);
+    expect(json(store, WINDOW_FILES.window)).toMatchObject({ observations: 2, ending });
+    expect((store.files.get(WINDOW_FILES.observations) ?? "").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("records a completed schedule's ending, and none for a window that never dispatched", async () => {
+    const dispatched = memoryStore();
+    decided(await recordWindow(windowRun(dispatched, windowRecord(true), {}, fakeRoute(accepted))));
+    expect(json(dispatched, WINDOW_FILES.window)["ending"]).toMatchObject({ kind: "completed" });
+    expect(json(await blockedWindow(), WINDOW_FILES.window)).not.toHaveProperty("ending");
+  });
+
   it("names a window by its preregistration id and a path-safe start time", () => {
     expect(pilotWindowId("gcd-ad11-pilot-1", "2026-10-03T09:23:39.047Z")).toBe("gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z");
-    expect(readdirSync(join(HERE, "windows")).every((id) => id.startsWith(`${prereg.id}--`) && !/[:.]/.test(id))).toBe(true);
+    // Every retained window belongs to one of the retained preregistrations (pilot-1, pilot-2).
+    const preregistrationIds = [preregBytes, pilot2PreregBytes].map((bytes) => (JSON.parse(bytes.toString("utf-8")) as { id: string }).id);
+    for (const id of readdirSync(join(HERE, "windows"))) {
+      expect(preregistrationIds.some((preregistrationId) => id.startsWith(`${preregistrationId}--`)), id).toBe(true);
+      expect(id).not.toMatch(/[:.]/);
+    }
   });
 
   it("records how a window ended even when the rubric cannot assess it (key and packet kept, no rubric file, no decision)", async () => {

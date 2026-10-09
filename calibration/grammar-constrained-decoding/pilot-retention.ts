@@ -35,7 +35,7 @@ import { parsePreregistration, type Preregistration, type ScheduledPair } from "
 import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type QualityAssessment } from "./pilot-quality";
 import { rubricAssessment } from "./pilot-rubric";
 import { contentDigest } from "./pilot-vocabulary";
-import { blind, blindedPacket, dispatchSchedule, type SampleRecord } from "./pilot-window";
+import { blind, blindedPacket, dispatchSchedule, type RouteHealthProbe, type SampleRecord, type WindowEnding } from "./pilot-window";
 import { resolveWindowInputs, WindowInputs, type ChangedPathsOf, type WorkloadFixtures } from "./pilot-workload";
 
 // ---------------------------------------------------------------------------
@@ -125,11 +125,13 @@ export type WindowRecord = Readonly<{
   dispatch: DispatchPlan;
 }>;
 
-/** `window.json` once the window has ended: how it ended and how many samples it retained. */
-type ClosedWindowRecord = WindowRecord & Readonly<{ endedAt: string; observations: number }>;
+/** `window.json` once the window has ended: how it ended and how many samples
+ *  it retained; a dispatched window also records how its schedule ended
+ *  (completed, or aborted by the route fail-fast and why). */
+type ClosedWindowRecord = WindowRecord & Readonly<{ endedAt: string; observations: number; ending?: WindowEnding }>;
 
-const closeWindow = (record: WindowRecord, endedAt: string, observations: number): ClosedWindowRecord =>
-  Object.freeze({ ...record, endedAt, observations });
+const closeWindow = (record: WindowRecord, endedAt: string, observations: number, ending: WindowEnding | null): ClosedWindowRecord =>
+  Object.freeze({ ...record, endedAt, observations, ...(ending === null ? {} : { ending }) });
 
 /** What a re-decision reads back from a retained `window.json`. */
 export type RetainedWindow = Readonly<{ preregistration: Readonly<{ path: string; digest: string }>; facts: PreflightFacts }>;
@@ -334,10 +336,14 @@ export type WindowRun = Readonly<{
   workload: WindowWorkload;
   /** The dispatch port: one attempt of one arm, launched and classified. */
   dispatch: ArmDispatch;
+  /** Re-probes the preregistered route for the dispatch fail-fast (`pilot-window.ts`). */
+  routeHealth: RouteHealthProbe;
   /** Monotonic clock in milliseconds: every sample's dispatch-to-ingestion time. */
   monotonicNow: () => number;
   /** Receives each completed pair (0-based index of `total`). */
   onPair: (index: number, total: number, pair: ScheduledPair) => void;
+  /** Receives how a dispatched window's schedule ended, before it is decided. */
+  onEnding: (ending: WindowEnding) => void;
   externalAssessments: readonly ExternalAssessment[];
   /** ISO-8601 wall clock. */
   now: () => string;
@@ -354,7 +360,7 @@ function resolveDispatchInputs(run: WindowRun): Result<WindowInputs, string> {
   return inputs.ok ? inputs : err(`${cannotDispatch}: its preregistered case inputs do not resolve:${issueList(inputs.error)}`);
 }
 
-type OpenedWindow = Readonly<{ records: readonly SampleRecord[]; inputs: WindowInputs }>;
+type OpenedWindow = Readonly<{ records: readonly SampleRecord[]; inputs: WindowInputs; ending: WindowEnding | null }>;
 
 /** Open the window record and run what its dispatch plan says — the one
  *  decision about whether the window dispatches. A dispatching window
@@ -366,17 +372,18 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
   const open = (): void => store.write(WINDOW_FILES.window, jsonText(record));
   if (record.dispatch.kind !== "dispatched") {
     open();
-    return ok(Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.EMPTY }));
+    return ok(Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.EMPTY, ending: null }));
   }
   const inputs = resolveDispatchInputs(run);
   if (!inputs.ok) return inputs;
   open();
-  const records = await dispatchSchedule({
+  const { records, ending } = await dispatchSchedule({
     windowId: record.windowId,
     prereg: run.preregistration.prereg,
     fixtures: run.workload.fixtures,
     inputs: inputs.value,
     dispatch: run.dispatch,
+    routeHealth: run.routeHealth,
     now: run.monotonicNow,
     onSample: (landed) => {
       const { sample } = landed;
@@ -387,14 +394,16 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
     },
     onPair: run.onPair,
   });
-  return ok(Object.freeze({ records, inputs: inputs.value }));
+  run.onEnding(ending);
+  return ok(Object.freeze({ records, inputs: inputs.value, ending }));
 }
 
 /**
  * One `--pilot` window: open it (never over a retained one; a dispatching
  * window resolves its inputs first, refusing before anything is written), run
  * the matched dispatch with every sample persisted as it lands (an
- * interrupted window keeps everything observed), close the window record,
+ * interrupted window keeps everything observed; a route outage stops it early
+ * through the fail-fast and is recorded as its ending), close the window record,
  * retain the blinding key, packet and rubric assessment, then decide.
  */
 export async function recordWindow(run: WindowRun): Promise<Result<DecisionOutcome, string>> {
@@ -404,8 +413,8 @@ export async function recordWindow(run: WindowRun): Promise<Result<DecisionOutco
   }
   const opened = await openAndDispatch(run);
   if (!opened.ok) return opened;
-  const { records, inputs } = opened.value;
-  store.write(WINDOW_FILES.window, jsonText(closeWindow(record, run.now(), records.length)));
+  const { records, inputs, ending } = opened.value;
+  store.write(WINDOW_FILES.window, jsonText(closeWindow(record, run.now(), records.length, ending)));
   const key = retainBlindedPacket(store, record, run.preregistration.prereg, records, inputs);
   if (!key.ok) return key;
   return decideAndRecord(store, {

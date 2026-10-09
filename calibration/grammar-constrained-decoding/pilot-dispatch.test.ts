@@ -382,6 +382,25 @@ describe("transcript classification through the engine's own selection", () => {
     expect(extraction.observation.outcome).toMatchObject({ payloadDigest: (emission.observation.outcome as { payloadDigest: string }).payloadDigest });
   });
 
+  it("reads a provider error ending the last model turn as an infrastructure failure on both arms, never as a semantic rejection", () => {
+    // What a Pi child records when its route refuses the connection mid-window (gcd-ad11-pilot-2's outage).
+    const providerError = { role: "assistant", stopReason: "error", errorMessage: "Connection error.", content: [] };
+    const reason = "the provider ended the model turn with an error: Connection error.";
+    expect(classify("judge-verdict/v1", [providerError]).observation.outcome).toEqual({ kind: "infrastructure-failure", reason });
+    const extraction = classifyAttemptTranscript({
+      arm: "extraction-only", cell: "judge-verdict/v1", cellBinding: cellBinding("judge-verdict/v1"), messages: [providerError],
+      attempt: 1, elapsedMs: 5, launch: { kind: "settled" },
+    });
+    expect(extraction.observation).toMatchObject({ modelRequests: 1, outcome: { kind: "infrastructure-failure", reason } });
+    expect(classify("judge-verdict/v1", [{ ...providerError, errorMessage: "  " }]).observation.outcome)
+      .toEqual({ kind: "infrastructure-failure", reason: "the provider ended the model turn with an error: no error message" });
+    // Only the LAST model turn decides: a provider error Pi recovered from is not a failure of the attempt.
+    expect(classify("judge-verdict/v1", [providerError, finalText(JSON.stringify(judgePayload))]).observation.outcome)
+      .toMatchObject({ kind: "accepted", source: "extraction" });
+    // A launch that already failed keeps its own class.
+    expect(classify("judge-verdict/v1", [providerError], { kind: "timeout", afterMs: 9 }).observation.outcome).toEqual({ kind: "timeout", afterMs: 9 });
+  });
+
   it("passes launch failures through as their own terminal classes", () => {
     expect(classify("judge-verdict/v1", [], { kind: "startup-refused", reason: "readiness refused" }).observation.outcome).toEqual({ kind: "startup-refused", reason: "readiness refused" });
     expect(classify("judge-verdict/v1", [], { kind: "timeout", afterMs: 900_000 }).observation.outcome).toEqual({ kind: "timeout", afterMs: 900_000 });

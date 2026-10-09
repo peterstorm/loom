@@ -13,7 +13,8 @@
  *   registry digests, workload fixtures, Pi version, staged vs loaded
  *   Runtime Revision, live route reachability), then — only when the
  *   preflight is ready — matched emission-enabled vs extraction-only dispatch
- *   with dispatch-to-ingestion counters, persisted incrementally, then the
+ *   with dispatch-to-ingestion counters, persisted incrementally and stopped
+ *   early by the route fail-fast if the route goes down mid-window, then the
  *   release decision. Cores: `calibration/grammar-constrained-decoding/`;
  *   `recordWindow` (`pilot-retention.ts`) runs the whole window — input
  *   resolution, the matched dispatch, retention and the decision — behind
@@ -48,6 +49,7 @@ import { contentDigest } from "../calibration/grammar-constrained-decoding/pilot
 import { parseWorkloadFixtures, type WorkloadFixtures } from "../calibration/grammar-constrained-decoding/pilot-workload";
 import { workloadCorpusLoader } from "../calibration/grammar-constrained-decoding/pilot-corpus-loader";
 import { importRpcLauncher, piArmDispatch } from "../calibration/grammar-constrained-decoding/pilot-dispatch";
+import type { RouteHealth, WindowEnding } from "../calibration/grammar-constrained-decoding/pilot-window";
 import {
   decideRetainedWindow,
   parsePreregistrationFile,
@@ -184,6 +186,22 @@ async function probeRoute(route: Preregistration["route"]): Promise<RouteProbe> 
   return preflightRouteProbe(route, observed);
 }
 
+/** The window's mid-run route re-probe for the dispatch fail-fast: the
+ *  preflight's own probe, where only an unreachable route is unhealthy (an
+ *  unverified or unlisted model still answers). */
+async function routeHealth(route: Preregistration["route"]): Promise<RouteHealth> {
+  const probe = await probeRoute(route);
+  return probe.kind === "unreachable" ? { kind: "unreachable", reason: probe.reason } : { kind: "reachable" };
+}
+
+const reportEnding = (ending: WindowEnding): void => {
+  if (ending.kind === "completed") return;
+  const why = ending.reason.kind === "route-unreachable"
+    ? `the route stopped answering: ${ending.reason.reason}`
+    : `${ending.reason.pairs} consecutive pairs failed at the infrastructure`;
+  process.stderr.write(`pilot window ABORTED after ${ending.afterPairs}/${ending.scheduledPairs} pairs: ${why}. Every landed sample is retained; the rest are unmeasured.\n`);
+};
+
 function observedPiVersion(): string | null {
   const run = spawnSync("pi", ["--version"], { encoding: "utf-8" });
   return run.status === 0 ? run.stdout.trim() || null : null;
@@ -250,8 +268,10 @@ async function runPilot(): Promise<number> {
       timeoutMs: prereg.perAttemptTimeoutMs,
       readinessTimeoutMs: READINESS_TIMEOUT_MS,
     }),
+    routeHealth: () => routeHealth(prereg.route),
     monotonicNow: () => performance.now(),
     onPair: (index, total, pair) => { process.stderr.write(`pilot ${index + 1}/${total} ${pair.pairId}\n`); },
+    onEnding: reportEnding,
     externalAssessments: externalAssessments(),
     now: () => new Date().toISOString(),
   });

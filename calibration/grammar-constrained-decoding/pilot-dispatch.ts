@@ -3,7 +3,9 @@
  *
  * Two halves, kept apart:
  *
- * - `classifyAttemptTranscript` (PURE) folds a settled child transcript
+ * - `classifyAttemptTranscript` (PURE) first reads a provider error ending
+ *   the last model turn (`providerFailure`) as an infrastructure failure, then
+ *   folds a settled child transcript
  *   through the engine's OWN observation and selection kernel —
  *   `piEmissionCallFrames` → `observeEmissionCalls` → `selectCanonicalPayload`
  *   / `selectVerdictSource` → the frozen registry parser — and counts model
@@ -228,6 +230,28 @@ function emissionCounters(toolName: string, records: readonly PiMessage[], assis
   };
 }
 
+/**
+ * A settled child whose LAST model turn ended in a provider error
+ * (`stopReason: "error"`: the route refused the connection, answered 5xx, or
+ * dropped the stream) never reached the model's answer. That is an
+ * infrastructure failure of the attempt, not a semantic rejection: counting it
+ * as "no final payload" would charge a route outage to the arm under test and
+ * spend the attempt-2 retry on a route that is down.
+ */
+type InfrastructureFailure = Extract<LaunchEnd, { kind: "infrastructure-failure" }>;
+
+export function providerFailure(records: readonly PiMessage[]): InfrastructureFailure | null {
+  const last = records.filter((message) => message["role"] === "assistant").at(-1);
+  if (last?.["stopReason"] !== "error") return null;
+  const message = last["errorMessage"];
+  const detail = typeof message === "string" && message.trim() !== "" ? message.trim() : "no error message";
+  return { kind: "infrastructure-failure", reason: `the provider ended the model turn with an error: ${detail}` };
+}
+
+/** A settled launch whose last model turn failed at the provider is that failure; otherwise the launch stands. */
+const effectiveLaunch = <L extends LaunchEnd>(launch: L, records: readonly PiMessage[]): L | InfrastructureFailure =>
+  launch.kind === "settled" ? providerFailure(records) ?? launch : launch;
+
 export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassification {
   const records = input.messages.filter(isRecord);
   const assistantIndices = records.flatMap((message, index) => (message["role"] === "assistant" ? [index] : []));
@@ -240,7 +264,7 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
       }),
       acceptedPayload,
     });
-    return match(input.launch)
+    return match(effectiveLaunch(input.launch, records))
       .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
       .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
       .with({ kind: "settled" }, () => {
@@ -256,7 +280,7 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
   };
   const end = (outcome: EmissionArmAttempt["outcome"], acceptedPayload: unknown = null): AttemptClassification =>
     Object.freeze({ observation: Object.freeze({ ...counters, outcome: Object.freeze(outcome) }), acceptedPayload });
-  return match(input.launch)
+  return match(effectiveLaunch(input.launch, records))
     .with({ kind: "startup-refused" }, (launch) => end({ kind: "startup-refused", reason: launch.reason }))
     .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
     .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))

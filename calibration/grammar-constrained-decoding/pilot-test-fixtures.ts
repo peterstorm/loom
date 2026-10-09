@@ -23,7 +23,7 @@ import type { PreflightDecision } from "./pilot-preflight";
 import { buildPairSchedule, parsePreregistration, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
 import type { WindowWorkload } from "./pilot-retention";
 import type { CellKey, PilotArm } from "./pilot-vocabulary";
-import { dispatchSchedule, type SampleRecord } from "./pilot-window";
+import { dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
 import {
   parseWorkloadFixtures,
   resolveWindowInputs,
@@ -160,6 +160,8 @@ export const accepted = (request: ArmRequest): Outcome => ({
 });
 export const REJECTED: Outcome = { kind: "rejected", cause: { kind: "extraction-failure", detail: "final message carried no JSON" } };
 export const TIMEOUT: Outcome = { kind: "timeout", afterMs: ATTEMPT_MS };
+/** What a route outage looks like from inside the window (`providerFailure`). */
+export const INFRASTRUCTURE: Outcome = { kind: "infrastructure-failure", reason: "the provider ended the model turn with an error: Connection error." };
 
 /**
  * A canonical payload each cell's frozen parser accepts, which lets every
@@ -210,14 +212,19 @@ export function fakeRoute(script: Script): FakeRoute {
   return { dispatch, now: () => clock, requests };
 }
 
+/** A route that always answers its listing: the fail-fast never trips on it. */
+export const HEALTHY_ROUTE: RouteHealthProbe = async () => ({ kind: "reachable" });
+
 /** The window dispatch path `recordWindow` runs, over a fake route. */
-export async function runWindow(route: FakeRoute, onSample: (record: SampleRecord) => void = () => {}) {
+export async function runWindow(
+  route: FakeRoute, onSample: (record: SampleRecord) => void = () => {}, routeHealth: RouteHealthProbe = HEALTHY_ROUTE,
+) {
   const landed: SampleRecord[] = [];
   const progress: string[] = [];
-  const records = await dispatchSchedule({
-    windowId: WINDOW_ID, prereg, fixtures, inputs, dispatch: route.dispatch, now: route.now,
+  const { records, ending } = await dispatchSchedule({
+    windowId: WINDOW_ID, prereg, fixtures, inputs, dispatch: route.dispatch, routeHealth, now: route.now,
     onSample: (record) => { landed.push(record); onSample(record); },
     onPair: (index, total, pair) => { progress.push(`${index + 1}/${total} ${pair.pairId}`); },
   });
-  return { records, landed, progress };
+  return { records, ending, landed, progress };
 }
