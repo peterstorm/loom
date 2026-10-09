@@ -613,16 +613,27 @@ export type IssuedRefutationPanelAuthorityInput = RefutationPanelAuthorityInput 
 }>;
 
 /**
- * Issue a refutation panel authority. The parse is exactly
- * `parseRefutationPanelAuthority`'s, which also re-reads checkpoints and so
- * takes its roster as recorded history; this entry point is the issuing seam,
- * typed so its verifier slots must come from `issueAgentRosterSlot` — every
- * request in a newly issued panel was checked against today's catalog.
+ * A refutation panel as ISSUED: its verifier roster holds minted slots only.
+ * A panel parsed back from a checkpoint or reconstructed from its durable
+ * record is a plain `RefutationPanelAuthority` — history, not issuance.
+ */
+export type IssuedRefutationPanelAuthority = RefutationPanelAuthority & Readonly<{
+  verifierRoster: ExactRoster<MintedAgentRosterSlot>;
+}>;
+
+/**
+ * Issue a refutation panel authority: the issuing seam, typed so its verifier
+ * slots must come from `issueAgentRosterSlot`, and its result keeps that proof
+ * in the roster type. The checks are exactly `parseRefutationPanelAuthority`'s,
+ * which also re-reads checkpoints and so takes its roster as recorded history.
  */
 export function issueRefutationPanelAuthority(
   input: IssuedRefutationPanelAuthorityInput,
-): PersistentPanelResult<RefutationPanelAuthority> {
-  return parseRefutationPanelAuthority(input);
+): PersistentPanelResult<IssuedRefutationPanelAuthority> {
+  const parsed = parseRefutationPanelAuthority(input);
+  // The roster is the canonical parse of `input.verifierSlots`, every one of
+  // which was minted; parsing preserves each slot's content, so it is minted.
+  return parsed.ok ? persistentSuccess(parsed.value as IssuedRefutationPanelAuthority) : parsed;
 }
 
 

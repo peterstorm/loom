@@ -456,7 +456,8 @@ async function resumeAwaitingRefutation(
   state: Extract<StandaloneReviewMachineState, { kind: "awaiting-refutation" }>,
   resolver: PublicationAuthorityResolver,
 ): Promise<FacadeDriveResult> {
-  const preparation = standaloneRefutationPreparation(handle, state.authority, state.aggregate);
+  // The checkpointed panel is this run's record of issuance: resume reads it, never re-mints it.
+  const preparation = standaloneRefutationPreparation(handle, state.authority, state.aggregate, state.refutationAuthority);
   if (state.authority.schemaVersion === 3) for (const packet of preparation.packets) await publishStandalonePanelView(handle, packet);
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver);
   if (recovered.kind === "corrupt") return failed(recovered.message);

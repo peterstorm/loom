@@ -46,6 +46,7 @@ import {
 import { StateManager } from "../../../src/state-manager";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
+import { publicationFile } from "../../../src/handlers/helpers/programs/durable-requests";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/issued-emission-capability";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../src/core/reviewer-retry";
 import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
@@ -820,6 +821,38 @@ describe("orchestration CLI", () => {
           : "The current immutable packet does not exhibit the finding",
       })),
     });
+  }
+
+  /** The Pi target the `refutation` profile lowered to before every profile moved to the local route. */
+  const RETIRED_REFUTATION_PI = Object.freeze({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" } as const);
+
+  /**
+   * Run `drive` against the catalog as it stood BEFORE the 2026-10-08
+   * retargeting: the `refutation` profile still lowers its Pi binding to its
+   * retired cloud target. Everything `drive` imports is loaded fresh under that
+   * catalog, so the engine itself writes a run whose recorded refutation
+   * authorities carry the retired binding; afterwards today's catalog is back.
+   */
+  async function underRetiredRefutationCatalog<T>(drive: () => Promise<T>): Promise<T> {
+    vi.resetModules();
+    vi.doMock("../../../src/core/model-profiles", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/core/model-profiles")>();
+      return {
+        ...actual,
+        currentProfileBindings: (profileId: Parameters<typeof actual.currentProfileBindings>[0]) => {
+          const current = actual.currentProfileBindings(profileId);
+          return profileId === "refutation" ? Object.freeze({ ...current, pi: RETIRED_REFUTATION_PI }) : current;
+        },
+        lowerModelProfile: (profile: Parameters<typeof actual.lowerModelProfile>[0], harness: "pi" | "claude-code") =>
+          profile.id === "refutation" && harness === "pi" ? RETIRED_REFUTATION_PI : actual.lowerModelProfile(profile, harness),
+      };
+    });
+    try {
+      return await drive();
+    } finally {
+      vi.doUnmock("../../../src/core/model-profiles");
+      vi.resetModules();
+    }
   }
 
   it("prints a status even when no state file exists", async () => {
@@ -4018,6 +4051,163 @@ describe("orchestration CLI", () => {
     expect(replayed.status, replayed.stderr).not.toBe(0);
     expect(replayed.stdout).not.toContain("spawn-batch");
   }, 30_000);
+
+  /**
+   * A standalone run whose reviewers raised one critical, with its Refutation
+   * Panel issued — checkpointed and its attempt-1 batch published — under the
+   * catalog as it stood before the 2026-10-08 retargeting.
+   */
+  async function standaloneRunWithRetiredRefutationPanel(name: string) {
+    const root = repository();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const runsRoot = canonicalTempDir(`loom-${name}-runs-`);
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, `run.${name}`);
+    mkdirSync(runDir);
+    const started = (await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "all", files: ["a.txt"], dryRun: false }), root));
+    expect(started.status, started.stderr).toBe(0);
+    const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const critical = currentStandaloneCritical("a.txt", "retired-route finding");
+    const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
+    for (const [index, request] of initial.requests.entries()) {
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+    }
+
+    const panel = await underRetiredRefutationCatalog(() => withFixturePiSession(root, async () => {
+      const programs = await import("../../../src/handlers/helpers/programs/standalone");
+      const registrations = await import("../../../src/handlers/helpers/programs/registration");
+      const raw = opened.value.readProgramRegistration();
+      if (!raw.ok) throw new Error(raw.error.message);
+      const registered = registrations.parseRegistration(raw.value);
+      if (!registered.ok) throw new Error(registered.message);
+      const driven = await programs.resumeStandaloneFacade(opened.value, registered.value);
+      if (!driven.ok) throw new Error(driven.message);
+      return driven.action as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    }));
+    expect(panel.kind).toBe("spawn-batch");
+    expect(panel.requests).toHaveLength(3);
+    expect(panel.requests.every(({ authority }) => authority.program === "refutation-panel" &&
+      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI))).toBe(true);
+    return { root, runsRoot, runDir, opened: opened.value, panel };
+  }
+
+  // ADR-0023: a request is checked against today's catalog once, at mint.
+  // A refutation panel issued before the catalog retargeted its Pi route is
+  // history; resuming or replaying it must read the recorded authorities, not
+  // re-mint today's binding and compare the two.
+  it("resumes and replays a standalone refutation panel issued before the catalog retargeted its Pi route", async () => {
+    const { root, runsRoot, runDir, opened, panel } = await standaloneRunWithRetiredRefutationPanel("standalone-retired-refutation");
+
+    // From here on the catalog is today's. Slot 1's attempt 1 is rejected, so
+    // the panel owes the recorded slot's attempt-2 retry.
+    for (const [index, request] of panel.requests.entries()) {
+      const raw = index === 0 ? "malformed" : refutationVerdicts(opened, request.authority, "upheld");
+      expect((await captureReviewedTranscript(opened, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+    // A Pi parent may not spawn the retired route: the spawn gate refuses it
+    // by name, AFTER the recorded panel was read — never as a recorded-versus-
+    // minted authority mismatch. A Claude Code parent runs the retry on the
+    // recorded profile's Claude model, so the run completes there.
+    const piResume = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+    expect(piResume.status).not.toBe(0);
+    expect(piResume.stderr).toContain("openai-codex/gpt-5.6-sol");
+    expect(piResume.stderr).toContain("is retired");
+    expect(piResume.stderr).not.toContain("durable refutation request is invalid");
+    const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const retry = JSON.parse(resumed.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(retry.kind, resumed.stdout).toBe("spawn-batch");
+    expect(retry.requests).toHaveLength(1);
+    // The retry is the recorded slot's second attempt: issued with the slot, under its recorded binding.
+    expect(retry.requests[0]?.authority).toMatchObject({
+      attempt: 2, program: "refutation-panel", slotId: panel.requests[0]!.authority.slotId,
+      modelProfile: "refutation", harnessBinding: { pi: RETIRED_REFUTATION_PI },
+    });
+
+    const valid = refutationVerdicts(opened, retry.requests[0]!.authority, "upheld");
+    expect((await captureReviewedTranscript(opened, retry.requests[0]!.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(done.status, done.stderr).toBe(0);
+    expect(JSON.parse(done.stdout).kind, done.stdout).toBe("done");
+    const evidenceReplay = replayFromCapturedEvidence(opened);
+    expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
+    const again = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(JSON.parse(again.stdout).kind, again.stdout).toBe("done");
+  }, 60_000);
+
+  it("republishes a checkpointed standalone refutation panel from its record when its batch receipt was never written", async () => {
+    const { root, runsRoot, runDir, panel } = await standaloneRunWithRetiredRefutationPanel("standalone-checkpointed-refutation");
+    // The run checkpoints the issued panel BEFORE it publishes the batch, so a
+    // crash between the two leaves the checkpoint as the only record.
+    const effectId = `effect:standalone-refutation:${createHash("sha256")
+      .update(panel.requests.map(({ authority }) => authority.requestId).join("|")).digest("hex")}`;
+    rmSync(join(runDir, "artifacts", publicationFile(effectId)));
+
+    const republished = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
+    expect(republished.status, republished.stderr).toBe(0);
+    const batch = JSON.parse(republished.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
+    expect(batch.kind, republished.stdout).toBe("spawn-batch");
+    // The recorded panel, not one re-minted from today's catalog.
+    expect(batch.requests.map(({ authority }) => authority)).toEqual(panel.requests.map(({ authority }) => authority));
+  }, 60_000);
+
+  it("resumes a Wave refutation panel issued before the catalog retargeted its Pi route", async () => {
+    const root = repository();
+    const proof = passingWaveTaskProof();
+    expect(proof.state).toBe("satisfied");
+    const finding = {
+      id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
+      file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
+    };
+    const planFile = modelFreePlan(root);
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify({
+      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: planFile, wave_gates: {},
+      wave_review_epoch: {
+        runId: "run.wave-retired-refutation", wave: 1, batchEpoch: "c".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, planFile),
+      },
+      spec_check: {
+        wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      tasks: [{
+        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+        new_test_evidence: "present", review_status: "blocked", review_generation: 0,
+        findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
+      }],
+    }));
+    const runsRoot = canonicalTempDir("loom-wave-retired-refutation-runs-");
+    cleanup.push(runsRoot);
+    const runDir = join(runsRoot, "run.wave-retired-refutation");
+    mkdirSync(runDir);
+
+    const action = await underRetiredRefutationCatalog(() => reviewedWave(root, runsRoot, runDir)) as {
+      kind: string; requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    expect(action.requests).toHaveLength(3);
+    expect(action.requests.every(({ authority }) => authority.program === "refutation-panel" &&
+      JSON.stringify(authority.harnessBinding.pi) === JSON.stringify(RETIRED_REFUTATION_PI))).toBe(true);
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    for (const { authority } of action.requests) {
+      const raw = refutationVerdicts(opened.value, authority, "refuted");
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
+    }
+
+    // Today's catalog lowers `refutation` to the local route; the recorded
+    // panel still adjudicates and the refuting tally drives the Wave to done.
+    const resumed = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; outcome?: { kind: string } };
+    expect(resumed.kind, JSON.stringify(resumed)).toBe("done");
+    expect(resumed.outcome?.kind).toBe("protected-wave-state-committed");
+  }, 60_000);
 
   it("drives a registered standalone review from spawn-batch to idempotent done", async () => {
     const root = sourceProject();

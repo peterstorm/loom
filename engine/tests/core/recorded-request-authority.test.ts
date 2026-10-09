@@ -7,20 +7,27 @@ import {
   currentProfileBindings,
   piModelPattern,
   recordedProfileBindings,
+  type LlmProfileId,
+  type LocalPiBinding,
   type PiBinding,
   type RecordedLlmProfileId,
 } from "../../src/core/model-profiles";
 import {
   issueAgentRosterSlot,
+  mintAgentRequestAuthority,
   parseAgentRequestAuthority,
   parseAgentRosterSlot,
+  parseOrchestrationRunId,
   parseStoredAgentRequestAuthority,
   type AgentRequestAuthority,
   type AgentRosterSlot,
   type MintedAgentRequestAuthority,
+  type MintedAgentRosterSlot,
+  type MintedHarnessBinding,
 } from "../../src/core/orchestration-contract";
-import { samePiBinding } from "../../src/core/orchestration-contract/roster";
-import { issueRefutationPanelAuthority } from "../../src/core/panel-authority";
+import { parseProfileAuthority, samePiBinding } from "../../src/core/orchestration-contract/roster";
+import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
+import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 
 /**
@@ -224,5 +231,155 @@ describe("a minted authority is the only thing an issuing seam accepts", () => {
       verifierSlots: storedSlots,
     });
     expect(panel().ok).toBe(false);
+  });
+});
+
+describe("the profile authority admits a Pi binding by its origin's strategy", () => {
+  const profileAuthority = (profile: RecordedLlmProfileId, origin: "issue" | "stored") => {
+    const parsed = parseProfileAuthority(profile, origin);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    return parsed.value;
+  };
+
+  it("admits a recorded binding exactly when the recorded profile has issued it, returning that binding", () => {
+    fc.assert(fc.property(fc.constantFrom(...RECORDED_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+      const admitted = profileAuthority(profile, "stored").admitPi({ ...pi });
+      expect(admitted.ok, `${profile} ${piModelPattern(pi)}`).toBe(issuedBy(profile, pi));
+      if (admitted.ok) expect(admitted.value).toEqual(pi);
+      else expect(admitted.error.map(({ field }) => field)).toEqual(["harnessBinding.pi"]);
+    }));
+  });
+
+  it("admits at issuance only the catalog profile's current binding, naming each differing field", () => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+      const current = currentProfileBindings(profile).pi;
+      const admitted = profileAuthority(profile, "issue").admitPi({ ...pi });
+      expect(admitted.ok).toBe(samePiBinding(pi, current));
+      if (admitted.ok) expect(admitted.value).toEqual(current);
+      else expect(admitted.error.map(({ field }) => field))
+        .toEqual(PI_FIELDS.filter((key) => pi[key] !== current[key]).map((key) => `harnessBinding.pi.${key}`));
+    }));
+  });
+
+  it("admits at issuance a subset of what the same profile admits as history", () => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...VOCABULARY), (profile, pi) => {
+      fc.pre(profileAuthority(profile, "issue").admitPi(pi).ok);
+      expect(profileAuthority(profile, "stored").admitPi(pi).ok).toBe(true);
+    }));
+  });
+
+  it("refuses every non-binding shape in both origins", () => {
+    const shapes = fc.oneof(
+      fc.constant(undefined), fc.constant(null), fc.string(), fc.integer(), fc.array(fc.string()),
+      fc.dictionary(fc.string(), fc.string()),
+      fc.constantFrom(...VOCABULARY).map((pi) => ({ ...pi, extra: true })),
+    );
+    const origins = fc.constantFrom("issue" as const, "stored" as const);
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), origins, shapes, (profile, origin, raw) => {
+      const admitted = profileAuthority(profile, origin).admitPi(raw);
+      expect(admitted.ok).toBe(false);
+      if (!admitted.ok) expect(admitted.error.length).toBeGreaterThan(0);
+    }));
+  });
+
+  it("names no retired profile at issuance and every recorded one in history", () => {
+    for (const profile of RETIRED_LLM_PROFILE_IDS) {
+      expect(parseProfileAuthority(profile, "issue").ok).toBe(false);
+      expect(parseProfileAuthority(profile, "stored").ok).toBe(true);
+    }
+    expect(parseProfileAuthority(7, "stored")).toMatchObject({ ok: false });
+  });
+});
+
+describe("the catalog mints a request from its identity alone", () => {
+  const identity = <Attempt extends 1 | 2>(role: (typeof AGENT_POLICIES)[number]["agent"], attempt: Attempt) => ({
+    runId: "run:minted-authority",
+    requestId: `request:minted-${role}-${attempt}`,
+    slotId: `slot:minted-${role}`,
+    program: "standalone-review" as const,
+    role,
+    attempt,
+    contextDigest: String(attempt).repeat(64),
+    outputSlot: `transcripts/slot:minted-${role}/attempt-${attempt}.raw`,
+  });
+
+  it("fills every role's catalog profile, current bindings and Skill, and agrees with the strict parse", () => {
+    for (const policy of AGENT_POLICIES) {
+      const minted = mintAgentRequestAuthority(identity(policy.agent, 1));
+      expect(minted.ok, policy.agent).toBe(true);
+      if (!minted.ok) continue;
+      expect(minted.value.modelProfile).toBe(policy.profile);
+      expect(minted.value.requiredSkill).toBe(policy.requiredSkill);
+      expect(minted.value.harnessBinding).toEqual(currentProfileBindings(policy.profile));
+      expect(parseAgentRequestAuthority(minted.value)).toEqual(minted);
+    }
+  });
+
+  it("keeps the attempt it was asked to mint, so a minted pair issues a slot", () => {
+    const first = mintAgentRequestAuthority(identity("code-reviewer", 1));
+    const retry = mintAgentRequestAuthority({ ...identity("code-reviewer", 2), requestId: "request:minted-retry" });
+    if (!first.ok || !retry.ok) throw new Error("mint failed");
+    expect(issueAgentRosterSlot(first.value, retry.value).ok).toBe(true);
+  });
+
+  it("refuses an identity whose own fields do not parse", () => {
+    expect(mintAgentRequestAuthority({ ...identity("code-reviewer", 1), contextDigest: "not-a-digest" }))
+      .toMatchObject({ ok: false, error: { violations: [expect.objectContaining({ field: "contextDigest" })] } });
+  });
+
+  it("types a minted authority narrower than history: a catalog profile on the local route", () => {
+    const minted = mintAgentRequestAuthority(identity("code-reviewer", 1));
+    if (!minted.ok) throw new Error("mint failed");
+    const binding: LocalPiBinding = minted.value.harnessBinding.pi;
+    const profile: LlmProfileId = minted.value.modelProfile;
+    expect([binding.provider, profile]).toEqual([LOCAL.provider, "general-review"]);
+    // @ts-expect-error a minted binding is never a retired cloud target
+    const retired: MintedHarnessBinding = { pi: SOL, claude: minted.value.harnessBinding.claude };
+    // @ts-expect-error a minted authority never names a retired profile
+    const retiredProfile: MintedAgentRequestAuthority["modelProfile"] = "qualified-local-review";
+    expect([retired.pi.provider, retiredProfile]).toEqual(["openai-codex", "qualified-local-review"]);
+  });
+});
+
+describe("an issued refutation panel keeps its minted roster", () => {
+  it("types the issued panel's verifier slots as minted, and a parsed panel's as history", () => {
+    const runId = parseOrchestrationRunId("run:issued-panel");
+    const findingId = parseWaveFindingId("T1:finding-1");
+    if (!runId.ok || findingId === null) throw new Error("fixture identities must parse");
+    const binding = deriveRefutationVerifierBinding(runId.value, "reproduction", [findingId]);
+    if (!binding.ok) throw new Error(binding.errors.join("; "));
+    const mint = <Attempt extends 1 | 2>(attempt: Attempt) => {
+      const minted = mintAgentRequestAuthority({
+        runId: runId.value,
+        requestId: binding.value.requestIds[attempt - 1]!,
+        slotId: binding.value.slotId,
+        program: "refutation-panel",
+        role: "review-verifier-agent",
+        attempt,
+        contextDigest: String(attempt).repeat(64),
+        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
+      });
+      if (!minted.ok) throw new Error(JSON.stringify(minted.error));
+      return minted.value;
+    };
+    const slot = issueAgentRosterSlot(mint(1), mint(2));
+    if (!slot.ok) throw new Error("slot must issue");
+    const input = {
+      runId: runId.value,
+      findings: [{ id: findingId, taskId: "T1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "c" }],
+      lenses: ["reproduction"],
+      verifierSlots: [slot.value],
+    };
+    const issued = issueRefutationPanelAuthority(input);
+    if (!issued.ok) throw new Error(issued.error.message);
+    const minted: MintedAgentRosterSlot = issued.value.verifierRoster.orderedSlots[0];
+    expect(minted.attempts[0].harnessBinding.pi).toEqual(LOCAL);
+
+    const parsed = parseRefutationPanelAuthority(input);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value).toEqual(issued.value);
+    // @ts-expect-error a parsed (recorded) panel's roster is history, not issuance
+    const recorded: MintedAgentRosterSlot = parsed.value.verifierRoster.orderedSlots[0];
+    expect(recorded).toEqual(minted);
   });
 });

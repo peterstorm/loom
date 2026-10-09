@@ -45,8 +45,9 @@ export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
  */
 export const RETIRED_LLM_PROFILE_IDS = ["qualified-local-review"] as const;
 export type RetiredLlmProfileId = (typeof RETIRED_LLM_PROFILE_IDS)[number];
-/** Every profile id a stored request authority may record. */
-export type RecordedLlmProfileId = LlmProfileId | RetiredLlmProfileId;
+/** Every profile id a stored request authority may record: the catalog's, then the retired. */
+const RECORDED_LLM_PROFILE_IDS = Object.freeze([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS] as const);
+export type RecordedLlmProfileId = (typeof RECORDED_LLM_PROFILE_IDS)[number];
 
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
 export type Harness = "claude-code" | "pi";
@@ -92,6 +93,13 @@ export type ClaudeCodeBinding = Readonly<{
   model: ClaudeCodeModel;
 }>;
 
+/** The Pi binding a request is issued with today: the catalog's local route. */
+export type LocalPiBinding = Readonly<{ harness: "pi" } & LocalPiTarget>;
+
+/**
+ * Every Pi binding a request authority may RECORD: the local one, or a retired
+ * cloud one. Only history is this wide — issuance yields `LocalPiBinding`.
+ */
 export type PiBinding = Readonly<{ harness: "pi" } & PiTarget>;
 
 export type HarnessBinding = ClaudeCodeBinding | PiBinding;
@@ -155,11 +163,63 @@ export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze(
   LLM_PROFILE_IDS.map((id) => profile(id, CLAUDE_MODEL_BY_PROFILE[id])),
 );
 
+/** `LLM_PROFILES` keyed by id; total because `LLM_PROFILES` maps every `LLM_PROFILE_IDS` entry. */
+const LLM_PROFILES_BY_ID: Readonly<Record<LlmProfileId, LlmProfile>> = Object.freeze(
+  Object.fromEntries(LLM_PROFILES.map((entry) => [entry.id, entry])) as Record<LlmProfileId, LlmProfile>,
+);
+
 /** Each Pi target the catalog has retired, named once; the history below refers to these. */
 const RETIRED_GPT_5_6_SOL: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
 const RETIRED_GPT_5_5: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.5", thinking: "high" });
 const RETIRED_GPT_5_4_MINI: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" });
 const RETIRED_GPT_5_6_TERRA: RetiredPiTarget = Object.freeze({ provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" });
+
+/**
+ * Why a row of recorded Pi history is not history. A row lists what a profile
+ * lowered to BEFORE its current binding, so an entry equal to the current
+ * binding is a second copy of the catalog, and a repeated entry is one
+ * retargeting written twice.
+ */
+export type PiHistoryViolation = Readonly<{
+  kind: "current-target-in-history" | "duplicate-history-target";
+  profileId: RecordedLlmProfileId;
+  target: string;
+}>;
+
+/**
+ * Check one profile's recorded Pi history against its current target (`null`
+ * for a retired profile, which has none): the structural invariant every row
+ * of `RETIRED_PI_HISTORY` and `RETIRED_PROFILE_BINDINGS` holds. Pure and
+ * total; the module runs it over both tables at load.
+ */
+export function piHistoryViolations(
+  profileId: RecordedLlmProfileId,
+  current: PiTarget | null,
+  history: readonly PiTarget[],
+): readonly PiHistoryViolation[] {
+  const currentPattern = current === null ? null : piModelPattern(current);
+  const patterns = history.map(piModelPattern);
+  return patterns.flatMap((target, index): PiHistoryViolation[] => [
+    ...(target === currentPattern ? [Object.freeze({ kind: "current-target-in-history" as const, profileId, target })] : []),
+    ...(patterns.indexOf(target) < index ? [Object.freeze({ kind: "duplicate-history-target" as const, profileId, target })] : []),
+  ]);
+}
+
+/**
+ * `rows`, once every row passes `check`. A violation is a defect in the
+ * catalog's own constant data — no caller input reaches it — so the module
+ * refuses to load rather than issue or admit under a malformed history.
+ */
+function guardedPiHistory<Id extends RecordedLlmProfileId, Row>(
+  rows: Readonly<Record<Id, Row>>,
+  check: (profileId: Id, row: Row) => readonly PiHistoryViolation[],
+): Readonly<Record<Id, Row>> {
+  const violations = (Object.entries(rows) as [Id, Row][]).flatMap(([profileId, row]) => check(profileId, row));
+  if (violations.length > 0) {
+    throw new Error(`model profile Pi history is malformed: ${violations.map(({ kind, profileId, target }) => `${profileId} ${kind} ${target}`).join("; ")}`);
+  }
+  return rows;
+}
 
 /**
  * The Pi targets each catalog profile lowered to BEFORE its current one,
@@ -168,9 +228,10 @@ const RETIRED_GPT_5_6_TERRA: RetiredPiTarget = Object.freeze({ provider: "github
  * retargeting a profile cannot leave issuance and the catalog disagreeing.
  * Retargeting moves the outgoing target onto the front of its row. Reconstructed
  * from the catalog's Git history; a target absent from a row was never that
- * profile's binding.
+ * profile's binding. Guarded at load (`piHistoryViolations`): no row repeats a
+ * target or holds its profile's current one.
  */
-const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget[]>> = Object.freeze({
+const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget[]>> = guardedPiHistory(Object.freeze({
   "implementation": Object.freeze([RETIRED_GPT_5_6_SOL]),
   "architecture-finalize": Object.freeze([RETIRED_GPT_5_6_SOL]),
   "general-review": Object.freeze([RETIRED_GPT_5_6_SOL]),
@@ -180,7 +241,7 @@ const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget
   "refutation": Object.freeze([RETIRED_GPT_5_6_SOL]),
   "mechanical": Object.freeze([RETIRED_GPT_5_4_MINI]),
   "spec-check-review": Object.freeze([RETIRED_GPT_5_6_TERRA]),
-});
+}), (profileId, history) => piHistoryViolations(profileId, LLM_PROFILES_BY_ID[profileId].pi, history));
 
 /**
  * Profiles the catalog no longer carries, so there is no current lowering to
@@ -191,14 +252,14 @@ const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget
 const RETIRED_PROFILE_BINDINGS: Readonly<Record<RetiredLlmProfileId, Readonly<{
   claudeCode: ClaudeCodeModel;
   pi: readonly [PiTarget, ...PiTarget[]];
-}>>> = Object.freeze({
+}>>> = guardedPiHistory(Object.freeze({
   "qualified-local-review": Object.freeze({ claudeCode: "sonnet", pi: Object.freeze([LOCAL_PI_TARGET] as const) }),
-});
+}), (profileId, row) => piHistoryViolations(profileId, null, row.pi));
 
-/** The exact bindings a request issued under one catalog profile carries today. */
+/** The exact bindings a request issued under one catalog profile carries today: its Pi binding is local. */
 export type CurrentProfileBindings = Readonly<{
   claude: ClaudeCodeBinding;
-  pi: PiBinding;
+  pi: LocalPiBinding;
 }>;
 
 /** The exact bindings a request issued under one recorded profile may carry. */
@@ -207,16 +268,11 @@ export type RecordedProfileBindings = Readonly<{
   pi: readonly [PiBinding, ...PiBinding[]];
 }>;
 
-/** `LLM_PROFILES` keyed by id; total because `LLM_PROFILES` maps every `LLM_PROFILE_IDS` entry. */
-const CATALOG_PROFILES: Readonly<Record<LlmProfileId, LlmProfile>> = Object.freeze(
-  Object.fromEntries(LLM_PROFILES.map((entry) => [entry.id, entry])) as Record<LlmProfileId, LlmProfile>,
-);
-
 const lowerPiTarget = (target: PiTarget): PiBinding => Object.freeze({ harness: "pi", ...target });
 
 /** The bindings `profileId` issues today: exactly its catalog lowering on both harnesses. */
 export function currentProfileBindings(profileId: LlmProfileId): CurrentProfileBindings {
-  const entry = CATALOG_PROFILES[profileId];
+  const entry = LLM_PROFILES_BY_ID[profileId];
   return Object.freeze({ claude: lowerModelProfile(entry, "claude-code"), pi: lowerModelProfile(entry, "pi") });
 }
 
@@ -357,12 +413,11 @@ export function parseLlmProfileId(raw: unknown): PolicyResult<LlmProfileId> {
 
 /** Parse the profile id a stored request authority recorded: current or retired. */
 export function parseRecordedLlmProfileId(raw: unknown): PolicyResult<RecordedLlmProfileId> {
-  if (typeof raw === "string" && includes(RETIRED_LLM_PROFILE_IDS, raw)) return success(raw);
-  return typeof raw === "string" && includes(LLM_PROFILE_IDS, raw)
+  return typeof raw === "string" && includes(RECORDED_LLM_PROFILE_IDS, raw)
     ? success(raw)
     : failure({
         kind: "invalid-profile",
-        message: `recorded model profile must be one of: ${[...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].join(", ")}; received ${JSON.stringify(raw)}`,
+        message: `recorded model profile must be one of: ${RECORDED_LLM_PROFILE_IDS.join(", ")}; received ${JSON.stringify(raw)}`,
       });
 }
 
@@ -451,7 +506,7 @@ export function parseHarness(raw: unknown): PolicyResult<Harness> {
 
 /** Lower a validated profile to a harness-specific binding with no inherited fields. */
 export function lowerModelProfile(profileValue: LlmProfile, harness: "claude-code"): ClaudeCodeBinding;
-export function lowerModelProfile(profileValue: LlmProfile, harness: "pi"): PiBinding;
+export function lowerModelProfile(profileValue: LlmProfile, harness: "pi"): LocalPiBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding {
   if (harness === "claude-code") return Object.freeze({ harness, model: profileValue.claudeCode.model });

@@ -6,12 +6,11 @@
  */
 import { sha256Hex } from "./digest";
 import {
-  AGENT_REQUIRED_SKILLS, canonicalRecord, canonicalStructuralEquals, issueAgentRosterSlot, parseAgentRequestAuthority,
+  canonicalRecord, canonicalStructuralEquals, issueAgentRosterSlot, mintAgentRequestAuthority,
   parseExactRoster, parseOrchestrationRunId,
   type AgentRosterSlot, type DomainResult, type MintedAgentRosterSlot, type NonEmpty,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
-import { lowerModelProfile, resolveAgentProfile } from "./model-profiles";
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import type { ReviewPath } from "./review-packet";
@@ -184,37 +183,31 @@ export function prepareFreshStandaloneReview(
 
   const authorityErrors: string[] = [];
   const roster = reviewers.map((role, index): MintedAgentRosterSlot | null => {
-    const profile = resolveAgentProfile(role);
-    if (!profile.ok) {
-      authorityErrors.push(`${role}: model profile resolution failed: ${profile.error.message}`);
-      return null;
-    }
     const contexts = input.reviewerContexts[index];
     if (contexts === undefined || !Array.isArray(contexts.attempts) || contexts.attempts.length !== 2) {
       authorityErrors.push(`${role}: exactly two immutable attempt context digests are required`);
       return null;
     }
+    const [firstContext, retryContext] = contexts.attempts;
+    if (typeof firstContext !== "string" || typeof retryContext !== "string") {
+      authorityErrors.push(`${role}: attempt context digests must be strings`);
+      return null;
+    }
     const slotId = `standalone-slot:${index + 1}:${role}`;
-    // Each request is minted through the issue-mode parser: the one point a
-    // request is checked against today's catalog (rosters are re-read as recorded).
-    const mint = (attempt: 1 | 2) => parseAgentRequestAuthority({
+    // Each request is minted from the catalog: the one point a request is
+    // checked against today's catalog (rosters are re-read as recorded).
+    const mint = <Attempt extends 1 | 2>(attempt: Attempt, contextDigest: string) => mintAgentRequestAuthority({
       runId: runId.value,
       requestId: `request:${sha256Hex(`${runId.value}\u0000${role}\u0000${attempt}`)}`,
       slotId,
       program: "standalone-review",
       role,
       attempt,
-      modelProfile: profile.value.id,
-      harnessBinding: {
-        pi: lowerModelProfile(profile.value, "pi"),
-        claude: lowerModelProfile(profile.value, "claude-code"),
-      },
-      requiredSkill: AGENT_REQUIRED_SKILLS[role],
-      contextDigest: contexts.attempts[attempt - 1],
+      contextDigest,
       outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
     });
-    const first = mint(1);
-    const retry = mint(2);
+    const first = mint(1, firstContext);
+    const retry = mint(2, retryContext);
     if (!first.ok || !retry.ok) {
       for (const minted of [first, retry]) {
         if (!minted.ok) authorityErrors.push(...minted.error.violations.map(({ message }) => `${role}: ${message}`));

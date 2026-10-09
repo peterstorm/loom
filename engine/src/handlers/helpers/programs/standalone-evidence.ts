@@ -13,7 +13,7 @@ import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } fro
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
 import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
-import { canonicalStructuralEquals, issueAgentRosterSlot, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type MintedAgentRosterSlot, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type SpawnRequest } from '../../../core/orchestration-contract';
 import {
   aggregateStandaloneReview,
   proveStandaloneRosterCompletion,
@@ -27,7 +27,7 @@ import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-r
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
-import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';
+import type { PersistentPanelResult, RefutationPanelAuthority } from '../../../core/panel-authority';
 import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
@@ -38,16 +38,16 @@ import {
   type PersistentRefutationPanelEvent,
   type PersistentRefutationStep,
 } from '../../../core/persistent-panel';
-import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
+import { buildContextPacket, encodeByteSection } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { admitRecordedReadCoverage } from '../../../orchestration/standalone-read-coverage-evidence';
-import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { boundedStandaloneReadHandle, successorSourceSnapshot } from './standalone-successor-source';
 import { parseRegistration, exactObject, type RegisteredStandaloneProgram } from './registration';
 import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
 import { durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { durableRequests, standaloneRetryEffectId } from './standalone-requests';
+import { prepareRefutationVerifiers } from './refutation-verifiers';
 import type { ProgramParse } from './program-result';
 
 function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandaloneReviewAuthority) {
@@ -63,34 +63,36 @@ function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandalon
   return { fixed: [lineage.value], variable: [registration.value.currentSource, ...registration.value.previousContexts] };
 }
 
+/**
+ * The standalone Refutation Panel for `aggregate`'s current criticals. Its
+ * verifier requests are read from the panel's record when one exists — the
+ * `recorded` panel the run checkpointed, else the durable attempt-1 batch
+ * receipt — and minted from today's catalog only when none does
+ * (`prepareRefutationVerifiers`), so resuming or replaying a panel issued
+ * under an older catalog compares recorded history with recorded history.
+ */
 export function standaloneRefutationPreparation(
   handle: RunDirHandle,
   authority: FrozenStandaloneReviewAuthority,
   aggregate: import("../../../core/standalone-review-model").StandaloneReviewAggregate,
+  recorded?: RefutationPanelAuthority,
 ) {
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });
   const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
   if (!selected.ok) throw new Error(selected.errors.join("; "));
   const lenses = selected.value;
+  const [firstFinding, ...otherFindings] = brief.findings;
+  const [firstLens, ...otherLenses] = lenses;
+  if (firstFinding === undefined) throw new Error("standalone refutation requires a non-empty critical Finding set");
+  if (firstLens === undefined) throw new Error("standalone refutation requires at least one review lens");
   const sources = standalonePanelSources(handle, authority);
-  const slots: MintedAgentRosterSlot[] = [];
-  const packets: ContextPacket[] = [];
-  const inputs: InitialSpawnRequestInput[] = [];
-  const retryInputs: Readonly<{ input: InitialSpawnRequestInput; packet: ContextPacket }>[] = [];
-  const profile = resolveModelProfile("refutation");
-  if (!profile.ok) throw new Error(profile.error.message);
-  for (let index = 0; index < lenses.length; index += 1) {
-    const lens = lenses[index]!;
-    const [firstFinding, ...otherFindings] = brief.findings;
-    if (firstFinding === undefined) throw new Error("standalone refutation requires a non-empty critical Finding set");
-    const binding = deriveRefutationVerifierBinding(
-      handle.runId,
-      lens,
-      [firstFinding.id, ...otherFindings.map(({ id }) => id)],
-    );
-    if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = binding.value.requestIds[attempt - 1];
+  const verifiers = prepareRefutationVerifiers({
+    handle,
+    label: "standalone-refutation",
+    findings: [firstFinding, ...otherFindings],
+    lenses: [firstLens, ...otherLenses],
+    ...(recorded === undefined ? {} : { recorded }),
+    packet: (lens, requestId, attempt) => {
       const section = encodeByteSection("refutation-authority", JSON.stringify({
         runId: handle.runId, lens, findings: brief.findings, attempt,
         ...(aggregate.schemaVersion === 3 ? { successorEvidence: { lineageDigest: aggregate.successor.lineageDigest,
@@ -105,34 +107,13 @@ export function standaloneRefutationPreparation(
         fixedContext: Object.freeze([section.value, ...sources.fixed]), variableContext: Object.freeze(sources.variable),
       });
       if (!packet.ok) throw new Error(packet.error.message);
-      if (attempt === 1) packets.push(packet.value);
-      const parsed = parseAgentRequestAuthority({
-        runId: handle.runId, requestId, slotId: binding.value.slotId,
-        program: "refutation-panel", role: "review-verifier-agent", attempt,
-        modelProfile: profile.value.id,
-        harnessBinding: { pi: lowerModelProfile(profile.value, "pi"), claude: lowerModelProfile(profile.value, "claude-code") },
-        requiredSkill: null, contextDigest: packet.value.digest,
-        outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
-      });
-      if (!parsed.ok) throw new Error(parsed.error.violations.map(({ message }) => message).join("; "));
-      const input = { authority: parsed.value, context: {
-        digest: packet.value.digest,
-        slot: { kind: "fixed-artifact-slot" as const, path: `contexts/${packet.value.digest}.json` },
-      } };
-      if (attempt === 1) inputs.push(input);
-      else retryInputs.push(Object.freeze({ input: Object.freeze(input), packet: packet.value }));
-      return parsed.value;
-    });
-    const slot = issueAgentRosterSlot(attempts[0], attempts[1]);
-    if (!slot.ok) throw new Error(`verifier slot ${binding.value.slotId} is invalid: ${slot.error.violations.map(({ kind }) => kind).join(", ")}`);
-    slots.push(slot.value);
-  }
-  const panel = issueRefutationPanelAuthority({ runId: handle.runId, findings: brief.findings, lenses, verifierSlots: slots });
-  if (!panel.ok) throw new Error(panel.error.message);
+      return packet.value;
+    },
+  });
   const threshold = defaultRefutationThreshold(lenses.length);
-  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: panel.value, threshold });
+  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: verifiers.panel, threshold });
   if (!frozen.ok) throw new Error(frozen.error.message);
-  return { brief, lenses, panel: panel.value, frozen: frozen.value, threshold, packets, inputs, retryInputs };
+  return { brief, lenses, frozen: frozen.value, threshold, ...verifiers };
 }
 
 export type StandaloneEvidenceReplayResult =
@@ -581,10 +562,10 @@ export function replayStandaloneResultFromEvidence(
         if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
         if (submitted.value.action?.kind === "spawn-refutation-verifiers") {
           const retryAuthority = submitted.value.action.requests[0];
-          const prepared = preparation.retryInputs.find(({ input }) => {
-            const candidate = parseAgentRequestAuthority(input.authority);
-            return candidate.ok && sameAgentRequestAuthority(candidate.value, retryAuthority);
-          });
+          // The prepared retry is already the panel's recorded (or freshly
+          // minted) authority: compare it as it is, never re-minted.
+          const prepared = preparation.retryInputs.find(({ input }) =>
+            sameAgentRequestAuthority(input.authority, retryAuthority));
           if (prepared === undefined) {
             return failed(`refutation retry ${retryAuthority.requestId} is not exact prepared attempt-2 authority`);
           }
