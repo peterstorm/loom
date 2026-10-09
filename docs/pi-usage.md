@@ -132,7 +132,7 @@ Source Agents map to semantic profiles in `engine/src/core/model-profiles.ts`. T
 
 Every Pi spawn byte-compares the selected user-global definition with a fresh render from the loaded package. Project-local Agent shadowing, stale definitions, unresolved root tokens, and missing required Skills are rejected.
 
-Pi runs local models only: every catalog profile's Pi binding is `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high`, and launcher routing may explicitly inherit a local parent model for children. The immutable request freezes both harness bindings. Before a spawn batch is emitted, the facade checks that the route each child will launch on (the generated render's binding, routing rules included) answers `GET {baseUrl}/models` (from `models.json`) and refuses the batch, naming the route, if it does not; resume once the server is up. A route that answers without a readable model list (an HTTP 401/403, or a 2xx that is not a model list) is admitted and reported on stderr as a `loom-route-unverified` event. A run whose stored requests carry a retired cloud binding is refused as `retired`: it predates local-only routing, so start a fresh run instead of resuming. A reviewer request issued under a Pi parent advertises the frozen reviewer emission tool, and the child still must pass the installed launcher's request-bound readiness barrier. Without that launcher, the parent refuses the spawn; it does not silently degrade the issued request.
+Pi runs local models only: every catalog profile's Pi binding is `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high`, and launcher routing may explicitly inherit a local parent model for children. The immutable request freezes both harness bindings. Before a spawn batch is emitted, the facade checks that the route each child will launch on (the generated render's binding, routing rules included) answers `GET {baseUrl}/models` (from `models.json`) and refuses the batch, naming the route, if it does not; resume once the server is up. A route that answers without a readable model list (an HTTP 401/403, or a 2xx that is not a model list) is admitted and reported on stderr as a `loom-route-unverified` event — unless the operator sets `LOOM_ROUTE_GATE=strict`, under which such a route is refused as `unverified` (see [A spawn batch is refused by the route gate](#a-spawn-batch-is-refused-by-the-route-gate)). The gate never guesses past an input it cannot read: a stored request authority that does not parse, a malformed `model-routing.json`, a malformed `models.json` or a `LOOM_ROUTE_GATE` naming no mode each refuse the batch. A run whose stored requests carry a retired cloud binding is refused as `retired`: it predates local-only routing, so start a fresh run instead of resuming. A reviewer request issued under a Pi parent advertises the frozen reviewer emission tool, and the child still must pass the installed launcher's request-bound readiness barrier. Without that launcher, the parent refuses the spawn; it does not silently degrade the issued request.
 
 ## Pi write grants
 
@@ -266,6 +266,21 @@ Never broaden the grant manually.
 ### An emission-enabled spawn is refused before dispatch
 
 The shared `subagent` launcher under the active `PI_CODING_AGENT_DIR` is missing its `loom:subagent-launch:v2` port, or the installed copy predates it. Install or update the separately owned launcher (`~/.dotfiles/pi/extensions/subagent/` on this workstation), restart Pi or reload its extensions, and confirm `~/.pi/agent/extensions/subagent/` carries it. Loom never silently degrades an emission-enabled request to an ordinary JSON-mode child, and provisioning `LOOM_EMISSION_BINDING` by hand or adding a descriptor to task text is not a fix — neither is issued request authority.
+
+### A spawn batch is refused by the route gate
+
+A diagnostic beginning `refusing to spawn:` names every route that cannot run, and ends with one remedy per cause. Nothing was published, so after the fix `resume` re-emits the same batch.
+
+| Route is | Means | Do |
+| --- | --- | --- |
+| `unreachable` | `GET {baseUrl}/models` was refused, timed out, answered a non-auth error status, or listed models without this one | bring the model server up (or load the model), then resume |
+| `unverified` (only under `LOOM_ROUTE_GATE=strict`) | the route answered 401/403 or a 2xx without an OpenAI-style model list, so the served model is unconfirmed | make the route list its models without credentials, or unset `LOOM_ROUTE_GATE`, then resume |
+| `unconfigured` | Pi's `models.json` declares no `baseUrl` for the provider — often a `model-routing.json` rule naming an undeclared provider | declare the provider or route the child elsewhere, then resume |
+| `retired` | a stored request was issued on a cloud route before local-only routing (ADR-0023) | start a fresh run; resume can never recover it |
+
+`LOOM_ROUTE_GATE` is read once per spawn batch from the Pi parent's environment. Unset (or `admit-unverified`) admits an unverified route and reports it on stderr as a `loom-route-unverified` event; `strict` refuses it — choose it when an authenticating gateway can answer while the model server behind it is down. Any other value refuses the batch rather than falling back to the default.
+
+A diagnostic beginning `cannot check Pi route reachability:` means the gate could not read its inputs: fix the named `model-routing.json`, `models.json` or `LOOM_ROUTE_GATE` value, then resume. A diagnostic beginning `Pi orchestration spawn request N:` means a stored request authority no longer parses, so its route cannot be known.
 
 ### A child fails the emission readiness barrier
 

@@ -80,7 +80,7 @@ import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 import { httpRouteProbe, observeSpawnRoutes, type RouteProbePort } from "../../utils/route-endpoint";
-import { reachabilityRefusal, unverifiedRoutes } from "../../core/route-reachability";
+import { decideSpawnGate, parseRouteGateMode, ROUTE_GATE_VARIABLE } from "../../core/route-reachability";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -973,6 +973,18 @@ function bindingSessionOf(env: NodeJS.ProcessEnv): BindingSession | null {
   return null;
 }
 
+/** One spawn request's stored authority as the stored-request parser admits it; a failure names the request and every violation. */
+function parseSpawnRequestAuthority(
+  label: string,
+  index: number,
+  authority: unknown,
+): Readonly<{ ok: true; value: AgentRequestAuthority }> | Readonly<{ ok: false; message: string }> {
+  const parsed = parseStoredAgentRequestAuthority(authority);
+  return parsed.ok
+    ? parsed
+    : { ok: false, message: `${label} orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}` };
+}
+
 async function publishSpawnBinding(
   session: BindingSession,
   handle: RunDirHandle,
@@ -991,10 +1003,8 @@ async function publishSpawnBinding(
   for (const [index, request] of requests.entries()) {
     // Re-parsed at the capture-authority boundary: the binding records only
     // authority the stored-request parser admits, never the in-memory value.
-    const parsed = parseStoredAgentRequestAuthority(request.authority);
-    if (!parsed.ok) {
-      return { kind: "error", message: `${label} orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}` };
-    }
+    const parsed = parseSpawnRequestAuthority(label, index, request.authority);
+    if (!parsed.ok) return { kind: "error", message: parsed.message };
     if (parsed.value.runId !== handle.runId) {
       return { kind: "error", message: `${label} orchestration spawn request ${index} belongs to another run` };
     }
@@ -1049,31 +1059,41 @@ async function publishCompletionBinding(
  * batch's children will launch on — resolved by the same routing rule as the
  * generated-agent render — must answer, and no request may carry a retired
  * route. Nothing is published to the session when the gate refuses, so a
- * later `resume` re-emits the same batch. A reachable route whose served
- * model went unconfirmed is admitted and reported on stderr
- * (`loom-route-unverified`). A request whose authority does not parse is left
- * to the binding publication below, which reports it.
+ * later `resume` re-emits the same batch.
+ *
+ * A reachable route whose served model went unconfirmed is admitted and
+ * reported on stderr (`loom-route-unverified`), unless the operator set
+ * `LOOM_ROUTE_GATE=strict`, which refuses it. Every input the gate cannot
+ * read refuses rather than guessing a route: a request authority that does
+ * not parse (its route is unknown), a malformed `model-routing.json` (the
+ * child may launch elsewhere than the declared binding), a malformed
+ * `models.json`, or a `LOOM_ROUTE_GATE` naming no mode.
  */
 async function spawnRouteRefusal(
   action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>,
   probe: RouteProbePort,
 ): Promise<HookResult | null> {
-  const requests = action.requests.flatMap(({ authority }) => {
-    const parsed = parseStoredAgentRequestAuthority(authority);
-    return parsed.ok ? [parsed.value] : [];
-  });
+  const requests: AgentRequestAuthority[] = [];
+  for (const [index, { authority }] of action.requests.entries()) {
+    const parsed = parseSpawnRequestAuthority(HARNESS_LABEL.pi, index, authority);
+    if (!parsed.ok) return { kind: "error", message: parsed.message };
+    requests.push(parsed.value);
+  }
+  const mode = parseRouteGateMode(process.env[ROUTE_GATE_VARIABLE]);
+  if (!mode.ok) return { kind: "error", message: `cannot check Pi route reachability: ${mode.error}` };
   const agentDir = activeAgentDir();
   const routing = buildPiRoutingContext(process.env, agentDir);
-  if (routing.configError !== null) {
-    process.stderr.write(`warning: Pi route gate resolves declared bindings: ${routing.configError}\n`);
-  }
+  if (routing.configError !== null) return { kind: "error", message: `cannot check Pi route reachability: ${routing.configError}` };
   const observed = await observeSpawnRoutes(requests, { agentDir, routing: routing.context, probe });
   if (!observed.ok) return { kind: "error", message: `cannot check Pi route reachability: ${observed.error}` };
-  for (const unverified of unverifiedRoutes(observed.decisions)) {
-    process.stderr.write(`${JSON.stringify({ event: "loom-route-unverified", ...unverified })}\n`);
-  }
-  const refusal = reachabilityRefusal(observed.decisions);
-  return refusal === null ? null : { kind: "error", message: refusal };
+  return match(decideSpawnGate(observed.decisions, mode.value))
+    .returnType<HookResult | null>()
+    .with({ kind: "refused" }, ({ message }) => ({ kind: "error", message }))
+    .with({ kind: "admitted" }, ({ unverified }) => {
+      for (const route of unverified) process.stderr.write(`${JSON.stringify({ event: "loom-route-unverified", ...route })}\n`);
+      return null;
+    })
+    .exhaustive();
 }
 
 /**

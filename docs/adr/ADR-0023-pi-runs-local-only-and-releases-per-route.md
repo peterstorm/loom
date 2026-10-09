@@ -5,6 +5,9 @@
 Accepted (2026-10-08). Amends AD-11 of the grammar-constrained decoding plan; supersedes the reviewer
 issue-route election (`qualified-local-review`).
 
+Amended (2026-10-09): decision 3 gains the operator opt-in `LOOM_ROUTE_GATE=strict` and states that every
+gate input that cannot be read refuses the batch. The default admission of an unverified route is unchanged.
+
 ## Context
 
 Grammar-constrained emission is Pi-only: Claude Code has no Loom extension seam for the frozen emission
@@ -45,6 +48,14 @@ Three things followed from the earlier cloud-default catalog:
    authentication refusal (401/403), or a 2xx whose body is not a model list, proves the server is up but
    not which model it serves: the batch is admitted and the unverified route is reported on stderr as a
    `loom-route-unverified` event. Loom never resolves or sends credentials; Pi authenticates the inference.
+   *(Amended 2026-10-09.)* That admission is the default, not the only mode: an authenticating gateway can
+   answer 401 while the model server behind it is down, so an operator may set `LOOM_ROUTE_GATE=strict`,
+   parsed once at the CLI boundary into the closed `RouteGateMode` union, under which an unverified route
+   refuses the batch with its own remedy (make the route list its models, or unset the variable). Any other
+   value of the variable refuses rather than falling back to the default. The gate never fails open on an
+   input it cannot read: a stored request authority that does not parse (its route is unknown), a malformed
+   `model-routing.json` (the child may launch elsewhere than the declared binding) and a malformed
+   `models.json` each refuse the batch.
    A stored request recorded on a retired cloud route is refused as `retired` without a probe: that run
    predates local-only routing, `resume` can never recover it, and the operator starts a fresh run. The
    calibration preflight maps the same pure decision (`decideProbedRoute`) rather than reading HTTP statuses
