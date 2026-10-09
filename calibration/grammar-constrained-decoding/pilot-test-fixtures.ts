@@ -19,7 +19,7 @@ import {
   type ExtractionArmAttempt,
   type SampleObservation,
 } from "./pilot-observation";
-import type { PreflightDecision } from "./pilot-preflight";
+import { decidePreflight, type PreflightDecision, type PreflightFacts } from "./pilot-preflight";
 import {
   buildPairSchedule,
   parsePreregistration,
@@ -28,9 +28,11 @@ import {
   type RouteQualification,
   type ScheduledPair,
 } from "./pilot-preregistration";
-import type { WindowWorkload } from "./pilot-retention";
-import type { CellKey, PilotArm } from "./pilot-vocabulary";
+import { planDispatch, type LoadedPreregistration, type WindowWorkload } from "./pilot-retention";
+import { contentDigest, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import { dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
+import { CURRENT_WINDOW_SCHEMA_VERSION } from "./pilot-window-ending";
+import type { WindowRecord } from "./pilot-window-record";
 import {
   parseWorkloadFixtures,
   resolveWindowInputs,
@@ -76,14 +78,44 @@ function retainedWorkload(): Readonly<{ fixtures: WorkloadFixtures; cases: reado
 }
 
 const workload = retainedWorkload();
-export const prereg: Preregistration = PILOT_1;
 export const { fixtures } = workload;
 export const corpusCases: readonly CalibrationCase[] = workload.cases;
+
+/** The retained pilot-1 preregistration as a window loads it. */
+export const LOADED: LoadedPreregistration = {
+  ref: { path: "calibration/grammar-constrained-decoding/preregistration.json", digest: contentDigest(preregBytes), id: PILOT_1.id },
+  prereg: PILOT_1,
+};
+
+/** Preflight facts of a route that refused the connection: the preflight blocks. */
+export const UNREACHABLE_FACTS: PreflightFacts = {
+  registry: { "reviewer-payload/v2": null, "reviewer-payload/v3": null, "judge-verdict/v1": null, "refutation-verdict/v1": null },
+  workloadFixturesDigest: PILOT_1.workloadFixturesDigest,
+  piVersion: PILOT_1.route.piVersion,
+  stagedRuntimeRevision: "sha256:abc",
+  loadedRuntimeRevision: null,
+  route: { kind: "unreachable", reason: "connection refused" },
+};
+
+/** An opened `window.json` of this revision: a ready, dispatching window, or a blocked one. */
+export const testWindowRecord = (dispatched: boolean): WindowRecord => {
+  const preflight = dispatched ? READY : decidePreflight(PILOT_1, UNREACHABLE_FACTS);
+  return {
+    schemaVersion: CURRENT_WINDOW_SCHEMA_VERSION,
+    windowId: "test-window",
+    preregistration: LOADED.ref,
+    workloadFixtures: { path: "calibration/grammar-constrained-decoding/workload-fixtures.json", digest: PILOT_1.workloadFixturesDigest },
+    startedAt: "2026-10-05T08:00:00.000Z",
+    preflightFacts: UNREACHABLE_FACTS,
+    preflight,
+    dispatch: planDispatch(preflight, false),
+  };
+};
 
 /** The window workload `recordWindow` resolves, with no git-derived changed paths. */
 export const WORKLOAD: WindowWorkload = { fixtures, loadCorpusCases: () => ({ ok: true, value: corpusCases }), changedPathsOf: () => [] };
 
-const resolved = resolveWindowInputs(prereg, fixtures, corpusCases, WORKLOAD.changedPathsOf);
+const resolved = resolveWindowInputs(PILOT_1, fixtures, corpusCases, WORKLOAD.changedPathsOf);
 if (!resolved.ok) throw new Error(resolved.error.join("\n"));
 export const inputs: WindowInputs = resolved.value;
 
@@ -179,7 +211,7 @@ export function sample(pair: ScheduledPair, arm: PilotArm, ms: number, attempts:
 }
 
 /** The first scheduled pair of the retained preregistration. */
-export const firstPair = (): ScheduledPair => buildPairSchedule(prereg)[0] as ScheduledPair;
+export const firstPair = (): ScheduledPair => buildPairSchedule(PILOT_1)[0] as ScheduledPair;
 
 type Outcome = AttemptObservation["outcome"];
 export type Script = (request: ArmRequest) => Outcome;
@@ -255,7 +287,7 @@ export async function runWindow(
   const landed: SampleRecord[] = [];
   const progress: string[] = [];
   const { records, ending } = await dispatchSchedule({
-    windowId: WINDOW_ID, prereg, fixtures, inputs, dispatch: route.dispatch, routeHealth, now: route.now,
+    windowId: WINDOW_ID, prereg: PILOT_1, fixtures, inputs, dispatch: route.dispatch, routeHealth, now: route.now,
     onSample: (record) => { landed.push(record); onSample(record); },
     onPair: (index, total, pair) => { progress.push(`${index + 1}/${total} ${pair.pairId}`); },
   });

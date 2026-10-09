@@ -5,8 +5,8 @@
  * adapter; tests wire an in-memory map).
  *
  * - Pure derivations over bytes and text, each returning a Result:
- *   preregistration and assessment parsing, the retained window record, the
- *   preregistration-drift check, the observation log, the assessment
+ *   preregistration and assessment parsing, the preregistration-drift check,
+ *   the observation log, the assessment
  *   retention decision (identical bytes are a no-op, different bytes are
  *   refused — never overwritten) and the decision record.
  * - `recordWindow` and `decideRetainedWindow` sequence them over the store:
@@ -18,36 +18,38 @@
  *   count and — for a dispatched window — its parsed `WindowEnding`) before
  *   the blinded packet is derived, so a window whose rubric cannot assess it
  *   still records how it ended; `recordWindow` returns that closed record
- *   beside the decision, and `parseRetainedWindow` reads the ending back;
- *   every decision is the current `release-decision.json` AND an append-only
- *   log line.
+ *   beside the decision. `window.json` itself is written and read back
+ *   through its one codec (`pilot-window-record.ts`); every decision is the
+ *   current `release-decision.json` AND an append-only log line.
  * - `recordWindow` runs the matched dispatch itself (`pilot-window.ts`) over
  *   the `ArmDispatch` port and an injected monotonic clock, persisting every
  *   sample as it lands: the script supplies only the live adapters.
  */
 
 import { match } from "ts-pattern";
-import { z } from "zod";
 import type { CalibrationCase } from "../../engine/src/core/model-calibration";
 import { err, ok, type NonEmpty, type Result } from "../kernel";
 import { evaluatePilot, type PilotEvaluation, type ReleaseDecision } from "./pilot-core";
 import type { ArmDispatch } from "./pilot-dispatch";
 import { parseSampleObservation, type SampleObservation } from "./pilot-observation";
-import { decidePreflight, parsePreflightFacts, type PreflightDecision, type PreflightFacts } from "./pilot-preflight";
+import { decidePreflight, type PreflightDecision } from "./pilot-preflight";
 import { parsePreregistration, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
 import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type QualityAssessment } from "./pilot-quality";
 import { rubricAssessment } from "./pilot-rubric";
-import { contentDigest } from "./pilot-vocabulary";
+import { contentDigest, jsonText, parseJsonText } from "./pilot-vocabulary";
+import { blind, blindedPacket, dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
+import type { WindowEnding } from "./pilot-window-ending";
 import {
-  blind,
-  blindedPacket,
-  dispatchSchedule,
-  parseRetainedWindowEnding,
-  type RetainedWindowEnding,
-  type RouteHealthProbe,
-  type SampleRecord,
-  type WindowEnding,
-} from "./pilot-window";
+  DISPATCHED,
+  encodeWindowRecord,
+  parseRetainedWindow,
+  type ClosedWindowRecord,
+  type DispatchPlan,
+  type NotAttempted,
+  type PreregistrationRef,
+  type RetainedWindow,
+  type WindowRecord,
+} from "./pilot-window-record";
 import { resolveWindowInputs, WindowInputs, type ChangedPathsOf, type WorkloadFixtures } from "./pilot-workload";
 
 // ---------------------------------------------------------------------------
@@ -82,17 +84,6 @@ export type WindowStore = Readonly<{
   locate: (name: string) => string;
 }>;
 
-/** How every retained JSON file is serialized. */
-const jsonText = (data: unknown): string => `${JSON.stringify(data, null, 2)}\n`;
-
-const parseJson = (text: string, label: string): Result<unknown, string> => {
-  try {
-    return ok(JSON.parse(text) as unknown);
-  } catch (error) {
-    return err(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-};
-
 const issueList = (problems: readonly string[]): string => `\n  - ${problems.join("\n  - ")}`;
 
 // ---------------------------------------------------------------------------
@@ -101,7 +92,7 @@ const issueList = (problems: readonly string[]): string => `\n  - ${problems.joi
 
 /** A preregistration file as content: its parsed value and the digest of its exact bytes. */
 export function parsePreregistrationFile(bytes: Uint8Array, label: string): Result<Readonly<{ digest: string; prereg: Preregistration }>, string> {
-  const raw = parseJson(new TextDecoder().decode(bytes), `invalid preregistration ${label}`);
+  const raw = parseJsonText(new TextDecoder().decode(bytes), `invalid preregistration ${label}`);
   if (!raw.ok) return raw;
   const parsed = parsePreregistration(raw.value);
   return parsed.ok
@@ -109,112 +100,17 @@ export function parsePreregistrationFile(bytes: Uint8Array, label: string): Resu
     : err(`invalid preregistration ${label}:${issueList(parsed.error)}`);
 }
 
-/** The retained identity of a preregistration: its checkout path, content digest and id. */
-export type PreregistrationRef = Readonly<{ path: string; digest: string; id: string }>;
 export type LoadedPreregistration = Readonly<{ ref: PreregistrationRef; prereg: Preregistration }>;
 
 /** A window's id: its preregistration id and its start time, path-safe (it names the window directory). */
 export const pilotWindowId = (preregistrationId: string, startedAt: string): string =>
   `${preregistrationId}--${startedAt.replace(/[:.]/g, "-")}`;
 
-export type DispatchPlan = Readonly<{ kind: "not-attempted"; reason: string }> | Readonly<{ kind: "dispatched" }>;
-
+/** Whether a window dispatches: only behind a ready preflight, and never under `--preflight-only`. */
 export function planDispatch(preflight: PreflightDecision, preflightOnly: boolean): DispatchPlan {
-  if (preflight.kind === "blocked") return { kind: "not-attempted", reason: "preflight blocked — no sample is dispatched or fabricated" };
-  if (preflightOnly) return { kind: "not-attempted", reason: "--preflight-only" };
-  return { kind: "dispatched" };
-}
-
-/**
- * `window.json` as written when the window opens. schemaVersion 2 records the
- * schedule's ending once a dispatched window closes; schemaVersion 1 windows
- * were retained before that field existed (`parseRetainedWindow`).
- */
-export type WindowRecord = Readonly<{
-  schemaVersion: 2;
-  windowId: string;
-  preregistration: PreregistrationRef;
-  workloadFixtures: Readonly<{ path: string; digest: string }>;
-  startedAt: string;
-  preflightFacts: PreflightFacts;
-  preflight: PreflightDecision;
-  dispatch: DispatchPlan;
-}>;
-
-type Dispatched = Extract<DispatchPlan, { kind: "dispatched" }>;
-type NotAttempted = Extract<DispatchPlan, { kind: "not-attempted" }>;
-const DISPATCHED: Dispatched = Object.freeze({ kind: "dispatched" });
-
-/** `window.json` once the window has ended, keyed on its dispatch plan: a
- *  dispatched window records how many samples it retained and how its
- *  schedule ended (completed, or aborted by the route fail-fast and why); a
- *  window that never dispatched retained none and has no ending. */
-export type ClosedWindowRecord =
-  | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: Dispatched; endedAt: string; observations: number; ending: WindowEnding }>)
-  | (Omit<WindowRecord, "dispatch"> & Readonly<{ dispatch: NotAttempted; endedAt: string; observations: 0 }>);
-
-/** How a re-decision reads a retained window's ending back. */
-export type RetainedEnding =
-  /** Opened and never closed: the run was interrupted mid-window. */
-  | Readonly<{ kind: "open" }>
-  | Readonly<{ kind: "not-dispatched" }>
-  | Readonly<{ kind: "dispatched"; ending: RetainedWindowEnding }>
-  /** A schemaVersion 1 dispatched window closed before endings were recorded. */
-  | Readonly<{ kind: "dispatched-unrecorded" }>;
-
-/** What a re-decision reads back from a retained `window.json`. */
-export type RetainedWindow = Readonly<{
-  preregistration: Readonly<{ path: string; digest: string }>;
-  facts: PreflightFacts;
-  ending: RetainedEnding;
-}>;
-
-const retainedWindowSchema = z.object({
-  preregistration: z.object({ path: z.string(), digest: z.string() }),
-  preflightFacts: z.unknown(),
-});
-
-const retainedClosureSchema = z.object({
-  schemaVersion: z.union([z.literal(1), z.literal(2)]),
-  dispatch: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("not-attempted"), reason: z.string() }).strict(),
-    z.object({ kind: z.literal("dispatched") }).strict(),
-  ]),
-  endedAt: z.string().optional(),
-  ending: z.unknown().optional(),
-});
-
-/** The retained ending, by dispatch plan and schema version: an ending only on
- *  a closed dispatched window, required there from schemaVersion 2 on. */
-function retainedEnding(closure: z.infer<typeof retainedClosureSchema>, label: string): Result<RetainedEnding, string> {
-  const { schemaVersion, dispatch, endedAt, ending } = closure;
-  if (endedAt === undefined) {
-    return ending === undefined ? ok(Object.freeze({ kind: "open" as const })) : err(`${label} records an ending but was never closed`);
-  }
-  if (dispatch.kind === "not-attempted") {
-    return ending === undefined ? ok(Object.freeze({ kind: "not-dispatched" as const })) : err(`${label} never dispatched, yet records an ending`);
-  }
-  if (ending === undefined) {
-    return schemaVersion === 1
-      ? ok(Object.freeze({ kind: "dispatched-unrecorded" as const }))
-      : err(`${label} is a closed dispatched schemaVersion 2 window without its ending`);
-  }
-  const parsed = parseRetainedWindowEnding(ending, schemaVersion === 1);
-  return parsed.ok ? ok(Object.freeze({ kind: "dispatched" as const, ending: parsed.value })) : err(`${label} ${parsed.error}`);
-}
-
-export function parseRetainedWindow(text: string, label: string): Result<RetainedWindow, string> {
-  const raw = parseJson(text, label);
-  if (!raw.ok) return raw;
-  const window = retainedWindowSchema.safeParse(raw.value);
-  if (!window.success) return err(`${label} carries no preregistration record`);
-  const facts = parsePreflightFacts(window.data.preflightFacts);
-  if (!facts.ok) return err(`${label} preflight facts: ${facts.error.join("; ")}`);
-  const closure = retainedClosureSchema.safeParse(raw.value);
-  if (!closure.success) return err(`${label} carries no schemaVersion 1 or 2 dispatch record`);
-  const ending = retainedEnding(closure.data, label);
-  if (!ending.ok) return ending;
-  return ok(Object.freeze({ preregistration: window.data.preregistration, facts: facts.value, ending: ending.value }));
+  if (preflight.kind === "blocked") return Object.freeze({ kind: "not-attempted", reason: "preflight blocked — no sample is dispatched or fabricated" });
+  if (preflightOnly) return Object.freeze({ kind: "not-attempted", reason: "--preflight-only" });
+  return DISPATCHED;
 }
 
 /** A window is re-decided only against the exact preregistration it recorded. */
@@ -229,7 +125,7 @@ export function parseObservationLog(text: string | null): Result<readonly Sample
   const samples: SampleObservation[] = [];
   const lines = (text ?? "").split("\n").filter((line) => line.trim());
   for (const [index, line] of lines.entries()) {
-    const raw = parseJson(line, `observation line ${index + 1}`);
+    const raw = parseJsonText(line, `observation line ${index + 1}`);
     if (!raw.ok) return raw;
     const parsed = parseSampleObservation(raw.value);
     if (!parsed.ok) return err(`observation line ${index + 1}: ${parsed.error.join("; ")}`);
@@ -241,14 +137,14 @@ export function parseObservationLog(text: string | null): Result<readonly Sample
 /** `blinding-key.json`; a window that never reached blinding has none. */
 function parseRetainedKey(text: string | null, label: string): Result<BlindingKey | null, string> {
   if (text === null) return ok(null);
-  const raw = parseJson(text, label);
+  const raw = parseJsonText(text, label);
   if (!raw.ok) return raw;
   const key = parseBlindingKey(raw.value);
   return key.ok ? ok(key.value) : err(`blinding key: ${key.error.join("; ")}`);
 }
 
 export function parseAssessmentText(text: string, label: string): Result<QualityAssessment, string> {
-  const raw = parseJson(text, `invalid assessment ${label}`);
+  const raw = parseJsonText(text, `invalid assessment ${label}`);
   if (!raw.ok) return raw;
   const parsed = parseQualityAssessment(raw.value);
   return parsed.ok ? ok(parsed.value) : err(`invalid assessment ${label}:${issueList(parsed.error)}`);
@@ -443,7 +339,7 @@ const closeWindow = (record: WindowRecord, opened: OpenedWindow, endedAt: string
  *  loads and resolves nothing. Every sample is persisted as it lands. */
 async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, string>> {
   const { store, record } = run;
-  const open = (): void => store.write(WINDOW_FILES.window, jsonText(record));
+  const open = (): void => store.write(WINDOW_FILES.window, encodeWindowRecord(record));
   if (record.dispatch.kind !== "dispatched") {
     open();
     return ok(Object.freeze({ kind: "not-attempted" as const, plan: record.dispatch }));
@@ -493,7 +389,7 @@ export async function recordWindow(run: WindowRun): Promise<Result<RecordedWindo
   const opened = await openAndDispatch(run);
   if (!opened.ok) return opened;
   const window = closeWindow(record, opened.value, run.now());
-  store.write(WINDOW_FILES.window, jsonText(window));
+  store.write(WINDOW_FILES.window, encodeWindowRecord(window));
   const { records, inputs } = opened.value.kind === "dispatched" ? opened.value : { records: [], inputs: WindowInputs.EMPTY };
   return ok(Object.freeze({ window, decision: decideClosedWindow(run, records, inputs) }));
 }

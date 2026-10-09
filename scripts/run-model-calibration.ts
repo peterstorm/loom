@@ -30,14 +30,13 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { match } from "ts-pattern";
 import { parseCalibrationCorpus } from "../engine/src/core/model-calibration";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBinding } from "../engine/src/core/model-profiles";
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
 import { httpRouteProbe } from "../engine/src/utils/route-endpoint";
 import { corpusCaseResult, type CorpusRun } from "../calibration/corpus-calibration";
-import { ok, type Result } from "../calibration/kernel";
+import { errorMessage, ok, type Result } from "../calibration/kernel";
 import {
   decidePreflight,
   preflightRouteProbe,
@@ -50,14 +49,14 @@ import { contentDigest } from "../calibration/grammar-constrained-decoding/pilot
 import { parseWorkloadFixtures, type WorkloadFixtures } from "../calibration/grammar-constrained-decoding/pilot-workload";
 import { workloadCorpusLoader } from "../calibration/grammar-constrained-decoding/pilot-corpus-loader";
 import { importRpcLauncher, piArmDispatch } from "../calibration/grammar-constrained-decoding/pilot-dispatch";
-import type { RouteHealth } from "../calibration/grammar-constrained-decoding/pilot-window";
+import { CURRENT_WINDOW_SCHEMA_VERSION, routeHealthOf } from "../calibration/grammar-constrained-decoding/pilot-window-ending";
+import { describeWindowEnding } from "../calibration/grammar-constrained-decoding/pilot-window-record";
 import {
   decideRetainedWindow,
   parsePreregistrationFile,
   pilotWindowId,
   planDispatch,
   recordWindow,
-  type ClosedWindowRecord,
   type DecisionOutcome,
   type ExternalAssessment,
   type LoadedPreregistration,
@@ -100,7 +99,7 @@ function runCorpusCase(corpusPath: string, target: PiBinding, caseId: string): C
   try {
     prompt = corpusPrompt(corpusPath, caseId);
   } catch (error) {
-    return { kind: "unlaunched", reason: error instanceof Error ? error.message : String(error) };
+    return { kind: "unlaunched", reason: errorMessage(error) };
   }
   const run = spawnSync("pi", [
     "--mode", "json", "-p", "--no-session",
@@ -188,26 +187,6 @@ async function probeRoute(route: Preregistration["route"]): Promise<RouteProbe> 
   return preflightRouteProbe(route, observed);
 }
 
-/** The window's mid-run route re-probe for the dispatch fail-fast: the
- *  preflight's own probe, where only an unreachable route is unhealthy (an
- *  unverified or unlisted model still answers). */
-async function routeHealth(route: Preregistration["route"]): Promise<RouteHealth> {
-  const probe = await probeRoute(route);
-  return probe.kind === "unreachable" ? { kind: "unreachable", reason: probe.reason } : { kind: "reachable" };
-}
-
-/** Prints how a recorded window's schedule ended, from its closed record. */
-const reportEnding = (window: ClosedWindowRecord): void => match(window)
-  .with({ dispatch: { kind: "dispatched" }, ending: { kind: "aborted" } }, ({ ending }) => {
-    const why = match(ending.reason)
-      .with({ kind: "route-unreachable" }, ({ reason }) => `the route stopped answering: ${reason}`)
-      .with({ kind: "consecutive-outage-pairs" }, ({ pairs }) => `${pairs} consecutive pairs failed at the infrastructure or timed out`)
-      .exhaustive();
-    process.stderr.write(`pilot window ABORTED after ${ending.afterPairs}/${ending.scheduledPairs} pairs: ${why}. Every landed sample is retained; the rest are unmeasured.\n`);
-  })
-  // A completed schedule, or a window that never dispatched, has nothing to report beyond its decision.
-  .otherwise(() => undefined);
-
 function observedPiVersion(): string | null {
   const run = spawnSync("pi", ["--version"], { encoding: "utf-8" });
   return run.status === 0 ? run.stdout.trim() || null : null;
@@ -251,7 +230,7 @@ async function runPilot(): Promise<number> {
   const recorded = orThrow(await recordWindow({
     store,
     record: {
-      schemaVersion: 2,
+      schemaVersion: CURRENT_WINDOW_SCHEMA_VERSION,
       windowId,
       preregistration: loaded.ref,
       workloadFixtures: { path: repoRelative(fixturesPath), digest: fixturesDigest },
@@ -274,13 +253,15 @@ async function runPilot(): Promise<number> {
       timeoutMs: prereg.perAttemptTimeoutMs,
       readinessTimeoutMs: READINESS_TIMEOUT_MS,
     }),
-    routeHealth: () => routeHealth(prereg.route),
+    // The mid-window re-probe is the preflight's own probe, read by the pure core.
+    routeHealth: async () => routeHealthOf(await probeRoute(prereg.route)),
     monotonicNow: () => performance.now(),
     onPair: (index, total, pair) => { process.stderr.write(`pilot ${index + 1}/${total} ${pair.pairId}\n`); },
     externalAssessments: externalAssessments(),
     now: () => new Date().toISOString(),
   }));
-  reportEnding(recorded.window);
+  const ending = describeWindowEnding(recorded.window);
+  if (ending !== null) process.stderr.write(`${ending}\n`);
   return reportDecision(orThrow(recorded.decision));
 }
 

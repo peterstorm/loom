@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "assessorId": "rubric-v1",
+  "method": "deterministic rubric: corpus match rules (reviewer), planted-flaw ranking (judge), real-defect refutation (refutation); sees blind id, source and canonical payload only",
+  "blinded": true,
+  "entries": [
+    {
+      "blindId": "0fbc7068-6684-4c52-94ae-9e9a0f273841",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "249e5566-7a0a-491d-a20f-e829d96e50ad",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "29e22b1a-22d8-44e1-bcc0-38f38498bd43",
+      "escapedDefects": [
+        {
+          "defectId": "locale-dependent-digest-order",
+          "severity": "major"
+        }
+      ]
+    },
+    {
+      "blindId": "5a17060c-a1b0-4e86-895d-c3239df13893",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "5dff571e-a68d-4129-a96a-f4ff28af219d",
+      "escapedDefects": [
+        {
+          "defectId": "retally-replay",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "718e022d-533f-4bcf-b070-5bb754122d8c",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "77a33f46-5f35-4a78-8e31-afef02e5c3f2",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "7914353c-951c-41b4-8aa1-4035471411a8",
+      "escapedDefects": [
+        {
+          "defectId": "review-evidence-race",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "8ab0d08c-4036-4a0f-b14e-206b44655a98",
+      "escapedDefects": [
+        {
+          "defectId": "review-evidence-race",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "8b652835-6047-4883-ab75-d1dcd960d088",
+      "escapedDefects": [
+        {
+          "defectId": "retally-replay",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "94475816-c45a-4071-9194-1eddba5696d0",
+      "escapedDefects": [
+        {
+          "defectId": "retally-replay",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "a02b01c1-8e67-4806-93c7-58f7f9e9f378",
+      "escapedDefects": [
+        {
+          "defectId": "review-evidence-race",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "ac1c95ee-1c97-407a-b95c-2ad204dcd1dd",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "bba2a38a-6541-4823-92de-efa8e50321ad",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "c07f1427-0dbc-4d6a-901a-2ae278539415",
+      "escapedDefects": [
+        {
+          "defectId": "review-evidence-race",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "ee755916-c650-4c9d-acc6-3c744e426238",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "f12ccbcb-4d9b-4dfe-a43a-e7fc5e6346e4",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "f38d48f6-a526-4bbb-bc0d-f2dfc10b3965",
+      "escapedDefects": [
+        {
+          "defectId": "retally-replay",
+          "severity": "critical"
+        }
+      ]
+    },
+    {
+      "blindId": "f86ec717-4331-4d57-802e-9ea3ff7c082d",
+      "escapedDefects": []
+    },
+    {
+      "blindId": "fa097b0c-99f4-42a5-b089-38279bb2d09e",
+      "escapedDefects": []
+    }
+  ]
+}

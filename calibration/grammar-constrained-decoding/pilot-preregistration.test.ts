@@ -9,7 +9,6 @@ import {
   PILOT_2_PREREGISTRATION,
   pilot2PreregBytes,
   preregBytes,
-  prereg as retainedPrereg,
   extractionOnlyCell,
   PILOT_1,
   testPreregistration,
@@ -18,16 +17,15 @@ import { CELL_KEYS, contentDigest } from "./pilot-vocabulary";
 
 describe("preregistration (retained before any window)", () => {
   it("parses the retained preregistration with the four required cells and >=100 pairs each", () => {
-    const prereg = retainedPrereg;
-    expect(prereg.cells.map((cell) => cell.cell).sort()).toEqual([...CELL_KEYS].sort());
-    const schedule = buildPairSchedule(prereg);
+    expect(PILOT_1.cells.map((cell) => cell.cell).sort()).toEqual([...CELL_KEYS].sort());
+    const schedule = buildPairSchedule(PILOT_1);
     const perCell = Object.fromEntries(CELL_KEYS.map((cell) => [cell, schedule.filter((pair) => pair.cell === cell).length]));
     expect(perCell).toEqual({ "reviewer-payload/v2": 104, "reviewer-payload/v3": 104, "judge-verdict/v1": 100, "refutation-verdict/v1": 100 });
-    expect(prereg.guardrails.p95RatioBound).toBe(1.25);
+    expect(PILOT_1.guardrails.p95RatioBound).toBe(1.25);
   });
 
   it("pins the exact workload fixture bytes by content address", () => {
-    expect(retainedPrereg.workloadFixturesDigest).toBe(contentDigest(fixtureBytes));
+    expect(PILOT_1.workloadFixturesDigest).toBe(contentDigest(fixtureBytes));
   });
 
   it("pins each retained preregistration's SHA-256, and the README states the same digest", () => {
@@ -78,9 +76,8 @@ describe("preregistration (retained before any window)", () => {
 
 describe("paired schedule", () => {
   it("is deterministic, unique and ABBA-counterbalanced per cell", () => {
-    const prereg = retainedPrereg;
-    const first = buildPairSchedule(prereg);
-    expect(buildPairSchedule(prereg)).toEqual(first);
+    const first = buildPairSchedule(PILOT_1);
+    expect(buildPairSchedule(PILOT_1)).toEqual(first);
     expect(new Set(first.map((pair) => pair.pairId)).size).toBe(first.length);
     for (const cell of CELL_KEYS) {
       const pairs = first.filter((pair) => pair.cell === cell);
@@ -114,8 +111,8 @@ describe("release policy (fixed by the preregistration, before any window)", () 
   };
 
   it("parses the retained pilot-1 preregistration (schemaVersion 1, no field) to capable-route-required", () => {
-    expect(retainedPrereg.schemaVersion).toBe(1);
-    expect(retainedPrereg.releasePolicy).toEqual({ kind: "capable-route-required" });
+    expect(PILOT_1.schemaVersion).toBe(1);
+    expect(PILOT_1.releasePolicy).toEqual({ kind: "capable-route-required" });
   });
 
   it("parses pilot-2 to per-route-engine-authoritative over exactly pilot-1's route, workload, cells and guardrails", () => {
@@ -125,8 +122,8 @@ describe("release policy (fixed by the preregistration, before any window)", () 
     expect(prereg2).toMatchObject({ schemaVersion: 2, id: "gcd-ad11-pilot-2", scheduleSeed: 20261008, releasePolicy: { kind: "per-route-engine-authoritative" } });
     const workloadOf = ({ route, workloadFixturesDigest, minimumPairsPerCell, semanticAttemptBudget, perAttemptTimeoutMs, guardrails, cells }: Preregistration) =>
       ({ route, workloadFixturesDigest, minimumPairsPerCell, semanticAttemptBudget, perAttemptTimeoutMs, guardrails, cells });
-    expect(workloadOf(prereg2)).toEqual(workloadOf(retainedPrereg));
-    expect(Date.parse(prereg2.recordedAt)).toBeGreaterThan(Date.parse(retainedPrereg.recordedAt));
+    expect(workloadOf(prereg2)).toEqual(workloadOf(PILOT_1));
+    expect(Date.parse(prereg2.recordedAt)).toBeGreaterThan(Date.parse(PILOT_1.recordedAt));
   });
 
   it("requires a schemaVersion 2 preregistration to state its policy (no default) and refuses an unknown kind", () => {
@@ -147,9 +144,9 @@ describe("release policy (fixed by the preregistration, before any window)", () 
   it("types a schemaVersion 1 preregistration as carrying only capable-route-required", () => {
     expectTypeOf<Extract<Preregistration, { schemaVersion: 1 }>["releasePolicy"]>().toEqualTypeOf<Readonly<{ kind: "capable-route-required" }>>();
     expectTypeOf<Extract<Preregistration, { schemaVersion: 2 }>["releasePolicy"]>().toEqualTypeOf<ReleasePolicy>();
-    if (retainedPrereg.schemaVersion !== 1) throw new Error("the retained pilot-1 preregistration is schemaVersion 1");
+    if (PILOT_1.schemaVersion !== 1) throw new Error("the retained pilot-1 preregistration is schemaVersion 1");
     // @ts-expect-error — a schemaVersion 1 preregistration cannot carry the per-route policy.
-    const forged: Preregistration = { ...retainedPrereg, releasePolicy: { kind: "per-route-engine-authoritative" } };
+    const forged: Preregistration = { ...PILOT_1, releasePolicy: { kind: "per-route-engine-authoritative" } };
     expect(forged.schemaVersion).toBe(1);
   });
 

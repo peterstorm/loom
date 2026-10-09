@@ -42,7 +42,7 @@ import {
 } from "../../pi/emission-tool";
 import { EMISSION_READINESS_COMMAND, EMISSION_READINESS_ENTRY_TYPE } from "../../pi/emission-readiness-protocol";
 import { decideReadinessGate, parseReadinessStageObservation } from "../../pi/emission-readiness-gate";
-import { err, ok, type Result } from "../kernel";
+import { err, errorMessage, ok, type Result } from "../kernel";
 import { isRecord, piContentText, readPiJsonLine, settlePiJsonStream, type PiJsonLine, type PiMessage } from "../pi-json-stream";
 import type { CellBinding } from "./pilot-binding";
 import {
@@ -431,8 +431,6 @@ function emissionArgs(config: PiDispatchConfig, toolName: string): readonly stri
   ];
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
 /**
  * How an emission launch ended, from the launcher's outcome (PURE). A launch
  * the launcher reports as successful counts as settled only if the adapter's
@@ -458,7 +456,7 @@ function emissionLaunchEnd(
  *  the window (the extraction arm maps its spawn errors the same way). */
 async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): Promise<AttemptClassification> {
   const launcher = await config.loadLauncher().catch((error: unknown): RpcLauncher =>
-    ({ kind: "unavailable", reason: `the installed launcher could not be loaded: ${messageOf(error)}` }));
+    ({ kind: "unavailable", reason: `the installed launcher could not be loaded: ${errorMessage(error)}` }));
   const started = performance.now();
   const messages: unknown[] = [];
   const readiness: { ms: number | null } = { ms: null };
@@ -494,7 +492,7 @@ async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): 
       (outcome) => emissionLaunchEnd(outcome, abort.signal.aborted, readiness.ms, config.timeoutMs),
       (error: unknown): LaunchEnd => abort.signal.aborted
         ? { kind: "timeout", afterMs: config.timeoutMs }
-        : { kind: "infrastructure-failure", reason: `the installed launcher's runRpcAgent rejected: ${messageOf(error)}` },
+        : { kind: "infrastructure-failure", reason: `the installed launcher's runRpcAgent rejected: ${errorMessage(error)}` },
     );
     return classify(launch);
   } finally {

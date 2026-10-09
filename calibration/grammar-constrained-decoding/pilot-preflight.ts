@@ -76,7 +76,8 @@ export function preflightRouteProbe(route: Preregistration["route"], probe: Rout
 /** Retained digests parse as strictly as the preregistered digests they are compared with. */
 const registryCellSchema = z.object({ toolName: z.string(), schemaDigest: hex64 }).strict().nullable();
 
-const preflightFactsSchema = z.object({
+/** The retained facts' schema; the window record codec embeds it in `window.json`. */
+export const preflightFactsSchema = z.object({
   /** Frozen registry cells as the staged runtime computes them (null = no cell), one per required cell. */
   registry: z.record(z.enum(CELL_KEYS), registryCellSchema),
   workloadFixturesDigest: hex64,

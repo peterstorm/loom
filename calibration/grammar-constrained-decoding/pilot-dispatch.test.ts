@@ -436,6 +436,24 @@ describe("transcript classification through the engine's own selection", () => {
       expect(classify("judge-verdict/v1", [finalText(JSON.stringify(judgePayload)), providerError]).observation.outcome).toEqual(infrastructure);
     });
 
+    it("reads ambiguous acknowledged calls (a duplicate-call rejection) followed by a provider error as an infrastructure failure, under either rule order", () => {
+      // Two successful emission calls leave no accepted payload (duplicate-call ambiguity), so the
+      // provider error ending the last turn decides — the README's documented rule-order-independent case.
+      const result = classify("judge-verdict/v1", [
+        toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "ok"),
+        toolCall("c2", "loom_emit_judge_verdict", judgePayload), toolResult("c2", "loom_emit_judge_verdict", false, "ok"),
+        providerError,
+      ]);
+      expect(result.observation).toMatchObject({ emissionCalls: 2, toolAcknowledged: true, outcome: infrastructure });
+      expect(result.acceptedPayload).toBeNull();
+      // Without the trailing error the same calls are the duplicate-call rejection.
+      const withoutError = classify("judge-verdict/v1", [
+        toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "ok"),
+        toolCall("c2", "loom_emit_judge_verdict", judgePayload), toolResult("c2", "loom_emit_judge_verdict", false, "ok"),
+      ]);
+      expect(withoutError.observation.outcome).toEqual({ kind: "rejected", cause: { kind: "duplicate-call", calls: 2 } });
+    });
+
     it("never overrides a rejection the last turn did not end in a provider error", () => {
       expect(classify("judge-verdict/v1", [finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
     });
