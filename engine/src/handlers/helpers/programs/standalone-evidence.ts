@@ -13,7 +13,7 @@ import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } fro
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
 import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
-import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, isNonEmpty, parseEffectId, sameAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type SpawnRequest } from '../../../core/orchestration-contract';
 import {
   aggregateStandaloneReview,
   proveStandaloneRosterCompletion,
@@ -87,14 +87,13 @@ export function standaloneRefutationPreparation(
   const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
   if (!selected.ok) throw new Error(selected.errors.join("; "));
   const lenses = selected.value;
-  const [firstFinding, ...otherFindings] = brief.findings;
-  const [firstLens, ...otherLenses] = lenses;
-  if (firstFinding === undefined) throw new Error("standalone refutation requires a non-empty critical Finding set");
-  if (firstLens === undefined) throw new Error("standalone refutation requires at least one review lens");
+  const { findings } = brief;
+  if (!isNonEmpty(findings)) throw new Error("standalone refutation requires a non-empty critical Finding set");
+  if (!isNonEmpty(lenses)) throw new Error("standalone refutation requires at least one review lens");
   const sources = standalonePanelSources(handle, authority);
   const verifiers = prepareRefutationVerifiers({ handle, label: "standalone-refutation", checkpointed }, {
-    findings: [firstFinding, ...otherFindings],
-    lenses: [firstLens, ...otherLenses],
+    findings,
+    lenses,
     catalog,
     packet: (lens, requestId, attempt) => {
       const section = encodeByteSection("refutation-authority", JSON.stringify({

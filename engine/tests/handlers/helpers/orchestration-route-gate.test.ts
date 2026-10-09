@@ -3,16 +3,17 @@
  * actions it gates, that a refusal publishes nothing, that it probes the
  * route the child will actually launch on, and that every input it cannot
  * read refuses rather than passing. The route probe port is substituted by
- * a recording fake keyed by provider, and the emission environment is
- * resolved from a constructed environment record — never the process's;
- * everything else — the agent directory's `models.json` and
- * `model-routing.json`, the session binding registry — is real files in a
- * scratch directory.
+ * a recording fake keyed by provider and the output channel by a recording
+ * fake; the emission environment and the route-gate facts are resolved from a
+ * constructed environment record — never the process's — through a reader
+ * that counts its reads. Everything else — the agent directory's
+ * `models.json` and `model-routing.json`, the session binding registry — is
+ * real files in a scratch directory.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
   parseArtifactRef,
   parseFixedArtifactSlot,
@@ -24,7 +25,7 @@ import { emitRunAction, type Emission } from "../../../src/handlers/helpers/orch
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
 import type { FacadeAction } from "../../../src/handlers/helpers/programs/program-result";
-import { resolveEmissionEnvironment } from "../../../src/utils/emission-environment";
+import { readPiRouteGateFacts, resolveEmissionEnvironment } from "../../../src/utils/emission-environment";
 import type { RouteProbePort } from "../../../src/utils/route-endpoint";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { FIXTURE_CLAUDE_CODE_SESSION_ID, parentAnnouncement } from "../../fixtures/facade-parent";
@@ -48,6 +49,8 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 let counter = 0;
 let stdout: string[];
 let stderr: string[];
+/** How many times this case's emission read its Pi route-gate facts. */
+let factReads: number;
 let handle: RunDirHandle;
 let agentDir: string;
 let home: string;
@@ -76,10 +79,8 @@ beforeEach(() => {
   handle = created.value;
   stdout = [];
   stderr = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => { stdout.push(String(chunk)); return true; });
-  vi.spyOn(process.stderr, "write").mockImplementation((chunk) => { stderr.push(String(chunk)); return true; });
+  factReads = 0;
 });
-afterEach(() => vi.restoreAllMocks());
 
 const sessionId = (): string => `019ff290-ffee-7e86-8ed0-${String(counter).padStart(12, "0")}`;
 
@@ -105,9 +106,16 @@ function gateMode(mode: string): void {
   parentEnv = { ...parentEnv, [ROUTE_GATE_VARIABLE]: mode };
 }
 
-/** The emission this case's parent resolves to at the composition root, with `probe` as its route probe. */
-const emission = (probe: RouteProbePort): Emission =>
-  ({ environment: resolveEmissionEnvironment({ env: parentEnv, home, bindingDir }), probe });
+/** The emission this case's parent resolves to at the composition root, with `probe` as its route probe and a recording output. */
+const emission = (probe: RouteProbePort): Emission => ({
+  environment: resolveEmissionEnvironment({ env: parentEnv, bindingDir }),
+  routeGateFacts: () => {
+    factReads += 1;
+    return readPiRouteGateFacts({ env: parentEnv, home });
+  },
+  probe,
+  output: { stdout: (text) => { stdout.push(text); }, stderr: (text) => { stderr.push(text); } },
+});
 
 /** A recording probe fake: each provider answers as configured; unlisted providers refuse. */
 function probeFake(answers: Readonly<Record<string, RouteProbe>>): Readonly<{ probe: RouteProbePort; probed: readonly string[] }> {
@@ -209,6 +217,7 @@ describe("emitRunAction: Pi route gate wiring", () => {
     expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: "spawn-batch", runId: RUN_ID });
     expect(JSON.parse(stdout.join(""))).not.toHaveProperty("unverifiedRoutes");
     expect(stderr.join("")).not.toContain("loom-route-unverified");
+    expect(factReads).toBe(1);
   });
 
   it("refuses a batch recorded on a retired route with the restart remedy, without probing it", async () => {
@@ -232,11 +241,12 @@ describe("emitRunAction: Pi route gate wiring", () => {
     expect(await emitRunAction(handle, spawnBatch([authority]), emission(probe))).toEqual({ kind: "allow" });
 
     expect(probed).toEqual([]);
+    expect(factReads).toBe(0);
     expect(readSessionRunBindings(bindingDir, id, "claude-code"))
       .toMatchObject({ ok: true, value: [{ runId: RUN_ID, requestIds: [authority.requestId] }] });
   });
 
-  it("leaves every non-spawn action under a Pi parent untouched", async () => {
+  it("leaves every non-spawn action under a Pi parent untouched, never reading its route-gate facts", async () => {
     piParent();
     const { probe, probed } = probeFake({});
     const { runId } = storedAuthority();
@@ -252,6 +262,7 @@ describe("emitRunAction: Pi route gate wiring", () => {
       expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: action.kind });
     }
     expect(probed).toEqual([]);
+    expect(factReads).toBe(0);
   });
 });
 
@@ -262,6 +273,7 @@ describe("emitRunAction: the gate refuses every input it cannot read", () => {
     const batch = spawnBatch([unparseable(storedAuthority())]);
 
     expectRefusedUntouched(await emitRunAction(handle, batch, emission(probe)), id, probed, "Pi orchestration spawn request 0");
+    expect(factReads).toBe(0);
   });
 
   it("refuses a batch with one unparseable authority among checkable ones, naming it, before probing any route", async () => {
@@ -270,6 +282,7 @@ describe("emitRunAction: the gate refuses every input it cannot read", () => {
     const batch = spawnBatch([storedAuthority(), unparseable(storedAuthority({ requestId: "request:reviewer:broken" }))]);
 
     expectRefusedUntouched(await emitRunAction(handle, batch, emission(probe)), id, probed, "Pi orchestration spawn request 1");
+    expect(factReads).toBe(0);
   });
 
   it("refuses when model-routing.json is malformed, since the child may launch elsewhere than the declared route", async () => {
@@ -425,6 +438,7 @@ describe("emitRunAction: a Pi parent is gated whatever session it announced", ()
     expect(await emitRunAction(handle, spawnBatch([storedAuthority()]), emission(probe))).toEqual({ kind: "allow" });
 
     expect(probed).toEqual([]);
+    expect(factReads).toBe(0);
     expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: "spawn-batch", runId: RUN_ID });
   });
 });

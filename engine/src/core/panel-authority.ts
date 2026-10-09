@@ -652,7 +652,7 @@ export type IssuedRefutationPanelAuthority = RefutationPanelAuthority<MintedAgen
 
 /**
  * Issue a refutation panel authority: the issuing seam, typed so its verifier
- * slots must be minted (`mintAgentRosterSlot`, `issueAgentRosterSlot`). Its
+ * slots must be minted (`mintAgentRosterSlot`). Its
  * roster is issued from those slots (`issueExactRoster`), so the result keeps
  * the minted slot type by construction; every other check is exactly
  * `parseRefutationPanelAuthority`'s.

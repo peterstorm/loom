@@ -49,7 +49,7 @@ import {
 import { StateManager } from "../../../src/state-manager";
 import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
-import { publicationFile } from "../../../src/handlers/helpers/programs/durable-requests";
+import { publicationFile, refutationBatchEffectId } from "../../../src/handlers/helpers/programs/durable-requests";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/issued-emission-capability";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../src/core/reviewer-retry";
 import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
@@ -4111,9 +4111,9 @@ describe("orchestration CLI", () => {
     const { root, runsRoot, runDir, panel } = await standaloneRunWithRetiredRefutationPanel("standalone-checkpointed-refutation");
     // The run checkpoints the issued panel BEFORE it publishes the batch, so a
     // crash between the two leaves the checkpoint as the only record.
-    const effectId = `effect:standalone-refutation:${createHash("sha256")
-      .update(panel.requests.map(({ authority }) => authority.requestId).join("|")).digest("hex")}`;
-    rmSync(join(runDir, "artifacts", publicationFile(effectId)));
+    const effectId = refutationBatchEffectId("standalone-refutation", panel.requests.map(({ authority }) => authority.requestId));
+    if (!effectId.ok) throw new Error(effectId.error.message);
+    rmSync(join(runDir, "artifacts", publicationFile(effectId.value)));
 
     const republished = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, {}, "claude-code"));
     expect(republished.status, republished.stderr).toBe(0);
