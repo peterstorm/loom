@@ -13,7 +13,8 @@
  * model for every child. That override is a policy decision at the spawn
  * boundary — this module never infers one.
  *
- * Scope: the profile catalog and the bindings each profile has recorded, the
+ * Scope: the profile catalog, its Pi lowering table (today's, or a replayed
+ * historical one — `PiCatalog`), the bindings each profile has recorded, the
  * Agent Catalog record, catalog resolution, harness lowering, and frontmatter
  * validation. Projections DERIVED from the catalog (agent
  * sets, the phase map, classification predicates, producer kinds) live in
@@ -110,9 +111,11 @@ export type HarnessBinding = ClaudeCodeBinding | PiBinding;
  * unambiguous mode, an item without a non-empty agent and task), distinct
  * from `unknown-agent`, a well-formed request naming an Agent Loom has no
  * policy for — so a caller branching on `kind` can tell the two apart.
+ * `unrecorded-pi-binding` refuses a replayed catalog (`piCatalogAsOf`) that
+ * names a Pi binding its profile never issued.
  */
 export type PolicyError = Readonly<{
-  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter" | "malformed-spawn-input";
+  kind: "invalid-profile" | "unknown-agent" | "invalid-harness" | "invalid-frontmatter" | "malformed-spawn-input" | "unrecorded-pi-binding";
   message: string;
 }>;
 
@@ -134,10 +137,47 @@ const invalid = (errors: readonly string[]): PolicyValidation =>
 
 const claudeTarget = (model: ClaudeCodeModel): ClaudeCodeTarget => Object.freeze({ model });
 const LOCAL_PI_TARGET: LocalPiTarget = Object.freeze({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+
+/**
+ * The catalog's Pi lowering as data: the Pi target each catalog profile
+ * lowers to. Total over `LlmProfileId` by type. Every Pi binding the catalog
+ * issues is read from one such table — `CURRENT_PI_CATALOG`'s in production —
+ * so a lowering path cannot disagree with it.
+ */
+export type PiLowering<Target extends PiTarget = PiTarget> = Readonly<Record<LlmProfileId, Target>>;
+
+declare const recordedPiLowering: unique symbol;
+
+/**
+ * A lowering every row of which is a target its profile really issued: today's
+ * local one, or one of its recorded history (`RETIRED_PI_HISTORY`). Only
+ * `piCatalogAsOf` builds one, so a replay can never invent a binding.
+ */
+export type RecordedPiLowering = PiLowering & Readonly<{ [recordedPiLowering]: true }>;
+
+/**
+ * The catalog a request is minted under — an ADT, so a caller says which:
+ * - "current": today's catalog, every profile on the local route. Production
+ *   mints only under it, and only it mints the `LocalPiBinding` a minted
+ *   authority's type promises.
+ * - "recorded-as-of": the catalog as it stood when the profiles a replay names
+ *   still lowered to a binding they recorded. It reconstructs history (a run
+ *   written before a retargeting); what it mints is history, never issuance.
+ */
+export type PiCatalog =
+  | Readonly<{ kind: "current"; lowering: PiLowering<LocalPiTarget> }>
+  | Readonly<{ kind: "recorded-as-of"; lowering: RecordedPiLowering }>;
+
+/** Today's catalog: every profile lowers its Pi binding to the one local route. */
+export const CURRENT_PI_CATALOG = Object.freeze({
+  kind: "current",
+  lowering: Object.freeze(Object.fromEntries(LLM_PROFILE_IDS.map((id) => [id, LOCAL_PI_TARGET])) as Record<LlmProfileId, LocalPiTarget>),
+} as const) satisfies PiCatalog;
+
 const profile = (id: LlmProfileId, claudeCode: ClaudeCodeModel): LlmProfile => Object.freeze({
   id,
   claudeCode: claudeTarget(claudeCode),
-  pi: LOCAL_PI_TARGET,
+  pi: CURRENT_PI_CATALOG.lowering[id],
 });
 
 /** Each catalog profile's Claude Code model — total over `LlmProfileId` by construction. */
@@ -246,11 +286,14 @@ const RETIRED_PROFILE_BINDINGS: Readonly<Record<RetiredLlmProfileId, Readonly<{
   "qualified-local-review": Object.freeze({ claudeCode: "sonnet", pi: Object.freeze([LOCAL_PI_TARGET] as const) }),
 });
 
-/** The exact bindings a request issued under one catalog profile carries today: its Pi binding is local. */
-export type CurrentProfileBindings = Readonly<{
+/** The exact bindings a request minted under one catalog profile carries, its Pi binding as the catalog lowers it. */
+export type ProfileBindings<Pi extends PiBinding = PiBinding> = Readonly<{
   claude: ClaudeCodeBinding;
-  pi: LocalPiBinding;
+  pi: Pi;
 }>;
+
+/** The exact bindings a request issued under one catalog profile carries today: its Pi binding is local. */
+export type CurrentProfileBindings = ProfileBindings<LocalPiBinding>;
 
 /** The exact bindings a request issued under one recorded profile may carry. */
 export type RecordedProfileBindings = Readonly<{
@@ -260,10 +303,53 @@ export type RecordedProfileBindings = Readonly<{
 
 const lowerPiTarget = (target: PiTarget): PiBinding => Object.freeze({ harness: "pi", ...target });
 
+/**
+ * The bindings `profileId` is minted with under `lowering`: its catalog
+ * Claude model, and the Pi target the lowering gives it. The Pi binding is
+ * typed by the lowering, so only today's lowering yields a `LocalPiBinding`.
+ */
+export function profileBindingsUnder(lowering: PiLowering<LocalPiTarget>, profileId: LlmProfileId): CurrentProfileBindings;
+export function profileBindingsUnder(lowering: PiLowering, profileId: LlmProfileId): ProfileBindings;
+export function profileBindingsUnder(lowering: PiLowering, profileId: LlmProfileId): ProfileBindings {
+  return Object.freeze({
+    claude: lowerModelProfile(LLM_PROFILES_BY_ID[profileId], "claude-code"),
+    pi: lowerPiTarget(lowering[profileId]),
+  });
+}
+
 /** The bindings `profileId` issues today: exactly its catalog lowering on both harnesses. */
 export function currentProfileBindings(profileId: LlmProfileId): CurrentProfileBindings {
-  const entry = LLM_PROFILES_BY_ID[profileId];
-  return Object.freeze({ claude: lowerModelProfile(entry, "claude-code"), pi: lowerModelProfile(entry, "pi") });
+  return profileBindingsUnder(CURRENT_PI_CATALOG.lowering, profileId);
+}
+
+/**
+ * The catalog as it stood when each profile `retired` names still lowered
+ * its Pi binding to the target the map gives it; every other profile keeps
+ * today's lowering. A named target must be one that profile really issued —
+ * its current one or one of its recorded history (`recordedProfileBindings`) —
+ * so the replayed catalog is history, never an invented binding: the one
+ * check every historical replay goes through.
+ */
+export function piCatalogAsOf(
+  retired: Readonly<Partial<Record<LlmProfileId, PiTarget>>>,
+): PolicyResult<Extract<PiCatalog, Readonly<{ kind: "recorded-as-of" }>>> {
+  const recorded = LLM_PROFILE_IDS.flatMap((id) => {
+    const named = retired[id];
+    if (named === undefined) return [];
+    const pattern = piModelPattern(named);
+    return [{ id, pattern, target: [CURRENT_PI_CATALOG.lowering[id], ...RETIRED_PI_HISTORY[id]].find((entry) => piModelPattern(entry) === pattern) }];
+  });
+  const unrecorded = recorded.filter(({ target }) => target === undefined);
+  if (unrecorded.length > 0) {
+    return failure({
+      kind: "unrecorded-pi-binding",
+      message: unrecorded.map(({ id, pattern }) => `profile '${id}' never recorded the Pi binding ${pattern}`).join("; "),
+    });
+  }
+  const replayed = new Map(recorded.map(({ id, target }) => [id, target] as const));
+  const lowering = Object.freeze(Object.fromEntries(LLM_PROFILE_IDS.map((id) =>
+    [id, replayed.get(id) ?? CURRENT_PI_CATALOG.lowering[id]])) as Record<LlmProfileId, PiTarget>) as RecordedPiLowering;
+  return success(Object.freeze({ kind: "recorded-as-of", lowering } as const));
 }
 
 /**

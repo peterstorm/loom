@@ -48,6 +48,7 @@ import { failed, type FacadeDriveResult, type ProgramParse } from './program-res
 import { renderReviewProgramSpawn } from './spawn-task';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
 import { type RegisteredStandaloneProgram } from './registration';
+import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 
 const preparedSuccessorStarts = new WeakSet<object>();
 
@@ -353,9 +354,16 @@ export async function inspectStandaloneFacade(
   }
 }
 
+/**
+ * Resume a standalone review. `catalog` is the catalog a Refutation Panel
+ * with no record is minted under: today's in production; a replay of a run
+ * written before a catalog retargeting passes the catalog as it stood
+ * (`piCatalogAsOf`).
+ */
 export async function resumeStandaloneFacade(
   opened: RunDirHandle,
   registration: RegisteredStandaloneProgram,
+  catalog: PiCatalog = CURRENT_PI_CATALOG,
 ): Promise<FacadeDriveResult> {
   try {
     const admission = await admitStandaloneRun(opened, registration);
@@ -435,7 +443,7 @@ export async function resumeStandaloneFacade(
       case "awaiting-refutation":
         return resumeAwaitingRefutation(handle, state.value, resolver);
       case "awaiting-results":
-        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols, registration);
+        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols, registration, catalog);
       case "preparing":
       case "aggregating":
         return failed(`unsupported standalone resume state ${state.value.kind}`);
@@ -457,7 +465,7 @@ async function resumeAwaitingRefutation(
   resolver: PublicationAuthorityResolver,
 ): Promise<FacadeDriveResult> {
   // The checkpointed panel is this run's record of issuance: resume reads it, never re-mints it.
-  const preparation = standaloneRefutationPreparation(handle, state.authority, state.aggregate, state.refutationAuthority);
+  const preparation = standaloneRefutationPreparation(handle, state.authority, state.aggregate, state.refutationAuthority, CURRENT_PI_CATALOG);
   if (state.authority.schemaVersion === 3) for (const packet of preparation.packets) await publishStandalonePanelView(handle, packet);
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver);
   if (recovered.kind === "corrupt") return failed(recovered.message);
@@ -615,6 +623,7 @@ async function resumeAwaitingResults(
   resolver: PublicationAuthorityResolver,
   reviewerProtocols: StandaloneReviewerProtocolResolver,
   registration: RegisteredStandaloneProgram,
+  catalog: PiCatalog,
 ): Promise<FacadeDriveResult> {
   const activeAuthority = state.authority;
   const recovered = durableRequests(handle, activeAuthority, resolver);
@@ -799,7 +808,7 @@ async function resumeAwaitingResults(
   if (!aggregate.ok) return failed(aggregate.errors.join("; "));
   if (aggregate.value.kind !== "clean") {
     // No panel checkpoint exists yet: it is written below, after this preparation.
-    const preparation = standaloneRefutationPreparation(handle, activeAuthority, aggregate.value.aggregate, null);
+    const preparation = standaloneRefutationPreparation(handle, activeAuthority, aggregate.value.aggregate, null, catalog);
     reduced = reduceStandaloneReviewMachine(reduced.value, {
       kind: "aggregate-has-criticals",
       aggregate: aggregate.value.aggregate,

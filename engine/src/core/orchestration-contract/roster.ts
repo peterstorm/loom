@@ -4,7 +4,7 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { currentProfileBindings, parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type CurrentProfileBindings, type LlmProfileId, type LocalPiBinding, type LoomAgentName, type PiBinding, type RecordedLlmProfileId } from '../model-profiles';
+import { CURRENT_PI_CATALOG, currentProfileBindings, parseAgentName, parseLlmProfileId, parseRecordedLlmProfileId, piModelPattern, profileBindingsUnder, recordedProfileBindings, resolveAgentPolicy, type ClaudeCodeBinding, type CurrentProfileBindings, type LlmProfileId, type LocalPiBinding, type LoomAgentName, type PiBinding, type PiLowering, type RecordedLlmProfileId, type RecordedPiLowering } from '../model-profiles';
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot } from './artifacts';
@@ -129,9 +129,9 @@ const oneViolation = (only: AgentRequestAuthorityViolation): NonEmpty<AgentReque
 const singleViolationError = (only: AgentRequestAuthorityViolation): AgentRequestAuthorityError =>
   canonicalRecord({ kind: "invalid-agent-request-authority", violations: oneViolation(only) });
 
-/** Issuance: a catalog profile admits exactly its ONE current lowering, and each differing field is named. */
-function issuedProfile(profileId: LlmProfileId): ProfileAuthority {
-  const { claude, pi } = currentProfileBindings(profileId);
+/** Issuance: a catalog profile admits exactly its ONE lowering under the minting catalog, and each differing field is named. */
+function issuedProfile(profileId: LlmProfileId, lowering: PiLowering): ProfileAuthority {
+  const { claude, pi } = profileBindingsUnder(lowering, profileId);
   return Object.freeze({
     profileId,
     claude,
@@ -178,8 +178,8 @@ function recordedProfile(profileId: RecordedLlmProfileId): ProfileAuthority {
  * which grants it no package imports.
  */
 type OriginStrategy = Readonly<{
-  /** The profile authority a profile id names in this origin. */
-  profile: (raw: string) => DomainResult<ProfileAuthority, Readonly<{ message: string }>>;
+  /** The profile authority a profile id names in this origin, minting under `lowering`. */
+  profile: (raw: string, lowering: PiLowering) => DomainResult<ProfileAuthority, Readonly<{ message: string }>>;
   /** Today's role -> profile and role -> Skill couplings this origin checks; a field that did not parse is not compared. */
   policyViolations: (
     role: LoomAgentName,
@@ -195,9 +195,9 @@ const describeSkill = (skill: string | null): string => skill === null ? "<none>
 
 const ORIGIN_STRATEGIES: Readonly<Record<AgentRequestAuthorityOrigin, OriginStrategy>> = Object.freeze({
   issue: Object.freeze({
-    profile: (raw: string) => {
+    profile: (raw: string, lowering: PiLowering) => {
       const profileId = parseLlmProfileId(raw);
-      return profileId.ok ? success(issuedProfile(profileId.value)) : failure(canonicalRecord({ message: profileId.error.message }));
+      return profileId.ok ? success(issuedProfile(profileId.value, lowering)) : failure(canonicalRecord({ message: profileId.error.message }));
     },
     policyViolations: (role, profileId, skill) => {
       const policy = resolveAgentPolicy(role);
@@ -227,7 +227,8 @@ const ORIGIN_STRATEGIES: Readonly<Record<AgentRequestAuthorityOrigin, OriginStra
     },
   } satisfies OriginStrategy),
   // A stored authority carries its own profile and Skill as recorded facts, so
-  // neither role -> profile nor role -> Skill is re-derived from today's tables.
+  // neither role -> profile nor role -> Skill is re-derived from today's tables,
+  // and no catalog's lowering is consulted: history admits what it recorded.
   stored: Object.freeze({
     profile: (raw: string) => {
       const profileId = parseRecordedLlmProfileId(raw);
@@ -240,17 +241,19 @@ const ORIGIN_STRATEGIES: Readonly<Record<AgentRequestAuthorityOrigin, OriginStra
 /**
  * The profile authority `raw` names under an origin's `strategy`: the seam
  * where a Pi binding is admitted. An issued authority names a catalog profile
- * and admits its current lowering; a stored one may name a retired profile
+ * and admits its lowering under the minting catalog — today's unless a replay
+ * names another (`piCatalogAsOf`); a stored one may name a retired profile
  * and admits any binding it has issued.
  */
 function parseProfileAuthority(
   raw: unknown,
   strategy: OriginStrategy,
+  lowering: PiLowering,
 ): DomainResult<ProfileAuthority, Readonly<{ message: string }>> {
   if (typeof raw !== "string") {
     return failure(canonicalRecord({ message: `model profile must be a string; received ${describeUnknown(raw)}` }));
   }
-  return strategy.profile(raw);
+  return strategy.profile(raw, lowering);
 }
 
 
@@ -334,6 +337,7 @@ export type AgentRequestAuthorityOrigin = "issue" | "stored";
 function parseAgentRequestAuthorityInMode(
   raw: unknown,
   origin: AgentRequestAuthorityOrigin,
+  lowering: PiLowering = CURRENT_PI_CATALOG.lowering,
 ): DomainResult<AgentRequestAuthority, AgentRequestAuthorityError> {
   const request = readExactDataRecord(raw, AGENT_REQUEST_KEYS, "agent request authority");
   if (!request.ok) return failure(singleViolationError(authorityBoundaryViolation(request.error, "request")));
@@ -353,7 +357,7 @@ function parseAgentRequestAuthorityInMode(
   const strategy = ORIGIN_STRATEGIES[origin];
   // An issued authority names a profile the catalog issues today; a stored one
   // may name a profile the catalog has since retired.
-  const profile = parseProfileAuthority(fields.modelProfile, strategy);
+  const profile = parseProfileAuthority(fields.modelProfile, strategy, lowering);
 
   if (!runId.ok) violations.push(violation("invalid-agent-request-field", "runId", runId.error.message));
   if (!requestId.ok) violations.push(violation("invalid-agent-request-field", "requestId", requestId.error.message));
@@ -502,6 +506,28 @@ export type AgentRequestIdentity<Attempt extends SemanticAttempt = SemanticAttem
 export function mintAgentRequestAuthority<Attempt extends SemanticAttempt>(
   identity: AgentRequestIdentity<Attempt>,
 ): DomainResult<MintedAgentRequestAuthority<Attempt>, AgentRequestAuthorityError> {
+  const minted = mintUnder(identity, CURRENT_PI_CATALOG.lowering);
+  if (!minted.ok) return minted;
+  // The strict parse proved the request carries exactly these catalog values;
+  // the narrow fields are taken from the catalog itself, so only the phantom
+  // brand is asserted.
+  return success(brandMinted<Attempt>(canonicalRecord({
+    ...minted.value.authority,
+    modelProfile: minted.value.profileId,
+    harnessBinding: mintedHarnessBinding(currentProfileBindings(minted.value.profileId)),
+  })));
+}
+
+/**
+ * Mint one request under `lowering`: the role's catalog profile, that
+ * profile's bindings as `lowering` lowers them and the role's required Skill,
+ * passed through the strict issue-mode parse against that same lowering. The
+ * one issuance path, under today's catalog or a replayed one alike.
+ */
+function mintUnder<Attempt extends SemanticAttempt>(
+  identity: AgentRequestIdentity<Attempt>,
+  lowering: PiLowering,
+): DomainResult<Readonly<{ authority: AgentRequestAuthority<Attempt>; profileId: LlmProfileId }>, AgentRequestAuthorityError> {
   const policy = resolveAgentPolicy(identity.role);
   if (!policy.ok) {
     return failure(singleViolationError(violation(
@@ -510,24 +536,16 @@ export function mintAgentRequestAuthority<Attempt extends SemanticAttempt>(
       `cannot resolve policy for role '${identity.role}': ${policy.error.message}`,
     )));
   }
-  const bindings = currentProfileBindings(policy.value.profile);
-  const parsed = parseAgentRequestAuthority({
+  const bindings = profileBindingsUnder(lowering, policy.value.profile);
+  const parsed = parseAgentRequestAuthorityInMode({
     ...identity,
     modelProfile: policy.value.profile,
     harnessBinding: { pi: bindings.pi, claude: bindings.claude },
     requiredSkill: policy.value.requiredSkill,
-  });
+  }, "issue", lowering);
   if (!parsed.ok) return parsed;
   const attempted = authorityForAttempt(parsed.value, identity.attempt);
-  if (!attempted.ok) return attempted;
-  // The strict parse proved the request carries exactly these catalog values;
-  // the narrow fields are taken from the catalog itself, so only the phantom
-  // brand is asserted.
-  return success(brandMinted<Attempt>(canonicalRecord({
-    ...attempted.value,
-    modelProfile: policy.value.profile,
-    harnessBinding: mintedHarnessBinding(bindings),
-  })));
+  return attempted.ok ? success(Object.freeze({ authority: attempted.value, profileId: policy.value.profile })) : attempted;
 }
 
 /** The one brand assertion: only `mintAgentRequestAuthority` calls it, after the strict parse. */
@@ -726,6 +744,24 @@ export function mintAgentRosterSlot(
   retry: AgentRequestIdentity<2>,
 ): DomainResult<MintedAgentRosterSlot, AgentRosterSlotError> {
   return pairRosterSlot<MintedAgentRequestAuthority>(mintAgentRequestAuthority(first), mintAgentRequestAuthority(retry));
+}
+
+/**
+ * Mint one roster slot as the catalog `lowering` replays stood
+ * (`piCatalogAsOf`): each request is minted exactly as `mintAgentRosterSlot`
+ * mints it, under that lowering instead of today's. What it mints is history,
+ * so the slot is typed as recorded (`AgentRosterSlot`), never as minted.
+ */
+export function mintAgentRosterSlotAsOf(
+  lowering: RecordedPiLowering,
+  first: AgentRequestIdentity<1>,
+  retry: AgentRequestIdentity<2>,
+): DomainResult<AgentRosterSlot, AgentRosterSlotError> {
+  const asOf = <Attempt extends SemanticAttempt>(identity: AgentRequestIdentity<Attempt>) => {
+    const minted = mintUnder(identity, lowering);
+    return minted.ok ? success(minted.value.authority) : minted;
+  };
+  return pairRosterSlot<AgentRequestAuthority>(asOf(first), asOf(retry));
 }
 
 /**

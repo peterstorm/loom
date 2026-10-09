@@ -17,6 +17,7 @@
  */
 import {
   mintAgentRosterSlot,
+  mintAgentRosterSlotAsOf,
   parseAgentRosterSlot,
   parseStoredAgentRequestAuthorityForAttempt,
   rosterSlotErrorMessages,
@@ -34,7 +35,7 @@ import {
   type SlotId,
 } from "./orchestration-contract";
 import type { ContextPacket } from "./context-packets";
-import type { LoomAgentName } from "./model-profiles";
+import type { LoomAgentName, PiCatalog, RecordedPiLowering } from "./model-profiles";
 import type { BriefFinding, ReviewLens } from "./review-panel";
 import {
   deriveRefutationVerifierBinding,
@@ -65,6 +66,13 @@ export type RefutationVerifierPlan = Readonly<{
   lenses: NonEmpty<ReviewLens>;
   /** The program's Context Packet for one verifier attempt, or why it cannot be built. */
   packet: (lens: ReviewLens, requestId: RequestId, attempt: SemanticAttempt) => DomainResult<ContextPacket, Readonly<{ message: string }>>;
+  /**
+   * The catalog a panel with no record is minted under: `CURRENT_PI_CATALOG`
+   * in production; a replay of a run written before a catalog retargeting
+   * names the catalog as it stood (`piCatalogAsOf`). Required, so no issuing
+   * path can mint under today's catalog by omission during a replay.
+   */
+  catalog: PiCatalog;
 }>;
 
 /** Why a panel's verifier requests could not be prepared. */
@@ -185,6 +193,18 @@ function mintedVerifierSlot(draft: DraftSlot): Result<PairedSlot<MintedAgentRost
 }
 
 /**
+ * Mint `draft`'s slot under the replayed catalog `lowering`, or name every
+ * reason it refused it. What it mints is history, so the slot is a recorded
+ * one, never minted.
+ */
+function mintedAsOfVerifierSlot(draft: DraftSlot, lowering: RecordedPiLowering): Result<PairedSlot> {
+  const slot = mintAgentRosterSlotAsOf(lowering, draft.attempts[0].identity, draft.attempts[1].identity);
+  return slot.ok
+    ? ok(Object.freeze({ draft, slot: slot.value }))
+    : refused("unmintable-slot", `verifier slot ${draft.slotId} cannot be minted: ${rosterSlotErrorMessages(slot.error).join("; ")}`);
+}
+
+/**
  * The recorded request for `draft`'s identity: the recorded profile, bindings
  * and Skill of `recorded`, which must be this exact request when it records
  * this attempt, or the slot's attempt 1 when the record holds only that — a
@@ -262,8 +282,9 @@ function preparation(refutationAuthority: RefutationPanelAuthority, paired: read
 
 /**
  * Decide a refutation panel's verifier requests from its already-read
- * `record`: read back as history when one exists, minted from today's catalog
- * when none does. A record that does not match the panel's deterministic
+ * `record`: read back as history when one exists, minted under the plan's
+ * catalog — today's, unless a replay names the catalog as it stood — when
+ * none does. A record that does not match the panel's deterministic
  * requests is refused, naming the request.
  */
 export function decideRefutationVerifiers(
@@ -277,6 +298,13 @@ export function decideRefutationVerifiers(
   const panelInput = { runId: plan.runId, identityRunId: plan.identityRunId ?? plan.runId, findings: plan.findings, lenses: plan.lenses };
 
   const recorded = recordedRequests(record);
+  if (recorded === null && plan.catalog.kind === "recorded-as-of") {
+    const { lowering } = plan.catalog;
+    const replayed = all(drafts.value.map((draft) => mintedAsOfVerifierSlot(draft, lowering)));
+    if (!replayed.ok) return replayed;
+    const parsed = parseRefutationPanelAuthority({ ...panelInput, verifierSlots: replayed.value.map(({ slot }) => slot) });
+    return parsed.ok ? ok(preparation(parsed.value, replayed.value)) : refused("invalid-panel", parsed.error.message);
+  }
   if (recorded === null) {
     const minted = all(drafts.value.map(mintedVerifierSlot));
     if (!minted.ok) return minted;

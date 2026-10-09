@@ -5,7 +5,9 @@ import {
   LLM_PROFILE_IDS,
   RETIRED_LLM_PROFILE_IDS,
   currentProfileBindings,
+  piCatalogAsOf,
   piModelPattern,
+  profileBindingsUnder,
   recordedProfileBindings,
   type LlmProfileId,
   type LocalPiBinding,
@@ -15,6 +17,8 @@ import {
 import {
   issueAgentRosterSlot,
   mintAgentRequestAuthority,
+  mintAgentRosterSlot,
+  mintAgentRosterSlotAsOf,
   parseAgentRequestAuthority,
   parseAgentRosterSlot,
   parseOrchestrationRunId,
@@ -321,6 +325,44 @@ describe("the catalog mints a request from its identity alone", () => {
     }
   });
 
+  it("mints under a replayed catalog exactly the binding it lowers each role's profile to, which history admits (property)", () => {
+    fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...VOCABULARY), (policy, replayedTo) => {
+      const catalog = piCatalogAsOf({ [policy.profile]: replayedTo });
+      fc.pre(catalog.ok);
+      if (!catalog.ok) return;
+      const lowered = profileBindingsUnder(catalog.value.lowering, policy.profile);
+      const slot = mintAgentRosterSlotAsOf(catalog.value.lowering, identity(policy.agent, 1),
+        { ...identity(policy.agent, 2), requestId: `request:replayed-${policy.agent}-2` });
+      expect(slot.ok, policy.agent).toBe(true);
+      if (!slot.ok) return;
+      for (const authority of slot.value.attempts) {
+        expect(authority.harnessBinding).toEqual(lowered);
+        expect(samePiBinding(authority.harnessBinding.pi, replayedTo)).toBe(true);
+        // Whatever a replay mints is history its profile has issued.
+        expect(parseStoredAgentRequestAuthority(authority)).toEqual({ ok: true, value: authority });
+      }
+    }));
+  });
+
+  it("mints a slot under a replayed catalog as history: today's slot, on the binding the replay lowers to", () => {
+    const catalog = piCatalogAsOf({ "general-review": SOL });
+    if (!catalog.ok) throw new Error(catalog.error.message);
+    const first = identity("code-reviewer", 1);
+    const retry = { ...identity("code-reviewer", 2), requestId: "request:minted-retry" };
+    const replayed = mintAgentRosterSlotAsOf(catalog.value.lowering, first, retry);
+    const today = mintAgentRosterSlot(first, retry);
+    if (!replayed.ok || !today.ok) throw new Error("mint failed");
+    const rebound = today.value.attempts.map((authority) => ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi: SOL } }));
+    expect(replayed.value.attempts).toEqual(rebound);
+    // History parses back unchanged, as any recorded slot does.
+    expect(parseAgentRosterSlot(replayed.value.attempts[0], replayed.value.attempts[1])).toEqual(replayed);
+    // A role whose profile the replay leaves alone mints exactly today's slot.
+    const untouched = <Attempt extends 1 | 2>(attempt: Attempt) =>
+      ({ ...identity("review-verifier-agent", attempt), requestId: `request:verifier-${attempt}` });
+    expect(mintAgentRosterSlotAsOf(catalog.value.lowering, untouched(1), untouched(2)))
+      .toEqual(mintAgentRosterSlot(untouched(1), untouched(2)));
+  });
+
   it("keeps the attempt it was asked to mint, so a minted pair issues a slot", () => {
     const first = mintAgentRequestAuthority(identity("code-reviewer", 1));
     const retry = mintAgentRequestAuthority({ ...identity("code-reviewer", 2), requestId: "request:minted-retry" });
@@ -343,7 +385,7 @@ describe("the catalog mints a request from its identity alone", () => {
     const retired: MintedHarnessBinding = { pi: SOL, claude: minted.value.harnessBinding.claude };
     // @ts-expect-error a minted authority never names a retired profile
     const retiredProfile: MintedAgentRequestAuthority["modelProfile"] = "qualified-local-review";
-    expect([retired.pi.provider, retiredProfile]).toEqual(["openai-codex", "qualified-local-review"]);
+    expect([retired.pi.provider, retiredProfile]).toEqual([SOL.provider, "qualified-local-review"]);
   });
 });
 

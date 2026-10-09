@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { buildContextPacket, encodeByteSection } from "../../../../src/core/context-packets";
-import { currentProfileBindings, type PiBinding } from "../../../../src/core/model-profiles";
+import { CURRENT_PI_CATALOG, currentProfileBindings, type PiBinding } from "../../../../src/core/model-profiles";
 import { parseAgentRosterSlot, type AgentRequestAuthority, type AgentRosterSlot } from "../../../../src/core/orchestration-contract";
 import { parseRefutationPanelAuthority, type RefutationPanelAuthority } from "../../../../src/core/panel-authority";
 import { decideRefutationVerifiers, type RefutationVerifierPlan } from "../../../../src/core/refutation-verifiers";
@@ -42,6 +42,7 @@ const FINDINGS: readonly [BriefFinding] = [Object.freeze({
 const LENSES: readonly [ReviewLens, ReviewLens] = ["reproduction", "intent"];
 
 const PANEL: Omit<RefutationVerifierPlan, "runId"> = {
+  catalog: CURRENT_PI_CATALOG,
   findings: FINDINGS,
   lenses: LENSES,
   packet: (lens, requestId, attempt) => {

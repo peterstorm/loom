@@ -5,6 +5,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   AGENT_POLICIES,
+  CURRENT_PI_CATALOG,
   LLM_PROFILE_IDS,
   LLM_PROFILES,
   RETIRED_LLM_PROFILE_IDS,
@@ -15,8 +16,10 @@ import {
   parseLlmProfile,
   parseLlmProfileId,
   parseRecordedLlmProfileId,
+  piCatalogAsOf,
   piHistoryViolations,
   piModelPattern,
+  profileBindingsUnder,
   resolveAgentPolicy,
   resolveAgentProfile,
   resolveHarnessBinding,
@@ -220,6 +223,67 @@ describe("recorded profile bindings", () => {
       expect(piHistoryViolations("general-review", current, [...history, repeated]))
         .toEqual([{ kind: "duplicate-history-target", profileId: "general-review", target: piModelPattern(repeated) }]);
     }));
+  });
+});
+
+describe("the Pi lowering table: today's catalog and a replayed one", () => {
+  /** Every Pi binding any catalog profile has issued: the vocabulary a replay may name. */
+  const ISSUED_TARGETS = [...new Map(LLM_PROFILE_IDS.flatMap((id) => recordedProfileBindings(id).pi)
+    .map((binding) => [piModelPattern(binding), binding] as const)).values()];
+
+  it("lowers every catalog profile through today's table, so the catalog, lowering and issuance agree", () => {
+    for (const profile of LLM_PROFILES) {
+      expect(CURRENT_PI_CATALOG.lowering[profile.id]).toEqual(profile.pi);
+      expect(profileBindingsUnder(CURRENT_PI_CATALOG.lowering, profile.id)).toEqual(currentProfileBindings(profile.id));
+      expect(currentProfileBindings(profile.id).pi).toEqual(lowerModelProfile(profile, "pi"));
+    }
+    expect(Object.isFrozen(CURRENT_PI_CATALOG) && Object.isFrozen(CURRENT_PI_CATALOG.lowering)).toBe(true);
+  });
+
+  it("replays nothing when a replay names no profile: the replayed table is today's", () => {
+    const replayed = piCatalogAsOf({});
+    expect(replayed).toEqual({ ok: true, value: { kind: "recorded-as-of", lowering: CURRENT_PI_CATALOG.lowering } });
+  });
+
+  it("property: accepts exactly the targets the named profile issued, lowering it there and every other profile as today", () => {
+    fc.assert(fc.property(fc.constantFrom(...LLM_PROFILE_IDS), fc.constantFrom(...ISSUED_TARGETS), (named, target) => {
+      const issued = recordedProfileBindings(named).pi.some((binding) => piModelPattern(binding) === piModelPattern(target));
+      const replayed = piCatalogAsOf({ [named]: target });
+      expect(replayed.ok).toBe(issued);
+      if (!replayed.ok) {
+        expect(replayed.error).toEqual({
+          kind: "unrecorded-pi-binding",
+          message: `profile '${named}' never recorded the Pi binding ${piModelPattern(target)}`,
+        });
+        return;
+      }
+      for (const id of LLM_PROFILE_IDS) {
+        const bindings = profileBindingsUnder(replayed.value.lowering, id);
+        expect(bindings.claude).toEqual(currentProfileBindings(id).claude);
+        expect(bindings.pi).toEqual(id === named ? target : currentProfileBindings(id).pi);
+      }
+    }));
+  });
+
+  it("names every unrecorded binding of one replay in one refusal", () => {
+    const sol = recordedProfileBindings("refutation").pi[1]!;
+    const mini = recordedProfileBindings("mechanical").pi[1]!;
+    expect(piCatalogAsOf({ refutation: mini, mechanical: sol, implementation: sol })).toEqual({
+      ok: false,
+      error: {
+        kind: "unrecorded-pi-binding",
+        message: `profile 'refutation' never recorded the Pi binding ${piModelPattern(mini)}; ` +
+          `profile 'mechanical' never recorded the Pi binding ${piModelPattern(sol)}`,
+      },
+    });
+  });
+
+  it("stores the recorded target itself, whatever extra fields the named binding carries", () => {
+    const sol = recordedProfileBindings("refutation").pi[1]!;
+    const replayed = piCatalogAsOf({ refutation: sol });
+    if (!replayed.ok) throw new Error(replayed.error.message);
+    expect(replayed.value.lowering.refutation).toEqual({ provider: sol.provider, model: sol.model, thinking: sol.thinking });
+    expect(Object.isFrozen(replayed.value) && Object.isFrozen(replayed.value.lowering)).toBe(true);
   });
 });
 

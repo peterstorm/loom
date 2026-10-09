@@ -36,8 +36,8 @@ import { disposeFixturePiSessions, withFixturePiSession } from "../../fixtures/p
 import { facadeParentEnvironment, parentAnnouncement, type FacadeParent } from "../../fixtures/facade-parent";
 import { normalizeRunRoot } from "../../fixtures/emission-route-delta";
 import { fixturePiAgentDirectory } from "../../fixtures/fixture-pi-agent-directory";
-import { DESKTOP_VLLM_ROUTE } from "../../../src/core/model-profiles";
-import { RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING, underRetiredPiCatalog } from "../../fixtures/local-pi-binding";
+import { CURRENT_PI_CATALOG, DESKTOP_VLLM_ROUTE, type PiCatalog } from "../../../src/core/model-profiles";
+import { RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING, retiredPiCatalog } from "../../fixtures/local-pi-binding";
 import { deadLoopbackPort } from "../../fixtures/dead-loopback-port";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
 import {
@@ -732,7 +732,7 @@ describe("orchestration CLI", () => {
     return `${Array.from({ length: count }, (_, index) => `${prefix}-${index}`).join("\n")}\n`;
   }
 
-  async function resumeWaveFixture(root: string, runsRoot: string, runDir: string): Promise<unknown> {
+  async function resumeWaveFixture(root: string, runsRoot: string, runDir: string, catalog: PiCatalog = CURRENT_PI_CATALOG): Promise<unknown> {
     return withFixturePiSession(root, async () => {
       vi.resetModules();
       const driver = await import("../../../src/handlers/helpers/programs/wave-gate");
@@ -742,7 +742,7 @@ describe("orchestration CLI", () => {
       if (!raw.ok) throw new Error(raw.error.message);
       const registered = parseRegisteredFacadeProgram(raw.value);
       if (registered.kind !== "registered" || registered.program.kind !== "wave-gate") throw new Error("fixture Wave registration unavailable");
-      const driven = await driver.resumeWaveGateFacade(handle.value, registered.program);
+      const driven = await driver.resumeWaveGateFacade(handle.value, registered.program, catalog);
       if (!driven.ok) throw new Error(driven.message);
       return driven.action;
     });
@@ -777,7 +777,7 @@ describe("orchestration CLI", () => {
   }
 
   /** Current fixture completion must earn accepted authority through the issued roster. */
-  async function reviewedWave(root: string, runsRoot: string, runDir: string) {
+  async function reviewedWave(root: string, runsRoot: string, runDir: string, catalog: PiCatalog = CURRENT_PI_CATALOG) {
     const statePath = join(root, ".claude/state/active_task_graph.json");
     const fixture = JSON.parse(readFileSync(statePath, "utf8"));
     writeFileSync(statePath, JSON.stringify({ ...fixture, spec_trace_version: 2,
@@ -800,7 +800,7 @@ describe("orchestration CLI", () => {
         })));
       expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
-    return resumeWaveFixture(root, runsRoot, runDir);
+    return resumeWaveFixture(root, runsRoot, runDir, catalog);
   }
 
   /** A refutation verdict transcript with a caller-chosen vote direction. */
@@ -826,10 +826,9 @@ describe("orchestration CLI", () => {
     });
   }
 
-  /** Run `drive` against the catalog as it stood before the 2026-10-08
-   *  retargeting, when the `refutation` profile still lowered to its retired cloud binding. */
-  const underRetiredRefutationCatalog = <T>(drive: () => Promise<T>): Promise<T> =>
-    underRetiredPiCatalog({ refutation: RETIRED_REFUTATION_PI_BINDING }, drive);
+  /** The catalog as it stood before the 2026-10-08 retargeting, when the
+   *  `refutation` profile still lowered to its retired cloud binding. */
+  const RETIRED_REFUTATION_CATALOG = retiredPiCatalog({ refutation: RETIRED_REFUTATION_PI_BINDING });
 
   it("prints a status even when no state file exists", async () => {
     const result = (await runCli(["status"], "", project()));
@@ -4048,17 +4047,15 @@ describe("orchestration CLI", () => {
       expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
 
-    const panel = await underRetiredRefutationCatalog(() => withFixturePiSession(root, async () => {
-      const programs = await import("../../../src/handlers/helpers/programs/standalone");
-      const registrations = await import("../../../src/handlers/helpers/programs/registration");
+    const panel = await withFixturePiSession(root, async () => {
       const raw = opened.value.readProgramRegistration();
       if (!raw.ok) throw new Error(raw.error.message);
-      const registered = registrations.parseRegistration(raw.value);
+      const registered = parseRegistration(raw.value);
       if (!registered.ok) throw new Error(registered.message);
-      const driven = await programs.resumeStandaloneFacade(opened.value, registered.value);
+      const driven = await resumeStandaloneFacade(opened.value, registered.value, RETIRED_REFUTATION_CATALOG);
       if (!driven.ok) throw new Error(driven.message);
       return driven.action as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
-    }));
+    });
     expect(panel.kind).toBe("spawn-batch");
     expect(panel.requests).toHaveLength(3);
     expect(panel.requests.every(({ authority }) => authority.program === "refutation-panel" &&
@@ -4159,7 +4156,7 @@ describe("orchestration CLI", () => {
     const runDir = join(runsRoot, "run.wave-retired-refutation");
     mkdirSync(runDir);
 
-    const action = await underRetiredRefutationCatalog(() => reviewedWave(root, runsRoot, runDir)) as {
+    const action = await reviewedWave(root, runsRoot, runDir, RETIRED_REFUTATION_CATALOG) as {
       kind: string; requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(action.kind).toBe("spawn-batch");

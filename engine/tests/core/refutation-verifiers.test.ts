@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../src/core/context-packets";
-import { currentProfileBindings, resolveAgentPolicy, type PiBinding } from "../../src/core/model-profiles";
+import { CURRENT_PI_CATALOG, currentProfileBindings, resolveAgentPolicy, type PiBinding } from "../../src/core/model-profiles";
 import {
   parseAgentRosterSlot,
   parseOrchestrationRunId,
@@ -17,7 +17,7 @@ import {
   type RefutationVerifierPreparation,
 } from "../../src/core/refutation-verifiers";
 import { REVIEW_LENSES, parseWaveFindingId, type BriefFinding, type ReviewLens } from "../../src/core/review-panel";
-import { RETIRED_REFUTATION_PI_BINDING as RETIRED } from "../fixtures/local-pi-binding";
+import { RETIRED_REFUTATION_PI_BINDING as RETIRED, retiredPiCatalog } from "../fixtures/local-pi-binding";
 
 /**
  * The pure verifier decision: a panel with no record is minted from today's
@@ -47,7 +47,7 @@ const fixturePacket: RefutationVerifierPlan["packet"] = (lens, requestId, attemp
 };
 
 const plan = (overrides: Partial<RefutationVerifierPlan> = {}): RefutationVerifierPlan =>
-  ({ runId: RUN_ID, findings: FINDINGS, lenses: LENSES, packet: fixturePacket, ...overrides });
+  ({ runId: RUN_ID, findings: FINDINGS, lenses: LENSES, packet: fixturePacket, catalog: CURRENT_PI_CATALOG, ...overrides });
 
 const NONE: RefutationPanelRecord = { kind: "none" };
 const checkpointed = (panel: RefutationPanelAuthority): RefutationPanelRecord => ({ kind: "checkpointed-panel", panel });
@@ -184,5 +184,40 @@ describe("decideRefutationVerifiers: issuance and history agree", () => {
       const lenses = [lensList[0]!, ...lensList.slice(1)] as const;
       expect(decided(NONE, { lenses })).toEqual(decided(NONE, { lenses }));
     }), { numRuns: 20 });
+  });
+});
+
+describe("decideRefutationVerifiers: a replayed historical catalog", () => {
+  const RETIRED_CATALOG = retiredPiCatalog({ refutation: RETIRED });
+  const lensSets = fc.subarray([...REVIEW_LENSES], { minLength: 1 }) as fc.Arbitrary<ReviewLens[]>;
+
+  it("mints an unrecorded panel on the binding the replayed catalog lowers to: today's panel, rebound", () => {
+    const replayed = decided(NONE, { catalog: RETIRED_CATALOG });
+    expect(bindings(replayed.refutationAuthority.verifierRoster.orderedSlots)).toEqual(Array(4).fill(RETIRED));
+    expect(replayed.refutationAuthority).toEqual(recordedOn(decided(NONE).refutationAuthority, RETIRED));
+    expect(replayed.retryInputs.map(({ input }) => input.authority.harnessBinding.pi)).toEqual([RETIRED, RETIRED]);
+  });
+
+  it("property: a replay that names no profile mints exactly today's panel", () => {
+    const unchanged = retiredPiCatalog({});
+    fc.assert(fc.property(lensSets, (lensList) => {
+      const lenses = [lensList[0]!, ...lensList.slice(1)] as const;
+      expect(decided(NONE, { lenses, catalog: unchanged })).toEqual(decided(NONE, { lenses }));
+    }), { numRuns: 20 });
+  });
+
+  it("property: a panel on record is read back as history whatever catalog the plan names", () => {
+    fc.assert(fc.property(lensSets, fc.constantFrom("checkpointed-panel", "receipt-requests"), (lensList, kind) => {
+      const lenses = [lensList[0]!, ...lensList.slice(1)] as const;
+      const minted = decided(NONE, { lenses });
+      const record = kind === "checkpointed-panel" ? checkpointed(minted.refutationAuthority) : receiptOf(minted.refutationAuthority);
+      expect(decided(record, { lenses, catalog: RETIRED_CATALOG })).toEqual(minted);
+    }), { numRuns: 20 });
+  });
+
+  it("re-reads a replayed panel from its record as exactly the panel it replayed", () => {
+    const replayed = decided(NONE, { catalog: RETIRED_CATALOG });
+    expect(decided(checkpointed(replayed.refutationAuthority))).toEqual(replayed);
+    expect(decided(receiptOf(replayed.refutationAuthority))).toEqual(replayed);
   });
 });

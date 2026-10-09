@@ -48,6 +48,20 @@ const answered = (status: number, servedModels: readonly string[] | null = null)
   ({ kind: "answered", status, servedModels });
 const probed = (probe: RouteProbe) => ({ kind: "probed" as const, endpoint: ENDPOINT, probe });
 
+/** The probe vocabulary the gate properties sample: one answer of each kind the local route can give. */
+const PROBE = Object.freeze({
+  listed: answered(200, [LOCAL.model]),
+  notServed: answered(200, ["other"]),
+  unreadableListing: answered(200),
+  authRefused401: answered(401),
+  authRefused403: answered(403),
+  serverError: answered(500),
+  refused: Object.freeze({ kind: "refused", reason: "down" } as const),
+} satisfies Record<string, RouteProbe>);
+const PROBES: readonly RouteProbe[] = Object.values(PROBE);
+/** The answers of a live server: the route is reachable, its listing verified or not. */
+const REACHABLE_PROBES: readonly RouteProbe[] = [PROBE.listed, PROBE.unreadableListing, PROBE.authRefused401, PROBE.authRefused403];
+
 /** The gate's refusal text, or null when it admits. */
 const refusal = (decisions: readonly SpawnRouteDecision[], mode: RouteGateMode = "admit-unverified"): string | null => {
   const verdict = decideSpawnGate(decisions, mode);
@@ -289,10 +303,6 @@ describe("decideSpawnGate: unverified routes and the gate mode", () => {
     expect(order).toEqual([...order].sort((left, right) => left - right));
   });
 
-  const PROBES: readonly RouteProbe[] = [
-    answered(200, [LOCAL.model]), answered(200, ["other"]), answered(200), answered(401), answered(403), answered(500),
-    { kind: "refused", reason: "down" },
-  ];
   const decisions = fc.array(fc.oneof(
     fc.constantFrom(...PROBES).map((probe): SpawnRouteDecision => decideProbedRoute(LOCAL, ENDPOINT, probe)),
     fc.constant<SpawnRouteDecision>(RETIRED),
@@ -328,8 +338,7 @@ describe("reportUnverifiedRoutes: the emitted action names what the gate admitte
   });
 
   it("reports exactly the routes the default gate admitted unverified, and none under strict (property)", () => {
-    const PROBES: readonly RouteProbe[] = [answered(200, [LOCAL.model]), answered(200), answered(401), answered(403)];
-    fc.assert(fc.property(fc.array(fc.constantFrom(...PROBES), { minLength: 1, maxLength: 5 }), (probes) => {
+    fc.assert(fc.property(fc.array(fc.constantFrom(...REACHABLE_PROBES),{ minLength: 1, maxLength: 5 }), (probes) => {
       const batch = probes.map((probe) => decideProbedRoute(LOCAL, ENDPOINT, probe));
       const admitted = decideSpawnGate(batch, "admit-unverified");
       if (admitted.kind !== "admitted") throw new Error("a reachable batch is admitted by default");

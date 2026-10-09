@@ -8,6 +8,7 @@ import recordOrchestrationSpawn from "../../src/handlers/post-tool-use/record-or
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import { resumeWaveGateFacade } from "../../src/handlers/helpers/programs";
+import { CURRENT_PI_CATALOG } from "../../src/core/model-profiles";
 import { driveRemediationFacade } from "../../src/handlers/helpers/programs/remediation";
 
 const cleanup: string[] = [];
@@ -282,6 +283,7 @@ describe("Wave Gate resume re-derivation bound", () => {
     const driven = await resumeWaveGateFacade(
       opened.value,
       {} as never,
+      CURRENT_PI_CATALOG,
       65,
     );
 
@@ -305,7 +307,7 @@ describe("Wave Gate resume re-derivation bound", () => {
     // Depth 64 is still within the bound, so the resume proceeds into its real
     // work (and fails there on the stub registration) rather than reporting the
     // spin diagnostic. An off-by-one here would cap legitimate long runs.
-    const driven = await resumeWaveGateFacade(opened.value, {} as never, 64);
+    const driven = await resumeWaveGateFacade(opened.value, {} as never, CURRENT_PI_CATALOG, 64);
 
     const action = driven.ok ? driven.action as { kind: string; diagnostic?: { message?: string } } : null;
     const message = action?.kind === "blocked" ? action.diagnostic?.message ?? "" : "";

@@ -19,6 +19,7 @@ import { durableCaptureRejection, durableRefutationRequests, publicationResolver
 import { failed } from './program-result';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
 import { prepareRefutationVerifiers } from './refutation-verifiers';
+import type { PiCatalog } from '../../../core/model-profiles';
 import { publishLegacyInitialBatch } from './request-publication';
 import { proceed, rederive, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 
@@ -28,13 +29,15 @@ type WaveReadiness = Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true 
  * The current Wave's Refutation Panel. The Wave Gate checkpoints no panel
  * authority, so its record is the durable attempt-1 batch receipt: its
  * verifier requests are read from that receipt when one exists and minted
- * from today's catalog only when none does (`prepareRefutationVerifiers`), so
+ * under `catalog` (today's in production) only when none does
+ * (`prepareRefutationVerifiers`), so
  * resuming a panel issued under an older catalog compares recorded history
  * with itself.
  */
 function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: WaveReadiness,
+  catalog: PiCatalog,
 ) {
   const plan = deriveWaveRefutationPlan(readiness);
   if (!plan.ok) throw new Error(plan.error.message);
@@ -42,6 +45,7 @@ function waveRefutationPreparation(
     identityRunId: plan.value.runId,
     findings: plan.value.findings,
     lenses: plan.value.lenses,
+    catalog,
     packet: (lens, requestId, attempt) => {
       const section = encodeByteSection("wave-refutation-authority", JSON.stringify({
         panelRunId: plan.value.runId, lens, findings: plan.value.findings, attempt,
@@ -64,12 +68,13 @@ function waveRefutationPreparation(
 export async function driveWaveRefutation(
   context: WaveResumeContext,
   current: WaveReadiness,
+  catalog: PiCatalog,
 ): Promise<WavePhase> {
   const { handle, manager, registration } = context;
   if (!(current.facts.findingCounts.kind === "known" && current.facts.findingCounts.value.activeCritical > 0)) {
     return proceed();
   }
-  const preparation = waveRefutationPreparation(handle, current);
+  const preparation = waveRefutationPreparation(handle, current, catalog);
   const resolver = publicationResolver(handle);
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver, "wave-refutation");
   if (recovered.kind === "corrupt") return settled(waveBlocked(handle, recovered.message));

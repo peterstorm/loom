@@ -28,6 +28,7 @@ import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '.
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
 import type { PersistentPanelResult, RefutationPanelAuthority } from '../../../core/panel-authority';
+import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
@@ -67,7 +68,8 @@ function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandalon
  * The standalone Refutation Panel for `aggregate`'s current criticals. Its
  * verifier requests are read from the panel's record when one exists — the
  * `checkpointed` panel the run holds, else the durable attempt-1 batch
- * receipt — and minted from today's catalog only when none does
+ * receipt — and minted under `catalog` (today's, except in a replay of a run
+ * written before a catalog retargeting) only when none does
  * (`prepareRefutationVerifiers`), so resuming or replaying a panel issued
  * under an older catalog compares recorded history with recorded history.
  * `checkpointed` is `null` where the caller holds no panel checkpoint: first
@@ -79,6 +81,7 @@ export function standaloneRefutationPreparation(
   authority: FrozenStandaloneReviewAuthority,
   aggregate: import("../../../core/standalone-review-model").StandaloneReviewAggregate,
   checkpointed: RefutationPanelAuthority | null,
+  catalog: PiCatalog,
 ) {
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });
   const selected = selectReviewLenses(reviewSignals(brief.findings), 3);
@@ -92,6 +95,7 @@ export function standaloneRefutationPreparation(
   const verifiers = prepareRefutationVerifiers({ handle, label: "standalone-refutation", checkpointed }, {
     findings: [firstFinding, ...otherFindings],
     lenses: [firstLens, ...otherLenses],
+    catalog,
     packet: (lens, requestId, attempt) => {
       const section = encodeByteSection("refutation-authority", JSON.stringify({
         runId: handle.runId, lens, findings: brief.findings, attempt,
@@ -508,7 +512,7 @@ export function replayStandaloneResultFromEvidence(
       ready = reduced.value;
     } else {
       // Checkpoint-independent by contract: the panel is proved from its receipt, never the checkpoint.
-      const preparation = standaloneRefutationPreparation(handle, authority, aggregated.value.aggregate, null);
+      const preparation = standaloneRefutationPreparation(handle, authority, aggregated.value.aggregate, null, CURRENT_PI_CATALOG);
       reduced = reduceStandaloneReviewMachine(reduced.value, {
         kind: "aggregate-has-criticals",
         aggregate: aggregated.value.aggregate,
