@@ -76,8 +76,9 @@ Three things followed from the earlier cloud-default catalog:
    retained pilot-1 windows keep `capable-route-required` and re-decide to their recorded bytes; pilot-2
    (`gcd-ad11-pilot-2`) is the first preregistration under the new policy.
 5. **Operator release without a measured window (AD-11 amended again, 2026-10-09).** Three pilot-2 windows
-   ran, and each ended early because the local vLLM stopped serving: an outage on 2026-10-08, then aborts by
-   the route fail-fast after 13 and after 30 of 408 pairs on 2026-10-09. A complete window needs roughly
+   ran, and none measured a complete schedule because the local vLLM stopped serving in each: the 2026-10-08
+   window walked all 408 pairs but measured an outage from about pair 6 on, and on 2026-10-09 the route
+   fail-fast aborted the other two after 13 and after 30 of 408 pairs. A complete window needs roughly
    two days of uninterrupted serving, and the route has not sustained that. The operator, as spec owner,
    therefore releases every cell on the local route as **unconstrained emission, engine-authoritative** by
    decision. This is option (b) of AD-11's original text — the spec owner accepting unconstrained emission —
@@ -96,7 +97,8 @@ Three things followed from the earlier cloud-default catalog:
      (`gcd-ad11-pilot-2--2026-10-09T14-43-58-835Z`, 30 pairs, below every cell's preregistered count):
      the emission arm accepted 26 of 30 samples at attempt 1 with no semantic rejection, and its 4 failures
      were outages or timeouts; the extraction arm accepted 21 of 30, needed attempt 2 for 2 of them and
-     ended 7 in semantic rejection after both attempts. Among accepted samples, emission's p50 / p95
+     ended 7 in semantic rejection after both attempts (5 judge, 2 refutation: final messages the frozen
+     verdict parser could not read as JSON). Among accepted samples, emission's p50 / p95
      dispatch-to-ingestion was 205 s / 310 s against extraction's 270 s / 543 s. These are point figures from
      one partial window with no bootstrap interval and no blinded quality assessment; they are not a
      guardrail result.
