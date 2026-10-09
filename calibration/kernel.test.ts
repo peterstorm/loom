@@ -9,6 +9,22 @@ describe("errorMessage (the one rendering of a caught value)", () => {
     expect(errorMessage(42)).toBe("42");
     expect(errorMessage(undefined)).toBe("undefined");
   });
+
+  it("is total: a value String() cannot render is named by its type, never rethrown", () => {
+    const throwingToString = { toString: () => { throw new Error("no text for you"); } };
+    const hostile = new Proxy({}, { get: () => { throw new Error("trap"); }, getPrototypeOf: () => { throw new Error("trap"); } });
+    const lyingError = Object.defineProperty(new Error("hidden"), "message", { get: () => { throw new Error("no message"); } });
+    expect(errorMessage(Object.create(null))).toBe("an unprintable thrown object");
+    expect(errorMessage(throwingToString)).toBe("an unprintable thrown object");
+    expect(errorMessage(hostile)).toBe("an unprintable thrown object");
+    expect(errorMessage(lyingError)).toBe("an unprintable thrown object");
+  });
+
+  it("never throws, whatever was caught (property)", () => {
+    fc.assert(fc.property(fc.anything({ withNullPrototype: true, withBoxedValues: true, withMap: true, withSet: true }), (caught) => {
+      expect(typeof errorMessage(caught)).toBe("string");
+    }), { numRuns: 300 });
+  });
 });
 
 describe("NonEmpty constructor", () => {

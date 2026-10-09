@@ -6,8 +6,20 @@
  * couples the cores to no domain: neither imports the other.
  */
 
-/** A caught value's message: an Error's own message, anything else as text. */
-export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+/**
+ * A caught value's message: an Error's own message, anything else as text.
+ * Total: a value that cannot be rendered — a null-prototype object, a
+ * throwing `toString`, a hostile Proxy, an Error whose `message` getter
+ * throws — is named by its type, so a fail-closed handler that renders what
+ * it caught can never itself throw.
+ */
+export function errorMessage(error: unknown): string {
+  try {
+    return error instanceof Error ? String(error.message) : String(error);
+  } catch {
+    return `an unprintable thrown ${typeof error}`;
+  }
+}
 
 export type Result<T, E> =
   | Readonly<{ ok: true; value: T }>

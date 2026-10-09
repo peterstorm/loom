@@ -23,7 +23,7 @@ import {
   type WindowStore,
 } from "./pilot-retention";
 import {
-  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, PILOT_1, pilot2PreregBytes, preregBytes, READY, REPO_ROOT, runWindow,
+  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, PILOT_1, pilot2PreregBytes, preregBytes, READY, READY_FACTS, REPO_ROOT, runWindow,
   testWindowRecord as windowRecord, UNREACHABLE_FACTS, WORKLOAD, type FakeRoute,
 } from "./pilot-test-fixtures";
 import { contentDigest } from "./pilot-vocabulary";
@@ -90,7 +90,7 @@ const windowRun = (store: MemoryStore, record: WindowRecord, overrides: Partial<
 /** A blocked window as `--pilot` leaves it. */
 async function blockedWindow(): Promise<MemoryStore> {
   const store = memoryStore();
-  decidedRecord(await recordWindow(windowRun(store, windowRecord(false))));
+  decidedRecord(await recordWindow(windowRun(store, windowRecord(UNREACHABLE_FACTS))));
   return store;
 }
 
@@ -125,7 +125,7 @@ describe("pure retention derivations", () => {
     await fc.assert(fc.asyncProperty(fc.nat({ max: 6 }), fc.boolean(), async (outageFrom, routeDown) => {
       const store = memoryStore();
       const route = fakeRoute((request) => (route.requests.length > outageFrom * 2 ? INFRASTRUCTURE : accepted(request)));
-      const { window } = recorded(await recordWindow(windowRun(store, windowRecord(true), {
+      const { window } = recorded(await recordWindow(windowRun(store, windowRecord(READY_FACTS), {
         routeHealth: async () => (routeDown ? { kind: "unreachable", reason: "down" } : { kind: "reachable" }),
       }, route)));
       if (!("ending" in window)) throw new Error("a dispatched window records its ending");
@@ -179,7 +179,7 @@ describe("recordWindow (--pilot)", () => {
     const store = await blockedWindow();
     const before = new Map(store.files);
     const writes = store.writes.length;
-    const again = await recordWindow(windowRun(store, windowRecord(false)));
+    const again = await recordWindow(windowRun(store, windowRecord(UNREACHABLE_FACTS)));
     expect(again).toEqual({ ok: false, error: "window mem:/window/ already exists; a retained window is never overwritten" });
     expect(store.writes).toHaveLength(writes);
     expect(store.files).toEqual(before);
@@ -198,7 +198,7 @@ describe("recordWindow (--pilot)", () => {
       },
     };
     const progress: string[] = [];
-    decidedRecord(await recordWindow(windowRun(store, windowRecord(true), { onPair: (index, total) => { progress.push(`${index + 1}/${total}`); } }, counted)));
+    decidedRecord(await recordWindow(windowRun(store, windowRecord(READY_FACTS), { onPair: (index, total) => { progress.push(`${index + 1}/${total}`); } }, counted)));
     const lines = (store.files.get(WINDOW_FILES.observations) ?? "").trim().split("\n");
     // The fake route answers every attempt at once: attempt n sees the n-1 samples before it persisted.
     expect(persistedAtDispatch).toEqual(lines.map((_line, index) => index));
@@ -222,7 +222,7 @@ describe("recordWindow (--pilot)", () => {
     if (broken === undefined) throw new Error(`${first.cell} has no case`);
     const unresolvable: Preregistration = { ...PILOT_1, cells: [{ ...first, workload: { ...first.workload, cases: [{ ...broken, source: "corpus:gone" }, ...cases] } }, ...rest] };
     const route = fakeRoute(accepted);
-    const outcome = await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: unresolvable } }, route));
+    const outcome = await recordWindow(windowRun(store, windowRecord(READY_FACTS), { preregistration: { ...LOADED, prereg: unresolvable } }, route));
     expect(outcome).toEqual({
       ok: false,
       error: `window test-window cannot dispatch: its preregistered case inputs do not resolve:\n  - ${first.cell} case ${broken.caseId}: corpus case gone is not in the corpus`,
@@ -230,14 +230,14 @@ describe("recordWindow (--pilot)", () => {
     expect(store.writes).toEqual([]);
     expect(route.requests).toHaveLength(0);
     // A window that will not dispatch never resolves its inputs.
-    decidedRecord(await recordWindow(windowRun(memoryStore(), windowRecord(false), { preregistration: { ...LOADED, prereg: unresolvable } })));
+    decidedRecord(await recordWindow(windowRun(memoryStore(), windowRecord(UNREACHABLE_FACTS), { preregistration: { ...LOADED, prereg: unresolvable } })));
   });
 
   it("loads the workload corpus only for a window that dispatches: a blocked or --preflight-only window is retained whatever the corpus", async () => {
     const loads: string[] = [];
     const unloadable = { ...WORKLOAD, loadCorpusCases: () => { loads.push("load"); return { ok: false as const, error: "ENOENT: no such corpus" }; } };
-    const preflightOnly: WindowRecord = { ...windowRecord(true), dispatch: planDispatch(READY, true) };
-    for (const record of [windowRecord(false), preflightOnly]) {
+    const preflightOnly: WindowRecord = { ...windowRecord(READY_FACTS), dispatch: planDispatch(READY, true) };
+    for (const record of [windowRecord(UNREACHABLE_FACTS), preflightOnly]) {
       const store = memoryStore();
       const outcome = decidedRecord(await recordWindow(windowRun(store, record, { workload: unloadable })));
       expect(outcome.decision).toBe("incomplete-missing-measurement");
@@ -249,7 +249,7 @@ describe("recordWindow (--pilot)", () => {
     // A window that will dispatch loads it first, and refuses before writing anything.
     const store = memoryStore();
     const route = fakeRoute(accepted);
-    expect(await recordWindow(windowRun(store, windowRecord(true), { workload: unloadable }, route))).toEqual({
+    expect(await recordWindow(windowRun(store, windowRecord(READY_FACTS), { workload: unloadable }, route))).toEqual({
       ok: false,
       error: "window test-window cannot dispatch: its workload corpus does not load: ENOENT: no such corpus",
     });
@@ -260,7 +260,7 @@ describe("recordWindow (--pilot)", () => {
 
   it("records a window the route fail-fast stopped: its ending in window.json and in the result, every landed sample, and an incomplete decision", async () => {
     const store = memoryStore();
-    const run = windowRun(store, windowRecord(true), {
+    const run = windowRun(store, windowRecord(READY_FACTS), {
       routeHealth: async () => ({ kind: "unreachable", reason: "fetch failed (connect ECONNREFUSED)" }),
     }, fakeRoute(() => INFRASTRUCTURE));
     const { window, decision } = recorded(await recordWindow(run));
@@ -277,7 +277,7 @@ describe("recordWindow (--pilot)", () => {
 
   it("closes a window whose route probe throws as route-unreachable with the error, never leaving it open", async () => {
     const store = memoryStore();
-    const run = windowRun(store, windowRecord(true), {
+    const run = windowRun(store, windowRecord(READY_FACTS), {
       routeHealth: async () => { throw new Error("probe crashed"); },
     }, fakeRoute(() => INFRASTRUCTURE));
     const { window } = recorded(await recordWindow(run));
@@ -291,12 +291,12 @@ describe("recordWindow (--pilot)", () => {
 
   it("records a completed schedule's ending, and none for a window that never dispatched", async () => {
     const dispatched = memoryStore();
-    const { window } = recorded(await recordWindow(windowRun(dispatched, windowRecord(true), {}, fakeRoute(accepted))));
+    const { window } = recorded(await recordWindow(windowRun(dispatched, windowRecord(READY_FACTS), {}, fakeRoute(accepted))));
     expect(window).toMatchObject({ ending: { kind: "completed" } });
     expect(json(dispatched, WINDOW_FILES.window)["ending"]).toMatchObject({ kind: "completed" });
     const readBack = parseRetainedWindow(dispatched.files.get(WINDOW_FILES.window) ?? "", "w.json");
     expect(readBack.ok && readBack.value.ending).toEqual({ kind: "dispatched", ending: { kind: "completed", pairs: expect.any(Number) } });
-    const blocked = recorded(await recordWindow(windowRun(memoryStore(), windowRecord(false))));
+    const blocked = recorded(await recordWindow(windowRun(memoryStore(), windowRecord(UNREACHABLE_FACTS))));
     expect(blocked.window).toMatchObject({ dispatch: { kind: "not-attempted" }, observations: 0 });
     expect(blocked.window).not.toHaveProperty("ending");
     expect(json(await blockedWindow(), WINDOW_FILES.window)).not.toHaveProperty("ending");
@@ -322,7 +322,7 @@ describe("recordWindow (--pilot)", () => {
       })),
     };
     const route = fakeRoute(accepted);
-    const outcome = recorded(await recordWindow(windowRun(store, windowRecord(true), { preregistration: { ...LOADED, prereg: undeclared } }, route)));
+    const outcome = recorded(await recordWindow(windowRun(store, windowRecord(READY_FACTS), { preregistration: { ...LOADED, prereg: undeclared } }, route)));
     expect(outcome.decision).toMatchObject({ ok: false, error: expect.stringMatching(/^the rubric assessor cannot assess window test-window:/) });
     expect(outcome.window).toMatchObject({ ending: { kind: "completed" } });
     const window = json(store, WINDOW_FILES.window);
