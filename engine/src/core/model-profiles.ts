@@ -132,55 +132,74 @@ const profile = (id: LlmProfileId, claudeCode: ClaudeCodeModel): LlmProfile => O
   pi: LOCAL_PI_TARGET,
 });
 
+/** Each catalog profile's Claude Code model — total over `LlmProfileId` by construction. */
+const CLAUDE_MODEL_BY_PROFILE = Object.freeze({
+  "implementation": "opus",
+  "architecture-finalize": "opus",
+  "general-review": "sonnet",
+  "focused-review": "sonnet",
+  "panel-design": "opus",
+  "panel-judge": "opus",
+  "refutation": "opus",
+  "mechanical": "haiku",
+  "spec-check-review": "sonnet",
+} satisfies Record<LlmProfileId, ClaudeCodeModel>);
+
 /**
  * Exact targets per harness; none is an alias for a parent model. Claude
  * Code runs Claude models. Pi runs the one local route, so every profile
- * shares it and the profiles differ only in their Claude model.
+ * shares it and the profiles differ only in their Claude model. One entry per
+ * id, in `LLM_PROFILE_IDS` order.
  */
-export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
-  profile("implementation", "opus"),
-  profile("architecture-finalize", "opus"),
-  profile("general-review", "sonnet"),
-  profile("focused-review", "sonnet"),
-  profile("panel-design", "opus"),
-  profile("panel-judge", "opus"),
-  profile("refutation", "opus"),
-  profile("mechanical", "haiku"),
-  profile("spec-check-review", "sonnet"),
-]);
+export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze(
+  LLM_PROFILE_IDS.map((id) => profile(id, CLAUDE_MODEL_BY_PROFILE[id])),
+);
 
-const RETIRED_SOL: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
+/** Each Pi target the catalog has retired, named once; the history below refers to these. */
+const RETIRED_GPT_5_6_SOL: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
+const RETIRED_GPT_5_5: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.5", thinking: "high" });
+const RETIRED_GPT_5_4_MINI: RetiredPiTarget = Object.freeze({ provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" });
+const RETIRED_GPT_5_6_TERRA: RetiredPiTarget = Object.freeze({ provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" });
 
 /**
- * The bindings a stored request authority issued under each recorded profile
- * may carry: the Claude model (unchanged since issuance) and every Pi target
- * the profile has lowered to, current first. Reconstructed from the catalog's
- * Git history; a target absent from a row was never that profile's binding.
+ * The Pi targets each catalog profile lowered to BEFORE its current one,
+ * newest first. Only history is written here: a profile's current binding is
+ * its catalog lowering (`currentProfileBindings`), never a second copy, so
+ * retargeting a profile cannot leave issuance and the catalog disagreeing.
+ * Retargeting moves the outgoing target onto the front of its row. Reconstructed
+ * from the catalog's Git history; a target absent from a row was never that
+ * profile's binding.
  */
-const RECORDED_PROFILE_BINDINGS: Readonly<Record<RecordedLlmProfileId, Readonly<{
-  claudeCode: ClaudeCodeModel;
-  pi: readonly [LocalPiTarget, ...RetiredPiTarget[]];
-}>>> = Object.freeze({
-  "implementation": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
-  "architecture-finalize": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
-  "general-review": { claudeCode: "sonnet", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
-  "focused-review": {
-    claudeCode: "sonnet",
-    pi: [LOCAL_PI_TARGET, Object.freeze({ provider: "openai-codex", model: "gpt-5.5", thinking: "high" })],
-  },
-  "qualified-local-review": { claudeCode: "sonnet", pi: [LOCAL_PI_TARGET] },
-  "panel-design": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
-  "panel-judge": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
-  "refutation": { claudeCode: "opus", pi: [LOCAL_PI_TARGET, RETIRED_SOL] },
-  "mechanical": {
-    claudeCode: "haiku",
-    pi: [LOCAL_PI_TARGET, Object.freeze({ provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" })],
-  },
-  "spec-check-review": {
-    claudeCode: "sonnet",
-    pi: [LOCAL_PI_TARGET, Object.freeze({ provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" })],
-  },
+const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget[]>> = Object.freeze({
+  "implementation": Object.freeze([RETIRED_GPT_5_6_SOL]),
+  "architecture-finalize": Object.freeze([RETIRED_GPT_5_6_SOL]),
+  "general-review": Object.freeze([RETIRED_GPT_5_6_SOL]),
+  "focused-review": Object.freeze([RETIRED_GPT_5_5]),
+  "panel-design": Object.freeze([RETIRED_GPT_5_6_SOL]),
+  "panel-judge": Object.freeze([RETIRED_GPT_5_6_SOL]),
+  "refutation": Object.freeze([RETIRED_GPT_5_6_SOL]),
+  "mechanical": Object.freeze([RETIRED_GPT_5_4_MINI]),
+  "spec-check-review": Object.freeze([RETIRED_GPT_5_6_TERRA]),
 });
+
+/**
+ * Profiles the catalog no longer carries, so there is no current lowering to
+ * derive from: each row is wholly history — the Claude model and every Pi
+ * target the profile issued, newest first. `qualified-local-review` issued
+ * only the local route it was retired on.
+ */
+const RETIRED_PROFILE_BINDINGS: Readonly<Record<RetiredLlmProfileId, Readonly<{
+  claudeCode: ClaudeCodeModel;
+  pi: readonly [PiTarget, ...PiTarget[]];
+}>>> = Object.freeze({
+  "qualified-local-review": Object.freeze({ claudeCode: "sonnet", pi: Object.freeze([LOCAL_PI_TARGET] as const) }),
+});
+
+/** The exact bindings a request issued under one catalog profile carries today. */
+export type CurrentProfileBindings = Readonly<{
+  claude: ClaudeCodeBinding;
+  pi: PiBinding;
+}>;
 
 /** The exact bindings a request issued under one recorded profile may carry. */
 export type RecordedProfileBindings = Readonly<{
@@ -188,14 +207,36 @@ export type RecordedProfileBindings = Readonly<{
   pi: readonly [PiBinding, ...PiBinding[]];
 }>;
 
-/** The Claude binding and every Pi binding `profileId` has issued, current first. */
+/** `LLM_PROFILES` keyed by id; total because `LLM_PROFILES` maps every `LLM_PROFILE_IDS` entry. */
+const CATALOG_PROFILES: Readonly<Record<LlmProfileId, LlmProfile>> = Object.freeze(
+  Object.fromEntries(LLM_PROFILES.map((entry) => [entry.id, entry])) as Record<LlmProfileId, LlmProfile>,
+);
+
+const lowerPiTarget = (target: PiTarget): PiBinding => Object.freeze({ harness: "pi", ...target });
+
+/** The bindings `profileId` issues today: exactly its catalog lowering on both harnesses. */
+export function currentProfileBindings(profileId: LlmProfileId): CurrentProfileBindings {
+  const entry = CATALOG_PROFILES[profileId];
+  return Object.freeze({ claude: lowerModelProfile(entry, "claude-code"), pi: lowerModelProfile(entry, "pi") });
+}
+
+/**
+ * The Claude binding and every Pi binding `profileId` has issued, current
+ * first. A catalog profile's current binding is its catalog lowering; only
+ * what came before is recorded data.
+ */
 export function recordedProfileBindings(profileId: RecordedLlmProfileId): RecordedProfileBindings {
-  const row = RECORDED_PROFILE_BINDINGS[profileId];
-  const lower = (target: PiTarget): PiBinding => Object.freeze({ harness: "pi", ...target });
-  const [current, ...retired] = row.pi;
+  if (includes(RETIRED_LLM_PROFILE_IDS, profileId)) {
+    const row = RETIRED_PROFILE_BINDINGS[profileId];
+    return Object.freeze({
+      claude: Object.freeze({ harness: "claude-code", model: row.claudeCode }),
+      pi: Object.freeze(row.pi.map(lowerPiTarget) as [PiBinding, ...PiBinding[]]),
+    });
+  }
+  const current = currentProfileBindings(profileId);
   return Object.freeze({
-    claude: Object.freeze({ harness: "claude-code", model: row.claudeCode }),
-    pi: Object.freeze([lower(current), ...retired.map(lower)] as const),
+    claude: current.claude,
+    pi: Object.freeze([current.pi, ...RETIRED_PI_HISTORY[profileId].map(lowerPiTarget)] as const),
   });
 }
 

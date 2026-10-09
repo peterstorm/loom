@@ -9,6 +9,7 @@ import {
   LLM_PROFILES,
   RETIRED_LLM_PROFILE_IDS,
   lowerModelProfile,
+  currentProfileBindings,
   recordedProfileBindings,
   parseAgentFrontmatter,
   parseLlmProfile,
@@ -104,8 +105,43 @@ describe("recorded profile bindings", () => {
   it("records each current profile's catalog lowering first, with its unchanged Claude model", () => {
     for (const profile of LLM_PROFILES) {
       const recorded = recordedProfileBindings(profile.id);
-      expect(recorded.pi[0]).toEqual(lowerModelProfile(profile, "pi"));
-      expect(recorded.claude).toEqual(lowerModelProfile(profile, "claude-code"));
+      const current = currentProfileBindings(profile.id);
+      expect(current).toEqual({ claude: lowerModelProfile(profile, "claude-code"), pi: lowerModelProfile(profile, "pi") });
+      expect(recorded.pi[0]).toEqual(current.pi);
+      expect(recorded.claude).toEqual(current.claude);
+    }
+  });
+
+  it("keeps every recorded binding byte-for-byte, current lowering included", () => {
+    const rows = Object.fromEntries([...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].map((id) => {
+      const recorded = recordedProfileBindings(id);
+      return [id, [recorded.claude.model, ...recorded.pi.map((binding) => JSON.stringify(binding))]];
+    }));
+    const local = JSON.stringify({ harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" });
+    const sol = JSON.stringify({ harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" });
+    expect(rows).toEqual({
+      implementation: ["opus", local, sol],
+      "architecture-finalize": ["opus", local, sol],
+      "general-review": ["sonnet", local, sol],
+      "focused-review": ["sonnet", local, JSON.stringify({ harness: "pi", provider: "openai-codex", model: "gpt-5.5", thinking: "high" })],
+      "qualified-local-review": ["sonnet", local],
+      "panel-design": ["opus", local, sol],
+      "panel-judge": ["opus", local, sol],
+      refutation: ["opus", local, sol],
+      mechanical: ["haiku", local, JSON.stringify({ harness: "pi", provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" })],
+      "spec-check-review": ["sonnet", local, JSON.stringify({ harness: "pi", provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" })],
+    });
+  });
+
+  it("returns immutable recorded and current bindings", () => {
+    for (const id of [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS]) {
+      const recorded = recordedProfileBindings(id);
+      expect(Object.isFrozen(recorded) && Object.isFrozen(recorded.pi) && Object.isFrozen(recorded.claude)).toBe(true);
+      expect(recorded.pi.every(Object.isFrozen)).toBe(true);
+    }
+    for (const id of LLM_PROFILE_IDS) {
+      const current = currentProfileBindings(id);
+      expect(Object.isFrozen(current) && Object.isFrozen(current.pi) && Object.isFrozen(current.claude)).toBe(true);
     }
   });
 

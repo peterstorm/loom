@@ -1002,8 +1002,9 @@ describe("ExactRoster and CompleteRoster conservation", () => {
     const tampers: readonly Readonly<{ change: Readonly<Record<string, unknown>>; field: string }>[] = [
       // focused-review never lowered to gpt-5.6-sol.
       { change: { modelProfile: "focused-review", harnessBinding: { ...retiredFocusedBindings, pi: { ...retiredFocusedBindings.pi, model: "gpt-5.6-sol" } } }, field: "harnessBinding.pi" },
-      // qualified-local-review only ever issued the local route.
-      { change: { role: "code-reviewer", modelProfile: "qualified-local-review", harnessBinding: { ...generalReviewBindings, pi: retiredFocusedBindings.pi }, requiredSkill: null }, field: "harnessBinding.pi.provider" },
+      // qualified-local-review only ever issued the local route. A re-read is
+      // checked against the recorded SET, however small, so it is refused once.
+      { change: { role: "code-reviewer", modelProfile: "qualified-local-review", harnessBinding: { ...generalReviewBindings, pi: retiredFocusedBindings.pi }, requiredSkill: null }, field: "harnessBinding.pi" },
       { change: { harnessBinding: { ...implementationBindings, claude: { harness: "claude-code", model: "haiku" } } }, field: "harnessBinding.claude.model" },
       { change: { modelProfile: "no-such-profile" }, field: "modelProfile" },
       { change: { extra: true }, field: "request.extra" },
