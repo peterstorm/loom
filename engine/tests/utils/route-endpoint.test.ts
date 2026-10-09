@@ -12,7 +12,7 @@ import {
   readRouteEndpoint,
   type RouteProbePort,
 } from "../../src/utils/route-endpoint";
-import { LOCAL_PI_BINDING, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_PROFILE, RETIRED_CLOUD_ROUTE } from "../fixtures/local-pi-binding";
+import { LOCAL_PI_BINDING, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_PROFILE } from "../fixtures/local-pi-binding";
 
 const LOCAL: PiBinding = LOCAL_PI_BINDING;
 
@@ -158,7 +158,7 @@ describe("observeSpawnRoutes", () => {
     const dir = agentDir({ providers: { [LOCAL.provider]: { baseUrl: "http://vllm/v1" } } });
     expect(await observeSpawnRoutes([request(RETIRED_CLOUD_PI_BINDING), request(LOCAL)], { agentDir: dir, routing: { parentRef: null, config: null }, probe }))
       .toMatchObject({ ok: true, decisions: [
-        { kind: "retired", route: RETIRED_CLOUD_ROUTE, profile: RETIRED_CLOUD_PROFILE },
+        { kind: "retired", profile: RETIRED_CLOUD_PROFILE, recorded: RETIRED_CLOUD_PI_BINDING, current: LOCAL },
         { kind: "reachable", route: LOCAL_PI_ROUTE },
       ] });
     expect(probed).toEqual([LOCAL.provider]);

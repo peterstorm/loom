@@ -190,7 +190,13 @@ export type PiHistoryViolation = Readonly<{
  * Check one profile's recorded Pi history against its current target (`null`
  * for a retired profile, which has none): the structural invariant every row
  * of `RETIRED_PI_HISTORY` and `RETIRED_PROFILE_BINDINGS` holds. Pure and
- * total; the module runs it over both tables at load.
+ * total.
+ *
+ * The tables are constant data no caller input reaches, so the invariant is
+ * pinned by a test over every recorded profile
+ * (tests/core/model-profiles.test.ts) rather than checked when the module
+ * loads: a malformed row fails the suite before it can ship, and loading the
+ * catalog never throws.
  */
 export function piHistoryViolations(
   profileId: RecordedLlmProfileId,
@@ -206,32 +212,16 @@ export function piHistoryViolations(
 }
 
 /**
- * `rows`, once every row passes `check`. A violation is a defect in the
- * catalog's own constant data — no caller input reaches it — so the module
- * refuses to load rather than issue or admit under a malformed history.
- */
-function guardedPiHistory<Id extends RecordedLlmProfileId, Row>(
-  rows: Readonly<Record<Id, Row>>,
-  check: (profileId: Id, row: Row) => readonly PiHistoryViolation[],
-): Readonly<Record<Id, Row>> {
-  const violations = (Object.entries(rows) as [Id, Row][]).flatMap(([profileId, row]) => check(profileId, row));
-  if (violations.length > 0) {
-    throw new Error(`model profile Pi history is malformed: ${violations.map(({ kind, profileId, target }) => `${profileId} ${kind} ${target}`).join("; ")}`);
-  }
-  return rows;
-}
-
-/**
  * The Pi targets each catalog profile lowered to BEFORE its current one,
  * newest first. Only history is written here: a profile's current binding is
  * its catalog lowering (`currentProfileBindings`), never a second copy, so
  * retargeting a profile cannot leave issuance and the catalog disagreeing.
  * Retargeting moves the outgoing target onto the front of its row. Reconstructed
  * from the catalog's Git history; a target absent from a row was never that
- * profile's binding. Guarded at load (`piHistoryViolations`): no row repeats a
- * target or holds its profile's current one.
+ * profile's binding. No row repeats a target or holds its profile's current
+ * one (`piHistoryViolations`, pinned by test).
  */
-const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget[]>> = guardedPiHistory(Object.freeze({
+const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget[]>> = Object.freeze({
   "implementation": Object.freeze([RETIRED_GPT_5_6_SOL]),
   "architecture-finalize": Object.freeze([RETIRED_GPT_5_6_SOL]),
   "general-review": Object.freeze([RETIRED_GPT_5_6_SOL]),
@@ -241,7 +231,7 @@ const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget
   "refutation": Object.freeze([RETIRED_GPT_5_6_SOL]),
   "mechanical": Object.freeze([RETIRED_GPT_5_4_MINI]),
   "spec-check-review": Object.freeze([RETIRED_GPT_5_6_TERRA]),
-}), (profileId, history) => piHistoryViolations(profileId, LLM_PROFILES_BY_ID[profileId].pi, history));
+});
 
 /**
  * Profiles the catalog no longer carries, so there is no current lowering to
@@ -252,9 +242,9 @@ const RETIRED_PI_HISTORY: Readonly<Record<LlmProfileId, readonly RetiredPiTarget
 const RETIRED_PROFILE_BINDINGS: Readonly<Record<RetiredLlmProfileId, Readonly<{
   claudeCode: ClaudeCodeModel;
   pi: readonly [PiTarget, ...PiTarget[]];
-}>>> = guardedPiHistory(Object.freeze({
+}>>> = Object.freeze({
   "qualified-local-review": Object.freeze({ claudeCode: "sonnet", pi: Object.freeze([LOCAL_PI_TARGET] as const) }),
-}), (profileId, row) => piHistoryViolations(profileId, null, row.pi));
+});
 
 /** The exact bindings a request issued under one catalog profile carries today: its Pi binding is local. */
 export type CurrentProfileBindings = Readonly<{

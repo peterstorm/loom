@@ -498,7 +498,7 @@ async function resumeAwaitingRefutation(
       action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, reissues, true) },
     };
   }
-  let panelState = startPersistentRefutationPanel(preparation.panel).state;
+  let panelState = startPersistentRefutationPanel(preparation.panel.authority).state;
   // Collect the FULL immutable event prefix as the panel runs. The legacy
   // completed-state projection records accepted verdicts only, so a slot
   // accepted on attempt 2 (after an attempt-1 verdict was rejected) cannot
@@ -803,7 +803,7 @@ async function resumeAwaitingResults(
       kind: "aggregate-has-criticals",
       aggregate: aggregate.value.aggregate,
       panelAuthority: preparation.frozen,
-      refutationAuthority: preparation.panel,
+      refutationAuthority: preparation.panel.authority,
     });
     if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") return failed(reduced.ok ? "critical route did not reach refutation" : reduced.error.message);
     await handle.writeCheckpoint(serializeStandaloneReviewMachineState(reduced.value));

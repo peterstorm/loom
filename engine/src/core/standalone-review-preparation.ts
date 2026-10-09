@@ -6,8 +6,8 @@
  */
 import { sha256Hex } from "./digest";
 import {
-  canonicalRecord, canonicalStructuralEquals, issueAgentRosterSlot, mintAgentRequestAuthority,
-  parseExactRoster, parseOrchestrationRunId,
+  canonicalRecord, canonicalStructuralEquals, mintAgentRosterSlot,
+  parseExactRoster, parseOrchestrationRunId, rosterSlotErrorMessages,
   type AgentRosterSlot, type DomainResult, type MintedAgentRosterSlot, type NonEmpty,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
@@ -196,27 +196,19 @@ export function prepareFreshStandaloneReview(
     const slotId = `standalone-slot:${index + 1}:${role}`;
     // Each request is minted from the catalog: the one point a request is
     // checked against today's catalog (rosters are re-read as recorded).
-    const mint = <Attempt extends 1 | 2>(attempt: Attempt, contextDigest: string) => mintAgentRequestAuthority({
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt, contextDigest: string) => ({
       runId: runId.value,
       requestId: `request:${sha256Hex(`${runId.value}\u0000${role}\u0000${attempt}`)}`,
       slotId,
-      program: "standalone-review",
+      program: "standalone-review" as const,
       role,
       attempt,
       contextDigest,
       outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
     });
-    const first = mint(1, firstContext);
-    const retry = mint(2, retryContext);
-    if (!first.ok || !retry.ok) {
-      for (const minted of [first, retry]) {
-        if (!minted.ok) authorityErrors.push(...minted.error.violations.map(({ message }) => `${role}: ${message}`));
-      }
-      return null;
-    }
-    const slot = issueAgentRosterSlot(first.value, retry.value);
+    const slot = mintAgentRosterSlot(identity(1, firstContext), identity(2, retryContext));
     if (!slot.ok) {
-      authorityErrors.push(...slot.error.violations.map(({ kind }) => `${role}: roster slot: ${kind}`));
+      authorityErrors.push(...rosterSlotErrorMessages(slot.error).map((message) => `${role}: ${message}`));
       return null;
     }
     return slot.value;

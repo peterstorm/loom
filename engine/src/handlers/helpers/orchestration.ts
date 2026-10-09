@@ -80,7 +80,7 @@ import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 import { httpRouteProbe, observeSpawnRoutes, type RouteProbePort } from "../../utils/route-endpoint";
-import { decideSpawnGate, parseRouteGateMode, ROUTE_GATE_VARIABLE } from "../../core/route-reachability";
+import { decideSpawnGate, parseRouteGateMode, reportUnverifiedRoutes, ROUTE_GATE_VARIABLE, type UnverifiedRoute } from "../../core/route-reachability";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
@@ -1062,44 +1062,52 @@ async function publishCompletionBinding(
  * later `resume` re-emits the same batch.
  *
  * A reachable route whose served model went unconfirmed is admitted and
- * reported on stderr (`loom-route-unverified`), unless the operator set
- * `LOOM_ROUTE_GATE=strict`, which refuses it. Every input the gate cannot
- * read refuses rather than guessing a route: a request authority that does
- * not parse (its route is unknown), a malformed `model-routing.json` (the
- * child may launch elsewhere than the declared binding), a malformed
- * `models.json`, or a `LOOM_ROUTE_GATE` naming no mode.
+ * reported — on stderr (`loom-route-unverified`) and in the emitted action's
+ * `unverifiedRoutes` — unless the operator set `LOOM_ROUTE_GATE=strict`,
+ * which refuses it. Every input the gate cannot read refuses rather than
+ * guessing a route: a request authority that does not parse (its route is
+ * unknown), a malformed `model-routing.json` (the child may launch elsewhere
+ * than the declared binding), a malformed `models.json`, or a
+ * `LOOM_ROUTE_GATE` naming no mode.
  */
-async function spawnRouteRefusal(
+async function gateSpawnRoutes(
   action: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>,
   probe: RouteProbePort,
-): Promise<HookResult | null> {
+): Promise<SpawnRouteGate> {
+  const refused = (message: string): SpawnRouteGate => ({ kind: "refused", result: { kind: "error", message } });
   const requests: AgentRequestAuthority[] = [];
   for (const [index, { authority }] of action.requests.entries()) {
     const parsed = parseSpawnRequestAuthority(HARNESS_LABEL.pi, index, authority);
-    if (!parsed.ok) return { kind: "error", message: parsed.message };
+    if (!parsed.ok) return refused(parsed.message);
     requests.push(parsed.value);
   }
   const mode = parseRouteGateMode(process.env[ROUTE_GATE_VARIABLE]);
-  if (!mode.ok) return { kind: "error", message: `cannot check Pi route reachability: ${mode.error}` };
+  if (!mode.ok) return refused(`cannot check Pi route reachability: ${mode.error}`);
   const agentDir = activeAgentDir();
   const routing = buildPiRoutingContext(process.env, agentDir);
-  if (routing.configError !== null) return { kind: "error", message: `cannot check Pi route reachability: ${routing.configError}` };
+  if (routing.configError !== null) return refused(`cannot check Pi route reachability: ${routing.configError}`);
   const observed = await observeSpawnRoutes(requests, { agentDir, routing: routing.context, probe });
-  if (!observed.ok) return { kind: "error", message: `cannot check Pi route reachability: ${observed.error}` };
+  if (!observed.ok) return refused(`cannot check Pi route reachability: ${observed.error}`);
   return match(decideSpawnGate(observed.decisions, mode.value))
-    .returnType<HookResult | null>()
-    .with({ kind: "refused" }, ({ message }) => ({ kind: "error", message }))
+    .returnType<SpawnRouteGate>()
+    .with({ kind: "refused" }, ({ message }) => refused(message))
     .with({ kind: "admitted" }, ({ unverified }) => {
       for (const route of unverified) process.stderr.write(`${JSON.stringify({ event: "loom-route-unverified", ...route })}\n`);
-      return null;
+      return { kind: "admitted", unverified };
     })
     .exhaustive();
 }
 
+/** The Pi route gate's outcome at the emission seam: the hook result it refused with, or the unverified routes it admitted. */
+type SpawnRouteGate =
+  | Readonly<{ kind: "refused"; result: HookResult }>
+  | Readonly<{ kind: "admitted"; unverified: readonly UnverifiedRoute[] }>;
+
 /**
  * Emit one façade action: gate a Pi parent's spawn batch on its routes,
- * publish the session binding, then print the action. `probe` is the route
- * probe port; the handler tests substitute a fake.
+ * publish the session binding, then print the action — annotated with the
+ * routes the gate admitted unverified, if any. `probe` is the route probe
+ * port; the handler tests substitute a fake.
  */
 export async function emitRunAction(
   handle: RunDirHandle,
@@ -1107,17 +1115,18 @@ export async function emitRunAction(
   probe: RouteProbePort = httpRouteProbe(),
 ): Promise<HookResult> {
   const session = bindingSessionOf(process.env);
-  if (session?.harness === "pi" && action.kind === "spawn-batch") {
-    const refusal = await spawnRouteRefusal(action, probe);
-    if (refusal !== null) return refusal;
-  }
+  // Only a Pi parent's spawn batch is gated; every other action is emitted as is.
+  const gate: SpawnRouteGate = session?.harness === "pi" && action.kind === "spawn-batch"
+    ? await gateSpawnRoutes(action, probe)
+    : { kind: "admitted", unverified: [] };
+  if (gate.kind === "refused") return gate.result;
   if (session !== null) {
     const failure = action.kind === "spawn-batch" ? await publishSpawnBinding(session, handle, action)
       : action.kind === "done" ? await publishCompletionBinding(session, handle, action)
       : null;
     if (failure !== null) return failure;
   }
-  process.stdout.write(`${JSON.stringify(action, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(reportUnverifiedRoutes(action, gate.unverified), null, 2)}\n`);
   return { kind: "allow" };
 }
 

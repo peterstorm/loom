@@ -34,13 +34,16 @@ import { parseReviewPath } from "./review-packet";
 import { sha256Hex } from "./digest";
 import { safeArray, safeRecord } from "./exact-data";
 import {
+  issueExactRoster,
   parseExactRoster,
   parseOrchestrationRunId,
   parseRequestId,
   parseSlotId,
   type AgentRequestAuthority,
+  type AgentRosterSlot,
   type DomainResult,
   type ExactRoster,
+  type ExactRosterError,
   type MintedAgentRosterSlot,
   type NonEmpty,
   type OrchestrationRunId,
@@ -485,7 +488,13 @@ function parseStrictBriefFinding(raw: unknown): DomainResult<BriefFinding, Reado
   }) };
 }
 
-export type RefutationPanelAuthority = Readonly<{
+/**
+ * A refutation panel's authority. `Slot` is what its verifier roster holds:
+ * recorded history (`AgentRosterSlot`) for a panel parsed from a checkpoint or
+ * reconstructed from its record, minted slots for one being issued
+ * (`IssuedRefutationPanelAuthority`).
+ */
+export type RefutationPanelAuthority<Slot extends AgentRosterSlot = AgentRosterSlot> = Readonly<{
   schemaVersion: 2;
   panel: "refutation";
   runId: OrchestrationRunId;
@@ -493,7 +502,7 @@ export type RefutationPanelAuthority = Readonly<{
   identityRunId: OrchestrationRunId;
   findings: readonly [BriefFinding, ...BriefFinding[]];
   lenses: readonly [ReviewLens, ...ReviewLens[]];
-  verifierRoster: ExactRoster;
+  verifierRoster: ExactRoster<Slot>;
 }>;
 
 export type RefutationPanelAuthorityInput = Readonly<{
@@ -558,53 +567,72 @@ export function boundCandidateEntry(
  *  `RefutationPanelAuthorityInput`, or a checkpoint's `authority` field read
  *  back from disk. No shape is assumed of `raw`. */
 export function parseRefutationPanelAuthority(raw: unknown): PersistentPanelResult<RefutationPanelAuthority> {
+  return refutationPanelAuthorityOver(raw, parseExactRoster);
+}
+
+/**
+ * The refutation panel authority `raw` describes, its verifier roster built by
+ * `roster` from the raw `verifierSlots`: parsed as recorded history, or issued
+ * from minted slots. Every other check is the same for both, and the result
+ * keeps the roster's slot type.
+ */
+function refutationPanelAuthorityOver<Slot extends AgentRosterSlot>(
+  raw: unknown,
+  roster: (verifierSlots: unknown) => DomainResult<ExactRoster<Slot>, ExactRosterError>,
+): PersistentPanelResult<RefutationPanelAuthority<Slot>> {
   try {
     const input = safeRecord(raw, ["runId", "identityRunId", "findings", "lenses", "verifierSlots"]) ??
       safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);
     if (input === null) return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority must be an exact data record"));
-    const runId = parseOrchestrationRunId(input.runId);
-    const identityRunId = parseOrchestrationRunId(input.identityRunId ?? input.runId);
-    const rawFindings = safeArray(input.findings);
-    const lenses = nonEmptyDistinctStrings(input.lenses);
-    const roster = parseExactRoster(input.verifierSlots);
-    const parsedFindings = refutationFindings(rawFindings);
-    const findings = [...parsedFindings.findings];
-    const errors: string[] = [];
-    if (!runId.ok) errors.push(runId.error.message);
-    if (!identityRunId.ok) errors.push(identityRunId.error.message);
-    errors.push(...parsedFindings.errors);
-    if (new Set(findings.map(({ id }) => id)).size !== findings.length) errors.push("refutation findings must be distinct");
-    if (lenses === null) errors.push("refutation lenses must be a non-empty distinct ordered list");
-    const parsedLenses = lenses?.filter((lens): lens is ReviewLens => (REVIEW_LENSES as readonly string[]).includes(lens)) ?? [];
-    if (lenses !== null && parsedLenses.length !== lenses.length) errors.push("refutation lenses contain an unknown review lens");
-    if (!roster.ok) errors.push(...roster.error.violations.map(({ kind }) => `verifier roster: ${kind}`));
-    if (runId.ok && lenses !== null && roster.ok) {
-      errors.push(...rosterAuthorityErrors(
-        roster.value,
-        runId.value,
-        "refutation-panel",
-        "review-verifier-agent",
-        lenses,
-        "verifier",
-        findings.map(({ id }) => id),
-        identityRunId.ok ? identityRunId.value : runId.value,
-      ));
-    }
-    if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
-      return persistentFailure(panelError("refutation", "invalid-authority", errors.join("; ") || "refutation authority is invalid"));
-    }
-    return persistentSuccess(Object.freeze({
-      schemaVersion: 2 as const,
-      panel: "refutation" as const,
-      runId: runId.value,
-      identityRunId: identityRunId.value,
-      findings: Object.freeze(findings) as readonly [BriefFinding, ...BriefFinding[]],
-      lenses: Object.freeze(parsedLenses) as readonly [ReviewLens, ...ReviewLens[]],
-      verifierRoster: roster.value,
-    }));
+    return refutationPanelAuthorityFrom(input, roster(input.verifierSlots));
   } catch {
     return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority could not be safely inspected"));
   }
+}
+
+function refutationPanelAuthorityFrom<Slot extends AgentRosterSlot>(
+  input: Readonly<Record<string, unknown>>,
+  roster: DomainResult<ExactRoster<Slot>, ExactRosterError>,
+): PersistentPanelResult<RefutationPanelAuthority<Slot>> {
+  const runId = parseOrchestrationRunId(input.runId);
+  const identityRunId = parseOrchestrationRunId(input.identityRunId ?? input.runId);
+  const rawFindings = safeArray(input.findings);
+  const lenses = nonEmptyDistinctStrings(input.lenses);
+  const parsedFindings = refutationFindings(rawFindings);
+  const findings = [...parsedFindings.findings];
+  const errors: string[] = [];
+  if (!runId.ok) errors.push(runId.error.message);
+  if (!identityRunId.ok) errors.push(identityRunId.error.message);
+  errors.push(...parsedFindings.errors);
+  if (new Set(findings.map(({ id }) => id)).size !== findings.length) errors.push("refutation findings must be distinct");
+  if (lenses === null) errors.push("refutation lenses must be a non-empty distinct ordered list");
+  const parsedLenses = lenses?.filter((lens): lens is ReviewLens => (REVIEW_LENSES as readonly string[]).includes(lens)) ?? [];
+  if (lenses !== null && parsedLenses.length !== lenses.length) errors.push("refutation lenses contain an unknown review lens");
+  if (!roster.ok) errors.push(...roster.error.violations.map(({ kind }) => `verifier roster: ${kind}`));
+  if (runId.ok && lenses !== null && roster.ok) {
+    errors.push(...rosterAuthorityErrors(
+      roster.value,
+      runId.value,
+      "refutation-panel",
+      "review-verifier-agent",
+      lenses,
+      "verifier",
+      findings.map(({ id }) => id),
+      identityRunId.ok ? identityRunId.value : runId.value,
+    ));
+  }
+  if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
+    return persistentFailure(panelError("refutation", "invalid-authority", errors.join("; ") || "refutation authority is invalid"));
+  }
+  return persistentSuccess(Object.freeze({
+    schemaVersion: 2 as const,
+    panel: "refutation" as const,
+    runId: runId.value,
+    identityRunId: identityRunId.value,
+    findings: Object.freeze(findings) as readonly [BriefFinding, ...BriefFinding[]],
+    lenses: Object.freeze(parsedLenses) as readonly [ReviewLens, ...ReviewLens[]],
+    verifierRoster: roster.value,
+  }));
 }
 
 /** A refutation panel being ISSUED now: its verifier slots hold only minted requests. */
@@ -617,23 +645,19 @@ export type IssuedRefutationPanelAuthorityInput = RefutationPanelAuthorityInput 
  * A panel parsed back from a checkpoint or reconstructed from its durable
  * record is a plain `RefutationPanelAuthority` — history, not issuance.
  */
-export type IssuedRefutationPanelAuthority = RefutationPanelAuthority & Readonly<{
-  verifierRoster: ExactRoster<MintedAgentRosterSlot>;
-}>;
+export type IssuedRefutationPanelAuthority = RefutationPanelAuthority<MintedAgentRosterSlot>;
 
 /**
  * Issue a refutation panel authority: the issuing seam, typed so its verifier
- * slots must come from `issueAgentRosterSlot`, and its result keeps that proof
- * in the roster type. The checks are exactly `parseRefutationPanelAuthority`'s,
- * which also re-reads checkpoints and so takes its roster as recorded history.
+ * slots must be minted (`mintAgentRosterSlot`, `issueAgentRosterSlot`). Its
+ * roster is issued from those slots (`issueExactRoster`), so the result keeps
+ * the minted slot type by construction; every other check is exactly
+ * `parseRefutationPanelAuthority`'s.
  */
 export function issueRefutationPanelAuthority(
   input: IssuedRefutationPanelAuthorityInput,
 ): PersistentPanelResult<IssuedRefutationPanelAuthority> {
-  const parsed = parseRefutationPanelAuthority(input);
-  // The roster is the canonical parse of `input.verifierSlots`, every one of
-  // which was minted; parsing preserves each slot's content, so it is minted.
-  return parsed.ok ? persistentSuccess(parsed.value as IssuedRefutationPanelAuthority) : parsed;
+  return refutationPanelAuthorityOver(input, () => issueExactRoster(input.verifierSlots));
 }
 
 

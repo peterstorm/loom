@@ -80,11 +80,9 @@ import {
   deriveWaveAdvisoryNextAction,
   deriveWaveGateDriveStep,
   deriveWaveRefutationPlan,
-  prepareWaveRefutationPanel,
   waveAdvisoryDecisionActionRequest,
 } from "../../src/core/wave-gate-preparation";
 import { WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
-import { lowerModelProfile, resolveAgentPolicy, resolveAgentProfile } from "../../src/core/model-profiles";
 import {
   blockedAction,
   doneAction,
@@ -2242,43 +2240,9 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     const replay = value(deriveWaveRefutationPlan(snapshot));
     expect(replay).toEqual(plan);
     expect(plan.findings.map(({ id }) => id)).toEqual(["T1:code-reviewer-1"]);
-    const panel = value(prepareWaveRefutationPanel(snapshot));
-    expect(panel.authority.findings).toEqual(plan.findings);
-    expect(panel.authority.lenses).toEqual(plan.lenses);
-    expect(panel.authority.verifierRoster.orderedSlots).toHaveLength(plan.lenses.length);
-    // Verifier routing comes from the catalog: the verifier role's own profile
-    // and its exact lowering, never a binding spelled in the Wave Gate core.
-    const verifierPolicy = value(resolveAgentPolicy("review-verifier-agent"));
-    const verifierProfile = value(resolveAgentProfile("review-verifier-agent"));
-    for (const request of panel.authority.verifierRoster.orderedSlots.flatMap(({ attempts }) => attempts)) {
-      expect(request.role).toBe("review-verifier-agent");
-      expect(request.modelProfile).toBe(verifierPolicy.profile);
-      expect(request.harnessBinding).toEqual({
-        pi: lowerModelProfile(verifierProfile, "pi"),
-        claude: lowerModelProfile(verifierProfile, "claude-code"),
-      });
-      // Golden bytes: the serialized authority is unchanged by resolving the
-      // binding through the catalog instead of a literal. Pi runs the one local
-      // route, so the verifier's Pi lowering is the local binding.
-      expect(JSON.stringify(request.harnessBinding)).toBe(
-        '{"pi":{"harness":"pi","provider":"desktop-vllm","model":"glm-5.3-flash-spark-tp2-v14","thinking":"high"},' +
-        '"claude":{"harness":"claude-code","model":"opus"}}',
-      );
-      expect(request.modelProfile).toBe("refutation");
-    }
-    const claimedReplay = value(prepareWaveRefutationPanel(snapshot, {
-      verifierSlots: panel.authority.verifierRoster.orderedSlots,
-    }));
-    expect(claimedReplay.runId).toBe(panel.runId);
-    expect(claimedReplay.findings).toEqual(panel.findings);
-    expect(claimedReplay.lenses).toEqual(panel.lenses);
-    expect(claimedReplay.authority.verifierRoster.orderedSlots).toEqual(panel.authority.verifierRoster.orderedSlots);
-    expect(prepareWaveRefutationPanel(snapshot, {
-      verifierSlots: [...panel.authority.verifierRoster.orderedSlots].reverse(),
-    })).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("caller verifier slot claim drifted") },
-    });
+    expect(plan.lenses.length).toBeGreaterThan(0);
+    // The plan's verifier requests are issued by the one shared seam
+    // (refutation-verifiers.ts); its catalog routing is pinned there.
   });
 
   it("derives advisory await-user internally and exposes it as the sole status action", () => {

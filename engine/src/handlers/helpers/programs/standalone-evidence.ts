@@ -111,7 +111,7 @@ export function standaloneRefutationPreparation(
     },
   });
   const threshold = defaultRefutationThreshold(lenses.length);
-  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: verifiers.panel, threshold });
+  const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: verifiers.panel.authority, threshold });
   if (!frozen.ok) throw new Error(frozen.error.message);
   return { brief, lenses, frozen: frozen.value, threshold, ...verifiers };
 }
@@ -513,7 +513,7 @@ export function replayStandaloneResultFromEvidence(
         kind: "aggregate-has-criticals",
         aggregate: aggregated.value.aggregate,
         panelAuthority: preparation.frozen,
-        refutationAuthority: preparation.panel,
+        refutationAuthority: preparation.panel.authority,
       });
       if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") {
         return failed(reduced.ok ? "critical standalone replay did not reach refutation" : reduced.error.message);
@@ -522,7 +522,7 @@ export function replayStandaloneResultFromEvidence(
       if (durablePanel.kind !== "found") {
         return failed(durablePanel.kind === "absent" ? "standalone refutation publication authority is absent" : durablePanel.message);
       }
-      let panelState = startPersistentRefutationPanel(preparation.panel).state;
+      let panelState = startPersistentRefutationPanel(preparation.panel.authority).state;
       const panelEvents: PersistentRefutationPanelEvent[] = [];
       for (const request of durablePanel.requests) {
         if (request.authority.attempt !== 1) {

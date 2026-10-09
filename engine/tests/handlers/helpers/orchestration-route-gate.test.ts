@@ -209,6 +209,7 @@ describe("emitRunAction: Pi route gate wiring", () => {
 
     expect(piBindings(id)).toMatchObject({ ok: true, value: [{ runId: RUN_ID, requestIds: [authority.requestId] }] });
     expect(JSON.parse(stdout.join(""))).toMatchObject({ kind: "spawn-batch", runId: RUN_ID });
+    expect(JSON.parse(stdout.join(""))).not.toHaveProperty("unverifiedRoutes");
     expect(stderr.join("")).not.toContain("loom-route-unverified");
   });
 
@@ -320,6 +321,11 @@ describe("emitRunAction: unverified routes under each gate mode", () => {
     expect(unverifiedEvents()).toEqual([{
       event: "loom-route-unverified", route: LOCAL_PI_ROUTE, url: "http://vllm.test/v1/models", cause: "auth-refused", status: 401,
     }]);
+    // The emitted action names it too, for an operator who does not watch stderr.
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      kind: "spawn-batch",
+      unverifiedRoutes: [{ route: LOCAL_PI_ROUTE, url: "http://vllm.test/v1/models", cause: "auth-refused", status: 401 }],
+    });
     expect(piBindings(id)).toMatchObject({ ok: true, value: [{ runId: RUN_ID }] });
   });
 

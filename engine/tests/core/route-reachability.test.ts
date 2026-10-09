@@ -8,16 +8,19 @@ import {
   modelsUrl,
   parseRouteGateMode,
   planSpawnRoutes,
+  reportUnverifiedRoutes,
   ROUTE_GATE_VARIABLE,
   type RouteGateMode,
   type RouteProbe,
   type SpawnRouteDecision,
   type SpawnRouting,
+  type UnverifiedRoute,
 } from "../../src/core/route-reachability";
 import {
   DESKTOP_VLLM_ROUTE,
   RETIRED_LLM_PROFILE_IDS,
   LLM_PROFILE_IDS,
+  piModelPattern,
   recordedProfileBindings,
   resolveAgentProfile,
   type PiBinding,
@@ -26,6 +29,7 @@ import {
 import { parseModelRoutingConfig, resolveAgentLaunchBinding, type ModelRoutingConfig } from "../../src/core/model-routing";
 import {
   LOCAL_PI_BINDING,
+  LOCAL_PI_MODEL_ARGUMENT,
   LOCAL_PI_ROUTE,
   RETIRED_CLOUD_PI_BINDING,
   RETIRED_CLOUD_PROFILE,
@@ -36,7 +40,9 @@ const LOCAL: PiBinding = LOCAL_PI_BINDING;
 const ENDPOINT = { provider: LOCAL.provider, baseUrl: "http://192.168.0.80:8000/v1/" };
 const URL = "http://192.168.0.80:8000/v1/models";
 const ROUTE = LOCAL_PI_ROUTE;
-const RETIRED = { kind: "retired", route: RETIRED_CLOUD_ROUTE, profile: RETIRED_CLOUD_PROFILE } as const;
+const RETIRED: SpawnRouteDecision = Object.freeze({
+  kind: "retired", profile: RETIRED_CLOUD_PROFILE, recorded: RETIRED_CLOUD_PI_BINDING, current: LOCAL,
+});
 
 const answered = (status: number, servedModels: readonly string[] | null = null): RouteProbe =>
   ({ kind: "answered", status, servedModels });
@@ -145,7 +151,9 @@ describe("planSpawnRoutes", () => {
       const plan = planSpawnRoutes([request(pi, profile)], NO_ROUTING);
       expect(plan.ok).toBe(true);
       if (!plan.ok) return;
-      expect(plan.value.retired.length).toBe(current ? 0 : 1);
+      expect(plan.value.retired).toEqual(current
+        ? []
+        : [{ kind: "retired", profile, recorded: pi, current: recordedProfileBindings(profile).pi[0] }]);
       expect(plan.value.launch.length).toBe(current ? 1 : 0);
     }));
   });
@@ -209,10 +217,21 @@ describe("decideSpawnGate: refusals", () => {
   it("tells the operator a retired route can only be recovered by a fresh run — never to bring it up", () => {
     const text = refusal([RETIRED]);
     expect(text).toContain(`route ${RETIRED_CLOUD_ROUTE} (recorded under profile '${RETIRED_CLOUD_PROFILE}') is retired`);
-    expect(text).toContain("ADR-0023");
+    expect(text).toContain(`the request records ${piModelPattern(RETIRED_CLOUD_PI_BINDING)}, ` +
+      `and profile '${RETIRED_CLOUD_PROFILE}' now issues ${LOCAL_PI_MODEL_ARGUMENT}`);
     expect(text).toContain("start a fresh run");
     expect(text).not.toContain("bring the route up");
     expect(text).not.toContain("unconfigured");
+  });
+
+  it("derives a retired route's refusal from the recorded and current bindings alone, naming no one retirement", () => {
+    // Any retargeting the catalog may make next — not only the cloud-to-local
+    // one of ADR-0023 — is described by the bindings the decision carries.
+    const reversed: SpawnRouteDecision = { kind: "retired", profile: "refutation", recorded: LOCAL, current: RETIRED_CLOUD_PI_BINDING };
+    const text = refusal([reversed]) ?? "";
+    expect(text).toContain(`route ${ROUTE} (recorded under profile 'refutation') is retired: ` +
+      `the request records ${LOCAL_PI_MODEL_ARGUMENT}, and profile 'refutation' now issues ${piModelPattern(RETIRED_CLOUD_PI_BINDING)}`);
+    expect(text).not.toMatch(/ADR-0023|local route only|local-only/);
   });
 
   it("names only the configure remedy for an unconfigured route", () => {
@@ -291,6 +310,33 @@ describe("decideSpawnGate: unverified routes and the gate mode", () => {
   it("only an unverified route can make the two modes disagree (property)", () => {
     fc.assert(fc.property(decisions.filter((batch) => !batch.some(isUnverified)), (batch) => {
       expect(decideSpawnGate(batch, "strict")).toEqual(decideSpawnGate(batch, "admit-unverified"));
+    }));
+  });
+});
+
+describe("reportUnverifiedRoutes: the emitted action names what the gate admitted unverified", () => {
+  const ACTION = Object.freeze({ kind: "spawn-batch", runId: "run.unverified", requests: [] });
+  const AUTH: UnverifiedRoute = { route: ROUTE, url: URL, cause: "auth-refused", status: 401 };
+
+  it("emits the action unchanged when every route was verified", () => {
+    expect(reportUnverifiedRoutes(ACTION, [])).toBe(ACTION);
+  });
+
+  it("adds every unverified route, in gate order, without touching the action's own fields", () => {
+    const muse: UnverifiedRoute = { route: "desktop-muse/m", url: "http://muse/v1/models", cause: "unreadable-listing", status: 200 };
+    expect(reportUnverifiedRoutes(ACTION, [AUTH, muse])).toEqual({ ...ACTION, unverifiedRoutes: [AUTH, muse] });
+  });
+
+  it("reports exactly the routes the default gate admitted unverified, and none under strict (property)", () => {
+    const PROBES: readonly RouteProbe[] = [answered(200, [LOCAL.model]), answered(200), answered(401), answered(403)];
+    fc.assert(fc.property(fc.array(fc.constantFrom(...PROBES), { minLength: 1, maxLength: 5 }), (probes) => {
+      const batch = probes.map((probe) => decideProbedRoute(LOCAL, ENDPOINT, probe));
+      const admitted = decideSpawnGate(batch, "admit-unverified");
+      if (admitted.kind !== "admitted") throw new Error("a reachable batch is admitted by default");
+      const emitted = reportUnverifiedRoutes(ACTION, admitted.unverified);
+      const unlisted = batch.filter((decision) => decision.kind === "reachable" && decision.served.kind === "unlisted").length;
+      expect("unverifiedRoutes" in emitted ? emitted.unverifiedRoutes.length : 0).toBe(unlisted);
+      expect(decideSpawnGate(batch, "strict").kind).toBe(unlisted === 0 ? "admitted" : "refused");
     }));
   });
 });

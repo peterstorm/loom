@@ -193,7 +193,11 @@ describe("issued request authority is today's catalog", () => {
 
 describe("a minted authority is the only thing an issuing seam accepts", () => {
   const mint = (attempt: 1 | 2): MintedAgentRequestAuthority => {
-    const minted = parseAgentRequestAuthority(request("general-review", LOCAL, "code-reviewer", "standalone-review", attempt));
+    const minted = mintAgentRequestAuthority({
+      runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
+      program: "standalone-review", role: "code-reviewer", attempt, contextDigest: String(attempt).repeat(64),
+      outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
+    });
     if (!minted.ok) throw new Error(JSON.stringify(minted.error));
     return minted.value;
   };

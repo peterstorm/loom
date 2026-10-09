@@ -105,7 +105,7 @@ export async function driveWaveRefutation(
       action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, reissues, false) },
     });
   }
-  let panelState = startPersistentRefutationPanel(preparation.panel).state;
+  let panelState = startPersistentRefutationPanel(preparation.panel.authority).state;
   for (const request of requests) {
     const transcript = decideRefutationTranscriptRead(
       handle.readTranscriptBytes(request.authority),
@@ -180,7 +180,7 @@ export async function driveWaveRefutation(
         locked,
         registration,
         current.registration,
-        preparation.panel,
+        preparation.panel.authority,
       );
       if (authorityProblem !== null) throw new Error(authorityProblem);
       const tasks = locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes));
