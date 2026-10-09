@@ -49,7 +49,7 @@ The catalog defines the requested Pi binding, and every role is issued under its
 Seams that take the minted type, so a builder that skipped the catalog check does not compile at them:
 
 - a fresh roster slot: `mintAgentRosterSlot`, the one issuing seam of a slot (it mints both requests from their identities) — the standalone reviewer roster and every refutation verifier slot;
-- a refutation panel: `issueRefutationPanelAuthority`, whose roster is issued by `issueExactRoster` and so keeps an `ExactRoster<MintedAgentRosterSlot>`;
+- a refutation panel: `issueRefutationPanelAuthority`, whose roster is issued by `issueExactRoster`, which also re-checks each minted slot against today's catalog at run time, so a slot cast past the type is refused too;
 - the Wave review batch and materialized panel requests;
 - refutation verifier slots, through their one decision shared by the standalone and Wave programs (`engine/src/core/refutation-verifiers.ts`, its record read by `handlers/helpers/programs/refutation-verifiers.ts`): minted only when the panel has no record, under the catalog its plan names.
 
