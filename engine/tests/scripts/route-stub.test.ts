@@ -31,10 +31,26 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A child that idles until stopped, and on SIGTERM writes `marker` before exiting. */
-const idleUntilStopped = (marker: string): string =>
+/**
+ * A child that on SIGTERM writes `marker` before exiting, then runs `body`
+ * and idles until stopped. The handler is installed before `body` runs: the
+ * parent stops the child as soon as `body`'s output reaches it, so a handler
+ * installed after that output races the stop, and a lost race kills the
+ * child by default action with its marker unwritten.
+ */
+const untilStopped = (marker: string, body: string): string =>
   `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(marker)}, "stopped"); process.exit(0); });\n` +
-  "setInterval(() => {}, 1000);\n";
+  `${body}\nsetInterval(() => {}, 1000);\n`;
+
+/**
+ * Close the child's stdout while it stays alive. `fs.closeSync(1)` cannot:
+ * on bun 1.3 (CI's pin) it is a silent no-op that leaves fd 1 naming the
+ * pipe. libc's own close(2) closes it on every bun, and a failed close throws,
+ * so the start fails as an exit instead of hanging.
+ */
+const CLOSE_STDOUT =
+  'const libc = require("bun:ffi").dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", { close: { args: ["i32"], returns: "i32" } });\n' +
+  'if (libc.symbols.close(1) !== 0) throw new Error("close(1) failed");';
 
 /** A harness running `source`, recording every after-start report. */
 function scripted(source: string): Readonly<{ harness: RouteStubHarness; reports: readonly string[]; reported: Promise<string> }> {
@@ -137,7 +153,7 @@ describe("startRouteStub", () => {
 
   it("refuses a malformed announcement, naming the line, and stops the stub", async () => {
     const marker = markerPath();
-    const stub = scripted(`process.stdout.write("listening\\n");\n${idleUntilStopped(marker)}`);
+    const stub = scripted(untilStopped(marker, 'process.stdout.write("listening\\n");'));
     await expect(startRouteStub("stub-model", stub.harness)).rejects.toThrow(refusal("listening"));
     await eventually(marker);
     expect(stub.reports).toEqual([]);
@@ -145,7 +161,7 @@ describe("startRouteStub", () => {
 
   it("refuses a stub that closes its output before announcing a port, and stops it", async () => {
     const marker = markerPath();
-    const stub = scripted(`require("node:fs").closeSync(1);\n${idleUntilStopped(marker)}`);
+    const stub = scripted(untilStopped(marker, CLOSE_STDOUT));
     await expect(startRouteStub("stub-model", stub.harness)).rejects.toThrow("route stub closed its output before announcing a port");
     await eventually(marker);
     expect(stub.reports).toEqual([]);
@@ -170,7 +186,7 @@ describe("startRouteStub", () => {
 
   it("does not report the exit its own stop caused", async () => {
     const marker = markerPath();
-    const stub = scripted(`process.stdout.write("4243\\n");\n${idleUntilStopped(marker)}`);
+    const stub = scripted(untilStopped(marker, 'process.stdout.write("4243\\n");'));
     const started = await startRouteStub("stub-model", stub.harness);
     started.stop();
     await eventually(marker);
