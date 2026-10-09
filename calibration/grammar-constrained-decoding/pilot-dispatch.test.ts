@@ -368,7 +368,17 @@ describe("transcript classification through the engine's own selection", () => {
       outcome: { kind: "accepted", source: "extraction", fallbackOverRefusal: false, payloadDigest: contentDigest(JSON.stringify(judgePayload)) },
     });
     expect(extraction([]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "extraction-failure" } });
-    expect(extraction([finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+    // The frozen parser is the emission tool's, so its own message speaks of emission arguments;
+    // the recorded refusal names the bytes it actually read — the final message — on either arm.
+    const refusedFinalMessage = {
+      kind: "rejected",
+      cause: {
+        kind: "payload-refused",
+        detail: "invalid-json: the final message was refused by the frozen judge-verdict/v1 emission-tool parser: emission arguments are not valid JSON",
+      },
+    };
+    expect(extraction([finalText("no json here")]).observation.outcome).toEqual(refusedFinalMessage);
+    expect(classify("judge-verdict/v1", [finalText("no json here")]).observation.outcome).toEqual(refusedFinalMessage);
   });
 
   it("canonicalizes an accepted payload identically for both arms, whatever the model's key order", () => {
