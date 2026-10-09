@@ -18,8 +18,7 @@ import {
 } from "../../src/core/route-reachability";
 import {
   DESKTOP_VLLM_ROUTE,
-  RETIRED_LLM_PROFILE_IDS,
-  LLM_PROFILE_IDS,
+  RECORDED_LLM_PROFILE_IDS,
   piModelPattern,
   recordedProfileBindings,
   resolveAgentProfile,
@@ -159,7 +158,7 @@ describe("planSpawnRoutes", () => {
   });
 
   it("is retired exactly for a recorded binding other than the profile's current one (property)", () => {
-    const recorded = [...LLM_PROFILE_IDS, ...RETIRED_LLM_PROFILE_IDS].flatMap((profile) =>
+    const recorded = RECORDED_LLM_PROFILE_IDS.flatMap((profile) =>
       recordedProfileBindings(profile).pi.map((pi, index) => ({ profile, pi, current: index === 0 })));
     fc.assert(fc.property(fc.constantFrom(...recorded), ({ profile, pi, current }) => {
       const plan = planSpawnRoutes([request(pi, profile)], NO_ROUTING);
