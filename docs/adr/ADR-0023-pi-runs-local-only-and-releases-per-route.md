@@ -11,6 +11,10 @@ and the admitted batch's emitted action also names each unverified route (`unver
 stderr event. A `retired` refusal is derived from the request's recorded binding and its profile's current
 one, so a later retargeting is reported in its own terms.
 
+Amended (2026-10-09, evening): decision 5. The operator releases tool-call emission on the local route by
+decision, without a completed calibration window. AS-015 and AS-016 are recorded as waived and unmeasured,
+never as passed. No further pilot window is planned.
+
 ## Context
 
 Grammar-constrained emission is Pi-only: Claude Code has no Loom extension seam for the frozen emission
@@ -71,6 +75,33 @@ Three things followed from the earlier cloud-default catalog:
    (escaped-defect severity, two blinded assessors) still apply. Constrained cells still need AS-004 = 0. The
    retained pilot-1 windows keep `capable-route-required` and re-decide to their recorded bytes; pilot-2
    (`gcd-ad11-pilot-2`) is the first preregistration under the new policy.
+5. **Operator release without a measured window (AD-11 amended again, 2026-10-09).** Three pilot-2 windows
+   ran, and each ended early because the local vLLM stopped serving: an outage on 2026-10-08, then aborts by
+   the route fail-fast after 13 and after 30 of 408 pairs on 2026-10-09. A complete window needs roughly
+   two days of uninterrupted serving, and the route has not sustained that. The operator, as spec owner,
+   therefore releases every cell on the local route as **unconstrained emission, engine-authoritative** by
+   decision. This is option (b) of AD-11's original text — the spec owner accepting unconstrained emission —
+   taken without the measurement decision 4 attached to it.
+   - **What is released.** Tool-call emission stays the issued mode for reviewers, judges and refutation
+     verifiers under a Pi parent, as decision 1 already makes it at runtime; nothing in the engine reads a
+     calibration decision, so no code changes. The engine stays authoritative: every emitted payload is
+     parsed by the frozen registry parser, and a violation is an `unenforced-schema-violation` handled by
+     the shared retry budget.
+   - **What is not claimed.** AS-015 (p95 latency within +25%, no increase in terminal failures) and AS-016
+     (escaped-defect severity, two blinded assessors) are **waived by the operator, not measured**. No
+     document may report them as passed. Every retained window keeps its own recorded decision,
+     `incomplete-missing-measurement`; none is re-decided, edited or presented as a release.
+   - **The basis is DECLARED.** It is the operator's judgement that tool calling is the better mode,
+     consistent with, but not established by, the descriptive figures of the third window
+     (`gcd-ad11-pilot-2--2026-10-09T14-43-58-835Z`, 30 pairs, below every cell's preregistered count):
+     the emission arm accepted 26 of 30 samples at attempt 1 with no semantic rejection, and its 4 failures
+     were outages or timeouts; the extraction arm accepted 21 of 30, needed attempt 2 for 2 of them and
+     ended 7 in semantic rejection after both attempts. Among accepted samples, emission's p50 / p95
+     dispatch-to-ingestion was 205 s / 310 s against extraction's 270 s / 543 s. These are point figures from
+     one partial window with no bootstrap interval and no blinded quality assessment; they are not a
+     guardrail result.
+   - **The calibration machinery is retained**, unchanged and tested, so a later window can still measure the
+     route. A violated guardrail in such a window would reopen this decision; a missing one would not.
 
 ## Consequences
 
@@ -80,3 +111,6 @@ Three things followed from the earlier cloud-default catalog:
   the engine's validation and the shared retry budget; it is never presented as a provider guarantee.
 - Re-introducing a cloud Pi provider would need a catalog change, a qualification probe and its own release
   cell; the retired-target history shows exactly what was issued before.
+- The grammar-constrained decoding feature may be declared done on the operator release (decision 5). The
+  done claim names the waiver: AS-004 not applicable on the unconstrained route, AS-015 and AS-016 waived and
+  unmeasured, AS-017 retention in force.

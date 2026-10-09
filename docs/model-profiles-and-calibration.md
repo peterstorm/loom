@@ -81,7 +81,7 @@ A stored request whose recorded Pi binding is not its profile's current binding 
 
 ### Release decision (AD-11, per route)
 
-The local route is qualified *unconstrained emission*: vLLM accepts the frozen schemas but does not enforce them, so the engine validates every payload. Under the `per-route-engine-authoritative` release policy (preregistration `gcd-ad11-pilot-2`), a cell on that route is released as *unconstrained emission, engine-authoritative* once its calibration window is complete and the latency (AS-015) and escaped-defect (AS-016) guardrails pass; AS-004 does not apply. See `calibration/grammar-constrained-decoding/README.md`.
+The local route is qualified *unconstrained emission*: vLLM accepts the frozen schemas but does not enforce them, so the engine validates every payload. Under the `per-route-engine-authoritative` release policy (preregistration `gcd-ad11-pilot-2`), a cell on that route is released as *unconstrained emission, engine-authoritative* once its calibration window is complete and the latency (AS-015) and escaped-defect (AS-016) guardrails pass; AS-004 does not apply. No window has completed: the route stopped serving in each of the three pilot-2 windows. On 2026-10-09 the operator released every local-route cell as unconstrained emission, engine-authoritative by decision (ADR-0023, decision 5), with AS-015 and AS-016 waived and unmeasured, never reported as passed. Runtime behaviour does not depend on the release: a Pi parent's reviewers, judges and refutation verifiers are issued the emission tools either way. See `calibration/grammar-constrained-decoding/README.md`.
 
 Route classes (exact vocabulary):
 
