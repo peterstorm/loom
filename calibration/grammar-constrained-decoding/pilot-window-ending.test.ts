@@ -1,9 +1,11 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { SampleObservation } from "./pilot-observation";
 import type { RouteProbe } from "./pilot-preflight";
 import { buildPairSchedule, type ScheduledPair } from "./pilot-preregistration";
-import { ACCEPT_EMISSION, ACCEPT_EXTRACTION, INFRASTRUCTURE, PILOT_1, REJECTED, sample, TIMEOUT } from "./pilot-test-fixtures";
+import { ACCEPT_EMISSION, ACCEPT_EXTRACTION, HERE, INFRASTRUCTURE, PILOT_1, REJECTED, sample, TIMEOUT } from "./pilot-test-fixtures";
 import type { PilotArm } from "./pilot-vocabulary";
 import {
   CONSECUTIVE_OUTAGE_PAIR_LIMIT,
@@ -50,7 +52,8 @@ function landed(kind: SampleKind, arm: PilotArm, pair: ScheduledPair = PAIR): Sa
 
 const isOutageLike = (kind: SampleKind): boolean => kind === "timeout" || kind === "infrastructure";
 
-type PairKind = "accepted" | "rejected" | "timeout" | "infrastructure" | "mixed-outage" | "mixed-infrastructure" | "mixed-timeout" | "rejected-and-timeout";
+/** A pair whose two arms landed the same sample kind is named by it; the mixed pairs are the rest. */
+type PairKind = SampleKind | "mixed-outage" | "mixed-infrastructure" | "mixed-timeout" | "rejected-and-timeout";
 
 /** Each landed pair kind: its two arms' sample kinds, and the pair health it
  *  must have (outage-like = infrastructure or timeout, never a rejection). */
@@ -265,6 +268,22 @@ describe("parseRetainedWindowEnding (a retained ending, under the rules of the v
   it("reads schemaVersion 2 exactly as this revision writes it", () => {
     const raw = { kind: "aborted", afterPairs: 3, scheduledPairs: 4, reason: { kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT } };
     expect(parseRetainedWindowEnding(raw, 2)).toEqual(parseWindowEnding(raw, 4));
+  });
+
+  it("reads a schemaVersion 2 streak under the limit that version recorded (3), not under the live limit", () => {
+    // Literal 3, never CONSECUTIVE_OUTAGE_PAIR_LIMIT: a retained window's evidence must not move with the live rule.
+    const recorded = { kind: "aborted", afterPairs: 5, scheduledPairs: 408, reason: { kind: "consecutive-outage-pairs", pairs: 3 } };
+    expect(parseRetainedWindowEnding(recorded, 2)).toEqual({ ok: true, value: recorded });
+    for (const pairs of [2, 4]) expect(parseRetainedWindowEnding({ ...recorded, reason: { kind: "consecutive-outage-pairs", pairs } }, 2).ok).toBe(false);
+  });
+
+  it("reads every retained schemaVersion 2 window's ending back as it was recorded", () => {
+    const windows = join(HERE, "windows");
+    const retained = readdirSync(windows)
+      .map((id) => JSON.parse(readFileSync(join(windows, id, "window.json"), "utf-8")) as { schemaVersion: number; ending?: unknown })
+      .filter((record) => record.schemaVersion === 2);
+    expect(retained.length).toBeGreaterThan(0);
+    for (const { ending } of retained) expect(parseRetainedWindowEnding(ending, 2)).toEqual({ ok: true, value: ending });
   });
 
   it("reads schemaVersion 1 as revision e8d688d8 recorded it: its legacy reason, and an abort judged on the last pair", () => {

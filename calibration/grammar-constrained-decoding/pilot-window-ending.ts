@@ -19,9 +19,11 @@
  *   `parseWindowEnding` admits — the shell carries no ordering obligation.
  * - `WindowEnding` is parsed evidence keyed on the window's `schemaVersion`:
  *   one per-version table (`WINDOW_VERSIONS`) says which abort reasons each
- *   version recorded and whether it judged the last pair, `parseWindowEnding`
- *   is the one constructor of the ending this revision records (schemaVersion
- *   2) against the schedule it ends, and `parseRetainedWindowEnding` reads
+ *   version recorded (with the streak limit it recorded, frozen per reason)
+ *   and whether it judged the last pair; `parseWindowEnding` is the one
+ *   parser of the ending this revision records (schemaVersion 2) against the
+ *   schedule it ends — the step builds its own endings through typed
+ *   constructors, by construction — and `parseRetainedWindowEnding` reads
  *   back a retained window's ending under the rules of the version that wrote
  *   it — checked against its preregistration's schedule once a re-decision
  *   has loaded that (`checkEndsSchedule`).
@@ -77,7 +79,10 @@ export const routeHealthOf = (probe: RouteProbe): RouteHealth => match(probe)
 /** Consecutive all-outage pairs (`PairHealth` `all-outage`: every sample an
  *  infrastructure failure or a timeout) that stop the window even while the
  *  route still answers its listing — a server that is up but cannot serve,
- *  or hangs, inference. */
+ *  or hangs, inference. The live rule, read only by `landPair`; what a
+ *  retained window recorded is its version's (`WINDOW_VERSIONS`), so changing
+ *  this needs a new `schemaVersion` — it must equal the limit the current
+ *  version records, or `landPair` does not compile. */
 export const CONSECUTIVE_OUTAGE_PAIR_LIMIT = 3;
 
 /**
@@ -146,20 +151,24 @@ const breakerOf = (dispatchedPairs: number, scheduledPairs: number, consecutiveO
     breaker: Object.freeze({ dispatchedPairs, scheduledPairs, consecutiveOutagePairs }) as RouteBreaker,
   });
 
-/** An ending of a `scheduledPairs`-pair schedule the step reached by
- *  construction; a refusal here is a defect in this module (the breaker's
- *  invariants failed), never in the evidence. */
-function ended(raw: unknown, scheduledPairs: number): ScheduleProgress {
-  const ending = parseWindowEnding(raw, scheduledPairs);
-  if (!ending.ok) throw new Error(`the route fail-fast reached an inconsistent ending: ${ending.error}`);
-  return Object.freeze({ kind: "ended" as const, ending: ending.value });
-}
+/** The schedule ended: every one of its `scheduledPairs` pairs landed. */
+const completedSchedule = (scheduledPairs: number): ScheduleProgress =>
+  Object.freeze({ kind: "ended" as const, ending: branded({ kind: "completed" as const, pairs: scheduledPairs }) });
+
+/** The schedule aborted after the pair that made `dispatchedPairs`, for
+ *  `reason`. Only `landPair` calls this, below the last pair, from a breaker —
+ *  so 1 ≤ `dispatchedPairs` < `scheduledPairs`, a streak reason never exceeds
+ *  the pairs dispatched, and a route reason is never blank
+ *  (`observedRouteHealth`): the invariants `parseWindowEnding` checks hold by
+ *  construction, which its round-trip property pins. */
+const abortedSchedule = (dispatchedPairs: number, scheduledPairs: number, reason: WindowAbortReason): ScheduleProgress =>
+  Object.freeze({ kind: "ended" as const, ending: branded({ kind: "aborted" as const, afterPairs: dispatchedPairs, scheduledPairs, reason }) });
 
 /** A schedule of `scheduledPairs` pairs before any has landed; an empty one
  *  (every cell extraction-only) has already completed. */
 export function startSchedule(scheduledPairs: number): ScheduleProgress {
   if (!Number.isInteger(scheduledPairs) || scheduledPairs < 0) throw new Error(`a schedule has a whole number of pairs, not ${scheduledPairs}`);
-  return scheduledPairs === 0 ? ended({ kind: "completed", pairs: 0 }, 0) : breakerOf(0, scheduledPairs, 0);
+  return scheduledPairs === 0 ? completedSchedule(0) : breakerOf(0, scheduledPairs, 0);
 }
 
 /**
@@ -173,11 +182,10 @@ export function startSchedule(scheduledPairs: number): ScheduleProgress {
 export function landPair(breaker: RouteBreaker, pair: readonly SampleObservation[]): LandedPair {
   const { scheduledPairs } = breaker;
   const dispatchedPairs = breaker.dispatchedPairs + 1;
-  if (dispatchedPairs === scheduledPairs) return ended({ kind: "completed", pairs: scheduledPairs }, scheduledPairs);
+  if (dispatchedPairs === scheduledPairs) return completedSchedule(scheduledPairs);
   const health = pairHealth(pair);
   const consecutiveOutagePairs = health.kind === "all-outage" ? breaker.consecutiveOutagePairs + 1 : 0;
-  const aborted = (reason: WindowAbortReason): ScheduleProgress =>
-    ended({ kind: "aborted", afterPairs: dispatchedPairs, scheduledPairs, reason }, scheduledPairs);
+  const aborted = (reason: WindowAbortReason): ScheduleProgress => abortedSchedule(dispatchedPairs, scheduledPairs, reason);
   const byStreak = (): ScheduleProgress => consecutiveOutagePairs >= CONSECUTIVE_OUTAGE_PAIR_LIMIT
     ? aborted({ kind: "consecutive-outage-pairs", pairs: CONSECUTIVE_OUTAGE_PAIR_LIMIT })
     : breakerOf(dispatchedPairs, scheduledPairs, consecutiveOutagePairs);
@@ -199,16 +207,24 @@ export const WINDOW_SCHEMA_VERSIONS = [1, 2] as const;
 export type WindowSchemaVersion = (typeof WINDOW_SCHEMA_VERSIONS)[number];
 export const CURRENT_WINDOW_SCHEMA_VERSION = 2 satisfies WindowSchemaVersion;
 
+// The limits retained windows RECORDED, frozen per reason: evidence is read
+// under the rule that wrote it, never under the live `CONSECUTIVE_OUTAGE_PAIR_LIMIT`.
+
 /** The consecutive all-infrastructure pairs at which revision `e8d688d8`
- *  stopped a window (its `consecutive-infrastructure-failures` reason). */
+ *  stopped a window (its `consecutive-infrastructure-failures` reason;
+ *  schemaVersion 1). */
 const LEGACY_CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT = 3;
+
+/** The consecutive all-outage pairs a schemaVersion 2 window records with its
+ *  `consecutive-outage-pairs` reason. */
+const RECORDED_CONSECUTIVE_OUTAGE_PAIR_LIMIT = 3;
 
 /** Every abort reason any window version recorded, one schema per kind — so
  *  a kind reads the same in every version that admits it. Which version
  *  admits which kind is `WINDOW_VERSIONS`' to say. */
 const abortReasonSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("route-unreachable"), reason: text }).strict(),
-  z.object({ kind: z.literal("consecutive-outage-pairs"), pairs: z.literal(CONSECUTIVE_OUTAGE_PAIR_LIMIT) }).strict(),
+  z.object({ kind: z.literal("consecutive-outage-pairs"), pairs: z.literal(RECORDED_CONSECUTIVE_OUTAGE_PAIR_LIMIT) }).strict(),
   // Revision e8d688d8's fail-fast counted only all-infrastructure pairs, not timeouts.
   z.object({ kind: z.literal("consecutive-infrastructure-failures"), pairs: z.literal(LEGACY_CONSECUTIVE_INFRASTRUCTURE_PAIR_LIMIT) }).strict(),
 ]);
@@ -266,14 +282,15 @@ type Branded<T> = T & Readonly<{ [windowEndingBrand]: true }>;
  * How a dispatched window's schedule ended. An aborted window keeps every
  * sample that landed; the pairs it never dispatched are simply unmeasured, so
  * its decision is `incomplete` — never a fabricated or censored sample.
- * Branded: only `parseWindowEnding` makes one, against the schedule it ends,
- * so its invariants hold — a completed window ran its whole schedule
+ * Branded: only `parseWindowEnding` (against the schedule it ends) and the
+ * fail-fast step's typed constructors (by construction) make one, so its
+ * invariants hold — a completed window ran its whole schedule
  * (`pairs` is the scheduled pair count, 0 for an empty schedule of
  * extraction-only cells); an aborted one names that schedule
  * (`scheduledPairs`) and stopped between its pairs
  * (1 ≤ `afterPairs` < `scheduledPairs`), on an unreachable route (with a
- * non-empty reason) or on exactly `CONSECUTIVE_OUTAGE_PAIR_LIMIT` consecutive
- * outage pairs.
+ * non-empty reason) or on exactly `RECORDED_CONSECUTIVE_OUTAGE_PAIR_LIMIT`
+ * consecutive outage pairs.
  */
 export type WindowEnding = Branded<EndingIn<typeof CURRENT_WINDOW_SCHEMA_VERSION>>;
 
@@ -286,18 +303,18 @@ export type RetainedWindowEnding = Branded<EndingIn<WindowSchemaVersion>>;
 
 const invalid = (problem: string): Result<never, string> => err(`invalid window ending: ${problem}`);
 
-/** The brand is this module's proof that `admittedUnder` admitted the value. */
+/** The brand is this module's proof that the value holds the ending's
+ *  invariants: `admittedUnder` admitted it, or the fail-fast step built it
+ *  (`completedSchedule`, `abortedSchedule`). */
 const branded = <T>(ending: T): Branded<T> => Object.freeze(ending) as Branded<T>;
 
-/** The abort reasons window version `version`'s writer recorded. */
-const reasonsOf = (version: WindowSchemaVersion): readonly AbortReasonKind[] => WINDOW_VERSIONS[version].reasons;
-
+/** Whether window version `version`'s writer recorded `reason`. */
 const admits = <V extends WindowSchemaVersion>(version: V, reason: AnyAbortReason): reason is AbortReasonIn<V> =>
-  reasonsOf(version).includes(reason.kind);
+  WINDOW_VERSIONS[version].reasons.some((recorded) => recorded === reason.kind);
 
 /** The versions whose writer recorded `kind`. */
 const versionsRecording = (kind: AbortReasonKind): readonly WindowSchemaVersion[] =>
-  WINDOW_SCHEMA_VERSIONS.filter((version) => reasonsOf(version).includes(kind));
+  WINDOW_SCHEMA_VERSIONS.filter((version) => WINDOW_VERSIONS[version].reasons.some((recorded) => recorded === kind));
 
 /**
  * An aborted ending's pair invariants under its version's rules: it stopped
