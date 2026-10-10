@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-contract";
 import { parseCalibrationCorpus, type CalibrationCase } from "../../engine/src/core/model-calibration";
 import type { ArmDispatch, ArmRequest } from "./pilot-dispatch";
@@ -30,10 +31,10 @@ import {
   type ScheduledPair,
 } from "./pilot-preregistration";
 import { planDispatch, type LoadedPreregistration, type WindowWorkload } from "./pilot-retention";
-import { contentDigest, PILOT_ARMS, type CellKey, type PilotArm } from "./pilot-vocabulary";
+import { contentDigest, hex64, parserOf, PILOT_ARMS, text, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import { dispatchSchedule, type RouteHealthProbe, type SampleRecord } from "./pilot-window";
 import { CURRENT_WINDOW_SCHEMA_VERSION } from "./pilot-window-ending";
-import type { WindowRecord } from "./pilot-window-record";
+import type { PreregistrationRef, WindowRecord } from "./pilot-window-record";
 import {
   parseWorkloadFixtures,
   resolveWindowInputs,
@@ -53,6 +54,22 @@ export const preregBytes = readFileSync(join(HERE, "preregistration.json"));
 export const PILOT_2_PREREGISTRATION = "preregistration-gcd-ad11-pilot-2.json";
 export const pilot2PreregBytes = readFileSync(join(HERE, PILOT_2_PREREGISTRATION));
 export const fixtureBytes = readFileSync(join(HERE, "workload-fixtures.json"));
+
+/** The one machine-readable pin of every retained preregistration
+ *  (`retained-preregistrations.json`): its checkout-relative path, id and
+ *  SHA-256, in the shape a window records it. A new preregistration is pinned
+ *  there and nowhere else; the README links to the manifest rather than restating it. */
+const parseRetainedPreregistrations = parserOf(z.object({
+  schemaVersion: z.literal(1),
+  preregistrations: z.array(z.object({ path: text, id: text, digest: hex64 }).strict()).min(1)
+    .refine((refs) => new Set(refs.map((ref) => ref.path)).size === refs.length, "each preregistration is pinned once"),
+}).strict());
+
+export const RETAINED_PREREGISTRATIONS: readonly PreregistrationRef[] = (() => {
+  const parsed = parseRetainedPreregistrations(JSON.parse(readFileSync(join(HERE, "retained-preregistrations.json"), "utf-8")));
+  if (!parsed.ok) throw new Error(parsed.error.join("\n"));
+  return parsed.value.preregistrations;
+})();
 
 /** A retained preregistration, parsed from its exact bytes; a refused one throws. */
 function retainedPreregistration(bytes: Uint8Array): Preregistration {
@@ -95,14 +112,11 @@ export const UNREACHABLE_FACTS: PreflightFacts = {
 };
 
 /** Preflight facts the retained pilot-1 preregistration dispatches behind:
- *  every cell's frozen tool and schema staged, the pinned Pi and workload,
- *  and the preregistered model served. */
+ *  `UNREACHABLE_FACTS` (the pinned Pi and workload) with every cell's frozen
+ *  tool and schema staged and the preregistered model served. */
 export const READY_FACTS: PreflightFacts = {
+  ...UNREACHABLE_FACTS,
   registry: { ...UNREACHABLE_FACTS.registry, ...Object.fromEntries(PILOT_1.cells.map((cell) => [cell.cell, { toolName: cell.toolName, schemaDigest: cell.schemaDigest }])) },
-  workloadFixturesDigest: PILOT_1.workloadFixturesDigest,
-  piVersion: PILOT_1.route.piVersion,
-  stagedRuntimeRevision: "sha256:abc",
-  loadedRuntimeRevision: null,
   route: { kind: "reachable", servedModels: [PILOT_1.route.model] },
 };
 

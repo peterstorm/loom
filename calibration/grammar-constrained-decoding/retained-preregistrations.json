@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "preregistrations": [
+    {
+      "path": "calibration/grammar-constrained-decoding/preregistration.json",
+      "id": "gcd-ad11-pilot-1",
+      "digest": "4f00b74ff732f779da9e4421a034ce1f8fc4045aee51dd8c249293447458f7b9"
+    },
+    {
+      "path": "calibration/grammar-constrained-decoding/preregistration-gcd-ad11-pilot-2.json",
+      "id": "gcd-ad11-pilot-2",
+      "digest": "3448a9f34eb21d43e3c8a632788350fa788e3eadb1c8da70b23b620e382ef75e"
+    }
+  ]
+}

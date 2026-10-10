@@ -13,10 +13,8 @@
  *   the policy would measure the copy. The extraction-only arm is offered no
  *   emission tool, so its transcript is classified by final-message
  *   extraction alone — the PR #52-only baseline — with no emission counters.
- *   Only an attempt left WITHOUT an accepted payload after ingestion — a
- *   kernel rejection, or an accepted decision the frozen parser refuses — is
- *   then read for a provider error ending its last model turn
- *   (`providerFailure`): an infrastructure failure, never a semantic rejection.
+ *   The provider-error rule is stated once, on `settle` below (and in the
+ *   README under *Measurement definitions*).
  * - `piArmDispatch` (I/O SHELL) launches the child exactly as production
  *   does per arm: the extraction-only arm is the launcher's print-mode JSON
  *   child; the emission-enabled arm goes through the INSTALLED production
