@@ -144,9 +144,10 @@ const digestOf = (value: string): ArtifactDigest =>
 function runGitProbingEmpty(
   repositoryRoot: string,
   invocation: GitInvocation,
+  spawn: GitSpawn = spawnGit,
 ): DomainResult<Buffer, GitBoundaryError> {
   const observed = observeGitProbe(
-    () => runRemediationGit(repositoryRoot, invocation),
+    () => runRemediationGit(repositoryRoot, invocation, spawn),
     (value) => value.length === 0,
   );
   return confirmedEmptyPassthrough(observed);
@@ -181,12 +182,17 @@ function requireNonEmptyGitOutput(
  * Resolve the repository root ONCE and use it as every later invocation's cwd.
  * A relative path is only meaningful against a fixed root, so resolving per
  * call would let the same path mean different files at different moments.
+ * `spawn` is the `GitSpawn` port both probes reach Git through: production
+ * keeps the policy-bound `spawnGit`, tests pass a scripted fake.
  */
-export function openGitRepository(startDirectory: string): DomainResult<GitRepository, GitBoundaryError> {
+export function openGitRepository(
+  startDirectory: string,
+  spawn: GitSpawn = spawnGit,
+): DomainResult<GitRepository, GitBoundaryError> {
   const start = resolve(startDirectory);
-  const root = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] });
+  const root = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] }, spawn);
   if (!root.ok) return root;
-  const gitDir = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
+  const gitDir = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] }, spawn);
   if (!gitDir.ok) return gitDir;
   const resolvedRoot = requireNonEmptyGitOutput("rev-parse", root.value, "git rev-parse --show-toplevel returned no output");
   if (!resolvedRoot.ok) return resolvedRoot;

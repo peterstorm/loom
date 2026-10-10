@@ -15,6 +15,7 @@ import {
 } from "../../src/utils/git-leaves";
 import { untrackedLeavesAt, visibleLeavesAt } from "../../src/utils/git";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { withEnvOverlaySync } from "../fixtures/env-overlay";
 import { git, gitResult, write } from "../fixtures/git-repository";
 
 let root: string;
@@ -265,23 +266,9 @@ describe("the shared Git execution policy", () => {
     "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
   ] as const;
 
-  function withAmbientGit<T>(environment: Readonly<Partial<Record<(typeof AMBIENT_KEYS)[number], string>>>, run: () => T): T {
-    const previous = new Map(AMBIENT_KEYS.map((key) => [key, process.env[key]]));
-    for (const key of AMBIENT_KEYS) {
-      const value = environment[key];
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    try {
-      return run();
-    } finally {
-      for (const key of AMBIENT_KEYS) {
-        const value = previous.get(key);
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  }
+  /** Run with exactly `environment` among the ambient Git variables: every other one is unset. */
+  const withAmbientGit = <T>(environment: Readonly<Partial<Record<(typeof AMBIENT_KEYS)[number], string>>>, run: () => T): T =>
+    withEnvOverlaySync({ ...Object.fromEntries(AMBIENT_KEYS.map((key) => [key, undefined])), ...environment }, run);
 
   it("never lets ambient GIT_* variables redirect, re-ignore or re-pattern the one leaf enumerator", () => {
     write(root, "lib/tracked.txt", "tracked");
