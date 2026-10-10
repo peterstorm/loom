@@ -24,7 +24,7 @@ import {
   type WindowStore,
 } from "./pilot-retention";
 import {
-  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, outageFromPair, PILOT_1, pilot2PreregBytes, preregBytes, READY, READY_FACTS, REPO_ROOT, runWindow,
+  accepted, ATTEMPT_MS, fakeRoute, HEALTHY_ROUTE, HERE, INFRASTRUCTURE, LOADED, outageFromPair, PILOT_1, preregBytes, READY, READY_FACTS, REPO_ROOT, RETAINED_PREREGISTRATIONS, runWindow,
   testWindowRecord as windowRecord, UNREACHABLE_FACTS, WORKLOAD, type FakeRoute,
 } from "./pilot-test-fixtures";
 import { contentDigest } from "./pilot-vocabulary";
@@ -326,10 +326,12 @@ describe("recordWindow (--pilot)", () => {
 
   it("names a window by its preregistration id and a path-safe start time", () => {
     expect(pilotWindowId("gcd-ad11-pilot-1", "2026-10-03T09:23:39.047Z")).toBe("gcd-ad11-pilot-1--2026-10-03T09-23-39-047Z");
-    // Every retained window belongs to one of the retained preregistrations (pilot-1, pilot-2).
-    const preregistrationIds = [preregBytes, pilot2PreregBytes].map((bytes) => (JSON.parse(bytes.toString("utf-8")) as { id: string }).id);
+    // Every retained window belongs to a pinned preregistration: named by its id, and recording exactly its pin.
     for (const id of readdirSync(join(HERE, "windows"))) {
-      expect(preregistrationIds.some((preregistrationId) => id.startsWith(`${preregistrationId}--`)), id).toBe(true);
+      const recorded = (JSON.parse(readFileSync(join(HERE, "windows", id, WINDOW_FILES.window), "utf-8")) as { preregistration: unknown }).preregistration;
+      const pin = RETAINED_PREREGISTRATIONS.find((ref) => id.startsWith(`${ref.id}--`));
+      expect(pin, id).toBeDefined();
+      expect(recorded, id).toEqual(pin);
       expect(id).not.toMatch(/[:.]/);
     }
   });

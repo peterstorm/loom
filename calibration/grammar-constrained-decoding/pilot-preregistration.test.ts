@@ -1,17 +1,19 @@
 import fc from "fast-check";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { buildPairSchedule, encodePreregistration, parsePreregistration, type Preregistration, type ReleasePolicy } from "./pilot-preregistration";
 import {
   fixtureBytes,
   HERE,
-  PILOT_2_PREREGISTRATION,
+  LOADED,
   pilot2PreregBytes,
   preregBytes,
   extractionOnlyCell,
   PILOT_1,
   PILOT_2,
+  REPO_ROOT,
+  RETAINED_PREREGISTRATIONS,
   testPreregistration,
 } from "./pilot-test-fixtures";
 import { CELL_KEYS, contentDigest } from "./pilot-vocabulary";
@@ -29,19 +31,17 @@ describe("preregistration (retained before any window)", () => {
     expect(PILOT_1.workloadFixturesDigest).toBe(contentDigest(fixtureBytes));
   });
 
-  it("pins each retained preregistration's SHA-256, and the README states the same digest", () => {
-    const readme = readFileSync(join(HERE, "README.md"), "utf-8");
-    const statedDigest = (file: string): readonly string[] => readme.split("\n")
-      .filter((line) => line.startsWith(`| \`${file}\` |`))
-      .flatMap((line) => line.match(/\b[0-9a-f]{64}\b/g) ?? []);
-    const RETAINED = [
-      { file: "preregistration.json", bytes: preregBytes, digest: "4f00b74ff732f779da9e4421a034ce1f8fc4045aee51dd8c249293447458f7b9" },
-      { file: PILOT_2_PREREGISTRATION, bytes: pilot2PreregBytes, digest: "3448a9f34eb21d43e3c8a632788350fa788e3eadb1c8da70b23b620e382ef75e" },
-    ] as const;
-    for (const { file, bytes, digest } of RETAINED) {
-      expect(contentDigest(bytes), file).toBe(digest);
-      expect(statedDigest(file), `README row for ${file}`).toEqual([digest]);
+  it("pins each retained preregistration once, in the manifest: its bytes hash to the pin and parse to its id", () => {
+    for (const { path, id, digest } of RETAINED_PREREGISTRATIONS) {
+      const bytes = readFileSync(join(REPO_ROOT, path));
+      expect(contentDigest(bytes), path).toBe(digest);
+      const parsed = parsePreregistration(JSON.parse(bytes.toString("utf-8")));
+      expect(parsed.ok && parsed.value.id, path).toBe(id);
     }
+    // Every preregistration file is pinned, so a new one cannot land without its pin.
+    const files = readdirSync(HERE).filter((file) => /^preregistration.*\.json$/.test(file)).map((file) => relative(REPO_ROOT, join(HERE, file)));
+    expect([...files].sort()).toEqual(RETAINED_PREREGISTRATIONS.map((ref) => ref.path).sort());
+    expect(RETAINED_PREREGISTRATIONS).toContainEqual(LOADED.ref);
   });
 
   it("refuses preregistrations that loosen the spec or under-size a cell", () => {

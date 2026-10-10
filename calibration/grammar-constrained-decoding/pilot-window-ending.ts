@@ -9,7 +9,7 @@
  *   `RouteHealthProbe` port answered (a blank reason is named, never written
  *   as an empty string the ending would refuse) or threw.
  * - The fail-fast is ONE step over an opaque `RouteBreaker`:
- *   `startSchedule` opens it, and `landPair` reads each landed pair
+ *   `startSchedule` opens it over the dispatched schedule, and `landPair` reads each landed pair
  *   (`pairHealth`) and returns where the schedule stands — still running,
  *   ended, or waiting on the route re-probe the pair called for (the probe
  *   I/O is the shell's; the step hands it a `judge` continuation). The
@@ -37,6 +37,7 @@ import { match } from "ts-pattern";
 import { err, ok, type Result } from "../kernel";
 import { sampleTerminal, type SampleObservation } from "./pilot-observation";
 import type { RouteProbe } from "./pilot-preflight";
+import type { ScheduledPair } from "./pilot-preregistration";
 import { issuesOf, text, type DeepReadonly } from "./pilot-vocabulary";
 
 // ---------------------------------------------------------------------------
@@ -164,11 +165,12 @@ const completedSchedule = (scheduledPairs: number): ScheduleProgress =>
 const abortedSchedule = (dispatchedPairs: number, scheduledPairs: number, reason: WindowAbortReason): ScheduleProgress =>
   Object.freeze({ kind: "ended" as const, ending: branded({ kind: "aborted" as const, afterPairs: dispatchedPairs, scheduledPairs, reason }) });
 
-/** A schedule of `scheduledPairs` pairs before any has landed; an empty one
- *  (every cell extraction-only) has already completed. */
-export function startSchedule(scheduledPairs: number): ScheduleProgress {
-  if (!Number.isInteger(scheduledPairs) || scheduledPairs < 0) throw new Error(`a schedule has a whole number of pairs, not ${scheduledPairs}`);
-  return scheduledPairs === 0 ? completedSchedule(0) : breakerOf(0, scheduledPairs, 0);
+/** The dispatched schedule before any of its pairs has landed; an empty one
+ *  (every cell extraction-only) has already completed. It takes the parsed
+ *  schedule itself, not a count, so its pair count is a whole number by
+ *  construction and opening a breaker cannot fail. */
+export function startSchedule(schedule: readonly ScheduledPair[]): ScheduleProgress {
+  return schedule.length === 0 ? completedSchedule(0) : breakerOf(0, schedule.length, 0);
 }
 
 /**
