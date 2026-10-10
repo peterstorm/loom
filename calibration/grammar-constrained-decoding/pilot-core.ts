@@ -12,7 +12,8 @@
  * vocabulary (`pilot-vocabulary.ts`) and statistics (`pilot-statistics.ts`).
  * What a cell's emission qualification fixes — its structural series, its
  * AS-004 verdicts and its release class — is `pilot-qualification.ts`'s,
- * read here through `measureStructural` and `releaseEvidence`. No clock, no filesystem, no network, no process: the runner
+ * read here through `measureStructural` and `releaseEvidence`.
+ * No clock, no filesystem, no network, no process: the runner
  * (`scripts/run-model-calibration.ts --pilot`) is the imperative shell that
  * gathers facts, dispatches, and persists what this module returns.
  *

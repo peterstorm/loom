@@ -20,8 +20,8 @@ import { LOCAL_PI_BINDING as LOCAL, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RE
  * The emission gate's one pure entry point: what it gates (a Pi parent's
  * spawn batch, and nothing a Claude Code parent emits), the order in which it
  * refuses unreadable inputs (a request before any fact is read, the facts
- * before any probe), the routes it asks the shell to observe, and the verdict — with its stderr
- * events as data.
+ * before any probe), the routes it asks the shell to observe, and the
+ * verdict — with its stderr events as data.
  */
 
 const RUN_ID = "run.emission-gate";

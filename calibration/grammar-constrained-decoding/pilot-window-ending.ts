@@ -9,8 +9,9 @@
  *   `RouteHealthProbe` port answered (a blank reason is named, never written
  *   as an empty string the ending would refuse) or threw.
  * - The fail-fast is ONE step over an opaque `RouteBreaker`:
- *   `startSchedule` opens it over the dispatched schedule, and `landPair` reads each landed pair
- *   (`pairHealth`) and returns where the schedule stands — still running,
+ *   `startSchedule` opens it over the dispatched schedule, and `landPair`
+ *   reads each landed pair (`pairHealth`) and returns where the schedule
+ *   stands — still running,
  *   ended, or waiting on the route re-probe the pair called for (the probe
  *   I/O is the shell's; the step hands it a `judge` continuation). The
  *   last-pair exemption is internal: the last scheduled pair is never

@@ -392,10 +392,11 @@ describe("an issued refutation panel is the panel its record parses as", () => {
   it("refuses a verifier slot the catalog will not mint before checking the panel itself", () => {
     const runId = parseOrchestrationRunId("run:issued-panel");
     if (!runId.ok) throw new Error(runId.error.message);
-    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => ({
-      runId: runId.value, requestId: `request:unmintable-${attempt}`, slotId: "slot:unmintable",
-      program: "refutation-panel" as const, role: "review-verifier-agent" as const, attempt,
-      contextDigest: "not-a-digest", outputSlot: `transcripts/slot:unmintable/attempt-${attempt}.raw`,
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => agentRequestIdentity("review-verifier-agent", attempt, {
+      runId: runId.value,
+      slotId: "slot:unmintable",
+      program: "refutation-panel",
+      contextDigest: "not-a-digest",
     });
     const minted = mintAgentRosterSlot(identity(1), identity(2));
     if (minted.ok) throw new Error("the fixture must not mint");
