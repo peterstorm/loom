@@ -11,12 +11,11 @@
  * - The fail-fast is ONE step over an opaque `RouteBreaker`:
  *   `startSchedule` opens it over the dispatched schedule, and `landPair`
  *   reads each landed pair (`pairHealth`) and returns where the schedule
- *   stands — still running,
- *   ended, or waiting on the route re-probe the pair called for (the probe
- *   I/O is the shell's; the step hands it a `judge` continuation). The
- *   last-pair exemption is internal: the last scheduled pair is never
- *   re-probed or judged, so a schedule dispatched in full always ends
- *   `completed`, and every ending the step returns is one
+ *   stands — still running, ended, or waiting on the route re-probe the pair
+ *   called for (the probe I/O is the shell's; the step hands it a `judge`
+ *   continuation). The last-pair exemption is internal: the last scheduled
+ *   pair is never re-probed or judged, so a schedule dispatched in full
+ *   always ends `completed`, and every ending the step returns is one
  *   `parseWindowEnding` admits — the shell carries no ordering obligation.
  * - `WindowEnding` is parsed evidence keyed on the window's `schemaVersion`:
  *   one per-version table (`WINDOW_VERSIONS`) says which abort reasons each

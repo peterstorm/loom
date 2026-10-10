@@ -16,7 +16,7 @@
  * compile-checked to cover every emission qualification exactly once.
  */
 
-import type { RejectionCause, RetryCause, SampleObservation } from "./pilot-observation";
+import { RETRY_CAUSES, sampleRetries, type RejectionCause, type RetryCause, type RetryEvent, type SampleObservation } from "./pilot-observation";
 import type { EmissionRouteQualification } from "./pilot-preregistration";
 import { guardrailOutcome, type CellKey, type GuardrailId, type GuardrailOutcome, type GuardrailVerdict, type PassingVerdict } from "./pilot-vocabulary";
 
@@ -100,8 +100,13 @@ type PassedOn<K extends EmissionKind> = Readonly<{ cell: CellKey; releaseClass: 
  */
 export type PassedCellEvidence = { [K in EmissionKind]: PassedOn<K> }[EmissionKind];
 
-/** The emission arm's retry counts by cause (the release decision's one retry fold). */
+/** Retry counts by cause — the release decision's one retry-cause fold (`retryCauseCounts`). */
 export type RetryCauseCounts = Readonly<Record<RetryCause, number>>;
+
+/** The one retry-cause fold: retries counted by the cause each is attributed to. */
+export const retryCauseCounts = (retries: readonly RetryEvent[]): RetryCauseCounts =>
+  Object.freeze(Object.fromEntries(RETRY_CAUSES.map((cause) =>
+    [cause, retries.filter((retry) => retry.cause === cause).length])) as Record<RetryCause, number>);
 
 /** A `K`-qualified cell's structural series together with the AS-004 verdict read from it. */
 export type StructuralMeasurement<K extends EmissionKind> = Readonly<{
@@ -169,18 +174,19 @@ function sharedSeries(samples: readonly SampleObservation[], causes: RetryCauseC
 }
 
 /**
- * A `K`-qualified cell's structural series over its emission-arm samples
- * (with their retry counts by cause), and the AS-004 verdict read from it.
- * Generic over `K` (called with the union, it returns the union of its arms):
- * the provider-enforced retry count is produced once, by
- * `QUALIFICATION_RULES[K]`, which writes it into the series and reads the
- * verdict from it.
+ * A `K`-qualified cell's structural series over its emission-arm samples, and
+ * the AS-004 verdict read from it. The retries are attributed to causes here,
+ * from the samples themselves under this qualification, so a series' counts
+ * cannot disagree with the samples they are read from. Generic over `K`
+ * (called with the union, it returns the union of its arms): the
+ * provider-enforced retry count is produced once, by `QUALIFICATION_RULES[K]`,
+ * which writes it into the series and reads the verdict from it.
  */
 export function measureStructural<K extends EmissionKind>(
   samples: readonly SampleObservation[],
-  causes: RetryCauseCounts,
   qualification: Qualified<K>,
 ): StructuralMeasurement<K> {
+  const causes = retryCauseCounts(samples.flatMap((sample) => sampleRetries(sample, qualification)));
   return QUALIFICATION_RULES[qualification.kind].structural(sharedSeries(samples, causes), causes, qualification);
 }
 

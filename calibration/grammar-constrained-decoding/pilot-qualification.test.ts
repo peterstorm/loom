@@ -1,14 +1,14 @@
 import fc from "fast-check";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { RETRY_CAUSES, type RetryCause } from "./pilot-observation";
-import { measureStructural, releaseEvidence, type RetryCauseCounts, type StructuralMeasurement } from "./pilot-qualification";
+import { measureStructural, releaseEvidence, type StructuralMeasurement } from "./pilot-qualification";
 import { ACCEPT_EMISSION, ACCEPT_EXTRACTION, firstPair, sample } from "./pilot-test-fixtures";
 import { guardrailOutcome, type GuardrailId } from "./pilot-vocabulary";
 
 /**
  * What a cell's emission qualification fixes, at the module's own interface:
  * `measureStructural` (the structural series and the AS-004 verdict read from
- * the same provider-enforced count) and `releaseEvidence` (the release class).
+ * the same provider-enforced count, both attributed from the samples alone)
+ * and `releaseEvidence` (the release class).
  * How these reach the release decision is pinned through `evaluatePilot` in
  * `pilot.test.ts`.
  */
@@ -16,8 +16,21 @@ import { guardrailOutcome, type GuardrailId } from "./pilot-vocabulary";
 const CONSTRAINED = { kind: "constrained-emission", enforcedConstraints: ["type", "required"], evidence: "test" } as const;
 const UNCONSTRAINED = { kind: "unconstrained-emission", evidence: "test" } as const;
 
-const NO_RETRIES: RetryCauseCounts = Object.fromEntries(RETRY_CAUSES.map((cause) => [cause, 0])) as Record<RetryCause, number>;
-const retryCounts = fc.record(Object.fromEntries(RETRY_CAUSES.map((cause) => [cause, fc.nat({ max: 50 })])) as Record<RetryCause, fc.Arbitrary<number>>);
+/** Errored tool results by class, re-prompted in child before an accepted emission. */
+type ToolErrorCounts = Readonly<{ schemaValidation: number; engineRefusal: number; unclassified: number }>;
+const toolErrorCounts = fc.record({ schemaValidation: fc.nat({ max: 12 }), engineRefusal: fc.nat({ max: 12 }), unclassified: fc.nat({ max: 12 }) });
+
+/** One emission-arm sample whose accepted attempt was re-prompted after each counted tool error. */
+const repromptedSample = ({ schemaValidation, engineRefusal, unclassified }: ToolErrorCounts) => [
+  sample(firstPair(), "emission-enabled", 10_000, [{
+    ...ACCEPT_EMISSION,
+    toolErrors: [
+      ...Array.from({ length: schemaValidation }, () => ({ class: "harness-schema-validation" })),
+      ...Array.from({ length: engineRefusal }, () => ({ class: "engine-refusal", code: "test-refusal" })),
+      ...Array.from({ length: unclassified }, () => ({ class: "unclassified", excerpt: "test" })),
+    ],
+  }]),
+];
 
 /** A series without the two fields its qualification fixes. */
 const sharedPart = ({ series }: StructuralMeasurement<"constrained-emission"> | StructuralMeasurement<"unconstrained-emission">) => {
@@ -26,31 +39,34 @@ const sharedPart = ({ series }: StructuralMeasurement<"constrained-emission"> | 
 };
 
 describe("measureStructural", () => {
-  it("writes a constrained route's provider-enforced count into its series and reads AS-004 from that same count (property)", () => {
-    fc.assert(fc.property(retryCounts, (causes) => {
-      const { series, guardrail } = measureStructural([], causes, CONSTRAINED);
+  it("attributes a constrained route's schema-validation retries to the provider, writes that count into its series and reads AS-004 from it (property)", () => {
+    fc.assert(fc.property(toolErrorCounts, (errors) => {
+      const { series, guardrail } = measureStructural(repromptedSample(errors), CONSTRAINED);
       expect(series.qualification).toBe("constrained-emission");
-      expect(series.providerEnforcedStructuralRetries).toBe(causes["provider-structural"]);
+      expect(series.providerEnforcedStructuralRetries).toBe(errors.schemaValidation);
+      expect(series.unenforcedSchemaViolationRetries).toBe(0);
       expect(guardrail.guardrail).toBe("provider-structural-retries");
-      expect(guardrail.verdict).toBe(causes["provider-structural"] === 0 ? "pass" : "violated");
-    }), { numRuns: 200 });
+      expect(guardrail.verdict).toBe(errors.schemaValidation === 0 ? "pass" : "violated");
+    }), { numRuns: 100 });
   });
 
-  it("gives an unconstrained route no provider-enforced count and AS-004 not-applicable, whatever its retries (property)", () => {
-    fc.assert(fc.property(retryCounts, (causes) => {
-      const { series, guardrail } = measureStructural([], causes, UNCONSTRAINED);
+  it("gives an unconstrained route no provider-enforced count and AS-004 not-applicable, its schema-validation retries reported as unenforced (property)", () => {
+    fc.assert(fc.property(toolErrorCounts, (errors) => {
+      const { series, guardrail } = measureStructural(repromptedSample(errors), UNCONSTRAINED);
       expect([series.qualification, series.providerEnforcedStructuralRetries]).toEqual(["unconstrained-emission", "not-applicable"]);
+      expect(series.unenforcedSchemaViolationRetries).toBe(errors.schemaValidation);
       expect(guardrail.verdict).toBe("not-applicable");
-      expect(guardrail.detail).toContain(`${causes["unenforced-schema-violation"]} unenforced schema-violation retries`);
-    }), { numRuns: 200 });
+      expect(guardrail.detail).toContain(`${errors.schemaValidation} unenforced schema-violation retries and ${errors.engineRefusal} engine-only refusal retries`);
+    }), { numRuns: 100 });
   });
 
-  it("measures everything but the qualification-fixed fields identically under either qualification (property)", () => {
-    fc.assert(fc.property(retryCounts, (causes) => {
-      const constrained = sharedPart(measureStructural([], causes, CONSTRAINED));
-      expect(sharedPart(measureStructural([], causes, UNCONSTRAINED))).toEqual(constrained);
-      expect([constrained.unenforcedSchemaViolationRetries, constrained.engineOnlyRefusalRetries, constrained.unclassifiedToolErrorRetries])
-        .toEqual([causes["unenforced-schema-violation"], causes["engine-only-refusal"], causes["unclassified-tool-error"]]);
+  it("measures everything but the schema-validation attribution identically under either qualification (property)", () => {
+    fc.assert(fc.property(toolErrorCounts, (errors) => {
+      const samples = repromptedSample(errors);
+      const { unenforcedSchemaViolationRetries: _constrainedUnenforced, ...constrained } = sharedPart(measureStructural(samples, CONSTRAINED));
+      const { unenforcedSchemaViolationRetries: _unconstrainedUnenforced, ...unconstrained } = sharedPart(measureStructural(samples, UNCONSTRAINED));
+      expect(unconstrained).toEqual(constrained);
+      expect([constrained.engineOnlyRefusalRetries, constrained.unclassifiedToolErrorRetries]).toEqual([errors.engineRefusal, errors.unclassified]);
     }), { numRuns: 100 });
   });
 
@@ -61,7 +77,7 @@ describe("measureStructural", () => {
       sample(pair, "emission-enabled", 10_000, [{ outcome: { kind: "rejected", cause: { kind: "extraction-failure", detail: "no JSON" } } }, ACCEPT_EXTRACTION]),
       sample(pair, "emission-enabled", 10_000, [ACCEPT_EMISSION]),
     ];
-    const { series } = measureStructural(samples, NO_RETRIES, CONSTRAINED);
+    const { series } = measureStructural(samples, CONSTRAINED);
     expect(series).toMatchObject({
       duplicateCallRejections: 1,
       extractionFailures: 1,

@@ -49,7 +49,6 @@
 import { match } from "ts-pattern";
 import { err, nonEmpty, ok, type NonEmpty, type Result } from "../kernel";
 import {
-  RETRY_CAUSES,
   sampleRetries,
   sampleTerminal,
   type ObservedPair,
@@ -69,6 +68,7 @@ import {
 import {
   measureStructural,
   releaseEvidence,
+  retryCauseCounts,
   type CellGuardrails,
   type EmissionKind,
   type PassedCellEvidence,
@@ -266,12 +266,12 @@ const rate = (count: number, total: number): number | null => (total === 0 ? nul
 
 type RetryTally = Readonly<{ causes: RetryCauseCounts; semanticRetries: number; inChildReprompts: number }>;
 
-/** The one retry fold every summary reads (cause counts + retry kinds). */
+/** The retry fold every arm summary reads: cause counts (by the qualification
+ *  module's one cause fold, the same one `measureStructural` reads) + retry kinds. */
 function tallyRetries(samples: readonly SampleObservation[], qualification: RouteQualification): RetryTally {
   const retries = samples.flatMap((sample) => sampleRetries(sample, qualification));
   return Object.freeze({
-    causes: Object.freeze(Object.fromEntries(RETRY_CAUSES.map((cause) =>
-      [cause, retries.filter((retry) => retry.cause === cause).length])) as Record<RetryCause, number>),
+    causes: retryCauseCounts(retries),
     semanticRetries: retries.filter((retry) => retry.kind === "semantic-retry").length,
     inChildReprompts: retries.filter((retry) => retry.kind === "in-child-reprompt").length,
   });
@@ -461,8 +461,7 @@ function measureCell<K extends EmissionKind>(
   const latency = latencyGuardrail(pairs, evidence.preregistration);
   const terminal = terminalGuardrail(pairs, evidence.preregistration);
   const emissionSamples = pairs.map((pair) => pair.emission);
-  const { causes } = tallyRetries(emissionSamples, qualification);
-  const structural = measureStructural(emissionSamples, causes, qualification);
+  const structural = measureStructural(emissionSamples, qualification);
   const quality = compareQuality(cell, pairs, evidence.preregistration, evidence.quality);
   if (!quality.ok) return quality;
   const measured: MeasuredOn<K, GuardrailVerdict> = Object.freeze({
