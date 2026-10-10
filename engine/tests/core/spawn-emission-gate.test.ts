@@ -1,15 +1,15 @@
-import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseModelRoutingConfig } from "../../src/core/model-routing";
 import type { RouteReachability, UnverifiedRoute } from "../../src/core/route-reachability";
 import {
   announcedParentHarness,
   gateEmission,
+  type ClaudeCodeParent,
   type EmissionGateStep,
-  type AnnouncedParent,
   type EmissionVerdict,
-  type GatedAction,
+  type PiParent,
   type PiRouteGateFacts,
+  type PiSpawnBatch,
   type RouteGateStep,
 } from "../../src/core/spawn-emission-gate";
 import { parseSpawnBatch } from "../../src/core/spawn-request-authority";
@@ -17,10 +17,10 @@ import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import { LOCAL_PI_BINDING as LOCAL, LOCAL_PI_ROUTE, RETIRED_CLOUD_PI_BINDING, RETIRED_CLOUD_ROUTE } from "../fixtures/local-pi-binding";
 
 /**
- * The emission gate's one pure entry point: which actions it gates (and so
- * which ask for route-gate facts), the order in which it refuses unreadable
- * inputs (a request before any fact is read, the facts before any probe), the
- * routes it asks the shell to observe, and the verdict — with its stderr
+ * The emission gate's one pure entry point: what it gates (a Pi parent's
+ * spawn batch, and nothing a Claude Code parent emits), the order in which it
+ * refuses unreadable inputs (a request before any fact is read, the facts
+ * before any probe), the routes it asks the shell to observe, and the verdict — with its stderr
  * events as data.
  */
 
@@ -32,11 +32,11 @@ const GATE: PiRouteGateFacts = {
   mode: { ok: true, value: "admit-unverified" },
   routing: { ok: true, value: { parentRef: null, config: null } },
 };
-const PI: AnnouncedParent["harness"] = "pi";
+const PI: PiParent = { harness: "pi", sessionId: "pi-session" };
 const facts = (overrides: Partial<PiRouteGateFacts> = {}): PiRouteGateFacts => ({ ...GATE, ...overrides });
 
-/** A spawn batch as the façade hands it to the gate: parsed once, as a Pi parent labels it. */
-const batch = (...authorities: unknown[]): GatedAction => ({ kind: "spawn-batch", batch: parseSpawnBatch("Pi", authorities) });
+/** A Pi parent's spawn batch as the façade hands it to the gate: parsed once for its run, as a Pi parent labels it. */
+const batch = (...authorities: unknown[]): PiSpawnBatch => ({ parent: PI, batch: parseSpawnBatch("Pi", RUN_ID, authorities) });
 const stored = (overrides: Record<string, unknown> = {}) => agentRequestAuthority(RUN_ID, overrides);
 const unparseable = () => ({ ...stored(), modelProfile: "no-such-profile" });
 const retired = () => stored({
@@ -58,9 +58,9 @@ const readingFacts = (step: EmissionGateStep): Extract<EmissionGateStep, { kind:
   if (step.kind !== "read-route-gate") throw new Error(`expected a read-route-gate step, got ${JSON.stringify(step)}`);
   return step;
 };
-/** A Pi parent's `action`, gated on `gateFacts`. */
-const gated = (action: GatedAction, gateFacts: PiRouteGateFacts = facts()): RouteGateStep =>
-  readingFacts(gateEmission(action, PI)).gate(gateFacts);
+/** A Pi parent's `spawn` batch, gated on `gateFacts`. */
+const gated = (spawn: PiSpawnBatch, gateFacts: PiRouteGateFacts = facts()): RouteGateStep =>
+  readingFacts(gateEmission(spawn)).gate(gateFacts);
 const observing = (step: RouteGateStep): Extract<RouteGateStep, { kind: "observe" }> => {
   if (step.kind !== "observe") throw new Error(`expected an observe step, got ${JSON.stringify(step)}`);
   return step;
@@ -68,16 +68,12 @@ const observing = (step: RouteGateStep): Extract<RouteGateStep, { kind: "observe
 const UNGATED: EmissionVerdict = { kind: "emit", unverified: [], events: [] };
 
 describe("gateEmission: what it gates", () => {
-  const actions = fc.constantFrom<GatedAction>(batch(stored()), batch(unparseable()), { kind: "other" });
-
-  it("emits every action of a Claude Code parent ungated, whatever its requests", () => {
-    fc.assert(fc.property(actions, (action) => {
-      expect(verdictOf(gateEmission(action, "claude-code"))).toEqual(UNGATED);
-    }));
-  });
-
-  it("emits every non-spawn action of a Pi parent ungated, without asking for its route-gate facts", () => {
-    expect(verdictOf(gateEmission({ kind: "other" }, PI))).toEqual(UNGATED);
+  it("takes only a Pi parent's spawn batch: a Claude Code parent's does not type", () => {
+    const claudeCode: ClaudeCodeParent = { harness: "claude-code", sessionId: "claude-session" };
+    const spawn = { parent: claudeCode, batch: batch(stored()).batch };
+    // Only the type is under test (`npm run typecheck`): a Claude Code parent never reaches the gate at run time.
+    // @ts-expect-error the route gate is a Pi parent's alone
+    void (() => gateEmission(spawn));
   });
 
   it("gates a Pi parent's spawn batch on the route it launches on", () => {
@@ -88,8 +84,13 @@ describe("gateEmission: what it gates", () => {
 
 describe("gateEmission: unreadable inputs refuse before any route is observed", () => {
   it("refuses an unparseable request first, naming it, before asking for any route-gate fact", () => {
-    const step = gateEmission(batch(stored(), unparseable()), PI);
+    const step = gateEmission(batch(stored(), unparseable()));
     expect(verdictOf(step)).toMatchObject({ kind: "refuse", message: expect.stringMatching(/^Pi orchestration spawn request 1: /) });
+  });
+
+  it("refuses a request of another run, naming it, before asking for any route-gate fact", () => {
+    const step = gateEmission(batch(stored(), agentRequestAuthority("run.elsewhere"), unparseable()));
+    expect(verdictOf(step)).toEqual({ kind: "refuse", message: "Pi orchestration spawn request 1 belongs to another run" });
   });
 
   it("refuses an unparseable gate mode before a malformed routing config", () => {

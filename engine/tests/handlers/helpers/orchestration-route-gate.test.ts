@@ -169,7 +169,25 @@ const retiredAuthority = (): AgentRequestAuthority => storedAuthority({
   harnessBinding: { pi: RETIRED_CLOUD_PI_BINDING, claude: { harness: "claude-code", model: "sonnet" } },
 });
 
+/** A stored authority this case's run did not issue: it belongs to another run. */
+function foreignAuthority(): AgentRequestAuthority {
+  const parsed = parseStoredAgentRequestAuthority(agentRequestAuthority("run.elsewhere"));
+  if (!parsed.ok) throw new Error("the foreign fixture must parse");
+  return parsed.value;
+}
+
 const piBindings = (id: string) => readSessionRunBindings(bindingDir, id, "pi");
+
+/**
+ * The run directories `id`'s session binds under `harness`. The fixture
+ * Claude Code session is shared across cases, so a case asserts only that its
+ * own run is absent from it.
+ */
+function boundRunDirectories(id: string, harness: "pi" | "claude-code"): readonly string[] {
+  const bound = readSessionRunBindings(bindingDir, id, harness);
+  if (!bound.ok) throw new Error(bound.message);
+  return bound.value.map(({ runDirectory }) => runDirectory);
+}
 
 const unverifiedEvents = (): readonly unknown[] =>
   stderr.join("").trim().split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
@@ -469,21 +487,57 @@ describe("emitRunAction: one parse of the batch serves the gate and the session 
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringMatching(/^Claude Code orchestration spawn request 1: /) });
     expect(stdout).toEqual([]);
-    // The fixture Claude Code session is shared across cases, so only this case's run must be absent from it.
-    const bound = readSessionRunBindings(bindingDir, id, "claude-code");
-    if (!bound.ok) throw new Error(bound.message);
-    expect(bound.value.map(({ runDirectory }) => runDirectory)).not.toContain(handle.runDirectory);
+    expect(boundRunDirectories(id, "claude-code")).not.toContain(handle.runDirectory);
   });
 
-  it("still names a request of another run before a later request that did not parse", async () => {
-    claudeCodeParent();
+  it("still names a request of another run before a later request that did not parse, publishing nothing", async () => {
+    const id = claudeCodeParent();
     const { probe } = probeFake({});
-    const foreign = parseStoredAgentRequestAuthority(agentRequestAuthority("run.elsewhere"));
-    if (!foreign.ok) throw new Error("the foreign fixture must parse");
 
-    const result = await emitRunAction(handle, spawnBatch([foreign.value, unparseable(storedAuthority())]), emission(probe));
+    const result = await emitRunAction(handle, spawnBatch([foreignAuthority(), unparseable(storedAuthority())]), emission(probe));
 
     expect(result).toEqual({ kind: "error", message: "Claude Code orchestration spawn request 0 belongs to another run" });
+    expect(stdout).toEqual([]);
+    expect(boundRunDirectories(id, "claude-code")).not.toContain(handle.runDirectory);
+  });
+});
+
+describe("emitRunAction: a batch that cannot be bound to this run publishes nothing", () => {
+  it("refuses a Claude Code batch mixing this run's request with another run's, naming the foreign one", async () => {
+    const id = claudeCodeParent();
+    const { probe } = probeFake({});
+
+    const result = await emitRunAction(handle, spawnBatch([storedAuthority(), foreignAuthority()]), emission(probe));
+
+    expect(result).toEqual({ kind: "error", message: "Claude Code orchestration spawn request 1 belongs to another run" });
+    expect(stdout).toEqual([]);
+    expect(boundRunDirectories(id, "claude-code")).not.toContain(handle.runDirectory);
+  });
+
+  it("refuses a Pi batch with another run's request before reading any route-gate fact or probing", async () => {
+    const id = piParent();
+    const { probe, probed } = probeFake({ [LOCAL.provider]: listing(LOCAL.model) });
+
+    const result = await emitRunAction(handle, spawnBatch([storedAuthority(), foreignAuthority()]), emission(probe));
+
+    expectRefusedUntouched(result, id, probed, "Pi orchestration spawn request 1 belongs to another run");
+    expect(factReads).toBe(0);
+  });
+
+  it.each([
+    ["Claude Code", "claude-code", claudeCodeParent],
+    ["Pi", "pi", () => piParent()],
+  ] as const)("refuses an empty %s batch as having no request authority", async (label, harness, parent) => {
+    const id = parent();
+    const { probe, probed } = probeFake({});
+    const empty: FacadeAction = { kind: "spawn-batch", runId: handle.identity.runId, requests: [] };
+
+    const result = await emitRunAction(handle, empty, emission(probe));
+
+    expect(result).toEqual({ kind: "error", message: `${label} orchestration spawn action has no request authority` });
+    expect(probed).toEqual([]);
+    expect(stdout).toEqual([]);
+    expect(boundRunDirectories(id, harness)).not.toContain(handle.runDirectory);
   });
 });
 
