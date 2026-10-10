@@ -33,6 +33,7 @@ import { samePiBinding } from "../../src/core/orchestration-contract/roster";
 import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
+import { agentRequestIdentity } from "../fixtures/agent-request-identity";
 import { LOCAL_PI_BINDING, RECORDED_PI_VOCABULARY, RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING } from "../fixtures/local-pi-binding";
 
 /**
@@ -151,11 +152,8 @@ describe("issued request authority is today's catalog", () => {
 });
 
 describe("a minted authority is the only thing an issuing seam accepts", () => {
-  const identity = <Attempt extends 1 | 2>(attempt: Attempt, role: LoomAgentName = "code-reviewer") => ({
-    runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
-    program: "standalone-review" as const, role, attempt, contextDigest: String(attempt).repeat(64),
-    outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
-  });
+  const identity = <Attempt extends 1 | 2>(attempt: Attempt, role: LoomAgentName = "code-reviewer") =>
+    agentRequestIdentity(role, attempt, { runId: "run:recorded-authority", slotId: "slot:recorded-authority" });
   const mint = (attempt: 1 | 2, role?: LoomAgentName): MintedAgentRequestAuthority => {
     const minted = mintAgentRequestAuthority(identity(attempt, role));
     if (!minted.ok) throw new Error(JSON.stringify(minted.error));
@@ -275,16 +273,8 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
 });
 
 describe("the catalog mints a request from its identity alone", () => {
-  const identity = <Attempt extends 1 | 2>(role: (typeof AGENT_POLICIES)[number]["agent"], attempt: Attempt) => ({
-    runId: "run:minted-authority",
-    requestId: `request:minted-${role}-${attempt}`,
-    slotId: `slot:minted-${role}`,
-    program: "standalone-review" as const,
-    role,
-    attempt,
-    contextDigest: String(attempt).repeat(64),
-    outputSlot: `transcripts/slot:minted-${role}/attempt-${attempt}.raw`,
-  });
+  const identity = <Attempt extends 1 | 2>(role: LoomAgentName, attempt: Attempt) =>
+    agentRequestIdentity(role, attempt, { runId: "run:minted-authority", slotId: `slot:minted-${role}` });
 
   it("fills every role's catalog profile, current bindings and Skill, and agrees with the strict parse", () => {
     for (const policy of AGENT_POLICIES) {
@@ -371,15 +361,11 @@ describe("an issued refutation panel is the panel its record parses as", () => {
     if (!runId.ok || findingId === null) throw new Error("fixture identities must parse");
     const binding = deriveRefutationVerifierBinding(runId.value, "reproduction", [findingId]);
     if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => ({
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => agentRequestIdentity("review-verifier-agent", attempt, {
       runId: runId.value,
-      requestId: binding.value.requestIds[attempt - 1]!,
       slotId: binding.value.slotId,
-      program: "refutation-panel" as const,
-      role: "review-verifier-agent" as const,
-      attempt,
-      contextDigest: String(attempt).repeat(64),
-      outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
+      requestId: binding.value.requestIds[attempt - 1]!,
+      program: "refutation-panel",
     });
     const slot = mintAgentRosterSlot(identity(1), identity(2));
     if (!slot.ok) throw new Error("slot must issue");

@@ -9,12 +9,12 @@ import {
   parseAgentRosterSlot,
   parseExactRoster,
   rosterSlotErrorMessages,
-  type AgentRequestIdentity,
   type ExactRoster,
   type MintedAgentRequestAuthority,
   type MintedAgentRosterSlot,
   type SlotId,
 } from "../../src/core/orchestration-contract";
+import { agentRequestIdentity } from "../fixtures/agent-request-identity";
 
 /**
  * Minting is the one way to a `MintedAgentRequestAuthority`: a slot is minted
@@ -24,19 +24,13 @@ import {
 
 const RUN = "run:roster-minting";
 
-function identity<Attempt extends 1 | 2>(role: LoomAgentName, index: number, attempt: Attempt): AgentRequestIdentity<Attempt> {
-  const slotId = `slot:minting-${index}`;
-  return {
+/** One identity per slot index; its digest varies with index and attempt, so no two minted identities share one. */
+const identity = <Attempt extends 1 | 2>(role: LoomAgentName, index: number, attempt: Attempt) =>
+  agentRequestIdentity(role, attempt, {
     runId: RUN,
-    requestId: `request:minting-${index}-${attempt}`,
-    slotId,
-    program: "standalone-review",
-    role,
-    attempt,
+    slotId: `slot:minting-${index}`,
     contextDigest: `${index.toString(16).padStart(3, "0")}${attempt}`.repeat(16),
-    outputSlot: `transcripts/${slotId}/attempt-${attempt}.raw`,
-  };
-}
+  });
 
 function mintedSlot(role: LoomAgentName, index: number): MintedAgentRosterSlot {
   const slot = mintAgentRosterSlot(identity(role, index, 1), identity(role, index, 2));
