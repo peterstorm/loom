@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { withEnvOverlaySync } from "../../../fixtures/env-overlay";
 import { git, write } from "../../../fixtures/git-repository";
 import { baselineBlob } from "../../../../src/handlers/helpers/programs/changed-paths";
 
@@ -39,15 +40,10 @@ describe("baselineBlob reads absence from plumbing, not localized stderr", () =>
 
   it("returns null for a path the revision does not have, under any Git locale", () => {
     repository();
-    const previous = process.env.LC_ALL;
-    process.env.LC_ALL = "de_DE.UTF-8";
-    try {
+    withEnvOverlaySync({ LC_ALL: "de_DE.UTF-8" }, () => {
       expect(baselineBlob("HEAD", "missing.txt")).toBeNull();
       expect(baselineBlob("HEAD", "dir/missing.txt")).toBeNull();
-    } finally {
-      if (previous === undefined) delete process.env.LC_ALL;
-      else process.env.LC_ALL = previous;
-    }
+    });
   });
 
   it("throws for a tree path and for an unknown revision instead of reporting an added file", () => {
