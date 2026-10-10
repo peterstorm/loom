@@ -16,7 +16,9 @@ describe("CI verification contract", () => {
   it("pins full Git history, the measured runtimes, and both existing frozen dependency graphs", () => {
     expect(workflow).toMatch(/uses: actions\/checkout@v4\n\s+with:\n\s+fetch-depth: 0/);
     expect(workflow).toContain('node-version: "22.23.2"');
-    expect(workflow).toContain('bun-version: "1.3.13"');
+    // .bun-version is the one Bun pin: CI installs it and asserts the installed Bun is it.
+    expect(workflow).toContain("bun-version-file: .bun-version");
+    expect(workflow).toContain('test "$(bun --version)" = "$(cat .bun-version)"');
     expect(workflow.match(/bun install --frozen-lockfile/g)).toHaveLength(2);
     expect(workflow).toContain("(cd engine && bun install --frozen-lockfile)");
     expect(workflow).toContain('test -x node_modules/.bin/pi');

@@ -48,9 +48,11 @@ type RouteStubPortParse =
 
 /** Parse the stub's announcement line: exactly a decimal TCP port, no sign, padding or whitespace. Pure and total. */
 export function parseRouteStubPort(line: string): RouteStubPortParse {
-  const port = /^[1-9][0-9]{0,4}$/.test(line) ? Number(line) : Number.NaN;
-  return port >= 1 && port <= 65_535
-    ? { ok: true, value: port as RouteStubPort }
+  // The pattern admits only canonical decimal integers of at least 1, so the
+  // one bound left to check is the top of the TCP range.
+  const valid = /^[1-9][0-9]{0,4}$/.test(line) && Number(line) <= 65_535;
+  return valid
+    ? { ok: true, value: Number(line) as RouteStubPort }
     : { ok: false, error: `route stub announced ${JSON.stringify(line)} instead of its TCP port (an integer in 1..65535)` };
 }
 
@@ -82,7 +84,7 @@ export function routeStubVerdict(phase: RouteStubPhase, event: RouteStubEvent): 
   if (phase.kind === "starting") {
     return event.kind === "error"
       ? { kind: "reject", error: event.error }
-      : { kind: "reject", error: new Error(`route stub exited before listening (code ${event.code})`) };
+      : { kind: "reject", error: new Error(`route stub exited before listening (${ending(event.code, event.signal)})`) };
   }
   if (event.kind === "exit") {
     return phase.kind === "stopping"

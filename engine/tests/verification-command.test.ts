@@ -54,6 +54,8 @@ if (stage === ${JSON.stringify(failingStage)}) process.exit(17);
   mkdirSync(join(directory, "engine/src/core"), { recursive: true });
   cpSync(resolve("scripts/typecheck.ts"), join(directory, "engine/scripts/typecheck.ts"));
   cpSync(resolve("scripts/verify-prerequisites.sh"), join(directory, "engine/scripts/verify-prerequisites.sh"));
+  cpSync(resolve("scripts/bun-version-pin.ts"), join(directory, "engine/scripts/bun-version-pin.ts"));
+  cpSync(join(repository, ".bun-version"), join(directory, ".bun-version"));
   cpSync(resolve("src/core/compiler-diagnostic-policy.ts"), join(directory, "engine/src/core/compiler-diagnostic-policy.ts"));
   symlinkSync(resolve("node_modules/typescript"), join(directory, "engine/node_modules/typescript"), "dir");
   return directory;
@@ -177,6 +179,18 @@ describe("canonical verification command", () => {
     expect(result.signal).toBeNull();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Verification blocked: install both frozen locks");
+    expect(result.stdout).not.toContain("typecheck.ts");
+    expect(() => readFileSync(join(directory, "stages"))).toThrow();
+  });
+
+  it("a local Bun other than the .bun-version pin is blocked before the compiler or any suite stage", async () => {
+    const directory = fixture("none");
+    writeFileSync(join(directory, ".bun-version"), "0.0.1\n");
+    const result = await runVerification(directory);
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Verification blocked: local Bun is \S+ but \.bun-version pins 0\.0\.1/);
     expect(result.stdout).not.toContain("typecheck.ts");
     expect(() => readFileSync(join(directory, "stages"))).toThrow();
   });
