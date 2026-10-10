@@ -45,7 +45,7 @@ const untilStopped = (marker: string, body: string): string =>
 
 /**
  * Close the child's stdout while it stays alive. `fs.closeSync(1)` cannot:
- * on bun 1.3 (CI's pin) it is a silent no-op that leaves fd 1 naming the
+ * on bun 1.3.13 it is a silent no-op that leaves fd 1 naming the
  * pipe. libc's own close(2) closes it on every bun, and a failed close throws,
  * so the start fails as an exit instead of hanging.
  */
