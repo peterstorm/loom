@@ -60,6 +60,19 @@ describe("measureStructural", () => {
     }), { numRuns: 100 });
   });
 
+  it("returns the one retry tally its series and verdict were read from (property)", () => {
+    fc.assert(fc.property(toolErrorCounts, fc.boolean(), (errors, constrained) => {
+      const measured = constrained ? measureStructural(repromptedSample(errors), CONSTRAINED) : measureStructural(repromptedSample(errors), UNCONSTRAINED);
+      const { causes, semanticRetries, inChildReprompts } = measured.retries;
+      expect(causes[constrained ? "provider-structural" : "unenforced-schema-violation"]).toBe(errors.schemaValidation);
+      expect(causes[constrained ? "unenforced-schema-violation" : "provider-structural"]).toBe(0);
+      expect(measured.series.providerEnforcedStructuralRetries).toBe(constrained ? causes["provider-structural"] : "not-applicable");
+      expect([measured.series.engineOnlyRefusalRetries, measured.series.unclassifiedToolErrorRetries])
+        .toEqual([causes["engine-only-refusal"], causes["unclassified-tool-error"]]);
+      expect([semanticRetries, inChildReprompts]).toEqual([0, errors.schemaValidation + errors.engineRefusal + errors.unclassified]);
+    }), { numRuns: 100 });
+  });
+
   it("measures everything but the schema-validation attribution identically under either qualification (property)", () => {
     fc.assert(fc.property(toolErrorCounts, (errors) => {
       const samples = repromptedSample(errors);

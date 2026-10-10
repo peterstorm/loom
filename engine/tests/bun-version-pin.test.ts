@@ -90,7 +90,7 @@ describe("hardCodedBunVersions", () => {
     "the Bun release pinned in the repository-root `.bun-version`",
     "          bun-version-file: .bun-version",
     "      - uses: oven-sh/setup-bun@v2",
-    "a different Bun can pass where CI fails, as `fs.closeSync(1)` did on 1.3.13",
+    "a different Bun can pass where the pinned one fails (`fs.closeSync(1)` is a silent no-op on 1.3.13 but not on the pinned release)",
     'test "$(bun --version)" = "$(cat .bun-version)"',
   ])("finds none in %j", (text) => {
     expect(hardCodedBunVersions(text)).toEqual([]);
@@ -130,8 +130,8 @@ describe("the repository's Bun pin", () => {
 describe("bun-version-pin CLI", () => {
   const realBun = spawnSync("bash", ["-c", "command -v bun"], { encoding: "utf8" }).stdout.trim();
 
-  /** A copy of the guard beside a `.bun-version` holding `pin` (none when `null`), with a fake `bun` on PATH printing `local`. */
-  function guard(pin: string | null, local: string): ReturnType<typeof spawnSync> {
+  /** A copy of the guard beside a `.bun-version` holding `pin` (none when `null`), with a fake `bun` on PATH printing `local` and exiting `status`. */
+  function guard(pin: string | null, local: string, status = 0): ReturnType<typeof spawnSync> {
     const root = canonicalTempDir("loom-bun-pin-");
     dirs.push(root);
     mkdirSync(join(root, "engine/scripts"), { recursive: true });
@@ -139,7 +139,7 @@ describe("bun-version-pin CLI", () => {
     cpSync(resolve("scripts/bun-version-pin.ts"), join(root, "engine/scripts/bun-version-pin.ts"));
     if (pin !== null) writeFileSync(join(root, ".bun-version"), pin);
     writeFileSync(join(root, "bin/version"), local);
-    writeFileSync(join(root, "bin/bun"), `#!/usr/bin/env bash\nexec cat ${JSON.stringify(join(root, "bin/version"))}\n`);
+    writeFileSync(join(root, "bin/bun"), `#!/usr/bin/env bash\ncat ${JSON.stringify(join(root, "bin/version"))}\nexit ${status}\n`);
     chmodSync(join(root, "bin/bun"), 0o755);
     // The real Bun runs the guard; only the `bun` the guard asks is the fake.
     return spawnSync(realBun, [join(root, "engine/scripts/bun-version-pin.ts")], {
@@ -168,5 +168,11 @@ describe("bun-version-pin CLI", () => {
     const result = guard(null, "1.4.2\n");
     expect(result.status).toBe(2);
     expect(result.stderr).toMatch(/^Verification blocked: cannot read the Bun pin \S+\/\.bun-version: ENOENT/);
+  });
+
+  it("blocks verification naming the exit status when `bun --version` itself fails", () => {
+    const result = guard("1.4.2\n", "1.4.2\n", 3);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toBe("Verification blocked: `bun --version` failed: exit 3\n");
   });
 });

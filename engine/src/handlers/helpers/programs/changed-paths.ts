@@ -5,9 +5,9 @@
  * change created, and the added-line count a frozen scope classifies with.
  * Imperative shell — every classification rule lives in core/scope-classification.
  * Every probe reaches Git through the `GitSpawn` port: each exported entry
- * point defaults it to the policy-bound `spawnGit` and binds it once with
- * `scopeProbes`, and tests pass a scripted fake returning `GitSpawnOutcome`
- * values.
+ * point defaults it to the policy-bound `spawnGit` and passes it explicitly
+ * to each probe it runs, and tests pass a scripted fake returning
+ * `GitSpawnOutcome` values.
  */
 import { devNull } from 'node:os';
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from '../../../utils/git-execution-policy';
@@ -266,23 +266,6 @@ function blobBytesProbe(spawn: GitSpawn, blobId: string, object: string): Uint8A
   );
 }
 
-/** The module's Git probes with the `GitSpawn` port bound ONCE: each entry
- *  point builds `scopeProbes(spawn)`, and every probe reaches Git through that
- *  one port, so no call site restates it. */
-function scopeProbes(spawn: GitSpawn) {
-  const bound = <A extends unknown[], R>(probe: (spawn: GitSpawn, ...args: A) => R) => (...args: A): R => probe(spawn, ...args);
-  return Object.freeze({
-    paths: bound(pathsProbe),
-    text: bound(textProbe),
-    candidateReference: bound(candidateReferenceProbe),
-    candidateMergeBase: bound(candidateMergeBaseProbe),
-    trackedAdditions: bound(trackedAdditionsProbe),
-    untrackedAdditions: bound(untrackedAdditionsProbe),
-    treeEntry: bound(treeEntryProbe),
-    blobBytes: bound(blobBytesProbe),
-  });
-}
-
 /**
  * One fixed-argv Git probe for text authority, retried twice on status-0
  * empty stdout. The `empty` argument is the caller's confirmed-empty decision
@@ -290,7 +273,7 @@ function scopeProbes(spawn: GitSpawn) {
  * for text authority is visible where the value is consumed, never defaulted.
  */
 export function gitText(args: readonly string[], empty: GitEmptyDecision, spawn: GitSpawn = spawnGit): string {
-  return scopeProbes(spawn).text(args, empty);
+  return textProbe(spawn, args, empty);
 }
 
 export type CanonicalChangedPaths = Readonly<{
@@ -315,31 +298,30 @@ export type DerivedChangedPaths = Readonly<{
 }>;
 
 export function deriveChangedPaths(spawn: GitSpawn = spawnGit): DerivedChangedPaths {
-  const git = scopeProbes(spawn);
   // A HEAD revision can never legitimately be empty: a confirmed-empty answer
   // after the bounded retry refuses instead of freezing `head_revision: ""`.
-  const head = git.text(["rev-parse", "HEAD"], "refuse");
+  const head = textProbe(spawn, ["rev-parse", "HEAD"], "refuse");
   let base: string | null = null;
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
     // A missing ref is distinct from an error: real temporary repositories
     // often have no origin/main, and merge-base reports that absence as 128.
-    if (git.candidateReference(candidate).kind === "missing") continue;
-    const observed = git.candidateMergeBase(candidate, head);
+    if (candidateReferenceProbe(spawn, candidate).kind === "missing") continue;
+    const observed = candidateMergeBaseProbe(spawn, candidate, head);
     if (observed.kind === "no-base") continue;
     base = observed.revision;
     break;
   }
-  const untracked = git.paths(["ls-files", "--others", "--exclude-standard", "-z", "--"], "legitimate").filter(reviewablePath);
-  const trackedUnstaged = git.paths(["diff", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath);
-  const stagedAdded = git.paths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"], "legitimate").filter(reviewablePath);
+  const untracked = pathsProbe(spawn, ["ls-files", "--others", "--exclude-standard", "-z", "--"], "legitimate").filter(reviewablePath);
+  const trackedUnstaged = pathsProbe(spawn, ["diff", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath);
+  const stagedAdded = pathsProbe(spawn, ["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"], "legitimate").filter(reviewablePath);
   const committedAdded = base === null
     ? []
-    : git.paths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath);
+    : pathsProbe(spawn, ["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath);
   return Object.freeze({
     authority: Object.freeze({
       unstaged: Object.freeze([...new Set([...trackedUnstaged, ...untracked])].sort()),
-      staged: git.paths(["diff", "--cached", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath),
-      committed: base === null ? Object.freeze([]) : git.paths(["diff", "--name-only", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath),
+      staged: pathsProbe(spawn, ["diff", "--cached", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath),
+      committed: base === null ? Object.freeze([]) : pathsProbe(spawn, ["diff", "--name-only", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath),
       base_revision: base,
       head_revision: head,
     }),
@@ -364,19 +346,18 @@ const TREE_ENTRY = /^[0-7]{6} ([a-z]+) ([0-9a-f]+)\t([^\0]*)\0$/;
  * Git's localized stderr text. Every other outcome (an invalid revision, a
  * path that names a tree or submodule, an unreadable object) throws with
  * attribution, so an unreadable base can never become an "added file" diff.
- * Both probes go through the module's `scopeProbes`/`observeGitProbe` seam.
+ * Both probes go through the module's `spawnProbe`/`observeGitProbe` seam.
  */
 export function baselineBlob(revision: string, path: string, spawn: GitSpawn = spawnGit): Uint8Array | null {
-  const git = scopeProbes(spawn);
   const object = `${revision}:${path}`;
-  const listing = git.treeEntry(revision, path);
+  const listing = treeEntryProbe(spawn, revision, path);
   if (listing === null) return null;
   const [, type, blobId, listedPath] = TREE_ENTRY.exec(listing) ?? [];
   if (type === undefined || blobId === undefined || listedPath !== path) {
     throw new Error(`git ls-tree listed an unexpected entry for ${object}`);
   }
   if (type !== "blob") throw new Error(`${object} is a ${type}, not a file`);
-  return git.blobBytes(blobId, object);
+  return blobBytesProbe(spawn, blobId, object);
 }
 
 export function metadata(
@@ -385,10 +366,9 @@ export function metadata(
   changed: DerivedChangedPaths,
   spawn: GitSpawn = spawnGit,
 ): StandaloneReviewMetadata {
-  const git = scopeProbes(spawn);
   const scopedUntracked = new Set(changed.untracked.filter((path) => scope.includes(path)));
   const trackedScope = scope.filter((path) => !scopedUntracked.has(path));
   const baseline = reviewBaseline(changed);
-  const additions = git.trackedAdditions(baseline, trackedScope) + git.untrackedAdditions([...scopedUntracked].sort());
+  const additions = trackedAdditionsProbe(spawn, baseline, trackedScope) + untrackedAdditionsProbe(spawn, [...scopedUntracked].sort());
   return classifyScope(kind, scope, changed.created, additions);
 }

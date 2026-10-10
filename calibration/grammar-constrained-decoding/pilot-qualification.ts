@@ -8,16 +8,18 @@
  * carries no such count and AS-004 is not applicable; and the qualification
  * fixes the class a passing cell is released in. The release decision
  * (`pilot-core.ts`) reads all of it through two functions —
- * `measureStructural` (a cell's structural series and its AS-004 verdict) and
- * `releaseEvidence` (a passing cell's release class) — and through the
- * per-qualification types they return, so it never tells a qualification
- * apart itself. Adding a qualification touches this module only: its
- * `QualificationTerms` entry and its `QUALIFICATION_RULES` entry, each
- * compile-checked to cover every emission qualification exactly once.
+ * `measureStructural` (a cell's emission-arm retry tally, its structural
+ * series and its AS-004 verdict) and `releaseEvidence` (a passing cell's
+ * release class) — and through the per-qualification types they return, so it
+ * never tells a qualification apart itself. Given a new qualification kind in
+ * the preregistration (`EmissionRouteQualification`), the release decision
+ * changes only here: its `QualificationTerms` entry and its
+ * `QUALIFICATION_RULES` entry, each compile-checked to cover every emission
+ * qualification exactly once.
  */
 
-import { RETRY_CAUSES, sampleRetries, type RejectionCause, type RetryCause, type RetryEvent, type SampleObservation } from "./pilot-observation";
-import type { EmissionRouteQualification } from "./pilot-preregistration";
+import { RETRY_CAUSES, sampleRetries, type RejectionCause, type RetryCause, type SampleObservation } from "./pilot-observation";
+import type { EmissionRouteQualification, RouteQualification } from "./pilot-preregistration";
 import { guardrailOutcome, type CellKey, type GuardrailId, type GuardrailOutcome, type GuardrailVerdict, type PassingVerdict } from "./pilot-vocabulary";
 
 export type EmissionKind = EmissionRouteQualification["kind"];
@@ -100,19 +102,32 @@ type PassedOn<K extends EmissionKind> = Readonly<{ cell: CellKey; releaseClass: 
  */
 export type PassedCellEvidence = { [K in EmissionKind]: PassedOn<K> }[EmissionKind];
 
-/** Retry counts by cause — the release decision's one retry-cause fold (`retryCauseCounts`). */
+/** Retry counts by cause. */
 export type RetryCauseCounts = Readonly<Record<RetryCause, number>>;
 
-/** The one retry-cause fold: retries counted by the cause each is attributed to. */
-export const retryCauseCounts = (retries: readonly RetryEvent[]): RetryCauseCounts =>
-  Object.freeze(Object.fromEntries(RETRY_CAUSES.map((cause) =>
-    [cause, retries.filter((retry) => retry.cause === cause).length])) as Record<RetryCause, number>);
+/** One arm's retries, attributed once: counted by the cause each is attributed to and by retry kind. */
+export type RetryTally = Readonly<{ causes: RetryCauseCounts; semanticRetries: number; inChildReprompts: number }>;
+
+/** The one retry attribution: an arm's retries under `qualification`, counted by cause and by kind. */
+export function tallyRetries(samples: readonly SampleObservation[], qualification: RouteQualification): RetryTally {
+  const retries = samples.flatMap((sample) => sampleRetries(sample, qualification));
+  return Object.freeze({
+    causes: Object.freeze(Object.fromEntries(RETRY_CAUSES.map((cause) =>
+      [cause, retries.filter((retry) => retry.cause === cause).length])) as Record<RetryCause, number>),
+    semanticRetries: retries.filter((retry) => retry.kind === "semantic-retry").length,
+    inChildReprompts: retries.filter((retry) => retry.kind === "in-child-reprompt").length,
+  });
+}
 
 /** A `K`-qualified cell's structural series together with the AS-004 verdict read from it. */
-export type StructuralMeasurement<K extends EmissionKind> = Readonly<{
+type StructuralVerdict<K extends EmissionKind> = Readonly<{
   series: StructuralSeriesOn<K>;
   guardrail: GuardrailOutcome<TermOn<"as004", K>, "provider-structural-retries">;
 }>;
+
+/** A `K`-qualified cell's structural series and AS-004 verdict, with the
+ *  emission-arm retry tally both were read from. */
+export type StructuralMeasurement<K extends EmissionKind> = StructuralVerdict<K> & Readonly<{ retries: RetryTally }>;
 
 /** The part of a structural series every qualification measures the same way.
  *  The rules write it AFTER the two qualification-fixed fields: retained
@@ -125,7 +140,7 @@ type QualificationRulesOn<K extends EmissionKind> = Readonly<{
   /** The complete structural series — the shared part plus the
    *  provider-enforced retry count the route admits — and the AS-004 verdict
    *  read from that same count. */
-  structural: (shared: SharedSeries, causes: RetryCauseCounts, qualification: QualificationOn<K>) => StructuralMeasurement<K>;
+  structural: (shared: SharedSeries, causes: RetryCauseCounts, qualification: QualificationOn<K>) => StructuralVerdict<K>;
 }>;
 
 /** `QualificationTerms`' one implementation: every per-qualification value
@@ -175,9 +190,11 @@ function sharedSeries(samples: readonly SampleObservation[], causes: RetryCauseC
 
 /**
  * A `K`-qualified cell's structural series over its emission-arm samples, and
- * the AS-004 verdict read from it. The retries are attributed to causes here,
- * from the samples themselves under this qualification, so a series' counts
- * cannot disagree with the samples they are read from. Generic over `K`
+ * the AS-004 verdict read from it. The retries are attributed here, once per
+ * cell, from the samples themselves under this qualification, and the tally is
+ * returned with the series so the emission arm's summary reads the same
+ * attribution: a series' counts cannot disagree with the samples they are read
+ * from, nor with the arm summary. Generic over `K`
  * (called with the union, it returns the union of its arms): the
  * provider-enforced retry count is produced once, by `QUALIFICATION_RULES[K]`,
  * which writes it into the series and reads the verdict from it.
@@ -186,8 +203,9 @@ export function measureStructural<K extends EmissionKind>(
   samples: readonly SampleObservation[],
   qualification: Qualified<K>,
 ): StructuralMeasurement<K> {
-  const causes = retryCauseCounts(samples.flatMap((sample) => sampleRetries(sample, qualification)));
-  return QUALIFICATION_RULES[qualification.kind].structural(sharedSeries(samples, causes), causes, qualification);
+  const retries = tallyRetries(samples, qualification);
+  const { causes } = retries;
+  return Object.freeze({ ...QUALIFICATION_RULES[qualification.kind].structural(sharedSeries(samples, causes), causes, qualification), retries });
 }
 
 /**

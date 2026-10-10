@@ -306,44 +306,42 @@ export function decideRefutationVerifiers(
   if (!drafts.ok) return drafts;
   const panelInput = { runId: plan.runId, identityRunId: panelIdentityRunId(plan), findings: plan.findings, lenses: plan.lenses };
   // A recorded or replayed panel is history, so it is parsed as recorded; only today's mint is issued.
-  const parsedPanel = (verifierSlots: readonly AgentRosterSlot[]) => parseRefutationPanelAuthority({ ...panelInput, verifierSlots });
+  const parsedPanel = (paired: readonly PairedSlot[]): Result<RefutationPanelAuthority> => {
+    const authority = parseRefutationPanelAuthority({ ...panelInput, verifierSlots: paired.map(({ slot }) => slot) });
+    return authority.ok ? ok(authority.value) : refused("invalid-panel", authority.error.message);
+  };
 
   const recorded = recordedRequests(record);
-  if (recorded !== null) return panelPreparation(drafts.value, (draft) => recordedVerifierSlot(draft, recorded), parsedPanel);
+  if (recorded !== null) return pairedPreparation(drafts.value, (draft) => recordedVerifierSlot(draft, recorded), parsedPanel);
   const { catalog } = plan;
-  if (catalog.kind === "recorded-as-of") return panelPreparation(drafts.value, replayedVerifierSlot(catalog.lowering), parsedPanel);
+  if (catalog.kind === "recorded-as-of") return pairedPreparation(drafts.value, replayedVerifierSlot(catalog.lowering), parsedPanel);
   const issued = issueRefutationPanelAuthority({ ...panelInput, verifierSlots: drafts.value.map(slotIdentities) });
-  return issued.ok ? issuedPreparation(drafts.value, issued.value) : issuanceRefusal(issued.error);
+  if (!issued.ok) return issuanceRefusal(issued.error);
+  return pairedPreparation(drafts.value, issuedVerifierSlot(issued.value), () => ok(issued.value));
 }
 
 /**
- * The tail a recorded or replayed panel shares: each draft's slot as
- * `slotFor` obtains it, the panel authority `panel` assembles over those
- * slots, and the preparation pairing each slot with its packets; a panel that
- * does not assemble is `invalid-panel`.
+ * The one pairing tail every panel shares: each draft's slot as `slotFor`
+ * obtains it, the panel authority `authorityOver` yields for those pairs (a
+ * recorded or replayed panel assembles it from the slots; an issued panel
+ * already holds it), and the preparation pairing each slot with its packets.
+ * A slot refusal precedes an authority refusal.
  */
-function panelPreparation(
+function pairedPreparation(
   drafts: readonly DraftSlot[],
   slotFor: (draft: DraftSlot) => Result<PairedSlot>,
-  panel: (verifierSlots: readonly AgentRosterSlot[]) => DomainResult<RefutationPanelAuthority, Readonly<{ message: string }>>,
+  authorityOver: (paired: readonly PairedSlot[]) => Result<RefutationPanelAuthority>,
 ): Result<RefutationVerifierPreparation> {
   const paired = all(drafts.map(slotFor));
   if (!paired.ok) return paired;
-  const authority = panel(paired.value.map(({ slot }) => slot));
-  return authority.ok ? ok(preparation(authority.value, paired.value)) : refused("invalid-panel", authority.error.message);
+  const authority = authorityOver(paired.value);
+  return authority.ok ? ok(preparation(authority.value, paired.value)) : authority;
 }
 
-/**
- * An issued panel's preparation: each draft paired with the slot issuance
- * minted for it, looked up by its slot id in the panel's own roster.
- */
-function issuedPreparation(drafts: readonly DraftSlot[], authority: RefutationPanelAuthority): Result<RefutationVerifierPreparation> {
-  const { byId } = authority.verifierRoster;
-  const paired = all(drafts.map((draft): Result<PairedSlot> => {
-    const slot = byId.get(draft.slotId);
-    return slot === undefined
-      ? refused("invalid-panel", `issued verifier roster lacks slot ${draft.slotId}`)
-      : ok(Object.freeze({ draft, slot }));
-  }));
-  return paired.ok ? ok(preparation(authority, paired.value)) : paired;
-}
+/** The slot issuance minted for a draft, looked up by its slot id in the issued panel's own roster. */
+const issuedVerifierSlot = (authority: RefutationPanelAuthority) => (draft: DraftSlot): Result<PairedSlot> => {
+  const slot = authority.verifierRoster.byId.get(draft.slotId);
+  return slot === undefined
+    ? refused("invalid-panel", `issued verifier roster lacks slot ${draft.slotId}`)
+    : ok(Object.freeze({ draft, slot }));
+};

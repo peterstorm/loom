@@ -48,13 +48,7 @@
 
 import { match } from "ts-pattern";
 import { err, nonEmpty, ok, type NonEmpty, type Result } from "../kernel";
-import {
-  sampleRetries,
-  sampleTerminal,
-  type ObservedPair,
-  type RetryCause,
-  type SampleObservation,
-} from "./pilot-observation";
+import { sampleTerminal, type ObservedPair, type SampleObservation } from "./pilot-observation";
 import type { PreflightBlock, PreflightDecision } from "./pilot-preflight";
 import {
   buildPairSchedule,
@@ -68,13 +62,14 @@ import {
 import {
   measureStructural,
   releaseEvidence,
-  retryCauseCounts,
+  tallyRetries,
   type CellGuardrails,
   type EmissionKind,
   type PassedCellEvidence,
   type QualificationOn,
   type Qualified,
   type RetryCauseCounts,
+  type RetryTally,
   type StructuralSeriesOn,
 } from "./pilot-qualification";
 import { compareQuality, type QualityComparison, type QualityInputs } from "./pilot-quality";
@@ -118,7 +113,7 @@ export type ArmSummary = Readonly<{
   acceptedOnlyP95: LatencyQuantile;
   semanticRetries: number;
   inChildReprompts: number;
-  retryCauses: Readonly<Record<RetryCause, number>>;
+  retryCauses: RetryCauseCounts;
   modelRequestsPerSampleMean: number | null;
   followUpTurnsAfterAckTotal: number;
 }>;
@@ -264,24 +259,13 @@ const latencyOf = (sample: SampleObservation): number =>
 
 const rate = (count: number, total: number): number | null => (total === 0 ? null : count / total);
 
-type RetryTally = Readonly<{ causes: RetryCauseCounts; semanticRetries: number; inChildReprompts: number }>;
-
-/** The retry fold every arm summary reads: cause counts (by the qualification
- *  module's one cause fold, the same one `measureStructural` reads) + retry kinds. */
-function tallyRetries(samples: readonly SampleObservation[], qualification: RouteQualification): RetryTally {
-  const retries = samples.flatMap((sample) => sampleRetries(sample, qualification));
-  return Object.freeze({
-    causes: retryCauseCounts(retries),
-    semanticRetries: retries.filter((retry) => retry.kind === "semantic-retry").length,
-    inChildReprompts: retries.filter((retry) => retry.kind === "in-child-reprompt").length,
-  });
-}
-
-function summarizeArm(samples: readonly SampleObservation[], qualification: RouteQualification): ArmSummary {
+/** One arm's summary over its samples and their `retries`, attributed once
+ *  (`tallyRetries`; the emission arm's is the one `measureStructural` returns). */
+function summarizeArm(samples: readonly SampleObservation[], retries: RetryTally): ArmSummary {
   const terminals = samples.map(sampleTerminal);
   const failures = { "semantic-exhausted": 0, "startup-refused": 0, infrastructure: 0, timeout: 0 };
   for (const terminal of terminals) if (terminal.kind === "terminal-failure") failures[terminal.cause] += 1;
-  const { causes, semanticRetries, inChildReprompts } = tallyRetries(samples, qualification);
+  const { causes, semanticRetries, inChildReprompts } = retries;
   const all = samples.map(latencyOf);
   const accepted = all.filter(Number.isFinite);
   return Object.freeze({
@@ -461,6 +445,7 @@ function measureCell<K extends EmissionKind>(
   const latency = latencyGuardrail(pairs, evidence.preregistration);
   const terminal = terminalGuardrail(pairs, evidence.preregistration);
   const emissionSamples = pairs.map((pair) => pair.emission);
+  const extractionSamples = pairs.map((pair) => pair.extraction);
   const structural = measureStructural(emissionSamples, qualification);
   const quality = compareQuality(cell, pairs, evidence.preregistration, evidence.quality);
   if (!quality.ok) return quality;
@@ -472,8 +457,8 @@ function measureCell<K extends EmissionKind>(
       scheduledPairs,
       observedPairs: pairs.length,
       arms: Object.freeze({
-        "emission-enabled": summarizeArm(emissionSamples, qualification),
-        "extraction-only": summarizeArm(pairs.map((pair) => pair.extraction), qualification),
+        "emission-enabled": summarizeArm(emissionSamples, structural.retries),
+        "extraction-only": summarizeArm(extractionSamples, tallyRetries(extractionSamples, qualification)),
       }),
       latency: latency.measurement,
       terminal: terminal.measurement,

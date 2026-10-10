@@ -5,8 +5,8 @@
  * compares `bun --version` to it, and `npm run verify`'s preflight runs this
  * script so a mismatched local Bun stops verification before the suite does.
  * Bun's behavior differs between releases in ways the suite can observe
- * (`fs.closeSync(1)` is a silent no-op on 1.3.13), so a run on another Bun
- * proves nothing about the pinned one.
+ * (`fs.closeSync(1)` is a silent no-op on 1.3.13 but not on the pinned
+ * release), so a run on another Bun proves nothing about the pinned one.
  *
  * The comparison is pure and total; the shell below only reads the pin file,
  * asks the `bun` on PATH for its version, and maps a refusal to stderr and a
