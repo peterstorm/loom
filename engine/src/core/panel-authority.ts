@@ -44,13 +44,14 @@ import {
   type DomainResult,
   type ExactRoster,
   type ExactRosterError,
+  type MintedAgentRosterSlot,
   type NonEmpty,
   type OrchestrationRunId,
   type RequestId,
   type RosterIssuanceError,
   type SlotId,
 } from "./orchestration-contract";
-import { failure } from "./orchestration-contract/identity";
+import { failure, success } from "./orchestration-contract/identity";
 
 export const persistentSuccess = <T>(value: T): PersistentPanelResult<T> =>
   Object.freeze({ ok: true, value });
@@ -634,26 +635,39 @@ export type IssuedRefutationPanelAuthorityInput = RefutationPanelAuthorityInput 
   verifierSlots: readonly AgentRosterSlotIdentities[];
 }>;
 
+/** A verifier slot today's catalog would not mint: issuance is refused before the panel is checked. */
+type UnmintableVerifierSlot = Extract<RosterIssuanceError, Readonly<{ kind: "unmintable-roster-slot" }>>;
+
 /** Why a refutation panel could not be issued: a verifier slot today's catalog would not mint, or the panel itself. */
-export type RefutationPanelIssuanceError =
-  | Extract<RosterIssuanceError, Readonly<{ kind: "unmintable-roster-slot" }>>
-  | PersistentPanelError;
+export type RefutationPanelIssuanceError = UnmintableVerifierSlot | PersistentPanelError;
+
+/**
+ * A roster issuance split at the one point the panel cares about: an
+ * unmintable slot refuses issuance outright; any other outcome — the issued
+ * roster or its aggregate violations — is the roster the panel check reads,
+ * exactly as a parsed roster would be.
+ */
+function mintableRoster(
+  issued: DomainResult<ExactRoster<MintedAgentRosterSlot>, RosterIssuanceError>,
+): DomainResult<DomainResult<ExactRoster, ExactRosterError>, UnmintableVerifierSlot> {
+  if (issued.ok) return success(issued);
+  const { error } = issued;
+  return error.kind === "unmintable-roster-slot" ? failure(error) : success(failure(error));
+}
 
 /**
  * Issue a refutation panel authority: the issuing seam. Its verifier roster
  * is issued from the slots' identities (`issueExactRoster`, which mints each
  * slot against today's catalog and owns the aggregate), never re-read from
  * untyped data; a slot the catalog will not mint is refused before the panel
- * is checked, and every other check is exactly
+ * is checked (`mintableRoster`), and every other check is exactly
  * `parseRefutationPanelAuthority`'s.
  */
 export function issueRefutationPanelAuthority(
   input: IssuedRefutationPanelAuthorityInput,
 ): DomainResult<RefutationPanelAuthority, RefutationPanelIssuanceError> {
-  const issued = issueExactRoster(input.verifierSlots);
-  if (issued.ok) return refutationPanelAuthority(input, () => issued);
-  const { error } = issued;
-  return error.kind === "unmintable-roster-slot" ? failure(error) : refutationPanelAuthority(input, () => failure(error));
+  const roster = mintableRoster(issueExactRoster(input.verifierSlots));
+  return roster.ok ? refutationPanelAuthority(input, () => roster.value) : roster;
 }
 
 const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";

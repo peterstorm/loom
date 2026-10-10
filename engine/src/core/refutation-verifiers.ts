@@ -42,6 +42,7 @@ import {
   issueRefutationPanelAuthority,
   parseRefutationPanelAuthority,
   type RefutationPanelAuthority,
+  type RefutationPanelIssuanceError,
   type RefutationVerifierBinding,
 } from "./panel-authority";
 
@@ -284,6 +285,10 @@ function preparation(refutationAuthority: RefutationPanelAuthority, paired: read
   });
 }
 
+/** An issuance refusal as the preparation names it: a verifier slot today's catalog would not mint, or an invalid panel. */
+const issuanceRefusal = (error: RefutationPanelIssuanceError): Result<never> =>
+  error.kind === "unmintable-roster-slot" ? unmintable(error.slotId, error.error) : refused("invalid-panel", error.message);
+
 /**
  * Decide a refutation panel's verifier requests from its already-read
  * `record`: read back as history when one exists, minted under the plan's
@@ -308,12 +313,7 @@ export function decideRefutationVerifiers(
   const { catalog } = plan;
   if (catalog.kind === "recorded-as-of") return panelPreparation(drafts.value, replayedVerifierSlot(catalog.lowering), parsedPanel);
   const issued = issueRefutationPanelAuthority({ ...panelInput, verifierSlots: drafts.value.map(slotIdentities) });
-  if (!issued.ok) {
-    return issued.error.kind === "unmintable-roster-slot"
-      ? unmintable(issued.error.slotId, issued.error.error)
-      : refused("invalid-panel", issued.error.message);
-  }
-  return issuedPreparation(drafts.value, issued.value);
+  return issued.ok ? issuedPreparation(drafts.value, issued.value) : issuanceRefusal(issued.error);
 }
 
 /**

@@ -19,6 +19,8 @@ export type ParsedSpawnBatch =
   | Readonly<{ ok: true; requests: readonly AgentRequestAuthority[] }>
   | Readonly<{ ok: false; message: string }>;
 
+const refused = (message: string): ParsedSpawnBatch => Object.freeze({ ok: false, message });
+
 /**
  * Parse a spawn batch's authorities in order for the run `runId`, stopping at
  * the first request that does not parse or that belongs to another run — so a
@@ -39,4 +41,3 @@ export function parseSpawnBatch(label: string, runId: string, authorities: reado
   return Object.freeze({ ok: true, requests: Object.freeze(requests) });
 }
 
-const refused = (message: string): ParsedSpawnBatch => Object.freeze({ ok: false, message });

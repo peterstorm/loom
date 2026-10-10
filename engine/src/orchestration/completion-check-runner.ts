@@ -119,6 +119,11 @@ export type CompletionCheckRunnerOptions = Readonly<{
   terminationGraceMs?: number;
   hardKillWaitMs?: number;
   diagnosticTailBytes?: number;
+  /** The `GitSpawn` port a remediation check's pre-launch report reset
+   *  observes Git through: the policy-bound `spawnGit` when absent (in
+   *  production), a scripted fake in tests. Nothing else the runner does
+   *  reaches Git. */
+  reportResetGit?: GitSpawn;
 }>;
 
 const DEFAULT_TERMINATION_GRACE_MS = 250;
@@ -271,9 +276,10 @@ function preSpawnReportSnapshot(
  * own diagnostic, or why there is none — never a bare status number
  * (silent-failure-hunter-1).
  *
- * Both probes reach Git through the `gitSpawn` port `runRemediationCheck` was
- * handed: the policy-bound `spawnGit` in production, a scripted fake in tests. */
-function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand, gitSpawn: GitSpawn): void {
+ * Both probes reach Git through the one `gitSpawn` port bound here, from the
+ * runner's `reportResetGit` option: the policy-bound `spawnGit` in
+ * production, a scripted fake in tests. */
+function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand, gitSpawn: GitSpawn = spawnGit): void {
   if (check.reportPolicy.kind !== "required-file") throw new Error("remediation requires a report path");
   const path = check.reportPolicy.path;
   const observed = observeGitProbe<Buffer, Error>(() => {
@@ -916,19 +922,16 @@ async function runProjectCommand(
   selected: AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions,
-  gitSpawn?: GitSpawn,
 ): Promise<CommandRunnerResult<RequiredFileReportPolicy>>;
 async function runProjectCommand(
   selected: ProjectCommandCheck | AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions,
-  gitSpawn?: GitSpawn,
 ): Promise<CommandRunnerResult>;
 async function runProjectCommand(
   selected: ProjectCommandCheck | AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions,
-  gitSpawn: GitSpawn = spawnGit,
 ): Promise<CommandRunnerResult> {
   const check = selected.kind === "authorized-remediation-check" ? selected.command : selected;
   const reportMode = selected.kind === "authorized-remediation-check" ? "remediation-reset" : "wave-snapshot";
@@ -973,7 +976,7 @@ async function runProjectCommand(
 
   if (reportMode === "remediation-reset") {
     try {
-      resetRemediationReport(repositoryRoot, check, gitSpawn);
+      resetRemediationReport(repositoryRoot, check, options.reportResetGit);
     } catch (cause) {
       return failed({
         kind: "report-reset-failed",
@@ -1218,14 +1221,12 @@ function remediationReportObservation(
 
 /**
  * Execute one core-authorized standalone remediation check. The returned facts
- * are raw event ingredients, never a pass or installation authority. `gitSpawn`
- * is the `GitSpawn` port the pre-launch report reset observes Git through.
+ * are raw event ingredients, never a pass or installation authority.
  */
 export async function runRemediationCheck(
   check: AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions = {},
-  gitSpawn: GitSpawn = spawnGit,
 ): Promise<RemediationCheckRunnerResult> {
   if (check.kind !== "authorized-remediation-check" ||
       check.scope.kind !== "standalone-remediation" ||
@@ -1238,7 +1239,7 @@ export async function runRemediationCheck(
   }
   const root = validatedRepositoryRoot(repositoryRoot);
   if (!root.ok) return root;
-  const execution = await runProjectCommand(check, root.value, options, gitSpawn);
+  const execution = await runProjectCommand(check, root.value, options);
   if (!execution.ok) return execution;
   // A spawn failure never collected a report; an observed required-file check
   // always has one whose `not-required` arm does not exist (see the

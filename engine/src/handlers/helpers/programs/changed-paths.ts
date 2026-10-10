@@ -104,54 +104,50 @@ function resolveObservation<T, R>(
 
 const decoded = <T>(value: T): GitProbeStep<T, Error> => ({ ok: true as const, value });
 
-/** The two spawn→probe wraps, closed over one `GitSpawn` port. */
-type ProbeRunner = Readonly<{
-  /** One shape for every spawn→probe wrap: the shared spawn-failure refusal
-   *  is stated once, and each probe passes only its own output budget,
-   *  accepted exits and refusal labels — the real per-site differences (the
-   *  no-index probe's status-1 acceptance, message labels) stay visible as
-   *  parameters. Only an `exited` outcome reaches `classify`; a child that
-   *  never started, faulted, timed out, outgrew its budget or was signalled
-   *  refuses here with its rendered outcome. */
-  spawnProbe: <T>(
-    args: readonly string[],
-    maxBuffer: number,
-    classify: (exit: GitExit) => GitProbeStep<T, Error>,
-  ) => () => GitProbeStep<T, Error>;
-  /** `spawnProbe` for the probes whose protocol accepts only status 0: every
-   *  other exit refuses through `exitRefusal` with `failure` as its fallback
-   *  label, and `decode` reads the accepted exit. */
-  zeroExitProbe: <T>(
-    args: readonly string[],
-    maxBuffer: number,
-    failure: string,
-    decode: (exit: GitExit<0>) => GitProbeStep<T, Error>,
-  ) => () => GitProbeStep<T, Error>;
-}>;
-
 /** Every probe runs under the shared `git-execution-policy` (production's
  *  `spawnGit`), so review scope is derived under the same ignore rules and
- *  config as every other observer. */
-function probeRunner(spawn: GitSpawn): ProbeRunner {
-  const spawnProbe: ProbeRunner["spawnProbe"] = (args, maxBuffer, classify) => () => {
+ *  config as every other observer.
+ *
+ *  One shape for every spawn→probe wrap: the shared spawn-failure refusal is
+ *  stated once, and each probe passes only its own output budget, accepted
+ *  exits and refusal labels — the real per-site differences (the no-index
+ *  probe's status-1 acceptance, message labels) stay visible as parameters.
+ *  Only an `exited` outcome reaches `classify`; a child that never started,
+ *  faulted, timed out, outgrew its budget or was signalled refuses here with
+ *  its rendered outcome. */
+function spawnProbe<T>(
+  spawn: GitSpawn,
+  args: readonly string[],
+  maxBuffer: number,
+  classify: (exit: GitExit) => GitProbeStep<T, Error>,
+): () => GitProbeStep<T, Error> {
+  return () => {
     const outcome = spawn(args, { maxBuffer });
     if (outcome.kind !== "exited") {
       return { ok: false as const, error: new Error(`git ${args[0]} ${describeGitOutcome(outcome)}`) };
     }
     return classify(outcome);
   };
-  return Object.freeze({
-    spawnProbe,
-    zeroExitProbe: (args, maxBuffer, failure, decode) =>
-      spawnProbe(args, maxBuffer, (exit) => gitExitedWith(exit, [0]) ? decode(exit) : exitRefusal(exit, failure)),
-  });
 }
 
-const pathsProbe = ({ zeroExitProbe }: ProbeRunner) => (args: readonly string[], empty: GitEmptyDecision): readonly string[] => {
+/** `spawnProbe` for the probes whose protocol accepts only status 0: every
+ *  other exit refuses through `exitRefusal` with `failure` as its fallback
+ *  label, and `decode` reads the accepted exit. */
+function zeroExitProbe<T>(
+  spawn: GitSpawn,
+  args: readonly string[],
+  maxBuffer: number,
+  failure: string,
+  decode: (exit: GitExit<0>) => GitProbeStep<T, Error>,
+): () => GitProbeStep<T, Error> {
+  return spawnProbe(spawn, args, maxBuffer, (exit) => gitExitedWith(exit, [0]) ? decode(exit) : exitRefusal(exit, failure));
+}
+
+function pathsProbe(spawn: GitSpawn, args: readonly string[], empty: GitEmptyDecision): readonly string[] {
   const frozenPaths = (listed: readonly string[]): readonly string[] => Object.freeze([...listed]);
   return resolveObservation(
     observeGitProbe(
-      zeroExitProbe(args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decodeListedPaths(exit.stdout)),
+      zeroExitProbe(spawn, args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decodeListedPaths(exit.stdout)),
       (listed) => listed.length === 0,
     ),
     (confirmed) => {
@@ -160,52 +156,58 @@ const pathsProbe = ({ zeroExitProbe }: ProbeRunner) => (args: readonly string[],
     },
     frozenPaths,
   );
-};
+}
 
-const textProbe = ({ zeroExitProbe }: ProbeRunner) => (args: readonly string[], empty: GitEmptyDecision): string => resolveObservation(
-  observeGitProbe(
-    zeroExitProbe(args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decoded(gitStdoutText(exit).trim())),
-    (value) => value === "",
-  ),
-  (confirmed) => {
-    if (empty === "refuse") throw scopeEmptyRefusal(args.join(" "));
-    return confirmed.third;
-  },
-  (value) => value,
-);
+function textProbe(spawn: GitSpawn, args: readonly string[], empty: GitEmptyDecision): string {
+  return resolveObservation(
+    observeGitProbe(
+      zeroExitProbe(spawn, args, SCOPE_LISTING_LIMIT, `git ${args[0]} failed`, (exit) => decoded(gitStdoutText(exit).trim())),
+      (value) => value === "",
+    ),
+    (confirmed) => {
+      if (empty === "refuse") throw scopeEmptyRefusal(args.join(" "));
+      return confirmed.third;
+    },
+    (value) => value,
+  );
+}
 
-const candidateReferenceProbe = ({ spawnProbe }: ProbeRunner) => (candidate: string): CandidateReference => resolveObservation(
-  observeGitProbe(
-    spawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
-      GIT_PROBE_OUTPUT_LIMIT, (exit) => {
-        if (gitCleanNegative(exit)) return decoded({ kind: "missing" });
-        if (!gitExitedWith(exit, [0])) return exitRefusal(exit, `git cannot observe candidate ${candidate}`);
-        return decoded({ kind: "present", revision: gitStdoutText(exit).trim() });
+function candidateReferenceProbe(spawn: GitSpawn, candidate: string): CandidateReference {
+  return resolveObservation(
+    observeGitProbe(
+      spawnProbe<CandidateReference>(spawn, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
+        GIT_PROBE_OUTPUT_LIMIT, (exit) => {
+          if (gitCleanNegative(exit)) return decoded({ kind: "missing" });
+          if (!gitExitedWith(exit, [0])) return exitRefusal(exit, `git cannot observe candidate ${candidate}`);
+          return decoded({ kind: "present", revision: gitStdoutText(exit).trim() });
+        }),
+      (value) => value.kind === "present" && value.revision === "",
+    ),
+    () => { throw scopeEmptyRefusal(`candidate ${candidate}`); },
+    (value) => value,
+  );
+}
+
+function candidateMergeBaseProbe(spawn: GitSpawn, candidate: string, head: string): MergeBaseCandidate {
+  return resolveObservation(
+    observeGitProbe(
+      spawnProbe<MergeBaseCandidate>(spawn, ["merge-base", candidate, head], GIT_PROBE_OUTPUT_LIMIT, (exit) => {
+        if (gitCleanNegative(exit)) return decoded({ kind: "no-base" });
+        if (!gitExitedWith(exit, [0])) return exitRefusal(exit, `git merge-base failed for ${candidate}`);
+        return decoded({ kind: "base", revision: gitStdoutText(exit).trim() });
       }),
-    (value) => value.kind === "present" && value.revision === "",
-  ),
-  () => { throw scopeEmptyRefusal(`candidate ${candidate}`); },
-  (value) => value,
-);
+      (value) => value.kind === "base" && value.revision === "",
+    ),
+    () => { throw scopeEmptyRefusal(`merge-base ${candidate} ${head}`); },
+    (value) => value,
+  );
+}
 
-const candidateMergeBaseProbe = ({ spawnProbe }: ProbeRunner) => (candidate: string, head: string): MergeBaseCandidate => resolveObservation(
-  observeGitProbe(
-    spawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], GIT_PROBE_OUTPUT_LIMIT, (exit) => {
-      if (gitCleanNegative(exit)) return decoded({ kind: "no-base" });
-      if (!gitExitedWith(exit, [0])) return exitRefusal(exit, `git merge-base failed for ${candidate}`);
-      return decoded({ kind: "base", revision: gitStdoutText(exit).trim() });
-    }),
-    (value) => value.kind === "base" && value.revision === "",
-  ),
-  () => { throw scopeEmptyRefusal(`merge-base ${candidate} ${head}`); },
-  (value) => value,
-);
-
-const trackedAdditionsProbe = ({ zeroExitProbe }: ProbeRunner) => (baseline: string, tracked: readonly string[]): number => {
+function trackedAdditionsProbe(spawn: GitSpawn, baseline: string, tracked: readonly string[]): number {
   if (tracked.length === 0) return 0;
   return resolveObservation(
     observeGitProbe(
-      zeroExitProbe(["diff", "--numstat", baseline, "--", ...tracked], GIT_PROBE_OUTPUT_LIMIT, "git diff --numstat failed",
+      zeroExitProbe(spawn, ["diff", "--numstat", baseline, "--", ...tracked], GIT_PROBE_OUTPUT_LIMIT, "git diff --numstat failed",
         (exit) => decoded(gitStdoutText(exit))),
       (output) => output === "",
     ),
@@ -215,14 +217,14 @@ const trackedAdditionsProbe = ({ zeroExitProbe }: ProbeRunner) => (baseline: str
     (confirmed) => parseNumstatAdditions(confirmed.third),
     parseNumstatAdditions,
   );
-};
+}
 
-const untrackedAdditionsProbe = ({ spawnProbe }: ProbeRunner) => (untracked: readonly string[]): number =>
-  untracked.reduce((sum, path) => sum + resolveObservation(
+function untrackedAdditionsProbe(spawn: GitSpawn, untracked: readonly string[]): number {
+  return untracked.reduce((sum, path) => sum + resolveObservation(
     observeGitProbe(
       // No-index numstat exits 1 whenever the file differs from /dev/null, so
       // its protocol accepts 0 and 1 — and only with a silent stderr.
-      spawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], GIT_PROBE_OUTPUT_LIMIT, (exit) =>
+      spawnProbe(spawn, ["diff", "--no-index", "--numstat", "--", devNull, path], GIT_PROBE_OUTPUT_LIMIT, (exit) =>
         gitExitedWith(exit, [0, 1]) && gitStderrText(exit) === ""
           ? decoded(gitStdoutText(exit))
           : exitRefusal(exit, `cannot measure untracked additions for ${path}`)),
@@ -235,55 +237,49 @@ const untrackedAdditionsProbe = ({ spawnProbe }: ProbeRunner) => (untracked: rea
     () => { throw new Error(`cannot measure untracked additions for ${path}: empty output after bounded retries`); },
     parseNumstatAdditions,
   ), 0);
+}
 
-const treeEntryProbe = ({ zeroExitProbe }: ProbeRunner) => (revision: string, path: string): string | null => resolveObservation(
-  observeGitProbe(
-    zeroExitProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT, `git ls-tree failed for ${revision}:${path}`,
-      (exit) => decoded(gitStdoutText(exit))),
-    (entry) => entry === "",
-  ),
-  () => null,
-  (entry: string | null) => entry,
-);
+/** The exact path's one `ls-tree -z` entry in `revision`, or null when it lists nothing. */
+function treeEntryProbe(spawn: GitSpawn, revision: string, path: string): string | null {
+  return resolveObservation(
+    observeGitProbe(
+      zeroExitProbe(spawn, ["ls-tree", "-z", "--full-tree", revision, "--", path], GIT_PROBE_OUTPUT_LIMIT,
+        `git ls-tree failed for ${revision}:${path}`, (exit) => decoded(gitStdoutText(exit))),
+      (entry) => entry === "",
+    ),
+    () => null,
+    (entry: string | null) => entry,
+  );
+}
 
-const blobBytesProbe = ({ zeroExitProbe }: ProbeRunner) => (blobId: string, object: string): Uint8Array => resolveObservation(
-  observeGitProbe(
-    zeroExitProbe(["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, `git cat-file blob failed for ${object}`,
-      (exit) => decoded(new Uint8Array(exit.stdout))),
-    (bytes) => bytes.length === 0,
-  ),
-  // An empty file is a real blob: confirmed-empty bytes are its content.
-  (confirmed) => confirmed.third,
-  (bytes) => bytes,
-);
+/** One blob's bytes; `object` is the `<revision>:<path>` it was listed for. */
+function blobBytesProbe(spawn: GitSpawn, blobId: string, object: string): Uint8Array {
+  return resolveObservation(
+    observeGitProbe(
+      zeroExitProbe(spawn, ["cat-file", "blob", blobId], BASELINE_BLOB_LIMIT, `git cat-file blob failed for ${object}`,
+        (exit) => decoded(new Uint8Array(exit.stdout))),
+      (bytes) => bytes.length === 0,
+    ),
+    // An empty file is a real blob: confirmed-empty bytes are its content.
+    (confirmed) => confirmed.third,
+    (bytes) => bytes,
+  );
+}
 
 /** The module's Git probes with the `GitSpawn` port bound ONCE: each entry
  *  point builds `scopeProbes(spawn)`, and every probe reaches Git through that
- *  one runner, so no call site restates the port. */
-type ScopeProbes = Readonly<{
-  paths: ReturnType<typeof pathsProbe>;
-  text: ReturnType<typeof textProbe>;
-  candidateReference: ReturnType<typeof candidateReferenceProbe>;
-  candidateMergeBase: ReturnType<typeof candidateMergeBaseProbe>;
-  trackedAdditions: ReturnType<typeof trackedAdditionsProbe>;
-  untrackedAdditions: ReturnType<typeof untrackedAdditionsProbe>;
-  /** The exact path's one `ls-tree -z` entry in `revision`, or null when it lists nothing. */
-  treeEntry: ReturnType<typeof treeEntryProbe>;
-  /** One blob's bytes; `object` is the `<revision>:<path>` it was listed for. */
-  blobBytes: ReturnType<typeof blobBytesProbe>;
-}>;
-
-function scopeProbes(spawn: GitSpawn): ScopeProbes {
-  const runner = probeRunner(spawn);
+ *  one port, so no call site restates it. */
+function scopeProbes(spawn: GitSpawn) {
+  const bound = <A extends unknown[], R>(probe: (spawn: GitSpawn, ...args: A) => R) => (...args: A): R => probe(spawn, ...args);
   return Object.freeze({
-    paths: pathsProbe(runner),
-    text: textProbe(runner),
-    candidateReference: candidateReferenceProbe(runner),
-    candidateMergeBase: candidateMergeBaseProbe(runner),
-    trackedAdditions: trackedAdditionsProbe(runner),
-    untrackedAdditions: untrackedAdditionsProbe(runner),
-    treeEntry: treeEntryProbe(runner),
-    blobBytes: blobBytesProbe(runner),
+    paths: bound(pathsProbe),
+    text: bound(textProbe),
+    candidateReference: bound(candidateReferenceProbe),
+    candidateMergeBase: bound(candidateMergeBaseProbe),
+    trackedAdditions: bound(trackedAdditionsProbe),
+    untrackedAdditions: bound(untrackedAdditionsProbe),
+    treeEntry: bound(treeEntryProbe),
+    blobBytes: bound(blobBytesProbe),
   });
 }
 

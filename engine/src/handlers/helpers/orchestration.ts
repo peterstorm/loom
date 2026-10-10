@@ -1071,6 +1071,12 @@ async function gateSpawnBatch(spawn: PiSpawnBatch, emission: Emission): Promise<
     : routed.decide(await observeRouteReachability(routed.launch, routed.agentDir, emission.probe));
 }
 
+/** The gate an announced parent's spawn batch passes before its session
+ *  binding is published: a Pi parent's batch is gated on its routes
+ *  (ADR-0023); a Claude Code parent's is ungated. */
+const spawnGate = (announced: AnnouncedParent, batch: ParsedSpawnBatch, emission: Emission): Promise<EmissionVerdict> =>
+  announced.harness === "pi" ? gateSpawnBatch(Object.freeze({ parent: announced, batch }), emission) : Promise.resolve(UNGATED);
+
 /** Print one emitted value as the façade's JSON output. */
 function printed(output: EmissionOutput, value: unknown): HookResult {
   output.stdout(`${JSON.stringify(value, null, 2)}\n`);
@@ -1086,28 +1092,25 @@ const publishedUnder = (verdict: EmissionVerdict, failure: string | null): Emiss
  * A process that announces no parent harness emits it as is: nothing gates it
  * and it has no session to publish into. Under an announced parent a spawn
  * batch's request authorities are parsed once for this run
- * (`parseSpawnBatch`), for both the gate and the session binding; only a Pi
- * parent's batch is gated on its routes (ADR-0023), before its session
- * binding is published, while a Claude Code parent's is published ungated;
- * a done action completes the session binding. Only then is the action
- * printed, annotated with the routes the gate admitted unverified, which are
- * also reported on stderr as `loom-route-unverified` events. A gate refusal
- * or a publication failure prints and reports nothing, so a later `resume`
- * re-emits the same batch.
+ * (`parseSpawnBatch`), for both the gate and the session binding, and the
+ * batch passes its parent's gate (`spawnGate`: only a Pi parent's batch is
+ * gated on its routes, ADR-0023) before its session binding is published —
+ * the gate is the only difference between the parents; a done action
+ * completes the session binding. Only then is the action printed, annotated
+ * with the routes the gate admitted unverified, which are also reported on
+ * stderr as `loom-route-unverified` events. A gate refusal or a publication
+ * failure prints and reports nothing, so a later `resume` re-emits the same
+ * batch.
  */
 export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, emission: Emission): Promise<HookResult> {
   const { bindingDir, parent } = emission.environment;
-  const parsed = (announced: AnnouncedParent, spawn: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>): ParsedSpawnBatch =>
-    parseSpawnBatch(HARNESS_LABEL[announced.harness], handle.runId, spawn.requests.map(({ authority }) => authority));
   const verdict = await match({ parent, action })
     .returnType<Promise<EmissionVerdict>>()
-    .with({ parent: { harness: "pi" }, action: { kind: "spawn-batch" } }, async ({ parent: pi, action: spawn }) => {
-      const batch = parsed(pi, spawn);
-      const gated = await gateSpawnBatch(Object.freeze({ parent: pi, batch }), emission);
-      return gated.kind === "refuse" ? gated : publishedUnder(gated, await publishSpawnBinding(bindingDir, pi, handle, batch));
+    .with({ parent: { harness: P.union("pi", "claude-code") }, action: { kind: "spawn-batch" } }, async ({ parent: announced, action: spawn }) => {
+      const batch = parseSpawnBatch(HARNESS_LABEL[announced.harness], handle.runId, spawn.requests.map(({ authority }) => authority));
+      const gated = await spawnGate(announced, batch, emission);
+      return gated.kind === "refuse" ? gated : publishedUnder(gated, await publishSpawnBinding(bindingDir, announced, handle, batch));
     })
-    .with({ parent: { harness: "claude-code" }, action: { kind: "spawn-batch" } }, async ({ parent: claudeCode, action: spawn }) =>
-      publishedUnder(UNGATED, await publishSpawnBinding(bindingDir, claudeCode, handle, parsed(claudeCode, spawn))))
     .with({ parent: { harness: P.union("pi", "claude-code") }, action: { kind: "done" } }, async ({ parent: announced, action: done }) =>
       publishedUnder(UNGATED, await publishCompletionBinding(bindingDir, announced, handle, done)))
     .otherwise(async () => UNGATED);

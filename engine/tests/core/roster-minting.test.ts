@@ -37,7 +37,7 @@ const slotIdentities = (role: LoomAgentName, index: number): AgentRosterSlotIden
   [identity(role, index, 1), identity(role, index, 2)];
 
 function mintedSlot(role: LoomAgentName, index: number): MintedAgentRosterSlot {
-  const slot = mintAgentRosterSlot(identity(role, index, 1), identity(role, index, 2));
+  const slot = mintAgentRosterSlot(...slotIdentities(role, index));
   if (!slot.ok) throw new Error(rosterSlotErrorMessages(slot.error).join("; "));
   return slot.value;
 }
@@ -50,7 +50,7 @@ describe("mintAgentRosterSlot", () => {
       const first = mintAgentRequestAuthority(identity(role, index, 1));
       const retry = mintAgentRequestAuthority(identity(role, index, 2));
       if (!first.ok || !retry.ok) throw new Error("every catalog role mints");
-      expect(mintAgentRosterSlot(identity(role, index, 1), identity(role, index, 2)))
+      expect(mintAgentRosterSlot(...slotIdentities(role, index)))
         .toEqual(parseAgentRosterSlot(first.value, retry.value));
     }));
   });

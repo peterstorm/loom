@@ -11,8 +11,8 @@
  * the explicit caller decision (empty legitimately means untracked), and a
  * failed observation throws with attribution.
  *
- * The reset's two Git probes reach Git through `runRemediationCheck`'s
- * injected `GitSpawn` port, which a case scripts with the shared port fake
+ * The reset's two Git probes reach Git through the `GitSpawn` port the
+ * runner's `reportResetGit` option binds, which a case scripts with the shared port fake
  * after real Git setup, so the status-0/empty-stdout transient is reproduced
  * deterministically — a real repository cannot produce it on demand. Fixture
  * setup, the spawned check process and every other Git observation stay real,
@@ -134,7 +134,7 @@ describe("remediation report reset survives the transient empty tracked-state ob
       answered(""), answered(""), answered("reset.xml\0"), // transient empties, then the tracked truth
     ]);
     const result: RemediationCheckRunnerResult = await runRemediationCheck(
-      remediationCheck(root, "tracked-transient"), root, {}, git.spawn,
+      remediationCheck(root, "tracked-transient"), root, { reportResetGit: git.spawn },
     );
     // The repaired guard re-observes through the bounded retry; the observed
     // non-empty truth refuses loudly and never reaches the unlink.
@@ -158,7 +158,7 @@ describe("remediation report reset survives the transient empty tracked-state ob
       answered(""), answered(""), answered(""), // confirmed-empty: legitimately untracked
       answered(""), // check-ignore -q: ignored
     ]);
-    const result = await runRemediationCheck(remediationCheck(root, "confirmed-empty"), root, {}, git.spawn);
+    const result = await runRemediationCheck(remediationCheck(root, "confirmed-empty"), root, { reportResetGit: git.spawn });
     expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
     if (!result.ok) throw new Error("confirmed-empty reset refused");
     expect(result.value.process).toMatchObject({ kind: "observed", exitCode: 0 });
@@ -178,7 +178,7 @@ describe("remediation report reset survives the transient empty tracked-state ob
     const git = scriptedGitSpawn([
       failedToStart("spawn git ENOENT"),
     ]);
-    const result = await runRemediationCheck(remediationCheck(root, "failed-probe"), root, {}, git.spawn);
+    const result = await runRemediationCheck(remediationCheck(root, "failed-probe"), root, { reportResetGit: git.spawn });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("failed probe was not refused");
     expect(result.error.kind).toBe("report-reset-failed");
