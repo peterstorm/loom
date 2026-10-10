@@ -69,7 +69,7 @@
  * operation that would advance the run; nothing is removed.
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { recordReadCoverageObservation, runReadCoverage } from "../../orchestration/standalone-read-coverage-evidence";
@@ -84,12 +84,14 @@ import { httpRouteProbe, observeRouteReachability, type RouteProbePort } from ".
 import { reportUnverifiedRoutes } from "../../core/route-reachability";
 import {
   gateEmission,
+  refusal,
   SESSION_VARIABLE,
+  UNGATED,
   type AnnouncedParent,
   type EmissionEnvironment,
   type EmissionVerdict,
-  type GatedAction,
   type PiRouteGateFacts,
+  type PiSpawnBatch,
 } from "../../core/spawn-emission-gate";
 import { parseSpawnBatch, type ParsedSpawnBatch } from "../../core/spawn-request-authority";
 import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
@@ -960,56 +962,45 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
 
 /**
  * Publish a spawn batch's SESSION RUN BINDING into the announced parent's
- * session (`AnnouncedParent`, resolved once at the composition root). Each
- * harness's subagent hooks learn which run a spawned agent belongs to from
- * this durable binding, never from the environment of the agent itself;
- * Claude Code's hooks receive the session id `CLAUDE_CODE_SESSION_ID` names as
- * the payload `session_id`.
+ * session (`AnnouncedParent`, resolved once at the composition root), or say
+ * why it cannot be. Each harness's subagent hooks learn which run a spawned
+ * agent belongs to from this durable binding, never from the environment of
+ * the agent itself; Claude Code's hooks receive the session id
+ * `CLAUDE_CODE_SESSION_ID` names as the payload `session_id`.
  *
  * The binding is built from the batch's one parse (`batch`), so it records
- * only authority the stored-request parser admits, never the in-memory value.
- * Each request is checked in order — a request of another run before a later
- * request that did not parse.
+ * only authority the stored-request parser admits for this run, never the
+ * in-memory value; a batch that was not admitted is refused with the parse's
+ * own message.
  */
 async function publishSpawnBinding(
   bindingDir: string,
   session: AnnouncedParent,
   handle: RunDirHandle,
   batch: ParsedSpawnBatch,
-): Promise<HookResult | null> {
+): Promise<string | null> {
   const { sessionId } = session;
   const label = HARNESS_LABEL[session.harness];
-  if (sessionId === null) {
-    return { kind: "error", message: `${label} orchestration spawn publication requires ${SESSION_VARIABLE[session.harness]}` };
-  }
-  if (batch.ok && batch.requests.length === 0) {
-    return { kind: "error", message: `${label} orchestration spawn action has no request authority` };
-  }
-  const admitted = batch.ok ? batch.requests : batch.admitted;
-  const foreign = admitted.findIndex(({ runId }) => runId !== handle.runId);
-  if (foreign !== -1) {
-    return { kind: "error", message: `${label} orchestration spawn request ${foreign} belongs to another run` };
-  }
-  if (!batch.ok) return { kind: "error", message: batch.message };
-  const requestIds = batch.requests.map(({ requestId }) => requestId);
+  if (sessionId === null) return `${label} orchestration spawn publication requires ${SESSION_VARIABLE[session.harness]}`;
+  if (!batch.ok) return batch.message;
+  if (batch.requests.length === 0) return `${label} orchestration spawn action has no request authority`;
   const registered = await registerSessionRunBinding(bindingDir, sessionId, Object.freeze({
     runId: handle.runId,
     runsRoot: dirname(handle.runDirectory),
     runDirectory: handle.runDirectory,
-    requestIds: Object.freeze(requestIds),
+    requestIds: Object.freeze(batch.requests.map(({ requestId }) => requestId)),
     resultDigest: null,
   }), session.harness);
-  return registered.ok
-    ? null
-    : { kind: "error", message: `cannot publish ${label} orchestration capture authority: ${registered.message}` };
+  return registered.ok ? null : `cannot publish ${label} orchestration capture authority: ${registered.message}`;
 }
 
+/** Complete the announced parent's session run binding with a done action's published result, or say why it cannot be. */
 async function publishCompletionBinding(
   bindingDir: string,
   session: AnnouncedParent,
   handle: RunDirHandle,
   action: Extract<FacadeAction, Readonly<{ kind: "done" }>>,
-): Promise<HookResult | null> {
+): Promise<string | null> {
   const { sessionId } = session;
   const label = HARNESS_LABEL[session.harness];
   // Only a done action whose outcome is the run's published `result.json`
@@ -1018,23 +1009,15 @@ async function publishCompletionBinding(
   if (typeof outcome !== "object" || !("slot" in outcome) || outcome.slot.kind !== "fixed-artifact-slot" ||
       outcome.slot.path !== "result.json" || !/^[0-9a-f]{64}$/.test(outcome.digest)) return null;
   const resultDigest = outcome.digest;
-  if (sessionId === null) {
-    return { kind: "error", message: `${label} orchestration completion publication requires ${SESSION_VARIABLE[session.harness]}` };
-  }
+  if (sessionId === null) return `${label} orchestration completion publication requires ${SESSION_VARIABLE[session.harness]}`;
   const bindings = readSessionRunBindings(bindingDir, sessionId, session.harness);
-  if (!bindings.ok) {
-    return { kind: "error", message: `cannot read ${label} orchestration completion authority: ${bindings.message}` };
-  }
+  if (!bindings.ok) return `cannot read ${label} orchestration completion authority: ${bindings.message}`;
   const binding = bindings.value.find(({ runId, runDirectory }) =>
     runId === handle.runId && runDirectory === handle.runDirectory);
-  if (binding === undefined) {
-    return { kind: "error", message: `cannot bind completed result for unregistered ${label} run ${handle.runId}` };
-  }
+  if (binding === undefined) return `cannot bind completed result for unregistered ${label} run ${handle.runId}`;
   const registered = await registerSessionRunBinding(
     bindingDir, sessionId, Object.freeze({ ...binding, resultDigest }), session.harness);
-  return registered.ok
-    ? null
-    : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
+  return registered.ok ? null : `cannot publish ${label} orchestration completion authority: ${registered.message}`;
 }
 
 /**
@@ -1048,7 +1031,7 @@ export type EmissionOutput = Readonly<{ stdout: (text: string) => void; stderr: 
  * What one façade invocation emits with: the environment resolved at the
  * composition root (`processEmission`), the reader of a Pi parent's
  * route-gate facts — called only when the gate asks for them, i.e. for a Pi
- * spawn batch whose requests parsed — the route probe port and the output
+ * spawn batch whose requests were admitted — the route probe port and the output
  * channel every run-advancing operation prints through. Tests construct each
  * — a resolved environment, a fact reader, a fake probe and a recording
  * output — instead of mutating the process environment or its streams.
@@ -1074,13 +1057,13 @@ function processEmission(): Emission {
 }
 
 /**
- * Gate one action through the pure emission gate (`gateEmission`), reading
- * the route-gate facts and observing the launch routes only when it asks to:
- * the only I/O here is the `model-routing.json` and `models.json` reads and
- * the probe.
+ * Gate a Pi parent's spawn batch through the pure emission gate
+ * (`gateEmission`), reading the route-gate facts and observing the launch
+ * routes only when it asks to: the only I/O here is the `model-routing.json`
+ * and `models.json` reads and the probe.
  */
-async function gateEmittedAction(action: GatedAction, parent: AnnouncedParent, emission: Emission): Promise<EmissionVerdict> {
-  const step = gateEmission(action, parent.harness);
+async function gateSpawnBatch(spawn: PiSpawnBatch, emission: Emission): Promise<EmissionVerdict> {
+  const step = gateEmission(spawn);
   if (step.kind === "decided") return step.verdict;
   const routed = step.gate(emission.routeGateFacts());
   return routed.kind === "decided"
@@ -1094,32 +1077,41 @@ function printed(output: EmissionOutput, value: unknown): HookResult {
   return { kind: "allow" };
 }
 
+/** `verdict`, unless publication refused with `failure`. */
+const publishedUnder = (verdict: EmissionVerdict, failure: string | null): EmissionVerdict =>
+  failure === null ? verdict : refusal(failure);
+
 /**
- * Emit one façade action. A process that announces no parent harness emits
- * it as is: nothing gates it and it has no session to publish into. Under an
- * announced parent a spawn batch's request authorities are parsed once
- * (`parseSpawnBatch`) for both the gate and the session binding; a Pi
- * parent's batch is gated on its routes (ADR-0023), the session binding is
- * published, and only then is the action printed — annotated with the routes
- * the gate admitted unverified, which are also reported on stderr as
- * `loom-route-unverified` events. A gate refusal or a publication failure
- * prints and reports nothing, so a later `resume` re-emits the same batch.
+ * Emit one façade action, decided by one match on the parent and the action.
+ * A process that announces no parent harness emits it as is: nothing gates it
+ * and it has no session to publish into. Under an announced parent a spawn
+ * batch's request authorities are parsed once for this run
+ * (`parseSpawnBatch`), for both the gate and the session binding; only a Pi
+ * parent's batch is gated on its routes (ADR-0023), before its session
+ * binding is published, while a Claude Code parent's is published ungated;
+ * a done action completes the session binding. Only then is the action
+ * printed, annotated with the routes the gate admitted unverified, which are
+ * also reported on stderr as `loom-route-unverified` events. A gate refusal
+ * or a publication failure prints and reports nothing, so a later `resume`
+ * re-emits the same batch.
  */
 export async function emitRunAction(handle: RunDirHandle, action: FacadeAction, emission: Emission): Promise<HookResult> {
   const { bindingDir, parent } = emission.environment;
-  if (parent.harness === "unannounced") return printed(emission.output, action);
-  const gated: GatedAction = action.kind === "spawn-batch"
-    ? Object.freeze({
-        kind: "spawn-batch",
-        batch: parseSpawnBatch(HARNESS_LABEL[parent.harness], action.requests.map(({ authority }) => authority)),
-      })
-    : Object.freeze({ kind: "other" });
-  const verdict = await gateEmittedAction(gated, parent, emission);
+  const parsed = (announced: AnnouncedParent, spawn: Extract<FacadeAction, Readonly<{ kind: "spawn-batch" }>>): ParsedSpawnBatch =>
+    parseSpawnBatch(HARNESS_LABEL[announced.harness], handle.runId, spawn.requests.map(({ authority }) => authority));
+  const verdict = await match({ parent, action })
+    .returnType<Promise<EmissionVerdict>>()
+    .with({ parent: { harness: "pi" }, action: { kind: "spawn-batch" } }, async ({ parent: pi, action: spawn }) => {
+      const batch = parsed(pi, spawn);
+      const gated = await gateSpawnBatch(Object.freeze({ parent: pi, batch }), emission);
+      return gated.kind === "refuse" ? gated : publishedUnder(gated, await publishSpawnBinding(bindingDir, pi, handle, batch));
+    })
+    .with({ parent: { harness: "claude-code" }, action: { kind: "spawn-batch" } }, async ({ parent: claudeCode, action: spawn }) =>
+      publishedUnder(UNGATED, await publishSpawnBinding(bindingDir, claudeCode, handle, parsed(claudeCode, spawn))))
+    .with({ parent: { harness: P.union("pi", "claude-code") }, action: { kind: "done" } }, async ({ parent: announced, action: done }) =>
+      publishedUnder(UNGATED, await publishCompletionBinding(bindingDir, announced, handle, done)))
+    .otherwise(async () => UNGATED);
   if (verdict.kind === "refuse") return { kind: "error", message: verdict.message };
-  const failure = gated.kind === "spawn-batch" ? await publishSpawnBinding(bindingDir, parent, handle, gated.batch)
-    : action.kind === "done" ? await publishCompletionBinding(bindingDir, parent, handle, action)
-    : null;
-  if (failure !== null) return failure;
   for (const event of verdict.events) emission.output.stderr(`${JSON.stringify(event)}\n`);
   return printed(emission.output, reportUnverifiedRoutes(action, verdict.unverified));
 }

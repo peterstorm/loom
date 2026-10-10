@@ -40,15 +40,17 @@ import {
   parseRequestId,
   parseSlotId,
   type AgentRequestAuthority,
+  type AgentRosterSlotIdentities,
   type DomainResult,
   type ExactRoster,
   type ExactRosterError,
-  type MintedAgentRosterSlot,
   type NonEmpty,
   type OrchestrationRunId,
   type RequestId,
+  type RosterIssuanceError,
   type SlotId,
 } from "./orchestration-contract";
+import { failure } from "./orchestration-contract/identity";
 
 export const persistentSuccess = <T>(value: T): PersistentPanelResult<T> =>
   Object.freeze({ ok: true, value });
@@ -627,22 +629,31 @@ function refutationPanelAuthority(
   }
 }
 
-/** A refutation panel being ISSUED now: its verifier slots hold only minted requests. */
+/** A refutation panel being ISSUED now: each verifier slot as the identities of its two requests, which issuance mints. */
 export type IssuedRefutationPanelAuthorityInput = RefutationPanelAuthorityInput & Readonly<{
-  verifierSlots: readonly MintedAgentRosterSlot[];
+  verifierSlots: readonly AgentRosterSlotIdentities[];
 }>;
 
+/** Why a refutation panel could not be issued: a verifier slot today's catalog would not mint, or the panel itself. */
+export type RefutationPanelIssuanceError =
+  | Extract<RosterIssuanceError, Readonly<{ kind: "unmintable-roster-slot" }>>
+  | PersistentPanelError;
+
 /**
- * Issue a refutation panel authority: the issuing seam, typed so its verifier
- * slots must be minted (`mintAgentRosterSlot`). Its roster is issued from
- * those typed slots (`issueExactRoster`, which re-checks each against today's
- * catalog at run time), never re-read from untyped data; every other check is
- * exactly `parseRefutationPanelAuthority`'s.
+ * Issue a refutation panel authority: the issuing seam. Its verifier roster
+ * is issued from the slots' identities (`issueExactRoster`, which mints each
+ * slot against today's catalog and owns the aggregate), never re-read from
+ * untyped data; a slot the catalog will not mint is refused before the panel
+ * is checked, and every other check is exactly
+ * `parseRefutationPanelAuthority`'s.
  */
 export function issueRefutationPanelAuthority(
   input: IssuedRefutationPanelAuthorityInput,
-): PersistentPanelResult<RefutationPanelAuthority> {
-  return refutationPanelAuthority(input, () => issueExactRoster(input.verifierSlots));
+): DomainResult<RefutationPanelAuthority, RefutationPanelIssuanceError> {
+  const issued = issueExactRoster(input.verifierSlots);
+  if (issued.ok) return refutationPanelAuthority(input, () => issued);
+  const { error } = issued;
+  return error.kind === "unmintable-roster-slot" ? failure(error) : refutationPanelAuthority(input, () => failure(error));
 }
 
 const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";
