@@ -15,6 +15,9 @@ if [[ "$(uname -s)" = "Linux" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# The repository-root .bun-version is the Bun CI installs; a different local
+# Bun can pass or fail where CI does not, so it blocks verification here.
+bun "$ROOT/engine/scripts/bun-version-pin.ts"
 for executable in "$ROOT/node_modules/.bin/pi" "$ROOT/engine/node_modules/.bin/vitest"; do
   test -x "$executable" || { printf 'Verification blocked: install both frozen locks; missing %s\n' "$executable" >&2; exit 1; }
 done

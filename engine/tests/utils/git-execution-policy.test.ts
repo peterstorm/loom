@@ -45,6 +45,7 @@ import {
 import { gitOutput, worktreeVisibleLeafPaths } from "../../src/utils/git-leaves";
 import { observeWorkspaceDigest } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { withEnvOverlaySync } from "../fixtures/env-overlay";
 import { git, pathspecContract, write } from "../fixtures/git-repository";
 import { value } from "../fixtures/parse-result";
 import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
@@ -88,23 +89,6 @@ function tempDir(prefix: string): string {
   const dir = canonicalTempDir(prefix);
   cleanup.push(dir);
   return dir;
-}
-
-/** Run with these ambient variables set — or, for an `undefined` value, unset. */
-function withAmbient<T>(variables: Readonly<Record<string, string | undefined>>, run: () => T): T {
-  const previous = new Map(Object.keys(variables).map((key) => [key, process.env[key]]));
-  for (const [key, value] of Object.entries(variables)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return run();
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
 }
 
 /** Routes that resolve their repository from the process cwd run there. */
@@ -173,8 +157,8 @@ function recordingGit(mode: "emulate" | "real" | "old-git", failOn?: string): Re
       const lines = record.split("\n");
       const argv = lines.filter((line) => line.startsWith("ARG ")).map((line) => line.slice(4));
       const env = Object.fromEntries(lines.filter((line) => line.startsWith("ENV ")).map((line) => {
-        const [key, ...value] = line.slice(4).split("=");
-        return [key!, value.join("=")];
+        const [key, ...rest] = line.slice(4).split("=");
+        return [key!, rest.join("=")];
       }));
       return Object.freeze({ argv, env });
     }),
@@ -214,7 +198,7 @@ const GLOBAL_IGNORE_SOURCES: readonly (readonly [string, (home: string, pattern:
  *  variables that would redirect it elsewhere are unset, so the real-Git
  *  controls read exactly that operator's files. */
 function withOperatorHome<T>(home: string, run: () => T): T {
-  return withAmbient({ HOME: home, XDG_CONFIG_HOME: undefined, GIT_CONFIG_GLOBAL: undefined, GIT_CONFIG_NOSYSTEM: undefined }, run);
+  return withEnvOverlaySync({ HOME: home, XDG_CONFIG_HOME: undefined, GIT_CONFIG_GLOBAL: undefined, GIT_CONFIG_NOSYSTEM: undefined }, run);
 }
 
 /** A repository whose own config names an fsmonitor hook that leaves a marker. */
@@ -241,7 +225,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     ["discard", undefined],
   ])("applies the argv prefix and the allow-listed environment on a %s run", (output, expected) => {
     const shim = recordingGit("emulate");
-    const result = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => runGit(["status", "--porcelain"], { output }));
+    const result = withEnvOverlaySync({ ...AMBIENT_ATTACK, PATH: shim.path }, () => runGit(["status", "--porcelain"], { output }));
 
     expect(result).toEqual(expected);
     const [invocation, ...rest] = shim.invocations();
@@ -254,7 +238,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
 
   it("applies both halves on a status-returning run and reports exit 1 without throwing", () => {
     const shim = recordingGit("emulate");
-    const result = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () =>
+    const result = withEnvOverlaySync({ ...AMBIENT_ATTACK, PATH: shim.path }, () =>
       spawnGit(["check-ignore", "--quiet", "fail"], { maxBuffer: 1024 }));
 
     expect(result).toEqual({ kind: "exited", status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("scripted failure\n") });
@@ -267,7 +251,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     const shim = recordingGit("emulate");
     let thrown: unknown;
     try {
-      withAmbient({ PATH: shim.path }, () => runGit(["fail"], { output: "text" }));
+      withEnvOverlaySync({ PATH: shim.path }, () => runGit(["fail"], { output: "text" }));
     } catch (error) {
       thrown = error;
     }
@@ -284,14 +268,14 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
       GIT_INDEX_FILE: "/work/.git/index",
       GIT_OBJECT_DIRECTORY: "/work/.git/objects",
     };
-    withAmbient({ GIT_DIR: "/attacker/.git", PATH: shim.path }, () => runGit(["diff"], { output: "text", location }));
+    withEnvOverlaySync({ GIT_DIR: "/attacker/.git", PATH: shim.path }, () => runGit(["diff"], { output: "text", location }));
     expect(shim.invocations()[0]!.env).toMatchObject({ ...location, ...POLICY_ENVIRONMENT });
   });
 
   it("pipes a status-returning run's input, relocates only its index, and bounds its wall time", () => {
     const { root } = fsmonitorRepository();
     const index = join(tempDir("loom-git-index-"), "index");
-    withAmbient({ GIT_INDEX_FILE: "/attacker/index" }, () => {
+    withEnvOverlaySync({ GIT_INDEX_FILE: "/attacker/index" }, () => {
       expect(spawnGit(["read-tree", "HEAD"], { cwd: root, maxBuffer: 1024, location: { GIT_INDEX_FILE: index } }))
         .toMatchObject({ kind: "exited", status: 0 });
       expect(existsSync(index)).toBe(true);
@@ -308,7 +292,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
 
   it("gives a bytes capture the listing budget, a text capture Node's default, and honours an explicit budget", () => {
     const shim = recordingGit("emulate");
-    withAmbient({ PATH: shim.path }, () => {
+    withEnvOverlaySync({ PATH: shim.path }, () => {
       expect(runGit(["big"], { output: "bytes" }).byteLength).toBe(2 * 1024 * 1024);
       expect(() => runGit(["big"], { output: "text" })).toThrow(expect.objectContaining({ code: "ENOBUFS" }));
       expect(() => runGit(["big"], { output: "bytes", maxBuffer: 1024 })).toThrow(expect.objectContaining({ code: "ENOBUFS" }));
@@ -321,7 +305,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     expect(runGit(["config", "--get", "core.fsmonitor"], { output: "text", cwd: root }).trim()).toBe("false");
 
     const oldGit = recordingGit("old-git");
-    withAmbient({ PATH: oldGit.path }, () => {
+    withEnvOverlaySync({ PATH: oldGit.path }, () => {
       expect(runGit(["config", "--get", "core.fsmonitor"], { output: "text", cwd: root }).trim()).toBe("false");
       expect(spawnGit(["config", "--get", "core.fsmonitor"], { cwd: root, maxBuffer: 1024 }))
         .toEqual({ kind: "exited", status: 0, stdout: Buffer.from("false\n"), stderr: Buffer.alloc(0) });
@@ -337,7 +321,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
     rmSync(marker);
 
     const oldGit = recordingGit("old-git");
-    withAmbient({ PATH: oldGit.path }, () => {
+    withEnvOverlaySync({ PATH: oldGit.path }, () => {
       runGit(["status", "--porcelain"], { output: "discard", cwd: root });
       expect(spawnGit(["status", "--porcelain"], { cwd: root, maxBuffer: 1024 * 1024 })).toMatchObject({ kind: "exited", status: 0 });
     });
@@ -356,11 +340,11 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
       Object.keys(invocation.env).filter((key) => !shellAdded.has(key)).sort();
     const policyKeys = Object.keys(POLICY_ENVIRONMENT);
 
-    withAmbient({
+    withEnvOverlaySync({
       ...AMBIENT_ATTACK, PATH: shim.path, HOME: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp,
       DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer", SDKROOT: "/sdk", USER: "operator",
     }, () => spawnGit(["status"], { maxBuffer: 1024 }));
-    withAmbient({ PATH: shim.path, HOME: undefined, TMPDIR: undefined, TEMP: undefined, TMP: undefined }, () =>
+    withEnvOverlaySync({ PATH: shim.path, HOME: undefined, TMPDIR: undefined, TEMP: undefined, TMP: undefined }, () =>
       spawnGit(["status"], { maxBuffer: 1024 }));
 
     const [withEssentials, withoutEssentials] = shim.invocations();
@@ -371,7 +355,7 @@ describe("runGit and spawnGit — the one policy-bound spawn", () => {
 
   it("hands back Git's own fatal diagnostic, and names a fatal exit with an empty stderr as a lost capture", () => {
     const shim = recordingGit("emulate");
-    withAmbient({ PATH: shim.path }, () => {
+    withEnvOverlaySync({ PATH: shim.path }, () => {
       const dubious = spawnGit(["rev-parse", "dubious"], { maxBuffer: 1024 });
       expect(dubious).toEqual({ kind: "exited", status: 128, stdout: Buffer.alloc(0), stderr: Buffer.from(`${DUBIOUS_OWNERSHIP}\n`) });
       expect(describeGitOutcome(dubious)).toBe(`exited 128: ${DUBIOUS_OWNERSHIP}`);
@@ -448,7 +432,7 @@ describe("every engine Git route runs under the policy", () => {
 
     const shim = recordingGit("real");
     const spawns = routeSpawns(shim);
-    const routes = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path }, () => ({
+    const routes = withEnvOverlaySync({ ...AMBIENT_ATTACK, PATH: shim.path }, () => ({
       revisionRead: spawns("revision read", () =>
         expect(gitOutput(root, ["rev-parse", "HEAD"]).toString("utf-8").trim()).toMatch(/^[0-9a-f]{40}$/)),
       leafListing: spawns("leaf listing", () =>
@@ -494,7 +478,7 @@ describe("every engine Git route runs under the policy", () => {
     const spawns = routeSpawns(shim);
     let temporaryIndex: string | null = null;
     // Root resolution answers CLAUDE_PROJECT_DIR before Git; it is unset so Git answers.
-    const staging = withAmbient({ ...AMBIENT_ATTACK, PATH: shim.path, CLAUDE_PROJECT_DIR: undefined }, () => withCwd(root, () => {
+    const staging = withEnvOverlaySync({ ...AMBIENT_ATTACK, PATH: shim.path, CLAUDE_PROJECT_DIR: undefined }, () => withCwd(root, () => {
       spawns("repository root", () => expect(resolveRepositoryRoot("policy route test")).toBe(root));
       spawns("repository context", () => expect(repositoryContext(root)).toEqual({ ok: true, root, headSha: head }));
       spawns("exact HEAD", () => expect(observeExactHead(root)).toEqual({ ok: true, headSha: head }));
@@ -576,7 +560,7 @@ describe("the shadow administration directory", () => {
     const tmp = tempDir("loom-git-tmp-");
     const shim = recordingGit("real");
 
-    withAmbient({ TMPDIR: tmp, PATH: shim.path }, () => {
+    withEnvOverlaySync({ TMPDIR: tmp, PATH: shim.path }, () => {
       expect(diffFilesAt(root, ["tracked.txt"]).ok).toBe(true);
       expect(isTrackedAt(root, "absent.txt")).toEqual({ ok: true, tracked: false });
       expect(diffFilesSinceAt(root, "no-such-revision", ["tracked.txt"]).ok).toBe(false);
@@ -597,7 +581,7 @@ describe("the shadow administration directory", () => {
     mkdirSync(join(tmp, "unrelated"));
     const shim = recordingGit("real", "--name-only");
 
-    withAmbient({ TMPDIR: tmp, PATH: shim.path }, () => {
+    withEnvOverlaySync({ TMPDIR: tmp, PATH: shim.path }, () => {
       expect(() => changedPaths(root, "worktree")).toThrow(/scripted route failure/);
     });
 

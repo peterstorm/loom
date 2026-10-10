@@ -17,6 +17,7 @@ import {
   type RecordedLlmProfileId,
 } from "../../src/core/model-profiles";
 import {
+  canonicalStructuralEquals,
   issueExactRoster,
   mintAgentRequestAuthority,
   mintAgentRosterSlot,
@@ -33,6 +34,7 @@ import { samePiBinding } from "../../src/core/orchestration-contract/roster";
 import { deriveRefutationVerifierBinding, issueRefutationPanelAuthority, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import { parseWaveFindingId } from "../../src/core/review-panel";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
+import { agentRequestIdentity } from "../fixtures/agent-request-identity";
 import { LOCAL_PI_BINDING, RECORDED_PI_VOCABULARY, RETIRED_CLOUD_PI_BINDING, RETIRED_REFUTATION_PI_BINDING } from "../fixtures/local-pi-binding";
 
 /**
@@ -151,11 +153,8 @@ describe("issued request authority is today's catalog", () => {
 });
 
 describe("a minted authority is the only thing an issuing seam accepts", () => {
-  const identity = <Attempt extends 1 | 2>(attempt: Attempt, role: LoomAgentName = "code-reviewer") => ({
-    runId: "run:recorded-authority", requestId: `request:recorded-authority-${attempt}`, slotId: "slot:recorded-authority",
-    program: "standalone-review" as const, role, attempt, contextDigest: String(attempt).repeat(64),
-    outputSlot: `transcripts/slot:recorded-authority/attempt-${attempt}.raw`,
-  });
+  const identity = <Attempt extends 1 | 2>(attempt: Attempt, role: LoomAgentName = "code-reviewer") =>
+    agentRequestIdentity(role, attempt, { runId: "run:recorded-authority", slotId: "slot:recorded-authority" });
   const mint = (attempt: 1 | 2, role?: LoomAgentName): MintedAgentRequestAuthority => {
     const minted = mintAgentRequestAuthority(identity(attempt, role));
     if (!minted.ok) throw new Error(JSON.stringify(minted.error));
@@ -176,7 +175,7 @@ describe("a minted authority is the only thing an issuing seam accepts", () => {
     if (!swapped.ok) expect(swapped.error.violations.map(({ kind }) => kind)).toContain("attempt-pair-mismatch");
   });
 
-  it("refuses a recorded roster slot at the issuing seam at compile time, and at run time exactly when it is not today's catalog (property)", () => {
+  it("never issues a recorded roster slot: the issuing seam takes identities and mints today's binding, whatever the slot recorded (property)", () => {
     fc.assert(fc.property(fc.constantFrom(...AGENT_POLICIES), fc.constantFrom(...RECORDED_PI_VOCABULARY), (policy, pi) => {
       fc.pre(issuedBy(policy.profile, pi));
       const recordedOn = (attempt: 1 | 2) => {
@@ -186,18 +185,16 @@ describe("a minted authority is the only thing an issuing seam accepts", () => {
       const recorded = parseAgentRosterSlot(recordedOn(1), recordedOn(2));
       if (!recorded.ok) throw new Error(JSON.stringify(recorded.error));
       const storedSlots: readonly AgentRosterSlot[] = [recorded.value];
-      // @ts-expect-error a recorded roster slot never passed the catalog check
-      const issued = issueExactRoster(storedSlots);
-      // The brand closes the forgetting path at compile time; the seam re-runs the catalog check itself.
-      expect(issued.ok, `${policy.agent} ${piModelPattern(pi)}`).toBe(samePiBinding(pi, currentProfileBindings(policy.profile).pi));
-      if (issued.ok) {
-        expect(issued.value.orderedSlots).toEqual(storedSlots);
-        return;
-      }
-      expect(issued.error.violations).toEqual(recorded.value.attempts.map((authority) => {
-        const strict = parseAgentRequestAuthority(authority);
-        return { kind: "malformed-attempt-authority", attempt: authority.attempt, authorityViolations: strict.ok ? [] : strict.error.violations };
-      }));
+      // Only the type is under test here: a recorded slot never passed the catalog check, and the seam takes identities.
+      // @ts-expect-error a recorded roster slot is not an issuer's identities
+      void (() => issueExactRoster(storedSlots));
+      const issued = issueExactRoster([[identity(1, policy.agent), identity(2, policy.agent)]]);
+      if (!issued.ok) throw new Error(JSON.stringify(issued.error));
+      const current = currentProfileBindings(policy.profile).pi;
+      expect(issued.value.orderedSlots[0].attempts.map(({ harnessBinding }) => harnessBinding.pi)).toEqual([current, current]);
+      // The recorded slot is exactly what issuance mints when it recorded today's binding, and only then.
+      expect(canonicalStructuralEquals(issued.value.orderedSlots, storedSlots), `${policy.agent} ${piModelPattern(pi)}`)
+        .toBe(samePiBinding(pi, current));
     }));
   });
 });
@@ -275,16 +272,8 @@ describe("the profile authority admits a Pi binding by its origin's strategy", (
 });
 
 describe("the catalog mints a request from its identity alone", () => {
-  const identity = <Attempt extends 1 | 2>(role: (typeof AGENT_POLICIES)[number]["agent"], attempt: Attempt) => ({
-    runId: "run:minted-authority",
-    requestId: `request:minted-${role}-${attempt}`,
-    slotId: `slot:minted-${role}`,
-    program: "standalone-review" as const,
-    role,
-    attempt,
-    contextDigest: String(attempt).repeat(64),
-    outputSlot: `transcripts/slot:minted-${role}/attempt-${attempt}.raw`,
-  });
+  const identity = <Attempt extends 1 | 2>(role: LoomAgentName, attempt: Attempt) =>
+    agentRequestIdentity(role, attempt, { runId: "run:minted-authority", slotId: `slot:minted-${role}` });
 
   it("fills every role's catalog profile, current bindings and Skill, and agrees with the strict parse", () => {
     for (const policy of AGENT_POLICIES) {
@@ -365,49 +354,54 @@ describe("the catalog mints a request from its identity alone", () => {
 });
 
 describe("an issued refutation panel is the panel its record parses as", () => {
-  it("issues exactly the parsed panel from minted slots, and refuses at run time a recorded slot that is not current", () => {
+  it("issues from its slots' identities exactly the panel its minted slots parse as, and never issues a recorded slot", () => {
     const runId = parseOrchestrationRunId("run:issued-panel");
     const findingId = parseWaveFindingId("T1:finding-1");
     if (!runId.ok || findingId === null) throw new Error("fixture identities must parse");
     const binding = deriveRefutationVerifierBinding(runId.value, "reproduction", [findingId]);
     if (!binding.ok) throw new Error(binding.errors.join("; "));
-    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => ({
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => agentRequestIdentity("review-verifier-agent", attempt, {
       runId: runId.value,
-      requestId: binding.value.requestIds[attempt - 1]!,
       slotId: binding.value.slotId,
-      program: "refutation-panel" as const,
-      role: "review-verifier-agent" as const,
-      attempt,
-      contextDigest: String(attempt).repeat(64),
-      outputSlot: `transcripts/${binding.value.slotId}/attempt-${attempt}.raw`,
+      requestId: binding.value.requestIds[attempt - 1]!,
+      program: "refutation-panel",
     });
     const slot = mintAgentRosterSlot(identity(1), identity(2));
     if (!slot.ok) throw new Error("slot must issue");
-    const input = {
+    const panel = {
       runId: runId.value,
       findings: [{ id: findingId, taskId: "T1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "c" }],
       lenses: ["reproduction"],
-      verifierSlots: [slot.value],
     };
-    const issued = issueRefutationPanelAuthority(input);
-    if (!issued.ok) throw new Error(issued.error.message);
+    const issued = issueRefutationPanelAuthority({ ...panel, verifierSlots: [[identity(1), identity(2)]] });
+    if (!issued.ok) throw new Error(JSON.stringify(issued.error));
     expect(issued.value.verifierRoster.orderedSlots[0].attempts[0].harnessBinding.pi).toEqual(LOCAL_PI_BINDING);
-    expect(parseRefutationPanelAuthority(input)).toEqual(issued);
+    expect(parseRefutationPanelAuthority({ ...panel, verifierSlots: [slot.value] })).toEqual(issued);
 
     // The same panel recorded on its profile's retired binding is history: it parses, and is never issued.
     const onRetired = (authority: MintedAgentRequestAuthority) =>
       ({ ...authority, harnessBinding: { ...authority.harnessBinding, pi: RETIRED_REFUTATION_PI_BINDING } });
     const retired = parseAgentRosterSlot(onRetired(slot.value.attempts[0]), onRetired(slot.value.attempts[1]));
     if (!retired.ok) throw new Error(JSON.stringify(retired.error));
-    expect(parseRefutationPanelAuthority({ ...input, verifierSlots: [retired.value] }).ok).toBe(true);
-    // @ts-expect-error a re-read roster slot is history, not an issued one
-    expect(issueRefutationPanelAuthority({ ...input, verifierSlots: [retired.value] })).toEqual({
-      ok: false,
-      error: {
-        kind: "invalid-authority",
-        panel: "refutation",
-        message: "verifier roster: malformed-attempt-authority; verifier roster: malformed-attempt-authority",
-      },
+    expect(parseRefutationPanelAuthority({ ...panel, verifierSlots: [retired.value] }).ok).toBe(true);
+    // Only the type is under test here: the issuing seam takes identities, so a re-read slot cannot be passed to it.
+    // @ts-expect-error a re-read roster slot is history, not an issuer's identities
+    void (() => issueRefutationPanelAuthority({ ...panel, verifierSlots: [retired.value] }));
+  });
+
+  it("refuses a verifier slot the catalog will not mint before checking the panel itself", () => {
+    const runId = parseOrchestrationRunId("run:issued-panel");
+    if (!runId.ok) throw new Error(runId.error.message);
+    const identity = <Attempt extends 1 | 2>(attempt: Attempt) => agentRequestIdentity("review-verifier-agent", attempt, {
+      runId: runId.value,
+      slotId: "slot:unmintable",
+      program: "refutation-panel",
+      contextDigest: "not-a-digest",
     });
+    const minted = mintAgentRosterSlot(identity(1), identity(2));
+    if (minted.ok) throw new Error("the fixture must not mint");
+    // An empty lens list is a panel refusal too; the unmintable slot is named first.
+    expect(issueRefutationPanelAuthority({ runId: runId.value, findings: [], lenses: [], verifierSlots: [[identity(1), identity(2)]] }))
+      .toEqual({ ok: false, error: { kind: "unmintable-roster-slot", slotId: "slot:unmintable", error: minted.error } });
   });
 });

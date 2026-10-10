@@ -15,9 +15,10 @@
  * that wants a parent model sets it explicitly with `withEnvOverlay`.
  *
  * `withEnvOverlay` is the suites' ONE process-environment overlay scope (the
- * parent model, run-directory roots, the Pi agent marker, any other
- * variable): one apply/restore-in-finally implementation, so no suite keeps
- * its own.
+ * parent model, run-directory roots, the Pi agent marker, `HOME`, `PATH`,
+ * any other variable): one apply/restore-in-finally implementation, so no
+ * suite keeps its own. `withEnvOverlaySync` is the same scope for a
+ * synchronous operation whose result the caller reads without awaiting.
  *
  * Dependency-free on purpose: the setup file imports it before every test
  * file, so it must load no engine module a suite might later `vi.mock`.
@@ -44,14 +45,32 @@ export function scrubAmbientParentModel(): void {
   applyOverlay(NO_PARENT_MODEL_ENV);
 }
 
+/** The current value of every variable `overlay` touches: the overlay that
+ *  restores them, with a variable unset now recorded as `undefined`. */
+function restoringOverlay(overlay: EnvironmentOverlay): EnvironmentOverlay {
+  return Object.freeze(Object.fromEntries(Object.keys(overlay).map((key) => [key, process.env[key]])));
+}
+
 /** Run `operation` under any process-environment `overlay`, restoring every
  *  touched variable afterwards — a variable that was unset before is deleted
  *  again. */
 export async function withEnvOverlay<T>(overlay: EnvironmentOverlay, operation: () => T | Promise<T>): Promise<T> {
-  const previous: EnvironmentOverlay = Object.fromEntries(Object.keys(overlay).map((key) => [key, process.env[key]]));
+  const previous = restoringOverlay(overlay);
   try {
     applyOverlay(overlay);
     return await operation();
+  } finally {
+    applyOverlay(previous);
+  }
+}
+
+/** `withEnvOverlay` for a synchronous `operation`: its result is returned
+ *  as is, and the overlay is lifted before the call returns. */
+export function withEnvOverlaySync<T>(overlay: EnvironmentOverlay, operation: () => T): T {
+  const previous = restoringOverlay(overlay);
+  try {
+    applyOverlay(overlay);
+    return operation();
   } finally {
     applyOverlay(previous);
   }

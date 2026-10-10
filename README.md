@@ -364,7 +364,7 @@ Interactive phase interviews use the dedicated RPC transport; non-interactive re
 
 ## Development
 
-Use Node **22.23.2**, Bun **1.3.13**, npm, Git, jq, Bash **4+**, and GNU `timeout`. Install both existing lockfiles from the repository root; the Pi smoke requires the root-local locked Pi CLI, not a global/latest installation. Use a full-history Git checkout: the suite resolves the committed model-calibration corpus against historical revisions available through remote refs. Linux CI enforces this with `actions/checkout` `fetch-depth: 0`; a depth-1 checkout cannot run the mandatory full gate.
+Use Node **22.23.2**, the Bun release pinned in the repository-root `.bun-version` (CI installs it and `npm run verify` enforces it locally), npm, Git, jq, Bash **4+**, and GNU `timeout`. Install both existing lockfiles from the repository root; the Pi smoke requires the root-local locked Pi CLI, not a global/latest installation. Use a full-history Git checkout: the suite resolves the committed model-calibration corpus against historical revisions available through remote refs. Linux CI enforces this with `actions/checkout` `fetch-depth: 0`; a depth-1 checkout cannot run the mandatory full gate.
 
 ```bash
 bun install --frozen-lockfile

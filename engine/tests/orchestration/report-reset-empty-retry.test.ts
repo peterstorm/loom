@@ -11,10 +11,12 @@
  * the explicit caller decision (empty legitimately means untracked), and a
  * failed observation throws with attribution.
  *
- * `spawnSync` is scripted after real Git setup (passthrough flag), so the
- * status-0/empty-stdout transient is reproduced deterministically — a real
- * repository cannot produce it on demand. The spawned check process itself
- * stays real, so the containment and report machinery is exercised unchanged.
+ * The reset's two Git probes reach Git through the `GitSpawn` port the
+ * runner's `reportResetGit` option binds, which a case scripts with the shared port fake
+ * after real Git setup, so the status-0/empty-stdout transient is reproduced
+ * deterministically — a real repository cannot produce it on demand. Fixture
+ * setup, the spawned check process and every other Git observation stay real,
+ * so the containment and report machinery is exercised unchanged.
  *
  * It also pins that the reset's ignore decision runs under the shared Git
  * execution policy, so it agrees with the remediation candidate's ignore
@@ -25,12 +27,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("node:child_process", async (importOriginal) =>
-  (await import("../fixtures/scripted-git")).scriptedChildProcess(await importOriginal()));
-
-import { answered, failedToStart, scriptedGit, scriptGit } from "../fixtures/scripted-git";
+import { afterEach, describe, expect, it } from "vitest";
+import { withEnvOverlay } from "../fixtures/env-overlay";
+import { answered, failedToStart, scriptedGitSpawn, type ScriptedGitCall } from "../fixtures/scripted-git";
 
 import {
   runRemediationCheck,
@@ -90,16 +89,11 @@ function refusalText(result: { readonly ok: false; readonly error: unknown }): s
   return JSON.stringify(rest);
 }
 
-const lsFilesCalls = (): number =>
-  scriptedGit.calls.filter(({ args }) => args[0] === "--literal-pathspecs" && args[1] === "ls-files").length;
+const lsFilesCalls = (calls: readonly ScriptedGitCall[]): number =>
+  calls.filter(({ args }) => args[0] === "--literal-pathspecs" && args[1] === "ls-files").length;
 
 afterEach(() => {
-  vi.restoreAllMocks();
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
-});
-
-beforeEach(() => {
-  scriptGit([], true); // fixture setup runs the real Git until a case scripts it
 });
 
 describe("remediation report reset agrees with the remediation candidate's ignore audit", () => {
@@ -113,9 +107,7 @@ describe("remediation report reset agrees with the remediation candidate's ignor
     roots.push(home);
     writeFileSync(join(home, "global-ignore"), ".loom/\n");
     writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${join(home, "global-ignore")}\n`);
-    const previousHome = process.env.HOME;
-    process.env.HOME = home;
-    try {
+    await withEnvOverlay({ HOME: home }, async () => {
       // Control: an ambient-config Git honours the operator's global ignore file…
       expect(spawnSync("git", ["check-ignore", "-q", "--", REPORT_PATH], { cwd: root }).status).toBe(0);
       // …but the candidate audit's policy-bound check-ignore (its exact argv) does not.
@@ -127,10 +119,7 @@ describe("remediation report reset agrees with the remediation candidate's ignor
       expect(result.error.kind).toBe("report-reset-failed");
       expect(result.error.message).toContain("requires a Git-ignored path");
       expect(readFileSync(report, "utf8")).toBe("stale, globally ignored only");
-    } finally {
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
-    }
+    });
   });
 });
 
@@ -141,11 +130,11 @@ describe("remediation report reset survives the transient empty tracked-state ob
     expect(spawnSync("git", ["add", "-f", REPORT_PATH], { cwd: root }).status).toBe(0);
     const index = readFileSync(join(root, ".git", "index"));
 
-    scriptGit([
+    const git = scriptedGitSpawn([
       answered(""), answered(""), answered("reset.xml\0"), // transient empties, then the tracked truth
     ]);
     const result: RemediationCheckRunnerResult = await runRemediationCheck(
-      remediationCheck(root, "tracked-transient"), root,
+      remediationCheck(root, "tracked-transient"), root, { reportResetGit: git.spawn },
     );
     // The repaired guard re-observes through the bounded retry; the observed
     // non-empty truth refuses loudly and never reaches the unlink.
@@ -158,18 +147,18 @@ describe("remediation report reset survives the transient empty tracked-state ob
     expect(readFileSync(report, "utf8")).toBe("stale tracked content");
     expect(readFileSync(join(root, ".git", "index"))).toEqual(index);
     // The full retry budget was spent before the refusal.
-    expect(lsFilesCalls()).toBe(3);
+    expect(lsFilesCalls(git.calls)).toBe(3);
   });
 
   it("proceeds with the reset only after a confirmed-empty observation names the untracked path", async () => {
     const root = fixtureRoot();
     writeStaleReport(root, "stale untracked content");
 
-    scriptGit([
+    const git = scriptedGitSpawn([
       answered(""), answered(""), answered(""), // confirmed-empty: legitimately untracked
       answered(""), // check-ignore -q: ignored
     ]);
-    const result = (await runRemediationCheck(remediationCheck(root, "confirmed-empty"), root));
+    const result = await runRemediationCheck(remediationCheck(root, "confirmed-empty"), root, { reportResetGit: git.spawn });
     expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
     if (!result.ok) throw new Error("confirmed-empty reset refused");
     expect(result.value.process).toMatchObject({ kind: "observed", exitCode: 0 });
@@ -178,17 +167,18 @@ describe("remediation report reset survives the transient empty tracked-state ob
       parsedReportFacts: { ok: true, value: { total: 1, failed: 0 } },
     });
     // The explicit caller decision was reached only after the full retry budget.
-    expect(lsFilesCalls()).toBe(3);
+    expect(lsFilesCalls(git.calls)).toBe(3);
+    expect(git.calls.map(({ args }) => args[0])).toEqual(["--literal-pathspecs", "--literal-pathspecs", "--literal-pathspecs", "check-ignore"]);
   });
 
   it("attributes a failed tracked-state observation instead of a generic untracked refusal", async () => {
     const root = fixtureRoot();
     const report = writeStaleReport(root, "stale");
 
-    scriptGit([
+    const git = scriptedGitSpawn([
       failedToStart("spawn git ENOENT"),
     ]);
-    const result = await runRemediationCheck(remediationCheck(root, "failed-probe"), root);
+    const result = await runRemediationCheck(remediationCheck(root, "failed-probe"), root, { reportResetGit: git.spawn });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("failed probe was not refused");
     expect(result.error.kind).toBe("report-reset-failed");
@@ -196,6 +186,6 @@ describe("remediation report reset survives the transient empty tracked-state ob
     expect(result.error.message).toContain("could not observe tracked state");
     expect(result.error.message).toContain("could not start");
     expect(existsSync(report)).toBe(true);
-    expect(lsFilesCalls()).toBe(1);
+    expect(lsFilesCalls(git.calls)).toBe(1);
   });
 });

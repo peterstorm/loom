@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import type { SampleObservation } from "./pilot-observation";
 import type { RouteProbe } from "./pilot-preflight";
 import { buildPairSchedule, type ScheduledPair } from "./pilot-preregistration";
@@ -34,7 +34,10 @@ import {
  * pilot-window.test.ts.
  */
 
-const PAIR = buildPairSchedule(PILOT_1)[0] as ScheduledPair;
+const SCHEDULE = buildPairSchedule(PILOT_1);
+const PAIR = SCHEDULE[0] as ScheduledPair;
+/** The first `pairs` pairs of the retained schedule: a schedule of that length for the fail-fast step. */
+const scheduleOf = (pairs: number): readonly ScheduledPair[] => SCHEDULE.slice(0, pairs);
 const DOWN = { kind: "unreachable", reason: "fetch failed (connect ECONNREFUSED)" } as const satisfies RouteHealth;
 
 // One place states how a landed sample of each kind looks.
@@ -124,7 +127,7 @@ describe("startSchedule / landPair (the one fail-fast step)", () => {
   /** Runs a schedule of `scheduled` pairs through the step as the shell does,
    *  answering each re-probe the step asks for as `routeDown` says. */
   function run(scheduled: number, script: readonly Step[]) {
-    let progress: ScheduleProgress = startSchedule(scheduled);
+    let progress: ScheduleProgress = startSchedule(scheduleOf(scheduled));
     const probedAfter: number[] = [];
     let landedPairs = 0;
     for (const { kind, routeDown } of script) {
@@ -190,10 +193,11 @@ describe("startSchedule / landPair (the one fail-fast step)", () => {
   });
 
   it("completes an empty schedule at once, and never judges the last pair", () => {
-    expect(startSchedule(0)).toEqual({ kind: "ended", ending: { kind: "completed", pairs: 0 } });
-    expect(() => startSchedule(-1)).toThrow("a schedule has a whole number of pairs, not -1");
+    expect(startSchedule(scheduleOf(0))).toEqual({ kind: "ended", ending: { kind: "completed", pairs: 0 } });
+    // The step opens over the parsed schedule, never a bare count, so a negative or fractional pair count cannot reach it.
+    expectTypeOf(startSchedule).parameter(0).toEqualTypeOf<readonly ScheduledPair[]>();
     // A one-pair schedule's only pair is its last: an outage there is recorded in its samples, not as an abort.
-    const single = startSchedule(1);
+    const single = startSchedule(scheduleOf(1));
     if (single.kind !== "running") throw new Error("a one-pair schedule runs");
     expect(landPair(single.breaker, landedPair("infrastructure"))).toEqual({ kind: "ended", ending: { kind: "completed", pairs: 1 } });
     // The limit reached on the last pair completes too.
@@ -205,7 +209,7 @@ describe("startSchedule / landPair (the one fail-fast step)", () => {
   });
 
   it("records a blank unreachable answer under a named reason, so the judge always returns a recordable ending", () => {
-    const opened = startSchedule(4);
+    const opened = startSchedule(scheduleOf(4));
     if (opened.kind !== "running") throw new Error("a four-pair schedule runs");
     const step = landPair(opened.breaker, landedPair("timeout"));
     if (step.kind !== "probe-route") throw new Error("an all-outage pair before the last is re-probed");

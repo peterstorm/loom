@@ -150,7 +150,7 @@ export type DispatchedSchedule = Readonly<{ records: readonly SampleRecord[]; en
 export async function dispatchSchedule(window: WindowDispatch): Promise<DispatchedSchedule> {
   const records: SampleRecord[] = [];
   const schedule = buildPairSchedule(window.prereg);
-  let progress: ScheduleProgress = startSchedule(schedule.length);
+  let progress: ScheduleProgress = startSchedule(schedule);
   for (const [index, pair] of schedule.entries()) {
     if (progress.kind === "ended") break;
     const landed = await dispatchPair(window, pair);

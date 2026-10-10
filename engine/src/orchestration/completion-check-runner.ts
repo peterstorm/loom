@@ -23,7 +23,7 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/digest";
-import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../utils/git-execution-policy";
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from "../utils/git-execution-policy";
 import { describeGitOutcome, gitCleanNegative, gitExitedWith } from "../utils/git-spawn-outcome";
 import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
@@ -119,6 +119,11 @@ export type CompletionCheckRunnerOptions = Readonly<{
   terminationGraceMs?: number;
   hardKillWaitMs?: number;
   diagnosticTailBytes?: number;
+  /** The `GitSpawn` port a remediation check's pre-launch report reset
+   *  observes Git through: the policy-bound `spawnGit` when absent (in
+   *  production), a scripted fake in tests. Nothing else the runner does
+   *  reaches Git. */
+  reportResetGit?: GitSpawn;
 }>;
 
 const DEFAULT_TERMINATION_GRACE_MS = 250;
@@ -269,12 +274,16 @@ function preSpawnReportSnapshot(
  *
  * A refused probe names its rendered outcome (`describeGitOutcome`): Git's
  * own diagnostic, or why there is none — never a bare status number
- * (silent-failure-hunter-1). */
-function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand): void {
+ * (silent-failure-hunter-1).
+ *
+ * Both probes reach Git through the one `gitSpawn` port bound here, from the
+ * runner's `reportResetGit` option: the policy-bound `spawnGit` in
+ * production, a scripted fake in tests. */
+function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand, gitSpawn: GitSpawn = spawnGit): void {
   if (check.reportPolicy.kind !== "required-file") throw new Error("remediation requires a report path");
   const path = check.reportPolicy.path;
   const observed = observeGitProbe<Buffer, Error>(() => {
-    const tracked = spawnGit(["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
+    const tracked = gitSpawn(["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
     return gitExitedWith(tracked, [0])
       ? Object.freeze({ ok: true as const, value: tracked.stdout })
       : Object.freeze({ ok: false as const, error: new Error(`git ls-files ${describeGitOutcome(tracked)} for ${path}`) });
@@ -289,7 +298,7 @@ function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerComm
   // 1 with empty stdout and stderr. A spawn error or a Git fatal exit with a
   // diagnostic is a different state and refuses with its own attribution
   // instead of reading as a .gitignore policy violation (silent-failure-hunter-1).
-  const ignored = spawnGit(["check-ignore", "-q", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
+  const ignored = gitSpawn(["check-ignore", "-q", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
   if (!gitExitedWith(ignored, [0])) {
     if (gitCleanNegative(ignored)) {
       throw new Error(`report reset requires a Git-ignored path: ${path}`);
@@ -967,7 +976,7 @@ async function runProjectCommand(
 
   if (reportMode === "remediation-reset") {
     try {
-      resetRemediationReport(repositoryRoot, check);
+      resetRemediationReport(repositoryRoot, check, options.reportResetGit);
     } catch (cause) {
       return failed({
         kind: "report-reset-failed",

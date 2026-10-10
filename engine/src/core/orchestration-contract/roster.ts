@@ -442,9 +442,10 @@ export type MintedHarnessBinding = Readonly<{ pi: LocalPiBinding; claude: Claude
  *   type and a builder that skipped the check does not compile there;
  * - it is a phantom brand: no runtime field, so serialization, equality and
  *   every reader typed `AgentRequestAuthority` are unchanged. It closes the
- *   forgetting path at compile time; the issuing roster seam
- *   (`issueExactRoster`) re-runs the strict parse against today's catalog, so
- *   a slot cast past the brand that is not current is refused at run time too.
+ *   forgetting path at compile time. The issuing roster seam
+ *   (`issueExactRoster`) does not rely on it: it takes identities and mints
+ *   every slot itself, so no value cast past the brand reaches an issued
+ *   roster.
  *
  * Which seams take it, and where coverage stops: docs/model-profiles-and-calibration.md,
  * "Issuance (minting)".
@@ -955,38 +956,39 @@ export function parseExactRoster(
   }));
 }
 
-/**
- * Issue an exact roster from freshly minted slots. The seam enforces its
- * invariant itself rather than trusting the phantom brand: each slot is
- * re-checked against TODAY's catalog with the strict issue-mode parse
- * (`currentSlotEntry`), so a recorded slot cast past the type — a retired
- * profile or binding, a mis-paired attempt — is refused at run time with the
- * catalog's own violations. The cross-slot checks are exactly
- * `parseExactRoster`'s, and the roster keeps the minted slot type, so an
- * issued aggregate carries its catalog proof without a cast.
- */
-export function issueExactRoster(
-  slots: readonly MintedAgentRosterSlot[],
-): DomainResult<ExactRoster<MintedAgentRosterSlot>, ExactRosterError> {
-  return assembleExactRoster(slots.map(currentSlotEntry));
-}
+/** The identities of one roster slot's two requests, in attempt order: everything its issuer decides about the slot. */
+export type AgentRosterSlotIdentities = readonly [AgentRequestIdentity<1>, AgentRequestIdentity<2>];
 
 /**
- * `slot` as a roster entry, with every reason it is not one today's catalog
- * issues: both attempts must pass the strict parse against today's catalog
- * and pair, and the slot must declare its attempts' slot id, exactly as
- * `parseExactRoster` reads a recorded slot. Every slot `mintAgentRosterSlot`
- * returns passes, so for a caller the type admits this only ever refuses a cast.
+ * Why a roster could not be issued: the first slot today's catalog would not
+ * mint — named by the slot id its identities declare, with the catalog's own
+ * reasons (`rosterSlotErrorMessages`) — or, every slot minted, the cross-slot
+ * rules `parseExactRoster` applies.
  */
-function currentSlotEntry(slot: MintedAgentRosterSlot): RosterEntry<MintedAgentRosterSlot> {
-  const current = <Attempt extends SemanticAttempt>(raw: unknown, attempt: Attempt) => {
-    const parsed = parseAgentRequestAuthorityInMode(raw, "issue");
-    return parsed.ok ? authorityForAttempt(parsed.value, attempt) : parsed;
-  };
-  const paired = pairRosterSlot<AgentRequestAuthority>(current(slot.attempts[0], 1), current(slot.attempts[1], 2));
-  return paired.ok
-    ? { slot, violations: declaredSlotIdViolations(paired.value.slotId, slot.slotId) }
-    : { slot: null, violations: paired.error.violations };
+export type RosterIssuanceError =
+  | Readonly<{ kind: "unmintable-roster-slot"; slotId: string; error: AgentRosterSlotError }>
+  | ExactRosterError;
+
+/**
+ * Issue an exact roster from its slots' identities: the one issuing seam of a
+ * roster, owning both the catalog check and the aggregate. Each slot is
+ * minted here (`mintAgentRosterSlot`, the strict check against today's
+ * catalog, run once), and the roster holds exactly the slots it minted, so no
+ * slot from outside — a recorded one, or one cast past the minted type — can
+ * reach an issued roster, and nothing is re-checked. The cross-slot checks are
+ * exactly `parseExactRoster`'s, and the roster keeps the minted slot type, so
+ * an issued aggregate carries its catalog proof without a cast.
+ */
+export function issueExactRoster(
+  slots: readonly AgentRosterSlotIdentities[],
+): DomainResult<ExactRoster<MintedAgentRosterSlot>, RosterIssuanceError> {
+  const minted: RosterEntry<MintedAgentRosterSlot>[] = [];
+  for (const [first, retry] of slots) {
+    const slot = mintAgentRosterSlot(first, retry);
+    if (!slot.ok) return failure(canonicalRecord({ kind: "unmintable-roster-slot", slotId: first.slotId, error: slot.error }));
+    minted.push({ slot: slot.value, violations: [] });
+  }
+  return assembleExactRoster(minted);
 }
 
 /** A roster slot must declare the slot id its attempts carry. */

@@ -7,9 +7,10 @@
  *
  * The failure arms run real children through the harness seam: tiny scripted
  * `bun -e` sources stand in for the server, and a recording sink stands in
- * for stderr. A stopped child proves its stop by writing a marker on SIGTERM.
+ * for stderr. A stopped child proves its stop by writing its pid to a marker
+ * on SIGTERM, so a test can also wait until that process is gone.
  */
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
@@ -32,19 +33,19 @@ afterEach(() => {
 });
 
 /**
- * A child that on SIGTERM writes `marker` before exiting, then runs `body`
+ * A child that on SIGTERM writes its pid to `marker` before exiting, then runs `body`
  * and idles until stopped. The handler is installed before `body` runs: the
  * parent stops the child as soon as `body`'s output reaches it, so a handler
  * installed after that output races the stop, and a lost race kills the
  * child by default action with its marker unwritten.
  */
 const untilStopped = (marker: string, body: string): string =>
-  `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(marker)}, "stopped"); process.exit(0); });\n` +
+  `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(process.pid)); process.exit(0); });\n` +
   `${body}\nsetInterval(() => {}, 1000);\n`;
 
 /**
  * Close the child's stdout while it stays alive. `fs.closeSync(1)` cannot:
- * on bun 1.3 (CI's pin) it is a silent no-op that leaves fd 1 naming the
+ * on bun 1.3.13 it is a silent no-op that leaves fd 1 naming the
  * pipe. libc's own close(2) closes it on every bun, and a failed close throws,
  * so the start fails as an exit instead of hanging.
  */
@@ -69,6 +70,31 @@ async function eventually(path: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path)) {
     if (Date.now() > deadline) throw new Error(`${path} never appeared`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * Resolve once the stopped child whose pid `marker` names has been reaped, or
+ * fail after `timeoutMs`. The parent reaps its child and emits the child's
+ * `exit` in the same event-loop step, so once the pid is gone the stub has
+ * already decided that exit: whatever the sink holds then is final.
+ */
+async function reaped(marker: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const alive = (): boolean => {
+    const pid = existsSync(marker) ? readFileSync(marker, "utf8") : "";
+    if (!/^[1-9][0-9]*$/.test(pid)) return true;
+    try {
+      process.kill(Number(pid), 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
+  };
+  while (alive()) {
+    if (Date.now() > deadline) throw new Error(`the child named by ${marker} was never reaped`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -110,9 +136,11 @@ describe("routeStubVerdict", () => {
   const listening: RouteStubPhase = { kind: "listening", port };
   const crash = new Error("spawn bun EACCES");
 
-  it("fails the start on any event before the stub listened", () => {
+  it("fails the start on any event before the stub listened, naming how an exit ended", () => {
     expect(routeStubVerdict({ kind: "starting" }, { kind: "exit", code: 7, signal: null }))
       .toEqual({ kind: "reject", error: new Error("route stub exited before listening (code 7)") });
+    expect(routeStubVerdict({ kind: "starting" }, { kind: "exit", code: null, signal: "SIGKILL" }))
+      .toEqual({ kind: "reject", error: new Error("route stub exited before listening (signal SIGKILL)") });
     expect(routeStubVerdict({ kind: "starting" }, { kind: "error", error: crash })).toEqual({ kind: "reject", error: crash });
   });
 
@@ -189,9 +217,9 @@ describe("startRouteStub", () => {
     const stub = scripted(untilStopped(marker, 'process.stdout.write("4243\\n");'));
     const started = await startRouteStub("stub-model", stub.harness);
     started.stop();
-    await eventually(marker);
-    // Let the exit event reach the parent before reading the sink.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait for the stop's exit itself to reach the stub, not a fixed sleep:
+    // an assertion before that point would pass however the exit was decided.
+    await reaped(marker);
     expect(stub.reports).toEqual([]);
   });
 });
