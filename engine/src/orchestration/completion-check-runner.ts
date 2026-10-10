@@ -23,7 +23,7 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/digest";
-import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../utils/git-execution-policy";
+import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from "../utils/git-execution-policy";
 import { describeGitOutcome, gitCleanNegative, gitExitedWith } from "../utils/git-spawn-outcome";
 import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
@@ -269,12 +269,15 @@ function preSpawnReportSnapshot(
  *
  * A refused probe names its rendered outcome (`describeGitOutcome`): Git's
  * own diagnostic, or why there is none — never a bare status number
- * (silent-failure-hunter-1). */
-function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand): void {
+ * (silent-failure-hunter-1).
+ *
+ * Both probes reach Git through the `gitSpawn` port `runRemediationCheck` was
+ * handed: the policy-bound `spawnGit` in production, a scripted fake in tests. */
+function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand, gitSpawn: GitSpawn): void {
   if (check.reportPolicy.kind !== "required-file") throw new Error("remediation requires a report path");
   const path = check.reportPolicy.path;
   const observed = observeGitProbe<Buffer, Error>(() => {
-    const tracked = spawnGit(["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
+    const tracked = gitSpawn(["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
     return gitExitedWith(tracked, [0])
       ? Object.freeze({ ok: true as const, value: tracked.stdout })
       : Object.freeze({ ok: false as const, error: new Error(`git ls-files ${describeGitOutcome(tracked)} for ${path}`) });
@@ -289,7 +292,7 @@ function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerComm
   // 1 with empty stdout and stderr. A spawn error or a Git fatal exit with a
   // diagnostic is a different state and refuses with its own attribution
   // instead of reading as a .gitignore policy violation (silent-failure-hunter-1).
-  const ignored = spawnGit(["check-ignore", "-q", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
+  const ignored = gitSpawn(["check-ignore", "-q", "--", path], { cwd: root, maxBuffer: GIT_PROBE_OUTPUT_LIMIT });
   if (!gitExitedWith(ignored, [0])) {
     if (gitCleanNegative(ignored)) {
       throw new Error(`report reset requires a Git-ignored path: ${path}`);
@@ -913,16 +916,19 @@ async function runProjectCommand(
   selected: AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions,
+  gitSpawn?: GitSpawn,
 ): Promise<CommandRunnerResult<RequiredFileReportPolicy>>;
 async function runProjectCommand(
   selected: ProjectCommandCheck | AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions,
+  gitSpawn?: GitSpawn,
 ): Promise<CommandRunnerResult>;
 async function runProjectCommand(
   selected: ProjectCommandCheck | AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions,
+  gitSpawn: GitSpawn = spawnGit,
 ): Promise<CommandRunnerResult> {
   const check = selected.kind === "authorized-remediation-check" ? selected.command : selected;
   const reportMode = selected.kind === "authorized-remediation-check" ? "remediation-reset" : "wave-snapshot";
@@ -967,7 +973,7 @@ async function runProjectCommand(
 
   if (reportMode === "remediation-reset") {
     try {
-      resetRemediationReport(repositoryRoot, check);
+      resetRemediationReport(repositoryRoot, check, gitSpawn);
     } catch (cause) {
       return failed({
         kind: "report-reset-failed",
@@ -1212,12 +1218,14 @@ function remediationReportObservation(
 
 /**
  * Execute one core-authorized standalone remediation check. The returned facts
- * are raw event ingredients, never a pass or installation authority.
+ * are raw event ingredients, never a pass or installation authority. `gitSpawn`
+ * is the `GitSpawn` port the pre-launch report reset observes Git through.
  */
 export async function runRemediationCheck(
   check: AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions = {},
+  gitSpawn: GitSpawn = spawnGit,
 ): Promise<RemediationCheckRunnerResult> {
   if (check.kind !== "authorized-remediation-check" ||
       check.scope.kind !== "standalone-remediation" ||
@@ -1230,7 +1238,7 @@ export async function runRemediationCheck(
   }
   const root = validatedRepositoryRoot(repositoryRoot);
   if (!root.ok) return root;
-  const execution = await runProjectCommand(check, root.value, options);
+  const execution = await runProjectCommand(check, root.value, options, gitSpawn);
   if (!execution.ok) return execution;
   // A spawn failure never collected a report; an observed required-file check
   // always has one whose `not-required` arm does not exist (see the
