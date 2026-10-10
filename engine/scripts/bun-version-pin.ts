@@ -53,7 +53,7 @@ export function checkBunVersion(pinRaw: string, localRaw: string): BunVersionChe
 export function describeBunVersionRefusal(refusal: BunVersionRefusal): string {
   switch (refusal.kind) {
     case "malformed-pin":
-      return `Verification blocked: .bun-version must hold exactly one Bun version (e.g. 1.4.2), got ${JSON.stringify(refusal.raw)}`;
+      return `Verification blocked: .bun-version must hold exactly one Bun version (MAJOR.MINOR.PATCH, as \`bun --version\` prints it), got ${JSON.stringify(refusal.raw)}`;
     case "malformed-local":
       return `Verification blocked: \`bun --version\` printed ${JSON.stringify(refusal.raw)}, not a Bun version`;
     case "mismatch":

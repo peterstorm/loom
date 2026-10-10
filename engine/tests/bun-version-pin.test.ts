@@ -5,7 +5,7 @@
  * enforces.
  */
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
@@ -62,31 +62,68 @@ describe("describeBunVersionRefusal", () => {
 
   it("names the raw text of a malformed pin or local output", () => {
     expect(describeBunVersionRefusal({ kind: "malformed-pin", raw: "latest\n" }))
-      .toBe('Verification blocked: .bun-version must hold exactly one Bun version (e.g. 1.4.2), got "latest\\n"');
+      .toBe('Verification blocked: .bun-version must hold exactly one Bun version (MAJOR.MINOR.PATCH, as `bun --version` prints it), got "latest\\n"');
     expect(describeBunVersionRefusal({ kind: "malformed-local", raw: "" }))
       .toBe("Verification blocked: `bun --version` printed \"\", not a Bun version");
+  });
+});
+
+/** A Bun release a text hard-codes: one right after "Bun" (through markup, a
+ *  `v` or an `@`), or a workflow's `bun-version:` value. A release named in
+ *  passing elsewhere in a sentence is not a claim about the pinned Bun. */
+const BUN_VERSION_LITERAL = /\bbun(?:-version)?[\s*_`'"]*(?::\s*['"]?)?[v@]?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)/gi;
+const hardCodedBunVersions = (text: string): readonly string[] =>
+  [...text.matchAll(BUN_VERSION_LITERAL)].flatMap(([, release]) => (release === undefined ? [] : [release]));
+
+describe("hardCodedBunVersions", () => {
+  it.each([
+    ["Use Bun **1.3.13** locally", ["1.3.13"]],
+    ["requires bun 1.4.2-canary.1", ["1.4.2-canary.1"]],
+    ["install bun@1.3.13 or Bun v1.4.2", ["1.3.13", "1.4.2"]],
+    ["        bun-version: 1.3.13", ["1.3.13"]],
+    ['        bun-version: "1.3.13"', ["1.3.13"]],
+  ])("finds the release hard-coded in %j", (text, releases) => {
+    expect(hardCodedBunVersions(text)).toEqual(releases);
+  });
+
+  it.each([
+    "the Bun release pinned in the repository-root `.bun-version`",
+    "          bun-version-file: .bun-version",
+    "      - uses: oven-sh/setup-bun@v2",
+    "a different Bun can pass where CI fails, as `fs.closeSync(1)` did on 1.3.13",
+    'test "$(bun --version)" = "$(cat .bun-version)"',
+  ])("finds none in %j", (text) => {
+    expect(hardCodedBunVersions(text)).toEqual([]);
   });
 });
 
 describe("the repository's Bun pin", () => {
   const repository = resolve("..");
   const pin = readFileSync(join(repository, ".bun-version"), "utf8");
+  const read = (path: string): string => readFileSync(join(repository, path), "utf8");
+  const workflowsDir = ".github/workflows";
+  /** The live operator docs and every CI workflow (historical plans and recorded evidence may name the Bun they ran on). */
+  const pinConsumers = [
+    "README.md",
+    ...readdirSync(join(repository, "docs"), { recursive: true, encoding: "utf8" }).filter((path) => path.endsWith(".md")).map((path) => join("docs", path)),
+    ...readdirSync(join(repository, workflowsDir)).filter((path) => /\.ya?ml$/.test(path)).map((path) => join(workflowsDir, path)),
+  ];
 
   it("is one release on one line, the file CI installs and compares against", () => {
     expect(pin).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+\n$/);
-    const workflow = readFileSync(join(repository, ".github/workflows/ci.yml"), "utf8");
-    expect(workflow).toContain("bun-version-file: .bun-version");
-    expect(workflow).toContain('test "$(bun --version)" = "$(cat .bun-version)"');
-    expect(workflow).not.toMatch(/bun-version: /);
+    const workflow = read(join(workflowsDir, "ci.yml"));
+    expect(workflow).toMatch(/^\s*bun-version-file:\s*['"]?\.bun-version['"]?\s*$/m);
+    expect(workflow).toMatch(/\$\(bun --version\)"?\s*=\s*"?\$\(cat \.bun-version\)/);
   });
 
-  it("is the version the operator docs name", () => {
+  it("is the only Bun release the operator docs and workflows hard-code", () => {
     const release = pin.trim();
-    for (const doc of ["README.md", "docs/operations.md"]) {
-      const text = readFileSync(join(repository, doc), "utf8");
-      expect(text, doc).toContain(`Bun **${release}**`);
-      expect(text, doc).toContain("`.bun-version`");
-    }
+    expect(pinConsumers).toEqual(expect.arrayContaining(["README.md", join("docs", "operations.md"), join(workflowsDir, "ci.yml")]));
+    for (const path of pinConsumers) expect(hardCodedBunVersions(read(path)).filter((found) => found !== release), path).toEqual([]);
+  });
+
+  it("is named by file in the docs that state the Bun requirement", () => {
+    for (const doc of ["README.md", "docs/operations.md"]) expect(read(doc), doc).toContain("`.bun-version`");
   });
 });
 
