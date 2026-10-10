@@ -16,7 +16,6 @@
  * the shell (`handlers/helpers/programs/refutation-verifiers.ts`) reads it.
  */
 import {
-  mintAgentRosterSlot,
   mintAgentRosterSlotAsOf,
   parseAgentRosterSlot,
   parseStoredAgentRequestAuthorityForAttempt,
@@ -26,6 +25,7 @@ import {
   type AgentRequestIdentity,
   type AgentRosterSlot,
   type AgentRosterSlotError,
+  type AgentRosterSlotIdentities,
   type DomainResult,
   type InitialSpawnRequestInput,
   type NonEmpty,
@@ -35,7 +35,7 @@ import {
   type SlotId,
 } from "./orchestration-contract";
 import type { ContextPacket } from "./context-packets";
-import type { LoomAgentName, PiCatalog } from "./model-profiles";
+import type { LoomAgentName, PiCatalog, RecordedPiLowering } from "./model-profiles";
 import type { BriefFinding, ReviewLens } from "./review-panel";
 import {
   deriveRefutationVerifierBinding,
@@ -102,8 +102,9 @@ export type PreparedVerifierRequest = Readonly<{
  * issued one is (the standalone evidence replay freezes a receipt-recorded
  * panel), so the provenance is not part of the result — nor of
  * `RefutationPanelAuthority`. The minted proof is enforced at the issuing seam
- * (`issueRefutationPanelAuthority`): its input must be minted slots, and each
- * is re-checked against today's catalog at run time.
+ * (`issueRefutationPanelAuthority`): it takes the verifier slots' identities
+ * and mints each itself (`issueExactRoster`), so no slot from outside reaches
+ * an issued panel.
  */
 export type RefutationVerifierPreparation = Readonly<{
   refutationAuthority: RefutationPanelAuthority;
@@ -134,11 +135,14 @@ type DraftAttempt<Attempt extends SemanticAttempt> = Readonly<{ identity: AgentR
 type DraftSlot = Readonly<{ slotId: SlotId; attempts: readonly [DraftAttempt<1>, DraftAttempt<2>] }>;
 
 /** A verifier slot beside the draft it was issued or read for, so its packets are never looked up by index. */
-type PairedSlot<Slot extends AgentRosterSlot = AgentRosterSlot> = Readonly<{ draft: DraftSlot; slot: Slot }>;
+type PairedSlot = Readonly<{ draft: DraftSlot; slot: AgentRosterSlot }>;
+
+/** The semantic panel identity the plan's verifier slots derive from: its `identityRunId`, or the run itself when it names none. */
+const panelIdentityRunId = (plan: RefutationVerifierPlan): OrchestrationRunId => plan.identityRunId ?? plan.runId;
 
 /** Each lens's verifier slot identity, in lens order. */
 function verifierBindings(plan: RefutationVerifierPlan): Result<readonly LensBinding[]> {
-  const identityRunId = plan.identityRunId ?? plan.runId;
+  const identityRunId = panelIdentityRunId(plan);
   const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
   return all(plan.lenses.map((lens): Result<LensBinding> => {
     const binding = deriveRefutationVerifierBinding(identityRunId, lens, findingIds);
@@ -186,19 +190,22 @@ function draftSlot(plan: RefutationVerifierPlan, { lens, binding }: LensBinding)
   return ok(Object.freeze({ slotId, attempts: Object.freeze([first.value, retry.value] as const) }));
 }
 
+/** The identities of a draft slot's two requests, as an issuer mints them. */
+const slotIdentities = ({ attempts: [first, retry] }: DraftSlot): AgentRosterSlotIdentities =>
+  Object.freeze([first.identity, retry.identity] as const);
+
+/** A verifier slot the catalog would not mint, refused with every reason it gave. */
+const unmintable = <T>(slotId: string, error: AgentRosterSlotError): Result<T> =>
+  refused("unmintable-slot", `verifier slot ${slotId} cannot be minted: ${rosterSlotErrorMessages(error).join("; ")}`);
+
 /**
- * Mint each draft's slot with `mint` — today's catalog (`mintAgentRosterSlot`)
- * or a replayed one (`mintAgentRosterSlotAsOf`) — or name every reason the
- * catalog refused it.
+ * Mint a draft's slot as the replayed catalog `lowering` stood
+ * (`mintAgentRosterSlotAsOf`): history, typed as recorded, never issued.
  */
-const mintedVerifierSlot = <Slot extends AgentRosterSlot>(
-  mint: (first: AgentRequestIdentity<1>, retry: AgentRequestIdentity<2>) => DomainResult<Slot, AgentRosterSlotError>,
-) =>
-  (draft: DraftSlot): Result<PairedSlot<Slot>> => {
-    const slot = mint(draft.attempts[0].identity, draft.attempts[1].identity);
-    return slot.ok
-      ? ok(Object.freeze({ draft, slot: slot.value }))
-      : refused("unmintable-slot", `verifier slot ${draft.slotId} cannot be minted: ${rosterSlotErrorMessages(slot.error).join("; ")}`);
+const replayedVerifierSlot = (lowering: RecordedPiLowering) =>
+  (draft: DraftSlot): Result<PairedSlot> => {
+    const slot = mintAgentRosterSlotAsOf(lowering, ...slotIdentities(draft));
+    return slot.ok ? ok(Object.freeze({ draft, slot: slot.value })) : unmintable(draft.slotId, slot.error);
   };
 
 /**
@@ -292,32 +299,51 @@ export function decideRefutationVerifiers(
   if (!bindings.ok) return bindings;
   const drafts = all(bindings.value.map((lensBinding) => draftSlot(plan, lensBinding)));
   if (!drafts.ok) return drafts;
-  const panelInput = { runId: plan.runId, identityRunId: plan.identityRunId ?? plan.runId, findings: plan.findings, lenses: plan.lenses };
+  const panelInput = { runId: plan.runId, identityRunId: panelIdentityRunId(plan), findings: plan.findings, lenses: plan.lenses };
   // A recorded or replayed panel is history, so it is parsed as recorded; only today's mint is issued.
   const parsedPanel = (verifierSlots: readonly AgentRosterSlot[]) => parseRefutationPanelAuthority({ ...panelInput, verifierSlots });
 
   const recorded = recordedRequests(record);
   if (recorded !== null) return panelPreparation(drafts.value, (draft) => recordedVerifierSlot(draft, recorded), parsedPanel);
   const { catalog } = plan;
-  return catalog.kind === "recorded-as-of"
-    ? panelPreparation(drafts.value, mintedVerifierSlot((first, retry) => mintAgentRosterSlotAsOf(catalog.lowering, first, retry)), parsedPanel)
-    : panelPreparation(drafts.value, mintedVerifierSlot(mintAgentRosterSlot),
-        (verifierSlots) => issueRefutationPanelAuthority({ ...panelInput, verifierSlots }));
+  if (catalog.kind === "recorded-as-of") return panelPreparation(drafts.value, replayedVerifierSlot(catalog.lowering), parsedPanel);
+  const issued = issueRefutationPanelAuthority({ ...panelInput, verifierSlots: drafts.value.map(slotIdentities) });
+  if (!issued.ok) {
+    return issued.error.kind === "unmintable-roster-slot"
+      ? unmintable(issued.error.slotId, issued.error.error)
+      : refused("invalid-panel", issued.error.message);
+  }
+  return issuedPreparation(drafts.value, issued.value);
 }
 
 /**
- * The one tail every origin of a panel shares: each draft's slot as `slotFor`
- * obtains it, the panel authority `panel` assembles over those slots, and the
- * preparation pairing each slot with its packets; a panel that does not
- * assemble is `invalid-panel`.
+ * The tail a recorded or replayed panel shares: each draft's slot as
+ * `slotFor` obtains it, the panel authority `panel` assembles over those
+ * slots, and the preparation pairing each slot with its packets; a panel that
+ * does not assemble is `invalid-panel`.
  */
-function panelPreparation<Slot extends AgentRosterSlot>(
+function panelPreparation(
   drafts: readonly DraftSlot[],
-  slotFor: (draft: DraftSlot) => Result<PairedSlot<Slot>>,
-  panel: (verifierSlots: readonly Slot[]) => DomainResult<RefutationPanelAuthority, Readonly<{ message: string }>>,
+  slotFor: (draft: DraftSlot) => Result<PairedSlot>,
+  panel: (verifierSlots: readonly AgentRosterSlot[]) => DomainResult<RefutationPanelAuthority, Readonly<{ message: string }>>,
 ): Result<RefutationVerifierPreparation> {
   const paired = all(drafts.map(slotFor));
   if (!paired.ok) return paired;
   const authority = panel(paired.value.map(({ slot }) => slot));
   return authority.ok ? ok(preparation(authority.value, paired.value)) : refused("invalid-panel", authority.error.message);
+}
+
+/**
+ * An issued panel's preparation: each draft paired with the slot issuance
+ * minted for it, looked up by its slot id in the panel's own roster.
+ */
+function issuedPreparation(drafts: readonly DraftSlot[], authority: RefutationPanelAuthority): Result<RefutationVerifierPreparation> {
+  const { byId } = authority.verifierRoster;
+  const paired = all(drafts.map((draft): Result<PairedSlot> => {
+    const slot = byId.get(draft.slotId);
+    return slot === undefined
+      ? refused("invalid-panel", `issued verifier roster lacks slot ${draft.slotId}`)
+      : ok(Object.freeze({ draft, slot }));
+  }));
+  return paired.ok ? ok(preparation(authority, paired.value)) : paired;
 }

@@ -46,10 +46,11 @@ The catalog defines the requested Pi binding, and every role is issued under its
 
 **Issuance (minting).** A request is checked against today's catalog once, where it is minted by `mintAgentRequestAuthority`, the only constructor of a `MintedAgentRequestAuthority`. What that type guarantees, and why it is narrower than recorded history, is its doc comment in `engine/src/core/orchestration-contract/roster.ts`.
 
-Seams that take the minted type, so a builder that skipped the catalog check does not compile at them:
+Issuing seams, each of which takes the minted type or mints what it issues itself, so a builder that skipped the catalog check does not compile at them:
 
 - a fresh roster slot: `mintAgentRosterSlot`, the one issuing seam of a slot (it mints both requests from their identities) — the standalone reviewer roster and every refutation verifier slot;
-- a refutation panel: `issueRefutationPanelAuthority`, whose roster is issued by `issueExactRoster`, which also re-checks each minted slot against today's catalog at run time, so a slot cast past the type is refused too;
+- an exact roster: `issueExactRoster`, the one issuing seam of a roster, which owns both the catalog check and the aggregate: it takes its slots' identities and mints each slot itself (`mintAgentRosterSlot`), so the roster holds exactly the slots it minted — no recorded slot, and no value cast past the minted type, can reach it — and nothing is checked against the catalog twice; a slot the catalog will not mint is refused by its declared slot id with the catalog's own reasons (`unmintable-roster-slot`);
+- a refutation panel: `issueRefutationPanelAuthority`, which takes its verifier slots' identities and issues its roster through `issueExactRoster`;
 - the Wave review batch and materialized panel requests;
 - refutation verifier slots, through their one decision shared by the standalone and Wave programs (`engine/src/core/refutation-verifiers.ts`, its record read by `handlers/helpers/programs/refutation-verifiers.ts`): minted only when the panel has no record, under the catalog its plan names.
 
