@@ -5,6 +5,7 @@
  */
 
 import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { match, P } from "ts-pattern";
@@ -709,6 +710,16 @@ export const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_G
 /** Default rules directory (shipped with loom) — resolved from this file's location */
 const CONFIG_DIR = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_RULES_DIR = join(CONFIG_DIR, "..", "..", "lint-rules");
+
+/** How long an edit waits for advisory type diagnostics before moving on. A
+ *  run that misses it keeps going in the background to warm the cache. */
+export const TYPE_DIAGNOSTICS_DEADLINE_MS = 30_000;
+
+/** Incremental build-info and repeat memory for advisory type diagnostics.
+ *  Outside every repository, so no checkout or state guard ever sees it. */
+export const typeDiagnosticsCacheDir = (env: Readonly<Record<string, string | undefined>> = process.env): string =>
+  env.LOOM_TYPE_DIAGNOSTICS_CACHE ??
+  join(env.XDG_CACHE_HOME ?? join(env.HOME ?? tmpdir(), ".cache"), "loom", "type-diagnostics");
 
 /** Project-local rules directory — resolved relative to repo root */
 export const PROJECT_RULES_DIR = HARNESS === "pi"

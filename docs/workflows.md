@@ -367,7 +367,7 @@ When invoked inside `/loom`, their phase Agents and hooks update protected phase
 
 ## Lint workflow
 
-The immediate tier runs automatically after Edit/Write. The full tier runs at Wave Gate. For an explicit project scan:
+The immediate tier runs automatically after Edit/Write, followed by advisory type diagnostics for TypeScript sources ([operations](operations.md#advisory-type-diagnostics)). The full tier runs at Wave Gate. For an explicit project scan:
 
 ```bash
 bun scripts/lint-project.ts <path>

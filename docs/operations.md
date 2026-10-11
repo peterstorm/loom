@@ -817,6 +817,20 @@ A nonexistent directory is an error for explicit validation. Runtime loading, by
 
 See [Lint Rules](../lint-rules/README.md) for configuration and tiers.
 
+### Advisory type diagnostics
+
+After an Edit/Write/MultiEdit on a TypeScript source (`.ts`, `.tsx`, `.mts`, `.cts`; not `.d.ts`), Loom runs the project's own `tsc --noEmit --incremental` and hands the model what no longer typechecks: the touched file's diagnostics, with a remedy per common code, plus errors this edit introduced in other files (judged against the previous run, so errors that were already there do not nag). When the same diagnostics survive 3, 5 and 8 consecutive edits of a file, an escalating repeat reminder tells the model to stop patching and change approach.
+
+It is **advisory and fail-open**: it never blocks an edit. Claude Code receives it as PostToolUse `additionalContext` (`hooks/scripts/type-diagnostics.sh`, 45s hook timeout); Pi appends it to the edit's tool result. Both call `engine/src/handlers/type-diagnostics-runner.ts`.
+
+- The project is the nearest `tsconfig.json` above the file; the compiler is the nearest `node_modules/typescript` above that. Without either, the check is silent.
+- A run waits up to 30s. A cold build that misses it keeps running in the background to warm the cache (the operator sees one note); later edits take the warm path (seconds on this repository).
+
+| Variable | Effect |
+|---|---|
+| `LOOM_TYPE_DIAGNOSTICS=off` | Disable the check on both harnesses |
+| `LOOM_TYPE_DIAGNOSTICS_CACHE=/path` | Build-info and repeat memory location (default `$XDG_CACHE_HOME/loom/type-diagnostics`, else `~/.cache/loom/type-diagnostics`) |
+
 ## Model policy operations
 
 ```bash

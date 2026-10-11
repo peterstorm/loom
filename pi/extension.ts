@@ -30,7 +30,7 @@
  * one shared rule in `engine/src/core/pi-agent-directory.ts`.
  */
 
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
@@ -59,8 +59,9 @@ import { fsSessionRegistry, parseSessionId } from "../engine/src/machine";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 
 // Linter integration (PostEdit lint via tool_result)
-import { processToolResult } from "../engine/src/handlers/pi-adapter";
+import { composePostEditResult, extractFilePath, processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
+import { typeDiagnosticsAdvisory } from "../engine/src/handlers/type-diagnostics-runner";
 import { publishLoomReviewAuthorityBridge } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
 import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/orchestration/no-follow-fs";
 import { materializePiResources } from "./resources";
@@ -541,13 +542,16 @@ export default function (
   });
 
 
-  // ─── PostEdit Lint (tool_result event for edit/write/multi_edit) ──────
-  // After edit/write lands on disk, run immediate-tier lint.
-  // If violations: report error content so the agent can remediate the landed edit.
-  // If pass: return undefined (no injection).
-  // If the lint engine errors: report the failure; this post-edit hook cannot roll back the mutation.
+  // ─── PostEdit Lint + Type Diagnostics (tool_result for edit/write/multi_edit)
+  // After edit/write lands on disk, run immediate-tier lint, then the advisory
+  // incremental type check (the same runner Claude Code's PostToolUse hook uses).
+  // Lint violations replace the content and mark the result an error so the
+  // agent remediates the landed edit; type diagnostics are appended as advisory
+  // context and never mark it an error. Both live in ONE handler — see
+  // composePostEditResult. If the lint engine errors: report the failure; this
+  // post-edit hook cannot roll back the mutation.
 
-  pi.on("tool_result", async (event, _ctx) => {
+  pi.on("tool_result", async (event, ctx) => {
     try {
       if (event.toolName !== "edit" && event.toolName !== "write" && event.toolName !== "multi_edit") return;
 
@@ -559,18 +563,21 @@ export default function (
       const projectRulesDir = pathExistsFailClosed(projectRulesPath) ? projectRulesPath : null;
 
       const loomDefaultRulesDir = join(PACKAGE_ROOT, "lint-rules");
-      const response = processToolResult(
+      const lint = processToolResult(
         event.toolName,
         event.input,
         (filePath) => lintFile(filePath, "immediate", loomDefaultRulesDir, projectRulesDir)
       );
 
-      if (response) {
-        return {
-          content: response.content.map(c => ({ type: c.type as "text", text: c.text })),
-          isError: response.isError,
-        };
-      }
+      // Never throws: an advisory that cannot run is an operator note.
+      const editedPath = extractFilePath(event.input);
+      const advisory = editedPath === null
+        ? { forModel: null, forOperator: null }
+        : await typeDiagnosticsAdvisory(resolve(projectRoot, editedPath));
+      if (advisory.forOperator !== null && ctx.hasUI) ctx.ui.notify(advisory.forOperator, "warning");
+
+      const composed = composePostEditResult(event, lint, advisory.forModel);
+      if (composed) return { content: [...composed.content], isError: composed.isError };
     } catch (error: unknown) {
       // Fail-closed: return error feedback so the agent must repair the edit
       // already on disk; this post-edit hook does not roll the write back.

@@ -176,6 +176,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // Spawn task text joins the run directory, packet and reader paths:
       // pure path math (join) over shell-gathered strings, no filesystem.
       "engine/src/core/spawn-task-text.ts": ["node:path"],
+      // Advisory type diagnostics resolve tsc's project-relative paths and
+      // display them relative again: pure path math (resolve/relative/
+      // isAbsolute) over strings, no filesystem.
+      "engine/src/core/type-diagnostics.ts": ["node:path"],
       "engine/src/core/standalone-review.ts": ["node:util"],
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],

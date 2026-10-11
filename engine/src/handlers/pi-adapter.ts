@@ -80,6 +80,30 @@ export function handleLintResult(
 }
 
 /**
+ * Compose the post-edit tool_result: the fail-closed lint verdict (if any)
+ * and the advisory type diagnostics (if any). Pi chains tool_result handlers
+ * on one shared event, so both live in ONE handler: a later handler could
+ * not tell a lint flag from a tool error, and a lint replacement would drop
+ * an advisory appended before it.
+ *
+ * - lint replaces the content and decides `isError`, as it always has
+ * - the advisory is appended after whatever content stands, and never sets `isError`
+ * - nothing to say → undefined (the tool result is untouched)
+ */
+export function composePostEditResult<C>(
+  original: Readonly<{ content: readonly C[]; isError: boolean }>,
+  lint: PiToolResultResponse | undefined,
+  typeAdvisory: string | null,
+): Readonly<{ content: readonly (C | { readonly type: "text"; readonly text: string })[]; isError: boolean }> | undefined {
+  if (lint === undefined && typeAdvisory === null) return undefined;
+  const base = lint === undefined ? original : lint;
+  return {
+    content: typeAdvisory === null ? [...base.content] : [...base.content, { type: "text" as const, text: typeAdvisory }],
+    isError: base.isError,
+  };
+}
+
+/**
  * Top-level adapter orchestrator (still pure — takes lintFile as a dependency).
  *
  * Composes: shouldTriggerLint → extractFilePath → lintFn → handleLintResult

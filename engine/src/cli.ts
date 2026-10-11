@@ -11,7 +11,7 @@ import { writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HookResult, HookHandler } from "./types";
-import { nonEmptyMessage } from "./types";
+import { hookSuccessStdout, nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
 import { KNOWN_HANDLERS, failureExitCode, piRuntimeHandshakeRequired, routeConsumesStdin } from "./handler-routes";
 import { captureLoomRuntimeIdentity, piCliMutationCompatibility } from "./runtime-compatibility";
@@ -67,10 +67,9 @@ stdinPromise.catch(() => {});
 
 function resultToExit(result: HookResult): never {
   match(result)
-    .with({ kind: "allow" }, { kind: "passthrough" }, ({ systemMessage }) => {
-      // JSON on stdout, not stderr: successful hooks have stderr swallowed,
-      // so this is the only channel that reaches the operator.
-      if (systemMessage) process.stdout.write(JSON.stringify({ systemMessage }) + "\n");
+    .with({ kind: "allow" }, { kind: "passthrough" }, (success) => {
+      const stdout = hookSuccessStdout(success);
+      if (stdout !== null) process.stdout.write(stdout + "\n");
       process.exit(0);
     })
     .with({ kind: "block" }, ({ message }) => {

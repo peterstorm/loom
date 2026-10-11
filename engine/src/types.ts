@@ -56,8 +56,14 @@ export type HookResult =
    * was as silent as the `allow` it replaced. The harness DOES surface a
    * `systemMessage` from a hook's JSON stdout, which is the only channel that
    * actually reaches the operator on this path.
+   *
+   * `postToolUseContext` is the MODEL's channel, distinct from the operator's:
+   * Claude Code adds a PostToolUse hook's `hookSpecificOutput.additionalContext`
+   * to the conversation after the tool result. Only PostToolUse handlers set it
+   * (construct with `postToolUseContextResult`); it is advisory context, never
+   * a veto.
    */
-  | { kind: "allow"; systemMessage?: string }
+  | { kind: "allow"; systemMessage?: string; postToolUseContext?: string }
   | { kind: "block"; message: string }
   | { kind: "error"; message: string }
   /**
@@ -87,7 +93,25 @@ export const passthroughResult = (systemMessage?: string): HookResult =>
   systemMessage === undefined
     ? { kind: "passthrough" }
     : { kind: "passthrough", systemMessage: nonEmptyMessage(systemMessage) };
+/** A PostToolUse success that tells the model something (and optionally the operator). */
+export const postToolUseContextResult = (context: string, systemMessage?: string): Extract<HookResult, { kind: "allow" }> =>
+  systemMessage === undefined
+    ? { kind: "allow", postToolUseContext: nonEmptyMessage(context) }
+    : { kind: "allow", postToolUseContext: nonEmptyMessage(context), systemMessage: nonEmptyMessage(systemMessage) };
 export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
+
+/** The JSON a successful hook writes to stdout, or null when it has nothing to
+ *  say. Successful hooks have stderr swallowed, so stdout JSON is the only
+ *  channel that reaches the operator (`systemMessage`) or the model
+ *  (`hookSpecificOutput.additionalContext`). */
+export function hookSuccessStdout(result: Extract<HookResult, { kind: "allow" | "passthrough" }>): string | null {
+  const context = result.kind === "allow" ? result.postToolUseContext : undefined;
+  if (result.systemMessage === undefined && context === undefined) return null;
+  return JSON.stringify({
+    ...(result.systemMessage === undefined ? {} : { systemMessage: result.systemMessage }),
+    ...(context === undefined ? {} : { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: context } }),
+  });
+}
 export const blockResult = (message: string): HookResult => ({ kind: "block", message: nonEmptyMessage(message) });
 
 // --- Handler signature ---
