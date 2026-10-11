@@ -94,3 +94,17 @@ describe("hookSuccessStdout", () => {
     });
   });
 });
+
+describe("type-diagnostics handler — path handling", () => {
+  it("keeps a relative path as given when the hook input carries no cwd", async () => {
+    const { handler, seen } = advising({ forModel: null, forOperator: null });
+    await handler(stdin({ tool_input: { file_path: "src/b.ts" } }), []);
+    expect(seen).toEqual(["src/b.ts"]);
+  });
+
+  it("ignores a non-object hook input", async () => {
+    const { handler, seen } = advising({ forModel: "x", forOperator: null });
+    expect(await handler("[1, 2]", [])).toEqual({ kind: "passthrough" });
+    expect(seen).toEqual([]);
+  });
+});

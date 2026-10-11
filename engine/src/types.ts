@@ -94,10 +94,11 @@ export const passthroughResult = (systemMessage?: string): HookResult =>
     ? { kind: "passthrough" }
     : { kind: "passthrough", systemMessage: nonEmptyMessage(systemMessage) };
 /** A PostToolUse success that tells the model something (and optionally the operator). */
-export const postToolUseContextResult = (context: string, systemMessage?: string): Extract<HookResult, { kind: "allow" }> =>
-  systemMessage === undefined
-    ? { kind: "allow", postToolUseContext: nonEmptyMessage(context) }
-    : { kind: "allow", postToolUseContext: nonEmptyMessage(context), systemMessage: nonEmptyMessage(systemMessage) };
+export const postToolUseContextResult = (context: string, systemMessage?: string): Extract<HookResult, { kind: "allow" }> => ({
+  kind: "allow",
+  postToolUseContext: nonEmptyMessage(context),
+  ...(systemMessage === undefined ? {} : { systemMessage: nonEmptyMessage(systemMessage) }),
+});
 export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
 
 /** The JSON a successful hook writes to stdout, or null when it has nothing to

@@ -1,5 +1,6 @@
 /**
- * Pi extension adapter — pure function for lint integration via tool_result events.
+ * Pi extension adapter — pure functions for post-edit lint and advisory type
+ * diagnostics via tool_result events (I/O arrives as injected ports).
  *
  * Satisfies:
  * - FR-018: Pi extension adapter integrating via Pi's event API
@@ -12,6 +13,7 @@
 import { match } from "ts-pattern";
 import type { LintResult } from "../linter/index";
 import { formatOutput, formatBlockMessage } from "../linter/index";
+import { adviceForEdit, type AdviseOnEdit } from "../core/type-diagnostics";
 
 // --- Response type (mirrors Pi's ToolResultEventResult) ---
 
@@ -102,6 +104,46 @@ export function composePostEditResult<C>(
     isError: base.isError,
   };
 }
+
+/** What the post-edit flow needs from the Pi runtime and the engine. */
+export type PiPostEditPorts = Readonly<{
+  /** Relative edited paths resolve against this for the type check. */
+  projectRoot: string;
+  lint: (filePath: string) => LintResult;
+  advise: AdviseOnEdit;
+  notifyOperator: (note: string) => void;
+}>;
+
+/**
+ * The whole post-edit tool_result for one Pi event: immediate-tier lint (fail
+ * closed), then the advisory type check (fail open), composed by
+ * `composePostEditResult`, with any operator note sent to the operator only.
+ * The type check runs after lint returns, so on a cold build Pi's lint
+ * feedback waits up to the type-diagnostics deadline (see docs/operations.md).
+ */
+export async function piPostEdit<C>(
+  event: Readonly<{ toolName: string; input: Record<string, unknown>; content: readonly C[]; isError: boolean }>,
+  ports: PiPostEditPorts,
+): Promise<ReturnType<typeof composePostEditResult<C>>> {
+  if (!shouldTriggerLint(event.toolName) || event.isError) return undefined;
+  const lint = processToolResult(event.toolName, event.input, ports.lint);
+  const path = extractFilePath(event.input);
+  const advisory = path === null ? null : await adviceForEdit(path, ports.projectRoot, ports.advise);
+  if (advisory?.forOperator) ports.notifyOperator(advisory.forOperator);
+  return composePostEditResult(event, lint, advisory?.forModel ?? null);
+}
+
+/** The slice of Pi's extension context an operator note needs. */
+export type PiOperatorChannel = Readonly<{
+  hasUI: boolean;
+  ui: Readonly<{ notify: (message: string, level: "warning") => void }>;
+}>;
+
+/** Where a Pi operator note goes: the UI when there is one, else stderr — never nowhere. */
+export const piOperatorNoteSink = (ctx: PiOperatorChannel, stderr: (line: string) => void) => (note: string): void => {
+  if (ctx.hasUI) ctx.ui.notify(note, "warning");
+  else stderr(`[loom] ${note}`);
+};
 
 /**
  * Top-level adapter orchestrator (still pure — takes lintFile as a dependency).

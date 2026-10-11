@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
+  NO_ADVISORY,
   REPEAT_THRESHOLDS,
+  REPEAT_WINDOW_MS,
+  adviceForEdit,
   isTypeScriptSource,
   judgeTypeCheck,
+  outcomeOfTscExit,
   parseTscOutput,
   parseTypeCheckMemory,
   remedyFor,
+  type TypeCheckJudgement,
   type TypeCheckMemory,
   type TypeCheckOutcome,
   type TypeDiagnostic,
@@ -14,6 +19,8 @@ import {
 
 const PROJECT = "/repo/app";
 const TOUCHED = "/repo/app/src/order.ts";
+const T0 = 1_800_000_000_000;
+const MINUTE = 60_000;
 
 const diagnostic = (overrides: Partial<TypeDiagnostic> = {}): TypeDiagnostic => ({
   file: TOUCHED,
@@ -26,13 +33,17 @@ const diagnostic = (overrides: Partial<TypeDiagnostic> = {}): TypeDiagnostic => 
 
 const completed = (diagnostics: readonly TypeDiagnostic[]): TypeCheckOutcome => ({ kind: "completed", diagnostics, global: [] });
 
-/** Run the judge over a sequence of outcomes, threading memory like the shell does. */
-function judgeSequence(outcomes: readonly TypeCheckOutcome[], initial: TypeCheckMemory | null = null) {
+/** The memory a judgement leaves behind, given the memory it was judged against. */
+const memoryAfter = (judged: TypeCheckJudgement, before: TypeCheckMemory | null): TypeCheckMemory | null =>
+  judged.memoryUpdate.kind === "replace" ? judged.memoryUpdate.memory : before;
+
+/** Run the judge over a sequence of outcomes, threading memory like the shell does, `stepMs` apart. */
+function judgeSequence(outcomes: readonly TypeCheckOutcome[], initial: TypeCheckMemory | null = null, stepMs = MINUTE) {
   let memory = initial;
-  return outcomes.map((outcome) => {
-    const judged = judgeTypeCheck({ touchedFile: TOUCHED, projectDir: PROJECT, outcome, memory });
-    memory = judged.memory;
-    return judged;
+  return outcomes.map((outcome, i) => {
+    const judged = judgeTypeCheck({ touchedFile: TOUCHED, projectDir: PROJECT, outcome, memory, now: T0 + i * stepMs });
+    memory = memoryAfter(judged, memory);
+    return { ...judged, memory };
   });
 }
 
@@ -98,11 +109,50 @@ describe("parseTscOutput", () => {
   });
 });
 
+describe("outcomeOfTscExit", () => {
+  const located = "src/order.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.\n";
+
+  it("a clean exit is a completed, clean program", () => {
+    expect(outcomeOfTscExit({ code: 0, signal: null }, "", PROJECT)).toEqual(completed([]));
+  });
+
+  it.each<[number]>([[1], [2]])("exit %s with diagnostics is a completed run", (code) => {
+    expect(outcomeOfTscExit({ code, signal: null }, located, PROJECT)).toEqual(completed([diagnostic()]));
+  });
+
+  it("a project-level error alone still counts as diagnostics", () => {
+    expect(outcomeOfTscExit({ code: 1, signal: null }, "error TS5023: Unknown compiler option 'bogus'.\n", PROJECT))
+      .toEqual({ kind: "completed", diagnostics: [], global: [{ code: 5023, message: "Unknown compiler option 'bogus'." }] });
+  });
+
+  it.each<[number, string, RegExp]>([
+    [1, "TypeError: Cannot read properties of undefined\n    at main (tsc.js:1:1)\n", /^tsc exited with 1 without diagnostics: TypeError: Cannot read properties of undefined$/],
+    [2, "", /^tsc exited with 2 without diagnostics$/],
+  ])("a nonzero exit %s with nothing parseable is a failure, never a clean program", (code, output, reason) => {
+    const outcome = outcomeOfTscExit({ code, signal: null }, output, PROJECT);
+    expect(outcome).toEqual({ kind: "failed", reason: expect.stringMatching(reason) });
+  });
+
+  it.each<[number | null, string | null, string]>([
+    [7, null, "tsc exited with 7: boom"],
+    [null, "SIGKILL", "tsc exited with SIGKILL: boom"],
+  ])("any other exit (%s, %s) is a failure carrying the first output line", (code, signal, reason) => {
+    expect(outcomeOfTscExit({ code, signal }, "\nboom\nmore\n", PROJECT)).toEqual({ kind: "failed", reason });
+  });
+});
+
 describe("remedyFor", () => {
   it.each([2307, 2304, 2305, 2724, 2339, 2322, 2345, 2532, 18048, 2531, 18047, 7006, 2366, 7030, 2741, 6133, 2554])(
     "TS%s carries a remedy",
     (code) => {
       expect(remedyFor(code)).toMatch(/\S/);
+    },
+  );
+
+  it.each<[number, number]>([[2305, 2724], [2532, 18048], [2531, 18047], [2366, 7030]])(
+    "TS%s and TS%s share one remedy",
+    (a, b) => {
+      expect(remedyFor(a)).toBe(remedyFor(b));
     },
   );
 
@@ -118,7 +168,7 @@ describe("remedyFor", () => {
 describe("judgeTypeCheck — the touched file", () => {
   it("says nothing when the project typechecks", () => {
     const [judged] = judgeSequence([completed([])]);
-    expect(judged!.advisory).toEqual({ forModel: null, forOperator: null });
+    expect(judged!.advisory).toEqual(NO_ADVISORY);
   });
 
   it("names the touched file's diagnostics with their remedies, as advisory", () => {
@@ -164,6 +214,18 @@ describe("judgeTypeCheck — other files", () => {
     const [, second] = judgeSequence([completed([legacy]), completed([{ ...legacy, line: 40 }])]);
     expect(second!.advisory.forModel).toBeNull();
   });
+
+  it("counts a second identical diagnostic on another line as introduced", () => {
+    const [, second] = judgeSequence([completed([caller]), completed([caller, { ...caller, line: 9 }])]);
+    const text = second!.advisory.forModel!;
+    expect(text).toContain("introduced 1 error(s)");
+    expect(text).toMatch(/\d+:1 TS2554/);
+  });
+
+  it("does not blame this edit on a baseline older than the window", () => {
+    const [, second] = judgeSequence([completed([]), completed([caller])], null, REPEAT_WINDOW_MS + 1);
+    expect(second!.advisory.forModel).toBeNull();
+  });
 });
 
 describe("judgeTypeCheck — repeat reminder", () => {
@@ -185,6 +247,26 @@ describe("judgeTypeCheck — repeat reminder", () => {
     expect(runs.map((r) => /survived/.test(r.advisory.forModel ?? ""))).toEqual([false, false, false, false, false, false]);
   });
 
+  it("restarts the count after a gap longer than the window: another session's edits are not this one's", () => {
+    const runs = judgeSequence(Array.from({ length: 3 }, () => completed([diagnostic()])), null, REPEAT_WINDOW_MS + 1);
+    expect(runs.map((r) => r.memory!.repeats[TOUCHED]!.consecutive)).toEqual([1, 1, 1]);
+  });
+
+  it("treats a duplicated diagnostic as a change, not a repeat", () => {
+    const runs = judgeSequence([completed([diagnostic()]), completed([diagnostic(), diagnostic({ line: 30 })])]);
+    expect(runs[1]!.memory!.repeats[TOUCHED]!.consecutive).toBe(1);
+  });
+
+  it("forgets other files' repeat records once they fall out of the window", () => {
+    const stale: TypeCheckMemory = {
+      recordedAt: T0,
+      diagnosticKeys: [],
+      repeats: { "/repo/app/src/old.ts": { fingerprint: "f", consecutive: 4, at: T0 - REPEAT_WINDOW_MS - 1 } },
+    };
+    const [judged] = judgeSequence([completed([])], stale);
+    expect(judged!.memory!.repeats).toEqual({});
+  });
+
   it("counts consecutive identical diagnostic sets regardless of order or line movement", () => {
     fc.assert(fc.property(
       fc.array(fc.record({ line: fc.integer({ min: 1, max: 500 }), code: fc.constantFrom(2322, 2304, 2339) }), { minLength: 1, maxLength: 5 }),
@@ -201,7 +283,7 @@ describe("judgeTypeCheck — repeat reminder", () => {
 });
 
 describe("judgeTypeCheck — runs that did not complete", () => {
-  const memory: TypeCheckMemory = { diagnosticKeys: ["k"], repeats: { [TOUCHED]: { fingerprint: "f", consecutive: 2 } } };
+  const memory: TypeCheckMemory = { recordedAt: T0, diagnosticKeys: ["k"], repeats: { [TOUCHED]: { fingerprint: "f", consecutive: 2, at: T0 } } };
 
   it.each<[TypeCheckOutcome, RegExp | null]>([
     [{ kind: "unavailable", reason: "no tsconfig.json above the file" }, null],
@@ -209,11 +291,16 @@ describe("judgeTypeCheck — runs that did not complete", () => {
     [{ kind: "timed-out", afterMs: 30_000 }, /did not finish within 30s/],
     [{ kind: "failed", reason: "spawn ENOENT" }, /spawn ENOENT/],
   ])("%o tells the model nothing and keeps memory", (outcome, operator) => {
-    const judged = judgeTypeCheck({ touchedFile: TOUCHED, projectDir: PROJECT, outcome, memory });
+    const judged = judgeTypeCheck({ touchedFile: TOUCHED, projectDir: PROJECT, outcome, memory, now: T0 });
     expect(judged.advisory.forModel).toBeNull();
-    expect(judged.memory).toBe(memory);
+    expect(judged.memoryUpdate).toEqual({ kind: "keep" });
     if (operator === null) expect(judged.advisory.forOperator).toBeNull();
     else expect(judged.advisory.forOperator).toMatch(operator);
+  });
+
+  it("a completed run always replaces memory", () => {
+    const judged = judgeTypeCheck({ touchedFile: TOUCHED, projectDir: PROJECT, outcome: completed([]), memory, now: T0 + MINUTE });
+    expect(judged.memoryUpdate).toEqual({ kind: "replace", memory: { recordedAt: T0 + MINUTE, diagnosticKeys: [], repeats: {} } });
   });
 
   it("surfaces project-level configuration errors to the operator, not the model", () => {
@@ -222,9 +309,32 @@ describe("judgeTypeCheck — runs that did not complete", () => {
       projectDir: PROJECT,
       outcome: { kind: "completed", diagnostics: [], global: [{ code: 5023, message: "Unknown compiler option 'bogus'." }] },
       memory: null,
+      now: T0,
     });
     expect(judged.advisory.forModel).toBeNull();
     expect(judged.advisory.forOperator).toContain("TS5023");
+  });
+});
+
+describe("adviceForEdit", () => {
+  const advised = (file: string) => Promise.resolve({ forModel: `checked ${file}`, forOperator: null });
+
+  it("resolves a relative path against the root and an absolute one as-is", async () => {
+    expect((await adviceForEdit("src/a.ts", "/repo", advised)).forModel).toBe("checked /repo/src/a.ts");
+    expect((await adviceForEdit("/elsewhere/b.ts", "/repo", advised)).forModel).toBe("checked /elsewhere/b.ts");
+  });
+
+  it("keeps a relative path as given when there is no root", async () => {
+    expect((await adviceForEdit("src/a.ts", null, advised)).forModel).toBe("checked src/a.ts");
+  });
+
+  it("has nothing to say without a path", async () => {
+    expect(await adviceForEdit(null, "/repo", advised)).toBe(NO_ADVISORY);
+  });
+
+  it("turns a failing advisor into an operator note, never a model message", async () => {
+    const advisory = await adviceForEdit("a.ts", "/repo", () => Promise.reject(new Error("boom")));
+    expect(advisory).toEqual({ forModel: null, forOperator: "Loom type diagnostics could not run: boom" });
   });
 });
 
@@ -236,8 +346,11 @@ describe("parseTypeCheckMemory", () => {
 
   it.each<[unknown]>([
     [null], [1], ["x"], [[]], [{}],
-    [{ diagnosticKeys: [1], repeats: {} }],
-    [{ diagnosticKeys: [], repeats: { a: { fingerprint: "f", consecutive: 0 } } }],
+    [{ recordedAt: T0, diagnosticKeys: [1], repeats: {} }],
+    [{ recordedAt: T0, diagnosticKeys: [], repeats: { a: { fingerprint: "f", consecutive: 0, at: T0 } } }],
+    [{ recordedAt: T0, diagnosticKeys: [], repeats: { a: { fingerprint: "f", consecutive: 1 } } }],
+    [{ diagnosticKeys: [], repeats: {} }],
+    [{ recordedAt: "yesterday", diagnosticKeys: [], repeats: {} }],
   ])(
     "rejects malformed memory %j",
     (raw) => {
