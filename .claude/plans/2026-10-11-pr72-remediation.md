@@ -25,8 +25,8 @@
 | pr-test-analyzer-3 | accepted | Fast port-based tests for busy, timed-out, failed, stale slot and corrupt memory; the real deadline test waits for the detached build to exit |
 | architecture-tech-lead-2 | accepted | Timestamped repeat records and baseline; the judge takes `now`; entries older than `REPEAT_WINDOW_MS` do not count; multiset fingerprint and baseline |
 | type-design-analyzer-1 | accepted in part | `MemoryUpdate = keep \| replace` replaces `memory: TypeCheckMemory \| null`. The `TypeAdvisory` product type stays because all four combinations are valid |
-| architecture-tech-lead-3 | accepted | Shared core `adviceForEdit(path, root, advise)` for both adapters; Pi latency trade-off documented |
-| pr-test-analyzer-1 | accepted | Pure, port-injected `piPostEditResult` in `pi-adapter.ts`, with tests; `extension.ts` becomes thin wiring |
+| architecture-tech-lead-3 | accepted | Shared `adviceForEdit(path, root, advise)` for both adapters (moved to `handlers/type-diagnostics-edit.ts` in round 2); Pi latency trade-off documented |
+| pr-test-analyzer-1 | accepted | Pure, port-injected `piPostEdit` in `pi-adapter.ts`, with tests; `extension.ts` becomes thin wiring |
 | pr-test-analyzer-2 | accepted | Bash-invoking shim test with fixture stdin and a stub plugin root |
 | code-simplifier-1 | accepted | Named remedy consts |
 | code-simplifier-2 | accepted | `identityKeys` helper |

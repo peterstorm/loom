@@ -67,7 +67,7 @@ stdinPromise.catch(() => {});
 
 function resultToExit(result: HookResult): never {
   match(result)
-    .with({ kind: "allow" }, { kind: "passthrough" }, (success) => {
+    .with({ kind: "allow" }, { kind: "passthrough" }, { kind: "post-tool-use-context" }, (success) => {
       const stdout = hookSuccessStdout(success);
       if (stdout !== null) process.stdout.write(stdout + "\n");
       process.exit(0);

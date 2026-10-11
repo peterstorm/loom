@@ -23,11 +23,13 @@
  * compiler supplies the numbers, this module supplies the words.
  *
  * Pure module: no I/O, no clock, no randomness — `now` is an input. The shell
- * (handlers/type-diagnostics-runner.ts) runs `tsc`, loads and stores memory.
+ * (handlers/type-diagnostics-runner.ts) runs `tsc`, loads and stores memory;
+ * handlers/type-diagnostics-edit.ts maps one edit onto it for both harnesses.
  */
 
 import { match } from "ts-pattern";
 import { isAbsolute, relative, resolve } from "node:path";
+import { isRecord } from "./plain-record";
 
 export type TypeDiagnostic = Readonly<{
   /** Absolute path. */
@@ -76,9 +78,6 @@ export type TypeAdvisory = Readonly<{
 }>;
 
 export const NO_ADVISORY: TypeAdvisory = { forModel: null, forOperator: null };
-
-/** The advisory for one landed edit of an absolute file path. */
-export type AdviseOnEdit = (file: string) => Promise<TypeAdvisory>;
 
 export const REPEAT_THRESHOLDS = [3, 5, 8] as const;
 /** How long a baseline or repeat record stays attributable to the current edits. */
@@ -142,6 +141,9 @@ export function parseTscOutput(output: string, projectDir: string): Parsed {
   return { located, global };
 }
 
+/** A tsc run that ended within its deadline: it either completed or failed. */
+export type FinishedTypeCheck = Extract<TypeCheckOutcome, { kind: "completed" | "failed" }>;
+
 /** How a tsc process ended: an exit code, or the signal that stopped it. */
 export type TscExit = Readonly<{ code: number | null; signal: string | null }>;
 
@@ -160,7 +162,7 @@ const withDetail = (reason: string, output: string): string => {
  * with those codes, but a crashing Node process exits 1 too, and treating
  * that as "clean" would silently reset memory and say nothing.
  */
-export function outcomeOfTscExit(exit: TscExit, output: string, projectDir: string): TypeCheckOutcome {
+export function outcomeOfTscExit(exit: TscExit, output: string, projectDir: string): FinishedTypeCheck {
   if (exit.code === 0) {
     const parsed = parseTscOutput(output, projectDir);
     return { kind: "completed", diagnostics: parsed.located, global: parsed.global };
@@ -346,33 +348,11 @@ export function judgeTypeCheck(input: Readonly<{
     .exhaustive();
 }
 
-// ── One edit, either harness ───────────────────────────────────────────
-
 /** The operator note for a check that could not run at all. */
 export const couldNotRun = (error: unknown): TypeAdvisory & Readonly<{ forModel: null; forOperator: string }> =>
   ({ forModel: null, forOperator: `Loom type diagnostics could not run: ${error instanceof Error ? error.message : String(error)}` });
 
-/**
- * The advisory for one landed edit, as both harness adapters ask for it: the
- * edited path as the harness reported it (relative paths resolve against
- * `root`), checked by `advise`. Fail-open: a throwing advisor becomes an
- * operator note. Only extracting the path and rendering the result are
- * harness-specific.
- */
-export async function adviceForEdit(path: string | null, root: string | null, advise: AdviseOnEdit): Promise<TypeAdvisory> {
-  if (path === null) return NO_ADVISORY;
-  const file = isAbsolute(path) || root === null ? path : resolve(root, path);
-  try {
-    return await advise(file);
-  } catch (error: unknown) {
-    return couldNotRun(error);
-  }
-}
-
 // ── Memory parsing ─────────────────────────────────────────────────────
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isEpochMs = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 

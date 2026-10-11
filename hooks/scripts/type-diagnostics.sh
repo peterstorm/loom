@@ -7,11 +7,15 @@
 
 stdin="$(cat)"
 
-# Fast paths that skip a bun spawn: switched off, or not a TypeScript source.
+# Fast paths that skip a bun spawn: switched off, or not a TypeScript source
+# (declaration files excluded). The engine re-checks both; this prefilter only
+# saves the spawn, and a contract test keeps it equal to the core's
+# isTypeScriptSource.
 if [[ "${LOOM_TYPE_DIAGNOSTICS:-}" == "off" ]]; then
   exit 0
 fi
-if ! grep -Eq '"(file_path|path)"[[:space:]]*:[[:space:]]*"[^"]*\.(ts|tsx|mts|cts)"' <<<"${stdin}"; then
+path_key='"(file_path|path)"[[:space:]]*:[[:space:]]*"[^"]*'
+if ! grep -Eq "${path_key}\.(ts|tsx|mts|cts)\"" <<<"${stdin}" || grep -Eq "${path_key}\.d\.(ts|mts|cts)\"" <<<"${stdin}"; then
   exit 0
 fi
 

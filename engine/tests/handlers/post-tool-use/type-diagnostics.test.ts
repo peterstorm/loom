@@ -29,13 +29,13 @@ const advising = (advisory: TypeAdvisory) => {
 describe("type-diagnostics handler", () => {
   it("hands the model's advisory to Claude as PostToolUse context, without blocking", async () => {
     const { handler, seen } = advising({ forModel: "⚠ TYPE DIAGNOSTICS …", forOperator: null });
-    expect(await handler(stdin(), [])).toEqual({ kind: "allow", postToolUseContext: "⚠ TYPE DIAGNOSTICS …" });
+    expect(await handler(stdin(), [])).toEqual({ kind: "post-tool-use-context", context: "⚠ TYPE DIAGNOSTICS …" });
     expect(seen).toEqual(["/repo/src/a.ts"]);
   });
 
   it("carries an operator note beside the model context", async () => {
     const { handler } = advising({ forModel: "ctx", forOperator: "note" });
-    expect(await handler(stdin(), [])).toEqual({ kind: "allow", postToolUseContext: "ctx", systemMessage: "note" });
+    expect(await handler(stdin(), [])).toEqual({ kind: "post-tool-use-context", context: "ctx", systemMessage: "note" });
   });
 
   it("sends an operator-only note as a systemMessage", async () => {
@@ -80,11 +80,18 @@ describe("type-diagnostics handler", () => {
 describe("hookSuccessStdout", () => {
   it("renders nothing for a bare success", () => {
     expect(hookSuccessStdout({ kind: "allow" })).toBeNull();
+    expect(hookSuccessStdout({ kind: "allow", systemMessage: "m" })).toBe(JSON.stringify({ systemMessage: "m" }));
     expect(hookSuccessStdout({ kind: "passthrough" })).toBeNull();
   });
 
   it("renders the operator channel alone", () => {
     expect(JSON.parse(hookSuccessStdout({ kind: "passthrough", systemMessage: "m" })!)).toEqual({ systemMessage: "m" });
+  });
+
+  it("renders PostToolUse context alone, without an operator note", () => {
+    expect(JSON.parse(hookSuccessStdout(postToolUseContextResult("ctx"))!)).toEqual({
+      hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: "ctx" },
+    });
   });
 
   it("renders PostToolUse context in Claude Code's hookSpecificOutput shape", () => {

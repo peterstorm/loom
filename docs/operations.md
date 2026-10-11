@@ -826,12 +826,12 @@ After an Edit/Write/MultiEdit on a TypeScript source (`.ts`, `.tsx`, `.mts`, `.c
 
 When the same diagnostics survive 3, 5 and 8 consecutive edits of a file, an escalating repeat reminder tells the model to stop patching and change approach.
 
-It is **advisory and fail-open**: it never blocks an edit. Claude Code receives it as PostToolUse `additionalContext` (`hooks/scripts/type-diagnostics.sh`, 45s hook timeout). Pi appends it to the edit's tool result. Both harnesses go through the core's `adviceForEdit` to `engine/src/handlers/type-diagnostics-runner.ts`.
+It is **advisory and fail-open**: it never blocks an edit. Claude Code receives it as PostToolUse `additionalContext` (`hooks/scripts/type-diagnostics.sh`, 45s hook timeout). Pi appends it to the edit's tool result. Both harnesses go through `adviceForEdit` (`engine/src/handlers/type-diagnostics-edit.ts`) to `engine/src/handlers/type-diagnostics-runner.ts`.
 
 - **Project and compiler:** the project is the nearest `tsconfig.json` above the file; the compiler is the nearest `node_modules/typescript` above that. Without either, the check is silent. A `tsc` that exits nonzero without printing diagnostics (a crash) is reported to the operator, never treated as a clean program.
 - **Deadline:** a run waits up to 30s. A cold build that misses the deadline keeps running in the background to warm the cache, and the operator sees one note. Later edits take the warm path (seconds on this repository).
-- **One run per project at a time:** a run slot (`<key>.slot` in the cache) allows one check per tsconfig. A second edit while a check, or a detached cold build, is still running gets no advisory. A slot whose owner has died, is older than 10 minutes, or is unreadable is reclaimed. Every run writes its own output file.
-- **Memory window:** the baseline and repeat counts live in the user cache and outlive a session. They count only within a 30-minute window, so an earlier session's edits never escalate the reminder or get blamed on this edit.
+- **One run per project at a time:** a run slot (`<key>.slot` in the cache; `engine/src/handlers/type-diagnostics-run-slot.ts`) allows one check per tsconfig. A run that misses the deadline hands the slot to its detached build. A second edit while a check, or a detached cold build, is still running gets no advisory. A slot whose owner has died, is older than 10 minutes, or is unreadable is reclaimed. Every run writes its own output file.
+- **Memory window:** the baseline and repeat counts live in the user cache and outlive a session. They count only within a 30-minute window, so an earlier session's edits never escalate the reminder or get blamed on this edit. If memory cannot be saved, the model still gets the diagnostics and the operator gets a note.
 - **Pi timing:** lint and the type check share one `tool_result` handler, so on a cold build Pi's lint feedback waits for the type check, up to the deadline.
 - **Pi operator notes:** notes go to the UI, or to stderr in a headless session.
 

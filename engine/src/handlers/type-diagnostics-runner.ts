@@ -3,9 +3,9 @@
  * TypeScript project, run the project's own `tsc` incrementally under a
  * deadline, and judge the result with the pure core (core/type-diagnostics.ts).
  *
- * Both harness adapters reach `typeDiagnosticsAdvisory` through the core's
- * `adviceForEdit` — the Claude Code PostToolUse hook and Pi's tool_result
- * handler — so they cannot drift.
+ * Both harness adapters reach `typeDiagnosticsAdvisory` through
+ * handlers/type-diagnostics-edit.ts — the Claude Code PostToolUse hook and
+ * Pi's post-edit flow — so they cannot drift.
  *
  * Cost model: `tsc --incremental --noEmit` keeps a build-info cache per
  * tsconfig under the cache directory. A cold run builds the whole program
@@ -13,23 +13,19 @@
  * changed. When a run misses the deadline it is NOT killed: it keeps running
  * detached, writes the cache, and later edits get the fast path.
  *
- * One run per tsconfig at a time, through a RUN SLOT: a slot file created
- * atomically (link of a complete record, so no reader ever sees a half-written
- * one) names its owner `{pid, startedAt, output}`. A second check while the
- * owner lives is `busy`. The slot is reclaimed when its owner is dead, older
- * than STALE_RUN_MS (bounding a recycled pid), or unreadable. A run that
- * misses the deadline hands the slot to its detached tsc. Every run writes its
- * own output file, and stored memory is only read and written while the slot
- * is held, so even the residual race (two checks reclaiming the same stale
- * slot at once) cannot interleave outputs; memory is replaced by atomic rename.
+ * One run per tsconfig at a time, through the run slot
+ * (handlers/type-diagnostics-run-slot.ts). A check holds the slot from
+ * acquisition until it finishes. If it misses the deadline, the slot passes
+ * to its detached compiler. Stored memory is read and written only while the
+ * slot is held: a busy check returns before touching it.
  *
  * Everything here fails open: this is advisory context, never a gate.
  */
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { DomainResult } from "../core/orchestration-contract/identity";
 import {
   couldNotRun,
@@ -38,11 +34,13 @@ import {
   NO_ADVISORY,
   outcomeOfTscExit,
   parseTypeCheckMemory,
+  type FinishedTypeCheck,
   type TypeAdvisory,
   type TypeCheckMemory,
   type TypeCheckOutcome,
 } from "../core/type-diagnostics";
 import { TYPE_DIAGNOSTICS_DEADLINE_MS, typeDiagnosticsCacheDir } from "../config";
+import { acquireRunSlot, handSlotTo, releaseRunSlot, type RunSlotPaths } from "./type-diagnostics-run-slot";
 
 export type TypeCheckProject = Readonly<{ tsconfig: string; projectDir: string; tscPath: string }>;
 
@@ -53,16 +51,20 @@ export type TypeCheckRun = Readonly<{
   /** This run's own output file. */
   output: string;
   deadlineMs: number;
-  /** Called with the compiler's pid once it is spawned: the slot passes to it if the deadline is missed. */
-  onSpawn: (pid: number) => void;
 }>;
 
 /**
- * The compiler port. Never throws: every failure is a `failed` outcome. A
- * `timed-out` outcome means the spawned compiler is still running and owns
- * the run slot.
+ * What the compiler port reports. A run either finished within the deadline
+ * (completed or failed), or missed it and is still running DETACHED as `pid`.
+ * The shell then hands that pid the run slot. One value carries both the
+ * outcome and the hand-off, so the two cannot disagree.
  */
-export type RunTypeCheck = (run: TypeCheckRun) => Promise<TypeCheckOutcome>;
+export type CompilerRun =
+  | FinishedTypeCheck
+  | Readonly<{ kind: "detached"; pid: number; afterMs: number }>;
+
+/** The compiler port. Never throws: every failure is a `failed` result. */
+export type RunTypeCheck = (run: TypeCheckRun) => Promise<CompilerRun>;
 
 export type TypeDiagnosticsOptions = Readonly<{
   cacheDir?: string;
@@ -73,9 +75,6 @@ export type TypeDiagnosticsOptions = Readonly<{
   /** Epoch-ms clock; `Date.now` by default. */
   now?: () => number;
 }>;
-
-/** A run slot older than this is reclaimed even if its pid is alive: the pid may have been recycled. */
-export const STALE_RUN_MS = 10 * 60_000;
 
 function* ancestors(start: string): Generator<string> {
   for (let dir = start; ; dir = dirname(dir)) {
@@ -101,10 +100,8 @@ export function locateTypeCheckProject(file: string): DomainResult<TypeCheckProj
   return { ok: false, error: `no node_modules/typescript installed for ${projectDir}` };
 }
 
-export type TypeCheckCachePaths = Readonly<{
-  cacheDir: string;
+export type TypeCheckCachePaths = RunSlotPaths & Readonly<{
   buildInfo: string;
-  slot: string;
   memory: string;
   outputFor: (runId: string) => string;
 }>;
@@ -114,91 +111,6 @@ export function typeCheckCachePaths(cacheDir: string, tsconfig: string): TypeChe
   const key = createHash("sha256").update(tsconfig).digest("hex").slice(0, 16);
   const at = (suffix: string) => join(cacheDir, `${key}.${suffix}`);
   return { cacheDir, buildInfo: at("tsbuildinfo"), slot: at("slot"), memory: at("memory.json"), outputFor: (runId) => at(`${runId}.out`) };
-}
-
-// ── Run slot ───────────────────────────────────────────────────────────
-
-type SlotRecord = Readonly<{ pid: number; startedAt: number; output: string }>;
-type SlotAcquisition = Readonly<{ kind: "acquired" }> | Readonly<{ kind: "busy" }>;
-
-const errnoCode = (error: unknown): string | undefined =>
-  error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-function parseSlotRecord(raw: string): SlotRecord | null {
-  let value: unknown;
-  try { value = JSON.parse(raw); } catch { return null; }
-  if (!isRecord(value)) return null;
-  const { pid, startedAt, output } = value;
-  return typeof pid === "number" && Number.isInteger(pid) && pid > 0 && typeof startedAt === "number" && Number.isFinite(startedAt) && typeof output === "string"
-    ? { pid, startedAt, output }
-    : null;
-}
-
-/** The slot's current record; null when it is absent or unreadable. */
-function readSlot(slot: string): SlotRecord | null {
-  try {
-    return parseSlotRecord(readFileSync(slot, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error: unknown) {
-    // EPERM: the process exists but belongs to another user — still running.
-    return errnoCode(error) === "EPERM";
-  }
-}
-
-/** Write a complete record to a private file first, so the slot never holds a partial one. */
-function stageRecord(paths: TypeCheckCachePaths, record: SlotRecord): string {
-  const staged = `${paths.slot}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(staged, JSON.stringify(record));
-  return staged;
-}
-
-/** Remove a run's output, but only a run output this cache directory owns. */
-function removeRunOutput(paths: TypeCheckCachePaths, output: string): void {
-  const resolved = resolve(output);
-  if (dirname(resolved) === resolve(paths.cacheDir) && resolved.endsWith(".out")) rmSync(resolved, { force: true });
-}
-
-function acquireRunSlot(paths: TypeCheckCachePaths, record: SlotRecord): SlotAcquisition {
-  const staged = stageRecord(paths, record);
-  try {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        linkSync(staged, paths.slot); // atomic, and fails if the slot is taken
-        return { kind: "acquired" };
-      } catch (error: unknown) {
-        if (errnoCode(error) !== "EEXIST") throw error;
-      }
-      const held = readSlot(paths.slot);
-      if (held !== null && isAlive(held.pid) && record.startedAt - held.startedAt <= STALE_RUN_MS) return { kind: "busy" };
-      if (held !== null) removeRunOutput(paths, held.output);
-      rmSync(paths.slot, { force: true });
-    }
-    return { kind: "busy" };
-  } finally {
-    rmSync(staged, { force: true });
-  }
-}
-
-/** Pass the held slot to the spawned compiler, so it stays held while that process lives. */
-function handSlotTo(paths: TypeCheckCachePaths, record: SlotRecord): void {
-  renameSync(stageRecord(paths, record), paths.slot);
-}
-
-/** Release the slot this run holds, unless another run has since reclaimed it. */
-function releaseRunSlot(paths: TypeCheckCachePaths, output: string): void {
-  if (readSlot(paths.slot)?.output === output) rmSync(paths.slot, { force: true });
-  removeRunOutput(paths, output);
 }
 
 // ── The real compiler ──────────────────────────────────────────────────
@@ -217,7 +129,6 @@ export const runTsc: RunTypeCheck = async (run) => {
     } finally {
       closeSync(outputFd);
     }
-    if (child.pid !== undefined) run.onSpawn(child.pid);
 
     type Ended = { kind: "exited"; code: number | null; signal: string | null } | { kind: "spawn-error"; message: string } | { kind: "deadline" };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -228,11 +139,12 @@ export const runTsc: RunTypeCheck = async (run) => {
     ]);
     clearTimeout(timer);
 
-    if (ended.kind === "deadline") {
+    if (ended.kind === "deadline" && child.pid !== undefined) {
       // Let the build finish on its own: it writes the incremental cache.
       child.unref();
-      return { kind: "timed-out", afterMs: run.deadlineMs };
+      return { kind: "detached", pid: child.pid, afterMs: run.deadlineMs };
     }
+    if (ended.kind === "deadline") return { kind: "failed", reason: `tsc did not start within ${run.deadlineMs}ms` };
     if (ended.kind === "spawn-error") return { kind: "failed", reason: ended.message };
     return outcomeOfTscExit({ code: ended.code, signal: ended.signal }, readFileSync(run.output, "utf-8"), run.project.projectDir);
   } catch (error: unknown) {
@@ -254,6 +166,17 @@ function storeMemory(path: string, memory: TypeCheckMemory): void {
   const staged = `${path}.${process.pid}.tmp`;
   writeFileSync(staged, JSON.stringify(memory));
   renameSync(staged, path);
+}
+
+/** Store memory without letting a bookkeeping failure cost the model its advisory. */
+function withStoredMemory(advisory: TypeAdvisory, path: string, memory: TypeCheckMemory): TypeAdvisory {
+  try {
+    storeMemory(path, memory);
+    return advisory;
+  } catch (error: unknown) {
+    const note = `Loom type diagnostics could not save its memory: ${error instanceof Error ? error.message : String(error)}`;
+    return { forModel: advisory.forModel, forOperator: advisory.forOperator === null ? note : `${advisory.forOperator}\n${note}` };
+  }
 }
 
 // ── One edit ───────────────────────────────────────────────────────────
@@ -284,24 +207,20 @@ export async function typeDiagnosticsAdvisory(file: string, options: TypeDiagnos
 
     const startedAt = clock();
     const output = paths.outputFor(randomUUID());
-    const judge = (outcome: TypeCheckOutcome) =>
-      judgeTypeCheck({ touchedFile, projectDir: project.projectDir, outcome, memory: loadMemory(paths.memory), now: clock() });
-
-    if (acquireRunSlot(paths, { pid: process.pid, startedAt, output }).kind === "busy") return judge({ kind: "busy" }).advisory;
+    if (acquireRunSlot(paths, { pid: process.pid, startedAt, output }).kind === "busy") return NO_ADVISORY;
 
     let handedOff = false;
     try {
-      const outcome = await runCheck({
-        project,
-        buildInfo: paths.buildInfo,
-        output,
-        deadlineMs: options.deadlineMs ?? TYPE_DIAGNOSTICS_DEADLINE_MS,
-        onSpawn: (pid) => handSlotTo(paths, { pid, startedAt, output }),
-      });
-      handedOff = outcome.kind === "timed-out";
-      const judged = judge(outcome);
-      if (judged.memoryUpdate.kind === "replace") storeMemory(paths.memory, judged.memoryUpdate.memory);
-      return judged.advisory;
+      const run = await runCheck({ project, buildInfo: paths.buildInfo, output, deadlineMs: options.deadlineMs ?? TYPE_DIAGNOSTICS_DEADLINE_MS });
+      if (run.kind === "detached") {
+        handSlotTo(paths, { pid: run.pid, startedAt, output });
+        handedOff = true;
+      }
+      const outcome: TypeCheckOutcome = run.kind === "detached" ? { kind: "timed-out", afterMs: run.afterMs } : run;
+      const judged = judgeTypeCheck({ touchedFile, projectDir: project.projectDir, outcome, memory: loadMemory(paths.memory), now: clock() });
+      return judged.memoryUpdate.kind === "replace"
+        ? withStoredMemory(judged.advisory, paths.memory, judged.memoryUpdate.memory)
+        : judged.advisory;
     } finally {
       if (!handedOff) releaseRunSlot(paths, output);
     }

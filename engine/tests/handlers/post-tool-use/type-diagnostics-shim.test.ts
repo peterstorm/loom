@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isTypeScriptSource } from "../../../src/core/type-diagnostics";
 
 const BASH = spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf-8" }).stdout.trim();
 const SHIM = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "hooks", "scripts", "type-diagnostics.sh");
@@ -75,6 +76,15 @@ describe("type-diagnostics.sh", () => {
   it.each(["README.md", "src/a.js", "src/a.ts.bak", "src/tsconfig.json"])("skips the engine for a non-TypeScript edit (%s)", (path) => {
     const run = runShim(hookInput({ file_path: path }), { CLAUDE_PLUGIN_ROOT: stubPluginRoot() });
     expect(run).toEqual({ status: 0, stdout: "" });
+  });
+
+  it.each([
+    "src/a.ts", "src/a.tsx", "src/a.mts", "src/a.cts",
+    "src/a.d.ts", "src/a.d.mts", "src/a.d.cts", "src/a.js", "src/a.ts.bak", "README.md", "src/types.d.tsx",
+  ])("forwards %s to the engine exactly when the core would check it", (path) => {
+    const run = runShim(hookInput({ file_path: path }), { CLAUDE_PLUGIN_ROOT: stubPluginRoot() });
+    expect(run.status).toBe(0);
+    expect(run.stdout !== "").toBe(isTypeScriptSource(path));
   });
 
   it("skips the engine when switched off with LOOM_TYPE_DIAGNOSTICS=off", () => {

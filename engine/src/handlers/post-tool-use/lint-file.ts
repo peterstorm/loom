@@ -17,6 +17,7 @@ import type { HookHandler } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
 import { lintFile, formatOutput, formatBlockMessage } from "../../linter/index";
 import { DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
+import { editedFilePath } from "../../core/tool-vocabulary";
 import { match } from "ts-pattern";
 
 /** Tool names that trigger file linting */
@@ -28,19 +29,6 @@ export interface PostToolUseInput {
   readonly tool_name: string;
   readonly tool_input: Record<string, unknown>;
   readonly tool_result?: string;
-}
-
-/**
- * Extracts file_path from tool_input, handling various tool input shapes.
- * Returns null if no file_path can be determined.
- */
-export function extractFilePath(toolInput: Record<string, unknown> | null | undefined): string | null {
-  if (!toolInput || typeof toolInput !== "object") return null;
-  const filePath = toolInput.file_path ?? toolInput.path;
-  if (typeof filePath === "string" && filePath.trim().length > 0) {
-    return filePath;
-  }
-  return null;
 }
 
 const handler: HookHandler = async (stdin) => {
@@ -59,7 +47,7 @@ const handler: HookHandler = async (stdin) => {
     }
 
     // Extract file path — fail-closed if not available for a lint-triggering tool
-    const filePath = extractFilePath(input.tool_input);
+    const filePath = editedFilePath(input.tool_input);
     if (!filePath) {
       return blockResult("Lint hook error: Could not extract file_path from tool_input");
     }

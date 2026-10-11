@@ -6,21 +6,20 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  STALE_RUN_MS,
   locateTypeCheckProject,
   typeCheckCachePaths,
   typeDiagnosticsAdvisory,
+  type CompilerRun,
   type RunTypeCheck,
   type TypeCheckRun,
   type TypeDiagnosticsOptions,
 } from "../../src/handlers/type-diagnostics-runner";
-import { NO_ADVISORY, parseTypeCheckMemory, type TypeCheckOutcome } from "../../src/core/type-diagnostics";
+import { NO_ADVISORY, parseTypeCheckMemory } from "../../src/core/type-diagnostics";
 
 const ENGINE = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ENGINE_TYPESCRIPT = join(ENGINE, "node_modules", "typescript");
@@ -66,7 +65,7 @@ function project(files: Readonly<Record<string, string>>, typescript: "real" | "
 }
 
 /** An in-memory RunTypeCheck: records each run and answers with `respond`. */
-function fakeCheck(respond: (run: TypeCheckRun) => TypeCheckOutcome | Promise<TypeCheckOutcome>) {
+function fakeCheck(respond: (run: TypeCheckRun) => CompilerRun | Promise<CompilerRun>) {
   const runs: TypeCheckRun[] = [];
   const runCheck: RunTypeCheck = async (run) => {
     runs.push(run);
@@ -74,9 +73,6 @@ function fakeCheck(respond: (run: TypeCheckRun) => TypeCheckOutcome | Promise<Ty
   };
   return { runs, runCheck };
 }
-
-/** A pid that is certainly not alive: a child that already exited. */
-const deadPid = (): number => spawnSync(process.execPath, ["-e", ""]).pid!;
 
 const isAlive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -113,7 +109,7 @@ describe("locateTypeCheckProject", () => {
 });
 
 describe("typeDiagnosticsAdvisory — orchestration over the check port", () => {
-  const completedWith = (output: string, root: string): TypeCheckOutcome => ({
+  const completedWith = (output: string, root: string): CompilerRun => ({
     kind: "completed",
     diagnostics: output ? [{ file: join(root, "src/a.ts"), line: 1, column: 14, code: 2322, message: "Type 'string' is not assignable to type 'number'." }] : [],
     global: [],
@@ -142,10 +138,8 @@ describe("typeDiagnosticsAdvisory — orchestration over the check port", () => 
 
   it("hands the slot to a run that missed the deadline, and stays silent (busy) while it lives", async () => {
     const p = project({ "src/a.ts": "export const a = 1;\n" }, "stub");
-    const detached = fakeCheck((run) => {
-      run.onSpawn(process.pid); // a live process now owns the slot
-      return { kind: "timed-out", afterMs: 1 };
-    });
+    // A live process (this one) stands in for the detached compiler that now owns the slot.
+    const detached = fakeCheck(() => ({ kind: "detached", pid: process.pid, afterMs: 1 }));
     const first = await typeDiagnosticsAdvisory(p.file("src/a.ts"), { ...p.options, runCheck: detached.runCheck });
     expect(first.forOperator).toMatch(/did not finish within/);
     expect(existsSync(p.paths.slot)).toBe(true);
@@ -161,32 +155,6 @@ describe("typeDiagnosticsAdvisory — orchestration over the check port", () => 
     const options = { ...p.options, runCheck: check.runCheck };
     await Promise.all([typeDiagnosticsAdvisory(p.file("src/a.ts"), options), typeDiagnosticsAdvisory(p.file("src/a.ts"), options)]);
     expect(check.runs).toHaveLength(1);
-  });
-
-  it.each<[string, (output: string) => string]>([
-    ["a dead owner", (output) => JSON.stringify({ pid: deadPid(), startedAt: Date.now(), output })],
-    ["a live owner older than the stale age", (output) => JSON.stringify({ pid: process.pid, startedAt: Date.now() - STALE_RUN_MS - 1, output })],
-    ["an unreadable record", () => "not json"],
-  ])("reclaims a slot held by %s, removing its leftover output", async (_label, record) => {
-    const p = project({ "src/a.ts": "export const a = 1;\n" }, "stub");
-    const leftover = join(p.options.cacheDir!, "leftover.out");
-    writeFileSync(leftover, "old");
-    writeFileSync(p.paths.slot, record(leftover));
-
-    const check = fakeCheck(() => completedWith("", p.root));
-    await typeDiagnosticsAdvisory(p.file("src/a.ts"), { ...p.options, runCheck: check.runCheck });
-    expect(check.runs).toHaveLength(1);
-    expect(existsSync(p.paths.slot)).toBe(false);
-    if (record(leftover).startsWith("{")) expect(existsSync(leftover)).toBe(false);
-  });
-
-  it("never removes a file outside the cache directory named by a slot record", async () => {
-    const p = project({ "src/a.ts": "export const a = 1;\n" }, "stub");
-    const outside = p.file("src/keep.txt");
-    writeFileSync(outside, "keep");
-    writeFileSync(p.paths.slot, JSON.stringify({ pid: deadPid(), startedAt: Date.now(), output: outside }));
-    await typeDiagnosticsAdvisory(p.file("src/a.ts"), { ...p.options, runCheck: fakeCheck(() => completedWith("", p.root)).runCheck });
-    expect(readFileSync(outside, "utf-8")).toBe("keep");
   });
 
   it("reports a failed run to the operator, leaves memory untouched and releases the slot", async () => {
@@ -209,7 +177,7 @@ describe("typeDiagnosticsAdvisory — orchestration over the check port", () => 
   it("treats corrupt memory as no baseline, then replaces it", async () => {
     const p = project({ "src/a.ts": "export const a = 1;\n", "src/b.ts": "export const b = 1;\n" }, "stub");
     writeFileSync(p.paths.memory, "{ corrupt");
-    const elsewhere: TypeCheckOutcome = {
+    const elsewhere: CompilerRun = {
       kind: "completed",
       diagnostics: [{ file: p.file("src/b.ts"), line: 1, column: 1, code: 2304, message: "Cannot find name 'q'." }],
       global: [],
@@ -217,6 +185,15 @@ describe("typeDiagnosticsAdvisory — orchestration over the check port", () => 
     const advisory = await typeDiagnosticsAdvisory(p.file("src/a.ts"), { ...p.options, runCheck: fakeCheck(() => elsewhere).runCheck });
     expect(advisory).toEqual(NO_ADVISORY);
     expect(parseTypeCheckMemory(JSON.parse(readFileSync(p.paths.memory, "utf-8")))).not.toBeNull();
+  });
+
+  it("still hands the model its diagnostics when memory cannot be stored, and tells the operator", async () => {
+    const p = project({ "src/a.ts": "export const a: number = 'x';\n" }, "stub");
+    mkdirSync(p.paths.memory); // a directory where the memory file belongs: the store fails
+    const advisory = await typeDiagnosticsAdvisory(p.file("src/a.ts"), { ...p.options, runCheck: fakeCheck(() => completedWith(BROKEN, p.root)).runCheck });
+    expect(advisory.forModel).toContain("TS2322");
+    expect(advisory.forOperator).toMatch(/^Loom type diagnostics could not save its memory: /);
+    expect(existsSync(p.paths.slot)).toBe(false);
   });
 
   it("judges against the injected clock", async () => {

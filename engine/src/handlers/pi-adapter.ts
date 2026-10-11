@@ -13,7 +13,7 @@
 import { match } from "ts-pattern";
 import type { LintResult } from "../linter/index";
 import { formatOutput, formatBlockMessage } from "../linter/index";
-import { adviceForEdit, type AdviseOnEdit } from "../core/type-diagnostics";
+import { adviceForEdit, type AdviseOnEdit } from "./type-diagnostics-edit";
 
 // --- Response type (mirrors Pi's ToolResultEventResult) ---
 

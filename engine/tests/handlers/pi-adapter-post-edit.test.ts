@@ -13,7 +13,8 @@ import {
   type PiPostEditPorts,
   type PiToolResultResponse,
 } from "../../src/handlers/pi-adapter";
-import { NO_ADVISORY, type AdviseOnEdit } from "../../src/core/type-diagnostics";
+import { NO_ADVISORY } from "../../src/core/type-diagnostics";
+import type { AdviseOnEdit } from "../../src/handlers/type-diagnostics-edit";
 import type { LintResult } from "../../src/linter/index";
 
 const original = { content: [{ type: "text" as const, text: "Edited src/a.ts" }], isError: false };

@@ -11,19 +11,17 @@
  * the 5s immediate lint tier, because a cold incremental build of a large
  * project takes tens of seconds (see handlers/type-diagnostics-runner.ts).
  *
- * The edit-to-advisory step is the core's `adviceForEdit`, shared with Pi;
- * this handler only reads Claude Code's input and renders its channels.
+ * The edit-to-advisory step is `adviceForEdit`, shared with Pi; this handler
+ * only reads Claude Code's input and renders its channels.
  */
 
 import type { HookHandler } from "../../types";
 import { passthroughResult, postToolUseContextResult } from "../../types";
-import { adviceForEdit, couldNotRun, type AdviseOnEdit } from "../../core/type-diagnostics";
-import { FILE_MODIFYING_TOOLS } from "../../core/tool-vocabulary";
+import { couldNotRun } from "../../core/type-diagnostics";
+import { isRecord } from "../../core/plain-record";
+import { editedFilePath, FILE_MODIFYING_TOOLS } from "../../core/tool-vocabulary";
+import { adviceForEdit, type AdviseOnEdit } from "../type-diagnostics-edit";
 import { typeDiagnosticsAdvisory } from "../type-diagnostics-runner";
-import { extractFilePath } from "./lint-file";
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 export function createTypeDiagnosticsHandler(advise: AdviseOnEdit): HookHandler {
   return async (stdin) => {
@@ -31,7 +29,7 @@ export function createTypeDiagnosticsHandler(advise: AdviseOnEdit): HookHandler 
     try {
       const input: unknown = JSON.parse(stdin);
       if (!isRecord(input) || typeof input.tool_name !== "string" || !FILE_MODIFYING_TOOLS.has(input.tool_name)) return passthroughResult();
-      const path = extractFilePath(isRecord(input.tool_input) ? input.tool_input : undefined);
+      const path = editedFilePath(isRecord(input.tool_input) ? input.tool_input : undefined);
       if (path === null) return passthroughResult();
 
       const { forModel, forOperator } = await adviceForEdit(path, typeof input.cwd === "string" ? input.cwd : null, advise);
