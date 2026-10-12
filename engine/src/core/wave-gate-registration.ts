@@ -244,15 +244,25 @@ export function retireWaveReviewAuthority(graph: TaskGraph, wave: number): TaskG
     graph.spec_check?.wave === wave ||
     graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
   if (!residue) return graph;
-  // Another Wave's spec-check is not this Wave's authority: the reset would
-  // clear it and re-derive that Wave's block without it, so it is held aside.
-  const otherWaveCheck = graph.spec_check?.wave === wave ? undefined : graph.spec_check;
-  const { spec_check: _held, ...withoutOtherWaveCheck } = graph;
-  const scoped = otherWaveCheck === undefined ? graph : withoutOtherWaveCheck;
-  const retired = active === undefined
+  return withOtherWaveSpecCheckHeld(graph, wave, (scoped) => active === undefined
     ? resetWaveGateReviewAuthority(scoped, waveTaskIds)
-    : supersedeAbandonedWaveGateReview(scoped, active.runId, waveTaskIds);
-  return otherWaveCheck === undefined ? retired : { ...retired, spec_check: otherWaveCheck };
+    : supersedeAbandonedWaveGateReview(scoped, active.runId, waveTaskIds));
+}
+
+/**
+ * Run `retire` with another Wave's spec-check held aside, then restore it. That
+ * check is not this Wave's authority: the reset would clear it and re-derive
+ * that Wave's block without it.
+ */
+function withOtherWaveSpecCheckHeld(
+  graph: TaskGraph,
+  wave: number,
+  retire: (scoped: TaskGraph) => TaskGraph,
+): TaskGraph {
+  const held = graph.spec_check;
+  if (held === undefined || held.wave === wave) return retire(graph);
+  const { spec_check: _held, ...scoped } = graph;
+  return { ...retire(scoped), spec_check: held };
 }
 
 /**
