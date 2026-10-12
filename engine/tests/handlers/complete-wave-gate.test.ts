@@ -1766,24 +1766,90 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         .toMatchObject({ diagnostic: { recovery: { kind: "start-wave-gate", wave: 1 } } });
     });
 
-    it("refuses a foreign-wave tombstone or one already naming a successor", () => {
+    it("refuses a foreign-wave tombstone", () => {
       const registered = registeredGraph();
-      for (const terminal of [
-        { ...registered.active_wave_gate!, wave: 2, terminalOutcome: {
+      const graph = registeredGraph({ active_wave_gate: {
+        ...registered.active_wave_gate!, wave: 2, terminalOutcome: {
           kind: "terminal-abandoned" as const, reason: "foreign", supersededBy: null,
-        } },
-        { ...registered.active_wave_gate!, terminalOutcome: {
-          kind: "terminal-abandoned" as const, reason: "successor selected",
-          supersededBy: value(parseOrchestrationRunId("next-run")),
-        } },
-      ]) {
-        const graph = registeredGraph({ active_wave_gate: terminal });
-        const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
-        expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
-        expect(status.next.action).toMatchObject({
-          kind: "blocked", diagnostic: { category: "invalid-authority", recovery: { kind: "inspect-run-and-stop" } },
+        },
+      } });
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+      expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+      expect(status.next.action).toMatchObject({
+        kind: "blocked", diagnostic: { category: "invalid-authority", recovery: { kind: "inspect-run-and-stop" } },
+      });
+    });
+
+    // Issue #50 Gap 2: a tombstone that names its successor used to fall to a
+    // generic "terminal history" contradiction that never said which run may
+    // take the Wave; only that successor's start can register it.
+    describe("a tombstone that names its successor", () => {
+      const named = (overrides: Partial<TaskGraph> = {}): TaskGraph => {
+        const registered = registeredGraph();
+        return registeredGraph({
+          active_wave_gate: { ...registered.active_wave_gate!, terminalOutcome: {
+            kind: "terminal-abandoned" as const, reason: "successor selected",
+            supersededBy: value(parseOrchestrationRunId("next-run")),
+          } },
+          ...overrides,
         });
-      }
+      };
+
+      it("asks to start exactly the named successor once implementation is complete", () => {
+        const status = deriveLoomStatusFromParsedGraph({ ok: true, value: named() }, statusDeps);
+        expect(Object.values(status.facts).every((fact) => fact.kind === "known")).toBe(true);
+        expect(status.next.action).toMatchObject({
+          kind: "blocked",
+          diagnostic: {
+            kind: "wave-gate-not-started",
+            message: "Wave 1 implementation is complete and abandoned Wave Gate run status-wave-run names " +
+              "successor next-run; start the Wave Gate with run id next-run",
+            recovery: {
+              kind: "start-successor-wave-gate", wave: 1, runId: "next-run", abandonedRunId: "status-wave-run",
+            },
+          },
+        });
+      });
+
+      it("keeps owed implementation dispatchable before the successor starts", () => {
+        const status = deriveLoomStatusFromParsedGraph({
+          ok: true,
+          value: named({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] }),
+        }, statusDeps);
+        expect(status.next.action).toMatchObject({
+          diagnostic: { recovery: { kind: "spawn-wave-implementation", wave: 1, dispatches: [{ taskId: "T1" }] } },
+        });
+      });
+    });
+
+    // Issue #50 Gap 2: a run abandoned before the state stamp existed (or whose
+    // stamp failed) has a Run Directory marker while its registration still
+    // reads as live; status must not send the operator to a resume the engine
+    // refuses, but to the abandon replay that stamps it.
+    it.each([
+      ["no successor", null, ""],
+      ["a named successor", "next-run", " --superseded-by next-run"],
+    ] as const)("names the stamping abandon replay for an unstamped legacy marker with %s", (_name, supersededBy, flag) => {
+      const graph = registeredGraph();
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, {
+        kind: "abandoned",
+        runId: "status-wave-run",
+        path: "/runs/status-wave-run",
+        runsRoot: "/runs",
+        reason: "exhausted reviewers",
+        supersededBy,
+      });
+      expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+      expect(status.next.action).toMatchObject({ kind: "blocked", diagnostic: { category: "invalid-authority" } });
+      expect(status.next.reasons).toEqual([{
+        kind: "authority-unavailable",
+        taskId: null,
+        message: "Wave Gate run status-wave-run was abandoned in its Run Directory (/runs/status-wave-run), " +
+          "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical " +
+          `abandon to stamp it: helper orchestration abandon --runs-root /runs --run status-wave-run${flag} ` +
+          '--reason "exhausted reviewers"',
+      }]);
+      expect(JSON.stringify(status)).not.toContain("resume-orchestration");
     });
 
     it("reports terminal non-retryable escalation after semantic attempt 2", () => {

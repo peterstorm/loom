@@ -975,6 +975,14 @@ export type WaveImplementationRecovery =
       }>>;
     }>
   | Readonly<{ kind: "start-wave-gate"; wave: number }>
+  /** The Wave's tombstone names its successor, and registration admits only
+   *  that run: start the Wave Gate with exactly `runId`, never a fresh id. */
+  | Readonly<{
+      kind: "start-successor-wave-gate";
+      wave: number;
+      runId: OrchestrationRunId;
+      abandonedRunId: OrchestrationRunId;
+    }>
   | Readonly<{
       kind: "repair-wave-start-readiness";
       wave: number;

@@ -87,7 +87,29 @@ export type ActiveRunDirectoryObservation =
       advisoryApproval?: AdvisoryApprovalObservation;
     }>
   | Readonly<{ kind: "absent"; runId: string; path: string }>
-  | Readonly<{ kind: "invalid"; runId: string; path: string; message: string }>;
+  | Readonly<{ kind: "invalid"; runId: string; path: string; message: string }>
+  /** The directory carries the immutable abandonment marker while the
+   * protected registration still reads as live: the run was abandoned before
+   * the state stamp existed, or its stamp failed. Fields mirror the marker. */
+  | Readonly<{
+      kind: "abandoned";
+      runId: string;
+      path: string;
+      runsRoot: string;
+      reason: string;
+      supersededBy: string | null;
+    }>;
+
+/** The engine refuses to resume an abandoned run, so status names the one
+ *  command that stamps the protected registration: the identical abandon,
+ *  which replays the immutable marker idempotently. */
+function unstampedAbandonmentMessage(observation: Extract<ActiveRunDirectoryObservation, { kind: "abandoned" }>): string {
+  const successor = observation.supersededBy === null ? "" : ` --superseded-by ${observation.supersededBy}`;
+  return `Wave Gate run ${observation.runId} was abandoned in its Run Directory (${observation.path}), ` +
+    "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical abandon " +
+    `to stamp it: helper orchestration abandon --runs-root ${observation.runsRoot} --run ${observation.runId}` +
+    `${successor} --reason ${JSON.stringify(observation.reason)}`;
+}
 
 const statusRunId = (() => {
   const parsed = parseOrchestrationRunId("loom-status-authority");
@@ -132,7 +154,7 @@ function waveImplementationAction(
       recovery: repair,
     }))
     .with(
-      { kind: P.union("spawn-wave-implementation", "await-wave-implementation", "start-wave-gate") },
+      { kind: P.union("spawn-wave-implementation", "await-wave-implementation", "start-wave-gate", "start-successor-wave-gate") },
       (healthy) => canonicalRecord({
         kind: "wave-gate-not-started" as const,
         category: "healthy-wave-unstarted" as const,
@@ -547,6 +569,7 @@ export function deriveLoomStatusFromParsedGraph(
     if (runDirectory.runId !== active.runId) {
       return unavailableStatus(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`);
     }
+    if (runDirectory.kind === "abandoned") return unavailableStatus(unstampedAbandonmentMessage(runDirectory));
     if (runDirectory.kind === "absent") {
       return unavailableStatus(
         `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +

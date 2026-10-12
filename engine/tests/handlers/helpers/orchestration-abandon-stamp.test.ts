@@ -10,6 +10,10 @@ import {
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
 import { fixturePiEnvironment } from "../../fixtures/pi-session";
+import { activeWaveGateFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import { currentOrchestrationStatus } from "../../../src/handlers/helpers/orchestration";
+import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import type { LoomStatus } from "../../../src/types";
 
 /**
  * The shell-level abandonment stamp wrapper's two arms, driven through the
@@ -82,6 +86,37 @@ describe("abandonment state-stamp wrapper arms", () => {
       runId: "run.abandon-no-graph",
       supersededBy: null,
     });
+  });
+
+  // Issue #50 Gap 2: a marker without a state stamp (a run abandoned before the
+  // stamp existed, or one whose stamp failed) used to read as a live run that
+  // status told the operator to resume, which the engine then refused.
+  it("reads an unstamped legacy marker and points status at the stamping replay, not a resume", async () => {
+    const root = project(null);
+    const runsRoot = join(root, ".claude", "reviews", "wave-gate-runs");
+    const runId = "run.legacy-unstamped";
+    mkdirSync(join(runsRoot, runId), { recursive: true });
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      ...graphFixture([taskFixture({
+        id: "T1", description: "T1", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/T1.ts"],
+      })]),
+      active_wave_gate: activeWaveGateFixture({ runId, wave: 1, authorityDigest: "d".repeat(64), runsRoot }),
+    }));
+    const opened = openRunDirectory(runsRoot, join(runsRoot, runId));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const marked = await opened.value.abandonRun({ supersededBy: null, reason: "legacy exhaustion" });
+    expect(marked.ok).toBe(true);
+
+    const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as LoomStatus;
+
+    expect(status.next.reasons[0]?.message).toBe(
+      `Wave Gate run ${runId} was abandoned in its Run Directory (${join(runsRoot, runId)}), ` +
+        "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical " +
+        `abandon to stamp it: helper orchestration abandon --runs-root ${runsRoot} --run ${runId} ` +
+        '--reason "legacy exhaustion"',
+    );
+    expect(JSON.stringify(status)).not.toContain("resume-orchestration");
   });
 
   it("returns the operator retry guidance when the protected stamp fails, not a bare error", async () => {
