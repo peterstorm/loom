@@ -38,10 +38,10 @@ export function reanchorVerifiedClaims(
     const anchors = task.spec_anchors ?? [];
     if (task.wave !== wave || anchors.length === 0) return task;
     const recorded = task.spec_anchor_hashes ?? {};
-    const hashes = { ...recorded, ...recordedAnchorHashes(specIndex.index, anchors) };
-    const same = Object.keys(hashes).length === Object.keys(recorded).length &&
-      Object.entries(hashes).every(([claim, hash]) => recorded[claim] === hash);
-    return same ? task : { ...task, spec_anchor_hashes: Object.freeze(hashes) };
+    const verified = recordedAnchorHashes(specIndex.index, anchors);
+    return Object.entries(verified).every(([claim, hash]) => recorded[claim] === hash)
+      ? task
+      : { ...task, spec_anchor_hashes: Object.freeze({ ...recorded, ...verified }) };
   });
   return tasks.every((task, at) => task === graph.tasks[at]) ? graph : { ...graph, tasks };
 }

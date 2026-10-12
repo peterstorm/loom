@@ -151,7 +151,7 @@ You MUST NOT overturn a settled row. If you believe one is wrong, the defect is 
 
 **Then emit both unclaimed lists from the projection** — Functional Requirements and Acceptance Scenarios — each entry as CRITICAL: a Requirement or Scenario whose completion has no planned owner at any Wave. Requirement Contributions are deliberately not completion ownership; if a listed item has contributing work planned, say so beside the finding rather than dropping it.
 
-**If the projection carries "Requirements completed in earlier Waves whose text changed since they passed", report each entry as a MEDIUM finding, verbatim.** An earlier Wave verified that Requirement against different text, or the entry is no longer completable. The section is advisory and never blocks the current Wave: the current Wave did not do that work, and the finding is never a CRITICAL footer line. The section is absent when nothing drifted.
+**If the projection carries "Requirements completed in earlier Waves whose text changed since they passed", report each entry as a MEDIUM finding, verbatim.** An earlier Wave verified that Requirement, but since then its text changed, it stopped being completable, or the hash recording what was verified was altered (corrupt authority, not a rewrite). The section is advisory and never blocks the current Wave: the current Wave did not do that work, and the finding is never a CRITICAL footer line. The section is absent when nothing drifted.
 
 ### Step 5: Acceptance scenario coverage
 

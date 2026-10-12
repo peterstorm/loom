@@ -146,7 +146,9 @@ function formattedRequirements(
  * The test-name prefixes a Task owes: one per Acceptance Scenario it claims.
  * `/spec-check` links a scenario to its tests only by an `AS-NNN:` test-name
  * prefix, so an unnamed scenario is reported NOT COVERED. Contributions owe
- * none, because a Contribution is not a completion claim.
+ * none, because a Contribution is not a completion claim. Reached only after
+ * every claim resolved against the Spec Index, so a `null` index here means
+ * the Task claims nothing and "none owed" is true.
  */
 function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): string {
   const scenarioIds = new Set<string>(spec?.scenarios.map(({ id }) => id) ?? []);

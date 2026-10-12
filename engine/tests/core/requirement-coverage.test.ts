@@ -447,10 +447,36 @@ describe("Requirements completed in earlier Waves", () => {
     expect(renderRequirementCoverage(coverage)).toContain(`- W1 completed ${claim} — MEDIUM: it is no longer a completable entry in the Spec Index`);
   });
 
+  it("reports a completed claim whose recorded hash no engine could have written as corrupt authority", () => {
+    const coverage = rowsOf([
+      completedEarlier({ anchorHashes: new Map([["FR-002", { kind: "unreadable", stored: "dead|beef\n- forged" }]]) }),
+      current,
+    ]);
+    expect(coverage.completedDrift).toEqual([{
+      taskId: "W1",
+      claim: "FR-002",
+      change: { kind: "unreadable-record", stored: "dead|beef\n- forged" },
+    }]);
+    // Advisory like every earlier-Wave fact: the current Wave cannot remedy it.
+    expect(settledCriticalCount(coverage)).toBe(0);
+    const rendered = renderRequirementCoverage(coverage);
+    expect(rendered).toContain("- W1 completed FR-002 — MEDIUM: its recorded hash is not a value this engine could have written");
+    expect(rendered).toContain("have been altered");
+    // It must not read as a rewrite or a withdrawal, and its stored bytes stay on one line.
+    expect(rendered).not.toContain("its text changed since that Wave passed");
+    expect(rendered).not.toContain("\n- forged");
+  });
+
+  it("states all three earlier-Wave facts in the section preamble, so a withdrawal is not called a text change", () => {
+    const rendered = renderRequirementCoverage(rowsOf([completedEarlier({ completionAnchors: ["FR-404"] }), current]));
+    expect(rendered).toContain("its text");
+    expect(rendered).toContain("changed, it stopped being completable, or the record of what was verified became unreadable");
+    expect(rendered).not.toContain("against different");
+  });
+
   it.each<[string, Partial<CoverageTask>]>([
     ["text unchanged since it passed", { anchorHashes: hashesOf(["FR-002"]) }],
     ["no recorded hash, so no basis to compare", {}],
-    ["an unreadable recorded hash", { anchorHashes: new Map([["FR-002", { kind: "unreadable", stored: "x" }]]) }],
     ["a later Wave that has not completed", { completed: false, anchorHashes: new Map([["FR-002", readable(STALE)]]) }],
   ])("reports nothing for %s", (_name, overrides) => {
     expect(rowsOf([completedEarlier(overrides), current]).completedDrift).toEqual([]);

@@ -4,9 +4,9 @@
 - **Status:** decided and implemented (B, A); C and D closed
 - **Date:** 2026-10-12
 
-## Where #11 stands
+## Where #11 stood before this change
 
-Most of #11 shipped through #41/#43 and later trace work. Checked against main on 2026-10-12:
+Most of #11 shipped through #41/#43 and later trace work. This table is the state of main on 2026-10-12, before this change; see "As implemented" below for what this change delivered.
 
 | Acceptance criterion | State |
 |---|---|

@@ -260,15 +260,32 @@ describe("Requirement Coverage Projection properties", () => {
     fc.assert(fc.property(tasksArb, (tasks) => {
       const coverage = projectRequirementCoverage(indexed, tasks);
       if (coverage.kind !== "projected") return;
+      const changeOf = (task: CoverageTask, claim: string): string | null => {
+        if (!COMPLETABLE.has(claim)) return "withdrawn";
+        const recorded = task.anchorHashes.get(claim);
+        if (recorded === undefined) return null;
+        if (recorded.kind === "unreadable") return "unreadable-record";
+        return recorded.hash === REAL_HASHES.get(claim) ? null : "rewritten";
+      };
       const expected = tasks
         .filter(({ inCurrentWave, completed }) => !inCurrentWave && completed)
-        .flatMap((task) => task.completionAnchors.filter((claim) => {
-          if (!COMPLETABLE.has(claim)) return true;
-          const recorded = task.anchorHashes.get(claim);
-          return recorded?.kind === "readable" && recorded.hash !== REAL_HASHES.get(claim);
-        }).map((claim) => `${task.id}|${claim}`));
-      expect(coverage.completedDrift.map(({ taskId, claim }) => `${taskId}|${claim}`)).toEqual(expected);
+        .flatMap((task) => task.completionAnchors.flatMap((claim) => {
+          const change = changeOf(task, claim);
+          return change === null ? [] : [`${task.id}|${claim}|${change}`];
+        }));
+      expect(coverage.completedDrift.map(({ taskId, claim, change }) => `${taskId}|${claim}|${change.kind}`))
+        .toEqual(expected);
     }));
+  });
+
+  it("reaches every earlier-Wave drift kind across the generated rosters", () => {
+    const seen = new Set<string>();
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      for (const { change } of coverage.completedDrift) seen.add(change.kind);
+    }), { numRuns: 400 });
+    expect(seen).toEqual(new Set(["rewritten", "withdrawn", "unreadable-record"]));
   });
 
   it("the floor is what reconcileSpecCheck actually enforces", () => {

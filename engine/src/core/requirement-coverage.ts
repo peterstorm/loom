@@ -183,17 +183,20 @@ export type UnclaimedWaveTrace = "contributions" | "decision-records" | "nowhere
 
 /**
  * A Requirement an earlier Wave completed whose specification no longer says
- * what that Wave verified: its text was `rewritten`, or the entry was
- * `withdrawn` (it is gone, or now Out of Scope). Advisory by construction — it
- * never enters the settled floor, because the current Wave did not do the work
- * and cannot remedy it.
+ * what that Wave verified: its text was `rewritten`, the entry was `withdrawn`
+ * (it is gone, or now Out of Scope), or its recorded hash is an
+ * `unreadable-record` no engine could have written, so what that Wave verified
+ * can no longer be known. Advisory by construction — it never enters the
+ * settled floor, because the current Wave did not do the work and cannot
+ * remedy it.
  */
 export type CompletedClaimDrift = Readonly<{
   taskId: string;
   claim: string;
   change:
     | Readonly<{ kind: "rewritten"; entry: CompletableEntry; recorded: SpecContentHash }>
-    | Readonly<{ kind: "withdrawn" }>;
+    | Readonly<{ kind: "withdrawn" }>
+    | Readonly<{ kind: "unreadable-record"; stored: string }>;
 }>;
 
 export type RequirementCoverage =
@@ -313,26 +316,26 @@ function unclaimedTraceOf(
 }
 
 /**
- * One completed earlier-Wave claim against the current Spec Index. A claim
- * without a readable recorded hash has no verified text to compare, so it
- * reports only a withdrawal, which needs no hash to prove.
+ * One completed earlier-Wave claim against the current Spec Index. The hash
+ * comparison is `driftOf`'s, so a completed claim and a current one can never
+ * disagree on what drift is. A claim with nothing recorded has no verified text
+ * to compare, so it reports only a withdrawal, which needs no hash to prove.
  */
 function completedDriftOf(
   task: CoverageTask,
   claim: string,
   byId: ReadonlyMap<string, IndexedEntry>,
 ): CompletedClaimDrift | null {
+  const of = (change: CompletedClaimDrift["change"]): CompletedClaimDrift =>
+    Object.freeze({ taskId: task.id, claim, change: Object.freeze(change) });
   const indexed = byId.get(claim);
-  if (indexed === undefined || indexed.family === "excluded") {
-    return Object.freeze({ taskId: task.id, claim, change: Object.freeze({ kind: "withdrawn" }) });
-  }
-  const recorded = task.anchorHashes.get(claim);
-  if (recorded?.kind !== "readable" || recorded.hash === indexed.entry.contentHash) return null;
-  return Object.freeze({
-    taskId: task.id,
-    claim,
-    change: Object.freeze({ kind: "rewritten", entry: indexed.entry, recorded: recorded.hash }),
-  });
+  if (indexed === undefined || indexed.family === "excluded") return of({ kind: "withdrawn" });
+  const entry = indexed.entry;
+  return match<DriftFact, CompletedClaimDrift | null>(driftOf(task.anchorHashes, claim, entry, undefined))
+    .with({ kind: "drifted" }, ({ recorded }) => of({ kind: "rewritten", entry, recorded }))
+    .with({ kind: "unreadable-record" }, ({ stored }) => of({ kind: "unreadable-record", stored }))
+    .with({ kind: "stable" }, { kind: "unverifiable" }, () => null)
+    .exhaustive();
 }
 
 /**
@@ -939,13 +942,18 @@ function renderCompletedDrift(drift: readonly CompletedClaimDrift[]): readonly s
   return [
     "### Requirements completed in earlier Waves whose text changed since they passed",
     "",
-    "Advisory, never settled: each Requirement below passed an earlier Wave Gate against different",
-    "text. Report each as a MEDIUM finding. The current Wave did not do this work and is not blocked by it.",
+    "Advisory, never settled: each Requirement below passed an earlier Wave Gate, but since then its text",
+    "changed, it stopped being completable, or the record of what was verified became unreadable. Report",
+    "each as a MEDIUM finding. The current Wave did not do this work and is not blocked by it.",
     "",
     ...drift.map(({ taskId, claim, change }) => `- ${cell(taskId)} completed ${cell(claim)} — MEDIUM: ` +
-      (change.kind === "rewritten"
-        ? `its text changed since that Wave passed (verified ${change.recorded.slice(0, 12)}, now ${change.entry.contentHash.slice(0, 12)})`
-        : "it is no longer a completable entry in the Spec Index")),
+      match<CompletedClaimDrift["change"], string>(change)
+        .with({ kind: "rewritten" }, ({ recorded, entry }) =>
+          `its text changed since that Wave passed (verified ${recorded.slice(0, 12)}, now ${entry.contentHash.slice(0, 12)})`)
+        .with({ kind: "withdrawn" }, () => "it is no longer a completable entry in the Spec Index")
+        .with({ kind: "unreadable-record" }, ({ stored }) =>
+          `its recorded hash is not a value this engine could have written (stored ${cell(JSON.stringify(stored.slice(0, 32)))}) — the TaskGraph's Requirement hashes have been altered`)
+        .exhaustive()),
     "",
   ];
 }
