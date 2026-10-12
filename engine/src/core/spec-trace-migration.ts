@@ -5,8 +5,9 @@ import type {
 } from "../types";
 import type { OrchestrationRunId } from "./orchestration-contract";
 import {
+  parseOwnershipInput,
   parseSpecTraceContract,
-  parseTraceOwnership,
+  rosterError,
   SPEC_TRACE_VERSION,
   specTraceDiagnosticMessages,
 } from "./spec-trace";
@@ -32,12 +33,7 @@ export type SpecTraceWaveGateAbandonment = Readonly<{
   supersededBy: OrchestrationRunId | null;
 }>;
 
-/** The exact-roster ownership input, keyed by Task id in submitted order. */
-export type OwnershipParse =
-  | Readonly<{ ok: true; value: ReadonlyMap<string, SpecTraceOwnership> }>
-  | Readonly<{ ok: false; message: string }>;
-
-/** Message prefix naming the helper whose input is being parsed. */
+/** Message prefix naming this helper in the shared roster parser's refusals. */
 const UPGRADE_LABEL = "Spec trace upgrade";
 
 const upgradeError = (message: string): SpecTraceUpgradeError => Object.freeze({
@@ -50,73 +46,8 @@ const reject = (message: string): SpecTraceUpgradeResult => Object.freeze({
   error: upgradeError(message),
 });
 
-const exactFields = (record: Record<string, unknown>, fields: readonly string[]): boolean => {
-  const keys = Object.keys(record).sort();
-  const expected = [...fields].sort();
-  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
-};
-
 const sameStrings = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
-
-/**
- * Parse the exact-roster contract `{spec_trace_version: 2, tasks: [{id,
- * spec_anchors, spec_contributions}]}` shared by every trace-writing helper.
- * `label` names that helper in each refusal.
- */
-export function parseOwnershipInput(raw: unknown, label: string = UPGRADE_LABEL): OwnershipParse {
-  const refuse = (message: string): OwnershipParse => Object.freeze({ ok: false, message: `${label} ${message}` });
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
-      !exactFields(raw as Record<string, unknown>, ["spec_trace_version", "tasks"])) {
-    return refuse("input must contain exactly spec_trace_version and tasks");
-  }
-  const input = raw as Record<string, unknown>;
-  if (input.spec_trace_version !== SPEC_TRACE_VERSION) {
-    return refuse(`input must declare spec_trace_version: ${SPEC_TRACE_VERSION}`);
-  }
-  if (!Array.isArray(input.tasks)) return refuse("tasks must be an array");
-
-  const ownership = new Map<string, SpecTraceOwnership>();
-  for (const [index, entry] of input.tasks.entries()) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry) ||
-        !exactFields(entry as Record<string, unknown>, ["id", "spec_anchors", "spec_contributions"])) {
-      return refuse(`tasks[${index}] must contain exactly id/spec_anchors/spec_contributions`);
-    }
-    const record = entry as Record<string, unknown>;
-    if (typeof record.id !== "string" || record.id === "") {
-      return refuse(`tasks[${index}].id must be a non-empty string`);
-    }
-    if (ownership.has(record.id)) return refuse(`roster repeats Task ${record.id}`);
-    const trace = parseTraceOwnership(record.spec_anchors, record.spec_contributions);
-    if (trace === null) {
-      return refuse(`Task ${record.id} must provide spec_anchors and spec_contributions string arrays`);
-    }
-    ownership.set(record.id, trace);
-  }
-  return Object.freeze({ ok: true, value: ownership });
-}
-
-/** Why a submitted roster is not exactly the protected Task roster, in order; null when it is. */
-export function rosterError(
-  graph: TaskGraph,
-  ownership: ReadonlyMap<string, SpecTraceOwnership>,
-  label: string = UPGRADE_LABEL,
-): string | null {
-  const currentIds = graph.tasks.map(({ id }) => id);
-  const submittedIds = [...ownership.keys()];
-  const missing = currentIds.filter((id) => !ownership.has(id));
-  const foreign = submittedIds.filter((id) => !currentIds.includes(id));
-  if (missing.length > 0 || foreign.length > 0 || submittedIds.length !== currentIds.length) {
-    return [
-      `${label} roster is stale or partial`,
-      ...(missing.length === 0 ? [] : [`missing existing Tasks: ${missing.join(", ")}`]),
-      ...(foreign.length === 0 ? [] : [`foreign Tasks: ${foreign.join(", ")}`]),
-    ].join("; ");
-  }
-  return submittedIds.some((id, index) => id !== currentIds[index])
-    ? `${label} roster order must exactly match the protected Task roster`
-    : null;
-}
 
 function installOwnership(graph: TaskGraph, ownership: ReadonlyMap<string, SpecTraceOwnership>): TaskGraph {
   return Object.freeze({
@@ -152,9 +83,9 @@ function validatedOwnershipCandidate(
   graph: TaskGraph,
   raw: unknown,
 ): SpecTraceUpgradeResult | Readonly<{ candidate: TaskGraph }> {
-  const parsed = parseOwnershipInput(raw);
+  const parsed = parseOwnershipInput(raw, UPGRADE_LABEL);
   if (!parsed.ok) return reject(parsed.message);
-  const rosterProblem = rosterError(graph, parsed.value);
+  const rosterProblem = rosterError(graph, parsed.value, UPGRADE_LABEL);
   if (rosterProblem !== null) return reject(rosterProblem);
   const executingTasks = graph.executing_tasks ?? [];
   if (executingTasks.length > 0) {

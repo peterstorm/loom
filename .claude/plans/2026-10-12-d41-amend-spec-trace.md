@@ -8,7 +8,7 @@
 
 A populated v2 TaskGraph cannot change any Task's `spec_anchors` (Completion Claims) or `spec_contributions` in place:
 
-- `upgrade-spec-trace` refuses v2→v2 changes by design (`spec-trace-migration.ts:173-177`). It is a one-shot legacy migration whose only replay is the identical one.
+- `upgrade-spec-trace` refuses v2→v2 changes by design (`validatedOwnershipCandidate` in `spec-trace-migration.ts`). It is a one-shot legacy migration whose only replay is the identical one.
 - `populate-task-graph --force` is the only route. It resets every Task to `pending`, mints fresh pending proof, sets `review_generation: 0`, clears every Finding, and drops all Wave authority (`task-graph-population.ts`).
 
 So an anchor-only correction, such as a Requirement claimed by the wrong Task or a missing Contribution, throws away every settled implementation, review and refutation result.
@@ -47,7 +47,7 @@ It amends the trace in place and retires, in the same locked write, exactly the 
 
 ### Input
 
-The same exact-roster contract `upgrade-spec-trace` already parses (`parseOwnershipInput` and `rosterError`, exported and reused, not copied):
+The same exact-roster contract `upgrade-spec-trace` already parses (`parseOwnershipInput` and `rosterError`, now in `core/spec-trace.ts` and shared by both helpers, not copied):
 
 ```json
 {"spec_trace_version": 2, "tasks": [{"id": "T1", "spec_anchors": ["FR-001"], "spec_contributions": []}, ...]}
@@ -78,8 +78,8 @@ As implemented, checked in this order; the first that applies wins. Items marked
   - mint a hash from the amend-time Spec Index for every added claim;
   - drop the hashes of removed claims.
 
-  Afterwards each amended Task's hash keys are exactly its claims (by construction; no load-boundary check, see deviations).
-- **Retire trace-derived review authority** for the current Wave: `supersedeAbandonedWaveGateReview` over a tombstone, otherwise `retireWaveReviewResidue` (both in `wave-gate-registration.ts`, built on `resetWaveGateReviewAuthority`). This is the same retirement restart, orphan recovery and successor start already use.
+  Afterwards an amended Task's hash keys are a subset of its claims: every added claim is hashed, every retained claim keeps its recorded hash if it had one (a claim hashless since legacy upgrade stays hashless), and removed claims' hashes are dropped. This holds by construction; there is no load-boundary check (see deviations).
+- **Retire trace-derived review authority** for the current Wave: `supersedeAbandonedWaveGateReview` over a tombstone, otherwise any residue, both through one `retireWaveReviewAuthority(graph, wave)` in `wave-gate-registration.ts`, built on `resetWaveGateReviewAuthority`. This is the same retirement restart, orphan recovery and successor start already use.
   - It clears `review_run`, `spec_check`, `wave_review_epoch`, `active_wave_completion_suite` and the tombstone.
   - It re-derives `wave_gates` blocks.
   - It keeps Findings and review generations.
@@ -111,7 +111,7 @@ As implemented, checked in this order; the first that applies wins. Items marked
   - hash retention, minting and dropping;
   - retirement clears exactly the trace-derived fields and keeps status, proof and findings;
   - the audit entry matches;
-  - property: any accepted amendment yields a graph the load boundary accepts, with each amended Task's hash keys equal to its claims.
+  - property: any accepted amendment yields a graph the load boundary accepts, with each amended Task's hash keys a subset of its claims (equal to them when every retained claim was hashed, as in the test fixture).
 - **Shell:**
   - the helper commits through StateManager;
   - it refuses an executing Task or active subagent;
@@ -143,4 +143,6 @@ As implemented, checked in this order; the first that applies wins. Items marked
 - **Added refusals:** `not-executing` (phase must be execute) and `spec-authority-changed` (the observed Spec Index must name the locked `spec_file`, mirroring population).
 - **Re-population drops `spec_trace_amendments`** with the Tasks it described.
 - **A repeated id in a submitted trace is `invalid-input`** (PR #75 review). Arrays compare as sets, so without it a repeated id read as an unchanged replay and reported success; the protected trace was never at risk because a changed candidate failed `invalid-trace`.
-- **Residue detection lives beside the reset** (PR #75 review): `retireWaveReviewResidue` in `wave-gate-registration.ts` owns both the "is any current-Wave review authority left" predicate and the reset, so a new authority field cannot be cleared by the reset yet missed by the amendment.
+- **One retirement entry point beside the reset** (PR #75 review, rounds 1 and 2): `retireWaveReviewAuthority(graph, wave)` in `wave-gate-registration.ts` owns the tombstone-versus-residue branch, the residue predicate and the reset, and throws on a live gate (the caller's precondition). Each residue field is pinned by its own test, so a field added to the reset but missed by the predicate fails there.
+- **The exact-roster input grammar lives in `core/spec-trace.ts`** (PR #75 review, round 2), beside `parseTraceOwnership`, `traceOf` and `sameRequirementTrace`, so the permanent amendment command does not depend on the removable legacy-upgrade module.
+- **The load boundary chains each Task's amendment history** (PR #75 review, round 2): a change must start, as sets, where that Task's previous change ended. Changes are not tied to `wave_gate_history`, because an amended Wave later completes legitimately.

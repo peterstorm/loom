@@ -32,13 +32,15 @@ import {
   type SpecIndexAvailability,
 } from "./requirement-coverage";
 import {
+  parseOwnershipInput,
   parseSpecTraceContract,
+  rosterError,
   sameRequirementTrace,
   SPEC_TRACE_VERSION,
   specTraceDiagnosticMessages,
+  traceOf,
 } from "./spec-trace";
-import { parseOwnershipInput, rosterError } from "./spec-trace-migration";
-import { retireWaveReviewResidue, supersedeAbandonedWaveGateReview } from "./wave-gate-registration";
+import { retireWaveReviewAuthority } from "./wave-gate-registration";
 
 export type SpecTraceAmendmentRefusal = Readonly<{
   kind:
@@ -57,7 +59,7 @@ export type SpecTraceAmendmentRefusal = Readonly<{
 
 export type SpecTraceAmendmentOutcome =
   | Readonly<{ kind: "amended"; graph: TaskGraph; amendment: SpecTraceAmendment }>
-  /** The submitted trace already holds (Arrays compare as sets): nothing to write. */
+  /** The submitted trace is set-equal to the stored one (arrays compare as sets): nothing to write. */
   | Readonly<{ kind: "unchanged"; graph: TaskGraph }>;
 
 export type SpecTraceAmendmentResult =
@@ -68,11 +70,6 @@ const LABEL = "Spec trace amendment";
 
 const refuse = (kind: SpecTraceAmendmentRefusal["kind"], message: string): SpecTraceAmendmentResult =>
   Object.freeze({ ok: false, error: Object.freeze({ kind, message }) });
-
-const traceOf = (task: Task): SpecTraceOwnership => Object.freeze({
-  spec_anchors: task.spec_anchors ?? [],
-  spec_contributions: task.spec_contributions ?? [],
-});
 
 const added = (before: readonly string[], after: readonly string[]): readonly string[] =>
   after.filter((id) => !before.includes(id));
@@ -138,8 +135,8 @@ function amendedTask(task: Task, change: SpecTraceAmendmentChange, specIndex: Sp
 }
 
 /** Every id the amendment introduces, per Task: new Completion Claims and new Contributions. */
-const introducedIds = (changes: readonly SpecTraceAmendmentChange[]): readonly Readonly<{ taskId: string; id: string }>[] =>
-  changes.flatMap(({ taskId, before, after }) => [
+const introducedIds = (amended: readonly AmendedTrace[]): readonly Readonly<{ taskId: string; id: string }>[] =>
+  amended.flatMap(({ change: { taskId, before, after } }) => [
     ...added(before.spec_anchors, after.spec_anchors),
     ...added(before.spec_contributions, after.spec_contributions),
   ].map((id) => Object.freeze({ taskId, id })));
@@ -170,9 +167,9 @@ function completedWaveRefusal(
 
 function specIndexRefusal(
   specIndex: SpecIndexAvailability,
-  changes: readonly SpecTraceAmendmentChange[],
+  amended: readonly AmendedTrace[],
 ): SpecTraceAmendmentResult | null {
-  const introduced = introducedIds(changes);
+  const introduced = introducedIds(amended);
   if (introduced.length === 0) return null;
   if (specIndex.kind === "unavailable") {
     return refuse(
@@ -190,17 +187,6 @@ function specIndexRefusal(
         `${LABEL} names ids the Spec Index does not define as a completable FR or AS entry: ` +
           unknown.map(({ taskId, id }) => `${taskId} → ${id}`).join(", "),
       );
-}
-
-/**
- * The trace-derived review authority an amendment retires. An abandoned
- * tombstone is retired exactly as its successor's install would retire it;
- * without a gate, whatever current-Wave review residue survives is retired.
- */
-function retireTraceDerivedAuthority(graph: TaskGraph, wave: number): TaskGraph {
-  if (graph.active_wave_gate === undefined) return retireWaveReviewResidue(graph, wave);
-  const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
-  return supersedeAbandonedWaveGateReview(graph, graph.active_wave_gate.runId, waveTaskIds);
 }
 
 /**
@@ -222,9 +208,7 @@ export function amendSpecTrace(
   if (inputProblem !== null) return refuse("invalid-input", inputProblem);
 
   const amendedTraces = changesOf(graph, parsed.value);
-  const [first, ...rest] = amendedTraces.map(({ change }) => change);
-  if (first === undefined) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
-  const changes = [first, ...rest];
+  if (amendedTraces.length === 0) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
 
   const wave = graph.current_wave;
   if (graph.current_phase !== "execute" || wave === undefined) {
@@ -245,7 +229,7 @@ export function amendSpecTrace(
   }
   const preconditionRefusal = liveGateRefusal(graph) ??
     completedWaveRefusal(graph, amendedTraces) ??
-    specIndexRefusal(specIndex, changes);
+    specIndexRefusal(specIndex, amendedTraces);
   if (preconditionRefusal !== null) return preconditionRefusal;
 
   const replacements = new Map(amendedTraces.map(({ task, change }) =>
@@ -264,11 +248,13 @@ export function amendSpecTrace(
     kind: "spec-trace-amendment",
     wave,
     retiredRunId: graph.active_wave_gate?.runId ?? null,
-    changes: Object.freeze(changes) as NonEmpty<SpecTraceAmendmentChange>,
+    // Non-empty: the unchanged replay returned above.
+    changes: Object.freeze(amendedTraces.map(({ change }) => change)) as NonEmpty<SpecTraceAmendmentChange>,
     specIndexObservation: specIndexObservationOf(specIndex),
   });
+  // A live gate was refused above, so only a tombstone or residue is retired.
   const amended: TaskGraph = Object.freeze({
-    ...retireTraceDerivedAuthority(candidate, wave),
+    ...retireWaveReviewAuthority(candidate, wave),
     spec_trace_amendments: Object.freeze([...(graph.spec_trace_amendments ?? []), amendment]),
   });
   return Object.freeze({ ok: true, value: Object.freeze({ kind: "amended", graph: amended, amendment }) });

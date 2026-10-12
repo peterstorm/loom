@@ -322,7 +322,7 @@ describe("amendSpecTrace", () => {
     expect(replay.ok && replay.value.kind).toBe("unchanged");
   });
 
-  it("any accepted current-Wave amendment loads, and every amended Task's hash keys are its claims", () => {
+  it("any accepted current-Wave amendment loads, and an amended Task's hash keys are its claims when every retained claim was hashed", () => {
     const ids = ["FR-001", "FR-002"];
     const traceArbitrary = fc.record({
       anchors: fc.subarray(ids),
@@ -347,6 +347,18 @@ describe("spec_trace_amendments load boundary", () => {
     tasks: Record<string, unknown>[];
     spec_trace_amendments: Record<string, unknown>[];
   };
+
+  it("refuses a Task's amendment history whose steps do not chain", () => {
+    const twice = amended(committed(), amendment({ T3: { anchors: ["FR-002"], contributions: ["FR-001"] } })).graph;
+    expect(reloads(twice).ok).toBe(true);
+
+    const tampered = raw(twice);
+    const second = (tampered.spec_trace_amendments[1]!.changes as Record<string, unknown>[])[0]!;
+    second.before = { spec_anchors: [], spec_contributions: [] };
+    const parsed = parseTaskGraph(tampered);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("Task T3 spec_trace_amendments change does not start where its previous change ended");
+  });
 
   it("refuses a trace that contradicts its latest amendment", () => {
     const tampered = raw(committed());

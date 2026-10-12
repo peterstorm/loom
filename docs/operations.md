@@ -724,7 +724,7 @@ Arrays compare as sets, so a reordering is not an amendment and an exact replay 
 - the input is not the exact Task roster in order, or a Task's array repeats an id;
 - the graph is legacy (use `upgrade-spec-trace`) or not in the execute Phase;
 - any Task is executing or a subagent is active;
-- a Wave Gate is live. Its review packets froze the old trace, so first run `helper orchestration abandon` on it; a `terminal-abandoned` tombstone is accepted and retired;
+- a Wave Gate is live: its review packets froze the old trace, so first run `helper orchestration abandon` on it. A `terminal-abandoned` tombstone is accepted and retired; a legacy terminal (`done` or `terminal-blocked`) registration is refused too and must first be migrated to terminal history;
 - any Task in a completed Wave (`wave_gate_history`) would change. Completed Waves are verified scope, so moving a Completion Claim into or out of one is refused too;
 - an added id is not a completable FR/AS entry in the Spec Index observed now, or that Spec Index is unavailable (fail closed; removals still apply), or `spec_file` moved during the call;
 - the result breaks v2 ownership (`parseSpecTraceContract`).

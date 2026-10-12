@@ -10,7 +10,10 @@ import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
 import { AMENDMENT_SPEC } from "../../fixtures/amendment-spec";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { activeWaveGateFixture, completedWaveGateFixture, pendingTaskProof } from "../../fixtures/task-lifecycle";
+import { activeWaveGateFixture, completedWaveGateFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import { WHITELISTED_HELPERS } from "../../../src/config";
+import { guardStateFileDecision } from "../../../src/core/guard-state-file";
+import { KNOWN_HANDLERS, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 
 const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("fixture spec must parse");
@@ -49,9 +52,9 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-const task = (id: string, wave: number, anchors: readonly string[]) => ({
-  id, description: id, agent: "code-implementer-agent", wave, status: "pending", proof: pendingTaskProof([`src/${id}.ts`]),
-  depends_on: [], file_list: [`src/${id}.ts`], spec_anchors: [...anchors], spec_contributions: [],
+const task = (id: string, wave: number, anchors: readonly string[]) => taskFixture({
+  id, description: id, agent: "code-implementer-agent", wave, depends_on: [], file_list: [`src/${id}.ts`],
+  spec_anchors: [...anchors], spec_contributions: [],
   review_status: "pending", review_generation: 2, findings: [], critical_findings: [], advisory_findings: [],
   refuted_findings: [], resolved_findings: [],
 });
@@ -103,6 +106,19 @@ function successorInstall(state: TaskGraph, runsRoot: string) {
     runId: "run.successor", wave: 2, authorityDigest: waveGateAuthorityDigest(2, taskIds, state), runsRoot,
   }), taskIds);
 }
+
+describe("amend-spec-trace registration", () => {
+  // The registry parity suites iterate whatever is registered, so only a
+  // named pin notices this helper dropping out of one of its registrations.
+  it("is routed, whitelisted past the State File guard, and handshake-gated", () => {
+    expect(KNOWN_HANDLERS.helper?.has("amend-spec-trace")).toBe(true);
+    expect(WHITELISTED_HELPERS).toContain("amend-spec-trace");
+    expect(piRuntimeHandshakeRequired("helper", "amend-spec-trace")).toBe(true);
+    expect(guardStateFileDecision(
+      'bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace < /tmp/trace.json',
+    ).kind).toBe("allow");
+  });
+});
 
 describe("amend-spec-trace helper", () => {
   it("commits the amendment through StateManager, minting the new claim's hash from the observed spec", async () => {

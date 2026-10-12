@@ -83,6 +83,7 @@ import {
   parseTraceOwnership,
   sameRequirementTrace,
   specTraceDiagnosticMessages,
+  traceOf,
 } from "./core/spec-trace";
 import { parseTaskVerificationPolicy } from "./core/verification-policy";
 import {
@@ -874,9 +875,11 @@ function parseSpecTraceAmendments(raw: unknown): ParseResult<readonly SpecTraceA
 }
 
 /**
- * Each amended Task's live trace must be, as sets, the `after` of its latest
- * amendment: the audit is the only sanctioned way a v2 trace changes in place,
- * so a contradiction means the trace was edited behind it.
+ * The amendment audit must describe the trace it claims to: each Task's
+ * successive changes chain (a change starts, as sets, where that Task's
+ * previous change ended), and its live trace is the `after` of its latest
+ * change. The audit is the only sanctioned way a v2 trace changes in place, so
+ * a break means the trace or its history was edited behind it.
  */
 function specTraceAmendmentTraceError(
   amendments: readonly SpecTraceAmendment[] | undefined,
@@ -888,14 +891,15 @@ function specTraceAmendmentTraceError(
     if (!byId.has(change.taskId)) {
       return `spec_trace_amendments names Task ${change.taskId}, which is not in the protected roster`;
     }
+    const previous = latest.get(change.taskId);
+    if (previous !== undefined && !sameRequirementTrace(previous.after, change.before)) {
+      return `Task ${change.taskId} spec_trace_amendments change does not start where its previous change ended`;
+    }
     latest.set(change.taskId, change);
   }
   for (const [taskId, change] of latest) {
-    const task = byId.get(taskId)!;
-    const live: SpecTraceOwnership = {
-      spec_anchors: (task.spec_anchors ?? []) as readonly string[],
-      spec_contributions: (task.spec_contributions ?? []) as readonly string[],
-    };
+    // parseTaskGraphTasks already proved every v2 trace array.
+    const live = traceOf(byId.get(taskId)! as Readonly<{ spec_anchors?: readonly string[]; spec_contributions?: readonly string[] }>);
     if (!sameRequirementTrace(live, change.after)) {
       return `Task ${taskId} Requirement trace contradicts its latest spec_trace_amendments change`;
     }
