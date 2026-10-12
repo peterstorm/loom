@@ -38,7 +38,7 @@ import {
   specTraceDiagnosticMessages,
 } from "./spec-trace";
 import { parseOwnershipInput, rosterError } from "./spec-trace-migration";
-import { resetWaveGateReviewAuthority, supersedeAbandonedWaveGateReview } from "./wave-gate-registration";
+import { retireWaveReviewResidue, supersedeAbandonedWaveGateReview } from "./wave-gate-registration";
 
 export type SpecTraceAmendmentRefusal = Readonly<{
   kind:
@@ -77,15 +77,35 @@ const traceOf = (task: Task): SpecTraceOwnership => Object.freeze({
 const added = (before: readonly string[], after: readonly string[]): readonly string[] =>
   after.filter((id) => !before.includes(id));
 
+/**
+ * The first id a submitted trace repeats, as a refusal message. Arrays compare
+ * as sets, so without this a repeated id would read as an unchanged replay
+ * instead of the malformed input it is.
+ */
+function repeatedIdError(ownership: ReadonlyMap<string, SpecTraceOwnership>): string | null {
+  for (const [taskId, trace] of ownership) {
+    for (const field of ["spec_anchors", "spec_contributions"] as const) {
+      const repeated = trace[field].find((id, index) => trace[field].indexOf(id) !== index);
+      if (repeated !== undefined) return `${LABEL} input Task ${taskId} ${field} repeats ${repeated}`;
+    }
+  }
+  return null;
+}
+
+/** One amended Task with the change made to it. */
+type AmendedTrace = Readonly<{ task: Task; change: SpecTraceAmendmentChange }>;
+
 /** Every Task whose submitted trace differs, as a set, from its protected one — in roster order. */
 function changesOf(
   graph: TaskGraph,
   ownership: ReadonlyMap<string, SpecTraceOwnership>,
-): readonly SpecTraceAmendmentChange[] {
+): readonly AmendedTrace[] {
   return graph.tasks.flatMap((task) => {
     const before = traceOf(task);
     const after = ownership.get(task.id)!;
-    return sameRequirementTrace(before, after) ? [] : [Object.freeze({ taskId: task.id, before, after })];
+    return sameRequirementTrace(before, after)
+      ? []
+      : [Object.freeze({ task, change: Object.freeze({ taskId: task.id, before, after }) })];
   });
 }
 
@@ -135,13 +155,11 @@ function liveGateRefusal(graph: TaskGraph): SpecTraceAmendmentResult | null {
 
 function completedWaveRefusal(
   graph: TaskGraph,
-  changes: readonly SpecTraceAmendmentChange[],
+  amended: readonly AmendedTrace[],
 ): SpecTraceAmendmentResult | null {
   const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave }) => wave));
-  const frozen = changes.flatMap(({ taskId }) => {
-    const wave = graph.tasks.find(({ id }) => id === taskId)!.wave;
-    return completedWaves.has(wave) ? [`${taskId} (Wave ${wave})`] : [];
-  });
+  const frozen = amended.flatMap(({ task }) =>
+    completedWaves.has(task.wave) ? [`${task.id} (Wave ${task.wave})`] : []);
   return frozen.length === 0
     ? null
     : refuse(
@@ -176,20 +194,13 @@ function specIndexRefusal(
 
 /**
  * The trace-derived review authority an amendment retires. An abandoned
- * tombstone is retired exactly as its successor's install would retire it.
- * Without a gate, any leftover current-Wave review state is reset the same way;
- * with none, nothing else changes.
+ * tombstone is retired exactly as its successor's install would retire it;
+ * without a gate, whatever current-Wave review residue survives is retired.
  */
 function retireTraceDerivedAuthority(graph: TaskGraph, wave: number): TaskGraph {
+  if (graph.active_wave_gate === undefined) return retireWaveReviewResidue(graph, wave);
   const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
-  if (graph.active_wave_gate !== undefined) {
-    return supersedeAbandonedWaveGateReview(graph, graph.active_wave_gate.runId, waveTaskIds);
-  }
-  const residue = graph.wave_review_epoch !== undefined ||
-    graph.active_wave_completion_suite !== undefined ||
-    graph.spec_check?.wave === wave ||
-    graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
-  return residue ? resetWaveGateReviewAuthority(graph, waveTaskIds) : graph;
+  return supersedeAbandonedWaveGateReview(graph, graph.active_wave_gate.runId, waveTaskIds);
 }
 
 /**
@@ -207,12 +218,13 @@ export function amendSpecTrace(
   }
   const parsed = parseOwnershipInput(raw, LABEL);
   if (!parsed.ok) return refuse("invalid-input", parsed.message);
-  const roster = rosterError(graph, parsed.value, LABEL);
-  if (roster !== null) return refuse("invalid-input", roster);
+  const inputProblem = rosterError(graph, parsed.value, LABEL) ?? repeatedIdError(parsed.value);
+  if (inputProblem !== null) return refuse("invalid-input", inputProblem);
 
-  const changes = changesOf(graph, parsed.value);
-  const [first, ...rest] = changes;
+  const amendedTraces = changesOf(graph, parsed.value);
+  const [first, ...rest] = amendedTraces.map(({ change }) => change);
   if (first === undefined) return Object.freeze({ ok: true, value: Object.freeze({ kind: "unchanged", graph }) });
+  const changes = [first, ...rest];
 
   const wave = graph.current_wave;
   if (graph.current_phase !== "execute" || wave === undefined) {
@@ -232,17 +244,15 @@ export function amendSpecTrace(
     );
   }
   const preconditionRefusal = liveGateRefusal(graph) ??
-    completedWaveRefusal(graph, changes) ??
+    completedWaveRefusal(graph, amendedTraces) ??
     specIndexRefusal(specIndex, changes);
   if (preconditionRefusal !== null) return preconditionRefusal;
 
-  const changeByTask = new Map(changes.map((change) => [change.taskId, change] as const));
+  const replacements = new Map(amendedTraces.map(({ task, change }) =>
+    [task, amendedTask(task, change, specIndex)] as const));
   const candidate: TaskGraph = Object.freeze({
     ...graph,
-    tasks: Object.freeze(graph.tasks.map((task) => {
-      const change = changeByTask.get(task.id);
-      return change === undefined ? task : amendedTask(task, change, specIndex);
-    })),
+    tasks: Object.freeze(graph.tasks.map((task) => replacements.get(task) ?? task)),
   });
   const validated = parseSpecTraceContract(SPEC_TRACE_VERSION, candidate.tasks);
   if (!validated.ok) {
@@ -254,7 +264,7 @@ export function amendSpecTrace(
     kind: "spec-trace-amendment",
     wave,
     retiredRunId: graph.active_wave_gate?.runId ?? null,
-    changes: Object.freeze([first, ...rest]) as NonEmpty<SpecTraceAmendmentChange>,
+    changes: Object.freeze(changes) as NonEmpty<SpecTraceAmendmentChange>,
     specIndexObservation: specIndexObservationOf(specIndex),
   });
   const amended: TaskGraph = Object.freeze({

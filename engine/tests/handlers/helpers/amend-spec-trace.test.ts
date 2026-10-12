@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import amendSpecTrace from "../../../src/handlers/helpers/amend-spec-trace";
 import { parseSpec } from "../../../src/core/parse-spec";
 import { installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
@@ -8,41 +8,37 @@ import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority
 import { newWaveGate } from "../../../src/core/wave-gate-model";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
+import { AMENDMENT_SPEC } from "../../fixtures/amendment-spec";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { activeWaveGateFixture, completedWaveGateFixture, pendingTaskProof } from "../../fixtures/task-lifecycle";
 
-const SPEC = `# Feature: Amendment
-
-## User Scenarios
-
-### US1: [P1] Amend a trace
-
-**Acceptance Scenarios:**
-- AS-001: Given a populated graph, When the trace is amended, Then settled work survives
-
-## Functional Requirements
-
-- FR-001: System MUST amend a Requirement trace in place
-- FR-002: System MUST retire review authority derived from the old trace
-
-## Out of Scope
-
-- OOS-001: Amending completed Waves
-
-## Appendix: Glossary
-
-| Term | Definition |
-|------|------------|
-| Trace | Requirement ownership |
-`;
-
-const parsedSpec = parseSpec(SPEC);
+const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("fixture spec must parse");
 const FR_002_HASH = parsedSpec.value.frs[1]!.contentHash;
+
+/**
+ * The real ledger, except that a test can make a subagent appear from the Nth
+ * observation on: the only way to land between the helper's pre-lock check and
+ * its in-lock re-check.
+ */
+const ledger = vi.hoisted(() => ({ activeFromObservation: null as number | null, observations: 0 }));
+vi.mock("../../../src/machine/ledger", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/machine/ledger")>();
+  return {
+    ...actual,
+    anyActiveSubagent: (path: string) => {
+      ledger.observations += 1;
+      return (ledger.activeFromObservation !== null && ledger.observations >= ledger.activeFromObservation) ||
+        actual.anyActiveSubagent(path);
+    },
+  };
+});
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
 beforeEach(() => {
+  ledger.activeFromObservation = null;
+  ledger.observations = 0;
   inheritedEnvironment = ["LOOM_STATE_PATH", "LOOM_SUBAGENT_DIR"].map((key) => [key, process.env[key]] as const);
 });
 afterEach(() => {
@@ -66,7 +62,7 @@ function fixture(overrides: Partial<TaskGraph> = {}): Fixture {
   const root = canonicalTempDir("loom-amend-spec-trace-");
   cleanup.push(root);
   const specFile = join(root, "spec.md");
-  writeFileSync(specFile, SPEC);
+  writeFileSync(specFile, AMENDMENT_SPEC);
   const statePath = join(root, "active_task_graph.json");
   const runsRoot = join(root, "runs");
   writeFileSync(statePath, JSON.stringify({
@@ -134,6 +130,36 @@ describe("amend-spec-trace helper", () => {
     const result = await amendSpecTrace(input(["FR-002"]), []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("subagent is active");
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
+  it("re-checks for a subagent under the lock and refuses without writing when one appeared", async () => {
+    const { statePath } = fixture();
+    const before = readFileSync(statePath, "utf8");
+    ledger.activeFromObservation = 2;
+
+    const result = await amendSpecTrace(input(["FR-002"]), []);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("became active before the spec trace amendment could commit");
+    expect(ledger.observations).toBe(2);
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
+  it("refuses under a live Wave Gate through StateManager, naming the abandon recovery, without writing", async () => {
+    const { statePath, runsRoot } = fixture();
+    const installed = successorInstall(new StateManager(statePath).load(), runsRoot);
+    if (installed.kind !== "installed") throw new Error("fixture successor must install");
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify(installed.state));
+    chmodSync(statePath, 0o444);
+    const before = readFileSync(statePath, "utf8");
+
+    const result = await amendSpecTrace(input(["FR-002"]), []);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain("run.successor is live");
+      expect(result.message).toContain("helper orchestration abandon");
+    }
     expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 

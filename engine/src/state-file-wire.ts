@@ -78,7 +78,12 @@ import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wav
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
-import { parseSpecTraceContract, sameRequirementTrace, specTraceDiagnosticMessages } from "./core/spec-trace";
+import {
+  parseSpecTraceContract,
+  parseTraceOwnership,
+  sameRequirementTrace,
+  specTraceDiagnosticMessages,
+} from "./core/spec-trace";
 import { parseTaskVerificationPolicy } from "./core/verification-policy";
 import {
   isProtectedVerificationPath,
@@ -791,15 +796,10 @@ function parseSpecTraceOwnership(raw: unknown, label: string): ParseResult<SpecT
   const record = raw as Record<string, unknown>;
   const fieldsError = exactFieldsError(record, ["spec_anchors", "spec_contributions"], [], label);
   if (fieldsError !== null) return parseErr(fieldsError);
-  const stringArray = (value: unknown): value is readonly string[] =>
-    Array.isArray(value) && value.every((entry) => typeof entry === "string");
-  if (!stringArray(record.spec_anchors) || !stringArray(record.spec_contributions)) {
-    return parseErr(`${label} spec_anchors and spec_contributions must be string arrays`);
-  }
-  return parseOk(Object.freeze({
-    spec_anchors: Object.freeze([...record.spec_anchors]),
-    spec_contributions: Object.freeze([...record.spec_contributions]),
-  }));
+  const trace = parseTraceOwnership(record.spec_anchors, record.spec_contributions);
+  return trace === null
+    ? parseErr(`${label} spec_anchors and spec_contributions must be string arrays`)
+    : parseOk(trace);
 }
 
 function parseSpecTraceAmendmentChange(raw: unknown, label: string): ParseResult<SpecTraceAmendmentChange> {

@@ -8,6 +8,7 @@ import type { SpecIndexAvailability } from "../../src/core/requirement-coverage"
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
+import { AMENDMENT_SPEC } from "../fixtures/amendment-spec";
 import { findingId } from "../fixtures/finding-id";
 import {
   activeWaveGateFixture,
@@ -16,30 +17,7 @@ import {
   taskFixture,
 } from "../fixtures/task-lifecycle";
 
-const parsedSpec = parseSpec(`# Feature: Amendment
-
-## User Scenarios
-
-### US1: [P1] Amend a trace
-
-**Acceptance Scenarios:**
-- AS-001: Given a populated graph, When the trace is amended, Then settled work survives
-
-## Functional Requirements
-
-- FR-001: System MUST amend a Requirement trace in place
-- FR-002: System MUST retire review authority derived from the old trace
-
-## Out of Scope
-
-- OOS-001: Amending completed Waves
-
-## Appendix: Glossary
-
-| Term | Definition |
-|------|------------|
-| Trace | Requirement ownership |
-`);
+const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("amendment fixture specification must parse");
 const index = parsedSpec.value;
 const digest = parseArtifactDigest("a".repeat(64));
@@ -234,6 +212,17 @@ describe("amendSpecTrace", () => {
     expect(reloads(graph).ok).toBe(true);
   });
 
+  it("without a tombstone retires only current-Wave review residue", () => {
+    const amendT3 = amendment({ T3: { anchors: ["FR-002"], contributions: [] } });
+    const currentCheck = capturedSpecCheck({ wave: 2, runAt: "2026-10-12T00:00:00.000Z", criticalFindings: [] });
+    expect(amended(populated({ spec_check: currentCheck }), amendT3).graph.spec_check).toBeUndefined();
+
+    const olderCheck = capturedSpecCheck({ wave: 1, runAt: "2026-10-11T00:00:00.000Z", criticalFindings: [] });
+    const kept = amended(populated({ spec_check: olderCheck }), amendT3).graph;
+    expect(kept.spec_check).toEqual(olderCheck);
+    expect(reloads(kept).ok).toBe(true);
+  });
+
   it("retires review acceptance granted by the abandoned run", () => {
     const runId = "run.abandoned";
     const accepted = {
@@ -289,6 +278,11 @@ describe("amendSpecTrace", () => {
   it.each<[string, unknown, SpecTraceAmendmentRefusal["kind"], string]>([
     ["a malformed input", { tasks: [] }, "invalid-input", "exactly spec_trace_version and tasks"],
     ["a partial roster", { spec_trace_version: 2, tasks: amendment().tasks.slice(1) }, "invalid-input", "missing existing Tasks: T1"],
+    // Arrays compare as sets, so without this a repeated id would read as an unchanged replay.
+    ["a repeated id in an otherwise unchanged trace", amendment({ T2: { anchors: ["FR-001", "FR-001"], contributions: [] } }),
+      "invalid-input", "Task T2 spec_anchors repeats FR-001"],
+    ["a repeated Contribution", amendment({ T3: { anchors: [], contributions: ["FR-001", "FR-001"] } }),
+      "invalid-input", "Task T3 spec_contributions repeats FR-001"],
     ["a completed Wave's Task", amendment({ T1: { anchors: ["AS-001", "FR-002"], contributions: [] } }), "completed-wave-changed", "T1"],
     ["a claim moved out of a completed Wave", amendment({
       T1: { anchors: [], contributions: [] },
@@ -303,9 +297,11 @@ describe("amendSpecTrace", () => {
     expect(error.message).toContain(message);
   });
 
-  it("fails closed on an added claim when the Spec Index is unavailable, but still applies removals", () => {
+  it("fails closed on an added claim or Contribution when the Spec Index is unavailable, but still applies removals", () => {
     const graph = populated({ spec_index_observation: undefined });
     expect(refusal(graph, amendment({ T3: { anchors: ["FR-002"], contributions: [] } }), unavailable).kind)
+      .toBe("spec-index-unavailable");
+    expect(refusal(graph, amendment({ T3: { anchors: [], contributions: ["FR-001"] } }), unavailable).kind)
       .toBe("spec-index-unavailable");
 
     const removed = amended(graph, amendment({ T2: { anchors: [], contributions: [] } }), unavailable);

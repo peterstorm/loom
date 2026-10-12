@@ -6,6 +6,7 @@ import type {
 import type { OrchestrationRunId } from "./orchestration-contract";
 import {
   parseSpecTraceContract,
+  parseTraceOwnership,
   SPEC_TRACE_VERSION,
   specTraceDiagnosticMessages,
 } from "./spec-trace";
@@ -55,9 +56,6 @@ const exactFields = (record: Record<string, unknown>, fields: readonly string[])
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 };
 
-const isStringArray = (raw: unknown): raw is readonly string[] =>
-  Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
-
 const sameStrings = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
@@ -89,13 +87,11 @@ export function parseOwnershipInput(raw: unknown, label: string = UPGRADE_LABEL)
       return refuse(`tasks[${index}].id must be a non-empty string`);
     }
     if (ownership.has(record.id)) return refuse(`roster repeats Task ${record.id}`);
-    if (!isStringArray(record.spec_anchors) || !isStringArray(record.spec_contributions)) {
+    const trace = parseTraceOwnership(record.spec_anchors, record.spec_contributions);
+    if (trace === null) {
       return refuse(`Task ${record.id} must provide spec_anchors and spec_contributions string arrays`);
     }
-    ownership.set(record.id, Object.freeze({
-      spec_anchors: Object.freeze([...record.spec_anchors]),
-      spec_contributions: Object.freeze([...record.spec_contributions]),
-    }));
+    ownership.set(record.id, trace);
   }
   return Object.freeze({ ok: true, value: ownership });
 }

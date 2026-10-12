@@ -721,6 +721,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace \
 
 Arrays compare as sets, so a reordering is not an amendment and an exact replay writes nothing. The helper refuses, without writing, when:
 
+- the input is not the exact Task roster in order, or a Task's array repeats an id;
 - the graph is legacy (use `upgrade-spec-trace`) or not in the execute Phase;
 - any Task is executing or a subagent is active;
 - a Wave Gate is live. Its review packets froze the old trace, so first run `helper orchestration abandon` on it; a `terminal-abandoned` tombstone is accepted and retired;

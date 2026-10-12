@@ -55,16 +55,20 @@ The same exact-roster contract `upgrade-spec-trace` already parses (`parseOwners
 
 Every Task appears exactly once, in protected order. Arrays are compared as sets, so a pure reordering is not an amendment and an exact replay is a no-op.
 
-### Preconditions (refusals, checked in this order, nothing written)
+### Preconditions (refusals, nothing written)
 
-1. The graph is v2. A legacy graph uses `upgrade-spec-trace`.
-2. There are no `executing_tasks` and no active subagent. The implementation brief's prompt digest binds the rendered trace text.
-3. **No live Wave Gate:** `active_wave_gate` is absent or a `terminal-abandoned` tombstone. A live run's packets froze the old trace, so the operator abandons it first; abandon now stamps the tombstone (#74).
-4. **Completed Waves are immutable:** every Task in a Wave present in `wave_gate_history` keeps a set-equal trace. Moving a Completion Claim into or out of a completed Wave is the same change seen from the other side, so it is refused too.
-5. **Every new or changed id exists in the Spec Index.**
-   - The Spec Index is observed at amend time, exactly like population does.
-   - If the index is unavailable and the amendment adds a Completion Claim, it is refused (fail closed). Removals and Contribution-only changes still apply.
-6. The candidate passes the full relational `parseSpecTraceContract`. The load boundary runs it anyway; running it first gives a typed refusal, not a write error.
+As implemented, checked in this order; the first that applies wins. Items marked † were added during implementation (see "Implementation deviations").
+
+1. `legacy-graph`: the graph is v2. A legacy graph uses `upgrade-spec-trace`.
+2. `invalid-input`: the exact roster parses, matches the protected roster in order, and repeats no id within a Task's arrays.
+3. **No-op replay:** a submitted trace that is set-equal for every Task returns `unchanged` here, before any state precondition.
+4. `not-executing` †: the graph is in the execute Phase with a current Wave.
+5. `spec-authority-changed` †: the observed Spec Index names the locked `spec_file`.
+6. `implementation-active`: there are no `executing_tasks`. The shell also refuses an active subagent before and under the lock. The implementation brief's prompt digest binds the rendered trace text.
+7. `live-wave-gate`: **No live Wave Gate.** `active_wave_gate` is absent or a `terminal-abandoned` tombstone. A live run's packets froze the old trace, so the operator abandons it first; abandon now stamps the tombstone (#74).
+8. `completed-wave-changed`: **Completed Waves are immutable.** Every Task in a Wave present in `wave_gate_history` keeps a set-equal trace. Moving a Completion Claim into or out of a completed Wave is the same change seen from the other side, so it is refused too.
+9. `spec-index-unavailable` / `unknown-requirement`: **every added id, claim or Contribution, is a completable FR/AS entry of the Spec Index observed at amend time**, exactly like population. An unavailable index refuses any added id (fail closed); removals still apply.
+10. `invalid-trace`: the candidate passes the full relational `parseSpecTraceContract`. The load boundary runs it anyway; running it first gives a typed refusal, not a write error.
 
 ### The locked transition
 
@@ -74,8 +78,8 @@ Every Task appears exactly once, in protected order. Arrays are compared as sets
   - mint a hash from the amend-time Spec Index for every added claim;
   - drop the hashes of removed claims.
 
-  Afterwards the hash keys are a subset of `spec_anchors`. The load boundary gains that check, and it holds for all writers.
-- **Retire trace-derived review authority** with `resetWaveGateReviewAuthority` for every Task in the current Wave. This is the same retirement restart, orphan recovery and successor start already use.
+  Afterwards each amended Task's hash keys are exactly its claims (by construction; no load-boundary check, see deviations).
+- **Retire trace-derived review authority** for the current Wave: `supersedeAbandonedWaveGateReview` over a tombstone, otherwise `retireWaveReviewResidue` (both in `wave-gate-registration.ts`, built on `resetWaveGateReviewAuthority`). This is the same retirement restart, orphan recovery and successor start already use.
   - It clears `review_run`, `spec_check`, `wave_review_epoch`, `active_wave_completion_suite` and the tombstone.
   - It re-derives `wave_gates` blocks.
   - It keeps Findings and review generations.
@@ -107,19 +111,19 @@ Every Task appears exactly once, in protected order. Arrays are compared as sets
   - hash retention, minting and dropping;
   - retirement clears exactly the trace-derived fields and keeps status, proof and findings;
   - the audit entry matches;
-  - property: any accepted amendment yields a graph the load boundary accepts, with hash keys a subset of anchors.
+  - property: any accepted amendment yields a graph the load boundary accepts, with each amended Task's hash keys equal to its claims.
 - **Shell:**
   - the helper commits through StateManager;
   - it refuses an executing Task or active subagent;
   - with a tombstone, the amendment then a fresh successor start installs cleanly;
   - without a tombstone, a fresh start installs cleanly.
-- **Load boundary:** a hash key outside `spec_anchors` is refused, and existing graphs still load.
+- **Load boundary:** a trace contradicting its latest amendment is refused, and existing graphs still load. (The planned hash-key subset check was dropped; see deviations.)
 - **Registration:** whitelist, `KNOWN_HANDLERS`, the handshake route, and the guard-state-file helper match.
 
 ## Docs
 
 - `docs/operations.md`:
-  - a new "Amending the Requirement trace" section;
+  - a new "Amending a v2 Requirement trace" section;
   - the escalation/attest section stops naming "anchor-only repair" as a reset scenario.
 - `commands/loom.md`, the decompose/repair guidance.
 - `CONTEXT.md`, the Requirement Content Hash entry: hashes are minted when an edge is created, at population or at amendment.
@@ -138,3 +142,5 @@ Every Task appears exactly once, in protected order. Arrays are compared as sets
 - **Exact replay is a no-op before state preconditions.** A replay after a successor gate went live returns `unchanged` instead of `live-wave-gate`.
 - **Added refusals:** `not-executing` (phase must be execute) and `spec-authority-changed` (the observed Spec Index must name the locked `spec_file`, mirroring population).
 - **Re-population drops `spec_trace_amendments`** with the Tasks it described.
+- **A repeated id in a submitted trace is `invalid-input`** (PR #75 review). Arrays compare as sets, so without it a repeated id read as an unchanged replay and reported success; the protected trace was never at risk because a changed candidate failed `invalid-trace`.
+- **Residue detection lives beside the reset** (PR #75 review): `retireWaveReviewResidue` in `wave-gate-registration.ts` owns both the "is any current-Wave review authority left" predicate and the reset, so a new authority field cannot be cleared by the reset yet missed by the amendment.

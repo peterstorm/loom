@@ -217,6 +217,22 @@ export function resetWaveGateReviewAuthority(
 }
 
 /**
+ * Retire whatever review authority one Wave still carries with no gate
+ * registered: the state `resetWaveGateReviewAuthority` clears, detected beside
+ * it so the two cannot drift. With no residue the graph is returned unchanged,
+ * so an older Wave's spec-check is never cleared for nothing. A Requirement
+ * trace amendment with no tombstone to supersede retires through this.
+ */
+export function retireWaveReviewResidue(graph: TaskGraph, wave: number): TaskGraph {
+  const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
+  const residue = graph.wave_review_epoch !== undefined ||
+    graph.active_wave_completion_suite !== undefined ||
+    graph.spec_check?.wave === wave ||
+    graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
+  return residue ? resetWaveGateReviewAuthority(graph, waveTaskIds) : graph;
+}
+
+/**
  * A fresh Wave Gate run superseding an operator-abandoned one. Abandonment only
  * stamps a terminal tombstone; the abandoned run's review epoch, spec-check
  * record and packet-bound review state stay behind and contradict any

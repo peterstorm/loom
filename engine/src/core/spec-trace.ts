@@ -273,6 +273,24 @@ export function specTraceDiagnosticMessages(result: SpecTraceParseResult): reado
   return result.ok ? Object.freeze([]) : Object.freeze(result.diagnostics.map(({ message }) => message));
 }
 
+const isStringArray = (raw: unknown): raw is readonly string[] =>
+  Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
+
+/**
+ * The one shape of a Task's Requirement trace ownership: two string arrays,
+ * copied and frozen. Every parser of an ownership record (helper input,
+ * persisted amendment audit) builds it here under its own labels; null when
+ * either field is not a string array.
+ */
+export function parseTraceOwnership(anchors: unknown, contributions: unknown): SpecTraceOwnership | null {
+  return isStringArray(anchors) && isStringArray(contributions)
+    ? Object.freeze({
+        spec_anchors: Object.freeze([...anchors]),
+        spec_contributions: Object.freeze([...contributions]),
+      })
+    : null;
+}
+
 const sameSet = (left: readonly string[], right: readonly string[]): boolean => {
   const leftSet = new Set(left);
   const rightSet = new Set(right);
