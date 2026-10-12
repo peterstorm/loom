@@ -151,6 +151,8 @@ You MUST NOT overturn a settled row. If you believe one is wrong, the defect is 
 
 **Then emit both unclaimed lists from the projection** — Functional Requirements and Acceptance Scenarios — each entry as CRITICAL: a Requirement or Scenario whose completion has no planned owner at any Wave. Requirement Contributions are deliberately not completion ownership; if a listed item has contributing work planned, say so beside the finding rather than dropping it.
 
+**If the projection carries "Requirements completed in earlier Waves whose text changed since they passed", report each entry as a MEDIUM finding, verbatim.** An earlier Wave verified that Requirement, but since then its text changed, it stopped being completable, or the hash recording what was verified was altered (corrupt authority, not a rewrite). The section is advisory and never blocks the current Wave: the current Wave did not do that work, and the finding is never a CRITICAL footer line. The section is absent when nothing drifted.
+
 ### Step 5: Acceptance scenario coverage
 
 Acceptance Scenarios are canonical `AS-NNN` entries in the Spec Index—a Task claims one exactly as it claims an `FR-NNN`. Step 4 decides implementation satisfaction; this step independently proves test linkage for **both** claimed and unclaimed scenarios.
@@ -161,7 +163,7 @@ Acceptance Scenarios are canonical `AS-NNN` entries in the Spec Index—a Task c
 grep -rn "AS-001" --include=*.test.ts --include=*.spec.ts --include=*Test.java .
 ```
 
-The convention is `it('AS-001: …')` — an identifier in a test name is a structural link, not prose matching.
+The convention is `it('AS-001: …')`, or `@DisplayName("AS-001: …")` in JUnit. An identifier in a test name is a structural link, not prose matching. The implementation brief lists the names each Task owes for the scenarios it claims, so a missing name is a real gap, not an unknown convention.
 
 1. **Emit verdict**: `AS-NNN: COVERED — <test file>` or `AS-NNN: NOT COVERED — <reason>`.
 2. When the grep finds a name, **Read the test** to confirm it exercises the scenario rather than merely naming it.

@@ -1,7 +1,8 @@
 /**
  * Requirement Coverage Projection — the pure join of one Spec Index against the
- * whole protected Task roster: rows describe the current Wave, while unclaimed
- * completion lists consider every Wave.
+ * whole protected Task roster: rows describe the current Wave, unclaimed
+ * completion lists consider every Wave, and completed earlier Waves are
+ * compared for Requirement drift since they passed.
  *
  * Every verdict here is decided by structure alone: an identifier is in the
  * Spec Index or it is not, a Task declared artifacts or it did not, a recorded
@@ -149,6 +150,10 @@ export type SpecIndexAvailability =
 export type CoverageTask = Readonly<{
   id: string;
   inCurrentWave: boolean;
+  /** The Task passed its Wave Gate. Its recorded hashes then name the text that
+   * Wave verified (completion re-anchors them), which is what makes drift on an
+   * earlier Wave's Requirement observable. */
+  completed: boolean;
   /** The Task records an Architecture Decision for work that already shipped.
    * A decision record traces to the plan's decisions, not to a Requirement, so
    * a Wave made only of them is the plan's closing record — not work that
@@ -176,6 +181,24 @@ export type CoverageTask = Readonly<{
  */
 export type UnclaimedWaveTrace = "contributions" | "decision-records" | "nowhere";
 
+/**
+ * A Requirement an earlier Wave completed whose specification no longer says
+ * what that Wave verified: its text was `rewritten`, the entry was `withdrawn`
+ * (it is gone, or now Out of Scope), or its recorded hash is an
+ * `unreadable-record` no engine could have written, so what that Wave verified
+ * can no longer be known. Advisory by construction — it never enters the
+ * settled floor, because the current Wave did not do the work and cannot
+ * remedy it.
+ */
+export type CompletedClaimDrift = Readonly<{
+  taskId: string;
+  claim: string;
+  change:
+    | Readonly<{ kind: "rewritten"; entry: CompletableEntry; recorded: SpecContentHash }>
+    | Readonly<{ kind: "withdrawn" }>
+    | Readonly<{ kind: "unreadable-record"; stored: string }>;
+}>;
+
 export type RequirementCoverage =
   | Readonly<{ kind: "unavailable"; reason: SpecIndexUnavailable }>
   | Readonly<{
@@ -192,6 +215,10 @@ export type RequirementCoverage =
        * roster of scenarios to check coverage for, and the step that exists to
        * find uncovered scenarios silently iterates nothing. */
       unclaimedScenarios: readonly SpecEntryId<"AS">[];
+      /** Claims of completed Tasks outside the current Wave whose Requirement
+       * changed since their Wave passed. Without it a Requirement rewritten
+       * after its Wave completed is never compared again. */
+      completedDrift: readonly CompletedClaimDrift[];
       /** How this Wave traces to the specification when it claims no
        * completions. Only `nowhere` is a settled CRITICAL. */
       unclaimedTrace: UnclaimedWaveTrace;
@@ -289,6 +316,29 @@ function unclaimedTraceOf(
 }
 
 /**
+ * One completed earlier-Wave claim against the current Spec Index. The hash
+ * comparison is `driftOf`'s, so a completed claim and a current one can never
+ * disagree on what drift is. A claim with nothing recorded has no verified text
+ * to compare, so it reports only a withdrawal, which needs no hash to prove.
+ */
+function completedDriftOf(
+  task: CoverageTask,
+  claim: string,
+  byId: ReadonlyMap<string, IndexedEntry>,
+): CompletedClaimDrift | null {
+  const of = (change: CompletedClaimDrift["change"]): CompletedClaimDrift =>
+    Object.freeze({ taskId: task.id, claim, change: Object.freeze(change) });
+  const indexed = byId.get(claim);
+  if (indexed === undefined || indexed.family === "excluded") return of({ kind: "withdrawn" });
+  const entry = indexed.entry;
+  return match<DriftFact, CompletedClaimDrift | null>(driftOf(task.anchorHashes, claim, entry, undefined))
+    .with({ kind: "drifted" }, ({ recorded }) => of({ kind: "rewritten", entry, recorded }))
+    .with({ kind: "unreadable-record" }, ({ stored }) => of({ kind: "unreadable-record", stored }))
+    .with({ kind: "stable" }, { kind: "unverifiable" }, () => null)
+    .exhaustive();
+}
+
+/**
  * The sole Requirement Coverage Projection derivation.
  *
  * Total and deterministic: the same Spec Index and roster always produce the
@@ -305,11 +355,16 @@ export function projectRequirementCoverage(
   }
   const byId = entryById(specIndex.index);
   const rows: CoverageRow[] = [];
+  const completedDrift: CompletedClaimDrift[] = [];
   const claimedAnywhere = new Set<string>();
   for (const task of tasks) {
     for (const claim of task.completionAnchors) {
       claimedAnywhere.add(claim);
-      if (!task.inCurrentWave) continue;
+      if (!task.inCurrentWave) {
+        const drift = task.completed ? completedDriftOf(task, claim, byId) : null;
+        if (drift !== null) completedDrift.push(drift);
+        continue;
+      }
       rows.push(Object.freeze({
         taskId: task.id,
         claim,
@@ -325,6 +380,7 @@ export function projectRequirementCoverage(
     unclaimedTrace: unclaimedTraceOf(tasks, byId),
     unclaimed: unclaimedOf(specIndex.index.frs),
     unclaimedScenarios: unclaimedOf(specIndex.index.scenarios),
+    completedDrift: Object.freeze(completedDrift),
     exclusions: specIndex.index.oos,
     glossary: specIndex.index.glossary,
   });
@@ -877,6 +933,32 @@ function renderUnclaimed(heading: string, family: string, ids: readonly string[]
 }
 
 /**
+ * Earlier-Wave drift, rendered only when present: an empty roster adds no
+ * bytes, so every packet without such drift keeps the identity it had before
+ * this section existed.
+ */
+function renderCompletedDrift(drift: readonly CompletedClaimDrift[]): readonly string[] {
+  if (drift.length === 0) return [];
+  return [
+    "### Requirements completed in earlier Waves whose text changed since they passed",
+    "",
+    "Advisory, never settled: each Requirement below passed an earlier Wave Gate, but since then its text",
+    "changed, it stopped being completable, or the record of what was verified became unreadable. Report",
+    "each as a MEDIUM finding. The current Wave did not do this work and is not blocked by it.",
+    "",
+    ...drift.map(({ taskId, claim, change }) => `- ${cell(taskId)} completed ${cell(claim)} — MEDIUM: ` +
+      match<CompletedClaimDrift["change"], string>(change)
+        .with({ kind: "rewritten" }, ({ recorded, entry }) =>
+          `its text changed since that Wave passed (verified ${recorded.slice(0, 12)}, now ${entry.contentHash.slice(0, 12)})`)
+        .with({ kind: "withdrawn" }, () => "it is no longer a completable entry in the Spec Index")
+        .with({ kind: "unreadable-record" }, ({ stored }) =>
+          `its recorded hash is not a value this engine could have written (stored ${cell(JSON.stringify(stored.slice(0, 32)))}) — the TaskGraph's Requirement hashes have been altered`)
+        .exhaustive()),
+    "",
+  ];
+}
+
+/**
  * The Requirement Coverage Projection as the spec-check Agent reads it.
  *
  * Deterministic text: the same projection always renders the same bytes, so the
@@ -901,6 +983,7 @@ export function renderRequirementCoverage(coverage: RequirementCoverage): string
     "",
     ...renderUnclaimed("Functional Requirements", "Functional Requirement", coverage.unclaimed),
     ...renderUnclaimed("Acceptance Scenarios", "Acceptance Scenario", coverage.unclaimedScenarios),
+    ...renderCompletedDrift(coverage.completedDrift),
     "### Required settled CRITICAL footer lines",
     "",
     "Copy every line below verbatim into the machine-readable footer. These structural findings remain",
@@ -924,7 +1007,8 @@ export function renderRequirementCoverage(coverage: RequirementCoverage): string
 
 /**
  * The Spec Index content hash for every claim the Task can be joined to, as the
- * specification stands at the moment the Task→Requirement edge is created.
+ * specification stands at the moment the Task→Requirement edge is created, and
+ * again when the registered Wave Gate completes (`reanchorVerifiedClaims`).
  *
  * The inverse of the drift comparison above, and the reason `driftOf` can ever
  * answer anything but `unverifiable`. Hashes are taken from the entries

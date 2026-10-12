@@ -57,6 +57,8 @@ export function ruleDocumentsFor(fileList: readonly string[]): readonly RuleDocu
 export const NO_CODE_RULES = "N/A — no code in this task.";
 /** Literal substituted for `{implementation_retry_context}` on attempt 1. */
 export const NO_RETRY_CONTEXT = "None — semantic attempt 1.";
+/** Literal substituted for `{scenario_test_names}` when the Task claims no Acceptance Scenario. */
+export const NO_SCENARIO_TEST_NAMES = "None — this Task claims no Acceptance Scenario.";
 
 /** The template variables the implementation brief template must declare —
  *  exactly these, so a drifted template is refused rather than half-rendered. */
@@ -72,6 +74,7 @@ const BRIEF_VARIABLES = [
   "task_description",
   "spec_anchors_formatted",
   "spec_contributions_formatted",
+  "scenario_test_names",
   "plan_context",
   "file_list",
   "plan_file_path",
@@ -140,6 +143,27 @@ function formattedRequirements(
 }
 
 /**
+ * The test-name prefixes a Task owes: one per Acceptance Scenario it claims.
+ * `/spec-check` links a scenario to its tests only by an `AS-NNN:` test-name
+ * prefix, so an unnamed scenario is reported NOT COVERED. Contributions owe
+ * none, because a Contribution is not a completion claim. Reached only after
+ * every claim resolved against the Spec Index, so a `null` index here means
+ * the Task claims nothing and "none owed" is true.
+ */
+function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): string {
+  const scenarioIds = new Set<string>(spec?.scenarios.map(({ id }) => id) ?? []);
+  const owed = claims.filter((id) => scenarioIds.has(id));
+  if (owed.length === 0) return NO_SCENARIO_TEST_NAMES;
+  return [
+    "Give each claimed Acceptance Scenario below at least one test whose name starts with its identifier and a colon. " +
+      "`/spec-check` links a scenario to its tests only by that name and reports a scenario without one NOT COVERED. " +
+      "If `new_tests` is waived, an existing test must already carry the name; report any that does not.",
+    "",
+    ...owed.map((id) => `- \`${id}: …\` — for example \`it('${id}: …', …)\` or \`@DisplayName("${id}: …")\``),
+  ].join("\n");
+}
+
+/**
  * Render one Task's implementation brief, or refuse with the exact reason the
  * brief could not be admissible.
  */
@@ -203,6 +227,7 @@ export function renderImplementationBrief(
     task_description: task.description,
     spec_anchors_formatted: anchors.value,
     spec_contributions_formatted: contributions.value,
+    scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",

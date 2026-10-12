@@ -102,6 +102,7 @@ const taskArb: fc.Arbitrary<CoverageTask> = fc
   .record({
     id: fc.string({ minLength: 1, maxLength: 6 }),
     inCurrentWave: fc.boolean(),
+    completed: fc.boolean(),
     decisionRecord: fc.boolean(),
     completionAnchors: fc.uniqueArray(claimArb, { maxLength: 6 }),
     contributions: fc.array(fc.constantFrom(...KNOWN), { maxLength: 2 }),
@@ -211,6 +212,7 @@ describe("Requirement Coverage Projection properties", () => {
         const coverage = projectRequirementCoverage(indexed, [{
           id: "T1",
           inCurrentWave: true,
+          completed: false,
           decisionRecord: false,
           completionAnchors: claims,
           contributions: [],
@@ -251,6 +253,39 @@ describe("Requirement Coverage Projection properties", () => {
         : current.length > 0 && current.every(({ decisionRecord }) => decisionRecord) ? "decision-records" : "nowhere";
       expect(coverage.unclaimedTrace).toBe(expected);
     }));
+  });
+
+  it("reports earlier-Wave drift for exactly the completed out-of-Wave claims whose verified text is gone", () => {
+    const COMPLETABLE = new Set<string>(["FR-001", "FR-002", "FR-003", "AS-001", "AS-002"]);
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      const changeOf = (task: CoverageTask, claim: string): string | null => {
+        if (!COMPLETABLE.has(claim)) return "withdrawn";
+        const recorded = task.anchorHashes.get(claim);
+        if (recorded === undefined) return null;
+        if (recorded.kind === "unreadable") return "unreadable-record";
+        return recorded.hash === REAL_HASHES.get(claim) ? null : "rewritten";
+      };
+      const expected = tasks
+        .filter(({ inCurrentWave, completed }) => !inCurrentWave && completed)
+        .flatMap((task) => task.completionAnchors.flatMap((claim) => {
+          const change = changeOf(task, claim);
+          return change === null ? [] : [`${task.id}|${claim}|${change}`];
+        }));
+      expect(coverage.completedDrift.map(({ taskId, claim, change }) => `${taskId}|${claim}|${change.kind}`))
+        .toEqual(expected);
+    }));
+  });
+
+  it("reaches every earlier-Wave drift kind across the generated rosters", () => {
+    const seen = new Set<string>();
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      for (const { change } of coverage.completedDrift) seen.add(change.kind);
+    }), { numRuns: 400 });
+    expect(seen).toEqual(new Set(["rewritten", "withdrawn", "unreadable-record"]));
   });
 
   it("the floor is what reconcileSpecCheck actually enforces", () => {

@@ -179,6 +179,7 @@ await waitFor(() => expect(screen.getByText('Loaded')).toBeInTheDocument());
 ## Checklist
 
 - [ ] Test name describes behavior, not implementation
+- [ ] A test for a claimed Acceptance Scenario starts its name with the identifier: `it('AS-004: rejects a stale cursor', …)`. `/spec-check` links scenarios to tests only by this prefix
 - [ ] Uses accessible queries (`getByRole`, `getByLabelText`)
 - [ ] Avoids implementation details
 - [ ] Independent of other tests

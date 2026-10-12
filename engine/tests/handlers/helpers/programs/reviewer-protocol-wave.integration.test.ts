@@ -30,6 +30,8 @@ import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixture
 import { facadeParentEnvironment, type FacadeParent } from "../../../fixtures/facade-parent";
 import { expectParentIndependentIssuance, withoutEmissionRouteDelta } from "../../../fixtures/emission-route-delta";
 import { value } from "../../../fixtures/parse-result";
+import { parseSpec } from "../../../../src/core/parse-spec";
+import { recordedAnchorHashes } from "../../../../src/core/requirement-coverage";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -221,6 +223,26 @@ describe("registered Wave reviewer protocol", () => {
     expect(completed.review_run).toBeUndefined();
     const before = readFileSync(p.statePath);
     expect(await resume(p, handle)).toEqual(final);
+    expect(readFileSync(p.statePath)).toEqual(before);
+  }, 60_000);
+
+  it("re-anchors the completed Wave's claim hashes to the spec text its spec-check reviewed", async () => {
+    const p = project();
+    // Claim-time hashes for text that has since been rewritten: the Wave is
+    // reviewed against the current spec, so completion must record that text.
+    const stale = "0".repeat(64);
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) =>
+      ({ ...task, spec_anchor_hashes: { "FR-001": stale, "AS-001": stale } })) }));
+    const { handle, action } = await start(p);
+    await capture(handle, action.requests![0]!.authority, specPass);
+    for (const { authority } of action.requests!.slice(1)) await capture(handle, authority, payload(handle, authority));
+    const done = await resume(p, handle);
+    expect(done.kind, JSON.stringify(done)).toBe("done");
+    const reviewed = parseSpec(specText);
+    if (!reviewed.ok) throw new Error("fixture spec must parse");
+    expect(graph(p).tasks[0]!.spec_anchor_hashes).toEqual(recordedAnchorHashes(reviewed.value, ["FR-001", "AS-001"]));
+    const before = readFileSync(p.statePath);
+    expect(await resume(p, handle)).toEqual(done);
     expect(readFileSync(p.statePath)).toEqual(before);
   }, 60_000);
 

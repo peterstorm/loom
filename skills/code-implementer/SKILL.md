@@ -137,6 +137,11 @@ For every implementation, consider:
 - Use real DB/APIs in test containers
 - Don't test business logic here
 
+### Acceptance Scenario Tests
+- A claimed Acceptance Scenario needs at least one test whose name starts with its identifier and a colon: `it('AS-004: rejects a stale cursor', …)`, or `@DisplayName("AS-004: rejects a stale cursor")` in JUnit
+- `/spec-check` links scenarios to tests only by this name; a scenario without one is reported NOT COVERED
+- The implementation brief's "Acceptance Scenario Test Names" section lists the names this Task owes
+
 ---
 
 ## Quality Standards
