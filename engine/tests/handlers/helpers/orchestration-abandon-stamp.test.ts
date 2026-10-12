@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -124,6 +124,30 @@ describe("abandonment state-stamp wrapper arms", () => {
         "--reason 'legacy exhaustion'",
     );
     expect(JSON.stringify(status)).not.toContain("resume-orchestration");
+  });
+
+  // The printed replay and the abandon parser live in different modules; this
+  // round trip through a real shell and the real CLI is what keeps them agreeing.
+  it("prints a replay that the real abandon command accepts and that stamps the registration", async () => {
+    const runId = "run.replay-round-trip";
+    const reason = "it's $(not) `expanded` --force";
+    const { statePath, runsRoot } = liveRegistrationProject(runId);
+    const opened = openRunDirectory(runsRoot, join(runsRoot, runId));
+    if (!opened.ok) throw new Error(opened.error.message);
+    expect((await opened.value.abandonRun({ supersededBy: null, reason })).ok).toBe(true);
+
+    const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as LoomStatus;
+    const message = status.next.reasons[0]?.message ?? "";
+    const prefix = "helper orchestration abandon ";
+    const replay = message.slice(message.indexOf(prefix) + prefix.length);
+    const argv = execFileSync("bash", ["-c", 'eval "set -- $1"; printf "%s\\0" "$@"', "replay", replay], { encoding: "utf8" })
+      .split("\0").slice(0, -1);
+
+    const result = await runCli(["abandon", ...argv], dirname(dirname(dirname(statePath))));
+
+    expect(result.status, result.stderr).toBe(0);
+    const graph = JSON.parse(readFileSync(statePath, "utf8")) as { active_wave_gate: { terminalOutcome: unknown } };
+    expect(graph.active_wave_gate.terminalOutcome).toEqual({ kind: "terminal-abandoned", reason, supersededBy: null });
   });
 
   it("reports an unreadable marker as unavailable authority, never as a resumable run", async () => {
