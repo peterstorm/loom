@@ -223,6 +223,10 @@ export function reduceLockedPiPhaseResult(
         value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
       };
     }
+    // Not a failure: population, not this result, moves decompose → execute.
+    if (transition.kind === "awaits-population") {
+      return { state: prepared.state, value: outcome([`loom(pi): ${transition.reason}`]) };
+    }
     return {
       state: reducePiPhaseTransition(
         prepared.state,

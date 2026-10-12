@@ -444,6 +444,8 @@ in the assembled prompt, do not spawn.
 
 **Wait for agent completion.** Agent outputs pure JSON task graph.
 
+The decompose agent's completion does **not** advance the phase: `current_phase` stays `decompose` through validation and approval, and only `populate-task-graph` (4d) moves it to `execute`, in the same write that installs the Tasks. An agent that returns no usable output therefore leaves the phase at `decompose` — re-spawn it. A plan rejected at 4c also stays in `decompose`.
+
 ### 4a. Validate Output
 
 Run schema validator on agent output:
@@ -530,6 +532,7 @@ This helper:
 - Reports Project Verification Coverage immediately: `configured` with non-empty check IDs, or `not-configured` with `engine-default` / `empty-operator-manifest`; later source edits cannot re-freeze this TaskGraph
 - Merges with validated decompose output (tasks, waves)
 - Adds `github_issue`, `spec_file`, `plan_file`, `current_wave: 1`
+- Moves `current_phase` decompose → execute (and records `phase_artifacts.decompose`) in the same write; it refuses any phase other than `decompose` (first population) or `execute` (re-population)
 - Initializes `wave_gates`, `executing_tasks`
 - Writes via `StateManager` (chmod 444 protection)
 
@@ -889,6 +892,7 @@ Advances `current_phase` when phase agents complete.
 | clarify-agent | architecture |
 | architecture-agent | plan-alignment (OR decompose if `--skip-plan-alignment`) |
 | plan-alignment-agent | decompose |
+| decompose-agent | *(stays decompose)* — `populate-task-graph` moves to execute in the same write that installs the Tasks |
 
 **Artifact verification:** `advance-phase.sh` verifies expected files exist on disk before advancing:
 - After `specify`: checks `spec_file` exists

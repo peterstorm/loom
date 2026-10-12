@@ -189,6 +189,36 @@ describe("populate-task-graph — overwrite guard (funneled through the real han
   });
 });
 
+describe("populate-task-graph — owns decompose → execute (issue #50 Gap 1)", () => {
+  it("moves an approved decompose graph to execute in the same write that installs its Tasks", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+
+    expect((await populate(decomposeJson(plan), [])).kind).toBe("passthrough");
+
+    const after = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(after.current_phase).toBe("execute");
+    expect(after.phase_artifacts).toEqual({ decompose: "task_graph" });
+    expect(after.tasks.map(({ id }) => id)).toEqual(["T9"]);
+  });
+
+  it("refuses to install Tasks before decompose and leaves the graph untouched", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "architecture" });
+    const before = stateBytes(statePath);
+
+    const result = await populate(decomposeJson(plan), []);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("requires current_phase decompose (first population) or execute"),
+    });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+});
+
 describe("populate-task-graph — protected verification manifest authority", () => {
   it.each(["absent-directory", "absent-file", "empty", "configured"] as const)(
     "announces %s coverage on successful population and never re-freezes on later source edits",

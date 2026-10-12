@@ -1,4 +1,4 @@
-import type { Task, TaskGraph } from "../types";
+import type { Phase, Task, TaskGraph } from "../types";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
@@ -112,9 +112,18 @@ export type TaskGraphPopulationCommand = Readonly<{
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
-  kind: "no-tasks" | "invalid-task-waves" | "non-pending-tasks" | "spec-authority-changed" | "spec-observation-mismatch";
+  kind:
+    | "no-tasks"
+    | "invalid-task-waves"
+    | "phase-not-populatable"
+    | "non-pending-tasks"
+    | "spec-authority-changed"
+    | "spec-observation-mismatch";
   message: string;
 }>;
+
+/** First population leaves decompose; re-population happens during execute. */
+const POPULATABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>(["decompose", "execute"]);
 
 export type TaskGraphPopulationResult =
   | Readonly<{
@@ -182,6 +191,10 @@ function sanitizeTask(
  * Pure TaskGraph aggregate command. The shell supplies parser-proven authored
  * data and immutable observations; this function owns every state transition
  * performed while the StateManager lock is held.
+ *
+ * It is also the only way out of decompose: the Tasks and the move to execute
+ * land in one write, so an execute graph with no Tasks cannot be written
+ * (issue #50). The decompose agent's SubagentStop leaves the phase alone.
  */
 export function populateTaskGraph(
   existing: TaskGraph,
@@ -194,6 +207,13 @@ export function populateTaskGraph(
   }
   const waveError = taskWaveRosterError(command.tasks);
   if (waveError !== null) return reject("invalid-task-waves", waveError);
+  if (!POPULATABLE_PHASES.has(existing.current_phase)) {
+    return reject(
+      "phase-not-populatable",
+      "populate-task-graph requires current_phase decompose (first population) or execute " +
+        `(re-population), got ${existing.current_phase}; finish the earlier phases first`,
+    );
+  }
   if (!command.force && existing.tasks.some(({ status }) => status !== "pending")) {
     return reject(
       "non-pending-tasks",
@@ -234,6 +254,8 @@ export function populateTaskGraph(
   } = existing;
   const state: TaskGraph = Object.freeze({
     ...existingWithoutWaveAuthority,
+    current_phase: "execute",
+    phase_artifacts: { ...existing.phase_artifacts, decompose: "task_graph" },
     spec_trace_version: 2,
     plan_title: command.planTitle,
     plan_file: command.validatedPlanFile,

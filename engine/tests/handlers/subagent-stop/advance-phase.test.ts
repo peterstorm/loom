@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import advancePhaseHandler, {
+  DECOMPOSE_AWAITS_POPULATION,
   applyEligiblePhaseTransition,
   countMarkers,
   isPhaseResultEligible,
@@ -521,11 +522,11 @@ describe("phase transitions", () => {
 
   // ── decompose ──
 
-  it("decompose → execute (always)", () => {
-    const r = resolveTransition("decompose", mkState());
-    expect(r).not.toBeNull();
-    expect(r!.nextPhase).toBe("execute");
-    expect(r!.artifact).toBe("task_graph");
+  it("decompose awaits population instead of advancing to an empty execute (issue #50 Gap 1)", () => {
+    expect(resolveTransition("decompose", mkState({ current_phase: "decompose" }))).toEqual({
+      kind: "awaits-population",
+      reason: DECOMPOSE_AWAITS_POPULATION,
+    });
   });
 
   // ── terminal / no-op phases ──
@@ -837,6 +838,28 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
       } finally {
         update.mockRestore();
       }
+    });
+  });
+
+  it("the REAL handler leaves an empty graph in decompose when the decompose agent stops (issue #50 Gap 1)", async () => {
+    // The observed failure: the agent returned no output and its SubagentStop
+    // advanced to execute with tasks: [] and wave_gates: {}. Only population may
+    // leave decompose now, so a re-spawn stays legal and nothing is stranded.
+    const session = `phase-decompose-${process.pid}-${Date.now()}`;
+    const initial = mkState({ current_phase: "decompose" });
+    await withPhaseState(session, initial, async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_id: "decompose-agent",
+        agent_type: "loom:decompose-agent",
+        agent_transcript_path: "",
+      }), []);
+
+      expect(result).toEqual({
+        kind: "passthrough",
+        systemMessage: DECOMPOSE_AWAITS_POPULATION,
+      });
+      expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toEqual(initial);
     });
   });
 
