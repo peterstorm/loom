@@ -203,6 +203,21 @@ describe("populate-task-graph — owns decompose → execute (issue #50 Gap 1)",
     expect(after.tasks.map(({ id }) => id)).toEqual(["T9"]);
   });
 
+  it("leaves a decompose graph in decompose, byte for byte, when population fails", async () => {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    const before = stateBytes(statePath);
+    const invalid = JSON.parse(decomposeJson(plan)) as { tasks: Array<Record<string, unknown>> };
+    invalid.tasks[0]!.agent = "no-such-agent";
+
+    const result = await populate(JSON.stringify(invalid), []);
+
+    expect(result.kind).toBe("error");
+    expect(stateBytes(statePath)).toBe(before);
+    expect((JSON.parse(before) as TaskGraph).current_phase).toBe("decompose");
+  });
+
   it("refuses to install Tasks before decompose and leaves the graph untouched", async () => {
     const dir = tempDir();
     const plan = modelFreePlan(dir);

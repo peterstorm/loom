@@ -3,6 +3,7 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import advancePhaseHandler, {
   DECOMPOSE_AWAITS_POPULATION,
   applyEligiblePhaseTransition,
+  decidePhaseResult,
   countMarkers,
   isPhaseResultEligible,
   observePhaseTransition,
@@ -165,6 +166,28 @@ describe("applyEligiblePhaseTransition", () => {
       plan_file: selected,
       phase_artifacts: { architecture: selected },
     });
+  });
+});
+
+describe("decidePhaseResult — the one policy both SubagentStop shells apply", () => {
+  it.each<readonly [string, PhaseTransitionResolution, ReturnType<typeof decidePhaseResult>]>([
+    [
+      "a ready transition advances",
+      { kind: "ready", nextPhase: "specify", artifact: "brainstorm.md" },
+      { kind: "advance", transition: { kind: "ready", nextPhase: "specify", artifact: "brainstorm.md" } },
+    ],
+    [
+      "a not-ready transition refuses the result",
+      { kind: "not-ready", reason: "brainstorm.md was not found" },
+      { kind: "refuse", reason: "brainstorm.md was not found" },
+    ],
+    [
+      "a decompose result awaiting population is only a note",
+      { kind: "awaits-population", reason: DECOMPOSE_AWAITS_POPULATION },
+      { kind: "note", reason: DECOMPOSE_AWAITS_POPULATION },
+    ],
+  ])("%s", (_name, resolution, decision) => {
+    expect(decidePhaseResult(resolution)).toEqual(decision);
   });
 });
 
