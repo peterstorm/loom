@@ -4,7 +4,13 @@
  * to a closed outcome, without deriving any status around it.
  */
 import { describe, expect, it } from "vitest";
-import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "../../src/core/implementation-window";
+import {
+  classifyImplementationWindow,
+  remediateEscalationCommand,
+  type ImplementationReservationStatusObservation,
+} from "../../src/core/implementation-window";
+import { deriveLoomStatusFromParsedGraph } from "../../src/core/loom-status";
+import { implementationEscalatedLineage } from "../fixtures/implementation-escalation";
 import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { activeWaveGateFixture, completedWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
@@ -114,6 +120,48 @@ describe("classifyImplementationWindow", () => {
     expect(classifyImplementationWindow(graph, observed(false))).toEqual({
       kind: "contradiction",
       reason: { kind: "authority-contradiction", message, taskId: "T1" },
+    });
+  });
+
+  describe("an escalated Task", () => {
+    const { retry, escalation } = implementationEscalatedLineage();
+    const escalatedGraph = graphFixture([task("T1", {
+      implementation_attempt_history: [retry, escalation],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    } as never)]);
+    const command = `helper orchestration remediate --task 'T1' --receipt '${escalation.receiptId}' ` +
+      `--reason '<why a fresh attempt is now sanctioned>'`;
+
+    it("renders the exact remediate command, quoting every operand", () => {
+      expect(remediateEscalationCommand({ taskId: "T1", receiptId: escalation.receiptId, failureKinds: ["x"] }))
+        .toBe(command);
+      expect(remediateEscalationCommand({ taskId: "T1", receiptId: "it's", failureKinds: ["x"] }))
+        .toContain(`--receipt 'it'\\''s'`);
+    });
+
+    it("names the remediate recovery in the window message", () => {
+      const window = classifyImplementationWindow(escalatedGraph, observed(false));
+      expect(window).toMatchObject({ kind: "window", recovery: { kind: "escalate-wave-implementation" } });
+      if (window.kind !== "window") return;
+      expect(window.message).toBe(
+        "Wave 1 requires implementation escalation; 1 task(s) reached a terminal implementation failure. " +
+        "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason",
+      );
+    });
+
+    it("gives each escalated Task's status reason its exact remediate command", () => {
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: escalatedGraph }, {
+        loadPlanModels: () => ({ kind: "none" }),
+        filePresence: () => ({ ok: true, exists: true }),
+        implementationReservations: observed(false),
+      });
+      const reason = status.next.reasons.find(({ kind }) => kind === "implementation-escalation-required");
+      expect(reason?.taskId).toBe("T1");
+      expect(reason?.message).toBe(
+        `T1 reached terminal implementation failure: ${escalation.failureKinds.join(", ")}; ` +
+        `after fixing the cause, remediate it: ${command}`,
+      );
     });
   });
 

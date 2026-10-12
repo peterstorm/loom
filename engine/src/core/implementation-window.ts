@@ -18,6 +18,7 @@
  */
 import type { StatusReason, TaskGraph, WaveImplementationDispatch, WaveImplementationRecovery } from "../types";
 import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
+import { quoteShellArgument } from "./shell-quoting";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
 import { staleReservationsForRosterObservation } from "./validate-task-execution";
 import { deriveWaveStartReadiness } from "./wave-gate-checks";
@@ -35,6 +36,19 @@ export type EscalatedImplementation = Readonly<{
   receiptId: string;
   failureKinds: NonEmpty<string>;
 }>;
+
+/** The `--reason` operand the operator replaces, already a single shell word. */
+const REMEDIATE_REASON_PLACEHOLDER = "'<why a fresh attempt is now sanctioned>'";
+
+/**
+ * The one command that consumes an escalation once its cause is fixed, with the
+ * exact terminal receipt filled in. Operands are shell-quoted, so pasting it
+ * passes them unchanged; only the reason is the operator's to write.
+ */
+export function remediateEscalationCommand(task: EscalatedImplementation): string {
+  return `helper orchestration remediate --task ${quoteShellArgument(task.taskId)} ` +
+    `--receipt ${quoteShellArgument(task.receiptId)} --reason ${REMEDIATE_REASON_PLACEHOLDER}`;
+}
 
 export type ImplementationWindow =
   /** The graph is not in the implementation window; status takes another branch. */
@@ -189,7 +203,8 @@ export function classifyImplementationWindow(
         wave,
         tasks: Object.freeze(escalated) as NonEmpty<EscalatedImplementation>,
       }),
-      `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure`,
+      `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure. ` +
+        "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason",
     );
   }
   if (dispatches.length > 0) {
