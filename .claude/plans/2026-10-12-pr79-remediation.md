@@ -43,3 +43,21 @@ Published in `pr79-policy-1` (initial revision, digest `e2f87c1e…`): 12 accept
 ## Registered remediation
 
 `defectFamily: not-required`. Support path: this plan file.
+
+## Round 3 (`pr79-review-3`)
+
+- **Scope:** commit `859c7c57`, 27 files.
+- **Result:**
+  - 0 critical;
+  - 9 advisory;
+  - all 7 reviewers admitted on attempt 1, two of them with no findings.
+- **Decisions:** published in `pr79-policy-3` (initial revision, digest `da3d5dd5…`). 5 accepted, 4 dismissed.
+
+| Finding | Decision |
+|---|---|
+| architecture-tech-lead-3: two attribution vocabularies | **Accepted.** `TaskAttribution` and `unprovenAttributionReason` move to `core/task-attribution.ts`. Pi's `unprovenAttribution` delegates to them, and the Claude legacy warning uses the same text. |
+| comment-analyzer-1: the "can only quarantine" wording omits stored evidence | **Accepted.** The module header, `docs/deterministic-core.md` and this plan now say that a guess settles through the untrusted legacy resolution, which stores evidence but leaves the Task pending for revalidation. |
+| code-simplifier-1, 2, 3 | **Accepted.** One freeze in `phaseGateTarget`; `pre`/`post` take an optional `agentId`; a local `bound()` constructor in the Pi resolver. |
+| pr-test-analyzer-1: failed-path parent-prompt test | **Dismissed.** Unreachable: the failed path always passes an empty parent prompt. |
+| type-design-analyzer-1, architecture-tech-lead-2: guard is textual | **Dismissed.** Decided in round 2; the barrier is `ImplementationAttemptAuthority`. |
+| architecture-tech-lead-1: `soleActiveBinding` port | **Dismissed.** It delegates to the same pure `resolveSoleActiveBinding`, so the rule has one owner. |

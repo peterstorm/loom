@@ -45,7 +45,7 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import type { ImplementationAuthorityObservation } from "../../implementation-attempt-sidecar";
 import { parseCompleteClaudeJsonl } from "../../core/claude-transcript-integrity";
-import { inferSoleExecutingTask } from "../../core/task-attribution";
+import { inferSoleExecutingTask, unprovenAttributionReason } from "../../core/task-attribution";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -330,7 +330,7 @@ export const runUpdateTaskStatus = async (
   if (!taskId) {
     const inference = inferSoleExecutingTask(mgr.load().executing_tasks ?? []);
     if (inference.kind === "inferred") {
-      process.stderr.write(`WARNING: ${agentType} transcript parse failed, inferred task ${inference.taskId} from executing_tasks\n`);
+      process.stderr.write(`WARNING: ${unprovenAttributionReason(agentType, inference.taskId, "sole-executing")}\n`);
       taskId = inference.taskId;
     } else {
       // Ambiguous or unavailable attribution cannot release any execution

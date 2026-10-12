@@ -548,23 +548,23 @@ export type PhaseGateTarget =
   | Readonly<{ kind: "fail-closed"; reason: string }>;
 
 export function phaseGateTarget(attribution: EvidenceAttribution): PhaseGateTarget {
-  return match(attribution)
+  return Object.freeze(match(attribution)
     .returnType<PhaseGateTarget>()
-    .with({ kind: "caller" }, { kind: "sole" }, ({ binding }) => Object.freeze({ kind: "gate", binding }))
-    .with({ kind: "ungated" }, { kind: "caller-unbound" }, () => Object.freeze({ kind: "pass" }))
+    .with({ kind: "caller" }, { kind: "sole" }, ({ binding }) => ({ kind: "gate", binding }))
+    .with({ kind: "ungated" }, { kind: "caller-unbound" }, () => ({ kind: "pass" }))
     .with({ kind: "contended" }, () =>
-      Object.freeze({ kind: "stand-down", reason: "call carries no agent_id and the session is contended" }))
+      ({ kind: "stand-down", reason: "call carries no agent_id and the session is contended" }))
     .with({ kind: "corrupt" }, () =>
-      Object.freeze({ kind: "fail-closed", reason: "machine binding authority has malformed rows" }))
-    .with({ kind: "caller-unparseable" }, ({ raw }) => Object.freeze({
+      ({ kind: "fail-closed", reason: "machine binding authority has malformed rows" }))
+    .with({ kind: "caller-unparseable" }, ({ raw }) => ({
       kind: "fail-closed",
       reason: `caller agent_id ${JSON.stringify(raw)} is reserved or path-unsafe — it cannot own a binding`,
     }))
-    .with({ kind: "caller-ambiguous" }, ({ agentId, bindings }) => Object.freeze({
+    .with({ kind: "caller-ambiguous" }, ({ agentId, bindings }) => ({
       kind: "fail-closed",
       reason: `caller ${agentId} owns ${bindings} binding lines — its machine is ambiguous`,
     }))
-    .exhaustive();
+    .exhaustive());
 }
 
 // --- SessionRegistry port ---

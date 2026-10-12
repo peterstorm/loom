@@ -37,7 +37,11 @@ import type { Phase, TaskGraph, WaveSpecCheckDocumentsAuthority } from "../engin
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import type { ImplementationSettlementApplicationResult } from "../engine/src/core/implementation-application";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
-import { inferSoleExecutingTask } from "../engine/src/core/task-attribution";
+import {
+  inferSoleExecutingTask,
+  unprovenAttributionReason,
+  type TaskAttribution,
+} from "../engine/src/core/task-attribution";
 import {
   messagesToClaudeJsonl,
   parsePiMessages,
@@ -271,8 +275,6 @@ export function reduceLockedPiPhaseResult(
  * batch, so its first Task id may belong to a sibling, and the executing set
  * proves nothing about who ran. Both are reported as unproven.
  */
-export type TaskAttribution = "named" | "parent-prompt" | "sole-executing";
-
 export type BoundImplementationTask = Readonly<{ kind: "bound"; taskId: string; attribution: TaskAttribution }>;
 
 export type ImplementationTaskBinding =
@@ -287,14 +289,14 @@ export function resolveImplementationTaskId(args: Readonly<{
   parentPrompt: ParentPromptText;
   executingTasks: readonly string[];
 }>): ImplementationTaskBinding {
+  const bound = (taskId: string, attribution: TaskAttribution): BoundImplementationTask =>
+    Object.freeze({ kind: "bound", taskId, attribution });
   const named = args.reservedAuthority?.taskId ?? args.reservedTaskId ?? extractTaskId(args.resultPrompt);
-  if (named) return Object.freeze({ kind: "bound" as const, taskId: named, attribution: "named" as const });
+  if (named) return bound(named, "named");
   const fromParent = extractTaskId(args.parentPrompt);
-  if (fromParent) return Object.freeze({ kind: "bound" as const, taskId: fromParent, attribution: "parent-prompt" as const });
+  if (fromParent) return bound(fromParent, "parent-prompt");
   const inference = inferSoleExecutingTask(args.executingTasks);
-  if (inference.kind === "inferred") {
-    return Object.freeze({ kind: "bound" as const, taskId: inference.taskId, attribution: "sole-executing" as const });
-  }
+  if (inference.kind === "inferred") return bound(inference.taskId, "sole-executing");
   return Object.freeze({
     kind: "unbound" as const,
     reason: inference.executingCount > 0
@@ -305,15 +307,7 @@ export function resolveImplementationTaskId(args: Readonly<{
 
 /** Why a bound Task is a guess, or null when the result named it itself. */
 export function unprovenAttribution(agentType: string, binding: BoundImplementationTask): string | null {
-  return match(binding.attribution)
-    .with("named", () => null)
-    .with("parent-prompt", () =>
-      `${agentType} named no Task: attribution came from the parent's spawn prompt, which names every Task of a ` +
-        `batch, so ${binding.taskId} is credited on that guess and not on evidence`)
-    .with("sole-executing", () =>
-      `${agentType} named no Task: attribution was inferred because executing_tasks holds exactly one ` +
-        `Task, so ${binding.taskId} is credited on that guess and not on evidence`)
-    .exhaustive();
+  return unprovenAttributionReason(agentType, binding.taskId, binding.attribution);
 }
 
 /**

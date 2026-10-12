@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { inferSoleExecutingTask } from "../../src/core/task-attribution";
+import { inferSoleExecutingTask, unprovenAttributionReason } from "../../src/core/task-attribution";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 
 describe("inferSoleExecutingTask", () => {
@@ -20,6 +20,18 @@ describe("inferSoleExecutingTask", () => {
       if (executing.length === 1) expect(inference).toEqual({ kind: "inferred", taskId: executing[0] });
       else expect(inference).toEqual({ kind: "unattributable", executingCount: executing.length });
     }));
+  });
+});
+
+describe("unprovenAttributionReason", () => {
+  it("is silent for a Task the result named, and names the guess otherwise", () => {
+    expect(unprovenAttributionReason("code-implementer-agent", "T3", "named")).toBeNull();
+    expect(unprovenAttributionReason("code-implementer-agent", "T3", "parent-prompt"))
+      .toBe("code-implementer-agent named no Task: attribution came from the parent's spawn prompt, which names every " +
+        "Task of a batch, so T3 is credited on that guess and not on evidence");
+    expect(unprovenAttributionReason("code-implementer-agent", "T3", "sole-executing"))
+      .toBe("code-implementer-agent named no Task: attribution was inferred because executing_tasks holds exactly " +
+        "one Task, so T3 is credited on that guess and not on evidence");
   });
 });
 

@@ -211,7 +211,7 @@ Determinism is scoped to what Loom can observe and own:
 
 - semantic design/review correctness still depends on models and user judgment;
 - a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
-- a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), and that guess can only quarantine or release a legacy reservation, never complete a Task;
+- a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), or on Pi to the first Task id in the parent's spawn prompt; such a guess settles only through the untrusted legacy resolution, which stores its evidence but leaves the Task pending for revalidation and reports the attribution as unproven, and it can never complete a Task, because completion requires engine-minted attempt authority;
 - report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals;
 - the shell guard judges command text, not an abstract Bash execution graph;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;
