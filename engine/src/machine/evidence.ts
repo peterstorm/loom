@@ -526,6 +526,47 @@ export function attributeEvidence(
     .exhaustive();
 }
 
+/**
+ * Which machine, if any, the live PreToolUse gate judges one tool call
+ * against — decided from the same attribution the recorder uses, so the gate
+ * and the ledger can never disagree about whose call it was.
+ *
+ *   gate        — the caller's own binding (or the sole-active one for an
+ *                 unreported caller): judge the call against that machine
+ *   pass        — nothing to gate: no live binding, or a reported caller that
+ *                 runs no machine (it is never judged by a sibling's)
+ *   stand-down  — an unreported caller in a contended session: no sound
+ *                 attribution exists, so the gate steps aside, loudly
+ *   fail-closed — a binding exists but the call cannot be attributed safely
+ *                 (corrupt authority, an id the harness may not report, or an
+ *                 id owning two binding lines); a gate that guesses is no gate
+ */
+export type PhaseGateTarget =
+  | Readonly<{ kind: "gate"; binding: MachineBinding }>
+  | Readonly<{ kind: "pass" }>
+  | Readonly<{ kind: "stand-down"; reason: string }>
+  | Readonly<{ kind: "fail-closed"; reason: string }>;
+
+export function phaseGateTarget(attribution: EvidenceAttribution): PhaseGateTarget {
+  return Object.freeze(match(attribution)
+    .returnType<PhaseGateTarget>()
+    .with({ kind: "caller" }, { kind: "sole" }, ({ binding }) => ({ kind: "gate", binding }))
+    .with({ kind: "ungated" }, { kind: "caller-unbound" }, () => ({ kind: "pass" }))
+    .with({ kind: "contended" }, () =>
+      ({ kind: "stand-down", reason: "call carries no agent_id and the session is contended" }))
+    .with({ kind: "corrupt" }, () =>
+      ({ kind: "fail-closed", reason: "machine binding authority has malformed rows" }))
+    .with({ kind: "caller-unparseable" }, ({ raw }) => ({
+      kind: "fail-closed",
+      reason: `caller agent_id ${JSON.stringify(raw)} is reserved or path-unsafe — it cannot own a binding`,
+    }))
+    .with({ kind: "caller-ambiguous" }, ({ agentId, bindings }) => ({
+      kind: "fail-closed",
+      reason: `caller ${agentId} owns ${bindings} binding lines — its machine is ambiguous`,
+    }))
+    .exhaustive());
+}
+
 // --- SessionRegistry port ---
 
 /** Exact outcome of an attempted machine-binding capability release. */

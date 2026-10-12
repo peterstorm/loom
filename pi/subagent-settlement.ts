@@ -38,6 +38,11 @@ import type { ImplementationAttemptAuthority } from "../engine/src/core/implemen
 import type { ImplementationSettlementApplicationResult } from "../engine/src/core/implementation-application";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import {
+  inferSoleExecutingTask,
+  unprovenAttributionReason,
+  type TaskAttribution,
+} from "../engine/src/core/task-attribution";
+import {
   messagesToClaudeJsonl,
   parsePiMessages,
   piStructuredTestDiagnostics,
@@ -259,12 +264,21 @@ export function reduceLockedPiPhaseResult(
  * caller (`applyImplementationPiResult`) reports an unbound failure and keeps
  * execution authority: without attribution it cannot safely release one Task.
  * Exact Oracle settlement releases matching modern authority for every proven
- * terminal transition, while compatibility settlement releases only a proven
- * legacy reservation; both ordinary terminal paths and completed/missing
+ * terminal transition. Compatibility settlement releases only a legacy
+ * reservation (never a modern attempt), and reports it as unproven unless the
+ * result named the Task; both ordinary terminal paths and completed/missing
  * cleanup therefore release the reservation they can identify.
+ *
+ * `attribution` says how the Task was found. Only `named` is the result's own
+ * identity (its reservation or its own prompt). `parent-prompt` and
+ * `sole-executing` are guesses: a parent's spawn call carries every brief of a
+ * batch, so its first Task id may belong to a sibling, and the executing set
+ * proves nothing about who ran. Both are reported as unproven.
  */
+export type BoundImplementationTask = Readonly<{ kind: "bound"; taskId: string; attribution: TaskAttribution }>;
+
 export type ImplementationTaskBinding =
-  | Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>
+  | BoundImplementationTask
   | Readonly<{ kind: "unbound"; reason: string }>;
 
 export function resolveImplementationTaskId(args: Readonly<{
@@ -275,19 +289,25 @@ export function resolveImplementationTaskId(args: Readonly<{
   parentPrompt: ParentPromptText;
   executingTasks: readonly string[];
 }>): ImplementationTaskBinding {
-  const direct = args.reservedAuthority?.taskId ?? args.reservedTaskId ??
-    extractTaskId(args.resultPrompt) ?? extractTaskId(args.parentPrompt);
-  if (direct) return Object.freeze({ kind: "bound" as const, taskId: direct, inferred: false });
-  const executing = args.executingTasks;
-  if (executing.length === 1) {
-    return Object.freeze({ kind: "bound" as const, taskId: executing[0]!, inferred: true });
-  }
+  const bound = (taskId: string, attribution: TaskAttribution): BoundImplementationTask =>
+    Object.freeze({ kind: "bound", taskId, attribution });
+  const named = args.reservedAuthority?.taskId ?? args.reservedTaskId ?? extractTaskId(args.resultPrompt);
+  if (named) return bound(named, "named");
+  const fromParent = extractTaskId(args.parentPrompt);
+  if (fromParent) return bound(fromParent, "parent-prompt");
+  const inference = inferSoleExecutingTask(args.executingTasks);
+  if (inference.kind === "inferred") return bound(inference.taskId, "sole-executing");
   return Object.freeze({
     kind: "unbound" as const,
-    reason: executing.length > 0
-      ? `WARNING: ${args.agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)`
+    reason: inference.executingCount > 0
+      ? `WARNING: ${args.agentType} completed without task ID, ${inference.executingCount} tasks executing (ambiguous)`
       : `WARNING: ${args.agentType} completed without task ID and executing_tasks is empty — task status was NOT recorded`,
   });
+}
+
+/** Why a bound Task is a guess, or null when the result named it itself. */
+export function unprovenAttribution(agentType: string, binding: BoundImplementationTask): string | null {
+  return unprovenAttributionReason(agentType, binding.taskId, binding.attribution);
 }
 
 /**

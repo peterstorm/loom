@@ -33,7 +33,7 @@ const previousStatePath = process.env.LOOM_STATE_PATH;
 const previousMachinesPath = process.env.LOOM_MACHINES_DIR;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-6b", "e2e-7"].map(sid);
+const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-6b", "e2e-7", "e2e-8"].map(sid);
 
 beforeAll(() => {
   writeFileSync(statePath, JSON.stringify({ current_phase: "init", phase_artifacts: {} }));
@@ -78,10 +78,14 @@ afterAll(() => {
 const start = (session: string, agentId = "a-1", agentType = "guarded-test-agent") =>
   JSON.stringify({ session_id: session, agent_id: agentId, agent_type: agentType });
 const stop = start;
-const pre = (session: string, tool: string) =>
-  JSON.stringify({ session_id: session, tool_name: tool, tool_input: {} });
-const post = (session: string, tool: string, input: Record<string, unknown>, response?: unknown) =>
-  JSON.stringify({ session_id: session, tool_name: tool, tool_input: input, tool_response: response, cwd: "/tmp" });
+/** `agentId`, when given, reports the caller as Claude Code does inside a subagent. */
+const caller = (agentId?: string) => (agentId === undefined ? {} : { agent_id: agentId });
+const pre = (session: string, tool: string, agentId?: string) =>
+  JSON.stringify({ session_id: session, ...caller(agentId), tool_name: tool, tool_input: {} });
+const post = (session: string, tool: string, input: Record<string, unknown>, response?: unknown, agentId?: string) =>
+  JSON.stringify({
+    session_id: session, ...caller(agentId), tool_name: tool, tool_input: input, tool_response: response, cwd: "/tmp",
+  });
 
 describe("guarded machine — full hook lifecycle", () => {
   it("blocks Write before Read, allows it after, then unbinds cleanly", async () => {
@@ -144,6 +148,38 @@ describe("guarded machine — full hook lifecycle", () => {
 
     await cleanup(stop(s), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
+  });
+
+  it("gates each parallel subagent against its OWN machine when its calls report agent_id", async () => {
+    const s = sid("e2e-8");
+    await markActive(start(s, "a-1"), []);
+    await markActive(start(s, "a-2"), []);
+    await markActive(start(s, "a-3", "brainstorm-agent"), []);
+    try {
+      // Both start in read-context, and neither stands down for the other.
+      expect((await enforce(pre(s, "Write", "a-1"), [])).kind).toBe("block");
+      expect((await enforce(pre(s, "Write", "a-2"), [])).kind).toBe("block");
+
+      // a-1 reads: only a-1's machine advances.
+      await recordEvidence(post(s, "Read", { file_path: "/plan.md" }, undefined, "a-1"), []);
+      expect((await enforce(pre(s, "Write", "a-1"), [])).kind).toBe("allow");
+      const sibling = await enforce(pre(s, "Write", "a-2"), []);
+      expect(sibling.kind).toBe("block");
+      if (sibling.kind === "block") expect(sibling.message).toContain("read-context");
+
+      // A machine-less caller is never judged by a sibling's machine.
+      expect((await enforce(pre(s, "Write", "a-3"), [])).kind).toBe("passthrough");
+      // A call with no agent_id cannot be attributed in a contended session.
+      expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
+      // A caller id the harness may not report never borrows a binding.
+      const forged = await enforce(pre(s, "Write", "evil:id"), []);
+      expect(forged.kind).toBe("block");
+      if (forged.kind === "block") expect(forged.message).toContain("reserved or path-unsafe");
+    } finally {
+      await cleanup(start(s, "a-3", "brainstorm-agent"), []);
+      await cleanup(start(s, "a-2"), []);
+      await cleanup(start(s, "a-1"), []);
+    }
   });
 
   it("agents without a machine definition are never gated (opt-in)", async () => {

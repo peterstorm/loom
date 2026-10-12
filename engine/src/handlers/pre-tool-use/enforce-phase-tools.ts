@@ -7,12 +7,15 @@
  * transition doesn't exist.
  *
  * Failure policy: once ANY binding exists for the session, unexpected
- * errors fail CLOSED — a gate that crashes open is no gate. The gate uses
- * only the session-wide sole-active rule: with multiple bindings, or any
- * second subagent active in the session, it stands down with a stderr note.
- * The recorder (record-evidence) attributes per caller `agent_id` instead, so
- * SubagentStop's per-epoch resolution still sees each parallel agent's own
- * evidence.
+ * errors fail CLOSED — a gate that crashes open is no gate.
+ *
+ * Attribution is the recorder's (`attributeEvidence` → `phaseGateTarget`): a
+ * call reporting its caller's `agent_id` is judged against that caller's own
+ * machine, so parallel subagents stay gated. Only a call with no `agent_id`
+ * (the main agent, or an older harness) falls back to the session-wide
+ * sole-active rule, and stands down with a stderr note when the session is
+ * contended. A reported caller that runs no machine is never judged by a
+ * sibling's.
  */
 
 import { existsSync, readdirSync } from "node:fs";
@@ -20,6 +23,7 @@ import type { HookHandler, PreToolUseInput } from "../../types";
 import { allowResult, blockResult, passthroughResult } from "../../types";
 import { machinesDir, SUBAGENT_DIR } from "../../config";
 import {
+  attributeEvidence,
   blockExplanation,
   eventsForEpoch,
   foldEvidence,
@@ -28,7 +32,9 @@ import {
   loadMachine,
   machineBindingPath,
   MACHINE_SUFFIX,
+  parseCallerIdentity,
   parseSessionId,
+  phaseGateTarget,
   type SessionRegistry,
 } from "../../machine";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
@@ -96,12 +102,21 @@ export const runEnforcePhaseTools = async (
         : passthroughResult();
     }
 
-    const binding = registry.soleActiveBinding(sessionId);
-    if (binding === null) {
-      // Contended session: no per-agent attribution possible. Stand down
-      // loudly rather than gate one agent on another's evidence.
-      return passthroughDiagnostic(`[loom machine] gate standing down for ${sessionId}: contended session\n`);
+    const target = phaseGateTarget(attributeEvidence(
+      parseCallerIdentity(input.agent_id),
+      registry.readBindingAuthority(sessionId),
+      registry.readActiveRoster(sessionId),
+    ));
+    if (target.kind === "pass") return passthroughResult();
+    if (target.kind === "stand-down") {
+      // No sound attribution: stand down loudly rather than gate one agent
+      // on another's evidence.
+      return passthroughDiagnostic(`[loom machine] gate standing down for ${sessionId}: ${target.reason}\n`);
     }
+    if (target.kind === "fail-closed") {
+      return blockResult(`[loom machine] gate evaluation failed — failing closed: ${target.reason}`);
+    }
+    const { binding } = target;
 
     const loaded = loadMachine(machinesDir(), binding.agentType);
     if (loaded.kind === "none") {

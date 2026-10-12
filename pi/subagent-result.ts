@@ -86,6 +86,8 @@ import {
   resolveImplementationTaskId,
   retireCompletedOrMissingImplementation,
   transcriptTextOf,
+  unprovenAttribution,
+  type BoundImplementationTask,
   type ImplementationTestObservation,
   type ImplementationTranscriptObservation,
   type LockedPiSettlement,
@@ -146,11 +148,9 @@ type FailedImplementationArgs = Readonly<{
   now: string;
 }>;
 
-type BoundImplementation = Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>;
-
 async function settleFailedExactImplementation(
   args: FailedImplementationArgs,
-  binding: BoundImplementation,
+  binding: BoundImplementationTask,
   authority: ImplementationAttemptAuthority,
 ): Promise<PiResultOutcome> {
   const observedAt = parseIsoInstant(args.now, "Pi failed-result instant");
@@ -173,7 +173,7 @@ async function settleFailedExactImplementation(
 
 async function cleanupFailedLegacyImplementation(
   args: FailedImplementationArgs,
-  binding: BoundImplementation,
+  binding: BoundImplementationTask,
 ): Promise<PiResultOutcome> {
   const released = await args.store.updateAndReturn((state) => {
     const task = state.tasks.find((candidate) => candidate.id === binding.taskId);
@@ -193,11 +193,12 @@ async function cleanupFailedLegacyImplementation(
     const message = `loom(pi): ${args.failure}; modern attempt lacks exact ReservedSlot authority — current attempt preserved`;
     return processingFailure(message);
   }
-  const inference = binding.inferred
-    ? `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation inferred from the sole executing ` +
-      "Task; completion evidence ignored and the attribution itself is unproven"
-    : `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation; completion evidence ignored`;
-  return binding.inferred ? outcome([inference], [inference]) : outcome([inference]);
+  const unproven = unprovenAttribution(args.agentType, binding);
+  const message = unproven === null
+    ? `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation; completion evidence ignored`
+    : `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation; completion evidence ignored and ` +
+      `the attribution itself is unproven: ${unproven}`;
+  return unproven === null ? outcome([message]) : outcome([message], [message]);
 }
 
 async function applyFailedImplementationResult(args: FailedImplementationArgs): Promise<PiResultOutcome> {
@@ -424,7 +425,7 @@ type ImplementationBindingResolution =
       kind: "bound";
       taskId: string;
       log: readonly string[];
-      /** Set when the Task was guessed from `executing_tasks`, never named by the result. */
+      /** Set when the Task was guessed (parent prompt or sole executing Task), never named by the result. */
       inference: string | null;
     }>;
 
@@ -442,10 +443,7 @@ function resolveImplementationBindingForResult(args: SlottedImplementationArgs):
   if (binding.kind === "unbound") {
     return { kind: "unbound", outcome: outcome([binding.reason], [binding.reason]) };
   }
-  const inference = binding.inferred
-    ? `${args.agentType} named no Task: attribution was inferred because executing_tasks holds exactly one ` +
-      `Task, so ${binding.taskId} is credited on that guess and not on evidence`
-    : null;
+  const inference = unprovenAttribution(args.agentType, binding);
   return {
     kind: "bound",
     taskId: binding.taskId,

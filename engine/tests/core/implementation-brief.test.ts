@@ -14,6 +14,7 @@ import {
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
+import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { parseSpec } from "../../src/core/parse-spec";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
@@ -85,6 +86,19 @@ const dispatchFor = (value: Task): WaveImplementationDispatch => {
   return derivation.dispatch;
 };
 
+const completedDependency = (id: string): Task => taskFixture({
+  id,
+  description: `Build the ${id} seam`,
+  agent: "code-implementer-agent",
+  wave: 1,
+  depends_on: [],
+  status: "completed",
+  file_list: [`engine/src/${id}.ts`],
+  files_modified: [`engine/src/${id}.ts`],
+  spec_anchors: [],
+});
+const ROSTER: readonly Task[] = [completedDependency("T3"), completedDependency("T4")];
+
 const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): ImplementationBriefInput => ({
   template: TEMPLATE,
   task: value,
@@ -92,6 +106,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   planFile: "/repo/.claude/plans/plan.md",
   spec: SPEC,
   rules: RULES,
+  roster: ROSTER,
   ...overrides,
 });
 
@@ -210,6 +225,23 @@ describe("renderImplementationBrief", () => {
     expect(section).not.toContain("FR-00");
   });
 
+  it("shows what each dependency produced, derived from its settled state", () => {
+    const rendered = renderImplementationBrief(input(task()));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    const section = rendered.value.prompt.split("## What Your Dependencies Produced\n\n")[1]?.split("\n## ")[0] ?? "";
+    expect(section).toContain("- **T3** — Build the T3 seam\n  - Completed: no Requirement Completion Claims\n  - Changed:\n    - engine/src/T3.ts");
+    expect(section).toContain("- **T4** — Build the T4 seam");
+    expect(section.indexOf("**T3**")).toBeLessThan(section.indexOf("**T4**"));
+  });
+
+  it("states that a Task without dependencies has none", () => {
+    const rendered = renderImplementationBrief(input(task({ depends_on: [] })));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value.prompt).toContain(`## What Your Dependencies Produced\n\n${NO_PREDECESSORS}\n`);
+  });
+
   it("owes no scenario test names when its only scenario is a Contribution", () => {
     const rendered = renderImplementationBrief(input(task({ spec_anchors: ["FR-001"], spec_contributions: ["AS-001"] })));
     expect(rendered.ok).toBe(true);
@@ -234,6 +266,10 @@ describe("renderImplementationBrief", () => {
     ["a Requirement the Spec Index lacks", (value) => input({ ...value, spec_anchors: ["FR-099"] }), "requirement-text-unavailable"],
     ["claims without a Spec Index", (value) => input(value, { spec: NO_SPEC_FILE }), "requirement-text-unavailable"],
     ["plan text the gate reads as a variable", (value) => input({ ...value, plan_context: "Use {placeholder} here" }), "residual-placeholders"],
+    ["a dependency missing from the roster", (value) => input(value, { roster: [completedDependency("T3")] }), "predecessor-output-unavailable"],
+    ["a dependency that is not completed", (value) => input(value, {
+      roster: [completedDependency("T3"), { ...completedDependency("T4"), status: "implemented" } as Task],
+    }), "predecessor-output-unavailable"],
   ])("refuses %s", (_name, build, kind) => {
     expect(renderImplementationBrief(build(task()))).toMatchObject({ ok: false, error: { kind } });
   });

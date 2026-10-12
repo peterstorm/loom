@@ -5,8 +5,9 @@
  *
  * Every value comes from protected authority: the Task row, the dispatch the
  * engine derived for it (`deriveTaskImplementationDispatch`), the Spec Index
- * text of its Requirement claims, the Agent Catalog's declared skill, and the
- * binding rule documents its file list selects. The renderer then proves the
+ * text of its Requirement claims, its dependencies' settled output
+ * (`predecessorOutputs`), the Agent Catalog's declared skill, and the binding
+ * rule documents its file list selects. The renderer then proves the
  * result passes the same spawn-gate checks the harness will apply — no
  * residual template variable, and the canonical `**Task ID:**` binding naming
  * this Task — so a rendered brief is admissible by construction rather than by
@@ -18,6 +19,7 @@
 import { AGENT_CATALOG, type LoomAgentName } from "./model-profiles";
 import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 import type { ParsedSpec } from "./parse-spec";
+import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOutputs } from "./predecessor-output";
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
@@ -69,6 +71,7 @@ const BRIEF_VARIABLES = [
   "agent_type",
   "required_skill",
   "dependencies",
+  "predecessor_outputs",
   "verification_policy",
   "implementation_retry_context",
   "task_description",
@@ -89,6 +92,9 @@ export type ImplementationBriefInput = Readonly<{
   /** The protected spec_file's Spec Index observation. An unavailable one
    *  carries its stated reason, so a refusal can name why there is no index. */
   spec: SpecIndexAvailability;
+  /** The whole protected Task roster, so each direct dependency's Predecessor
+   *  Output is derived from its own settled state rather than reconstructed. */
+  roster: readonly Task[];
   /** Contents of every rule document `ruleDocumentsFor(task.file_list)` names. */
   rules: ReadonlyMap<RuleDocument, string>;
 }>;
@@ -106,6 +112,7 @@ export type ImplementationBriefError =
   | Readonly<{ kind: "template-variables-mismatch"; message: string }>
   | Readonly<{ kind: "rule-document-missing"; message: string }>
   | Readonly<{ kind: "requirement-text-unavailable"; message: string }>
+  | Readonly<{ kind: "predecessor-output-unavailable"; message: string }>
   | Readonly<{ kind: "residual-placeholders"; message: string }>
   | Readonly<{ kind: "task-id-binding"; message: string }>;
 
@@ -211,6 +218,11 @@ export function renderImplementationBrief(
     );
   }
 
+  const predecessors = predecessorOutputs(task, input.roster);
+  if (!predecessors.ok) {
+    return refused("predecessor-output-unavailable", `${task.id}: ${predecessorOutputErrorMessage(predecessors.error)}`);
+  }
+
   const policy = taskVerificationPolicy(task);
   const values: Readonly<Record<BriefVariable, string>> = {
     rules_content: rulesContent,
@@ -219,6 +231,7 @@ export function renderImplementationBrief(
     agent_type: task.agent,
     required_skill: requiredSkill,
     dependencies: task.depends_on.length === 0 ? "none" : task.depends_on.join(", "),
+    predecessor_outputs: renderPredecessorOutputs(predecessors.value),
     verification_policy: [
       `- regression: ${requirementRendering(policy.regression)}`,
       `- new_tests: ${requirementRendering(policy.newTests)}`,

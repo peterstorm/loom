@@ -2,11 +2,7 @@
 
 ## Status
 
-Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`; Slice 3 (Task-local Completion Oracle and exact Implementation Attempt authority) merged through PR #35 at `cfeacae6`. Slice 4 is implemented and locally validated on its feature branch but is not yet review/merge evidence. Slice 5 remains planned.
-
-Slice 4 worktree: `~/dev/claude-plugins/loom-deterministic-implementation-retry`
-
-Branch: `feat/deterministic-implementation-retry` — issue #39
+Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`; Slice 3 (Task-local Completion Oracle and exact Implementation Attempt authority) merged through PR #35 at `cfeacae6`. Slice 4 (bounded retry and escalation) merged through PR #40 at `64b1ab3`. Slice 5 was re-scoped by issue #53 (`.claude/plans/2026-10-12-issue-53-slice-5.md`). It delivers dependency output in dependent briefs, per-caller phase gating, and a single owner for sole-executing inference. It drops frozen Requirement assertions, which the Requirement Coverage Projection already covers.
 
 ## Objective
 
@@ -566,7 +562,7 @@ Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagn
 - One retry for semantic failure; explicit escalation after attempt 2.
 - Infrastructure retry policy remains separate.
 
-#### Slice 4 implementation checkpoint (feature branch; not merge evidence)
+#### Slice 4 implementation checkpoint (merged through PR #40)
 
 - `engine/src/core/implementation-retry.ts` derives the only legal next attempt from exact settlement history and owns exact Retry Context/Attempt Context parsing, rendering, self-digests, and admission.
 - Canonical status emits initial or exact retry dispatch instructions. Attempt-2 exhaustion emits non-retryable `escalate-wave-implementation`; no pending-state inference can mint attempt 3.
@@ -581,6 +577,8 @@ Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagn
 - Never infer parallel Claude tool attribution from `executing_tasks`.
 - Persist typed Task output for dependent Task briefs.
 - Compile Requirement Completion Claims into frozen assertions where supported.
+
+Re-scoped and built under issue #53; see `.claude/plans/2026-10-12-issue-53-slice-5.md`. The implementation brief derives each completed dependency's Predecessor Output from protected Task state. On Claude Code, the live phase gate attributes each call per caller. `inferSoleExecutingTask` is the only place a Task is guessed from `executing_tasks`, and a guard test enforces that. The fourth bullet was dropped.
 
 ## Invariants
 

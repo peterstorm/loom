@@ -45,6 +45,7 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import type { ImplementationAuthorityObservation } from "../../implementation-attempt-sidecar";
 import { parseCompleteClaudeJsonl } from "../../core/claude-transcript-integrity";
+import { inferSoleExecutingTask, unprovenAttributionReason } from "../../core/task-attribution";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -277,18 +278,18 @@ export const runUpdateTaskStatus = async (
       }
       const settlement = await mgr.updateAndReturn<LegacyUnreadableTranscriptSettlement>((state) => {
         const executing = state.executing_tasks ?? [];
-        const taskId = executing.length === 1 ? executing[0] : undefined;
-        const target = taskId === undefined ? undefined : state.tasks.find((task) => task.id === taskId);
-        const exactLegacy = taskId !== undefined && target?.active_implementation_attempt === undefined;
-        return exactLegacy
+        const inference = inferSoleExecutingTask(executing);
+        const preserved = { state, value: { kind: "preserved", executingCount: executing.length } as const };
+        if (inference.kind !== "inferred") return preserved;
+        // An inferred Task may only be quarantined, and never one carrying a
+        // modern attempt, whose settlement belongs to its exact authority.
+        const target = state.tasks.find((task) => task.id === inference.taskId);
+        return target?.active_implementation_attempt === undefined
           ? {
-              state: applyCompletionInfrastructureFailure(state, taskId, true),
-              value: { kind: "quarantined", taskId } as const,
+              state: applyCompletionInfrastructureFailure(state, inference.taskId, true),
+              value: { kind: "quarantined", taskId: inference.taskId } as const,
             }
-          : {
-              state,
-              value: { kind: "preserved", executingCount: executing.length } as const,
-            };
+          : preserved;
       });
       if (settlement.kind === "quarantined") {
         return {
@@ -323,21 +324,21 @@ export const runUpdateTaskStatus = async (
   // sole-executing inference remain compatibility-only for legacy graphs.
   let taskId: string | null = authority?.taskId ?? extractTaskId(transcript);
 
-  // When transcript parse fails, try to infer task ID from executing_tasks.
-  // If exactly one task is executing, it's unambiguous.
+  // A legacy transcript that names no Task may still be attributed to the one
+  // Task executing — a guess, so it reaches only the quarantine path below
+  // (`applyUntrustedStopResolution`), which can never mint completion.
   if (!taskId) {
-    const state = mgr.load();
-    const executing = state.executing_tasks ?? [];
-    if (executing.length === 1) {
-      process.stderr.write(`WARNING: ${agentType} transcript parse failed, inferred task ${executing[0]} from executing_tasks\n`);
-      taskId = executing[0];
-      // Fall through with inferred taskId
+    const inference = inferSoleExecutingTask(mgr.load().executing_tasks ?? []);
+    if (inference.kind === "inferred") {
+      process.stderr.write(`WARNING: ${unprovenAttributionReason(agentType, inference.taskId, "sole-executing")}\n`);
+      taskId = inference.taskId;
     } else {
       // Ambiguous or unavailable attribution cannot release any execution
       // reservation: in a parallel Wave every entry may belong to a live
       // sibling. Preserve authority and make the missing settlement explicit.
-      if (executing.length > 0) {
-        process.stderr.write(`WARNING: ${agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)\n`);
+      const executingCount = inference.executingCount;
+      if (executingCount > 0) {
+        process.stderr.write(`WARNING: ${agentType} completed without task ID, ${executingCount} tasks executing (ambiguous)\n`);
       } else {
         process.stderr.write(
           `WARNING: ${agentType} completed but task status was NOT recorded — no task ID in the transcript ` +
@@ -349,7 +350,7 @@ export const runUpdateTaskStatus = async (
         kind: "error",
         message:
           `update-task-status: ${agentType} completion has no task identity; ` +
-          `${executing.length} executing Tasks make attribution ${executing.length === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
+          `${executingCount} executing Tasks make attribution ${executingCount === 0 ? "unavailable" : "ambiguous"}, so execution authority was preserved`,
       };
     }
   }

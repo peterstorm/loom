@@ -713,9 +713,9 @@ describe("applyFailedPiResult", () => {
     // The reservation WAS released, but the Task was guessed rather than named:
     // an inference is reported to the harness and logged, never silently waved through.
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("inferred from the sole executing Task"),
+      expect.stringContaining("executing_tasks holds exactly one Task"),
     ]);
-    expect(applied.log.join("\n")).toContain("inferred from the sole executing Task");
+    expect(applied.log.join("\n")).toContain("executing_tasks holds exactly one Task");
   });
 
   it("preserves parallel execution and reports an unbound failed implementation", async () => {
@@ -1737,6 +1737,28 @@ describe("applyImplementationPiResult", () => {
 
     expect(applied.processingErrors).toEqual([expect.stringContaining("credited on that guess")]);
     expect(store.current().executing_tasks).toEqual([]);
+  });
+
+  // A batch's parent spawn call carries every brief, so the id it names first
+  // may be a sibling's: crediting it is a guess and must read as one.
+  it("reports a parent-prompt Task attribution as unproven, even when the verdict applied", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: "implementation completed",
+        messages: assistantText("All requested work completed."),
+      }),
+      reservedSlot: undefined,
+      parentPrompt: "**Task ID:** T1\n...\n**Task ID:** T2",
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("parent's spawn prompt")]);
+    expect(applied.log.join("\n")).toContain("credited on that guess");
   });
 
   /**

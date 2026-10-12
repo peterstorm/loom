@@ -32,6 +32,7 @@ import {
   resolveImplementationTaskId,
   retireCompletedOrMissingImplementation,
   transcriptTextOf,
+  unprovenAttribution,
   type LockedReviewEvidenceApplication,
 } from "../../../pi/subagent-settlement";
 import {
@@ -106,19 +107,27 @@ describe("resolveImplementationTaskId", () => {
       reservedTaskId: "T9",
       resultPrompt: "Task ID: T1",
       parentPrompt: "Task ID: T2",
-    })).toEqual({ kind: "bound", taskId: "T9", inferred: false });
+    })).toEqual({ kind: "bound", taskId: "T9", attribution: "named" });
   });
 
-  it("falls back to the result prompt, then the parent prompt", () => {
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, resultPrompt: "Task ID: T1" }))
-      .toEqual({ kind: "bound", taskId: "T1", inferred: false });
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, parentPrompt: "Task ID: T2" }))
-      .toEqual({ kind: "bound", taskId: "T2", inferred: false });
+  it("falls back to the result prompt, then the parent prompt, which is only a guess", () => {
+    const named = resolveImplementationTaskId({ ...base, reservedTaskId: null, resultPrompt: "Task ID: T1" });
+    expect(named).toEqual({ kind: "bound", taskId: "T1", attribution: "named" });
+    if (named.kind === "bound") expect(unprovenAttribution("code-implementer-agent", named)).toBeNull();
+    // A batch's parent spawn call carries every brief, so its first id may be a sibling's.
+    const fromParent = resolveImplementationTaskId({ ...base, reservedTaskId: null, parentPrompt: "Task ID: T2" });
+    expect(fromParent).toEqual({ kind: "bound", taskId: "T2", attribution: "parent-prompt" });
+    if (fromParent.kind === "bound") {
+      expect(unprovenAttribution("code-implementer-agent", fromParent)).toContain("parent's spawn prompt");
+    }
   });
 
   it("infers a single executing task, and refuses an ambiguous or empty set", () => {
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5"] }))
-      .toEqual({ kind: "bound", taskId: "T5", inferred: true });
+    const inferred = resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5"] });
+    expect(inferred).toEqual({ kind: "bound", taskId: "T5", attribution: "sole-executing" });
+    if (inferred.kind === "bound") {
+      expect(unprovenAttribution("code-implementer-agent", inferred)).toContain("executing_tasks holds exactly one");
+    }
     expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5", "T6"] }))
       .toMatchObject({ kind: "unbound", reason: expect.stringContaining("ambiguous") });
     expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: [] }))

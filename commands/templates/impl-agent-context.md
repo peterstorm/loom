@@ -97,6 +97,12 @@ Contributions identify partial work. Do not claim the Requirement is complete un
 
 {scenario_test_names}
 
+## What Your Dependencies Produced
+
+{predecessor_outputs}
+
+The engine derives this from each dependency's settled, Wave-Gate-reviewed state, not from any Agent's summary. Read the files a dependency changed before you write code that uses them, and build on what they provide rather than re-implementing it.
+
 ## Context from Plan
 
 {plan_context}
