@@ -12,6 +12,7 @@ import { basename, join } from "node:path";
 import { GATE_WIRED_TOOLS } from "../../src/machine/types";
 import { FILE_MODIFYING_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../src/core/tool-vocabulary";
 import { KNOWN_HANDLERS } from "../../src/handler-routes";
+import { TYPE_DIAGNOSTICS_DEADLINE_MS } from "../../src/config";
 
 interface HookEntry {
   readonly matcher?: string;
@@ -179,6 +180,28 @@ describe("evidence recorder ↔ hooks.json (PostToolUse coverage)", () => {
         covered.has(tool) || covered.has("*"),
         `record-evidence.sh's PostToolUse matcher does not cover "${tool}" — evidence for it would never reach the ledger`,
       ).toBe(true);
+    }
+  });
+});
+
+describe("type diagnostics ↔ hooks.json (PostToolUse advisory wiring)", () => {
+  const entries = entriesWiring("PostToolUse", "type-diagnostics.sh");
+
+  it("type-diagnostics.sh covers every file-modifying tool", () => {
+    expect(entries.length).toBeGreaterThan(0);
+    const covered = new Set(entries.flatMap((e) => matcherTools(e.matcher ?? "*")));
+    for (const tool of FILE_MODIFYING_TOOLS) {
+      expect(covered.has(tool), `type-diagnostics.sh does not cover "${tool}"`).toBe(true);
+    }
+  });
+
+  it("the hook timeout outlasts the engine's tsc deadline, so the hook reports instead of being killed", () => {
+    for (const entry of entries) {
+      for (const hook of entry.hooks.filter((h) => h.command.includes("type-diagnostics.sh"))) {
+        const timeoutSeconds = (hook as { timeout?: number }).timeout;
+        expect(timeoutSeconds, "type-diagnostics.sh needs an explicit timeout").toBeDefined();
+        expect(timeoutSeconds! * 1000).toBeGreaterThan(TYPE_DIAGNOSTICS_DEADLINE_MS + 5_000);
+      }
     }
   });
 });

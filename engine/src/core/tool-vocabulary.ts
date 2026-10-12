@@ -19,6 +19,16 @@ import { frozenSet } from "./frozen";
 export const FILE_MODIFYING_TOOLS: ReadonlySet<string> = frozenSet(GATE_WIRED_TOOLS);
 
 /**
+ * The path a file-modifying tool call names: `file_path` (Claude Code's
+ * Edit/Write/MultiEdit), else `path`. Null when neither is a non-blank string.
+ */
+export function editedFilePath(toolInput: Readonly<Record<string, unknown>> | null | undefined): string | null {
+  if (!toolInput || typeof toolInput !== "object") return null;
+  const filePath = toolInput.file_path ?? toolInput.path;
+  return typeof filePath === "string" && filePath.trim().length > 0 ? filePath : null;
+}
+
+/**
  * Every tool name a harness uses to SPAWN A SUBAGENT.
  *
  * This is harness vocabulary, not loom's: Claude Code calls it `Agent` (it was

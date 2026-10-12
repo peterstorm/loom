@@ -36,6 +36,12 @@ Compare the architecture plan against the specification and produce a gap report
 - Read `{plan_file_path}` in full
 - Understand what components are designed, how data flows, what files are created
 
+### 2.5 Read Every Supporting Document
+
+- List `{spec_dir}` and read every supporting document in it other than the spec and this report: `feasibility.md`, research notes, probe records, interview digests, ADR drafts
+- From each, extract the recorded **discoveries**: measured or observed facts about the harness, providers, libraries, or existing code that constrain what can be built (e.g. "the harness retries an invalid tool call inside the child", "provider X ignores `strict`")
+- If `{spec_dir}` holds no supporting documents, say so in the report and skip step 3.6
+
 ### 3. Match Requirements to Plan Coverage
 
 For each requirement from the spec, determine if the plan addresses it **by meaning** (semantic match, not literal text).
@@ -52,6 +58,16 @@ Loom's standing policy: a model either executes or it doesn't exist (documented 
 - An `## Invariants` entry tiered `checkable` whose stated property a regex lint rule could not actually check (mis-tiered — should be `advisory`)
 
 Do NOT flag the mere absence of these sections — they are opt-in; most features need none.
+
+### 3.6 Check Requirements Against Recorded Discoveries
+
+Coverage is not enough: a plan can cover a Requirement that the recorded facts make unsatisfiable. For **each** Requirement and plan decision, check it against **every** discovery from step 2.5. Flag as a gap (ID `FEAS-N`) any pair where:
+
+- the Requirement or plan decision assumes behavior a discovery contradicts (the harness, provider, or library does something else)
+- a discovery makes a Requirement unreachable or unmeasurable on every route the plan qualifies
+- a discovery names a constraint the plan neither honors nor explicitly rejects
+
+Each `FEAS-N` gap names the Requirement or decision, the document and discovery it conflicts with, and why. Never write "No gaps found." while a `FEAS-N` contradiction stands.
 
 ### 4. Write Gap Report
 
@@ -76,8 +92,15 @@ The report MUST always be written — even when no gaps are found.
 
 - **FR-xxx** — (requirement description): (why it is not addressed)
 - **SC-xxx** — (requirement description): (what is missing)
+- **FEAS-N** — (Requirement or decision) vs `(document)`: (the discovery it contradicts, and why)
 
 (Write "None." if no gaps)
+
+## Supporting Documents Checked
+
+- `(document)` — (number of discoveries checked)
+
+(Write "None in {spec_dir}." if there were none)
 
 ## Coverage
 

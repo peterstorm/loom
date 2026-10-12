@@ -440,6 +440,8 @@ Regex rules are evaluated **line-by-line** against file content:
 
 The immediate tier runs after every file write to catch surface-level issues instantly. The full tier runs at natural pause points where deeper structural analysis is acceptable.
 
+Type errors are not a lint tier: a separate, advisory post-edit check runs the project's incremental `tsc` and never blocks. See [Advisory type diagnostics](../docs/operations.md#advisory-type-diagnostics).
+
 ### Fail-Closed Guarantee
 
 Any linter error (malformed rule, timeout, crash) **blocks the edit**. The linter never silently passes — if something goes wrong, the agent sees the error and can investigate.

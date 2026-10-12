@@ -28,6 +28,8 @@ const SPAWN_AUTHORITY_ALLOWLIST: Readonly<Record<string, string>> = Object.freez
   "engine/src/orchestration/completion-check-runner.ts":
     "runs the operator's verification-manifest project command (any executable, no shell); its Git probes use the seam",
   "pi/interactive-subagent.ts": "spawns the Pi RPC subagent child process",
+  "engine/src/handlers/type-diagnostics-runner.ts":
+    "runs the edited project's own TypeScript compiler (its tsc.js under the current runtime, no shell) for advisory type diagnostics",
 });
 
 const CHILD_PROCESS_MODULES: ReadonlySet<string> = new Set(["child_process", "node:child_process"]);

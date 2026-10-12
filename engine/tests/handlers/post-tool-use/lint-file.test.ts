@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractFilePath } from "../../../src/handlers/post-tool-use/lint-file";
+import { editedFilePath } from "../../../src/core/tool-vocabulary";
 
 
 // --- Test helpers ---
@@ -256,44 +256,44 @@ describe("PostToolUse lint-file handler", () => {
   });
 });
 
-describe("extractFilePath", () => {
+describe("editedFilePath", () => {
   it("returns null for null input", () => {
-    expect(extractFilePath(null)).toBeNull();
+    expect(editedFilePath(null)).toBeNull();
   });
 
   it("returns null for undefined input", () => {
-    expect(extractFilePath(undefined)).toBeNull();
+    expect(editedFilePath(undefined)).toBeNull();
   });
 
   it("returns null for non-object input", () => {
-    expect(extractFilePath("string" as any)).toBeNull();
+    expect(editedFilePath("string" as any)).toBeNull();
   });
 
   it("returns null when no file_path or path field", () => {
-    expect(extractFilePath({ content: "hello" })).toBeNull();
+    expect(editedFilePath({ content: "hello" })).toBeNull();
   });
 
   it("returns null for non-string file_path", () => {
-    expect(extractFilePath({ file_path: 123 })).toBeNull();
+    expect(editedFilePath({ file_path: 123 })).toBeNull();
   });
 
   it("returns null for empty string file_path", () => {
-    expect(extractFilePath({ file_path: "" })).toBeNull();
+    expect(editedFilePath({ file_path: "" })).toBeNull();
   });
 
   it("returns null for whitespace-only file_path", () => {
-    expect(extractFilePath({ file_path: "   " })).toBeNull();
+    expect(editedFilePath({ file_path: "   " })).toBeNull();
   });
 
   it("extracts valid file_path", () => {
-    expect(extractFilePath({ file_path: "/path/to/file.ts" })).toBe("/path/to/file.ts");
+    expect(editedFilePath({ file_path: "/path/to/file.ts" })).toBe("/path/to/file.ts");
   });
 
   it("extracts valid path fallback", () => {
-    expect(extractFilePath({ path: "/path/to/file.ts" })).toBe("/path/to/file.ts");
+    expect(editedFilePath({ path: "/path/to/file.ts" })).toBe("/path/to/file.ts");
   });
 
   it("prefers file_path over path", () => {
-    expect(extractFilePath({ file_path: "/a.ts", path: "/b.ts" })).toBe("/a.ts");
+    expect(editedFilePath({ file_path: "/a.ts", path: "/b.ts" })).toBe("/a.ts");
   });
 });
