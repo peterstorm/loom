@@ -384,13 +384,27 @@ function statusRunDirectoryBinding(
     );
   }
   const opened = openRunDirectory(inspected.value.reference.runsRoot, inspected.value.reference.runDirectory);
-  return opened.ok
-    ? Object.freeze({
-        kind: "bound" as const,
-        observation: Object.freeze({ kind: "present" as const, runId, path: opened.value.runDirectory }),
-        handle: opened.value,
-      })
-    : invalidStatusBinding(runId, inspected.value.reference.runDirectory, opened.error.message);
+  if (!opened.ok) return invalidStatusBinding(runId, inspected.value.reference.runDirectory, opened.error.message);
+  // A live registration over an abandoned directory predates the state stamp
+  // (or its stamp failed); every advancing operation refuses it, so status must
+  // not describe it as resumable.
+  const abandonment = opened.value.readAbandonment();
+  if (!abandonment.ok) return invalidStatusBinding(runId, opened.value.runDirectory, abandonment.error.message);
+  if (abandonment.value !== null) {
+    return unavailableStatusBinding(Object.freeze({
+      kind: "abandoned" as const,
+      runId,
+      path: opened.value.runDirectory,
+      runsRoot: opened.value.identity.runsRoot,
+      reason: abandonment.value.reason,
+      supersededBy: abandonment.value.supersededBy,
+    }));
+  }
+  return Object.freeze({
+    kind: "bound" as const,
+    observation: Object.freeze({ kind: "present" as const, runId, path: opened.value.runDirectory }),
+    handle: opened.value,
+  });
 }
 
 function openStatusObservationHandle(
@@ -411,6 +425,7 @@ function unavailableCompletionReason(
 ): string {
   if (observation.kind === "unverified") return "authoritative Run Directory observation is unavailable";
   if (observation.kind === "absent") return `authoritative Run Directory does not exist at ${observation.path}`;
+  if (observation.kind === "abandoned") return `authoritative Run Directory at ${observation.path} is abandoned`;
   return `authoritative Run Directory is invalid at ${observation.path}: ${observation.message}`;
 }
 

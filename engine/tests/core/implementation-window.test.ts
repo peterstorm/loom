@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "../../src/core/implementation-window";
-import type { Task, TaskGraph } from "../../src/types";
+import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
+import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { activeWaveGateFixture, completedWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const abandoned = (supersededBy: string | null) => ({ kind: "terminal-abandoned", reason: "exhausted", supersededBy });
@@ -29,8 +30,6 @@ describe("classifyImplementationWindow", () => {
       ["terminal history for the current Wave",
         { ...graphFixture([task("T1")]), wave_gate_history: [completedWaveGateFixture({ runId: "run.done", wave: 1 })] }],
       ["a live registration", { ...graphFixture([task("T1")]), active_wave_gate: gate(null) }],
-      ["an abandoned registration that names a successor",
-        { ...graphFixture([task("T1")]), active_wave_gate: gate(abandoned("run.next")) }],
       ["a registration for another Wave",
         { ...graphFixture([task("T1")]), active_wave_gate: activeWaveGateFixture({
           runId: "run.old", wave: 2, authorityDigest: "d".repeat(64), terminalOutcome: abandoned(null) }) }],
@@ -47,9 +46,30 @@ describe("classifyImplementationWindow", () => {
     });
   });
 
-  it("stays inside the window under an abandoned registration with no successor", () => {
-    const graph: TaskGraph = { ...graphFixture([task("T1")]), active_wave_gate: gate(abandoned(null)) };
+  it.each([null, "run.next"])("stays inside the window under an abandoned registration with successor %s", (successor) => {
+    const graph: TaskGraph = { ...graphFixture([task("T1")]), active_wave_gate: gate(abandoned(successor)) };
     expect(classifyImplementationWindow(graph, observed(false)).kind).toBe("window");
+  });
+
+  // Only the named successor may register the Wave, so the
+  // start recovery must name it instead of inviting a fresh run id.
+  it.each([
+    [null, { kind: "start-wave-gate", wave: 1 }],
+    ["run.next", { kind: "start-successor-wave-gate", wave: 1, runId: "run.next", abandonedRunId: "run.old" }],
+  ] as const)("starts the run a tombstone with successor %s authorizes", (successor, recovery) => {
+    const startReady = task("T1", {
+      status: "implemented",
+      file_list: [],
+      proof: evaluateTaskProof(
+        { newTestsRequired: true, declaredArtifacts: [] },
+        { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
+      ),
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "1 passed",
+      new_test_observation: parseNewTestEvidence(true, "1 new test"),
+    });
+    const graph: TaskGraph = { ...graphFixture([startReady]), active_wave_gate: gate(abandoned(successor)) };
+    expect(classifyImplementationWindow(graph, observed(false))).toMatchObject({ kind: "window", recovery });
   });
 
   it("awaits a live reservation and never dispatches it", () => {

@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -10,6 +10,10 @@ import {
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
 import { fixturePiEnvironment } from "../../fixtures/pi-session";
+import { activeWaveGateFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import { currentOrchestrationStatus } from "../../../src/handlers/helpers/orchestration";
+import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import type { LoomStatus } from "../../../src/types";
 
 /**
  * The shell-level abandonment stamp wrapper's two arms, driven through the
@@ -65,6 +69,22 @@ function project(stateFileBytes: string | null): string {
   return root;
 }
 
+/** A project whose protected graph holds a live registration for `runId` over an existing, empty Run Directory. */
+function liveRegistrationProject(runId: string): Readonly<{ statePath: string; runsRoot: string; runDirectory: string }> {
+  const root = project(null);
+  const runsRoot = join(root, ".claude", "reviews", "wave-gate-runs");
+  const runDirectory = join(runsRoot, runId);
+  mkdirSync(runDirectory, { recursive: true });
+  const statePath = join(root, ".claude", "state", "active_task_graph.json");
+  writeFileSync(statePath, JSON.stringify({
+    ...graphFixture([taskFixture({
+      id: "T1", description: "T1", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/T1.ts"],
+    })]),
+    active_wave_gate: activeWaveGateFixture({ runId, wave: 1, authorityDigest: "d".repeat(64), runsRoot }),
+  }));
+  return { statePath, runsRoot, runDirectory };
+}
+
 describe("abandonment state-stamp wrapper arms", () => {
   it("treats a missing protected graph as the no-graph arm and completes the abandonment", async () => {
     const root = project(null);
@@ -82,6 +102,65 @@ describe("abandonment state-stamp wrapper arms", () => {
       runId: "run.abandon-no-graph",
       supersededBy: null,
     });
+  });
+
+  // Status reads the Run Directory's abandonment marker under a live
+  // registration, so a marker the state never stamped is reported with the
+  // replay that stamps it and is never described as resumable.
+  it("reads an unstamped marker and points status at the stamping replay, not a resume", async () => {
+    const runId = "run.legacy-unstamped";
+    const { statePath, runsRoot } = liveRegistrationProject(runId);
+    const opened = openRunDirectory(runsRoot, join(runsRoot, runId));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const marked = await opened.value.abandonRun({ supersededBy: null, reason: "legacy exhaustion" });
+    expect(marked.ok).toBe(true);
+
+    const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as LoomStatus;
+
+    expect(status.next.reasons[0]?.message).toBe(
+      `Wave Gate run ${runId} was abandoned in its Run Directory (${join(runsRoot, runId)}), ` +
+        "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical " +
+        `abandon to stamp it: helper orchestration abandon --runs-root '${runsRoot}' --run '${runId}' ` +
+        "--reason 'legacy exhaustion'",
+    );
+    expect(JSON.stringify(status)).not.toContain("resume-orchestration");
+  });
+
+  // The printed replay and the abandon parser live in different modules; this
+  // round trip through a real shell and the real CLI is what keeps them agreeing.
+  it("prints a replay that the real abandon command accepts and that stamps the registration", async () => {
+    const runId = "run.replay-round-trip";
+    const reason = "it's $(not) `expanded` --force";
+    const { statePath, runsRoot } = liveRegistrationProject(runId);
+    const opened = openRunDirectory(runsRoot, join(runsRoot, runId));
+    if (!opened.ok) throw new Error(opened.error.message);
+    expect((await opened.value.abandonRun({ supersededBy: null, reason })).ok).toBe(true);
+
+    const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as LoomStatus;
+    const message = status.next.reasons[0]?.message ?? "";
+    const prefix = "helper orchestration abandon ";
+    const replay = message.slice(message.indexOf(prefix) + prefix.length);
+    const argv = execFileSync("bash", ["-c", 'eval "set -- $1"; printf "%s\\0" "$@"', "replay", replay], { encoding: "utf8" })
+      .split("\0").slice(0, -1);
+
+    const result = await runCli(["abandon", ...argv], dirname(dirname(dirname(statePath))));
+
+    expect(result.status, result.stderr).toBe(0);
+    const graph = JSON.parse(readFileSync(statePath, "utf8")) as { active_wave_gate: { terminalOutcome: unknown } };
+    expect(graph.active_wave_gate.terminalOutcome).toEqual({ kind: "terminal-abandoned", reason, supersededBy: null });
+  });
+
+  it("reports an unreadable marker as unavailable authority, never as a resumable run", async () => {
+    const { statePath, runDirectory } = liveRegistrationProject("run.unreadable-marker");
+    writeFileSync(join(runDirectory, "abandoned.json"), "{not json");
+
+    const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as LoomStatus;
+
+    expect(status.next.reasons[0]).toMatchObject({
+      kind: "authority-unavailable",
+      message: expect.stringContaining(`cannot verify authoritative Run Directory ${runDirectory}`),
+    });
+    expect(JSON.stringify(status)).not.toContain("resume-orchestration");
   });
 
   it("returns the operator retry guidance when the protected stamp fails, not a bare error", async () => {

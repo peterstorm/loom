@@ -1766,24 +1766,100 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         .toMatchObject({ diagnostic: { recovery: { kind: "start-wave-gate", wave: 1 } } });
     });
 
-    it("refuses a foreign-wave tombstone or one already naming a successor", () => {
+    it("refuses a foreign-wave tombstone", () => {
       const registered = registeredGraph();
-      for (const terminal of [
-        { ...registered.active_wave_gate!, wave: 2, terminalOutcome: {
+      const graph = registeredGraph({ active_wave_gate: {
+        ...registered.active_wave_gate!, wave: 2, terminalOutcome: {
           kind: "terminal-abandoned" as const, reason: "foreign", supersededBy: null,
-        } },
-        { ...registered.active_wave_gate!, terminalOutcome: {
-          kind: "terminal-abandoned" as const, reason: "successor selected",
-          supersededBy: value(parseOrchestrationRunId("next-run")),
-        } },
-      ]) {
-        const graph = registeredGraph({ active_wave_gate: terminal });
-        const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
-        expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
-        expect(status.next.action).toMatchObject({
-          kind: "blocked", diagnostic: { category: "invalid-authority", recovery: { kind: "inspect-run-and-stop" } },
+        },
+      } });
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+      expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+      expect(status.next.action).toMatchObject({
+        kind: "blocked", diagnostic: { category: "invalid-authority", recovery: { kind: "inspect-run-and-stop" } },
+      });
+    });
+
+    // Registration admits only the run a tombstone names, so every start
+    // recovery under that tombstone must carry that exact run id.
+    describe("a tombstone that names its successor", () => {
+      const named = (overrides: Partial<TaskGraph> = {}): TaskGraph => {
+        const registered = registeredGraph();
+        return registeredGraph({
+          active_wave_gate: { ...registered.active_wave_gate!, terminalOutcome: {
+            kind: "terminal-abandoned" as const, reason: "successor selected",
+            supersededBy: value(parseOrchestrationRunId("next-run")),
+          } },
+          ...overrides,
         });
-      }
+      };
+
+      it("asks to start exactly the named successor once implementation is complete", () => {
+        const status = deriveLoomStatusFromParsedGraph({ ok: true, value: named() }, statusDeps);
+        expect(Object.values(status.facts).every((fact) => fact.kind === "known")).toBe(true);
+        expect(status.next.action).toMatchObject({
+          kind: "blocked",
+          diagnostic: {
+            kind: "wave-gate-not-started",
+            message: "Wave 1 implementation is complete and abandoned Wave Gate run status-wave-run names " +
+              "successor next-run; start the Wave Gate with run id next-run",
+            recovery: {
+              kind: "start-successor-wave-gate", wave: 1, runId: "next-run", abandonedRunId: "status-wave-run",
+            },
+          },
+        });
+      });
+
+      it("asks for start repair, not the successor start, while a start prerequisite is unmet", () => {
+        const status = deriveLoomStatusFromParsedGraph({
+          ok: true,
+          value: named({ tasks: [{ ...taskState({ id: "T1", wave: 1, status: "implemented" }), test_result: undefined }] }),
+        }, statusDeps);
+        expect(status.next.action).toMatchObject({
+          diagnostic: { kind: "wave-start-not-ready", recovery: { kind: "repair-wave-start-readiness", wave: 1 } },
+        });
+      });
+
+      it("keeps owed implementation dispatchable before the successor starts", () => {
+        const status = deriveLoomStatusFromParsedGraph({
+          ok: true,
+          value: named({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] }),
+        }, statusDeps);
+        expect(status.next.action).toMatchObject({
+          diagnostic: { recovery: { kind: "spawn-wave-implementation", wave: 1, dispatches: [{ taskId: "T1" }] } },
+        });
+      });
+    });
+
+    // A Run Directory marker under a registration that still reads as live is
+    // never resumable (every advancing operation refuses it); status names the
+    // identical abandon replay, each argument shell-quoted to the recorded value.
+    it.each([
+      ["no successor", null, "exhausted reviewers", "", "'exhausted reviewers'"],
+      ["a named successor", "next-run", "exhausted reviewers", " --superseded-by 'next-run'", "'exhausted reviewers'"],
+      ["a shell-active reason", null, "cost $(x) it's", "", "'cost $(x) it'\\''s'"],
+      ["a flag-shaped reason", null, "--force", "", "'--force'"],
+    ] as const)("names the stamping abandon replay for an unstamped marker with %s", (_name, supersededBy, reason, flag, quotedReason) => {
+      const graph = registeredGraph();
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, {
+        kind: "abandoned",
+        runId: "status-wave-run",
+        path: "/runs/status-wave-run",
+        runsRoot: "/runs",
+        reason,
+        supersededBy,
+      });
+      expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+      expect(status.next.action).toMatchObject({ kind: "blocked", diagnostic: { category: "invalid-authority" } });
+      expect(status.next.reasons).toEqual([{
+        kind: "authority-unavailable",
+        taskId: null,
+        message: "Wave Gate run status-wave-run was abandoned in its Run Directory (/runs/status-wave-run), " +
+          "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical " +
+          `abandon to stamp it: helper orchestration abandon --runs-root '/runs' --run 'status-wave-run'${flag} ` +
+          `--reason ${quotedReason}`,
+      }]);
+      expect(JSON.stringify(status)).not.toContain("resume-orchestration");
     });
 
     it("reports terminal non-retryable escalation after semantic attempt 2", () => {

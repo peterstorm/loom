@@ -5,9 +5,10 @@
  * Completion retires the outgoing registration in the same commit that
  * advances `current_wave`, and the next registration only appears when the
  * gate is started, so every Wave spends its whole implementation span with
- * `active_wave_gate === undefined`. A terminal-abandoned Run without a named
- * successor also leaves the Wave in this window: its protected tombstone is
- * retained, but cannot authorize review or block a Task retry.
+ * `active_wave_gate === undefined`. A terminal-abandoned Run also leaves the
+ * Wave in this window: its protected tombstone is retained, but cannot
+ * authorize review or block a Task retry. When the tombstone names a
+ * successor, registration admits only that run, so the start recovery names it.
  *
  * Every policy decision of the window lives here: which outstanding Tasks hold
  * active implementation authority, which reservations are reclaimable, which
@@ -75,8 +76,13 @@ export function classifyImplementationWindow(
   if (graph.current_wave === undefined) return notInWindow;
   const registration = graph.active_wave_gate;
   if (registration !== undefined &&
-      (registration.wave !== graph.current_wave || registration.terminalOutcome?.kind !== "terminal-abandoned" ||
-        registration.terminalOutcome.supersededBy !== null)) return notInWindow;
+      (registration.wave !== graph.current_wave || registration.terminalOutcome?.kind !== "terminal-abandoned")) {
+    return notInWindow;
+  }
+  const successor = registration?.terminalOutcome?.kind === "terminal-abandoned" &&
+      registration.terminalOutcome.supersededBy !== null
+    ? { runId: registration.terminalOutcome.supersededBy, abandonedRunId: registration.runId }
+    : null;
   const wave = graph.current_wave;
   // A terminal receipt for the current Wave means this is not an unstarted
   // Wave. The committed-terminal branch already accepted the exact terminal
@@ -165,10 +171,16 @@ export function classifyImplementationWindow(
     );
   }
   if (startReadiness?.kind === "ready") {
-    return window(
-      canonicalRecord({ kind: "start-wave-gate", wave }),
-      `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`,
-    );
+    return successor === null
+      ? window(
+          canonicalRecord({ kind: "start-wave-gate", wave }),
+          `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`,
+        )
+      : window(
+          canonicalRecord({ kind: "start-successor-wave-gate", wave, ...successor }),
+          `Wave ${wave} implementation is complete and abandoned Wave Gate run ${successor.abandonedRunId} names ` +
+            `successor ${successor.runId}; start the Wave Gate with run id ${successor.runId}`,
+        );
   }
   if (escalated.length > 0) {
     return window(
