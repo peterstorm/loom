@@ -8,7 +8,7 @@
  * accepts the graph.
  */
 
-import type { SpecTraceOwnership } from "../types";
+import type { SpecTraceAmendment, SpecTraceAmendmentChange, SpecTraceOwnership } from "../types";
 
 export const SPEC_TRACE_VERSION = 2 as const;
 
@@ -291,13 +291,45 @@ export function parseTraceOwnership(anchors: unknown, contributions: unknown): S
     : null;
 }
 
+/** The trace fields a Task carries; on a v2 graph both arrays are proven. */
+export type TraceFields = Readonly<{ spec_anchors?: readonly string[]; spec_contributions?: readonly string[] }>;
+
 /** A Task's live trace ownership: an absent array owns nothing. */
-export const traceOf = (
-  task: Readonly<{ spec_anchors?: readonly string[]; spec_contributions?: readonly string[] }>,
-): SpecTraceOwnership => Object.freeze({
+export const traceOf = (task: TraceFields): SpecTraceOwnership => Object.freeze({
   spec_anchors: task.spec_anchors ?? [],
   spec_contributions: task.spec_contributions ?? [],
 });
+
+/**
+ * Why an amendment audit does not describe the trace it claims to, or null.
+ * Each Task's successive changes must chain (a change starts, as sets, where
+ * that Task's previous change ended) and its live trace must be the `after` of
+ * its latest change. The audit is the only sanctioned way a v2 trace changes
+ * in place, so a break means the trace or its history was edited behind it.
+ */
+export function amendmentHistoryError(
+  amendments: readonly SpecTraceAmendment[] | undefined,
+  tasks: readonly (TraceFields & Readonly<{ id: string }>)[],
+): string | null {
+  const byId = new Map(tasks.map((task) => [task.id, task] as const));
+  const latest = new Map<string, SpecTraceAmendmentChange>();
+  for (const change of (amendments ?? []).flatMap(({ changes }) => changes)) {
+    if (!byId.has(change.taskId)) {
+      return `spec_trace_amendments names Task ${change.taskId}, which is not in the protected roster`;
+    }
+    const previous = latest.get(change.taskId);
+    if (previous !== undefined && !sameRequirementTrace(previous.after, change.before)) {
+      return `Task ${change.taskId} spec_trace_amendments change does not start where its previous change ended`;
+    }
+    latest.set(change.taskId, change);
+  }
+  for (const [taskId, change] of latest) {
+    if (!sameRequirementTrace(traceOf(byId.get(taskId)!), change.after)) {
+      return `Task ${taskId} Requirement trace contradicts its latest spec_trace_amendments change`;
+    }
+  }
+  return null;
+}
 
 /** The exact-roster ownership input, keyed by Task id in submitted order. */
 export type OwnershipParse =

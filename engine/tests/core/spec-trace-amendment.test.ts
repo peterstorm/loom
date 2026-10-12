@@ -4,6 +4,7 @@ import { parseSpec } from "../../src/core/parse-spec";
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { amendSpecTrace, type SpecTraceAmendmentRefusal } from "../../src/core/spec-trace-amendment";
+import { amendmentHistoryError } from "../../src/core/spec-trace";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
@@ -159,8 +160,8 @@ describe("amendSpecTrace", () => {
     ] });
     for (const anchors of [["FR-001", "FR-002"], ["FR-002", "FR-001"]]) {
       const result = amendSpecTrace(graph, amendment({ T2: { anchors, contributions: [] } }), indexed);
-      expect(result).toEqual({ ok: true, value: { kind: "unchanged", graph } });
-      if (result.ok) expect(result.value.graph).toBe(graph);
+      if (!result.ok || result.value.kind !== "unchanged") throw new Error("expected an unchanged replay");
+      expect(result.value.graph).toBe(graph);
     }
   });
 
@@ -332,6 +333,7 @@ describe("amendSpecTrace", () => {
       const result = amendSpecTrace(populated(), amendment({ T2: t2, T3: t3 }), indexed);
       if (!result.ok || result.value.kind === "unchanged") return;
       expect(reloads(result.value.graph).ok).toBe(true);
+      expect(amendmentHistoryError(result.value.graph.spec_trace_amendments, result.value.graph.tasks)).toBeNull();
       for (const { taskId } of result.value.amendment.changes) {
         const amendedTask = taskById(result.value.graph, taskId);
         expect(Object.keys(amendedTask.spec_anchor_hashes ?? {}).sort())

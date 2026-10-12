@@ -222,10 +222,11 @@ export function resetWaveGateReviewAuthority(
  *
  * - An abandoned tombstone is retired exactly as its successor's install would.
  * - With no gate, whatever review state survives is reset. The residue test
- *   below names the fields `resetWaveGateReviewAuthority` clears; it is kept
- *   here, beside the reset, and pinned field by field in its tests, so a field
- *   added to one without the other fails there. With no residue the graph is
- *   returned unchanged, so an older Wave's spec-check is never cleared.
+ *   below hand-lists the fields `resetWaveGateReviewAuthority` clears, and each
+ *   listed field has a test row. Nothing fails if a field added to the reset is
+ *   forgotten here, so such a field needs a clause below and a row there. With
+ *   no residue the graph is returned unchanged, so an older Wave's spec-check
+ *   is never cleared.
  *
  * A live or legacy-terminal gate is the caller's precondition to refuse; it is
  * an invariant violation here, never silently reset.

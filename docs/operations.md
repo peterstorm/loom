@@ -733,10 +733,10 @@ On success, one locked write:
 
 - replaces only the changed Tasks' `spec_anchors`/`spec_contributions`;
 - keeps the recorded Requirement Content Hash of every retained Completion Claim (drift evidence survives), mints one from the observed Spec Index for every added claim, and drops removed claims' hashes;
-- retires the current Wave's trace-derived review authority exactly as a successor gate install would: `review_run`, `spec_check`, `wave_review_epoch`, `active_wave_completion_suite`, the abandoned tombstone, and review acceptance granted by that abandoned run. Wave blocks are re-derived;
+- retires the current Wave's trace-derived review authority. Over an abandoned tombstone this is exactly what a successor gate install does: it clears `review_run`, `spec_check`, `wave_review_epoch`, `active_wave_completion_suite`, the tombstone, and review acceptance granted by that run, and re-derives Wave blocks. With no gate registered, the same reset runs only if some of that review state is left for the current Wave; otherwise nothing else changes, so an older Wave's `spec_check` survives;
 - appends a `spec_trace_amendments` audit naming the Wave, the retired run (or `null`), each change before and after, and the Spec Index observation.
 
-Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, and re-population drops the audit together with the Tasks it described.
+Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, or whose amendment history for a Task does not chain, and re-population drops the audit together with the Tasks it described.
 
 ### State is malformed
 

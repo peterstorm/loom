@@ -113,12 +113,13 @@ function amendedAnchorHashes(
   specIndex: SpecIndexAvailability,
 ): Readonly<Record<string, string>> {
   const recorded = task.spec_anchor_hashes ?? {};
-  const addedClaims = added(change.before.spec_anchors, change.after.spec_anchors);
+  // An unavailable index never reaches here with an added claim:
+  // specIndexRefusal refuses it first, so the empty map only satisfies the type.
   const minted: Readonly<Record<string, string>> = specIndex.kind === "indexed"
-    ? recordedAnchorHashes(specIndex.index, addedClaims)
+    ? recordedAnchorHashes(specIndex.index, added(change.before.spec_anchors, change.after.spec_anchors))
     : {};
   return Object.freeze(Object.fromEntries(change.after.spec_anchors.flatMap((claim) => {
-    const hash = addedClaims.includes(claim) ? minted[claim] : recorded[claim];
+    const hash = change.before.spec_anchors.includes(claim) ? recorded[claim] : minted[claim];
     return hash === undefined ? [] : [[claim, hash] as const];
   })));
 }

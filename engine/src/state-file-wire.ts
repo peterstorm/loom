@@ -79,11 +79,11 @@ import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejecti
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
 import {
+  amendmentHistoryError,
   parseSpecTraceContract,
   parseTraceOwnership,
-  sameRequirementTrace,
   specTraceDiagnosticMessages,
-  traceOf,
+  type TraceFields,
 } from "./core/spec-trace";
 import { parseTaskVerificationPolicy } from "./core/verification-policy";
 import {
@@ -792,7 +792,7 @@ const SPEC_TRACE_AMENDMENT_FIELDS = [
   "schemaVersion", "kind", "wave", "retiredRunId", "changes", "specIndexObservation",
 ] as const;
 
-function parseSpecTraceOwnership(raw: unknown, label: string): ParseResult<SpecTraceOwnership> {
+function parseOwnershipRecord(raw: unknown, label: string): ParseResult<SpecTraceOwnership> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const record = raw as Record<string, unknown>;
   const fieldsError = exactFieldsError(record, ["spec_anchors", "spec_contributions"], [], label);
@@ -810,9 +810,9 @@ function parseSpecTraceAmendmentChange(raw: unknown, label: string): ParseResult
   if (fieldsError !== null) return parseErr(fieldsError);
   const idError = taskIdError(record.taskId, label);
   if (idError !== null) return parseErr(idError);
-  const before = parseSpecTraceOwnership(record.before, `${label}.before`);
+  const before = parseOwnershipRecord(record.before, `${label}.before`);
   if (!before.ok) return before;
-  const after = parseSpecTraceOwnership(record.after, `${label}.after`);
+  const after = parseOwnershipRecord(record.after, `${label}.after`);
   if (!after.ok) return after;
   return parseOk(Object.freeze({ taskId: record.taskId as string, before: before.value, after: after.value }));
 }
@@ -872,39 +872,6 @@ function parseSpecTraceAmendments(raw: unknown): ParseResult<readonly SpecTraceA
     amendments.push(parsed.value);
   }
   return parseOk(Object.freeze(amendments));
-}
-
-/**
- * The amendment audit must describe the trace it claims to: each Task's
- * successive changes chain (a change starts, as sets, where that Task's
- * previous change ended), and its live trace is the `after` of its latest
- * change. The audit is the only sanctioned way a v2 trace changes in place, so
- * a break means the trace or its history was edited behind it.
- */
-function specTraceAmendmentTraceError(
-  amendments: readonly SpecTraceAmendment[] | undefined,
-  tasks: readonly Record<string, unknown>[],
-): string | null {
-  const byId = new Map(tasks.map((task) => [task.id as string, task] as const));
-  const latest = new Map<string, SpecTraceAmendmentChange>();
-  for (const change of (amendments ?? []).flatMap(({ changes }) => changes)) {
-    if (!byId.has(change.taskId)) {
-      return `spec_trace_amendments names Task ${change.taskId}, which is not in the protected roster`;
-    }
-    const previous = latest.get(change.taskId);
-    if (previous !== undefined && !sameRequirementTrace(previous.after, change.before)) {
-      return `Task ${change.taskId} spec_trace_amendments change does not start where its previous change ended`;
-    }
-    latest.set(change.taskId, change);
-  }
-  for (const [taskId, change] of latest) {
-    // parseTaskGraphTasks already proved every v2 trace array.
-    const live = traceOf(byId.get(taskId)! as Readonly<{ spec_anchors?: readonly string[]; spec_contributions?: readonly string[] }>);
-    if (!sameRequirementTrace(live, change.after)) {
-      return `Task ${taskId} Requirement trace contradicts its latest spec_trace_amendments change`;
-    }
-  }
-  return null;
 }
 
 /** One task-identity grammar shared by load and operator-validation boundaries. */
@@ -2233,7 +2200,11 @@ function parseTaskGraphHistoryFields(
   if ((specTraceAmendments.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
     return parseErr("spec_trace_amendments requires spec_trace_version 2");
   }
-  const amendmentTraceError = specTraceAmendmentTraceError(specTraceAmendments.value, tasks);
+  // parseTaskGraphTasks already proved every v2 Task id and trace array.
+  const amendmentTraceError = amendmentHistoryError(
+    specTraceAmendments.value,
+    tasks as readonly (TraceFields & Readonly<{ id: string }>)[],
+  );
   if (amendmentTraceError !== null) return parseErr(amendmentTraceError);
   return parseOk({
     reopeningHistory: reopeningHistory.value,
