@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -12,7 +12,9 @@ afterEach(() => {
 
 /** A protected graph on disk: T1 (Wave 1) and its dependent T2 (Wave 2). */
 function graphWith(t1Status: "completed" | "implemented"): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-brief-"));
+  // The canonical root: macOS tmpdir() sits behind the /var symlink, which the
+  // State File boundary refuses to follow.
+  const root = canonicalTempDir("loom-brief-");
   roots.push(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   const path = join(root, ".claude", "state", "active_task_graph.json");
