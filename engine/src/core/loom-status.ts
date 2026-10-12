@@ -61,7 +61,11 @@ import {
   statusReason,
   taskCounts,
 } from "./wave-status-facts";
-import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "./implementation-window";
+import {
+  classifyImplementationWindow,
+  remediateEscalationCommand,
+  type ImplementationReservationStatusObservation,
+} from "./implementation-window";
 
 /** What status reads: the gate's own deps plus the one observation only the
  *  implementation-window projection consumes. Gate checks never see it. */
@@ -473,7 +477,8 @@ function unstartedWaveStatus(
       statusReason("task-running", `${taskId} already has active implementation authority`, taskId)),
     ...window.escalated.map((task) => statusReason(
       "implementation-escalation-required",
-      `${task.taskId} reached terminal implementation failure: ${task.failureKinds.join(", ")}`,
+      `${task.taskId} reached terminal implementation failure: ${task.failureKinds.join(", ")}; ` +
+        `after fixing the cause, remediate it: ${remediateEscalationCommand(task)}`,
       task.taskId,
     )),
     statusReason(recovery.kind === "repair-wave-start-readiness" ? "wave-start-not-ready" : "wave-gate-not-started", message),

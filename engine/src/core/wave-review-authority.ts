@@ -711,9 +711,10 @@ const parsedAnchorHashes = (stored: Task["spec_anchor_hashes"]): ReadonlyMap<str
   }));
 
 /**
- * The projection's join input for one graph. Exported so the SubagentStop
- * enforcement path derives the settled floor from the SAME lift the packet was
- * built from, rather than a second, drift-prone copy of it.
+ * The projection's join input for one graph, used only where the packet is
+ * built (`prepareWaveReviewBatch`). Enforcement deliberately does not re-run
+ * it: a capture's settled floor is read back from the epoch that recorded it
+ * (`epochSettledFloor`). Exported as the lift's own test surface.
  */
 export function coverageTasks(graph: TaskGraph, currentWave: number): readonly CoverageTask[] {
   return Object.freeze(graph.tasks.map((task) => Object.freeze({
