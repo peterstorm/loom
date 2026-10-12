@@ -1739,6 +1739,28 @@ describe("applyImplementationPiResult", () => {
     expect(store.current().executing_tasks).toEqual([]);
   });
 
+  // A batch's parent spawn call carries every brief, so the id it names first
+  // may be a sibling's: crediting it is a guess and must read as one.
+  it("reports a parent-prompt Task attribution as unproven, even when the verdict applied", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: "implementation completed",
+        messages: assistantText("All requested work completed."),
+      }),
+      reservedSlot: undefined,
+      parentPrompt: "**Task ID:** T1\n...\n**Task ID:** T2",
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("parent's spawn prompt")]);
+    expect(applied.log.join("\n")).toContain("credited on that guess");
+  });
+
   /**
    * `compareAttemptBaseline` failing is a documented fail-closed contract, but
    * nothing pinned the Pi bridge's WIRING to it — only the pure comparator was

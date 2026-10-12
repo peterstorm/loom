@@ -260,8 +260,9 @@ export function reduceLockedPiPhaseResult(
  * caller (`applyImplementationPiResult`) reports an unbound failure and keeps
  * execution authority: without attribution it cannot safely release one Task.
  * Exact Oracle settlement releases matching modern authority for every proven
- * terminal transition, while compatibility settlement releases only a proven
- * legacy reservation; both ordinary terminal paths and completed/missing
+ * terminal transition. Compatibility settlement releases only a legacy
+ * reservation (never a modern attempt), and reports it as unproven unless the
+ * result named the Task; both ordinary terminal paths and completed/missing
  * cleanup therefore release the reservation they can identify.
  *
  * `attribution` says how the Task was found. Only `named` is the result's own
@@ -272,8 +273,10 @@ export function reduceLockedPiPhaseResult(
  */
 export type TaskAttribution = "named" | "parent-prompt" | "sole-executing";
 
+export type BoundImplementationTask = Readonly<{ kind: "bound"; taskId: string; attribution: TaskAttribution }>;
+
 export type ImplementationTaskBinding =
-  | Readonly<{ kind: "bound"; taskId: string; attribution: TaskAttribution }>
+  | BoundImplementationTask
   | Readonly<{ kind: "unbound"; reason: string }>;
 
 export function resolveImplementationTaskId(args: Readonly<{
@@ -301,10 +304,7 @@ export function resolveImplementationTaskId(args: Readonly<{
 }
 
 /** Why a bound Task is a guess, or null when the result named it itself. */
-export function unprovenAttribution(
-  agentType: string,
-  binding: Extract<ImplementationTaskBinding, { kind: "bound" }>,
-): string | null {
+export function unprovenAttribution(agentType: string, binding: BoundImplementationTask): string | null {
   return match(binding.attribution)
     .with("named", () => null)
     .with("parent-prompt", () =>

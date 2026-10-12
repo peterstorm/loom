@@ -34,7 +34,7 @@ async function bind(session: SessionId, type: string, id: string): Promise<void>
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "mixed-corrupt-binding", "unreadable-binding", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
+const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "mixed-corrupt-binding", "unreadable-binding", "ambiguous-caller", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -136,6 +136,30 @@ describe("gate fails closed on corrupt binding files (Fix 2)", () => {
     if (result.kind === "block") {
       expect(result.message).toContain("gate evaluation failed");
       expect(result.message).toContain("machine binding file");
+    }
+  });
+
+  it("a reported caller owning two binding lines blocks instead of passing through", async () => {
+    // Per-caller attribution cannot choose between two machines for one id;
+    // the gate must not guess, and must not let the call through ungated.
+    const s = sid("ambiguous-caller");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const now = Date.now();
+    writeFileSync(
+      machineBindingPath(s),
+      `a-1\tcode-implementer-agent\t${now}\na-1\tts-test-agent\t${now}\n`,
+    );
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+
+    const result = await enforce(
+      JSON.stringify({ session_id: s, agent_id: "a-1", tool_name: "Write", tool_input: {} }),
+      [],
+    );
+
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("failing closed");
+      expect(result.message).toContain("owns 2 binding lines");
     }
   });
 

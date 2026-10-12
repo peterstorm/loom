@@ -87,7 +87,7 @@ import {
   retireCompletedOrMissingImplementation,
   transcriptTextOf,
   unprovenAttribution,
-  type ImplementationTaskBinding,
+  type BoundImplementationTask,
   type ImplementationTestObservation,
   type ImplementationTranscriptObservation,
   type LockedPiSettlement,
@@ -148,11 +148,9 @@ type FailedImplementationArgs = Readonly<{
   now: string;
 }>;
 
-type BoundImplementation = Extract<ImplementationTaskBinding, { kind: "bound" }>;
-
 async function settleFailedExactImplementation(
   args: FailedImplementationArgs,
-  binding: BoundImplementation,
+  binding: BoundImplementationTask,
   authority: ImplementationAttemptAuthority,
 ): Promise<PiResultOutcome> {
   const observedAt = parseIsoInstant(args.now, "Pi failed-result instant");
@@ -175,7 +173,7 @@ async function settleFailedExactImplementation(
 
 async function cleanupFailedLegacyImplementation(
   args: FailedImplementationArgs,
-  binding: BoundImplementation,
+  binding: BoundImplementationTask,
 ): Promise<PiResultOutcome> {
   const released = await args.store.updateAndReturn((state) => {
     const task = state.tasks.find((candidate) => candidate.id === binding.taskId);

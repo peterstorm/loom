@@ -279,19 +279,17 @@ export const runUpdateTaskStatus = async (
       const settlement = await mgr.updateAndReturn<LegacyUnreadableTranscriptSettlement>((state) => {
         const executing = state.executing_tasks ?? [];
         const inference = inferSoleExecutingTask(executing);
-        const inferredId: string | null = inference.kind === "inferred" ? inference.taskId : null;
-        const target = state.tasks.find((task) => task.id === inferredId);
+        const preserved = { state, value: { kind: "preserved", executingCount: executing.length } as const };
+        if (inference.kind !== "inferred") return preserved;
         // An inferred Task may only be quarantined, and never one carrying a
         // modern attempt, whose settlement belongs to its exact authority.
-        return inference.kind === "inferred" && target?.active_implementation_attempt === undefined
+        const target = state.tasks.find((task) => task.id === inference.taskId);
+        return target?.active_implementation_attempt === undefined
           ? {
               state: applyCompletionInfrastructureFailure(state, inference.taskId, true),
               value: { kind: "quarantined", taskId: inference.taskId } as const,
             }
-          : {
-              state,
-              value: { kind: "preserved", executingCount: executing.length } as const,
-            };
+          : preserved;
       });
       if (settlement.kind === "quarantined") {
         return {

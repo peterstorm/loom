@@ -7,7 +7,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 
 describe("inferSoleExecutingTask", () => {
   it.each<[readonly string[], ReturnType<typeof inferSoleExecutingTask>]>([
-    [["T3"], { kind: "inferred", taskId: "T3" as never }],
+    [["T3"], { kind: "inferred", taskId: "T3" }],
     [[], { kind: "unattributable", executingCount: 0 }],
     [["T3", "T4"], { kind: "unattributable", executingCount: 2 }],
   ])("infers from %j", (executing, expected) => {
@@ -30,7 +30,14 @@ describe("inferSoleExecutingTask", () => {
  */
 describe("sole-executing inference has one owner", () => {
   const OWNER = "engine/src/core/task-attribution.ts";
-  const PICK = /executing\w*(?:\s*\?\?\s*\[\])?\)?\s*\[0\]|executing\w*\.length\s*===\s*1\b/u;
+  // Every way this codebase spells "the first / only executing Task": indexing,
+  // .at(0), destructuring the executing set, or a strict or loose length-1 test.
+  const PICK = new RegExp([
+    String.raw`executing\w*(?:\s*\?\?\s*\[\])?\)?\s*(?:\[0\]|\.at\(\s*0\s*\))`,
+    String.raw`executing\w*\.length\s*={2,3}\s*1\b`,
+    String.raw`\b1\s*={2,3}\s*\(?[\w.]*executing\w*\.length`,
+    String.raw`(?:const|let|var)\s*\[\s*\w+[^\]]*\]\s*=\s*\(?[\w.]*executing`,
+  ].join("|"), "u");
 
   const sources = (dir: string): readonly string[] => readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
@@ -48,8 +55,26 @@ describe("sole-executing inference has one owner", () => {
   });
 
   it("would catch the patterns it exists to refuse", () => {
-    for (const line of ["const id = executing[0];", "if (executing.length === 1) {", "(state.executing_tasks ?? [])[0]", "executingTasks[0]!"]) {
+    for (const line of [
+      "const id = executing[0];",
+      "if (executing.length === 1) {",
+      "if (executing.length == 1) {",
+      "if (1 === state.executing_tasks.length) {",
+      "(state.executing_tasks ?? [])[0]",
+      "executingTasks[0]!",
+      "const only = executing.at(0);",
+      "const [only] = state.executing_tasks ?? [];",
+      "let [first, ...others] = executingTasks;",
+    ]) {
       expect(PICK.test(line), line).toBe(true);
+    }
+    // Reads that check membership or count without picking a Task stay legal.
+    for (const line of [
+      "(state.executing_tasks ?? []).includes(taskId)",
+      "executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),",
+      "if (executing.length > 0) {",
+    ]) {
+      expect(PICK.test(line), line).toBe(false);
     }
   });
 });
