@@ -4,6 +4,7 @@ import advancePhaseHandler, {
   DECOMPOSE_AWAITS_POPULATION,
   applyEligiblePhaseTransition,
   decidePhaseResult,
+  notReadyDiagnostic,
   countMarkers,
   isPhaseResultEligible,
   observePhaseTransition,
@@ -188,6 +189,13 @@ describe("decidePhaseResult — the one policy both SubagentStop shells apply", 
     ],
   ])("%s", (_name, resolution, decision) => {
     expect(decidePhaseResult(resolution)).toEqual(decision);
+  });
+
+  it("words a refusal once, for whichever subject each shell names", () => {
+    expect(notReadyDiagnostic("brainstorm", "brainstorm.md was not found"))
+      .toBe("brainstorm completed but phase transition is not ready: brainstorm.md was not found");
+    expect(notReadyDiagnostic("specify-agent", "no readable spec.md"))
+      .toBe("specify-agent completed but phase transition is not ready: no readable spec.md");
   });
 });
 

@@ -16,6 +16,7 @@ import { match } from "ts-pattern";
 import {
   decidePhaseResult,
   isPhaseResultEligible,
+  notReadyDiagnostic,
   transitionAuthorityMatches,
   type PhaseTransitionObservation,
 } from "../engine/src/handlers/subagent-stop/advance-phase";
@@ -221,7 +222,7 @@ export function reduceLockedPiPhaseResult(
     if (decision.kind !== "advance") {
       const value = match(decision)
         .with({ kind: "refuse" }, ({ reason }) => {
-          const diagnostic = `${args.agentType} completed but phase transition is not ready: ${reason}`;
+          const diagnostic = notReadyDiagnostic(args.agentType, reason);
           return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
         })
         .with({ kind: "note" }, ({ reason }) => outcome([`loom(pi): ${reason}`]))

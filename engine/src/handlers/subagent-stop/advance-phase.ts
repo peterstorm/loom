@@ -223,6 +223,11 @@ export const decidePhaseResult = (resolution: PhaseTransitionResolution): PhaseR
     .with({ kind: "awaits-population" }, ({ reason }): PhaseResultDecision => ({ kind: "note", reason }))
     .exhaustive();
 
+/** The one wording of a refused phase result; each shell names its own subject
+ *  (Claude the completed phase, Pi the agent type) and its own framing. */
+export const notReadyDiagnostic = (subject: string, reason: string): string =>
+  `${subject} completed but phase transition is not ready: ${reason}`;
+
 const transitionReady = (
   nextPhase: Phase,
   artifact: string,
@@ -541,7 +546,7 @@ const handler: HookHandler = async (stdin) => {
     return match(decision)
       .with({ kind: "refuse" }, ({ reason }): HookResult => ({
         kind: "error",
-        message: `advance-phase: ${completedPhase} completed but phase transition is not ready: ${reason}; phase NOT advanced`,
+        message: `advance-phase: ${notReadyDiagnostic(completedPhase, reason)}; phase NOT advanced`,
       }))
       .with({ kind: "note" }, ({ reason }) => passthroughDiagnostic(reason))
       .exhaustive();
