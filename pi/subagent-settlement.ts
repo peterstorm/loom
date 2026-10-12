@@ -37,6 +37,7 @@ import type { Phase, TaskGraph, WaveSpecCheckDocumentsAuthority } from "../engin
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import type { ImplementationSettlementApplicationResult } from "../engine/src/core/implementation-application";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
+import { inferSoleExecutingTask } from "../engine/src/core/task-attribution";
 import {
   messagesToClaudeJsonl,
   parsePiMessages,
@@ -262,9 +263,17 @@ export function reduceLockedPiPhaseResult(
  * terminal transition, while compatibility settlement releases only a proven
  * legacy reservation; both ordinary terminal paths and completed/missing
  * cleanup therefore release the reservation they can identify.
+ *
+ * `attribution` says how the Task was found. Only `named` is the result's own
+ * identity (its reservation or its own prompt). `parent-prompt` and
+ * `sole-executing` are guesses: a parent's spawn call carries every brief of a
+ * batch, so its first Task id may belong to a sibling, and the executing set
+ * proves nothing about who ran. Both are reported as unproven.
  */
+export type TaskAttribution = "named" | "parent-prompt" | "sole-executing";
+
 export type ImplementationTaskBinding =
-  | Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>
+  | Readonly<{ kind: "bound"; taskId: string; attribution: TaskAttribution }>
   | Readonly<{ kind: "unbound"; reason: string }>;
 
 export function resolveImplementationTaskId(args: Readonly<{
@@ -275,19 +284,36 @@ export function resolveImplementationTaskId(args: Readonly<{
   parentPrompt: ParentPromptText;
   executingTasks: readonly string[];
 }>): ImplementationTaskBinding {
-  const direct = args.reservedAuthority?.taskId ?? args.reservedTaskId ??
-    extractTaskId(args.resultPrompt) ?? extractTaskId(args.parentPrompt);
-  if (direct) return Object.freeze({ kind: "bound" as const, taskId: direct, inferred: false });
-  const executing = args.executingTasks;
-  if (executing.length === 1) {
-    return Object.freeze({ kind: "bound" as const, taskId: executing[0]!, inferred: true });
+  const named = args.reservedAuthority?.taskId ?? args.reservedTaskId ?? extractTaskId(args.resultPrompt);
+  if (named) return Object.freeze({ kind: "bound" as const, taskId: named, attribution: "named" as const });
+  const fromParent = extractTaskId(args.parentPrompt);
+  if (fromParent) return Object.freeze({ kind: "bound" as const, taskId: fromParent, attribution: "parent-prompt" as const });
+  const inference = inferSoleExecutingTask(args.executingTasks);
+  if (inference.kind === "inferred") {
+    return Object.freeze({ kind: "bound" as const, taskId: inference.taskId, attribution: "sole-executing" as const });
   }
   return Object.freeze({
     kind: "unbound" as const,
-    reason: executing.length > 0
-      ? `WARNING: ${args.agentType} completed without task ID, ${executing.length} tasks executing (ambiguous)`
+    reason: inference.executingCount > 0
+      ? `WARNING: ${args.agentType} completed without task ID, ${inference.executingCount} tasks executing (ambiguous)`
       : `WARNING: ${args.agentType} completed without task ID and executing_tasks is empty — task status was NOT recorded`,
   });
+}
+
+/** Why a bound Task is a guess, or null when the result named it itself. */
+export function unprovenAttribution(
+  agentType: string,
+  binding: Extract<ImplementationTaskBinding, { kind: "bound" }>,
+): string | null {
+  return match(binding.attribution)
+    .with("named", () => null)
+    .with("parent-prompt", () =>
+      `${agentType} named no Task: attribution came from the parent's spawn prompt, which names every Task of a ` +
+        `batch, so ${binding.taskId} is credited on that guess and not on evidence`)
+    .with("sole-executing", () =>
+      `${agentType} named no Task: attribution was inferred because executing_tasks holds exactly one ` +
+        `Task, so ${binding.taskId} is credited on that guess and not on evidence`)
+    .exhaustive();
 }
 
 /**

@@ -70,9 +70,13 @@ subagents share the parent's `session_id`. So:
   stderr note. Pi has no PostToolUse recorder, so none of this applies
   there.
 
-The live PreToolUse gate (`enforce-phase-tools`) still uses only the
-sole-active rule, so it stands down whenever more than one subagent is
-active. The recorder never blocks, so a bound-but-empty ledger surfaces
+The live PreToolUse gate (`enforce-phase-tools`) uses the same attribution
+through `phaseGateTarget`. A call carrying `agent_id` is judged against that
+caller's own machine, so parallel bound subagents stay gated. A caller that
+runs no machine passes through and is never judged by a sibling's machine.
+An `agent_id` that is reserved/path-unsafe, or that owns two binding lines,
+fails closed. Only a call with no `agent_id` uses the sole-active rule, and
+it stands down when the session is contended. The recorder never blocks, so a bound-but-empty ledger surfaces
 downstream as the `degraded` label. SubagentStop resolution is safe either
 way, because it reads only the stopping agent's epoch.
 
@@ -110,11 +114,14 @@ additionally walks the import closure so the reducer can never re-acquire
   invariants over interleavings).
 
 Known residual limits, on purpose and documented:
-- Parallel waves run without the live gate: `enforce-phase-tools` uses
-  only the sole-active rule, so with more than one subagent active it
-  stands down rather than gate one agent on another's evidence. The
-  recorder keeps recording per caller `agent_id`, so the per-epoch
-  SubagentStop audit still sees each parallel agent's own evidence.
+- A call with no `agent_id` (the main agent, or an older harness) is gated
+  only under the sole-active rule, so in a contended session it runs
+  ungated. Claude Code stamps `agent_id` on every subagent call, so parallel
+  Waves stay gated.
+- Pi has no recorder, and its `tool_call` guard cannot name the calling
+  agent, so Pi children run without the live phase gate. Each Pi child is a
+  separate process, so nothing is credited to the wrong agent; the gate is
+  simply absent.
 - Report freshness is *call-scoped*: the PreToolUse Bash hook stamps the
   start of every Bash call (`<session>.callstart.json`, keyed by the
   harness `tool_use_id`), and a disk artifact (explicit `--outputFile`

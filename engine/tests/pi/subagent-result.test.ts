@@ -713,9 +713,9 @@ describe("applyFailedPiResult", () => {
     // The reservation WAS released, but the Task was guessed rather than named:
     // an inference is reported to the harness and logged, never silently waved through.
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("inferred from the sole executing Task"),
+      expect.stringContaining("executing_tasks holds exactly one Task"),
     ]);
-    expect(applied.log.join("\n")).toContain("inferred from the sole executing Task");
+    expect(applied.log.join("\n")).toContain("executing_tasks holds exactly one Task");
   });
 
   it("preserves parallel execution and reports an unbound failed implementation", async () => {

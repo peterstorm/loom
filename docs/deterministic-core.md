@@ -64,7 +64,7 @@ The proof object is engine-authored. Agent prose is input evidence, not the verd
 
 A report-backed test run can produce `trusted-pass` or `trusted-fail`. A transcript-only signal remains explicitly `untrusted`; Pi’s paired structured evidence remains labeled `pi-structured`. Provenance is never upgraded merely because a consumer prefers a boolean.
 
-The code-implementer machine enforces `read-context → implement → verify → done` when one Agent can be attributed unambiguously. During parallel activity, Claude tool events do not carry enough child identity; the live gate and recorder stand down rather than cross-credit one Agent’s work to another. SubagentStop still audits whatever epoch-specific evidence exists.
+The code-implementer machine enforces `read-context → implement → verify → done` per Agent. On Claude Code every subagent tool call carries its `agent_id`, and the recorder and the live gate decide attribution through one function (`attributeEvidence`). Each parallel Agent records into, and is gated by, its own machine, and an id that owns no single binding is never credited to a sibling. Only a call with no `agent_id` falls back to the sole-active rule, and it stands down when the session is contended. SubagentStop audits the stopping Agent’s own epoch.
 
 Report freshness is call-scoped, duplicate tool deliveries are deduplicated by call id, and later file writes can invalidate an earlier pass. Detailed limits are in [Guarded Skill Machines](../machines/README.md).
 
@@ -210,7 +210,8 @@ Model calibration uses deterministic matching over vulnerable/fixed historical c
 Determinism is scoped to what Loom can observe and own:
 
 - semantic design/review correctness still depends on models and user judgment;
-- Claude’s live per-Agent evidence attribution cannot be sound during ambiguous parallel tool activity, so it stands down;
+- a tool call with no `agent_id` cannot be attributed in a contended session, so it is neither recorded nor gated; Pi children run without the live phase gate, because Pi cannot name a tool call’s caller;
+- a legacy graph, whose Agents named no Task, may still attribute a result to the one executing Task (`inferSoleExecutingTask`), and that guess can only quarantine or release a legacy reservation, never complete a Task;
 - report artifacts remain in an Agent-writable environment, with documented same-call forgery residuals;
 - the shell guard judges command text, not an abstract Bash execution graph;
 - Pi's Interactive Phase Transport supports standard relayed dialogs but not `ctx.ui.custom()` components inside RPC children;

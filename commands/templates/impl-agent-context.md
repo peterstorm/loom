@@ -97,6 +97,12 @@ Contributions identify partial work. Do not claim the Requirement is complete un
 
 {scenario_test_names}
 
+## What Your Dependencies Produced
+
+{predecessor_outputs}
+
+The engine derives this from each dependency's settled, Wave-Gate-reviewed state, not from any Agent's summary. Read the files a dependency changed before you write code that uses them, and build on what they provide rather than re-implementing it.
+
 ## Context from Plan
 
 {plan_context}
@@ -128,7 +134,7 @@ Available at: {plan_file_path}
 ## Required Workflow
 
 1. Read & apply the **Architecture & Language Rules** inlined above — binding constraints, not suggestions
-2. Read the plan file and understand scope
+2. Read the plan file and understand scope, and read the files listed under "What Your Dependencies Produced"
 3. If `new_tests` is required, write the failing tests first: encode this Task's behavior (Completion Claims, acceptance scenarios, error cases) as NEW tests through the real entry point, naming each claimed scenario's test as "Acceptance Scenario Test Names" directs (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked), then run them and confirm they fail for the expected reason — missing behavior, not a typo or a broken import. If it is waived, preserve the stated waiver boundary rather than inventing unrelated tests, and keep the existing suite as the oracle.
 4. Implement code following the plan's patterns AND the rules above until those tests pass. Reuse existing operations before writing new ones.
 5. If `regression` is required, **run tests via Bash tool** — fix failures, re-run until 0 failures, and make the final run the bare report-writing command from the table at the top. Skip only under the explicit regression waiver above.

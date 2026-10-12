@@ -63,6 +63,7 @@ export function renderTaskImplementationBrief(
       planFile: graph.plan_file ?? null,
       spec: observeSpecIndex(specFile),
       rules,
+      roster: graph.tasks,
     });
     return rendered.ok ? rendered : { ok: false, error: rendered.error.message };
   } catch (error) {
