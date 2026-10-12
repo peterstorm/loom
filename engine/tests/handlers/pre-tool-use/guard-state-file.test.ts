@@ -1509,10 +1509,19 @@ describe("glob leading-dot rule — bash default (no dotglob)", () => {
   };
   const globArb = fc.stringMatching(/^[*?.lomx]{1,6}$/);
 
+  // The guarded-literal test (`stateFilePatterns`) is an unanchored substring
+  // match, fail closed by design: a word that CONTAINS `.loom` (`o.loom`) blocks
+  // whatever bash would expand it to. The alphabet above can spell such a
+  // literal, so the oracle carries that rule too — without it the property
+  // fails on the rare seeds that draw one (macOS CI, counterexample `o.loom`).
+  const containsGuardedLiteral = (glob: string): boolean => glob.includes(".loom");
+
   it("property: a one-segment unquoted glob blocks exactly when bash would expand it to `.loom`", () => {
+    expect(guardDecision("rm -rf o.loom")).toBe("block");
     fc.assert(
       fc.property(globArb, (glob) => {
-        expect(guardDecision(`rm -rf ${glob}`)).toBe(matchesLoom(glob, false) ? "block" : "allow");
+        const blocks = matchesLoom(glob, false) || containsGuardedLiteral(glob);
+        expect(guardDecision(`rm -rf ${glob}`)).toBe(blocks ? "block" : "allow");
       }),
       { numRuns: 500 },
     );

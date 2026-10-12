@@ -42,6 +42,9 @@ import type {
   OrphanedWaveGateRetirement,
   WaveReopeningAudit,
   SpecCheck,
+  SpecTraceAmendment,
+  SpecTraceAmendmentChange,
+  SpecTraceOwnership,
   SpecTraceWaveGateRetirement,
   Task,
   TaskGraph,
@@ -75,7 +78,13 @@ import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wav
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { isExactGitSha } from "./core/git-sha";
-import { parseSpecTraceContract, specTraceDiagnosticMessages } from "./core/spec-trace";
+import {
+  amendmentHistoryError,
+  parseSpecTraceContract,
+  parseTraceOwnership,
+  specTraceDiagnosticMessages,
+  type TraceFields,
+} from "./core/spec-trace";
 import { parseTaskVerificationPolicy } from "./core/verification-policy";
 import {
   isProtectedVerificationPath,
@@ -777,6 +786,92 @@ function parseSpecTraceWaveGateRetirements(
     return parseErr("spec_trace_wave_gate_retirements contains colliding protected authority identities");
   }
   return parseOk(Object.freeze(retirements));
+}
+
+const SPEC_TRACE_AMENDMENT_FIELDS = [
+  "schemaVersion", "kind", "wave", "retiredRunId", "changes", "specIndexObservation",
+] as const;
+
+function parseOwnershipRecord(raw: unknown, label: string): ParseResult<SpecTraceOwnership> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, ["spec_anchors", "spec_contributions"], [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const trace = parseTraceOwnership(record.spec_anchors, record.spec_contributions);
+  return trace === null
+    ? parseErr(`${label} spec_anchors and spec_contributions must be string arrays`)
+    : parseOk(trace);
+}
+
+function parseSpecTraceAmendmentChange(raw: unknown, label: string): ParseResult<SpecTraceAmendmentChange> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, ["taskId", "before", "after"], [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const idError = taskIdError(record.taskId, label);
+  if (idError !== null) return parseErr(idError);
+  const before = parseOwnershipRecord(record.before, `${label}.before`);
+  if (!before.ok) return before;
+  const after = parseOwnershipRecord(record.after, `${label}.after`);
+  if (!after.ok) return after;
+  return parseOk(Object.freeze({ taskId: record.taskId as string, before: before.value, after: after.value }));
+}
+
+/** Parse one immutable audit of an in-place v2 Requirement trace amendment. */
+function parseSpecTraceAmendment(raw: unknown): ParseResult<SpecTraceAmendment> {
+  if (!isRecord(raw)) return parseErr("spec_trace_amendments entry must be an object");
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, SPEC_TRACE_AMENDMENT_FIELDS, [], "spec_trace_amendments entry");
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1 || record.kind !== "spec-trace-amendment") {
+    return parseErr("spec_trace_amendments entry has invalid schema or kind");
+  }
+  const wave = parseIntegerBound(
+    record.wave,
+    "spec_trace_amendments.wave",
+    1,
+    "an integer >= 1 within the safe-integer range",
+  );
+  if (!wave.ok) return parseErr(wave.error);
+  const retiredRunId = record.retiredRunId === null ? null : parseOrchestrationRunId(record.retiredRunId);
+  if (retiredRunId !== null && !retiredRunId.ok) {
+    return parseErr(`spec_trace_amendments.retiredRunId: ${retiredRunId.error.message}`);
+  }
+  if (!Array.isArray(record.changes) || record.changes.length === 0) {
+    return parseErr("spec_trace_amendments.changes must be a non-empty array");
+  }
+  const changes: SpecTraceAmendmentChange[] = [];
+  for (const [index, rawChange] of record.changes.entries()) {
+    const change = parseSpecTraceAmendmentChange(rawChange, `spec_trace_amendments.changes[${index}]`);
+    if (!change.ok) return change;
+    changes.push(change.value);
+  }
+  if (new Set(changes.map(({ taskId }) => taskId)).size !== changes.length) {
+    return parseErr("spec_trace_amendments.changes names a Task more than once");
+  }
+  const observation = parseSpecIndexObservation(record.specIndexObservation);
+  if (!observation.ok) return parseErr(`spec_trace_amendments.specIndexObservation: ${observation.error}`);
+  const [first, ...rest] = changes;
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "spec-trace-amendment",
+    wave: wave.value,
+    retiredRunId: retiredRunId === null ? null : retiredRunId.value,
+    changes: Object.freeze([first!, ...rest]) as SpecTraceAmendment["changes"],
+    specIndexObservation: observation.value,
+  }));
+}
+
+function parseSpecTraceAmendments(raw: unknown): ParseResult<readonly SpecTraceAmendment[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("spec_trace_amendments must be an array when present");
+  const amendments: SpecTraceAmendment[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseSpecTraceAmendment(entry);
+    if (!parsed.ok) return parseErr(`spec_trace_amendments[${index}]: ${parsed.error}`);
+    amendments.push(parsed.value);
+  }
+  return parseOk(Object.freeze(amendments));
 }
 
 /** One task-identity grammar shared by load and operator-validation boundaries. */
@@ -2028,6 +2123,7 @@ type ParsedTaskGraphHistoryFields = Readonly<{
   reopeningHistory: readonly WaveReopeningAudit[] | undefined;
   orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
+  specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
 }>;
 
 function activeWaveGateRetirementConflict(
@@ -2082,6 +2178,7 @@ function parseTaskGraphHistoryFields(
   obj: Record<string, unknown>,
   activeWaveGate: ActiveWaveGateRegistration | undefined,
   waveGateHistory: readonly CompletedWaveGateRegistration[] | undefined,
+  tasks: readonly Record<string, unknown>[],
 ): ParseResult<ParsedTaskGraphHistoryFields> {
   const reopeningHistory = parseWaveReopeningHistory(obj.wave_reopening_history);
   if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
@@ -2098,10 +2195,22 @@ function parseTaskGraphHistoryFields(
   if (specTraceConflict !== null) return parseErr(specTraceConflict);
   const installationConflict = activeWaveGateInstallationAuditConflict(activeWaveGate, orphanedHistory.value);
   if (installationConflict !== null) return parseErr(installationConflict);
+  const specTraceAmendments = parseSpecTraceAmendments(obj.spec_trace_amendments);
+  if (!specTraceAmendments.ok) return parseErr(specTraceAmendments.error);
+  if ((specTraceAmendments.value?.length ?? 0) > 0 && obj.spec_trace_version !== 2) {
+    return parseErr("spec_trace_amendments requires spec_trace_version 2");
+  }
+  // parseTaskGraphTasks already proved every v2 Task id and trace array.
+  const amendmentTraceError = amendmentHistoryError(
+    specTraceAmendments.value,
+    tasks as readonly (TraceFields & Readonly<{ id: string }>)[],
+  );
+  if (amendmentTraceError !== null) return parseErr(amendmentTraceError);
   return parseOk({
     reopeningHistory: reopeningHistory.value,
     orphanedHistory: orphanedHistory.value,
     specTraceRetirements: specTraceRetirements.value,
+    specTraceAmendments: specTraceAmendments.value,
   });
 }
 
@@ -2139,7 +2248,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     verificationManifest,
     activeWaveCompletionSuite,
   } = parts.authority;
-  const { reopeningHistory, orphanedHistory, specTraceRetirements } = parts.history;
+  const { reopeningHistory, orphanedHistory, specTraceRetirements, specTraceAmendments } = parts.history;
   // The single blessed cast: every union field above is proven in place.
   return {
     ...obj,
@@ -2167,6 +2276,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
+    ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
   } as unknown as ParsedTaskGraph;
 }
 
@@ -2248,7 +2358,12 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (blockedCauseError !== null) return parseErr(blockedCauseError);
   const authority = parseTaskGraphAuthorityFields(obj);
   if (!authority.ok) return parseErr(authority.error);
-  const history = parseTaskGraphHistoryFields(obj, authority.value.activeWaveGate, authority.value.waveGateHistory);
+  const history = parseTaskGraphHistoryFields(
+    obj,
+    authority.value.activeWaveGate,
+    authority.value.waveGateHistory,
+    tasks.value as Record<string, unknown>[],
+  );
   if (!history.ok) return parseErr(history.error);
 
   return parseOk(taskGraphFromParsedParts(obj, {

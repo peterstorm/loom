@@ -8,6 +8,8 @@
  * accepts the graph.
  */
 
+import type { SpecTraceAmendment, SpecTraceAmendmentChange, SpecTraceOwnership } from "../types";
+
 export const SPEC_TRACE_VERSION = 2 as const;
 
 export type RequirementTraceTask = Readonly<{
@@ -269,4 +271,143 @@ export function parseSpecTraceContract(
 
 export function specTraceDiagnosticMessages(result: SpecTraceParseResult): readonly string[] {
   return result.ok ? Object.freeze([]) : Object.freeze(result.diagnostics.map(({ message }) => message));
+}
+
+const isStringArray = (raw: unknown): raw is readonly string[] =>
+  Array.isArray(raw) && raw.every((entry) => typeof entry === "string");
+
+/**
+ * The one shape of a Task's Requirement trace ownership: two string arrays,
+ * copied and frozen. Every parser of an ownership record (helper input,
+ * persisted amendment audit) builds it here under its own labels; null when
+ * either field is not a string array.
+ */
+export function parseTraceOwnership(anchors: unknown, contributions: unknown): SpecTraceOwnership | null {
+  return isStringArray(anchors) && isStringArray(contributions)
+    ? Object.freeze({
+        spec_anchors: Object.freeze([...anchors]),
+        spec_contributions: Object.freeze([...contributions]),
+      })
+    : null;
+}
+
+/** The trace fields a Task carries; on a v2 graph both arrays are proven. */
+export type TraceFields = Readonly<{ spec_anchors?: readonly string[]; spec_contributions?: readonly string[] }>;
+
+/** A Task's live trace ownership: an absent array owns nothing. */
+export const traceOf = (task: TraceFields): SpecTraceOwnership => Object.freeze({
+  spec_anchors: task.spec_anchors ?? [],
+  spec_contributions: task.spec_contributions ?? [],
+});
+
+/**
+ * Why an amendment audit does not describe the trace it claims to, or null.
+ * Each Task's successive changes must chain (a change starts, as sets, where
+ * that Task's previous change ended) and its live trace must be the `after` of
+ * its latest change. The audit is the only sanctioned way a v2 trace changes
+ * in place, so a break means the trace or its history was edited behind it.
+ */
+export function amendmentHistoryError(
+  amendments: readonly SpecTraceAmendment[] | undefined,
+  tasks: readonly (TraceFields & Readonly<{ id: string }>)[],
+): string | null {
+  const byId = new Map(tasks.map((task) => [task.id, task] as const));
+  const latest = new Map<string, SpecTraceAmendmentChange>();
+  for (const change of (amendments ?? []).flatMap(({ changes }) => changes)) {
+    if (!byId.has(change.taskId)) {
+      return `spec_trace_amendments names Task ${change.taskId}, which is not in the protected roster`;
+    }
+    const previous = latest.get(change.taskId);
+    if (previous !== undefined && !sameRequirementTrace(previous.after, change.before)) {
+      return `Task ${change.taskId} spec_trace_amendments change does not start where its previous change ended`;
+    }
+    latest.set(change.taskId, change);
+  }
+  for (const [taskId, change] of latest) {
+    if (!sameRequirementTrace(traceOf(byId.get(taskId)!), change.after)) {
+      return `Task ${taskId} Requirement trace contradicts its latest spec_trace_amendments change`;
+    }
+  }
+  return null;
+}
+
+/** The exact-roster ownership input, keyed by Task id in submitted order. */
+export type OwnershipParse =
+  | Readonly<{ ok: true; value: ReadonlyMap<string, SpecTraceOwnership> }>
+  | Readonly<{ ok: false; message: string }>;
+
+const exactFields = (record: Record<string, unknown>, fields: readonly string[]): boolean => {
+  const keys = Object.keys(record).sort();
+  const expected = [...fields].sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+};
+
+/**
+ * Parse the exact-roster contract `{spec_trace_version: 2, tasks: [{id,
+ * spec_anchors, spec_contributions}]}` shared by every trace-writing helper.
+ * `label` names that helper in each refusal.
+ */
+export function parseOwnershipInput(raw: unknown, label: string): OwnershipParse {
+  const refuse = (message: string): OwnershipParse => Object.freeze({ ok: false, message: `${label} ${message}` });
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
+      !exactFields(raw as Record<string, unknown>, ["spec_trace_version", "tasks"])) {
+    return refuse("input must contain exactly spec_trace_version and tasks");
+  }
+  const input = raw as Record<string, unknown>;
+  if (input.spec_trace_version !== SPEC_TRACE_VERSION) {
+    return refuse(`input must declare spec_trace_version: ${SPEC_TRACE_VERSION}`);
+  }
+  if (!Array.isArray(input.tasks)) return refuse("tasks must be an array");
+
+  const ownership = new Map<string, SpecTraceOwnership>();
+  for (const [index, entry] of input.tasks.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry) ||
+        !exactFields(entry as Record<string, unknown>, ["id", "spec_anchors", "spec_contributions"])) {
+      return refuse(`tasks[${index}] must contain exactly id/spec_anchors/spec_contributions`);
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id === "") {
+      return refuse(`tasks[${index}].id must be a non-empty string`);
+    }
+    if (ownership.has(record.id)) return refuse(`roster repeats Task ${record.id}`);
+    const trace = parseTraceOwnership(record.spec_anchors, record.spec_contributions);
+    if (trace === null) {
+      return refuse(`Task ${record.id} must provide spec_anchors and spec_contributions string arrays`);
+    }
+    ownership.set(record.id, trace);
+  }
+  return Object.freeze({ ok: true, value: ownership });
+}
+
+/** Why a submitted roster is not exactly the protected Task roster, in order; null when it is. */
+export function rosterError(
+  graph: Readonly<{ tasks: readonly Readonly<{ id: string }>[] }>,
+  ownership: ReadonlyMap<string, SpecTraceOwnership>,
+  label: string,
+): string | null {
+  const currentIds = graph.tasks.map(({ id }) => id);
+  const submittedIds = [...ownership.keys()];
+  const missing = currentIds.filter((id) => !ownership.has(id));
+  const foreign = submittedIds.filter((id) => !currentIds.includes(id));
+  if (missing.length > 0 || foreign.length > 0 || submittedIds.length !== currentIds.length) {
+    return [
+      `${label} roster is stale or partial`,
+      ...(missing.length === 0 ? [] : [`missing existing Tasks: ${missing.join(", ")}`]),
+      ...(foreign.length === 0 ? [] : [`foreign Tasks: ${foreign.join(", ")}`]),
+    ].join("; ");
+  }
+  return submittedIds.some((id, index) => id !== currentIds[index])
+    ? `${label} roster order must exactly match the protected Task roster`
+    : null;
+}
+
+const sameSet = (left: readonly string[], right: readonly string[]): boolean => {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
+};
+
+/** Whether two traces own the same Requirements. Arrays compare as sets: order is not ownership. */
+export function sameRequirementTrace(left: SpecTraceOwnership, right: SpecTraceOwnership): boolean {
+  return sameSet(left.spec_anchors, right.spec_anchors) && sameSet(left.spec_contributions, right.spec_contributions);
 }

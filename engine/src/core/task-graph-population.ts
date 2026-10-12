@@ -248,6 +248,7 @@ export function populateTaskGraph(
     wave_reopening_history: _staleWaveReopeningHistory,
     orphaned_wave_gate_history: _staleOrphanedWaveGateHistory,
     spec_trace_wave_gate_retirements: _staleSpecTraceRetirements,
+    spec_trace_amendments: _staleSpecTraceAmendments,
     spec_index_observation: _staleSpecIndexObservation,
     proof_boundary_observation: _staleProofBoundaryObservation,
     ...existingWithoutWaveAuthority

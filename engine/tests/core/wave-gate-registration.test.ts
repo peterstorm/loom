@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   admitWaveGateRegistration,
   installWaveGateRegistration,
+  retireWaveReviewAuthority,
+  supersedeAbandonedWaveGateReview,
   type WaveGateRegistrationCandidate,
 } from "../../src/core/wave-gate-registration";
+import { capturedSpecCheck } from "../../src/core/spec-check";
 import { waveGateAuthorityDigest } from "../../src/core/wave-review-authority";
 import type { ActiveWaveGateRegistration, TaskGraph } from "../../src/types";
+import { acceptedWaveCompletionSuite } from "../fixtures/accepted-wave-completion-suite";
 import {
   activeWaveGateFixture,
   completedWaveGateFixture,
@@ -240,5 +244,53 @@ describe("installWaveGateRegistration", () => {
       const next = install(blockedBySpecCheck(["still broken"]));
       expect(next.wave_gates["8"]).toMatchObject({ blocked: true });
     });
+  });
+});
+
+describe("retireWaveReviewAuthority", () => {
+  const reviewRun = {
+    generation: 1, packet_id: "b".repeat(64), head_sha: "c".repeat(40),
+    prior_finding_ids: [], expected_agents: ["code-reviewer"], evidence: [],
+  };
+  const otherWaveCheck = capturedSpecCheck({ wave: 2, runAt: "now", criticalFindings: [] });
+
+  it("returns the graph itself when the Wave carries no review residue", () => {
+    expect(retireWaveReviewAuthority(base, 1)).toBe(base);
+    const withOtherWaveCheck = { ...base, spec_check: otherWaveCheck };
+    expect(retireWaveReviewAuthority(withOtherWaveCheck, 1)).toBe(withOtherWaveCheck);
+  });
+
+  // The predicate reads only presence, so `review_run` is a partial stub.
+  // One row per field resetWaveGateReviewAuthority clears: a field added to the
+  // reset without a row here is a predicate that can silently stop triggering.
+  it.each<readonly [string, (graph: TaskGraph) => TaskGraph, (graph: TaskGraph) => unknown]>([
+    ["wave_review_epoch", (graph) => ({
+      ...graph, wave_review_epoch: { runId: "run.gone" as never, wave: 1, batchEpoch: "e".repeat(64) as never },
+    }), (graph) => graph.wave_review_epoch],
+    ["active_wave_completion_suite", (graph) => ({
+      ...graph, active_wave_completion_suite: acceptedWaveCompletionSuite(registrationFor(graph, 1, ROSTER, "run.gone")),
+    }), (graph) => graph.active_wave_completion_suite],
+    ["a current-Wave spec_check", (graph) => ({
+      ...graph, spec_check: capturedSpecCheck({ wave: 1, runAt: "now", criticalFindings: [] }),
+    }), (graph) => graph.spec_check],
+    ["a current-Wave Task review_run", (graph) => ({
+      ...graph,
+      tasks: graph.tasks.map((task) => task.id === "T1" ? { ...task, review_run: reviewRun as never } : task),
+    }), (graph) => graph.tasks[0]!.review_run],
+  ])("retires %s left with no gate registered", (_field, seed, read) => {
+    const seeded = seed(base);
+    expect(read(seeded)).toBeDefined();
+    expect(read(retireWaveReviewAuthority(seeded, 1))).toBeUndefined();
+  });
+
+  it("retires an abandoned tombstone exactly as its successor's install would", () => {
+    const tombstoned = withActive(active(base, "run.old", abandoned(null)));
+    const retired = retireWaveReviewAuthority(tombstoned, 1);
+    expect(retired.active_wave_gate).toBeUndefined();
+    expect(retired).toEqual(supersedeAbandonedWaveGateReview(tombstoned, "run.old", ROSTER));
+  });
+
+  it("refuses to retire a live gate's authority: that is the caller's precondition", () => {
+    expect(() => retireWaveReviewAuthority(withActive(active(base, "run.live")), 1)).toThrow("run.live");
   });
 });

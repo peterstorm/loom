@@ -217,15 +217,48 @@ export function resetWaveGateReviewAuthority(
 }
 
 /**
+ * Retire one Wave's review authority while no live gate owns it, for a caller
+ * that changed what that authority judged (a Requirement trace amendment).
+ *
+ * - An abandoned tombstone is retired exactly as its successor's install would.
+ * - With no gate, whatever review state survives is reset. The residue test
+ *   below hand-lists the fields `resetWaveGateReviewAuthority` clears, and each
+ *   listed field has a test row. Nothing fails if a field added to the reset is
+ *   forgotten here, so such a field needs a clause below and a row there. With
+ *   no residue the graph is returned unchanged, so an older Wave's spec-check
+ *   is never cleared.
+ *
+ * A live or legacy-terminal gate is the caller's precondition to refuse; it is
+ * an invariant violation here, never silently reset.
+ */
+export function retireWaveReviewAuthority(graph: TaskGraph, wave: number): TaskGraph {
+  const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
+  const active = graph.active_wave_gate;
+  if (active !== undefined) {
+    if (active.terminalOutcome?.kind !== "terminal-abandoned") {
+      throw new Error(`Wave ${wave} review authority belongs to unretired Wave Gate run ${active.runId}`);
+    }
+    return supersedeAbandonedWaveGateReview(graph, active.runId, waveTaskIds);
+  }
+  const residue = graph.wave_review_epoch !== undefined ||
+    graph.active_wave_completion_suite !== undefined ||
+    graph.spec_check?.wave === wave ||
+    graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
+  return residue ? resetWaveGateReviewAuthority(graph, waveTaskIds) : graph;
+}
+
+/**
  * A fresh Wave Gate run superseding an operator-abandoned one. Abandonment only
  * stamps a terminal tombstone; the abandoned run's review epoch, spec-check
  * record and packet-bound review state stay behind and contradict any
  * successor (an epoch must belong to the active run). This retires that review
  * authority exactly as restart and orphan recovery do — accepted findings and
  * Review Generations survive — and reopens any review the abandoned run
- * accepted, because that acceptance's authority died with it.
+ * accepted, because that acceptance's authority died with it. A Requirement
+ * trace amendment over the same tombstone retires it identically, through
+ * `retireWaveReviewAuthority`.
  */
-function supersedeAbandonedWaveGateReview(
+export function supersedeAbandonedWaveGateReview(
   graph: TaskGraph,
   abandonedRunId: string,
   taskIds: readonly string[],
