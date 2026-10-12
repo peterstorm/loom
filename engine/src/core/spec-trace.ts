@@ -8,6 +8,8 @@
  * accepts the graph.
  */
 
+import type { SpecTraceOwnership } from "../types";
+
 export const SPEC_TRACE_VERSION = 2 as const;
 
 export type RequirementTraceTask = Readonly<{
@@ -269,4 +271,15 @@ export function parseSpecTraceContract(
 
 export function specTraceDiagnosticMessages(result: SpecTraceParseResult): readonly string[] {
   return result.ok ? Object.freeze([]) : Object.freeze(result.diagnostics.map(({ message }) => message));
+}
+
+const sameSet = (left: readonly string[], right: readonly string[]): boolean => {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
+};
+
+/** Whether two traces own the same Requirements. Arrays compare as sets: order is not ownership. */
+export function sameRequirementTrace(left: SpecTraceOwnership, right: SpecTraceOwnership): boolean {
+  return sameSet(left.spec_anchors, right.spec_anchors) && sameSet(left.spec_contributions, right.spec_contributions);
 }

@@ -953,6 +953,16 @@ export function recordedAnchorHashes(
 }
 
 /**
+ * Every identifier a Task may claim or contribute to: the completable FR and AS
+ * entries. An Out-of-Scope entry is indexed but excluded, so it is absent here.
+ */
+export function completableRequirementIds(index: ParsedSpec): ReadonlySet<string> {
+  return new Set([...entryById(index)]
+    .filter(([, indexed]) => indexed.family === "completable")
+    .map(([id]) => id));
+}
+
+/**
  * The spec file an observation was taken from, whichever way it turned out.
  *
  * Total accessor owned by the type, so a caller proving the observation names

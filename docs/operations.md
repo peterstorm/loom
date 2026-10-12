@@ -612,7 +612,8 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration remediate \
 
 # Separately, arm re-attestation only on an eligible pending, nonterminal Task
 # when the declared artifacts ALREADY carry the completed work
-# (populate-task-graph --force reset, reopened Wave, anchor-only repair).
+# (populate-task-graph --force reset, reopened Wave). An anchor-only repair
+# needs no attestation: amend-spec-trace keeps implementation proof.
 bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
   --task <task-id> \
   --reason "<why the work is known to be already present>"
@@ -708,6 +709,33 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper upgrade-spec-trace \
 Usually omit `--superseded-by` and start the replacement only after migration. If an already-created successor Run Directory was deliberately named during abandonment, the upgrade re-proves that exact direct child and preserves the pointer as audit data; it does not install the successor as protected authority. The upgrade opens the exact protected Run Directory, proves its engine-owned Wave Gate program (Wave, Task roster, and authority digest), reads the immutable abandonment marker, then repeats those proofs under StateManager's lock. Missing/unreadable/foreign markers, authority drift, missing or foreign supersession targets, and non-abandoned runs cause no TaskGraph mutation.
 
 On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old run id, Wave, authority digest, revision, runs root, and exact abandonment reason/supersession. The same locked commit installs trace v2 and clears only stale `active_wave_gate`, `wave_review_epoch`, and `spec_check` scope. Tasks, proofs, Review Runs, Findings, Refutations, Resolutions, issued packets, completed/orphan retirement history, and implementation evidence remain intact. An exact replay does not append another audit; a different mapping remains refused.
+
+### Amending a v2 Requirement trace
+
+A populated v2 graph whose Completion Claims or Contributions are wrong (a Requirement claimed by the wrong Task, a missing Contribution) is corrected in place, not by `populate-task-graph --force`. Re-population resets every Task to `pending` and discards all settled implementation, review and refutation results; an amendment keeps them. Prepare the same exact-roster JSON as the legacy upgrade, every Task once in protected order, then:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper amend-spec-trace \
+  < /path/to/exact-trace-ownership.json
+```
+
+Arrays compare as sets, so a reordering is not an amendment and an exact replay writes nothing. The helper refuses, without writing, when:
+
+- the graph is legacy (use `upgrade-spec-trace`) or not in the execute Phase;
+- any Task is executing or a subagent is active;
+- a Wave Gate is live. Its review packets froze the old trace, so first run `helper orchestration abandon` on it; a `terminal-abandoned` tombstone is accepted and retired;
+- any Task in a completed Wave (`wave_gate_history`) would change. Completed Waves are verified scope, so moving a Completion Claim into or out of one is refused too;
+- an added id is not a completable FR/AS entry in the Spec Index observed now, or that Spec Index is unavailable (fail closed; removals still apply), or `spec_file` moved during the call;
+- the result breaks v2 ownership (`parseSpecTraceContract`).
+
+On success, one locked write:
+
+- replaces only the changed Tasks' `spec_anchors`/`spec_contributions`;
+- keeps the recorded Requirement Content Hash of every retained Completion Claim (drift evidence survives), mints one from the observed Spec Index for every added claim, and drops removed claims' hashes;
+- retires the current Wave's trace-derived review authority exactly as a successor gate install would: `review_run`, `spec_check`, `wave_review_epoch`, `active_wave_completion_suite`, the abandoned tombstone, and review acceptance granted by that abandoned run. Wave blocks are re-derived;
+- appends a `spec_trace_amendments` audit naming the Wave, the retired run (or `null`), each change before and after, and the Spec Index observation.
+
+Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, and re-population drops the audit together with the Tasks it described.
 
 ### State is malformed
 

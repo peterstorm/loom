@@ -223,9 +223,10 @@ export function resetWaveGateReviewAuthority(
  * successor (an epoch must belong to the active run). This retires that review
  * authority exactly as restart and orphan recovery do — accepted findings and
  * Review Generations survive — and reopens any review the abandoned run
- * accepted, because that acceptance's authority died with it.
+ * accepted, because that acceptance's authority died with it. A Requirement
+ * trace amendment over the same tombstone retires it identically.
  */
-function supersedeAbandonedWaveGateReview(
+export function supersedeAbandonedWaveGateReview(
   graph: TaskGraph,
   abandonedRunId: string,
   taskIds: readonly string[],

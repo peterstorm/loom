@@ -721,6 +721,32 @@ export type SpecTraceWaveGateRetirement = Readonly<{
   supersededBy: OrchestrationRunId | null;
 }>;
 
+/** One Task's Requirement trace: its Completion Claims and Contributions. */
+export type SpecTraceOwnership = Readonly<{
+  spec_anchors: readonly string[];
+  spec_contributions: readonly string[];
+}>;
+
+/** One Task whose trace an amendment changed, before and after. */
+export type SpecTraceAmendmentChange = Readonly<{
+  taskId: string;
+  before: SpecTraceOwnership;
+  after: SpecTraceOwnership;
+}>;
+
+/** Immutable audit of one in-place v2 Requirement trace amendment. It names
+ * the Wave whose review authority it retired (and the abandoned run, when one
+ * was tombstoned), every changed Task, and the Spec Index observation any
+ * newly recorded Requirement Content Hash was minted from. */
+export type SpecTraceAmendment = Readonly<{
+  schemaVersion: 1;
+  kind: "spec-trace-amendment";
+  wave: number;
+  retiredRunId: OrchestrationRunId | null;
+  changes: OrchestrationNonEmpty<SpecTraceAmendmentChange>;
+  specIndexObservation: SpecIndexObservation;
+}>;
+
 export type StatusFact<T> =
   | Readonly<{ kind: "known"; value: T }>
   | Readonly<{ kind: "unavailable"; reasons: OrchestrationNonEmpty<StatusReason> }>;
@@ -1138,6 +1164,9 @@ export interface TaskGraph {
   readonly orphaned_wave_gate_history?: readonly OrphanedWaveGateRetirement[];
   /** Abandoned active authority retired only to install Requirement trace v2. */
   readonly spec_trace_wave_gate_retirements?: readonly SpecTraceWaveGateRetirement[];
+  /** Append-only audit of in-place v2 trace amendments; each Task's latest
+   *  change must agree with its current trace. Dropped by re-population. */
+  readonly spec_trace_amendments?: readonly SpecTraceAmendment[];
   readonly updated_at?: string;
 }
 
