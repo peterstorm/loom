@@ -130,7 +130,7 @@ As implemented, checked in this order; the first that applies wins. Items marked
 
 ## Separate follow-ups (not in this change)
 
-- `upgrade-spec-trace --retire-abandoned-run` uses the narrower `retireWaveGateScope`. Check whether it leaves `review_run` or `accepted_review_authority` behind for the successor.
+- ~~`upgrade-spec-trace --retire-abandoned-run` uses the narrower `retireWaveGateScope`.~~ Resolved on `fix/57-d6-retire-scope`: it did leave `review_run`, abandoned-run acceptance and the completion suite behind, and with a suite present the retirement write was refused outright. It now records the proven abandonment as a tombstone and retires through `retireWaveReviewAuthority`.
 - The stale doc comment on `coverageTasks`: enforcement reads `epochSettledFloor`, not "the same lift".
 
 ## Implementation deviations

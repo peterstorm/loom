@@ -670,6 +670,12 @@ Do not repair state. The mutating CLI route compared the Runtime Revision publis
 
 A missing handshake means the Pi session predates this protocol or did not load Loom; it is also resolved by reload/restart, not by deleting fields from the TaskGraph.
 
+### Wave Gate full-tier lint refuses imports the branch allows
+
+The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the completion suite changes into the worktree), but the lint rule code is the loaded runtime's, not the branch's. A branch that changes a rule, for example a new per-file capability grant in `no-cross-boundary-imports` for a `node:` builtin or an exact-specifier package, therefore fails the gate with a boundary refusal that its own rule would admit. The branch's files are correct; the runtime is older.
+
+This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
+
 ### Active graph uses the legacy Requirement trace contract
 
 Legacy graphs without `spec_trace_version` remain readable and auditable. To upgrade exactly one active legacy graph, prepare JSON covering the exact existing Task roster in protected order; provide both arrays for every Task:
@@ -708,7 +714,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper upgrade-spec-trace \
 
 Usually omit `--superseded-by` and start the replacement only after migration. If an already-created successor Run Directory was deliberately named during abandonment, the upgrade re-proves that exact direct child and preserves the pointer as audit data; it does not install the successor as protected authority. The upgrade opens the exact protected Run Directory, proves its engine-owned Wave Gate program (Wave, Task roster, and authority digest), reads the immutable abandonment marker, then repeats those proofs under StateManager's lock. Missing/unreadable/foreign markers, authority drift, missing or foreign supersession targets, and non-abandoned runs cause no TaskGraph mutation.
 
-On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old run id, Wave, authority digest, revision, runs root, and exact abandonment reason/supersession. The same locked commit installs trace v2 and clears only stale `active_wave_gate`, `wave_review_epoch`, and `spec_check` scope. Tasks, proofs, Review Runs, Findings, Refutations, Resolutions, issued packets, completed/orphan retirement history, and implementation evidence remain intact. An exact replay does not append another audit; a different mapping remains refused.
+On success, one immutable `SpecTraceWaveGateRetirement` audit preserves the old run id, Wave, authority digest, revision, runs root, and exact abandonment reason/supersession. The same locked commit installs trace v2 and retires the run's review authority exactly as a successor install would: `active_wave_gate`, `wave_review_epoch`, `active_wave_completion_suite`, the retired Wave's `spec_check`, the Wave's in-flight `review_run`s, and review acceptance granted by the abandoned run (those reviews reopen), with Wave blocks re-derived. Another Wave's `spec_check` and its block are left alone. Tasks, proofs, Findings, Review Generations, Refutations, Resolutions, issued packets, completed/orphan retirement history, and implementation evidence remain intact, so the next `start wave-gate` installs cleanly. An exact replay does not append another audit; a different mapping remains refused.
 
 ### Amending a v2 Requirement trace
 
@@ -733,7 +739,7 @@ On success, one locked write:
 
 - replaces only the changed Tasks' `spec_anchors`/`spec_contributions`;
 - keeps the recorded Requirement Content Hash of every retained Completion Claim (drift evidence survives), mints one from the observed Spec Index for every added claim, and drops removed claims' hashes;
-- retires the current Wave's trace-derived review authority. Over an abandoned tombstone this is exactly what a successor gate install does: it clears `review_run`, `spec_check`, `wave_review_epoch`, `active_wave_completion_suite`, the tombstone, and review acceptance granted by that run, and re-derives Wave blocks. With no gate registered, the same reset runs only if some of that review state is left for the current Wave; otherwise nothing else changes, so an older Wave's `spec_check` survives;
+- retires the current Wave's trace-derived review authority. Over an abandoned tombstone this is what a successor gate install does: it clears `review_run`, the current Wave's `spec_check`, `wave_review_epoch`, `active_wave_completion_suite`, the tombstone, and review acceptance granted by that run, and re-derives Wave blocks. Another Wave's `spec_check` and its block are left alone. With no gate registered, the same reset runs only if some of that review state is left for the current Wave; otherwise nothing else changes, so an older Wave's `spec_check` survives;
 - appends a `spec_trace_amendments` audit naming the Wave, the retired run (or `null`), each change before and after, and the Spec Index observation.
 
 Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, or whose amendment history for a Task does not chain, and re-population drops the audit together with the Tasks it described.
