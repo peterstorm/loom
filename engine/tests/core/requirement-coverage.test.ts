@@ -87,6 +87,7 @@ const hashesOf = (claims: readonly string[]): ReadonlyMap<string, RecordedHash> 
 const task = (overrides: Partial<CoverageTask> = {}): CoverageTask => Object.freeze({
   id: "T1",
   inCurrentWave: true,
+  completed: false,
   decisionRecord: false,
   completionAnchors: ["FR-001"],
   contributions: [],
@@ -406,6 +407,69 @@ describe("decision-record Waves", () => {
     const coverage = rowsOf([task({ decisionRecord: true, completionAnchors: ["FR-404"] })]);
     expect(coverage.rows[0]?.verdict).toEqual({ kind: "unknown-requirement" });
     expect(claimSeverity(coverage.rows[0]!.verdict)).toBe("CRITICAL");
+  });
+});
+
+describe("Requirements completed in earlier Waves", () => {
+  const STALE = "0".repeat(64) as SpecContentHash;
+  const completedEarlier = (overrides: Partial<CoverageTask> = {}): CoverageTask => task({
+    id: "W1",
+    inCurrentWave: false,
+    completed: true,
+    completionAnchors: ["FR-002"],
+    ...overrides,
+  });
+  const current = task({ id: "W2", completionAnchors: ["FR-001", "AS-001", "AS-002"], anchorHashes: hashesOf(["FR-001"]) });
+
+  it("reports a completed claim whose text changed since its Wave passed", () => {
+    const coverage = rowsOf([
+      completedEarlier({ anchorHashes: new Map([["FR-002", readable(STALE)]]) }),
+      current,
+    ]);
+    expect(coverage.completedDrift).toEqual([{
+      taskId: "W1",
+      claim: "FR-002",
+      change: { kind: "rewritten", entry: index.frs[1], recorded: STALE },
+    }]);
+    // Advisory: it never reaches the settled floor the current Wave must meet.
+    expect(settledCriticalCount(coverage)).toBe(0);
+    const rendered = renderRequirementCoverage(coverage);
+    expect(rendered).toContain("### Requirements completed in earlier Waves whose text changed since they passed");
+    expect(rendered).toContain(`- W1 completed FR-002 — MEDIUM: its text changed since that Wave passed (verified ${STALE.slice(0, 12)}, now ${index.frs[1].contentHash.slice(0, 12)})`);
+  });
+
+  it.each([
+    ["absent from the Spec Index", "FR-404"],
+    ["now Out of Scope", "OOS-001"],
+  ])("reports a completed claim that is %s as withdrawn", (_name, claim) => {
+    const coverage = rowsOf([completedEarlier({ completionAnchors: [claim] }), current, task({ id: "W3", completionAnchors: ["FR-002"] })]);
+    expect(coverage.completedDrift).toEqual([{ taskId: "W1", claim, change: { kind: "withdrawn" } }]);
+    expect(renderRequirementCoverage(coverage)).toContain(`- W1 completed ${claim} — MEDIUM: it is no longer a completable entry in the Spec Index`);
+  });
+
+  it.each<[string, Partial<CoverageTask>]>([
+    ["text unchanged since it passed", { anchorHashes: hashesOf(["FR-002"]) }],
+    ["no recorded hash, so no basis to compare", {}],
+    ["an unreadable recorded hash", { anchorHashes: new Map([["FR-002", { kind: "unreadable", stored: "x" }]]) }],
+    ["a later Wave that has not completed", { completed: false, anchorHashes: new Map([["FR-002", readable(STALE)]]) }],
+  ])("reports nothing for %s", (_name, overrides) => {
+    expect(rowsOf([completedEarlier(overrides), current]).completedDrift).toEqual([]);
+  });
+
+  it("leaves current-Wave drift to its row, never to the earlier-Wave section", () => {
+    const coverage = rowsOf([task({ completed: true, anchorHashes: new Map([["FR-001", readable(STALE)]]) })]);
+    expect(coverage.completedDrift).toEqual([]);
+    expect(coverage.rows[0]?.verdict).toMatchObject({ drift: { kind: "drifted" } });
+  });
+
+  it("renders no section at all when nothing drifted, so existing packets keep their bytes", () => {
+    const rendered = renderRequirementCoverage(rowsOf([completedEarlier({ anchorHashes: hashesOf(["FR-002"]) }), current]));
+    expect(rendered).not.toContain("completed in earlier Waves");
+  });
+
+  it("keeps an untrusted claim string from breaking its line", () => {
+    const rendered = renderRequirementCoverage(rowsOf([completedEarlier({ completionAnchors: ["FR-9\n- forged"] }), current]));
+    expect(rendered).not.toContain("\n- forged");
   });
 });
 

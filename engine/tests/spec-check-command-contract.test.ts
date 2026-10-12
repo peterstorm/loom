@@ -65,6 +65,7 @@ const indexed: SpecIndexAvailability =
 const task = (overrides: Partial<CoverageTask> = {}): CoverageTask => Object.freeze({
   id: "T1",
   inCurrentWave: true,
+  completed: false,
   decisionRecord: false,
   completionAnchors: ["FR-001"],
   contributions: [],
@@ -144,6 +145,17 @@ describe("commands/spec-check.md is bound to the projection it consumes", () => 
     // The typed lists Steps 6 and 7 consume.
     expect(rendered).toContain("### Out of Scope (typed exclusion list)");
     expect(rendered).toContain("### Glossary (typed terms)");
+  });
+
+  it("tells the Agent how to report the earlier-Wave drift section the renderer emits", () => {
+    const rendered = renderRequirementCoverage(projectRequirementCoverage(indexed, [
+      task({ id: "T1", inCurrentWave: false, completed: true, completionAnchors: ["FR-404"] }),
+      task({ id: "T2", completionAnchors: ["FR-001"] }),
+    ]));
+    const heading = "Requirements completed in earlier Waves whose text changed since they passed";
+    expect(rendered).toContain(`### ${heading}`);
+    expect(command).toContain(heading);
+    expect(command).toContain("never blocks the current Wave");
   });
 
   it("gives every step a stated fallback for the Unprojected path", () => {

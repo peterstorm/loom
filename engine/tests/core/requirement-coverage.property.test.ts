@@ -102,6 +102,7 @@ const taskArb: fc.Arbitrary<CoverageTask> = fc
   .record({
     id: fc.string({ minLength: 1, maxLength: 6 }),
     inCurrentWave: fc.boolean(),
+    completed: fc.boolean(),
     decisionRecord: fc.boolean(),
     completionAnchors: fc.uniqueArray(claimArb, { maxLength: 6 }),
     contributions: fc.array(fc.constantFrom(...KNOWN), { maxLength: 2 }),
@@ -211,6 +212,7 @@ describe("Requirement Coverage Projection properties", () => {
         const coverage = projectRequirementCoverage(indexed, [{
           id: "T1",
           inCurrentWave: true,
+          completed: false,
           decisionRecord: false,
           completionAnchors: claims,
           contributions: [],
@@ -250,6 +252,22 @@ describe("Requirement Coverage Projection properties", () => {
         ? "contributions"
         : current.length > 0 && current.every(({ decisionRecord }) => decisionRecord) ? "decision-records" : "nowhere";
       expect(coverage.unclaimedTrace).toBe(expected);
+    }));
+  });
+
+  it("reports earlier-Wave drift for exactly the completed out-of-Wave claims whose verified text is gone", () => {
+    const COMPLETABLE = new Set<string>(["FR-001", "FR-002", "FR-003", "AS-001", "AS-002"]);
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      const expected = tasks
+        .filter(({ inCurrentWave, completed }) => !inCurrentWave && completed)
+        .flatMap((task) => task.completionAnchors.filter((claim) => {
+          if (!COMPLETABLE.has(claim)) return true;
+          const recorded = task.anchorHashes.get(claim);
+          return recorded?.kind === "readable" && recorded.hash !== REAL_HASHES.get(claim);
+        }).map((claim) => `${task.id}|${claim}`));
+      expect(coverage.completedDrift.map(({ taskId, claim }) => `${taskId}|${claim}`)).toEqual(expected);
     }));
   });
 

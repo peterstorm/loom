@@ -11,6 +11,7 @@ import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH } from '../../../config';
 import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness } from '../../../core/wave-gate-machine';
+import { reanchorVerifiedClaims } from '../../../core/verified-claim-hashes';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
 import { WAVE_REVIEW_AGENTS } from '../../../core/agent-catalog-projections';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
@@ -222,11 +223,12 @@ async function resumeWaveGateAfter(
     }
     const lint = runFullTierWaveLint(current.value.waveTasks);
     if (lint.kind === "block") return waveBlocked(handle, lint.message);
-    const completionDocuments = observeWaveSpecCheckDocuments({
+    const completionObservation = observeWaveSpecCheckDocuments({
       specFile: refreshed.spec_file,
       planFile: refreshed.plan_file,
       projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
-    }).authority;
+    });
+    const completionDocuments = completionObservation.authority;
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
       if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||
           !waveSpecCheckDocumentsMatch(locked.wave_review_epoch?.specCheckDocuments, completionDocuments)) {
@@ -239,10 +241,21 @@ async function resumeWaveGateAfter(
         };
       }
       const lockedReadiness = deriveWaveReadiness(locked, currentWaveGateDeps(locked, handle.runDirectory));
-      return lockedReadiness.ok ? commitWaveGateCompletion(lockedReadiness.value) : {
-        ok: false as const,
-        error: { kind: "wave-completion-commit-rejected" as const, message: lockedReadiness.error.reasons.map(({ message }) => message).join("; ") },
-      };
+      if (!lockedReadiness.ok) {
+        return {
+          ok: false as const,
+          error: { kind: "wave-completion-commit-rejected" as const, message: lockedReadiness.error.reasons.map(({ message }) => message).join("; ") },
+        };
+      }
+      const commit = commitWaveGateCompletion(lockedReadiness.value);
+      // The completed Wave's claims now name the text spec-check verified, so a
+      // later Wave's projection can report a Requirement rewritten since.
+      return commit.ok
+        ? { ok: true as const, value: { ...commit.value, graph: reanchorVerifiedClaims(
+            commit.value.graph, lockedReadiness.value.wave,
+            locked.wave_review_epoch?.specCheckDocuments, completionObservation.specIndex,
+          ) } }
+        : commit;
     });
     await handle.writeCheckpoint(JSON.stringify({ schemaVersion: 1, kind: "wave-gate-done", receipt: committed.receipt }));
     return { ok: true, action: { kind: "done", runId: handle.runId, outcome: committed.receipt } };

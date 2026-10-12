@@ -647,9 +647,9 @@ export function readWaveReviewContext(
  * One shared Task→row-fields lift, consumed by both Task→row serializations.
  *
  * `waveSpecCheckScope` (packet serialization) and `coverageTasks` (projection
- * join input) differ for good reasons — description, `inCurrentWave`, and
- * `anchorHashes` diverge — but these four field expressions are the same
- * mapping written at two seams. A domain change to the Task→row shape would
+ * join input) differ for good reasons — description, `inCurrentWave`,
+ * `completed` and `anchorHashes` diverge — but these four field expressions
+ * are the same mapping written at two seams. A domain change to the Task→row shape would
  * otherwise require two edits, and a field carried by one serialization could be
  * dropped by the other. One lift makes that defect structurally impossible —
  * a new field lands here once, and both serializations derive from it.
@@ -720,6 +720,7 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
   return Object.freeze(graph.tasks.map((task) => Object.freeze({
     id: task.id,
     inCurrentWave: task.wave === currentWave,
+    completed: task.status === "completed",
     decisionRecord: task.agent === DECISION_RECORD_AGENT,
     ...taskRowFields(task),
     anchorHashes: parsedAnchorHashes(task.spec_anchor_hashes),

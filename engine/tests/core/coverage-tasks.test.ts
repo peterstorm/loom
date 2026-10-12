@@ -20,4 +20,13 @@ describe("coverageTasks", () => {
         { id: "T15", inCurrentWave: true, decisionRecord: false },
       ]);
   });
+
+  it("lifts completion from the Task's status, so only a passed Wave's claims are compared for drift", () => {
+    const statuses = { tasks: [
+      { id: "T1", wave: 1, status: "completed" },
+      { id: "T2", wave: 2, status: "implemented" },
+    ] } as unknown as TaskGraph;
+    expect(coverageTasks(statuses, 2).map(({ id, completed }) => ({ id, completed })))
+      .toEqual([{ id: "T1", completed: true }, { id: "T2", completed: false }]);
+  });
 });

@@ -5,6 +5,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import {
   NO_CODE_RULES,
   NO_RETRY_CONTEXT,
+  NO_SCENARIO_TEST_NAMES,
   parseImplementationBriefMarker,
   renderImplementationBrief,
   ruleDocumentsFor,
@@ -193,6 +194,27 @@ describe("renderImplementationBrief", () => {
     expect(rendered.value.prompt).toContain(NO_CODE_RULES);
     expect(rendered.value.prompt).not.toContain(RULES.get("architecture.md")!.trimEnd());
     expect(rendered.value.prompt).toContain("## Requirement Completion Claims (MUST fully satisfy in this Wave)\n\nNone.");
+    expect(rendered.value.prompt).toContain(`## Acceptance Scenario Test Names\n\n${NO_SCENARIO_TEST_NAMES}\n`);
+  });
+
+  // spec-check links an Acceptance Scenario to its tests only by the
+  // `AS-NNN:` prefix of a test name, so the brief names the prefixes it owes.
+  it("names the test prefix owed for each claimed Acceptance Scenario, and only those", () => {
+    const rendered = renderImplementationBrief(input(task({ spec_anchors: ["FR-001", "AS-001"], spec_contributions: ["FR-002"] })));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    const section = rendered.value.prompt.split("## Acceptance Scenario Test Names\n\n")[1]?.split("\n## ")[0] ?? "";
+    expect(section).toContain("- `AS-001: …`");
+    expect(section).toContain("it('AS-001: …'");
+    expect(section).toContain('@DisplayName("AS-001: …")');
+    expect(section).not.toContain("FR-00");
+  });
+
+  it("owes no scenario test names when its only scenario is a Contribution", () => {
+    const rendered = renderImplementationBrief(input(task({ spec_anchors: ["FR-001"], spec_contributions: ["AS-001"] })));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value.prompt).toContain(`## Acceptance Scenario Test Names\n\n${NO_SCENARIO_TEST_NAMES}\n`);
   });
 
   it("substitutes the template in one pass, never re-scanning Task text for variables", () => {

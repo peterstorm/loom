@@ -239,6 +239,7 @@ await().atMost(5, SECONDS).untilAsserted(() -> assertThat(...).isPresent());
 ## Checklist
 
 - [ ] Test name describes behavior, not implementation
+- [ ] A test for a claimed Acceptance Scenario starts its display name with the identifier: `@DisplayName("AS-004: rejects a stale cursor")`. `/spec-check` links scenarios to tests only by this prefix
 - [ ] Functional-core tests have NO Spring, NO Mockito, NO `@Autowired`
 - [ ] Property tests cover pure functions with invariants
 - [ ] Integration tests use Testcontainers, not H2/embedded fakes
