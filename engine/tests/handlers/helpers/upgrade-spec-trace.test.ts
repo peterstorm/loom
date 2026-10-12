@@ -8,7 +8,10 @@ import { createRunDirectory } from "../../../src/orchestration/run-directory-han
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import type { ActiveWaveGateTerminalOutcome, TaskGraph } from "../../../src/types";
 import { terminalBlockedDiagnostic } from "../../../src/core/orchestration-contract";
-import { pendingTaskProof } from "../../fixtures/task-lifecycle";
+import { activeWaveGateFixture, pendingTaskProof } from "../../fixtures/task-lifecycle";
+import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
+import { installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
+import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
 import { findingId } from "../../fixtures/finding-id";
 
@@ -410,6 +413,50 @@ describe("upgrade-spec-trace helper", () => {
       reason: "legacy scope requires a replacement run",
       supersededBy: "run.replacement",
     });
+  });
+
+  it("retires the abandoned run's packet-bound review state exactly as a successor install would, so the successor starts clean", async () => {
+    const { statePath, runsRoot, graph } = await activeFixture({ marker: "valid" });
+    const active = graph.active_wave_gate!;
+    const [t1, t2] = graph.tasks;
+    const withReviewState: TaskGraph = {
+      ...graph,
+      tasks: [
+        { ...t1!, review_run: {
+          generation: 3, packet_id: "b".repeat(64), head_sha: "e".repeat(40),
+          prior_finding_ids: [finding.id], expected_agents: ["code-reviewer"], evidence: [],
+        } as never },
+        { ...t2!, review_status: "passed", accepted_review_authority: {
+          generation: 7, packet_id: "a".repeat(64), head_sha: "f".repeat(40), scope: ["src/T2.ts"],
+          run_id: "run.active", authority_digest: "c".repeat(64),
+        } },
+      ],
+      active_wave_completion_suite: acceptedWaveCompletionSuite(active),
+    };
+    chmodSync(statePath, 0o644);
+    writeFileSync(statePath, JSON.stringify(withReviewState));
+    chmodSync(statePath, 0o444);
+    expect(new StateManager(statePath).load().active_wave_completion_suite).toBeDefined();
+
+    const result = await upgradeSpecTrace(JSON.stringify(input), ["--retire-abandoned-run"]);
+    expect(result.kind, result.kind === "error" ? result.message : "").toBe("passthrough");
+    const stored = new StateManager(statePath).load();
+    expect(stored.active_wave_completion_suite).toBeUndefined();
+    expect(stored.tasks[0]?.review_run).toBeUndefined();
+    expect(stored.tasks[0]?.findings).toEqual([finding]);
+    expect(stored.tasks[1]).toMatchObject({ review_status: "pending", review_generation: 7 });
+    expect(stored.tasks[1]?.accepted_review_authority).toBeUndefined();
+
+    const successorRoster = ["T1", "T2"];
+    const installed = installWaveGateRegistration(stored, activeWaveGateFixture({
+      runId: "run.successor", wave: 1, runsRoot,
+      authorityDigest: waveGateAuthorityDigest(1, successorRoster, stored),
+    }), successorRoster);
+    expect(installed.kind).toBe("installed");
+    if (installed.kind === "installed") {
+      expect(installed.state.tasks.map(({ review_run }) => review_run)).toEqual([undefined, undefined]);
+      expect(parseTaskGraph(JSON.parse(JSON.stringify(installed.state))).ok).toBe(true);
+    }
   });
 
   it("preserves a spec-check that does not belong to the retired Wave", async () => {

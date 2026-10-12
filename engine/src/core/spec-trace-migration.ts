@@ -11,6 +11,7 @@ import {
   SPEC_TRACE_VERSION,
   specTraceDiagnosticMessages,
 } from "./spec-trace";
+import { retireWaveReviewAuthority } from "./wave-gate-registration";
 
 export type SpecTraceUpgradeOutcome = Readonly<{
   kind: "upgraded" | "already-v2";
@@ -70,13 +71,6 @@ function traceOwnershipUnchanged(graph: TaskGraph, candidate: TaskGraph): boolea
     return sameStrings(task.spec_anchors ?? [], candidateTask.spec_anchors ?? []) &&
       sameStrings(task.spec_contributions ?? [], candidateTask.spec_contributions ?? []);
   });
-}
-
-function retireWaveGateScope(graph: TaskGraph, wave: number): TaskGraph {
-  const { active_wave_gate: _active, wave_review_epoch: _epoch, ...withoutAuthority } = graph;
-  if (withoutAuthority.spec_check?.wave !== wave) return withoutAuthority;
-  const { spec_check: _staleSpecCheck, ...withoutStaleSpecCheck } = withoutAuthority;
-  return withoutStaleSpecCheck;
 }
 
 function validatedOwnershipCandidate(
@@ -177,8 +171,25 @@ export function prepareAbandonedWaveGateSpecTraceUpgrade(
     return reject(`Spec trace Wave Gate retirement audit already exists for run ${active.runId}`);
   }
 
+  // The marker proved the abandonment; recording it as the tombstone (when the
+  // registration predates the abandon stamp) lets the run retire exactly as
+  // its successor's install would: packet-bound review state, the completion
+  // suite and acceptance granted by the run all go, never another Wave's.
+  const tombstoned: TaskGraph = active.terminalOutcome === null
+    ? {
+        ...prepared.candidate,
+        active_wave_gate: {
+          ...active,
+          terminalOutcome: {
+            kind: "terminal-abandoned",
+            reason: abandonment.reason,
+            supersededBy: abandonment.supersededBy,
+          },
+        },
+      }
+    : prepared.candidate;
   const migrated = Object.freeze({
-    ...retireWaveGateScope(prepared.candidate, active.wave),
+    ...retireWaveReviewAuthority(tombstoned, active.wave),
     spec_trace_wave_gate_retirements: Object.freeze([
       ...(graph.spec_trace_wave_gate_retirements ?? []),
       audit,

@@ -290,6 +290,25 @@ describe("retireWaveReviewAuthority", () => {
     expect(retired).toEqual(supersedeAbandonedWaveGateReview(tombstoned, "run.old", ROSTER));
   });
 
+  it.each<readonly [string, (graph: TaskGraph) => TaskGraph]>([
+    ["over a tombstone", (graph) => withActive(active(graph, "run.old", abandoned(null)))],
+    ["over gate-less residue", (graph) => ({
+      ...graph, wave_review_epoch: { runId: "run.gone" as never, wave: 1, batchEpoch: "e".repeat(64) as never },
+    })],
+  ])("never touches another Wave's spec-check or the block it causes, %s", (_path, seedRetirable) => {
+    const blockingOtherWave = capturedSpecCheck({ wave: 2, runAt: "now", criticalFindings: ["still broken"] });
+    const graph: TaskGraph = {
+      ...seedRetirable(base),
+      spec_check: blockingOtherWave,
+      wave_gates: { "2": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: true } },
+    };
+    const retired = retireWaveReviewAuthority(graph, 1);
+    expect(retired.active_wave_gate).toBeUndefined();
+    expect(retired.wave_review_epoch).toBeUndefined();
+    expect(retired.spec_check).toEqual(blockingOtherWave);
+    expect(retired.wave_gates["2"]).toMatchObject({ blocked: true });
+  });
+
   it("refuses to retire a live gate's authority: that is the caller's precondition", () => {
     expect(() => retireWaveReviewAuthority(withActive(active(base, "run.live")), 1)).toThrow("run.live");
   });
