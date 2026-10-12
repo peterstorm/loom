@@ -69,6 +69,22 @@ function project(stateFileBytes: string | null): string {
   return root;
 }
 
+/** A project whose protected graph holds a live registration for `runId` over an existing, empty Run Directory. */
+function liveRegistrationProject(runId: string): Readonly<{ statePath: string; runsRoot: string; runDirectory: string }> {
+  const root = project(null);
+  const runsRoot = join(root, ".claude", "reviews", "wave-gate-runs");
+  const runDirectory = join(runsRoot, runId);
+  mkdirSync(runDirectory, { recursive: true });
+  const statePath = join(root, ".claude", "state", "active_task_graph.json");
+  writeFileSync(statePath, JSON.stringify({
+    ...graphFixture([taskFixture({
+      id: "T1", description: "T1", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/T1.ts"],
+    })]),
+    active_wave_gate: activeWaveGateFixture({ runId, wave: 1, authorityDigest: "d".repeat(64), runsRoot }),
+  }));
+  return { statePath, runsRoot, runDirectory };
+}
+
 describe("abandonment state-stamp wrapper arms", () => {
   it("treats a missing protected graph as the no-graph arm and completes the abandonment", async () => {
     const root = project(null);
@@ -88,21 +104,12 @@ describe("abandonment state-stamp wrapper arms", () => {
     });
   });
 
-  // Issue #50 Gap 2: a marker without a state stamp (a run abandoned before the
-  // stamp existed, or one whose stamp failed) used to read as a live run that
-  // status told the operator to resume, which the engine then refused.
-  it("reads an unstamped legacy marker and points status at the stamping replay, not a resume", async () => {
-    const root = project(null);
-    const runsRoot = join(root, ".claude", "reviews", "wave-gate-runs");
+  // Status reads the Run Directory's abandonment marker under a live
+  // registration, so a marker the state never stamped is reported with the
+  // replay that stamps it and is never described as resumable.
+  it("reads an unstamped marker and points status at the stamping replay, not a resume", async () => {
     const runId = "run.legacy-unstamped";
-    mkdirSync(join(runsRoot, runId), { recursive: true });
-    const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      ...graphFixture([taskFixture({
-        id: "T1", description: "T1", agent: "code-implementer-agent", wave: 1, depends_on: [], file_list: ["src/T1.ts"],
-      })]),
-      active_wave_gate: activeWaveGateFixture({ runId, wave: 1, authorityDigest: "d".repeat(64), runsRoot }),
-    }));
+    const { statePath, runsRoot } = liveRegistrationProject(runId);
     const opened = openRunDirectory(runsRoot, join(runsRoot, runId));
     if (!opened.ok) throw new Error(opened.error.message);
     const marked = await opened.value.abandonRun({ supersededBy: null, reason: "legacy exhaustion" });
@@ -113,9 +120,22 @@ describe("abandonment state-stamp wrapper arms", () => {
     expect(status.next.reasons[0]?.message).toBe(
       `Wave Gate run ${runId} was abandoned in its Run Directory (${join(runsRoot, runId)}), ` +
         "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical " +
-        `abandon to stamp it: helper orchestration abandon --runs-root ${runsRoot} --run ${runId} ` +
-        '--reason "legacy exhaustion"',
+        `abandon to stamp it: helper orchestration abandon --runs-root '${runsRoot}' --run '${runId}' ` +
+        "--reason 'legacy exhaustion'",
     );
+    expect(JSON.stringify(status)).not.toContain("resume-orchestration");
+  });
+
+  it("reports an unreadable marker as unavailable authority, never as a resumable run", async () => {
+    const { statePath, runDirectory } = liveRegistrationProject("run.unreadable-marker");
+    writeFileSync(join(runDirectory, "abandoned.json"), "{not json");
+
+    const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as LoomStatus;
+
+    expect(status.next.reasons[0]).toMatchObject({
+      kind: "authority-unavailable",
+      message: expect.stringContaining(`cannot verify authoritative Run Directory ${runDirectory}`),
+    });
     expect(JSON.stringify(status)).not.toContain("resume-orchestration");
   });
 

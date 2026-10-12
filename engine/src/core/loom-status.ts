@@ -27,6 +27,7 @@ import type {
   WaveWorkspaceObservation,
 } from "../types";
 import { sha256Bytes } from "./digest";
+import { quoteShellArgument } from "./shell-quoting";
 import { renderProjectVerificationCoverage } from "./verification-manifest";
 import {
   blockedAction,
@@ -100,15 +101,27 @@ export type ActiveRunDirectoryObservation =
       supersededBy: string | null;
     }>;
 
+type AbandonedRunDirectory = Extract<ActiveRunDirectoryObservation, { kind: "abandoned" }>;
+
+/** The identical abandon, as flag/value pairs: the one place that knows the replay's shape. */
+const abandonReplayFlags = (observation: AbandonedRunDirectory): readonly (readonly [string, string])[] => [
+  ["--runs-root", observation.runsRoot],
+  ["--run", observation.runId],
+  ...(observation.supersededBy === null ? [] : [["--superseded-by", observation.supersededBy] as const]),
+  ["--reason", observation.reason],
+];
+
 /** The engine refuses to resume an abandoned run, so status names the one
  *  command that stamps the protected registration: the identical abandon,
- *  which replays the immutable marker idempotently. */
-function unstampedAbandonmentMessage(observation: Extract<ActiveRunDirectoryObservation, { kind: "abandoned" }>): string {
-  const successor = observation.supersededBy === null ? "" : ` --superseded-by ${observation.supersededBy}`;
+ *  which replays the immutable marker idempotently. Every value is
+ *  shell-quoted, so pasting it reproduces the recorded values exactly. */
+function unstampedAbandonmentMessage(observation: AbandonedRunDirectory): string {
+  const flags = abandonReplayFlags(observation)
+    .map(([flag, value]) => `${flag} ${quoteShellArgument(value)}`)
+    .join(" ");
   return `Wave Gate run ${observation.runId} was abandoned in its Run Directory (${observation.path}), ` +
     "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical abandon " +
-    `to stamp it: helper orchestration abandon --runs-root ${observation.runsRoot} --run ${observation.runId}` +
-    `${successor} --reason ${JSON.stringify(observation.reason)}`;
+    `to stamp it: helper orchestration abandon ${flags}`;
 }
 
 const statusRunId = (() => {

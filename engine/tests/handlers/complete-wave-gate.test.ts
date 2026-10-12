@@ -1780,9 +1780,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       });
     });
 
-    // Issue #50 Gap 2: a tombstone that names its successor used to fall to a
-    // generic "terminal history" contradiction that never said which run may
-    // take the Wave; only that successor's start can register it.
+    // Registration admits only the run a tombstone names, so every start
+    // recovery under that tombstone must carry that exact run id.
     describe("a tombstone that names its successor", () => {
       const named = (overrides: Partial<TaskGraph> = {}): TaskGraph => {
         const registered = registeredGraph();
@@ -1811,6 +1810,16 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         });
       });
 
+      it("asks for start repair, not the successor start, while a start prerequisite is unmet", () => {
+        const status = deriveLoomStatusFromParsedGraph({
+          ok: true,
+          value: named({ tasks: [{ ...taskState({ id: "T1", wave: 1, status: "implemented" }), test_result: undefined }] }),
+        }, statusDeps);
+        expect(status.next.action).toMatchObject({
+          diagnostic: { kind: "wave-start-not-ready", recovery: { kind: "repair-wave-start-readiness", wave: 1 } },
+        });
+      });
+
       it("keeps owed implementation dispatchable before the successor starts", () => {
         const status = deriveLoomStatusFromParsedGraph({
           ok: true,
@@ -1822,21 +1831,22 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       });
     });
 
-    // Issue #50 Gap 2: a run abandoned before the state stamp existed (or whose
-    // stamp failed) has a Run Directory marker while its registration still
-    // reads as live; status must not send the operator to a resume the engine
-    // refuses, but to the abandon replay that stamps it.
+    // A Run Directory marker under a registration that still reads as live is
+    // never resumable (every advancing operation refuses it); status names the
+    // identical abandon replay, each argument shell-quoted to the recorded value.
     it.each([
-      ["no successor", null, ""],
-      ["a named successor", "next-run", " --superseded-by next-run"],
-    ] as const)("names the stamping abandon replay for an unstamped legacy marker with %s", (_name, supersededBy, flag) => {
+      ["no successor", null, "exhausted reviewers", "", "'exhausted reviewers'"],
+      ["a named successor", "next-run", "exhausted reviewers", " --superseded-by 'next-run'", "'exhausted reviewers'"],
+      ["a shell-active reason", null, "cost $(x) it's", "", "'cost $(x) it'\\''s'"],
+      ["a flag-shaped reason", null, "--force", "", "'--force'"],
+    ] as const)("names the stamping abandon replay for an unstamped marker with %s", (_name, supersededBy, reason, flag, quotedReason) => {
       const graph = registeredGraph();
       const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, {
         kind: "abandoned",
         runId: "status-wave-run",
         path: "/runs/status-wave-run",
         runsRoot: "/runs",
-        reason: "exhausted reviewers",
+        reason,
         supersededBy,
       });
       expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
@@ -1846,8 +1856,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         taskId: null,
         message: "Wave Gate run status-wave-run was abandoned in its Run Directory (/runs/status-wave-run), " +
           "but its protected registration was never tombstoned, so it cannot be resumed; repeat the identical " +
-          `abandon to stamp it: helper orchestration abandon --runs-root /runs --run status-wave-run${flag} ` +
-          '--reason "exhausted reviewers"',
+          `abandon to stamp it: helper orchestration abandon --runs-root '/runs' --run 'status-wave-run'${flag} ` +
+          `--reason ${quotedReason}`,
       }]);
       expect(JSON.stringify(status)).not.toContain("resume-orchestration");
     });

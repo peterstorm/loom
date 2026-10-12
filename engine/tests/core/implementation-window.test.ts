@@ -51,7 +51,7 @@ describe("classifyImplementationWindow", () => {
     expect(classifyImplementationWindow(graph, observed(false)).kind).toBe("window");
   });
 
-  // Issue #50 Gap 2: only the named successor may register the Wave, so the
+  // Only the named successor may register the Wave, so the
   // start recovery must name it instead of inviting a fresh run id.
   it.each([
     [null, { kind: "start-wave-gate", wave: 1 }],

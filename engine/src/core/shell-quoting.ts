@@ -108,3 +108,13 @@ export function scanUnquoted<T>(
 export function openQuoteAfter(text: string, start: number): ShellQuoteChar | null {
   return walkQuotedText(text, start, () => CONTINUE).openQuote;
 }
+
+/**
+ * Render `value` as exactly one sh word that reads back as `value`: the
+ * inverse of the scan above. Single quotes disable every expansion, so the
+ * only character to handle is `'` itself, which closes the quote, emits an
+ * escaped `'`, and reopens it.
+ */
+export function quoteShellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
