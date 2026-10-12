@@ -37,6 +37,9 @@ export type EscalatedImplementation = Readonly<{
   failureKinds: NonEmpty<string>;
 }>;
 
+/** The `--reason` operand the operator replaces, already a single shell word. */
+const REMEDIATE_REASON_PLACEHOLDER = "'<why a fresh attempt is now sanctioned>'";
+
 /**
  * The one command that consumes an escalation once its cause is fixed, with the
  * exact terminal receipt filled in. Operands are shell-quoted, so pasting it
@@ -44,7 +47,7 @@ export type EscalatedImplementation = Readonly<{
  */
 export function remediateEscalationCommand(task: EscalatedImplementation): string {
   return `helper orchestration remediate --task ${quoteShellArgument(task.taskId)} ` +
-    `--receipt ${quoteShellArgument(task.receiptId)} --reason ${quoteShellArgument("<why a fresh attempt is now sanctioned>")}`;
+    `--receipt ${quoteShellArgument(task.receiptId)} --reason ${REMEDIATE_REASON_PLACEHOLDER}`;
 }
 
 export type ImplementationWindow =
