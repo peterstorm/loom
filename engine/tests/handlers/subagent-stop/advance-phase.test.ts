@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import advancePhaseHandler, {
+  DECOMPOSE_AWAITS_POPULATION,
   applyEligiblePhaseTransition,
+  decidePhaseResult,
+  notReadyDiagnostic,
   countMarkers,
   isPhaseResultEligible,
   observePhaseTransition,
@@ -164,6 +167,35 @@ describe("applyEligiblePhaseTransition", () => {
       plan_file: selected,
       phase_artifacts: { architecture: selected },
     });
+  });
+});
+
+describe("decidePhaseResult — the one policy both SubagentStop shells apply", () => {
+  it.each<readonly [string, PhaseTransitionResolution, ReturnType<typeof decidePhaseResult>]>([
+    [
+      "a ready transition advances",
+      { kind: "ready", nextPhase: "specify", artifact: "brainstorm.md" },
+      { kind: "advance", transition: { kind: "ready", nextPhase: "specify", artifact: "brainstorm.md" } },
+    ],
+    [
+      "a not-ready transition refuses the result",
+      { kind: "not-ready", reason: "brainstorm.md was not found" },
+      { kind: "refuse", reason: "brainstorm.md was not found" },
+    ],
+    [
+      "a decompose result awaiting population is only a note",
+      { kind: "awaits-population", reason: DECOMPOSE_AWAITS_POPULATION },
+      { kind: "note", reason: DECOMPOSE_AWAITS_POPULATION },
+    ],
+  ])("%s", (_name, resolution, decision) => {
+    expect(decidePhaseResult(resolution)).toEqual(decision);
+  });
+
+  it("words a refusal once, for whichever subject each shell names", () => {
+    expect(notReadyDiagnostic("brainstorm", "brainstorm.md was not found"))
+      .toBe("brainstorm completed but phase transition is not ready: brainstorm.md was not found");
+    expect(notReadyDiagnostic("specify-agent", "no readable spec.md"))
+      .toBe("specify-agent completed but phase transition is not ready: no readable spec.md");
   });
 });
 
@@ -521,11 +553,11 @@ describe("phase transitions", () => {
 
   // ── decompose ──
 
-  it("decompose → execute (always)", () => {
-    const r = resolveTransition("decompose", mkState());
-    expect(r).not.toBeNull();
-    expect(r!.nextPhase).toBe("execute");
-    expect(r!.artifact).toBe("task_graph");
+  it("decompose awaits population instead of advancing to an empty execute (issue #50 Gap 1)", () => {
+    expect(resolveTransition("decompose", mkState({ current_phase: "decompose" }))).toEqual({
+      kind: "awaits-population",
+      reason: DECOMPOSE_AWAITS_POPULATION,
+    });
   });
 
   // ── terminal / no-op phases ──
@@ -837,6 +869,28 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
       } finally {
         update.mockRestore();
       }
+    });
+  });
+
+  it("the REAL handler leaves an empty graph in decompose when the decompose agent stops (issue #50 Gap 1)", async () => {
+    // The observed failure: the agent returned no output and its SubagentStop
+    // advanced to execute with tasks: [] and wave_gates: {}. Only population may
+    // leave decompose now, so a re-spawn stays legal and nothing is stranded.
+    const session = `phase-decompose-${process.pid}-${Date.now()}`;
+    const initial = mkState({ current_phase: "decompose" });
+    await withPhaseState(session, initial, async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_id: "decompose-agent",
+        agent_type: "loom:decompose-agent",
+        agent_transcript_path: "",
+      }), []);
+
+      expect(result).toEqual({
+        kind: "passthrough",
+        systemMessage: DECOMPOSE_AWAITS_POPULATION,
+      });
+      expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toEqual(initial);
     });
   });
 

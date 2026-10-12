@@ -12,8 +12,11 @@
 
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
 import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
+import { match } from "ts-pattern";
 import {
+  decidePhaseResult,
   isPhaseResultEligible,
+  notReadyDiagnostic,
   transitionAuthorityMatches,
   type PhaseTransitionObservation,
 } from "../engine/src/handlers/subagent-stop/advance-phase";
@@ -215,19 +218,22 @@ export function reduceLockedPiPhaseResult(
         value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
       };
     }
-    const transition = observation.resolution;
-    if (transition.kind === "not-ready") {
-      const diagnostic = `${args.agentType} completed but phase transition is not ready: ${transition.reason}`;
-      return {
-        state: prepared.state,
-        value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
-      };
+    const decision = decidePhaseResult(observation.resolution);
+    if (decision.kind !== "advance") {
+      const value = match(decision)
+        .with({ kind: "refuse" }, ({ reason }) => {
+          const diagnostic = notReadyDiagnostic(args.agentType, reason);
+          return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
+        })
+        .with({ kind: "note" }, ({ reason }) => outcome([`loom(pi): ${reason}`]))
+        .exhaustive();
+      return { state: prepared.state, value };
     }
     return {
       state: reducePiPhaseTransition(
         prepared.state,
         args.completedPhase,
-        transition,
+        decision.transition,
         args.now,
         args.phaseArtifactBaseDir,
       ),

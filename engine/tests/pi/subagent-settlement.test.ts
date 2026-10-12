@@ -24,6 +24,7 @@ import {
   outcome,
   pendingMalformedTranscriptState,
   processingFailure,
+  reduceLockedPiPhaseResult,
   reduceLockedReviewEvidence,
   reducePiSpecCheckResult,
   renderFailedReviewEvidence,
@@ -33,6 +34,11 @@ import {
   transcriptTextOf,
   type LockedReviewEvidenceApplication,
 } from "../../../pi/subagent-settlement";
+import {
+  DECOMPOSE_AWAITS_POPULATION,
+  observePhaseTransition,
+} from "../../src/handlers/subagent-stop/advance-phase";
+import { SPEC_ARTIFACT_DIR, parseSpecArtifactDirectory } from "../../src/core/phase-artifact-paths";
 
 const AGENT = "code-reviewer";
 
@@ -385,6 +391,34 @@ describe("reducePiSpecCheckResult", () => {
     if (specCheck?.verdict !== "EVIDENCE_CAPTURE_FAILED") return;
     expect(specCheck.error).toContain("transcript unreadable");
     expect(reduced.value).toEqual(outcome([`loom(pi): ${specCheck.error} — marking spec-check evidence_capture_failed`]));
+  });
+});
+
+describe("reduceLockedPiPhaseResult", () => {
+  it("keeps an empty graph in decompose when the decompose agent finishes (issue #50 Gap 1)", () => {
+    const state: TaskGraph = {
+      current_phase: "decompose",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      tasks: [],
+      wave_gates: {},
+    };
+    const specDir = parseSpecArtifactDirectory(SPEC_ARTIFACT_DIR);
+    if (!specDir.ok) throw new Error(specDir.message);
+    const baseDir = "/nonexistent-project";
+    const observation = observePhaseTransition("decompose", state, specDir.value, baseDir);
+
+    const reduced = reduceLockedPiPhaseResult(
+      state,
+      { agentType: "decompose-agent", completedPhase: "decompose", now: "2026-10-12T00:00:00.000Z", phaseArtifactBaseDir: baseDir },
+      [],
+      observation,
+    );
+
+    expect(reduced.state).toEqual(state);
+    expect(reduced.value).toEqual(outcome([`loom(pi): ${DECOMPOSE_AWAITS_POPULATION}`]));
   });
 });
 

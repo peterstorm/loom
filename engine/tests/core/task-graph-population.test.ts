@@ -11,7 +11,7 @@ import { defaultVerificationManifest } from "../../src/core/verification-manifes
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import { registerTaskExecutionBaseline } from "../../src/core/validate-task-execution";
 import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
-import type { TaskGraph } from "../../src/types";
+import { PHASES, type TaskGraph } from "../../src/types";
 
 const specSource = `# Feature: Population
 
@@ -412,5 +412,49 @@ describe("populateTaskGraph aggregate command", () => {
         }
       },
     ));
+  });
+});
+
+describe("populateTaskGraph owns the decompose → execute transition (issue #50 Gap 1)", () => {
+  it("moves decompose → execute in the same write that installs the Tasks", () => {
+    const result = populateTaskGraph(
+      graph({ current_phase: "decompose", phase_artifacts: { architecture: "plan.md" } }),
+      command(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.state.current_phase).toBe("execute");
+    expect(result.value.state.phase_artifacts).toEqual({ architecture: "plan.md", decompose: "task_graph" });
+    expect(result.value.state.tasks.map(({ id }) => id)).toEqual(["T1"]);
+  });
+
+  it("re-population during execute stays in execute", () => {
+    const result = populateTaskGraph(
+      graph({ current_phase: "execute", phase_artifacts: { decompose: "task_graph" } }),
+      command(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.state.current_phase).toBe("execute");
+    expect(result.value.state.phase_artifacts).toEqual({ decompose: "task_graph" });
+  });
+
+  it("succeeds exactly from decompose or execute, and success is always a populated execute graph", () => {
+    fc.assert(fc.property(fc.constantFrom(...PHASES), (phase) => {
+      const result = populateTaskGraph(graph({ current_phase: phase }), command());
+      expect(result.ok).toBe(phase === "decompose" || phase === "execute");
+      if (result.ok) {
+        expect(result.value.state.current_phase).toBe("execute");
+        expect(result.value.state.tasks.length).toBeGreaterThan(0);
+      } else {
+        expect(result.error).toEqual({
+          kind: "phase-not-populatable",
+          message: "populate-task-graph requires current_phase decompose (first population) or execute " +
+            `(re-population), got ${phase}; finish the earlier phases first`,
+        });
+      }
+    }));
   });
 });

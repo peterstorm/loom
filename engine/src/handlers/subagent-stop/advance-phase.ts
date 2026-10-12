@@ -193,9 +193,40 @@ function derivedPlanCandidate(
     : Object.freeze({ kind: "ambiguous", datePrefix });
 }
 
+/** Why a finished decompose agent never moves the phase. populate-task-graph
+ *  is the only writer of decompose → execute, and it refuses an empty Task
+ *  list in that same write, so an execute graph always holds Tasks and a
+ *  decompose agent that produced nothing can simply be re-spawned. */
+export const DECOMPOSE_AWAITS_POPULATION =
+  "decompose completed; the phase stays decompose until populate-task-graph installs the approved task graph";
+
+/** The fields only a ready transition carries, absent from every other kind. */
+type NoTransition = Readonly<{ nextPhase?: never; artifact?: never; skipClarify?: never }>;
+
 export type PhaseTransitionResolution =
   | Readonly<{ kind: "ready"; nextPhase: Phase; artifact: string; skipClarify?: boolean }>
-  | Readonly<{ kind: "not-ready"; reason: string; nextPhase?: never; artifact?: never; skipClarify?: never }>;
+  | (Readonly<{ kind: "not-ready"; reason: string }> & NoTransition)
+  | (Readonly<{ kind: "awaits-population"; reason: string }> & NoTransition);
+
+/** What a phase agent's result does to the TaskGraph. Both SubagentStop shells
+ *  (Claude's handler below and Pi's settlement) apply this one decision; only
+ *  how each surfaces a refusal or a note is theirs. */
+export type PhaseResultDecision =
+  | Readonly<{ kind: "advance"; transition: Extract<PhaseTransitionResolution, { kind: "ready" }> }>
+  | Readonly<{ kind: "refuse"; reason: string }>
+  | Readonly<{ kind: "note"; reason: string }>;
+
+export const decidePhaseResult = (resolution: PhaseTransitionResolution): PhaseResultDecision =>
+  match(resolution)
+    .with({ kind: "ready" }, (transition): PhaseResultDecision => ({ kind: "advance", transition }))
+    .with({ kind: "not-ready" }, ({ reason }): PhaseResultDecision => ({ kind: "refuse", reason }))
+    .with({ kind: "awaits-population" }, ({ reason }): PhaseResultDecision => ({ kind: "note", reason }))
+    .exhaustive();
+
+/** The one wording of a refused phase result; each shell names its own subject
+ *  (Claude the completed phase, Pi the agent type) and its own framing. */
+export const notReadyDiagnostic = (subject: string, reason: string): string =>
+  `${subject} completed but phase transition is not ready: ${reason}`;
 
 const transitionReady = (
   nextPhase: Phase,
@@ -208,7 +239,8 @@ const transitionReady = (
   ...(skipClarify === undefined ? {} : { skipClarify }),
 });
 
-const transitionNotReady = (reason: string): PhaseTransitionResolution => ({ kind: "not-ready", reason });
+const transitionNotReady = (reason: string): Extract<PhaseTransitionResolution, { kind: "not-ready" }> =>
+  ({ kind: "not-ready", reason });
 
 /**
  * An exact current-Phase completion is always eligible, including `init` for
@@ -353,9 +385,10 @@ export function observePhaseTransition(
       }
       return transitionReady("decompose", gapReport);
     })
-    .with("decompose", () => {
-      return transitionReady("execute", "task_graph");
-    })
+    .with("decompose", (): PhaseTransitionResolution => ({
+      kind: "awaits-population",
+      reason: DECOMPOSE_AWAITS_POPULATION,
+    }))
     .with("init", () => transitionNotReady("init has no completed phase transition"))
     .with("execute", () => transitionNotReady("execute is terminal and has no next phase"))
     .exhaustive();
@@ -508,15 +541,20 @@ const handler: HookHandler = async (stdin) => {
       message: `advance-phase: phase artifact discovery failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (observation.resolution.kind === "not-ready") {
-    return {
-      kind: "error",
-      message: `advance-phase: ${completedPhase} completed but phase transition is not ready: ${observation.resolution.reason}; phase NOT advanced`,
-    };
+  const decision = decidePhaseResult(observation.resolution);
+  if (decision.kind !== "advance") {
+    return match(decision)
+      .with({ kind: "refuse" }, ({ reason }): HookResult => ({
+        kind: "error",
+        message: `advance-phase: ${notReadyDiagnostic(completedPhase, reason)}; phase NOT advanced`,
+      }))
+      .with({ kind: "note" }, ({ reason }) => passthroughDiagnostic(reason))
+      .exhaustive();
   }
+  const resolution = decision.transition;
 
   type LockedTransitionOutcome =
-    | PhaseTransitionResolution
+    | Extract<PhaseTransitionResolution, { kind: "ready" | "not-ready" }>
     | Readonly<{ kind: "refused"; result: HookResult }>;
 
   let lockedOutcome: LockedTransitionOutcome;
@@ -533,16 +571,14 @@ const handler: HookHandler = async (stdin) => {
           value: transitionNotReady("TaskGraph phase artifact authority changed after filesystem observation"),
         };
       }
-      const lockedTransition = observation.resolution;
-      if (lockedTransition.kind === "not-ready") return { state: s, value: lockedTransition };
       return {
         state: applyEligiblePhaseTransition(
           s,
           completedPhase,
-          lockedTransition,
+          resolution,
           new Date().toISOString(),
         ),
-        value: lockedTransition,
+        value: resolution,
       };
     });
   } catch (e) {
