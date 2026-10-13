@@ -21,7 +21,7 @@
  * an orchestrator building this manifest by hand could quietly omit a critical.
  */
 
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import type { HookHandler, HookResult, TaskGraph } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
@@ -307,6 +307,17 @@ function operationBrief(
   return writeCanonicalOutput(briefJson + "\n");
 }
 
+/** The refusal for a run that already holds a tally marker, or null. A marker
+ *  whose presence cannot be observed refuses too: it may be a prior tally. */
+function priorTallyRefusal(paths: readonly string[], alreadyTallied: string): readonly string[] | null {
+  for (const path of paths) {
+    const presence = observePathPresence(path);
+    if (presence.kind === "present") return [alreadyTallied];
+    if (presence.kind === "unknown") return [alreadyTallied, `cannot observe ${path}: ${presence.cause}`];
+  }
+  return null;
+}
+
 /** Narrow state-update port: tests can present a state that changes after preflight. */
 export interface ReviewTallyStateUpdater {
   readonly update: (transform: (state: TaskGraph) => TaskGraph) => Promise<void>;
@@ -387,7 +398,7 @@ const handler: HookHandler = async (stdin, args) => {
   // misleading content-drift error caused by the tally's own state update.
   if (operation === "verdict" || operation === "tally") {
     const closurePath = join(runDir, "tally-closure.json");
-    if (existsSync(closurePath)) {
+    if (observePathPresence(closurePath).kind !== "absent") {
       let closedIds = "<unknown findings>";
       let closureReadError: string | null = null;
       try {
@@ -563,11 +574,11 @@ const handler: HookHandler = async (stdin, args) => {
     const outcomesPath = join(runDir, "outcomes.json");
     const resultPath = join(runDir, "result.json");
     const pendingResultPath = join(runDir, ".result.pending.json");
-    if (existsSync(outcomesPath) || existsSync(resultPath) || existsSync(pendingResultPath)) {
-      return contractError("review tally", [
-        "this standalone run has already been tallied or has an incomplete prior tally — start a new run directory",
-      ]);
-    }
+    const priorStandalone = priorTallyRefusal(
+      [outcomesPath, resultPath, pendingResultPath],
+      "this standalone run has already been tallied or has an incomplete prior tally — start a new run directory",
+    );
+    if (priorStandalone !== null) return contractError("review tally", priorStandalone);
 
     const aggregatePath = join(runDir, "aggregate.json");
     const aggregateError = artifactError(aggregatePath, resolve(runDir));
@@ -597,7 +608,7 @@ const handler: HookHandler = async (stdin, args) => {
       publishStagedRunFile(pendingResultPath, resultPath);
     } catch (error) {
       let cleanupError: unknown = null;
-      try { if (existsSync(pendingResultPath)) unlinkSync(pendingResultPath); }
+      try { if (observePathPresence(pendingResultPath).kind !== "absent") unlinkSync(pendingResultPath); }
       catch (cleanup) { cleanupError = cleanup; }
       return contractError(
         "review tally",
@@ -608,11 +619,11 @@ const handler: HookHandler = async (stdin, args) => {
     const closurePath = join(runDir, "tally-closure.json");
     const outcomesPath = join(runDir, "outcomes.json");
     const pendingOutcomesPath = join(runDir, ".outcomes.pending.json");
-    if (existsSync(closurePath) || existsSync(outcomesPath) || existsSync(pendingOutcomesPath)) {
-      return contractError("review tally", [
-        `this review run has already been tallied or has an incomplete prior tally: ${findingIds.join(", ")}`,
-      ]);
-    }
+    const priorWave = priorTallyRefusal(
+      [closurePath, outcomesPath, pendingOutcomesPath],
+      `this review run has already been tallied or has an incomplete prior tally: ${findingIds.join(", ")}`,
+    );
+    if (priorWave !== null) return contractError("review tally", priorWave);
 
     const current = loadGraph();
     if (!current.ok) return contractError("review tally", current.errors);

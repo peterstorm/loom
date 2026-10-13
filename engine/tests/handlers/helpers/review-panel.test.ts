@@ -728,6 +728,19 @@ describe("review-panel helper CLI", () => {
     expect(result.stderr).toContain("session.json");
   });
 
+  it("refuses to tally a run whose prior-tally marker exists but cannot be read", () => {
+    // A tally marker behind a symlink loop may be a prior tally: reading it as
+    // absent let the publish rename over it and adjudicate the run again.
+    stage();
+    writeVerdicts([["refuted", "upheld"], ["refuted", "upheld"], ["uncertain", "upheld"]]);
+    symlinkSync("outcomes.json", join(runDir, "outcomes.json"));
+    const result = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("already been tallied or has an incomplete prior tally");
+    expect(result.stderr).toContain("cannot observe");
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].refuted_findings ?? []).toHaveLength(0);
+  });
+
   it("rejects an unknown operation", () => {
     expect(run(["adjudicate", "--runs-root", REL_ROOT]).stderr).toContain("Usage: helper review-panel");
   });

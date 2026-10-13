@@ -1,6 +1,7 @@
-import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseDeclaredSkills } from "../core/agent-skills";
+import { observePathPresence } from "./path-presence";
 import { renderPiAgentResource, type PreloadedSkill } from "../core/harness-resources";
 import { lowerModelProfile, resolveAgentProfile } from "../core/model-profiles";
 import {
@@ -16,13 +17,9 @@ function skillPath(packageRoot: string, skill: string): string | null {
     join(packageRoot, "commands", `${skill}.md`),
   ];
   for (const path of candidates) {
-    try {
-      accessSync(path, fsConstants.F_OK);
-      return path;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw new Error(`cannot inspect Loom skill candidate ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    const presence = observePathPresence(path);
+    if (presence.kind === "present") return path;
+    if (presence.kind === "unknown") throw new Error(`cannot inspect Loom skill candidate ${path}: ${presence.cause}`);
   }
   return null;
 }

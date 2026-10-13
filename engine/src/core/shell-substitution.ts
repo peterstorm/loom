@@ -79,11 +79,9 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
   return { bodies, rebuilt, unclosed: false };
 }
 
-/** Index of the `)` closing a substitution opened before `start` — paren
- *  depth counted quote-aware (parens inside a quoted body don't count, and
- *  "quoted" includes a BACKTICK body: this scanner tracked only `"` and `'`
- *  where both its twins tracked all three, so `` $(`a)b`) `` closed here at the
- *  `)` inside the backtick). -1 when unclosed. */
+/** Index of the `)` closing a substitution opened before `start`. Paren depth
+ *  is counted quote-aware, and a BACKTICK body counts as quoted, so
+ *  `` $(`a)b`) `` closes at the final `)`. -1 when unclosed. */
 export function findClosingParen(command: string, start: number): number {
   let depth = 1;
   return scanUnquoted<number>(command, start, (c, i) => {

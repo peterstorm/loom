@@ -1,8 +1,8 @@
-import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { extractNamespace } from "./strip-namespace";
 import { LOOM_PACKAGE_ROOT } from "./loom-package-root";
 import { resolveRepositoryRoot } from "./git";
+import { observePathPresence } from "./path-presence";
 
 /**
  * One Claude agent-definition resolver shared by model and skill policy gates.
@@ -40,15 +40,10 @@ export function resolveClaudeAgentDefinitionPath(
   if (repositoryRoot) candidates.push(join(repositoryRoot, "agents", `${agentName}.md`));
 
   for (const path of candidates) {
-    try {
-      accessSync(path, fsConstants.F_OK);
-      return path;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw new Error(
-        `cannot inspect authoritative Claude agent definition candidate ${path}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
+    const presence = observePathPresence(path);
+    if (presence.kind === "present") return path;
+    if (presence.kind === "unknown") {
+      throw new Error(`cannot inspect authoritative Claude agent definition candidate ${path}: ${presence.cause}`);
     }
   }
   return null;

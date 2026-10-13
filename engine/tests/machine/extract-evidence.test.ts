@@ -126,6 +126,11 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
     // …while a substitution with no separator inside keeps its real position:
     expect(classifyTestCommand("npm test $(echo --run)")).toBe("npm test $(echo --run)");
     expect(classifyTestCommand("cd $(git rev-parse --show-toplevel) && npm test")).toBe("npm test");
+    // Deliberate trade-off (fail closed): a real top-level runner AFTER a
+    // substitution that itself contains a separator is not classified either,
+    // because segment positions are untrusted once the split crossed a
+    // substitution. A substitution-aware splitter would lift this.
+    expect(classifyTestCommand("cd $(a; b) && npm test")).toBeNull();
   });
 
   it("property: a runner after a separator inside a command substitution never classifies", () => {
