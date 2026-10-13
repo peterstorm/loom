@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parsePlanModels, hasModels, renderStray, type Stray } from "../../src/parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type Stray } from "../../src/core/parse-plan-models";
 
 const FULL_PLAN = `# Plan: Order Processing
 
@@ -50,11 +50,18 @@ Orders move through a lifecycle; fulfillment is a pipeline.
 
 **Tier:** checkable
 **Rule file:** \`.claude/linter/rules/inv-1-no-raw-order-states.json\`
+**Owner module:** \`src/domain/order/order-machine.ts\`
+**Sibling entry points:**
+- \`src/api/orders.ts\` — HTTP handler
+- src/jobs/expire.ts
+**Matrix test:** \`src/domain/order/order-machine.matrix.test.ts\`
 **Statement:** Order state names appear only in order-machine.ts.
 
 ### INV-2: Refunds complete within 30 days
 
 **Tier:** advisory
+**Owner module:** none
+**Unowned reason:** A business SLA; no code owns it.
 **Statement:** Business SLA — not deterministically observable.
 
 ## Testing Strategy
@@ -86,8 +93,30 @@ describe("parsePlanModels", () => {
       declaredNodes: ["fetch-order"],
     });
     expect(models.invariants).toEqual([
-      { id: "INV-1", title: "No state string literals outside the machine", tier: { status: "ok", tier: "checkable" }, ruleFile: ".claude/linter/rules/inv-1-no-raw-order-states.json" },
-      { id: "INV-2", title: "Refunds complete within 30 days", tier: { status: "ok", tier: "advisory" }, ruleFile: null },
+      {
+        id: "INV-1",
+        title: "No state string literals outside the machine",
+        tier: { status: "ok", tier: "checkable" },
+        ruleFile: ".claude/linter/rules/inv-1-no-raw-order-states.json",
+        statement: "Order state names appear only in order-machine.ts.",
+        ownership: {
+          kind: "owned",
+          owner: "src/domain/order/order-machine.ts",
+          siblings: [
+            { path: "src/api/orders.ts", note: "HTTP handler" },
+            { path: "src/jobs/expire.ts", note: null },
+          ],
+          matrixTest: "src/domain/order/order-machine.matrix.test.ts",
+        },
+      },
+      {
+        id: "INV-2",
+        title: "Refunds complete within 30 days",
+        tier: { status: "ok", tier: "advisory" },
+        ruleFile: null,
+        statement: "Business SLA — not deterministically observable.",
+        ownership: { kind: "unowned", reason: "A business SLA; no code owns it." },
+      },
     ]);
     expect(hasModels(models)).toBe(true);
   });
@@ -124,12 +153,67 @@ describe("parsePlanModels", () => {
 
   it("represents an unrecognized tier with its raw text", () => {
     const models = parsePlanModels("## Invariants\n\n### INV-1: Weird\n\n**Tier:** enforced-ish\n");
-    expect(models.invariants).toEqual([{ id: "INV-1", title: "Weird", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null }]);
+    expect(models.invariants[0]).toMatchObject({ id: "INV-1", title: "Weird", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null });
   });
 
   it("represents a missing tier line as absent (not conflated with unrecognized)", () => {
     const models = parsePlanModels("## Invariants\n\n### INV-1: X\n\n**Statement:** prose\n");
-    expect(models.invariants).toEqual([{ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null }]);
+    expect(models.invariants[0]).toMatchObject({ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null, statement: "prose" });
+  });
+
+  describe("invariant ownership — every invariant declares its owner", () => {
+    const inv = (body: string) => parsePlanModels(`## Invariants\n\n### INV-1: X\n\n**Tier:** advisory\n${body}`).invariants[0]!;
+
+    it("parses an owned invariant with no siblings declared as `none`", () => {
+      expect(inv("**Owner module:** `src/a.ts`\n**Sibling entry points:** none\n**Matrix test:** `src/a.test.ts`\n").ownership)
+        .toEqual({ kind: "owned", owner: "src/a.ts", siblings: [], matrixTest: "src/a.test.ts" });
+    });
+
+    it("parses a sibling list that ends at the next label", () => {
+      expect(inv("**Owner module:** src/a.ts\n**Sibling entry points:**\n- src/b.ts — reads it\n- `src/c.ts`\n**Matrix test:** src/a.test.ts\n").ownership)
+        .toEqual({
+          kind: "owned",
+          owner: "src/a.ts",
+          siblings: [{ path: "src/b.ts", note: "reads it" }, { path: "src/c.ts", note: null }],
+          matrixTest: "src/a.test.ts",
+        });
+    });
+
+    it("parses `none` case-insensitively as unowned when a reason is given", () => {
+      expect(inv("**Owner module:** None\n**Unowned reason:** a prohibition\n").ownership)
+        .toEqual({ kind: "unowned", reason: "a prohibition" });
+    });
+
+    it.each<[string, string, readonly unknown[]]>([
+      ["no owner line", "**Statement:** s\n", [{ kind: "missing-owner" }]],
+      ["`none` without a reason", "**Owner module:** none\n", [{ kind: "unowned-without-reason" }]],
+      [
+        "owner fields on an unowned invariant",
+        "**Owner module:** none\n**Unowned reason:** r\n**Sibling entry points:** none\n**Matrix test:** t.ts\n",
+        [{ kind: "owner-fields-on-unowned", labels: ["Sibling entry points", "Matrix test"] }],
+      ],
+      ["a reason on an owned invariant", "**Owner module:** a.ts\n**Unowned reason:** r\n**Sibling entry points:** none\n**Matrix test:** t.ts\n", [{ kind: "reason-on-owned" }]],
+      ["no sibling declaration", "**Owner module:** a.ts\n**Matrix test:** t.ts\n", [{ kind: "missing-siblings" }]],
+      ["an empty sibling list", "**Owner module:** a.ts\n**Sibling entry points:**\n**Matrix test:** t.ts\n", [{ kind: "missing-siblings" }]],
+      ["a non-list sibling value", "**Owner module:** a.ts\n**Sibling entry points:** b.ts, c.ts\n**Matrix test:** t.ts\n", [{ kind: "malformed-sibling", line: "b.ts, c.ts" }]],
+      ["no matrix test", "**Owner module:** a.ts\n**Sibling entry points:** none\n", [{ kind: "missing-matrix-test" }]],
+    ])("represents %s as malformed with a named problem", (_name, body, problems) => {
+      expect(inv(body).ownership).toEqual({ kind: "malformed", problems });
+    });
+
+    it("collects every problem of one declaration, not just the first", () => {
+      expect(inv("**Owner module:** a.ts\n**Unowned reason:** r\n").ownership).toEqual({
+        kind: "malformed",
+        problems: [{ kind: "reason-on-owned" }, { kind: "missing-siblings" }, { kind: "missing-matrix-test" }],
+      });
+    });
+
+    it("flags ownership labels outside the Invariants section as strays", () => {
+      const models = parsePlanModels("## Notes\n\n**Owner module:** a.ts\n**Sibling entry points:** none\n**Matrix test:** t.ts\n**Unowned reason:** r\n");
+      for (const label of ["Owner module", "Sibling entry points", "Matrix test", "Unowned reason"]) {
+        expect(models.strays).toContainEqual({ kind: "misplaced-label", label, home: "Invariants" });
+      }
+    });
   });
 
   it("tier matching is case-insensitive", () => {
@@ -323,5 +407,8 @@ describe("template conformance — the shipped plan template parses cleanly", ()
     expect(models.invariants[0].tier).toEqual({ status: "ok", tier: "checkable" });
     expect(models.invariants[0].ruleFile).not.toBeNull();
     expect(models.invariants[1].tier).toEqual({ status: "ok", tier: "advisory" });
+    // The template shows both ownership forms, and both parse cleanly.
+    expect(models.invariants[0].ownership.kind).toBe("owned");
+    expect(models.invariants[1].ownership.kind).toBe("unowned");
   });
 });

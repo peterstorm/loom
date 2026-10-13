@@ -1523,6 +1523,8 @@ describe("orchestration CLI", () => {
 
   it("renders the owed implementation dispatches as briefs with per-harness invocations", async () => {
     const root = project();
+    // The brief reads the graph's plan for invariant ownership, so the plan it names must exist.
+    modelFreePlan(root);
     writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph()));
 
     const listed = await runCli(["brief"], "", root);

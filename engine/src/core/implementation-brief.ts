@@ -6,8 +6,9 @@
  * Every value comes from protected authority: the Task row, the dispatch the
  * engine derived for it (`deriveTaskImplementationDispatch`), the Spec Index
  * text of its Requirement claims, its dependencies' settled output
- * (`predecessorOutputs`), the Agent Catalog's declared skill, and the binding
- * rule documents its file list selects. The renderer then proves the
+ * (`predecessorOutputs`), the Agent Catalog's declared skill, the binding
+ * rule documents its file list selects, and the ownership of every plan
+ * invariant whose family it changes. The renderer then proves the
  * result passes the same spawn-gate checks the harness will apply — no
  * residual template variable, and the canonical `**Task ID:**` binding naming
  * this Task — so a rendered brief is admissible by construction rather than by
@@ -23,7 +24,8 @@ import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOut
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
-import type { Task, WaveImplementationDispatch } from "../types";
+import { pathsMatch } from "./plan-paths";
+import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 
 /** The binding rule documents an implementation brief can inline. */
@@ -61,6 +63,8 @@ export const NO_CODE_RULES = "N/A — no code in this task.";
 export const NO_RETRY_CONTEXT = "None — semantic attempt 1.";
 /** Literal substituted for `{scenario_test_names}` when the Task claims no Acceptance Scenario. */
 export const NO_SCENARIO_TEST_NAMES = "None — this Task claims no Acceptance Scenario.";
+/** Literal substituted for `{invariant_ownership}` when no owned invariant names a file the Task changes. */
+export const NO_INVARIANT_OWNERSHIP = "None — no plan invariant names a file this Task changes.";
 
 /** The template variables the implementation brief template must declare —
  *  exactly these, so a drifted template is refused rather than half-rendered. */
@@ -79,6 +83,7 @@ const BRIEF_VARIABLES = [
   "spec_contributions_formatted",
   "scenario_test_names",
   "plan_context",
+  "invariant_ownership",
   "file_list",
   "plan_file_path",
 ] as const;
@@ -97,6 +102,8 @@ export type ImplementationBriefInput = Readonly<{
   roster: readonly Task[];
   /** Contents of every rule document `ruleDocumentsFor(task.file_list)` names. */
   rules: ReadonlyMap<RuleDocument, string>;
+  /** The invariants the protected plan declares; empty when there is no plan. */
+  invariants: readonly PlanInvariant[];
 }>;
 
 export type ImplementationBrief = Readonly<{
@@ -171,6 +178,48 @@ function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): 
 }
 
 /**
+ * The ownership guidance for every owned invariant whose family this Task
+ * changes: its role (owner, sibling, matrix-test author — possibly several),
+ * then the whole family, so a sibling sees its owner and its peers. Unowned
+ * and malformed invariants name no files, so they never render here (plan
+ * validation has already refused a malformed one).
+ */
+function invariantOwnership(fileList: readonly string[], invariants: readonly PlanInvariant[]): string {
+  const changes = (path: string): boolean => fileList.some((file) => pathsMatch(file, path));
+  const blocks = invariants.flatMap((invariant) => {
+    if (invariant.ownership.kind !== "owned") return [];
+    const { owner, siblings, matrixTest } = invariant.ownership;
+    const changedSiblings = siblings.filter(({ path }) => changes(path));
+    const roles = [
+      ...(changes(owner)
+        ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
+        : []),
+      ...(changedSiblings.length > 0
+        ? [`- Sibling: you change ${changedSiblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
+        : []),
+      ...(changes(matrixTest)
+        ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
+        : []),
+    ];
+    if (roles.length === 0) return [];
+    return [[
+      `**${invariant.id}: ${invariant.title}**`,
+      ...(invariant.statement === null ? [] : [invariant.statement]),
+      "",
+      "**Your role:**",
+      ...roles,
+      "",
+      `**Owner module:** \`${owner}\``,
+      siblings.length === 0
+        ? "**Sibling entry points:** none"
+        : ["**Sibling entry points:**", ...siblings.map(({ path, note }) => `- \`${path}\`${note === null ? "" : ` — ${note}`}`)].join("\n"),
+      `**Matrix test:** \`${matrixTest}\``,
+    ].join("\n")];
+  });
+  return blocks.length === 0 ? NO_INVARIANT_OWNERSHIP : blocks.join("\n\n");
+}
+
+/**
  * Render one Task's implementation brief, or refuse with the exact reason the
  * brief could not be admissible.
  */
@@ -242,6 +291,7 @@ export function renderImplementationBrief(
     spec_contributions_formatted: contributions.value,
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
+    invariant_ownership: invariantOwnership(task.file_list ?? [], input.invariants),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",
   };

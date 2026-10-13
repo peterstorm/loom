@@ -7,10 +7,11 @@ import populate from "../../src/handlers/helpers/populate-task-graph";
 import {
   validateModelBindings,
   checkPlanModelBindings,
-  pathsMatch,
   type ModelBindingDeps,
 } from "../../src/handlers/helpers/validate-model-bindings";
-import type { PlanModels } from "../../src/parsers/parse-plan-models";
+import { pathsMatch } from "../../src/core/plan-paths";
+import type { PlanModels } from "../../src/core/parse-plan-models";
+import type { InvariantOwnership } from "../../src/types";
 
 function errorsOf(r: { ok: true } | { ok: false; errors: readonly string[] }): readonly string[] {
   return r.ok ? [] : r.errors;
@@ -23,15 +24,34 @@ function expectError(r: { ok: true } | { ok: false; errors: readonly string[] },
 
 const NO_MODELS: PlanModels = { lifecycles: [], pipeline: null, invariants: [], strays: [] };
 
-const NO_FILES: ModelBindingDeps = { readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }) };
+const NO_FILES: ModelBindingDeps = {
+  readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }),
+  pathPresence: () => ({ kind: "absent" }),
+};
 
 function depsWith(files: Record<string, string>): ModelBindingDeps {
   return {
     readFile: (path) => path in files
       ? { ok: true, content: files[path]! }
       : { ok: false, error: `ENOENT: ${path}` },
+    pathPresence: (path) => (path in files ? { kind: "present" } : { kind: "absent" }),
   };
 }
+
+const UNOWNED: InvariantOwnership = { kind: "unowned", reason: "a prohibition" };
+
+/** An advisory invariant (no rule file) with the given ownership. */
+const ownedInvariant = (ownership: InvariantOwnership): PlanModels => ({
+  ...NO_MODELS,
+  invariants: [{ id: "INV-3", title: "Probes fail closed", tier: { status: "ok", tier: "advisory" }, ruleFile: null, statement: null, ownership }],
+});
+
+const OWNED: InvariantOwnership = {
+  kind: "owned",
+  owner: "src/probe.ts",
+  siblings: [{ path: "src/panel.ts", note: null }, { path: "src/review.ts", note: "replay guard" }],
+  matrixTest: "tests/probe.matrix.test.ts",
+};
 
 function task(overrides: Record<string, unknown>): Record<string, unknown> {
   return { id: "T1", description: "x", agent: "code-implementer-agent", wave: 1, depends_on: [], ...overrides };
@@ -191,53 +211,139 @@ describe("validateModelBindings", () => {
 
   describe("invariants", () => {
     it("rejects a missing tier with the missing-specific message", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "absent" }, ruleFile: null, statement: null, ownership: UNOWNED }] };
       const result = validateModelBindings(models, [], NO_FILES);
       expectError(result, "missing '**Tier:**'");
       expectError(result, "'checkable' or 'advisory'");
     });
 
     it("rejects an unrecognized tier, naming the raw text it saw", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "unrecognized", raw: "enforced-ish" }, ruleFile: null, statement: null, ownership: UNOWNED }] };
       const result = validateModelBindings(models, [], NO_FILES);
       expectError(result, "unrecognized '**Tier:**' 'enforced-ish'");
       expectError(result, "'checkable' or 'advisory'");
     });
 
     it("rejects a checkable invariant with no rule file", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: null, statement: null, ownership: UNOWNED }] };
       expectError(validateModelBindings(models, [], NO_FILES), "must be a lint rule");
     });
 
     it("rejects an ADVISORY invariant that declares a rule file (mis-tiered intent)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "advisory" }, ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "advisory" }, ruleFile: "r.json", statement: null, ownership: UNOWNED }] };
       expectError(validateModelBindings(models, [], NO_FILES), "advisory invariants are never enforced");
     });
 
     it("rejects a checkable invariant whose rule file does not exist", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: ".claude/linter/rules/inv-1.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: ".claude/linter/rules/inv-1.json", statement: null, ownership: UNOWNED }] };
       expectError(validateModelBindings(models, [], NO_FILES), "cannot read rule file");
     });
 
     it("rejects a rule file that is not a rule-shaped JSON object", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json", statement: null, ownership: UNOWNED }] };
       expectError(validateModelBindings(models, [], depsWith({ "r.json": JSON.stringify({ pattern: "x" }) })), "'kind' and 'name'");
     });
 
     it("rejects a rule file with invalid JSON and preserves the parse error", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json", statement: null, ownership: UNOWNED }] };
       expectError(validateModelBindings(models, [], depsWith({ "r.json": "{{" })), "not valid JSON:");
     });
 
     it("accepts a checkable invariant bound to an existing rule file", () => {
       const rule = JSON.stringify({ kind: "regex", name: "inv-1", description: "d", extensions: [".ts"], pattern: "x", fixHint: "f", enabled: true });
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json" }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-1", title: "X", tier: { status: "ok", tier: "checkable" }, ruleFile: "r.json", statement: null, ownership: UNOWNED }] };
       expect(validateModelBindings(models, [], depsWith({ "r.json": rule })).ok).toBe(true);
     });
 
     it("accepts an advisory invariant with no rule file (honest prose)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-2", title: "SLA", tier: { status: "ok", tier: "advisory" }, ruleFile: null }] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [{ id: "INV-2", title: "SLA", tier: { status: "ok", tier: "advisory" }, ruleFile: null, statement: null, ownership: UNOWNED }] };
       expect(validateModelBindings(models, [], NO_FILES).ok).toBe(true);
+    });
+  });
+
+  describe("invariant ownership", () => {
+    it("accepts an unowned invariant (a prohibition with a reason)", () => {
+      expect(validateModelBindings(ownedInvariant(UNOWNED), [], NO_FILES).ok).toBe(true);
+    });
+
+    it("renders every problem of a malformed declaration, naming the invariant", () => {
+      const result = validateModelBindings(
+        ownedInvariant({ kind: "malformed", problems: [{ kind: "missing-owner" }, { kind: "malformed-sibling", line: "b.ts, c.ts" }] }),
+        [],
+        NO_FILES,
+      );
+      expect(errorsOf(result)).toHaveLength(2);
+      expectError(result, "INV-3");
+      expectError(result, "'**Owner module:**'");
+      expectError(result, "'b.ts, c.ts'");
+    });
+
+    it("accepts an owned family whose paths exist and whose matrix test is untouched", () => {
+      const deps = depsWith({ "src/probe.ts": "", "src/panel.ts": "", "src/review.ts": "", "tests/probe.matrix.test.ts": "" });
+      expect(validateModelBindings(ownedInvariant(OWNED), [task({ file_list: ["src/unrelated.ts"] })], deps).ok).toBe(true);
+    });
+
+    it("accepts paths that do not exist yet when a task creates them", () => {
+      const tasks = [
+        task({ id: "T1", file_list: ["src/probe.ts", "tests/probe.matrix.test.ts"] }),
+        task({ id: "T2", depends_on: ["T1"], file_list: ["src/panel.ts", "src/review.ts"] }),
+      ];
+      expect(validateModelBindings(ownedInvariant(OWNED), tasks, NO_FILES).ok).toBe(true);
+    });
+
+    it("rejects a path that neither exists nor is in any task's file_list", () => {
+      const deps = depsWith({ "src/probe.ts": "", "src/panel.ts": "", "tests/probe.matrix.test.ts": "" });
+      const result = validateModelBindings(ownedInvariant(OWNED), [], deps);
+      expectError(result, "INV-3");
+      expectError(result, "sibling entry point 'src/review.ts'");
+      expectError(result, "neither exists nor is in any task's file_list");
+    });
+
+    it("rejects a path whose presence cannot be observed, with the cause", () => {
+      const deps: ModelBindingDeps = {
+        ...depsWith({ "src/panel.ts": "", "src/review.ts": "", "tests/probe.matrix.test.ts": "" }),
+        pathPresence: (path) => (path === "src/probe.ts" ? { kind: "unknown", cause: "ELOOP" } : { kind: "present" }),
+      };
+      const result = validateModelBindings(ownedInvariant(OWNED), [], deps);
+      expectError(result, "owner module 'src/probe.ts'");
+      expectError(result, "ELOOP");
+    });
+
+    it("rejects a path given two roles in one invariant", () => {
+      const deps = depsWith({ "src/probe.ts": "", "src/review.ts": "", "tests/probe.matrix.test.ts": "" });
+      const twice: InvariantOwnership = { ...OWNED, siblings: [{ path: "./src/probe.ts", note: null }, { path: "src/review.ts", note: null }, { path: "src/review.ts", note: null }] } as InvariantOwnership;
+      const result = validateModelBindings(ownedInvariant(twice), [], deps);
+      expectError(result, "'src/probe.ts' is both the owner module and a sibling entry point");
+      expectError(result, "'src/review.ts' is listed twice as a sibling entry point");
+    });
+
+    it("rejects a plan that touches the family without touching its matrix test", () => {
+      const deps = depsWith({ "src/probe.ts": "", "src/panel.ts": "", "src/review.ts": "", "tests/probe.matrix.test.ts": "" });
+      const result = validateModelBindings(ownedInvariant(OWNED), [task({ id: "T4", file_list: ["src/panel.ts"] })], deps);
+      expectError(result, "T4 touches the family");
+      expectError(result, "matrix test 'tests/probe.matrix.test.ts'");
+    });
+
+    it("rejects a sibling task that does not depend on the task building the owner", () => {
+      const tasks = [
+        task({ id: "T1", file_list: ["src/probe.ts", "tests/probe.matrix.test.ts"] }),
+        task({ id: "T2", depends_on: [], file_list: ["src/panel.ts"] }),
+        task({ id: "T3", depends_on: ["T2"], file_list: ["src/review.ts"] }),
+      ];
+      const result = validateModelBindings(ownedInvariant(OWNED), tasks, depsWith({}));
+      expectError(result, "T2 changes sibling entry point 'src/panel.ts'");
+      expectError(result, "must depend on T1");
+      // T3 reaches neither T1 directly nor transitively
+      expectError(result, "T3 changes sibling entry point 'src/review.ts'");
+    });
+
+    it("accepts a transitive dependency on the owner task, and the owner task touching a sibling itself", () => {
+      const tasks = [
+        task({ id: "T1", file_list: ["src/probe.ts", "src/panel.ts", "tests/probe.matrix.test.ts"] }),
+        task({ id: "T2", depends_on: ["T1"], file_list: [] }),
+        task({ id: "T3", depends_on: ["T2"], file_list: ["src/review.ts"] }),
+      ];
+      expect(validateModelBindings(ownedInvariant(OWNED), tasks, depsWith({})).ok).toBe(true);
     });
   });
 
@@ -245,7 +351,7 @@ describe("validateModelBindings", () => {
     const models: PlanModels = {
       lifecycles: [{ id: "LC-1", title: "A", machineFile: null }],
       pipeline: { dagFile: null, declaredNodes: [] },
-      invariants: [{ id: "INV-1", title: "B", tier: { status: "ok", tier: "checkable" }, ruleFile: null }],
+      invariants: [{ id: "INV-1", title: "B", tier: { status: "ok", tier: "checkable" }, ruleFile: null, statement: null, ownership: UNOWNED }],
       strays: [{ kind: "near-miss-heading", heading: "## Lifecycles:" }],
     };
     expect(errorsOf(validateModelBindings(models, [], NO_FILES))).toHaveLength(4);

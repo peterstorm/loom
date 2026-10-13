@@ -17,11 +17,27 @@ import {
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
+import { parsePlanModels } from "../core/parse-plan-models";
 import { StateManager } from "../state-manager";
+import type { PlanInvariant } from "../types";
 import { observeSpecIndex } from "./spec-index-observation";
 
 /** The brief template, relative to the active Loom package root. */
 export const IMPLEMENTATION_BRIEF_TEMPLATE = join("commands", "templates", "impl-agent-context.md");
+
+/**
+ * The invariants the recorded plan declares; none when the graph records no
+ * plan. Plan population validated the plan, so one that cannot be read now
+ * refuses the brief rather than silently dropping its invariant ownership.
+ */
+function planInvariants(planFile: string | null): DomainResult<readonly PlanInvariant[], string> {
+  if (planFile === null) return { ok: true, value: [] };
+  try {
+    return { ok: true, value: parsePlanModels(readFileSync(planFile, "utf8")).invariants };
+  } catch (error) {
+    return { ok: false, error: `cannot read the plan ${planFile} for its invariant ownership: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
 
 /**
  * Render the brief for one Task of the graph at `graphPath`, using the binding
@@ -51,9 +67,12 @@ export function renderTaskImplementationBrief(
       return { ok: false, error: `Task ${taskId} cannot derive its attestation context: ${derivation.error}` };
     }
     const projectRoot = observeTaskGraphProjectBoundary(graphPath).root;
-    const specFile = graph.spec_file === null || graph.spec_file === undefined
-      ? null
-      : isAbsolute(graph.spec_file) ? graph.spec_file : resolve(projectRoot, graph.spec_file);
+    const inProject = (path: string | null | undefined): string | null =>
+      path === null || path === undefined ? null : isAbsolute(path) ? path : resolve(projectRoot, path);
+    const specFile = inProject(graph.spec_file);
+    const planFile = inProject(graph.plan_file);
+    const invariants = planInvariants(planFile);
+    if (!invariants.ok) return { ok: false, error: `Task ${taskId}: ${invariants.error}` };
     const rules = new Map<RuleDocument, string>(ruleDocumentsFor(task.file_list ?? []).map((name) =>
       [name, readFileSync(join(packageRoot, "rules", name), "utf8")] as const));
     const rendered = renderImplementationBrief({
@@ -64,6 +83,7 @@ export function renderTaskImplementationBrief(
       spec: observeSpecIndex(specFile),
       rules,
       roster: graph.tasks,
+      invariants: invariants.value,
     });
     return rendered.ok ? rendered : { ok: false, error: rendered.error.message };
   } catch (error) {

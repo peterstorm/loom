@@ -1175,13 +1175,11 @@ export interface TaskGraph {
 // ---------------------------------------------------------------------------
 //
 // These are pure data shapes describing what a plan DECLARED, not how it is
-// parsed. They live here rather than in `parsers/parse-plan-models.ts` because
-// both the producer (that parser) and a consumer in the functional core
-// (`core/wave-gate-checks.ts`, which binds lifecycle artifacts to a wave) need
-// them. Keeping them in the parser forced core to import across a denied
-// boundary for a type-only dependency; keeping them here lets the arrow point
-// at shared data instead. `parse-plan-models.ts` re-exports them, so its
-// public surface is unchanged.
+// parsed. They live here rather than in `core/parse-plan-models.ts` because
+// consumers that need only the shapes (`core/wave-gate-checks.ts`, which binds
+// lifecycle artifacts to a wave; the implementation brief) need not depend on
+// the grammar. `parse-plan-models.ts` re-exports them, so its public surface
+// is unchanged.
 
 export type InvariantTier = "checkable" | "advisory";
 
@@ -1237,6 +1235,32 @@ export interface PlanPipeline {
   readonly declaredNodes: readonly string[];
 }
 
+/** One `- path — note` line of an invariant's `**Sibling entry points:**` list. */
+export type SiblingEntryPoint = Readonly<{ path: string; note: string | null }>;
+
+/** Why an invariant's ownership declaration is malformed. Each names exactly
+ *  one way the plan text failed the grammar, so validation can say which. */
+export type OwnershipProblem =
+  | Readonly<{ kind: "missing-owner" }>
+  | Readonly<{ kind: "unowned-without-reason" }>
+  | Readonly<{ kind: "owner-fields-on-unowned"; labels: readonly string[] }>
+  | Readonly<{ kind: "reason-on-owned" }>
+  | Readonly<{ kind: "missing-siblings" }>
+  | Readonly<{ kind: "malformed-sibling"; line: string }>
+  | Readonly<{ kind: "missing-matrix-test" }>;
+
+/**
+ * Who owns an invariant's implementation. An owned invariant names its one
+ * home, every other entry point that applies the rule, and the test that runs
+ * the rule through all of them; an unowned one (a prohibition, an SLA) says
+ * why it has no home. A declaration that is neither is `malformed`, carrying
+ * every problem — never a half-filled owned or unowned value.
+ */
+export type InvariantOwnership =
+  | Readonly<{ kind: "owned"; owner: string; siblings: readonly SiblingEntryPoint[]; matrixTest: string }>
+  | Readonly<{ kind: "unowned"; reason: string }>
+  | Readonly<{ kind: "malformed"; problems: readonly OwnershipProblem[] }>;
+
 export interface PlanInvariant {
   /** e.g. "INV-1" */
   readonly id: string;
@@ -1245,6 +1269,10 @@ export interface PlanInvariant {
   readonly tier: PlanInvariantTier;
   /** Path from the `**Rule file:**` line; null when the line is missing */
   readonly ruleFile: string | null;
+  /** The `**Statement:**` line; null when the line is missing */
+  readonly statement: string | null;
+  /** The owner module, sibling entry points and matrix test — or why none */
+  readonly ownership: InvariantOwnership;
 }
 
 export interface PlanModels {

@@ -10,7 +10,9 @@
  *                        architecture phase (validated deeply by fugue, not loom)
  *   - `## Invariants`  — `### INV-N: {title}` blocks tiered `checkable`
  *                        (bound to a lint-rule file, enforced fail-closed) or
- *                        `advisory` (prose, never enforced)
+ *                        `advisory` (prose, never enforced), each declaring its
+ *                        owner module, sibling entry points and matrix test —
+ *                        or `**Owner module:** none` with a reason
  *
  * The parser is total and pure: malformed declarations are represented, never
  * thrown. Malformed *field lines* become null fields; malformed or misplaced
@@ -28,20 +30,25 @@ import { match } from "ts-pattern";
 
 import type {
   BlockSection,
+  InvariantOwnership,
   InvariantTier,
   ModelSection,
+  OwnershipProblem,
   PlanInvariant,
   PlanInvariantTier,
   PlanLifecycle,
   PlanModels,
   PlanPipeline,
+  SiblingEntryPoint,
   Stray,
 } from "../types";
 
-// The plan model data shapes live in types.ts so the functional core can
-// depend on them without importing this parser across a bounded-context
-// boundary. Re-exported here because they are part of this module’s
-// established public surface.
+// The plan model data shapes live in types.ts (consumers that only need the
+// shapes need not import the grammar). Re-exported here because they are part
+// of this module's established public surface. The grammar itself lives in
+// core/ — a domain grammar whose output carries invariants, like the Spec
+// Index — so the orchestration shell that renders implementation briefs may
+// parse the plan.
 export type {
   BlockSection,
   InvariantTier,
@@ -198,6 +205,74 @@ function parseTier(raw: string | null): PlanInvariantTier {
   return { status: "unrecognized", raw };
 }
 
+/** The `**Sibling entry points:**` declaration of one block, in its four real
+ *  states. `none` is a declared empty list; a bare label with no items is not. */
+type SiblingDeclaration =
+  | Readonly<{ status: "absent" }>
+  | Readonly<{ status: "empty" }>
+  | Readonly<{ status: "malformed"; line: string }>
+  | Readonly<{ status: "declared"; entries: readonly SiblingEntryPoint[] }>;
+
+const SIBLING_LABEL = /^\*\*Sibling entry points:\*\*/i;
+const SIBLING_ITEM = /^-\s+`?([^`\s]+)`?(?:\s+[—–-]\s+(.+?))?\s*$/;
+
+/** `none` on the label line, or `- path — note` items on the lines after it,
+ *  up to the first line that is not an item. */
+function siblingDeclaration(block: string): SiblingDeclaration {
+  const lines = block.split("\n").map((line) => line.replace(/\r$/, ""));
+  const at = lines.findIndex((line) => SIBLING_LABEL.test(line));
+  if (at === -1) return { status: "absent" };
+  const inline = lines[at]!.replace(SIBLING_LABEL, "").trim();
+  if (inline.toLowerCase() === "none") return { status: "declared", entries: [] };
+  if (inline !== "") return { status: "malformed", line: inline };
+  const entries: SiblingEntryPoint[] = [];
+  for (const line of lines.slice(at + 1)) {
+    if (!line.startsWith("- ")) break;
+    const item = SIBLING_ITEM.exec(line);
+    if (item === null) return { status: "malformed", line };
+    entries.push({ path: item[1]!, note: item[2]?.trim() ?? null });
+  }
+  return entries.length === 0 ? { status: "empty" } : { status: "declared", entries };
+}
+
+/**
+ * The block's ownership declaration as its three real states. Every problem
+ * is collected, so one validation run names all of them; an owned or unowned
+ * value exists only when the declaration is complete and consistent.
+ */
+function parseOwnership(block: string): InvariantOwnership {
+  const owner = fieldValue(block, "Owner module");
+  const reason = fieldValue(block, "Unowned reason");
+  const matrixTest = fieldValue(block, "Matrix test");
+  const siblings = siblingDeclaration(block);
+  if (owner === null) return { kind: "malformed", problems: [{ kind: "missing-owner" }] };
+
+  if (owner.toLowerCase() === "none") {
+    const ownerLabels = [
+      ...(siblings.status === "absent" ? [] : ["Sibling entry points"]),
+      ...(matrixTest === null ? [] : ["Matrix test"]),
+    ];
+    const problems: OwnershipProblem[] = [
+      ...(reason === null ? [{ kind: "unowned-without-reason" } as const] : []),
+      ...(ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels } as const] : []),
+    ];
+    return reason !== null && problems.length === 0 ? { kind: "unowned", reason } : { kind: "malformed", problems };
+  }
+
+  const problems: OwnershipProblem[] = [
+    ...(reason === null ? [] : [{ kind: "reason-on-owned" } as const]),
+    ...match(siblings)
+      .with({ status: "declared" }, () => [])
+      .with({ status: "malformed" }, ({ line }) => [{ kind: "malformed-sibling", line } as const])
+      .with({ status: "absent" }, { status: "empty" }, () => [{ kind: "missing-siblings" } as const])
+      .exhaustive(),
+    ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
+  ];
+  return siblings.status === "declared" && matrixTest !== null && problems.length === 0
+    ? { kind: "owned", owner, siblings: siblings.entries, matrixTest }
+    : { kind: "malformed", problems };
+}
+
 const CANONICAL_SECTIONS = ["Lifecycles", "Pipeline", "Invariants"] as const;
 
 function inRange(index: number, s: Section | null): boolean {
@@ -260,6 +335,10 @@ function collectStrays(
     { label: "AuthoredDag", s: pipeline, home: "Pipeline" },
     { label: "Rule file", s: invariants, home: "Invariants" },
     { label: "Tier", s: invariants, home: "Invariants" },
+    { label: "Owner module", s: invariants, home: "Invariants" },
+    { label: "Unowned reason", s: invariants, home: "Invariants" },
+    { label: "Sibling entry points", s: invariants, home: "Invariants" },
+    { label: "Matrix test", s: invariants, home: "Invariants" },
   ];
   for (const { label, s, home } of labelHomes) {
     for (const m of text.matchAll(new RegExp(`^\\*\\*${label}:\\*\\*[^\\n]*$`, "gim"))) {
@@ -307,6 +386,8 @@ export function parsePlanModels(markdown: string): PlanModels {
         title,
         tier: parseTier(fieldValue(block, "Tier")),
         ruleFile: fieldValue(block, "Rule file"),
+        statement: fieldValue(block, "Statement"),
+        ownership: parseOwnership(block),
       }));
 
   const strays: Stray[] = [

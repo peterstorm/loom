@@ -39,7 +39,7 @@ describe("implementation prompt required-skill contract", () => {
       if (derivation.kind !== "dispatch") throw new Error(`fixture must be owed a dispatch, got ${derivation.kind}`);
       const rendered = renderImplementationBrief({
         template, task, dispatch: derivation.dispatch, planFile: "plan.md",
-        spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task],
+        spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task], invariants: [],
       });
       if (!rendered.ok) throw new Error(rendered.error.message);
       expect(checkAgentSkillPrompt(source, rendered.value.prompt)).toEqual({ ok: true });

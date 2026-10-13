@@ -51,7 +51,7 @@ The project's architecture and language-pattern rules are inlined below. They ar
   - **Otherwise you are a consumer.** The machine file is the single source of truth for that lifecycle. Import it. Never re-implement transition logic, duplicate state-name string literals, or store lifecycle state outside the machine's types.
 - **Pipeline node body (context references an AuthoredDag node):** fill ONLY the node body (fetch impl, `buildInput`, prompt). Never hand-write or edit `defineDag`/graph wiring — it is generated code. The node's declared input/output schemas are binding contracts, not suggestions.
 - **Pipeline codegen task:** run the `fugue new --from` command from your plan context. If it fails its validation gauntlet, the authored dag is defective — report the failure verbatim and stop; never hand-patch generated code to make it pass.
-- **Invariants (`INV-N`):** `checkable` invariants are lint rules — the linter blocks your edits fail-closed if you violate them, so design with them, not around them. `advisory` invariants are design guidance, honestly unenforced.
+- **Invariants (`INV-N`):** `checkable` invariants are lint rules — the linter blocks your edits fail-closed if you violate them, so design with them, not around them. `advisory` invariants are design guidance, honestly unenforced. Whatever the tier, each owned invariant has ONE owner module: the "Invariant Ownership" section below tells you your role when your files belong to an invariant's family.
 
 If your plan context declares none of these, this section imposes nothing.
 
@@ -106,6 +106,12 @@ The engine derives this from each dependency's settled, Wave-Gate-reviewed state
 ## Context from Plan
 
 {plan_context}
+
+## Invariant Ownership — BINDING
+
+{invariant_ownership}
+
+The engine derives this section from the plan's `## Invariants`: a rule the plan gives one owner module is implemented there once and called from every sibling entry point. Never write a second copy of an owned rule; if the owner cannot serve your entry point, stop and report what it is missing.
 
 ## Files to Create/Modify
 

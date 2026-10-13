@@ -59,6 +59,15 @@ Loom's standing policy: a model either executes or it doesn't exist (documented 
 
 Do NOT flag the mere absence of these sections — they are opt-in; most features need none.
 
+Then check invariant ownership. Flag as a gap (ID `OWN-N`):
+
+- The plan describes one rule applied at two or more sites (the same check, guard, parse or policy in several modules) with no `## Invariants` entry that owns it
+- An owned invariant's `**Sibling entry points:**` list leaves out a file from the plan's own File Structure or Component Design that its `**Statement:**` says applies the rule
+- One invariant bundles several distinct rules (each needs its own invariant and owner)
+- An `**Owner module:** none` invariant whose reason does not explain why no module can own it (a prohibition or an unobservable SLA is a reason; "spread across modules" is a missing owner)
+
+Each `OWN-N` gap names the rule, the sites the plan describes, and the missing or contradicting declaration.
+
 ### 3.6 Check Requirements Against Recorded Discoveries
 
 Coverage is not enough: a plan can cover a Requirement that the recorded facts make unsatisfiable. For **each** Requirement and plan decision, check it against **every** discovery from step 2.5. Flag as a gap (ID `FEAS-N`) any pair where:
@@ -93,6 +102,7 @@ The report MUST always be written — even when no gaps are found.
 - **FR-xxx** — (requirement description): (why it is not addressed)
 - **SC-xxx** — (requirement description): (what is missing)
 - **FEAS-N** — (Requirement or decision) vs `(document)`: (the discovery it contradicts, and why)
+- **OWN-N** — (the rule): (the sites the plan applies it at, and the missing or contradicting ownership declaration)
 
 (Write "None." if no gaps)
 

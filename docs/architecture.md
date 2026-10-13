@@ -96,7 +96,7 @@ Important parser boundaries include:
 - `runtime-compatibility.ts` — binds fresh Pi-launched CLI mutators to the exact extension/engine bytes loaded in memory;
 - `state-manager.ts` — parses the complete protected TaskGraph before use;
 - `parsers/parse-phase-artifacts.ts` — derives phase artifacts from completed Agent output;
-- `parsers/parse-plan-models.ts` — parses exact lifecycle, pipeline, and invariant declarations;
+- `core/parse-plan-models.ts` — parses exact lifecycle, pipeline, and invariant (including ownership) declarations;
 - `core/review-output.ts` and `core/findings.ts` — parse, identify, reconcile, and classify review Findings;
 - `core/review-packet.ts` — parses immutable code-review scope packets;
 - `core/panel-contract.ts` / `core/review-panel.ts` — validate architecture and refutation verdicts;
