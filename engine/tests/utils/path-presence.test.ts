@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { observePathPresence } from "../../src/utils/path-presence";
+import { observePathPresence, pathMayExist } from "../../src/utils/path-presence";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -28,5 +28,14 @@ describe("observePathPresence — only ENOENT proves absence", () => {
     const dir = scratch();
     symlinkSync("loop", join(dir, "loop"));
     expect(observePathPresence(join(dir, "loop"))).toEqual({ kind: "unknown", cause: expect.stringContaining("ELOOP") });
+  });
+
+  it("pathMayExist is false only for a proven absence", () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "here.json"), "{}");
+    symlinkSync("loop", join(dir, "loop"));
+    expect(pathMayExist(join(dir, "missing.json"))).toBe(false);
+    expect(pathMayExist(join(dir, "here.json"))).toBe(true);
+    expect(pathMayExist(join(dir, "loop"))).toBe(true);
   });
 });

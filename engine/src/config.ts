@@ -467,10 +467,10 @@ function taskGraphRelative(): string {
 }
 
 /**
- * Fail-closed existence probe for gates that arm on a path's presence: an
- * unknown presence (`utils/path-presence` — ENOENT is the ONLY absent answer)
- * means "cannot prove absence", so it reads as present, says why, and lets
- * the gate fail closed. The operator line is built by `diagnostic` so each
+ * Fail-closed existence probe for gates that arm on a path's presence: it
+ * answers exactly as `pathMayExist` (`utils/path-presence` — ENOENT is the
+ * ONLY absent answer) and also writes a stderr line saying why when presence
+ * is unknown, so the gate fails closed visibly. The operator line is built by `diagnostic` so each
  * harness keeps its own name (and the ELOOP regression tests can tell the
  * probes apart) while the ENOENT-only-absent semantics live in one place.
  */

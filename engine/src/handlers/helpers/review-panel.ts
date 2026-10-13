@@ -63,7 +63,7 @@ import { finalizeStandaloneReview } from "../../core/standalone-review";
 import { parseStandalonePanelOutcomes } from "../../core/standalone-refutation-panel";
 import { serializeAdjudicatedStandaloneReview } from "../../core/standalone-review-records";
 import { loadEvidenceBoundAggregate } from "./standalone-review";
-import { observePathPresence } from "../../utils/path-presence";
+import { observePathPresence, pathMayExist } from "../../utils/path-presence";
 
 export function standaloneTallyPublishErrors(
   original: unknown,
@@ -398,7 +398,7 @@ const handler: HookHandler = async (stdin, args) => {
   // misleading content-drift error caused by the tally's own state update.
   if (operation === "verdict" || operation === "tally") {
     const closurePath = join(runDir, "tally-closure.json");
-    if (observePathPresence(closurePath).kind !== "absent") {
+    if (pathMayExist(closurePath)) {
       let closedIds = "<unknown findings>";
       let closureReadError: string | null = null;
       try {
@@ -608,7 +608,7 @@ const handler: HookHandler = async (stdin, args) => {
       publishStagedRunFile(pendingResultPath, resultPath);
     } catch (error) {
       let cleanupError: unknown = null;
-      try { if (observePathPresence(pendingResultPath).kind !== "absent") unlinkSync(pendingResultPath); }
+      try { if (pathMayExist(pendingResultPath)) unlinkSync(pendingResultPath); }
       catch (cleanup) { cleanupError = cleanup; }
       return contractError(
         "review tally",

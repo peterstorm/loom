@@ -18,6 +18,13 @@ export type PathPresence =
 const ABSENT: PathPresence = Object.freeze({ kind: "absent" });
 const PRESENT: PathPresence = Object.freeze({ kind: "present" });
 
+/** Fail-closed "may this path exist?": only a proven absence answers false,
+ *  so an unobservable path counts as present. For callers that need only the
+ *  yes/no; callers that refuse with a cause use `observePathPresence`. */
+export function pathMayExist(path: string): boolean {
+  return observePathPresence(path).kind !== "absent";
+}
+
 export function observePathPresence(path: string): PathPresence {
   try {
     accessSync(path, fsConstants.F_OK);

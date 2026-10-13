@@ -42,3 +42,18 @@ None.
 ## Validation
 
 - `npm --prefix engine run verify` (typecheck, full Vitest suite, six smokes)
+
+## Round 2
+
+- **Review run:** `pr81-review-2` (result `baf401ffa67244a7a3fd930c4338e51f021cf1a7b28730c61780e6f0544464bf`): 0 critical, 5 advisory, nothing refuted
+- **Policy publication:** `pr81-policy-2` (initial revision)
+
+| ID | Decision | Reason |
+|---|---|---|
+| pr-test-analyzer-1 | accepted | Unreadable `tally-closure.json` test (fails against main's `existsSync` closure check) |
+| comment-analyzer-1 | accepted | Scope the architecture.md bullet to `path-presence.ts` callers; name G5a INV-1 for the rest |
+| architecture-tech-lead-1 | accepted | `pathMayExist` names the fail-closed reading once; rules-gate and both review-panel sites use it |
+| architecture-tech-lead-2 | deferred | Substitution-aware splitter = G5a INV-4 (same as round 1) |
+| code-simplifier-1 | accepted | Same as architecture-tech-lead-1; round 1 dismissed it at two callers |
+
+**Validation:** `npm --prefix engine run verify` passes: 12,262 tests, 1 skipped, all smoke tests.

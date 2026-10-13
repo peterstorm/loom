@@ -741,6 +741,20 @@ describe("review-panel helper CLI", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].refuted_findings ?? []).toHaveLength(0);
   });
 
+  it("treats a tally closure that exists but cannot be read as a closed run", () => {
+    // The closure marker blocks verdict and tally replays; one behind a symlink
+    // loop may be a real closure, so it must close the run, not read as absent.
+    stage();
+    symlinkSync("tally-closure.json", join(runDir, "tally-closure.json"));
+    const verdict = run(
+      ["verdict", "--lens", "reproduction", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST],
+      verdictJson("reproduction", "refuted", "upheld"),
+    );
+    expect(verdict.status).toBe(1);
+    expect(verdict.stderr).toContain("already been tallied or has an incomplete prior tally");
+    expect(verdict.stderr).toContain("cannot read tally closure");
+  });
+
   it("rejects an unknown operation", () => {
     expect(run(["adjudicate", "--runs-root", REL_ROOT]).stderr).toContain("Usage: helper review-panel");
   });

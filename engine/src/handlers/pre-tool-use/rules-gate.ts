@@ -28,7 +28,7 @@ import { firstBashCodeMutationTarget } from "../../core/bash-code-mutation";
 import { decideRulesGate, renderGateBlock, type GateDirs, type GatePorts } from "../../core/rules-gate";
 import { parseTranscriptEvents } from "./claude-transcript-events";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
-import { observePathPresence } from "../../utils/path-presence";
+import { pathMayExist } from "../../utils/path-presence";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
 
 const gateDisabled = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
@@ -92,7 +92,7 @@ export const filesystemPorts = (cwd: string): GatePorts => {
     // Only ENOENT drops a requirement: a rule, skill or target that is present
     // but unreadable stays required, so the gate blocks instead of passing an
     // edit with nothing required at all.
-    exists: (canonical) => observePathPresence(canonical).kind !== "absent",
+    exists: pathMayExist,
   };
 };
 

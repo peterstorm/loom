@@ -317,7 +317,7 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - guarded spawn routes fail closed on handler crashes;
 - Pi runtime/CLI version skew is rejected before Run Directory or TaskGraph mutation;
 - state and evidence paths are denied to arbitrary Bash writers;
-- a path a decision depends on is absent only on ENOENT: `utils/path-presence.ts` keeps "present but unreadable" as its own answer, so an unreadable config, rule or run marker refuses instead of reading as missing;
+- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (moving the remaining raw `existsSync` checks onto it, with a lint ban, is tracked as G5a INV-1);
 - a test command counts as evidence only at a real top-level position: a runner inside `$(…)`/`<(…)` never owns the line's exit or output;
 - Run Directory paths must be direct children and are accessed no-follow;
 - model and Skill bindings are explicit;
