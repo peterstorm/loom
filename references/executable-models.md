@@ -151,6 +151,53 @@ The plan declares invariants in an `## Invariants` section, each tiered:
   checkable. Re-tier it `advisory` rather than writing a rule that doesn't
   test the real property.
 
+### Invariant ownership (every invariant, whatever its tier)
+
+Most repeated review rounds fixed one copy of a rule and missed the others.
+So a rule enforced at two or more entry points is an invariant, and every
+invariant names who owns it:
+
+```markdown
+### INV-3: Path probes that decide authority fail closed
+
+**Tier:** advisory
+**Owner module:** `engine/src/utils/path-presence.ts`
+**Sibling entry points:**
+- `engine/src/utils/route-endpoint.ts` — models.json presence
+- `engine/src/handlers/helpers/review-panel.ts` — run markers
+**Matrix test:** `engine/tests/utils/path-presence.matrix.test.ts`
+**Statement:** Where an authority decision depends on a path existing, only ENOENT means absent.
+
+### INV-4: No console output in the domain
+
+**Tier:** checkable
+**Rule file:** `.claude/linter/rules/inv-4-no-console-in-domain.json`
+**Owner module:** none
+**Unowned reason:** A prohibition; there is no implementation to home.
+**Statement:** No file under src/domain/ writes to the console.
+```
+
+- `**Owner module:**` is required on every invariant. Owned: one path, the
+  rule's only implementation. Unowned: `none` plus `**Unowned reason:**`.
+- `**Sibling entry points:**` — every other entry point that applies the
+  rule, as `- path — note` lines, or `none`.
+- `**Matrix test:**` — the test that runs the rule through the owner and
+  every sibling, so a divergent copy is caught.
+- An unowned invariant may not carry sibling or matrix lines; an owned one may
+  not carry an unowned reason. A malformed declaration is a validation error
+  naming each problem — never a silent opt-out.
+- **One invariant per rule.** A family with several rules (word
+  normalization vs. command splitting) gets several invariants.
+- **The statement defines scope**: it says which call sites the rule covers,
+  so the sibling list can be judged complete.
+
+**Decompose** never creates invariant tasks, but an owned family shapes the
+graph: a task changing a sibling depends on the task building the owner, and
+any change to the family includes the matrix test. **The engine renders each
+Task's role** — owner, sibling, matrix-test author — and the whole family into
+its implementation brief from the plan, so the instruction does not depend on
+a model copying plan text into `plan_context`.
+
 ---
 
 ## Enforcement points (deterministic, wired)
@@ -163,9 +210,13 @@ The plan declares invariants in an `## Invariants` section, each tiered:
    letting it reach fugue runtime; checked against the exact non-empty `id` of
    each node object, the narrow identity boundary Loom needs while Fugue retains
    ownership of deeper DAG-shape validation);
-   every checkable `INV-N` rule file exists and is rule-shaped; near-miss
-   declarations (typo'd headings/labels) are errors; an unreadable `plan_file`
-   is an error, never a skipped check.
+   every checkable `INV-N` rule file exists and is rule-shaped; every `INV-N`
+   declares well-formed ownership, and an owned one's owner, siblings and
+   matrix test each exist on disk or appear in a task's `file_list` (only
+   ENOENT reads as absent), each path has one role, a task touching the family
+   comes with a task touching the matrix test, and sibling tasks depend on the
+   owner's task; near-miss declarations (typo'd headings/labels) are errors;
+   an unreadable `plan_file` is an error, never a skipped check.
 2. **`populate-task-graph`** — the only whitelisted helper that populates
    tasks into `active_task_graph.json` — runs the same binding checks before
    any state write, resolving the plan path from evidence-derived state
@@ -186,6 +237,14 @@ The plan declares invariants in an `## Invariants` section, each tiered:
    architecture phase) is the check skipped, and it says so.
 
 ## Known residuals (honest limits)
+
+- **Sibling completeness is declared, not proven.** Validation checks that
+  every declared path is real and correctly ordered; it cannot know an entry
+  point the plan forgot. Plan alignment (`OWN-N`) and review catch omissions;
+  a matrix test that exercises the real entry points — and, later, mutation
+  checks on it — is the mechanical correction.
+- **"The matrix test exists" is not "the matrix test is complete".** A test
+  that covers only well-formed input still satisfies the path check.
 
 - **Import discipline is advisory-plus-lint.** "Dependents import the machine,
   never re-implement transitions" is enforced only where a paired checkable

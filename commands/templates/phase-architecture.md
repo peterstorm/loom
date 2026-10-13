@@ -150,8 +150,9 @@ A model either executes or it doesn't exist. Never describe a lifecycle, pipelin
     ```
     A failing load means fix the rule now — it would otherwise block every edit in wave 1.
   - `advisory` → prose only, never pretended to be enforced.
+  - **Ownership, whatever the tier.** A rule the design enforces at two or more entry points IS an invariant, and every invariant names its owner: `**Owner module:**` (the one module that implements the rule), `**Sibling entry points:**` (every other entry point that applies it, as `- path — note` lines, or `none`) and `**Matrix test:**` (the test that runs the rule through every entry point). A rule with no home — a prohibition, a business SLA — says `**Owner module:** none` plus `**Unowned reason:**`. Declare **one invariant per rule**: a family with several rules (word normalization vs. command splitting, say) gets several invariants. Write `**Statement:**` so it says which call sites the rule covers, or nobody can tell whether the sibling list is complete. Validation refuses a path that neither exists nor is created by a task, a family change that never touches its matrix test, and a sibling task that does not depend on the task building the owner.
 
-**These sections are parsed deterministically by a regex grammar — exact spelling matters.** Section headings must be `## Lifecycles`, `## Pipeline`, `## Invariants` — no suffixes, no colon (case is tolerated, but write them as shown). Block headings must be `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase prefix, numeric id, colon). Field labels (`**Machine file:**`, `**AuthoredDag:**`, `**Tier:**`, `**Rule file:**`) start at column 0 with the colon inside the bold, never bulletized. Declare machine-file paths repo-relative. Close every code fence — an unterminated fence hides everything after it. Near-miss variants are rejected by validation, not silently ignored — but don't make it guess.
+**These sections are parsed deterministically by a regex grammar — exact spelling matters.** Section headings must be `## Lifecycles`, `## Pipeline`, `## Invariants` — no suffixes, no colon (case is tolerated, but write them as shown). Block headings must be `### LC-<n>: <title>` / `### INV-<n>: <title>` (uppercase prefix, numeric id, colon). Field labels (`**Machine file:**`, `**AuthoredDag:**`, `**Tier:**`, `**Rule file:**`, `**Owner module:**`, `**Unowned reason:**`, `**Sibling entry points:**`, `**Matrix test:**`) start at column 0 with the colon inside the bold, never bulletized; only the sibling entries below their label are `- ` list lines. Declare machine-file paths repo-relative. Close every code fence — an unterminated fence hides everything after it. Near-miss variants are rejected by validation, not silently ignored — but don't make it guess.
 
 Most features need none of these sections. A CRUD endpoint has no lifecycle; two sequential steps are not a pipeline. When in doubt, leave the section out — `validate-task-graph` fail-closes on declared-but-unbound models and near-miss declarations, not on absent sections.
 
@@ -172,7 +173,7 @@ Read `references/plan-template.md` from the loom plugin dir (`$LOOM_DIR`, resolv
 | **Testing Strategy** | Independent regression/new-test Verification Policy per component |
 | **Lifecycles** (opt-in) | Dedicated machine-file task per LC-N; dependents wired to it |
 | **Pipeline** (opt-in) | Codegen task + one node-body task per node |
-| **Invariants** (opt-in) | Nothing — checkable rules already enforce; advisory quoted as guidance |
+| **Invariants** (opt-in) | No invariant tasks; owner-before-sibling ordering and the matrix test in the family's tasks (the engine renders each Task's ownership role into its brief) |
 
 Record the chosen approach (and the interview decisions that shaped it) under `## Architectural Decisions` so future readers see WHY this approach won.
 
@@ -200,6 +201,6 @@ Commit: `git add .claude/plans/ && git commit -m "plan: {date_slug}"` — and wh
 - Implementation phases identified (count + names)
 - Key architectural decisions with rationale (captured as `### AD-N` blocks in the plan)
 - Which approach the user picked at the gate (and which you had recommended, if different)
-- Executable models declared, if any: LC-N lifecycles (+ machine file paths), Pipeline AuthoredDag path, INV-N invariants (+ tier; rule file paths for checkable ones, with `validate-lint-rules` output)
+- Executable models declared, if any: LC-N lifecycles (+ machine file paths), Pipeline AuthoredDag path, INV-N invariants (+ tier; rule file paths for checkable ones, with `validate-lint-rules` output; owner module, sibling count and matrix test — or the unowned reason)
 
 The architecture-agent has the `architecture-tech-lead` skill preloaded which provides FP, DDD, testability, and stack-specific domain knowledge. Use that knowledge to **design**, not to **review**.

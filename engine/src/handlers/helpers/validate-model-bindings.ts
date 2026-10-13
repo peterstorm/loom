@@ -19,7 +19,10 @@
 import { match } from "ts-pattern";
 
 import { readFileSync } from "node:fs";
-import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
+import type { OwnershipProblem, PlanInvariant } from "../../types";
+import { observePathPresence, type PathPresence } from "../../utils/path-presence";
+import { changesFamily, invariantRoles, normalizePlanPath, pathsMatch, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
 import { type ValidationResult, ok, fail } from "./validation-result";
 
 export type ModelFileRead =
@@ -29,6 +32,8 @@ export type ModelFileRead =
 export interface ModelBindingDeps {
   /** Reads one binding artifact while preserving the concrete boundary failure. */
   readonly readFile: (path: string) => ModelFileRead;
+  /** Whether a path an invariant names exists yet; only ENOENT is absent. */
+  readonly pathPresence: (path: string) => PathPresence;
 }
 
 /**
@@ -45,36 +50,153 @@ export const productionModelBindingDeps: ModelBindingDeps = {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
+  pathPresence: observePathPresence,
 };
-
-
-
-function normalizePath(p: string): string {
-  return p.replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-/**
- * One-directional, suffix-tolerant match: the task path may be an absolute or
- * deeper form of the declared plan path, never the reverse — a bare-basename
- * file_list entry must not satisfy a fully-pathed declaration. A declared
- * path with no directory segment only matches exactly.
- */
-export function pathsMatch(taskFile: string, declared: string): boolean {
-  const nt = normalizePath(taskFile);
-  const nd = normalizePath(declared);
-  if (nt === nd) return true;
-  if (!nd.includes("/")) return false;
-  return nt.endsWith(`/${nd}`);
-}
-
-function taskFileLists(tasks: readonly Record<string, unknown>[]): string[] {
-  return tasks.flatMap((t) =>
-    Array.isArray(t.file_list) ? (t.file_list as unknown[]).filter((f): f is string => typeof f === "string") : []
-  );
-}
 
 function jsonParseError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+function renderOwnershipProblem(problem: OwnershipProblem): string {
+  return match(problem)
+    .with({ kind: "missing-owner" }, () =>
+      "no '**Owner module:**' declared — name the one module that implements the rule, or 'none' with an '**Unowned reason:**'")
+    .with({ kind: "unowned-without-reason" }, () => "'**Owner module:** none' needs an '**Unowned reason:**'")
+    .with({ kind: "owner-fields-on-unowned" }, ({ labels }) =>
+      `an unowned invariant declares ${labels.map((label) => `'**${label}:**'`).join(" and ")} — remove them, or name the owner module`)
+    .with({ kind: "reason-on-owned" }, () => "declares both an owner module and an '**Unowned reason:**' — keep one")
+    .with({ kind: "missing-siblings" }, () =>
+      "no '**Sibling entry points:**' declared — list every other entry point that applies the rule ('- path — note' lines), or write 'none'")
+    .with({ kind: "malformed-sibling" }, ({ line }) => `sibling entry point line '${line}' is not '- path — note' (or 'none')`)
+    .with({ kind: "missing-matrix-test" }, () =>
+      "no '**Matrix test:**' declared — name the test that runs the rule through every entry point")
+    .exhaustive();
+}
+
+type TaskRecord = Readonly<{ id: string; files: readonly string[]; dependsOn: readonly string[] }>;
+
+function taskRecords(tasks: readonly Record<string, unknown>[]): readonly TaskRecord[] {
+  return tasks.map((t) => ({
+    id: typeof t.id === "string" ? t.id : "<unnamed task>",
+    files: Array.isArray(t.file_list) ? t.file_list.filter((f): f is string => typeof f === "string") : [],
+    dependsOn: Array.isArray(t.depends_on) ? t.depends_on.filter((d): d is string => typeof d === "string") : [],
+  }));
+}
+
+/** Whether `from` depends on any of `targets`, directly or transitively. */
+function dependsOnAny(from: TaskRecord, targets: ReadonlySet<string>, byId: ReadonlyMap<string, TaskRecord>): boolean {
+  const seen = new Set<string>();
+  const queue = [...from.dependsOn];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (targets.has(id)) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    queue.push(...(byId.get(id)?.dependsOn ?? []));
+  }
+  return false;
+}
+
+/** One Task with the roles its file_list plays in the family under check. */
+type RoledTask = Readonly<{ record: TaskRecord; roles: InvariantRoles }>;
+
+/** Every declared path with its role, in declaration order. */
+type DeclaredRole = readonly [role: string, path: string];
+
+function declaredRoles(ownership: OwnedInvariant): readonly DeclaredRole[] {
+  return [
+    ["owner module", ownership.owner],
+    ...ownership.siblings.map(({ path }) => ["sibling entry point", path] as const),
+    ["matrix test", ownership.matrixTest],
+  ];
+}
+
+/** A declared path must exist already, or be one a Task creates. */
+function unresolvedPathErrors(
+  label: string,
+  declared: readonly DeclaredRole[],
+  records: readonly TaskRecord[],
+  deps: ModelBindingDeps,
+): string[] {
+  return declared.flatMap(([role, path]) => {
+    if (records.some(({ files }) => files.some((file) => pathsMatch(file, path)))) return [];
+    const presence = deps.pathPresence(path);
+    return match(presence)
+      .with({ kind: "present" }, () => [])
+      .with({ kind: "unknown" }, ({ cause }) => [`${label}: cannot observe ${role} '${path}': ${cause}`])
+      .with({ kind: "absent" }, () => [
+        `${label}: ${role} '${path}' neither exists nor is in any task's file_list — fix the path, or add the task that creates it`,
+      ])
+      .exhaustive();
+  });
+}
+
+/** Each declared path plays exactly one role. */
+function duplicateRoleErrors(label: string, declared: readonly DeclaredRole[]): string[] {
+  const firstRole = new Map<string, string>();
+  return declared.flatMap(([role, path]) => {
+    const key = normalizePlanPath(path);
+    const earlier = firstRole.get(key);
+    if (earlier === undefined) {
+      firstRole.set(key, role);
+      return [];
+    }
+    return earlier === role
+      ? [`${label}: '${key}' is listed twice as a ${role}`]
+      : [`${label}: '${key}' is both the ${earlier} and a ${role} — give each path one role`];
+  });
+}
+
+/** A change to the owner or a sibling updates the family's matrix test. */
+function matrixTestErrors(label: string, ownership: OwnedInvariant, roled: readonly RoledTask[]): string[] {
+  const familyTasks = roled.filter(({ roles }) => changesFamily(roles));
+  if (familyTasks.length === 0 || roled.some(({ roles }) => roles.matrixTest)) return [];
+  return [
+    `${label}: ${familyTasks.map(({ record }) => record.id).join(", ")} touches the family but no task's file_list includes the matrix test ` +
+      `'${ownership.matrixTest}' — a change to the owner or a sibling must update the test that runs the rule through every entry point`,
+  ];
+}
+
+/** A sibling's Task reaches the owner's Task, so the owner exists before its callers. */
+function ownerFirstErrors(label: string, roled: readonly RoledTask[]): string[] {
+  const ownerIds = new Set(roled.filter(({ roles }) => roles.owner).map(({ record }) => record.id));
+  if (ownerIds.size === 0) return [];
+  const byId = new Map(roled.map(({ record }) => [record.id, record] as const));
+  return roled.flatMap(({ record, roles }) => {
+    const sibling = roles.siblings[0];
+    if (ownerIds.has(record.id) || sibling === undefined || dependsOnAny(record, ownerIds, byId)) return [];
+    return [
+      `${label}: ${record.id} changes sibling entry point '${sibling.path}' but does not reach the owner module's task — ` +
+        `it must depend on ${[...ownerIds].join(" or ")}, directly or transitively, so the owner exists before its callers`,
+    ];
+  });
+}
+
+/**
+ * Ownership checks for one invariant: a malformed declaration names its
+ * problems; an owned one must name paths that exist or that a task creates,
+ * give each path one role, update its matrix test whenever the family
+ * changes, and build siblings after the owner.
+ */
+function ownershipErrors(
+  inv: PlanInvariant,
+  tasks: readonly Record<string, unknown>[],
+  deps: ModelBindingDeps,
+): string[] {
+  const label = `${inv.id} ("${inv.title}")`;
+  const ownership = inv.ownership;
+  if (ownership.kind === "unowned") return [];
+  if (ownership.kind === "malformed") return ownership.problems.map((problem) => `${label}: ${renderOwnershipProblem(problem)}`);
+
+  const records = taskRecords(tasks);
+  const roled = records.map((record) => ({ record, roles: invariantRoles(record.files, ownership) }));
+  const declared = declaredRoles(ownership);
+  return [
+    ...unresolvedPathErrors(label, declared, records, deps),
+    ...duplicateRoleErrors(label, declared),
+    ...matrixTestErrors(label, ownership, roled),
+    ...ownerFirstErrors(label, roled),
+  ];
 }
 
 export function validateModelBindings(
@@ -83,7 +205,7 @@ export function validateModelBindings(
   deps: ModelBindingDeps,
 ): ValidationResult {
   const errors: string[] = [];
-  const allFiles = taskFileLists(tasks);
+  const allFiles = taskRecords(tasks).flatMap(({ files }) => files);
 
   for (const stray of models.strays) {
     errors.push(`Model declaration problem: ${renderStray(stray)}`);
@@ -199,6 +321,8 @@ export function validateModelBindings(
       errors.push(`${inv.id}: rule file '${ruleFile}' must be a JSON object with 'kind' and 'name' (full fail-closed load happens in the linter)`);
     }
   }
+
+  for (const inv of models.invariants) errors.push(...ownershipErrors(inv, tasks, deps));
 
   return errors.length === 0 ? ok() : fail(errors);
 }

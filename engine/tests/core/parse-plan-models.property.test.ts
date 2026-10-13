@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { parsePlanModels, hasModels, renderStray, type PlanModels, type PlanInvariant, type Stray } from "../../src/parsers/parse-plan-models";
+import { parsePlanModels, hasModels, renderStray, type PlanModels, type PlanInvariant, type Stray } from "../../src/core/parse-plan-models";
 import { validateModelBindings, type ModelBindingDeps } from "../../src/handlers/helpers/validate-model-bindings";
 
-const NO_FILES: ModelBindingDeps = { readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }) };
+const NO_FILES: ModelBindingDeps = {
+  readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }),
+  pathPresence: () => ({ kind: "absent" }),
+};
 
 const STRAY_KINDS: ReadonlyArray<Stray["kind"]> = [
   "unterminated-fence",
@@ -36,7 +39,12 @@ function isWellShaped(models: PlanModels): boolean {
     models.lifecycles.every((lc) => /^LC-\d+$/.test(lc.id) && typeof lc.title === "string" && (lc.machineFile === null || typeof lc.machineFile === "string")) &&
     (models.pipeline === null || models.pipeline.dagFile === null || typeof models.pipeline.dagFile === "string") &&
     Array.isArray(models.invariants) &&
-    models.invariants.every((inv) => /^INV-\d+$/.test(inv.id) && isWellShapedTier(inv.tier)) &&
+    models.invariants.every((inv) =>
+      /^INV-\d+$/.test(inv.id) &&
+      isWellShapedTier(inv.tier) &&
+      ["owned", "unowned", "malformed"].includes(inv.ownership.kind) &&
+      // A malformed declaration always says why.
+      (inv.ownership.kind !== "malformed" || inv.ownership.problems.length > 0)) &&
     Array.isArray(models.strays) &&
     models.strays.every(isWellShapedStray)
   );
@@ -75,7 +83,20 @@ describe("parsePlanModels — properties", () => {
       title: fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ]{0,30}$/),
       tier: fc.constantFrom("checkable", "advisory"),
       rule: slug.map((s) => `.claude/linter/rules/inv-${s}.json`),
+      // undefined = unowned; otherwise the owner slug and its sibling slugs
+      owner: fc.option(fc.record({ owner: slug, siblings: fc.array(slug, { maxLength: 3 }) }), { nil: undefined }),
     });
+    const ownershipLines = (owner: { owner: string; siblings: string[] } | undefined): string =>
+      owner === undefined
+        ? "**Owner module:** none\n**Unowned reason:** a prohibition\n"
+        : [
+            `**Owner module:** \`src/${owner.owner}.ts\``,
+            owner.siblings.length === 0
+              ? "**Sibling entry points:** none"
+              : ["**Sibling entry points:**", ...owner.siblings.map((s) => `- \`src/${s}/caller.ts\` — uses it`)].join("\n"),
+            `**Matrix test:** \`tests/${owner.owner}.matrix.test.ts\``,
+            "",
+          ].join("\n");
 
     fc.assert(
       fc.property(
@@ -93,7 +114,7 @@ describe("parsePlanModels — properties", () => {
             parts.push("## Invariants\n");
             for (const inv of invariants) {
               const ruleLine = inv.tier === "checkable" ? `**Rule file:** \`${inv.rule}\`\n` : "";
-              parts.push(`### INV-${inv.n}: ${inv.title.trim() || "T"}\n\n**Tier:** ${inv.tier}\n${ruleLine}`);
+              parts.push(`### INV-${inv.n}: ${inv.title.trim() || "T"}\n\n**Tier:** ${inv.tier}\n${ruleLine}${ownershipLines(inv.owner)}`);
             }
           }
           const models = parsePlanModels(parts.join("\n"));
@@ -102,7 +123,15 @@ describe("parsePlanModels — properties", () => {
             models.lifecycles.length === lifecycles.length &&
             models.invariants.length === invariants.length &&
             models.lifecycles.every((lc, i) => lc.machineFile === lifecycles[i].file) &&
-            models.invariants.every((inv, i) => inv.tier.status === "ok" && inv.tier.tier === invariants[i].tier)
+            models.invariants.every((inv, i) => inv.tier.status === "ok" && inv.tier.tier === invariants[i].tier) &&
+            models.invariants.every((inv, i) => {
+              const declared = invariants[i].owner;
+              if (declared === undefined) return inv.ownership.kind === "unowned";
+              return inv.ownership.kind === "owned" &&
+                inv.ownership.owner === `src/${declared.owner}.ts` &&
+                inv.ownership.matrixTest === `tests/${declared.owner}.matrix.test.ts` &&
+                inv.ownership.siblings.map(({ path }) => path).join("|") === declared.siblings.map((s) => `src/${s}/caller.ts`).join("|");
+            })
           );
         }
       ),
@@ -118,6 +147,8 @@ describe("validateModelBindings — properties", () => {
       title: fc.string({ maxLength: 30 }),
       tier: fc.constant({ status: "ok" as const, tier: "advisory" as const }),
       ruleFile: fc.constant(null),
+      statement: fc.constant(null),
+      ownership: fc.constant({ kind: "unowned" as const, reason: "a prohibition" }),
     });
     fc.assert(
       fc.property(fc.array(arbAdvisory, { maxLength: 5 }), (invariants) => {

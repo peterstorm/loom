@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { prepareTaskGraphRepair } from "../../../src/handlers/helpers/repair-task-graph";
+import type { ModelBindingDeps } from "../../../src/handlers/helpers/validate-model-bindings";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
@@ -70,8 +71,9 @@ const NO_MODELS_PLAN = "# Repair plan\n\nNothing to bind.\n";
  *  executable-models policy refuses. Not structurally fixable. */
 const UNBOUND_MODEL_PLAN = "# Repair plan\n\n## Lifecycles\n\n### LC-1: Order\n\nNo machine file.\n";
 
-const planDeps = (content: string) => ({
-  readFile: (_path: string) => ({ ok: true as const, content }),
+const planDeps = (content: string): ModelBindingDeps => ({
+  readFile: () => ({ ok: true, content }),
+  pathPresence: () => ({ kind: "absent" }),
 });
 
 function fixtureState(
@@ -175,6 +177,7 @@ describe("prepareTaskGraphRepair", () => {
   it("refuses a repair whose plan_file cannot be read rather than skipping the check", () => {
     const prepared = prepareTaskGraphRepair(corruptEvidencePair(), {
       readFile: () => ({ ok: false as const, error: "ENOENT" }),
+      pathPresence: () => ({ kind: "absent" }),
     });
 
     expect(prepared.ok).toBe(false);

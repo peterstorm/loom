@@ -20,8 +20,8 @@ import {
   StateManager,
   type LegacyWaveGateCompatibilityAuthority,
 } from "../../state-manager";
-import { parsePlanModels } from "../../parsers/parse-plan-models";
-import { pathsMatch } from "./validate-model-bindings";
+import { parsePlanModels } from "../../core/parse-plan-models";
+import { pathsMatch } from "../../core/plan-paths";
 import { inspectRepositoryPath } from "../../utils/repository-path";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { commitWaveGateCompletion, deriveWaveReadiness } from "../../core/wave-gate-machine";

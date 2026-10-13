@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import {
   NO_CODE_RULES,
+  NO_INVARIANT_OWNERSHIP,
   NO_RETRY_CONTEXT,
   NO_SCENARIO_TEST_NAMES,
   parseImplementationBriefMarker,
@@ -20,7 +21,7 @@ import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
-import type { Task, WaveImplementationDispatch } from "../../src/types";
+import type { PlanInvariant, Task, WaveImplementationDispatch } from "../../src/types";
 import { extractTaskId } from "../../src/utils/extract-task-id";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../src/state-manager";
@@ -107,8 +108,26 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   spec: SPEC,
   rules: RULES,
   roster: ROSTER,
+  invariants: [],
   ...overrides,
 });
+
+const PROBE_FAMILY: PlanInvariant = {
+  id: "INV-3",
+  title: "Path probes fail closed",
+  tier: { status: "ok", tier: "advisory" },
+  ruleFile: null,
+  statement: "Only ENOENT proves a path absent.",
+  ownership: {
+    kind: "owned",
+    owner: "engine/src/utils/path-presence.ts",
+    siblings: [{ path: "engine/src/utils/route-endpoint.ts", note: "models.json" }, { path: "engine/src/config.ts", note: null }],
+    matrixTest: "engine/tests/utils/path-presence.matrix.test.ts",
+  },
+};
+
+const ownershipSection = (prompt: string): string =>
+  prompt.split("## Invariant Ownership — BINDING\n\n")[1]?.split("\n\nThe engine derives this section")[0] ?? "";
 
 describe("ruleDocumentsFor", () => {
   it.each<[string, readonly string[], readonly RuleDocument[]]>([
@@ -247,6 +266,49 @@ describe("renderImplementationBrief", () => {
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(rendered.value.prompt).toContain(`## Acceptance Scenario Test Names\n\n${NO_SCENARIO_TEST_NAMES}\n`);
+  });
+
+  describe("invariant ownership", () => {
+    const render = (fileList: readonly string[], invariants: readonly PlanInvariant[] = [PROBE_FAMILY]): string => {
+      const rendered = renderImplementationBrief(input(task({ file_list: [...fileList] }), { invariants }));
+      if (!rendered.ok) throw new Error(rendered.error.message);
+      return ownershipSection(rendered.value.prompt);
+    };
+
+    it("states that no invariant applies when the plan declares none", () => {
+      expect(render(["engine/src/x.ts"], [])).toBe(NO_INVARIANT_OWNERSHIP);
+    });
+
+    it("states that no invariant applies when the Task touches no declared family", () => {
+      expect(render(["engine/src/unrelated.ts"])).toBe(NO_INVARIANT_OWNERSHIP);
+    });
+
+    it("tells the owner-module Task it owns the rule, with the full family", () => {
+      const section = render(["engine/src/utils/path-presence.ts"]);
+      expect(section).toContain("**INV-3: Path probes fail closed**");
+      expect(section).toContain("Only ENOENT proves a path absent.");
+      expect(section).toContain("- Owner: you change the owner module `engine/src/utils/path-presence.ts`. Implement the rule there, once; every sibling entry point must call it.");
+      expect(section).toContain("**Sibling entry points:**\n- `engine/src/utils/route-endpoint.ts` — models.json\n- `engine/src/config.ts`");
+      expect(section).toContain("**Matrix test:** `engine/tests/utils/path-presence.matrix.test.ts`");
+    });
+
+    it("tells a sibling Task to call the owner, naming the siblings it changes", () => {
+      const section = render(["/repo/engine/src/utils/route-endpoint.ts"]);
+      expect(section).toContain("- Sibling: you change `engine/src/utils/route-endpoint.ts`. Call the owner module `engine/src/utils/path-presence.ts`; never re-implement the rule.");
+      expect(section).not.toContain("- Owner:");
+    });
+
+    it("tells the matrix-test Task to exercise every sibling, and combines roles", () => {
+      const section = render(["engine/src/utils/path-presence.ts", "engine/tests/utils/path-presence.matrix.test.ts"]);
+      expect(section).toContain("- Owner:");
+      expect(section).toContain("- Matrix test: you change `engine/tests/utils/path-presence.matrix.test.ts`. It must exercise every sibling entry point listed below against the owner module.");
+    });
+
+    it("renders nothing for unowned or malformed invariants", () => {
+      const unowned: PlanInvariant = { ...PROBE_FAMILY, id: "INV-4", ownership: { kind: "unowned", reason: "a prohibition" } };
+      const malformed: PlanInvariant = { ...PROBE_FAMILY, id: "INV-5", ownership: { kind: "malformed", problems: [{ kind: "missing-owner" }] } };
+      expect(render(["engine/src/utils/path-presence.ts"], [unowned, malformed])).toBe(NO_INVARIANT_OWNERSHIP);
+    });
   });
 
   it("substitutes the template in one pass, never re-scanning Task text for variables", () => {

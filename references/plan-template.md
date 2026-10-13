@@ -118,17 +118,27 @@ sidecar must exist before decompose (architecture phase authors it).
 
 Only if the design has invariants worth stating. Delete section if not.
 Checkable invariants MUST have a rule file (written during this phase);
-non-checkable ones are honestly tiered advisory.
+non-checkable ones are honestly tiered advisory. A rule enforced at two or
+more entry points is an invariant, and EVERY invariant names its owner: the
+one module that implements the rule, every other entry point that applies it,
+and the matrix test that runs the rule through all of them — or
+`**Owner module:** none` with the reason it has no home.
 
 ### INV-1: {Invariant Title}
 
 **Tier:** checkable
 **Rule file:** `.claude/linter/rules/inv-1-{slug}.json`
-**Statement:** {what must always hold}
+**Owner module:** `{path/to/owner.ts}`
+**Sibling entry points:**
+- `{path/to/caller.ts}` — {what this entry point uses the rule for}
+**Matrix test:** `{path/to/owner.matrix.test.ts}`
+**Statement:** {what must always hold, and which call sites it covers}
 
 ### INV-2: {Invariant Title}
 
 **Tier:** advisory
+**Owner module:** none
+**Unowned reason:** {why no module owns it — e.g. a prohibition or a business SLA}
 **Statement:** {what should hold, and why it can't be deterministically checked}
 
 ---
@@ -226,6 +236,13 @@ Per component, not global.
 - Rule files go in the project rules dir: `.claude/linter/rules/` (or
   `.pi/linter/rules/` under the pi harness) — the linter loads only from the
   harness-appropriate dir.
+- **Invariant ownership** — every `INV-N` declares `**Owner module:**`. Owned:
+  `**Sibling entry points:**` (`- path — note` lines, or `none`) and
+  `**Matrix test:**`. Unowned: `**Owner module:** none` plus
+  `**Unowned reason:**`. Declare **one invariant per rule** (a family with
+  several rules gets several invariants), and write the `**Statement:**` so it
+  says which call sites the rule covers — otherwise the sibling list cannot be
+  checked for completeness.
 - Full policy: `references/executable-models.md`
 
 **What NOT to include:**

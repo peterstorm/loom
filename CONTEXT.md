@@ -416,6 +416,18 @@ _Avoid_: Barrel, API surface, exports (bare), the index
 A plan invariant (`INV-N`, tier `checkable`) expressed as a lint rule enforced fail-closed on every edit. Invariants that cannot be deterministically checked are tiered `advisory` and stay honest prose.
 _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory rules are never enforced)
 
+**Invariant Owner**:
+The one module a plan invariant names (`**Owner module:**`) as the only implementation of its rule. Every invariant, checkable or advisory, either names its owner or says `none` with an `**Unowned reason:**` (a prohibition or an unobservable SLA has no home). An owner is declared per rule, not per subsystem.
+_Avoid_: Home module (informal), canonical implementation, single source of truth (vague about which kind)
+
+**Sibling Entry Point**:
+A module other than the **Invariant Owner** that applies an owned invariant's rule, and must do so by calling the owner rather than re-implementing it. Declared as `- path — note` lines under `**Sibling entry points:**` (or `none`); the Task changing one depends on the Task building the owner.
+_Avoid_: Caller (too broad — not every caller applies the rule), consumer, copy
+
+**Matrix Test**:
+The test an owned invariant names (`**Matrix test:**`) that runs its rule through the owner and every **Sibling Entry Point**, so a divergent second copy fails it. Any Task change to the family must come with a change to its matrix test.
+_Avoid_: Parity test (one specific shape), integration test (says nothing about coverage)
+
 **Git-Visible Leaf**:
 A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it, under the one Git execution policy (`utils/git-execution-policy.ts`: allow-listed environment, no ambient `GIT_*`, no system or global config, fsmonitor disabled). Every engine Git child runs under that policy, so no observer's ignore rules can depend on an operator's global ignore file — neither one named by `core.excludesFile` nor Git's implicit `~/.config/git/ignore` (`XDG_CONFIG_HOME` is pinned to `/dev/null`).
 _Avoid_: Directory listing, file walk, pathspec match
@@ -485,6 +497,7 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A module's **Public Surface** is curated, and every symbol on it has a consumer outside that module
 - A Review Packet reviews the **Git-Visible Leaves** of a scoped directory plus the leaves at its base, so a deletion shows; its **Reviewed Workspace Observation** hashes only the **Git-Visible Leaves**, where a deleted leaf has no bytes
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
+- Every plan invariant names its **Invariant Owner** (or why it has none); an owned one lists its **Sibling Entry Points** and **Matrix Test**, and the engine renders each **Task**'s role among them into its implementation brief
 
 ## Example Dialogue
 
