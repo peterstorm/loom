@@ -53,6 +53,7 @@ import type {
   PlanContract,
 } from "../types";
 import { normalizePlanPath } from "./plan-path-match";
+import { COVERABLE_ANCHOR } from "./acceptance-contract";
 
 // The plan model data shapes live in types.ts (consumers that only need the
 // shapes need not import the grammar). Only the shapes importers take through
@@ -322,9 +323,6 @@ function contractTypes(block: string): Readonly<{ types: ContractTypes | null; p
 
 const ACCEPTANCE_LABEL = /^\*\*Acceptance tests:\*\*/i;
 const ACCEPTANCE_ITEM = /^-\s+`?([^`\s]+)`?\s+[—–-]\s+(.+?)\s*$/;
-/** Only a functional Requirement or an Acceptance Scenario can be decided by a
- *  test; an Out-of-Scope entry never is. */
-const COVERABLE_ANCHOR = /^(?:FR|AS)-\d+$/;
 
 /** The `- path — FR-n, AS-n` items, every problem in them, and no file twice. */
 function contractAcceptance(block: string): Readonly<{ files: readonly ContractAcceptanceFile[]; problems: readonly ContractProblem[] }> {

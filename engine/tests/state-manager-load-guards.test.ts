@@ -26,9 +26,9 @@ import {
   type FrozenVerificationManifest,
 } from "../src/core/verification-manifest";
 import {
-  evaluateWaveCompletionSuite,
   type AcceptedWaveCompletionReceipt,
 } from "../src/core/completion-suite";
+import { evaluateAsRecorded } from "./fixtures/completion-suite-evaluation";
 import { canonicalJson } from "../src/core/review-packet";
 import { sha256Hex } from "../src/core/digest";
 import fc from "fast-check";
@@ -674,7 +674,7 @@ function acceptedReceipt(
       },
     })),
   };
-  const evaluated = evaluateWaveCompletionSuite(authority, rawResult, { kind: "as-recorded" });
+  const evaluated = evaluateAsRecorded(authority, rawResult);
   if (evaluated.kind !== "accepted") throw new Error("fixture evaluation failed");
   return evaluated.receipt;
 }

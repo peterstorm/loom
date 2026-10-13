@@ -21,7 +21,7 @@ import { match } from "ts-pattern";
 
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
-import { coveredAnchors, frozenPaths } from "../../core/acceptance-contract";
+import { contractWriter, coveredAnchors, frozenPaths, type ContractWriterProblem } from "../../core/acceptance-contract";
 import type { ContractProblem, OwnershipProblem, PlanContract, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
 import { changesFamily, invariantRoles, normalizePlanPath, pathsMatch, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
@@ -244,6 +244,16 @@ function renderContractProblem(problem: ContractProblem): string {
 
 const COVERED_BY_CONTRACT = "covered-by-acceptance-contract";
 
+function renderWriterProblem(problem: ContractWriterProblem): string {
+  return match(problem)
+    .with({ kind: "unwritten" }, ({ path }) => `'${path}' is in no task's file_list — decompose must emit the contract task that writes it`)
+    .with({ kind: "shared" }, ({ path, taskIds }) =>
+      `'${path}' is in the file_list of ${taskIds.join(" and ")} — a frozen path has exactly one writer, the contract task`)
+    .with({ kind: "split" }, ({ taskIds }) =>
+      `frozen paths are written by ${taskIds.join(" and ")} — one contract task writes the types file and every acceptance file`)
+    .exhaustive();
+}
+
 /** A declared contract whose frozen paths have exactly one writer: its contract Task. */
 type ResolvedContract = Readonly<{ contract: PlanContract; contractTask: string; covered: readonly string[] }>;
 
@@ -274,24 +284,12 @@ function contractErrors(contracts: readonly PlanContract[], tasks: readonly Reco
       if (earlier === undefined) frozenBy.set(key, contract.id);
       else errors.push(`${label}: '${key}' is frozen by ${earlier} and ${contract.id} — a frozen path belongs to one contract`);
     }
-    const writers = paths.map((path) => ({
-      path,
-      ids: records.filter(({ files }) => files.some((file) => pathsMatch(file, path))).map(({ id }) => id),
-    }));
-    const unwritten = writers.filter(({ ids }) => ids.length === 0);
-    const shared = writers.filter(({ ids }) => ids.length > 1);
-    errors.push(
-      ...unwritten.map(({ path }) => `${label}: '${path}' is in no task's file_list — decompose must emit the contract task that writes it`),
-      ...shared.map(({ path, ids }) =>
-        `${label}: '${path}' is in the file_list of ${ids.join(" and ")} — a frozen path has exactly one writer, the contract task`),
-    );
-    if (unwritten.length > 0 || shared.length > 0) continue;
-    const writerIds = [...new Set(writers.map(({ ids }) => ids[0]!))];
-    if (writerIds.length > 1) {
-      errors.push(`${label}: frozen paths are written by ${writerIds.join(" and ")} — one contract task writes the types file and every acceptance file`);
+    const writer = contractWriter(paths, records.map(({ id, files }) => ({ id, file_list: files })));
+    if (!writer.ok) {
+      errors.push(...writer.error.map((problem) => `${label}: ${renderWriterProblem(problem)}`));
       continue;
     }
-    const contractTask = writerIds[0]!;
+    const contractTask = writer.value;
     const covered = coveredAnchors(declaration);
     resolved.push({ contract, contractTask, covered });
     const contractRecord = byId.get(contractTask)!;

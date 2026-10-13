@@ -1,4 +1,4 @@
-import { evaluateWaveCompletionSuite } from "../../src/core/completion-suite";
+import { evaluateAsRecorded } from "./completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -12,7 +12,7 @@ export function acceptedWaveCompletionSuite(
   const manifest = defaultVerificationManifest();
   const authorized = authorizeWaveCompletionSuite(manifest, active, "c".repeat(64));
   if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));
-  const evaluated = evaluateWaveCompletionSuite(authorized.value, {
+  const evaluated = evaluateAsRecorded(authorized.value, {
     kind: "wave-completion-suite-result",
     runId: active.runId,
     wave: active.wave,
@@ -32,7 +32,7 @@ export function acceptedWaveCompletionSuite(
         report: { kind: "not-required" as const },
       },
     })),
-  }, { kind: "as-recorded" });
+  });
   if (evaluated.kind !== "accepted") throw new Error("completion-suite fixture was not accepted");
   return evaluated.receipt;
 }

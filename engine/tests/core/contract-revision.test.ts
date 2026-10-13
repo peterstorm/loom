@@ -8,9 +8,9 @@ import {
   acceptanceExpectation,
   frozenPathDrift,
   type AcceptanceContract,
+  type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
 import { parseArtifactDigest, type ArtifactDigest } from "../../src/core/orchestration-contract";
-import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
@@ -18,6 +18,7 @@ import {
   activeWaveGateFixture,
   completedWaveGateFixture,
   protectedGraphFixture,
+  satisfiedProof,
   taskFixture,
 } from "../fixtures/task-lifecycle";
 
@@ -30,15 +31,6 @@ const digest = (fill: string): ArtifactDigest => {
 const TYPES = "src/payload-contract.ts";
 const ACCEPTANCE = "tests/payload.acceptance.test.ts";
 
-const satisfied = (files: readonly string[]) => {
-  const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: files },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: files, newTestsWritten: true },
-  );
-  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
-  return evaluated;
-};
-
 const task = (
   id: string,
   wave: number,
@@ -49,7 +41,7 @@ const task = (
   id, description: id, agent: "code-implementer-agent", wave, depends_on: wave === 1 ? [] : ["T1"],
   file_list: [...files], spec_anchors: [...anchors], spec_contributions: [],
   status,
-  ...(status === "pending" ? {} : { proof: satisfied(files) }),
+  ...(status === "pending" ? {} : { proof: satisfiedProof(files) }),
   review_status: status === "pending" ? "pending" : "passed",
   review_generation: 3,
 });
@@ -100,7 +92,12 @@ function populated(overrides: Partial<TaskGraph> = {}): TaskGraph {
   });
 }
 
-const REVISED = new Map<string, ArtifactDigest | null>([[TYPES, digest("c")], [ACCEPTANCE, digest("b")]]);
+type Observations = ReadonlyMap<string, FrozenPathObservation>;
+const seen = (sha256: ArtifactDigest): FrozenPathObservation => ({ kind: "digest", sha256 });
+const observed = (types: FrozenPathObservation, acceptance: FrozenPathObservation): Observations =>
+  new Map([[TYPES, types], [ACCEPTANCE, acceptance]]);
+
+const REVISED = observed(seen(digest("c")), seen(digest("b")));
 const REQUEST = { contract: "CT-1", reason: "AS-001 asserted the wrong error variant" };
 
 const revised = (graph: TaskGraph, digests = REVISED, request = REQUEST) => {
@@ -159,7 +156,7 @@ describe("reviseAcceptanceContract", () => {
 
   it("numbers a second revision after the first and chains its previous bytes", () => {
     const first = revised(populated()).graph;
-    const again = new Map<string, ArtifactDigest | null>([[TYPES, digest("c")], [ACCEPTANCE, digest("d")]]);
+    const again = observed(seen(digest("c")), seen(digest("d")));
     const { graph, revision } = revised(first, again, { contract: "CT-1", reason: "FR-001 needed a boundary case" });
     expect(revision.revision).toBe(2);
     expect(revision.previous).toEqual([{ path: TYPES, sha256: digest("c") }, { path: ACCEPTANCE, sha256: digest("b") }]);
@@ -216,15 +213,23 @@ describe("reviseAcceptanceContract", () => {
   });
 
   it("refuses when a frozen path cannot be read", () => {
-    const digests = new Map<string, ArtifactDigest | null>([[TYPES, null], [ACCEPTANCE, digest("b")]]);
+    const digests = observed({ kind: "unreadable", reason: "ELOOP: refusing to follow a link" }, seen(digest("b")));
     expect(refusal(populated(), digests)).toMatchObject({
       kind: "unreadable-path",
-      message: expect.stringContaining(TYPES),
+      message: expect.stringContaining(`'${TYPES}' (ELOOP: refusing to follow a link)`),
+    });
+  });
+
+  it("refuses as stale when the locked contracts name a path the shell never observed", () => {
+    const partial: Observations = new Map([[ACCEPTANCE, seen(digest("b"))]]);
+    expect(refusal(populated(), partial)).toMatchObject({
+      kind: "observation-stale",
+      message: expect.stringContaining(`'${TYPES}' (not observed)`),
     });
   });
 
   it("refuses when the bytes did not change", () => {
-    const digests = new Map<string, ArtifactDigest | null>([[TYPES, digest("a")], [ACCEPTANCE, digest("b")]]);
+    const digests = observed(seen(digest("a")), seen(digest("b")));
     expect(refusal(populated(), digests)).toMatchObject({ kind: "unchanged" });
   });
 });

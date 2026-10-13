@@ -18,7 +18,7 @@ import {
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { parseSpec } from "../../src/core/parse-spec";
-import type { ArtifactDigest } from "../../src/core/orchestration-contract";
+import { parseArtifactDigest, type ArtifactDigest } from "../../src/core/orchestration-contract";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
@@ -30,6 +30,12 @@ import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
+
+const digest = (fill: string): ArtifactDigest => {
+  const parsed = parseArtifactDigest(fill.repeat(64));
+  if (!parsed.ok) throw new Error("fixture digest must parse");
+  return parsed.value;
+};
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
@@ -65,7 +71,7 @@ if (!parsed.ok) throw new Error("spec fixture must parse");
 const SPEC: SpecIndexAvailability = {
   kind: "indexed",
   path: "/repo/.claude/specs/brief/spec.md",
-  contentDigest: "a".repeat(64) as ArtifactDigest,
+  contentDigest: digest("a"),
   index: parsed.value,
 };
 const NO_SPEC_FILE: SpecIndexAvailability = { kind: "unavailable", reason: { kind: "no-spec-file" } };
@@ -153,8 +159,8 @@ const FROZEN_CONTRACT: AcceptanceContract = {
     state: "frozen",
     wave: 1,
     paths: [
-      { path: "engine/src/core/brief-contract.ts", sha256: "a".repeat(64) as ArtifactDigest },
-      { path: "engine/tests/acceptance/brief.acceptance.test.ts", sha256: "b".repeat(64) as ArtifactDigest },
+      { path: "engine/src/core/brief-contract.ts", sha256: digest("a") },
+      { path: "engine/tests/acceptance/brief.acceptance.test.ts", sha256: digest("b") },
     ],
     roster: [
       { file: "engine/tests/acceptance/brief.acceptance.test.ts", name: "brief > FR-001: renders", anchors: ["FR-001"] },
@@ -431,7 +437,7 @@ describe("renderImplementationBrief", () => {
       "a spec file that is not UTF-8",
       {
         kind: "unavailable",
-        reason: { kind: "invalid-encoding", path: "/repo/spec.md", contentDigest: "b".repeat(64) as ArtifactDigest, reason: "bad byte" },
+        reason: { kind: "invalid-encoding", path: "/repo/spec.md", contentDigest: digest("b"), reason: "bad byte" },
       },
       "spec file /repo/spec.md is not valid UTF-8: bad byte",
     ],
@@ -442,7 +448,7 @@ describe("renderImplementationBrief", () => {
         reason: {
           kind: "unparsed",
           path: "/repo/spec.md",
-          contentDigest: "c".repeat(64) as ArtifactDigest,
+          contentDigest: digest("c"),
           errors: [{ kind: "no-acceptance-block" }],
         },
       },

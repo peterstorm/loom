@@ -1,8 +1,8 @@
 import { dirname, join, resolve } from "node:path";
 import { canonicalJson, type JsonValue } from "../../core/review-packet";
 import {
-  acceptanceExpectation,
   frozenPathDrift,
+  graphAcceptanceExpectation,
   frozenPathsToObserve,
   observeAcceptanceFacts,
   owesAcceptance,
@@ -373,7 +373,6 @@ function exactActiveAuthorityProblem(
     : "completion suite registered Task roster differs from the protected current-Wave roster";
 }
 
-
 /**
  * The acceptance facts of every project check that produced its report, read
  * back and bound to the digest the runner recorded — a report that changed
@@ -439,7 +438,7 @@ function reusableReceipt(
   const evaluation = evaluateWaveCompletionSuite(authority.value, {
     kind: "wave-completion-suite-result",
     ...resultAuthority,
-  }, { kind: "current", expectation });
+  }, expectation);
   return evaluation.kind === "accepted" ? receipt.value : null;
 }
 
@@ -562,7 +561,7 @@ function replayCompletionResult(
       message: parsed.reason,
     });
   }
-  const evaluation = evaluateWaveCompletionSuite(authority, parsed.result, { kind: "current", expectation });
+  const evaluation = evaluateWaveCompletionSuite(authority, parsed.result, expectation);
   if (evaluation.kind === "accepted") {
     return freeze({ kind: "accepted", receipt: evaluation.receipt });
   }
@@ -699,7 +698,7 @@ export async function ensureWaveCompletionSuite(
   }
   // `exactActiveAuthorityProblem` proved the registration names this Wave.
   const contracts = graph.acceptance_contracts ?? [];
-  const expectation = acceptanceExpectation(contracts, graph.tasks, registration.input.wave!);
+  const expectation = graphAcceptanceExpectation(graph, registration.input.wave!);
   const drift = frozenPathDrift(contracts, observeFrozenDigests(repositoryRoot, frozenPathsToObserve(contracts)));
   if (drift.length > 0) return blocked(before, ["artifact"], [], renderFrozenPathDrift(drift));
   if (reusableReceipt(graph, before, expectation) !== null) return accepted("reused", before);
@@ -799,7 +798,7 @@ export async function ensureWaveCompletionSuite(
     return blocked(after, ["authority"], [], parsedResult.error.errors.join("; "));
   }
   const result = parsedResult.value;
-  const evaluation = evaluateWaveCompletionSuite(authorized.value, result, { kind: "current", expectation });
+  const evaluation = evaluateWaveCompletionSuite(authorized.value, result, expectation);
   if (evaluation.kind === "rejected" && evaluation.authorityFailures.length > 0) {
     const rejection = evaluationDiagnostic(evaluation);
     return blocked(after, rejection.categories, rejection.checkIds, rejection.message);

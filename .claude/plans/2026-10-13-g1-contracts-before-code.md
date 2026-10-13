@@ -33,7 +33,7 @@
    (hashes + red roster) in the same locked update that installs the accepted receipt.
 6. **Contract Revision** — `helper revise-contract --contract CT-n --reason …`: operator-only, refused while a Wave
    Gate is active, before the freeze, or when a claimant sits in a completed Wave; re-stamps hashes, clears the roster
-   (the next gate re-records it green) and returns completed claimants of the current Wave to
+   (the next gate re-records it green) and returns the current Wave's implemented claimants to
    `revalidation_required`.
 7. **Brief.** New `{acceptance_contract}` variable: the contract task is told to write declarations-only types,
    dedicated acceptance tests that fail by assertion, and compiling stubs; a claimant sees the frozen paths, the

@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import reviseContract from "../../../src/handlers/helpers/revise-contract";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { parseArtifactDigest, type ArtifactDigest } from "../../../src/core/orchestration-contract";
-import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import { WHITELISTED_HELPERS } from "../../../src/config";
@@ -14,7 +13,7 @@ import { guardStateFileDecision } from "../../../src/core/guard-state-file";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import type { Task } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { completedWaveGateFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import { completedWaveGateFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
 
 /** The real ledger, except that a test can make a subagent appear from the
  *  Nth observation on: the only way to land between the pre-lock check and
@@ -58,20 +57,11 @@ const sha = (text: string): ArtifactDigest => {
   return parsed.value;
 };
 
-const satisfied = (files: readonly string[]) => {
-  const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: files },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: files, newTestsWritten: true },
-  );
-  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
-  return evaluated;
-};
-
 const task = (id: string, wave: number, status: "implemented" | "completed", anchors: readonly string[], files: readonly string[]): Task =>
   taskFixture({
     id, description: id, agent: "code-implementer-agent", wave, depends_on: wave === 1 ? [] : ["T1"],
     file_list: [...files], spec_anchors: [...anchors], spec_contributions: [],
-    status, proof: satisfied(files), review_status: "passed", review_generation: 1,
+    status, proof: satisfiedProof(files), review_status: "passed", review_generation: 1,
   });
 
 const CONTRACT: AcceptanceContract = {

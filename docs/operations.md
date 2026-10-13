@@ -764,7 +764,8 @@ The helper hashes the frozen paths as they are now, then commits under the TaskG
 - the contract is still `awaiting-red`: its contract Task owns the files until its Wave Gate observes them red;
 - the contract Wave has not completed;
 - any Task claiming a covered Requirement sits in a completed Wave — that Wave was verified against the old bytes, so reopen it first (`helper reopen-completed-wave`, above);
-- a frozen path is missing or unreadable, or the bytes did not change.
+- a frozen path is missing or unreadable (the refusal names the read error, e.g. a symlink the no-follow read refuses), or the bytes did not change;
+- the contracts changed between the helper's observation and its lock, so it never read a path the locked contract freezes (`observation-stale`) — retry.
 
 On success, one locked write:
 

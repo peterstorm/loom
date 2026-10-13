@@ -114,13 +114,15 @@ describe("parsePlanModels — properties", () => {
         { minLength: 1, maxLength: 2, selector: (f) => f.file },
       ),
     });
+    // One id encoding shared by the generator and the oracle below.
+    const anchorId = (n: number): string => `AS-${String(n).padStart(3, "0")}`;
     const contractLines = (contract: { types: string | undefined; files: { file: string; anchors: number[] }[] }): string => [
       contract.types === undefined
         ? "**Types file:** none\n**No types reason:** consumes another contract"
         : `**Types file:** \`${contract.types}\``,
       "**Acceptance tests:**",
       ...contract.files.map(({ file, anchors }) =>
-        `- \`tests/${file}.acceptance.test.ts\` — ${anchors.map((a) => `AS-${String(a).padStart(3, "0")}`).join(", ")}`),
+        `- \`tests/${file}.acceptance.test.ts\` — ${anchors.map(anchorId).join(", ")}`),
       "**Statement:** behaves",
       "",
     ].join("\n");
@@ -162,7 +164,7 @@ describe("parsePlanModels — properties", () => {
                 : declaration.types.kind === "file" && declaration.types.path === contracts[i].types) &&
               declaration.acceptance.map(({ path, anchors }) => `${path}:${anchors.join(",")}`).join("|") ===
                 contracts[i].files.map(({ file, anchors }) =>
-                  `tests/${file}.acceptance.test.ts:${anchors.map((a) => `AS-${String(a).padStart(3, "0")}`).join(",")}`).join("|")) &&
+                  `tests/${file}.acceptance.test.ts:${anchors.map(anchorId).join(",")}`).join("|")) &&
             models.lifecycles.every((lc, i) => lc.machineFile === lifecycles[i].file) &&
             models.invariants.every((inv, i) => inv.tier.status === "ok" && inv.tier.tier === invariants[i].tier) &&
             models.invariants.every((inv, i) => {

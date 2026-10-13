@@ -6,9 +6,11 @@ import {
   acceptanceExpectation,
   frozenPathDrift,
   frozenPaths,
+  renderFrozenPathDrift,
   judgeAcceptance,
   observeAcceptanceFacts,
   parseAcceptanceContracts,
+  parseAcceptanceExpectation,
   parseAcceptanceReportFacts,
   redWindowTaskIds,
   stampAcceptanceFreezes,
@@ -16,8 +18,13 @@ import {
   type AcceptanceContract,
   type AcceptanceExpectation,
   type AcceptanceReportFacts,
+  type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
+
+const seen = (sha256: ArtifactDigest): FrozenPathObservation => ({ kind: "digest", sha256 });
+const observations = (entries: readonly (readonly [string, FrozenPathObservation])[]): ReadonlyMap<string, FrozenPathObservation> =>
+  new Map(entries);
 import type { ReportTestcase } from "../../src/core/structured-test-report";
 import type { PlanContract } from "../../src/types";
 
@@ -118,9 +125,14 @@ describe("testcaseAcceptanceFile — attributing a JUnit testcase to a declared 
 
 describe("acceptanceExpectation — what each Wave Gate owes a contract", () => {
   it("owes nothing before the contract Wave, RED in it, and GREEN by anchor after it", () => {
-    expect(acceptanceExpectation([contract()], TASKS, 1).contracts).toMatchObject([
-      { contract: "CT-1", phase: "red", roster: null, dueWave: { "AS-003": 2, "AS-004": 3 } },
+    const red = acceptanceExpectation([contract()], TASKS, 1);
+    expect(red.contracts).toEqual([
+      { contract: "CT-1", phase: "red", files: contract().acceptance, dueWave: { "AS-003": 2, "AS-004": 3 } },
     ]);
+    // RED carries no roster on the wire either: the parser refuses one.
+    const withRoster = { ...red, contracts: [{ ...red.contracts[0], roster: null }] };
+    expect(parseAcceptanceExpectation(JSON.parse(JSON.stringify(red)))).toEqual({ ok: true, value: red });
+    expect(parseAcceptanceExpectation(withRoster)).toMatchObject({ ok: false, error: expect.stringContaining("unexpected field(s): roster") });
     expect(acceptanceExpectation([contract(FROZEN)], TASKS, 2).contracts).toMatchObject([
       { contract: "CT-1", phase: "green", roster: ROSTER },
     ]);
@@ -214,7 +226,7 @@ describe("judgeAcceptance — GREEN by anchor after the contract Wave", () => {
 });
 
 describe("stampAcceptanceFreezes — the Acceptance Freeze", () => {
-  const digests = new Map([[TYPES, digest("a")], [ACCEPTANCE, digest("b")]]);
+  const digests = observations([[TYPES, seen(digest("a"))], [ACCEPTANCE, seen(digest("b"))]]);
 
   it("freezes the observed-red bytes and roster at the contract Wave's accepted gate, idempotently", () => {
     const expectation = acceptanceExpectation([contract()], TASKS, 1);
@@ -226,8 +238,18 @@ describe("stampAcceptanceFreezes — the Acceptance Freeze", () => {
 
   it("refuses to restamp a frozen contract with different bytes", () => {
     const expectation = acceptanceExpectation([contract()], TASKS, 1);
-    const changed = new Map([[TYPES, digest("c")], [ACCEPTANCE, digest("b")]]);
+    const changed = observations([[TYPES, seen(digest("c"))], [ACCEPTANCE, seen(digest("b"))]]);
     expect(stampAcceptanceFreezes([contract(FROZEN)], expectation, [facts(expectation, RED_REPORT)], changed)).toMatchObject({ ok: false });
+  });
+
+  it("names each frozen path it could not read, and why, instead of stamping", () => {
+    const expectation = acceptanceExpectation([contract()], TASKS, 1);
+    const unreadable = observations([[TYPES, { kind: "unreadable", reason: "ELOOP: refusing to follow a link" }]]);
+    expect(stampAcceptanceFreezes([contract()], expectation, [facts(expectation, RED_REPORT)], unreadable)).toEqual({
+      ok: false,
+      error: `CT-1: frozen paths could not be read to stamp the freeze: '${TYPES}' (ELOOP: refusing to follow a link), ` +
+        `'${ACCEPTANCE}' (not observed)`,
+    });
   });
 
   it("re-records the roster green at the first gate after a Contract Revision", () => {
@@ -242,12 +264,17 @@ describe("stampAcceptanceFreezes — the Acceptance Freeze", () => {
 });
 
 describe("frozenPathDrift — bytes that changed outside any Task", () => {
-  it("names every frozen path whose bytes differ or vanished", () => {
-    expect(frozenPathDrift([contract(FROZEN)], new Map([[TYPES, digest("a")], [ACCEPTANCE, digest("b")]]))).toEqual([]);
-    expect(frozenPathDrift([contract(FROZEN)], new Map([[TYPES, digest("f")], [ACCEPTANCE, null]]))).toEqual([
-      { contract: "CT-1", path: TYPES, expected: digest("a"), actual: digest("f") },
-      { contract: "CT-1", path: ACCEPTANCE, expected: digest("b"), actual: null },
+  it("names every frozen path whose bytes differ, cannot be read, or were not observed", () => {
+    expect(frozenPathDrift([contract(FROZEN)], observations([[TYPES, seen(digest("a"))], [ACCEPTANCE, seen(digest("b"))]]))).toEqual([]);
+    const unreadable: FrozenPathObservation = { kind: "unreadable", reason: "ENOENT: no such file" };
+    const drift = frozenPathDrift([contract(FROZEN)], observations([[TYPES, seen(digest("f"))], [ACCEPTANCE, unreadable]]));
+    expect(drift).toEqual([
+      { contract: "CT-1", path: TYPES, expected: digest("a"), actual: seen(digest("f")) },
+      { contract: "CT-1", path: ACCEPTANCE, expected: digest("b"), actual: unreadable },
     ]);
+    expect(renderFrozenPathDrift(drift)).toContain(`CT-1 '${ACCEPTANCE}' is missing or unreadable (ENOENT: no such file)`);
+    expect(renderFrozenPathDrift(frozenPathDrift([contract(FROZEN)], observations([[TYPES, seen(digest("a"))]]))))
+      .toContain(`CT-1 '${ACCEPTANCE}' was not observed`);
     expect(frozenPathDrift([contract()], new Map())).toEqual([]);
   });
 });

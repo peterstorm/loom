@@ -30,12 +30,8 @@ import {
   deriveProjectVerificationCoverage,
 } from "./verification-manifest";
 import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
-import { acceptanceExpectation, emptyAcceptanceExpectation } from "./acceptance-contract";
+import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
 
-/** The acceptance expectation the protected graph derives for one Wave's gate. */
-function graphAcceptanceExpectation(graph: TaskGraph, wave: number) {
-  return acceptanceExpectation(graph.acceptance_contracts ?? [], graph.tasks, wave);
-}
 
 function exactCompletionSuiteError(
   registration: ActiveWaveGateRegistration,
@@ -221,10 +217,11 @@ function deriveCompletionSuiteOutcome(
         manifestDigest,
       );
     }
-    const evaluation = evaluateWaveCompletionSuite(authorized.value, currentResult.result, {
-      kind: "current",
-      expectation: graphAcceptanceExpectation(graph, source.registration.wave),
-    });
+    const evaluation = evaluateWaveCompletionSuite(
+      authorized.value,
+      currentResult.result,
+      graphAcceptanceExpectation(graph, source.registration.wave),
+    );
     if (evaluation.kind === "accepted") {
       return requiredWaveCompletionSuite(
         "accepted-suite-missing",

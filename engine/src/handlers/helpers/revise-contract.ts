@@ -43,13 +43,14 @@ const handler: HookHandler = async (_stdin, args) => {
 
   try {
     // Observed before the lock, like the Wave Gate's stamp: the locked
-    // transform reads no mutable bytes, and refuses a path it cannot match.
-    const digests = observeFrozenDigests(repository.value, frozenPathsToObserve(manager.load().acceptance_contracts ?? []));
+    // transform reads no mutable bytes, and refuses as stale if the contracts
+    // under the lock name a path this observation never read.
+    const observations = observeFrozenDigests(repository.value, frozenPathsToObserve(manager.load().acceptance_contracts ?? []));
     const outcome = await manager.updateAndReturn((locked) => {
       if (anyActiveSubagent(statePath)) {
         throw new Error("A subagent became active before the Contract Revision could commit");
       }
-      const revised = reviseAcceptanceContract(locked, request.value, digests);
+      const revised = reviseAcceptanceContract(locked, request.value, observations);
       if (!revised.ok) throw new Error(revised.error.message);
       return { state: revised.value.graph, value: revised.value };
     });

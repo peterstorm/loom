@@ -10,18 +10,19 @@
  * return to revalidation. A claimant in a completed Wave is verified scope —
  * that Wave must be reopened first, never silently re-judged.
  *
- * Pure: the shell supplies the observed digests of the frozen paths.
+ * Pure: the shell supplies its observations of the frozen paths.
  */
 
 import {
   CONTRACT_ID,
   coveredAnchors,
   frozenPathDigests,
+  renderFrozenPathProblems,
   type AcceptanceContract,
   type ContractRevision,
-
+  type FrozenPathObservations,
 } from "./acceptance-contract";
-import { canonicalStructuralEquals, type ArtifactDigest, type DomainResult } from "./orchestration-contract";
+import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
 import { returnToRevalidation } from "./task-revalidation";
 import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 import { retireWaveReviewAuthority } from "./wave-gate-registration";
@@ -41,6 +42,7 @@ export type ContractRevisionRefusalKind =
   | "contract-wave-open"
   | "claimant-completed"
   | "unreadable-path"
+  | "observation-stale"
   | "unchanged";
 
 export type ContractRevisionRefusal = Readonly<{ kind: ContractRevisionRefusalKind; message: string }>;
@@ -75,7 +77,6 @@ export function parseContractRevisionArgs(args: readonly string[]): DomainResult
   return freeze({ ok: true as const, value: freeze({ contract, reason }) });
 }
 
-
 /**
  * Record an operator Contract Revision against the observed frozen bytes, or
  * refuse with the exact precondition that failed.
@@ -83,7 +84,7 @@ export function parseContractRevisionArgs(args: readonly string[]): DomainResult
 export function reviseAcceptanceContract(
   graph: TaskGraph,
   request: ContractRevisionRequest,
-  digests: ReadonlyMap<string, ArtifactDigest | null>,
+  observations: FrozenPathObservations,
 ): DomainResult<RevisedContract, ContractRevisionRefusal> {
   const contracts = graph.acceptance_contracts ?? [];
   const contract = contracts.find(({ id }) => id === request.contract);
@@ -123,9 +124,14 @@ export function reviseAcceptanceContract(
       `${settled.map(({ id, wave: settledWave }) => `${id} (Wave ${settledWave})`).join(", ")}; ` +
       "reopen that Wave first (helper reopen-completed-wave)");
   }
-  const observed = frozenPathDigests(contract, digests);
+  const observed = frozenPathDigests(contract, observations);
   if (!observed.ok) {
-    return refuse("unreadable-path", `${contract.id}: frozen path(s) missing or unreadable: ${observed.error.join(", ")}`);
+    // A path the shell never observed means the contracts changed between its
+    // read and this lock: the observation is stale, not the file unreadable.
+    return observed.error.some(({ kind }) => kind === "not-observed")
+      ? refuse("observation-stale", `${contract.id}'s frozen paths changed while they were being observed ` +
+        `(${renderFrozenPathProblems(observed.error)}); retry`)
+      : refuse("unreadable-path", `${contract.id}: frozen path(s) missing or unreadable: ${renderFrozenPathProblems(observed.error)}`);
   }
   if (canonicalStructuralEquals(contract.freeze.paths, observed.value)) {
     return refuse("unchanged", `${contract.id}'s frozen bytes are unchanged; edit them before recording a revision`);

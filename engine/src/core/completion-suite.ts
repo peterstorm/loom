@@ -25,6 +25,7 @@ import { sha256Hex } from "./digest";
 import {
   emptyAcceptanceExpectation,
   judgeAcceptance,
+  owesAcceptance,
   parseAcceptanceExpectation,
   parseAcceptanceReportFacts,
   type AcceptanceExpectation,
@@ -147,7 +148,8 @@ export type AuthorizedWaveCompletionSuite = Readonly<{
  * The acceptance a gate judged: the expectation derived from the protected
  * graph and the facts observed from each check's report, bound to its digest.
  * Absent means the gate owed no contract anything — the shape every result
- * written before contracts existed already has.
+ * written before contracts existed already has — and is the only encoding of
+ * that: the parser refuses an observation whose expectation owes nothing.
  */
 export type AcceptanceObservation = Readonly<{
   expectation: AcceptanceExpectation;
@@ -217,12 +219,6 @@ export type CompletionSemanticFailure =
   | Readonly<{ kind: "missing-report"; checkId: CompletionCheckId; path: ReviewPath }>
   | Readonly<{ kind: "acceptance-rejected"; checkId: CompletionCheckId; failures: NonEmpty<AcceptanceFailure> }>;
 
-/** Which acceptance expectation a result is judged under: the one the
- *  protected graph derives for the live gate, or — for a historical receipt —
- *  the one it recorded when it was accepted. */
-export type AcceptanceAuthority =
-  | Readonly<{ kind: "current"; expectation: AcceptanceExpectation }>
-  | Readonly<{ kind: "as-recorded" }>;
 
 export type AcceptedWaveCompletionReceipt = Readonly<{
   kind: "accepted-wave-completion-suite";
@@ -790,6 +786,9 @@ function parseAcceptanceObservation(raw: unknown, path: string): Parsed<Acceptan
   if (!record.ok) return record;
   const expectation = parseAcceptanceExpectation(record.value.expectation, `${path}.expectation`);
   if (!expectation.ok) return failure([expectation.error]);
+  if (!owesAcceptance(expectation.value)) {
+    return failure([`${path} must be absent when the gate owes no contract anything`]);
+  }
   if (!Array.isArray(record.value.facts)) return failure([`${path}.facts must be an array`]);
   const facts: AcceptanceReportFacts[] = [];
   for (const [index, entry] of record.value.facts.entries()) {
@@ -1059,16 +1058,16 @@ function acceptanceCheckId(
  * Authority failures never get reinterpreted as check failures. Once authority
  * matches, every independent process fact contributes its own typed failure.
  *
- * Acceptance: the result must have been judged under the expectation the
- * caller names (the live gate's, or the one a historical receipt recorded),
- * and its facts must be bound to the very reports the checks produced. A
- * check's non-zero exit is excused only when every failure in its report is a
- * RED or pending acceptance testcase; any acceptance failure rejects.
+ * Acceptance: the result must have been judged under exactly the expectation
+ * the protected graph derives for this gate, and its facts must be bound to
+ * the very reports the checks produced. A check's non-zero exit is excused
+ * only when its report's failures are all RED or pending acceptance testcases
+ * (report-derived — see `judgeAcceptance`); any acceptance failure rejects.
  */
 export function evaluateWaveCompletionSuite(
   rawAuthority: AuthorizedWaveCompletionSuite,
   rawResult: unknown,
-  acceptanceAuthority: AcceptanceAuthority,
+  expectation: AcceptanceExpectation,
 ): CompletionSuiteEvaluation {
   const authority = parseAuthorizedWaveCompletionSuite(rawAuthority);
   if (!authority.ok) {
@@ -1126,8 +1125,7 @@ export function evaluateWaveCompletionSuite(
   }
   const recorded = result.value.acceptance;
   const recordedExpectation = recorded?.expectation ?? emptyAcceptanceExpectation(result.value.wave);
-  if (acceptanceAuthority.kind === "current" &&
-      !canonicalStructuralEquals(acceptanceAuthority.expectation, recordedExpectation)) {
+  if (!canonicalStructuralEquals(expectation, recordedExpectation)) {
     authorityFailures.push(freeze({ kind: "acceptance-expectation-mismatch" }));
   }
   const [firstUnbound, ...restUnbound] = unboundFactChecks(result.value.checks, recorded?.facts ?? []);

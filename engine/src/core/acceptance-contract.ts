@@ -154,6 +154,14 @@ function nonEmpty<T>(values: readonly T[]): NonEmpty<T> | null {
   return head === undefined ? null : Object.freeze([head, ...tail]);
 }
 
+/** The Requirement ids a contract may cover — only a functional Requirement or
+ *  an Acceptance Scenario can be decided by a test, never an Out-of-Scope
+ *  entry. The one grammar the plan parser and the persisted parser both read. */
+export const COVERABLE_ANCHOR = /^(?:FR|AS)-\d+$/;
+
+/** The id grammar of a plan contract. */
+export const CONTRACT_ID = /^CT-\d+$/;
+
 // ---------------------------------------------------------------------------
 // Derived facts
 // ---------------------------------------------------------------------------
@@ -171,8 +179,37 @@ export function coveredAnchors(contract: Pick<AcceptanceContract, "acceptance">)
   return Object.freeze([...new Set(contract.acceptance.flatMap(({ anchors }) => anchors))]);
 }
 
-const changes = (task: ContractTaskView, path: string): boolean =>
-  (task.file_list ?? []).some((file) => pathsMatch(file, path));
+/** Why a contract's frozen paths do not have exactly one writer. */
+export type ContractWriterProblem =
+  | Readonly<{ kind: "unwritten"; path: string }>
+  | Readonly<{ kind: "shared"; path: string; taskIds: NonEmpty<string> }>
+  | Readonly<{ kind: "split"; taskIds: NonEmpty<string> }>;
+
+/**
+ * The contract Task: the one Task whose file_list holds every frozen path,
+ * with no other Task listing any of them. The one owner of that rule — plan
+ * validation renders its problems, population refuses on them.
+ */
+export function contractWriter(
+  paths: NonEmpty<string>,
+  tasks: readonly Pick<ContractTaskView, "id" | "file_list">[],
+): DomainResult<string, NonEmpty<ContractWriterProblem>> {
+  const writers = paths.map((path) => ({
+    path,
+    ids: tasks.filter((task) => (task.file_list ?? []).some((file) => pathsMatch(file, path))).map(({ id }) => id),
+  }));
+  const problems: ContractWriterProblem[] = writers.flatMap(({ path, ids }): ContractWriterProblem[] => {
+    const shared = nonEmpty(ids);
+    if (shared === null) return [freeze({ kind: "unwritten", path })];
+    return shared.length > 1 ? [freeze({ kind: "shared", path, taskIds: shared })] : [];
+  });
+  if (problems.length === 0) {
+    const writerIds = nonEmpty([...new Set(writers.map(({ ids }) => ids[0]!))])!;
+    if (writerIds.length === 1) return ok(writerIds[0]);
+    problems.push(freeze({ kind: "split", taskIds: writerIds }));
+  }
+  return err(nonEmpty(problems)!);
+}
 
 /** The Tasks that claim an anchor's completion, other than the contract Task. */
 function anchorClaimants(
@@ -207,10 +244,9 @@ export function acceptanceContractsFromPlan(
       errors.push(`${planContract.id}: the declaration is malformed`);
       return [];
     }
-    const paths = frozenPaths(declaration);
-    const writers = tasks.filter((task) => paths.every((path) => changes(task, path)));
-    if (writers.length !== 1) {
-      errors.push(`${planContract.id}: ${writers.length} Tasks write every frozen path; exactly one contract Task must`);
+    const writer = contractWriter(frozenPaths(declaration), tasks);
+    if (!writer.ok) {
+      errors.push(`${planContract.id}: the frozen paths do not have exactly one writer; exactly one contract Task must write them all`);
       return [];
     }
     return [freeze({
@@ -218,7 +254,7 @@ export function acceptanceContractsFromPlan(
       id: planContract.id,
       title: planContract.title,
       statement: declaration.statement,
-      contractTask: writers[0]!.id,
+      contractTask: writer.value,
       types: declaration.types,
       acceptance: declaration.acceptance,
       supportedDomain: declaration.supportedDomain,
@@ -295,17 +331,26 @@ function testcaseAnchors(name: string, fileAnchors: readonly string[]): readonly
 // Wave Gate expectation, observation and judgment
 // ---------------------------------------------------------------------------
 
-/** What one Wave Gate owes one contract. */
-export type ContractGateExpectation = Readonly<{
+type GateExpectationBase = Readonly<{
   contract: string;
   files: NonEmpty<ContractAcceptanceFile>;
-  phase: "red" | "green";
   /** Each covered anchor's completion Wave. */
   dueWave: Readonly<Record<string, number>>;
-  /** The frozen roster; null when this gate records it (the contract Wave, or
-   *  the first gate after a Contract Revision). */
-  roster: NonEmpty<AcceptanceTestcase> | null;
 }>;
+
+/**
+ * What one Wave Gate owes one contract. RED always records the roster, so it
+ * carries none. GREEN carries the frozen roster, or null when this gate
+ * records it (the gate that froze it, or the first gate after a Contract
+ * Revision).
+ */
+export type ContractGateExpectation =
+  | Readonly<GateExpectationBase & { phase: "red" }>
+  | Readonly<GateExpectationBase & { phase: "green"; roster: NonEmpty<AcceptanceTestcase> | null }>;
+
+/** Whether this gate records the contract's roster rather than judging against a frozen one. */
+const recordsRoster = (expected: ContractGateExpectation): boolean =>
+  expected.phase === "red" || expected.roster === null;
 
 export type AcceptanceExpectation = Readonly<{
   wave: number;
@@ -332,7 +377,7 @@ export function acceptanceExpectation(
     if (wave < contractWave) continue;
     const base = { contract: contract.id, files: contract.acceptance, dueWave: dueWaves(contract, tasks) };
     if (wave === contractWave) {
-      owed.push(freeze({ ...base, phase: "red", roster: null }));
+      owed.push(freeze({ ...base, phase: "red" }));
       continue;
     }
     switch (contract.freeze.state) {
@@ -353,6 +398,15 @@ export function acceptanceExpectation(
     }
   }
   return freeze({ wave, contracts: Object.freeze(owed), unobservable: Object.freeze(unobservable) });
+}
+
+/** The expectation a protected TaskGraph derives for one Wave's gate: the one
+ *  derivation every shell site compares a receipt against. */
+export function graphAcceptanceExpectation(
+  graph: Readonly<{ acceptance_contracts?: readonly AcceptanceContract[]; tasks: readonly ContractTaskView[] }>,
+  wave: number,
+): AcceptanceExpectation {
+  return acceptanceExpectation(graph.acceptance_contracts ?? [], graph.tasks, wave);
 }
 
 /** The expectation of a gate that owes no contract anything. */
@@ -435,7 +489,7 @@ export type AcceptanceFailure =
 
 export type AcceptanceJudgment = Readonly<{
   failures: readonly AcceptanceFailure[];
-  /** Checks whose non-zero exit is wholly explained by RED or pending testcases. */
+  /** Checks whose report's failures are all RED or pending acceptance testcases. */
   excusedCheckIds: readonly string[];
 }>;
 
@@ -478,7 +532,7 @@ function contractFailures(
   // Collection and anchoring are proven when a roster is recorded; once
   // frozen, the roster is the authority and a vanished testcase is reported
   // against it below.
-  for (const file of expected.roster === null ? expected.files : []) {
+  for (const file of recordsRoster(expected) ? expected.files : []) {
     const real = observed.filter((testcase) => testcase.file === file.path && !testcase.collectionError);
     if (real.length === 0) failures.push(freeze({ kind: "acceptance-file-not-collected", contract, file: file.path }));
     for (const testcase of real) {
@@ -510,8 +564,14 @@ function contractFailures(
   return failures;
 }
 
-/** A check's failures are excused only when every one is a collected RED or
- *  pending acceptance testcase and nothing else in its report failed. */
+/**
+ * A check's non-zero exit is excused only when its report shows failures and
+ * every one is a collected RED or pending acceptance testcase. The judgment is
+ * report-derived: an exit cause that never appears as a failing testcase (a
+ * coverage threshold, a chained step, a crash after the report was written)
+ * is invisible here, which is why a contract's test runner must be its own
+ * project check or the last step of one (`references/executable-models.md`).
+ */
 function excused(expectation: AcceptanceExpectation, fact: AcceptanceReportFacts): boolean {
   if (fact.kind !== "projected" || fact.otherFailures > 0) return false;
   const failing = fact.testcases.filter(({ outcome }) => outcome === "failed");
@@ -578,12 +638,12 @@ export function stampAcceptanceFreezes(
   contracts: readonly AcceptanceContract[],
   expectation: AcceptanceExpectation,
   facts: readonly AcceptanceReportFacts[],
-  digests: ReadonlyMap<string, ArtifactDigest | null>,
+  observations: FrozenPathObservations,
 ): DomainResult<readonly AcceptanceContract[], string> {
   const errors: string[] = [];
   const stamped = contracts.map((contract): AcceptanceContract => {
     const expected = expectation.contracts.find(({ contract: id }) => id === contract.id);
-    if (expected === undefined || expected.roster !== null) return contract;
+    if (expected === undefined || !recordsRoster(expected)) return contract;
     const observed = facts.flatMap((fact) => fact.kind === "projected" ? fact.testcases : []);
     const roster = nonEmpty(observedRoster(expected, observed));
     if (roster === null) {
@@ -595,9 +655,9 @@ export function stampAcceptanceFreezes(
         ? freeze({ ...contract, freeze: freeze({ state: "frozen", wave: expectation.wave, paths: contract.freeze.paths, roster }) })
         : contract;
     }
-    const paths = frozenPathDigests(contract, digests);
+    const paths = frozenPathDigests(contract, observations);
     if (!paths.ok) {
-      errors.push(`${contract.id}: a frozen path could not be read to stamp the freeze`);
+      errors.push(`${contract.id}: frozen paths could not be read to stamp the freeze: ${renderFrozenPathProblems(paths.error)}`);
       return contract;
     }
     const next: AcceptanceFreeze = freeze({ state: "frozen", wave: expectation.wave, paths: paths.value, roster });
@@ -609,24 +669,52 @@ export function stampAcceptanceFreezes(
   return errors.length > 0 ? err(errors.join("; ")) : ok(Object.freeze(stamped));
 }
 
-/** Each frozen path with its observed digest, in freeze order, or the paths
- *  that could not be read. */
+/** What the shell saw at one frozen path: its digest, or why it could not be
+ *  read without following a link. */
+export type FrozenPathObservation =
+  | Readonly<{ kind: "digest"; sha256: ArtifactDigest }>
+  | Readonly<{ kind: "unreadable"; reason: string }>;
+
+/** The shell's observations, by frozen path. A path with no entry was never
+ *  observed — the contracts changed after the shell chose what to read. */
+export type FrozenPathObservations = ReadonlyMap<string, FrozenPathObservation>;
+
+/** A frozen path the core could not digest. */
+export type FrozenPathProblem =
+  | Readonly<{ kind: "unreadable"; path: string; reason: string }>
+  | Readonly<{ kind: "not-observed"; path: string }>;
+
+export function renderFrozenPathProblems(problems: readonly FrozenPathProblem[]): string {
+  return problems.map((problem) => problem.kind === "unreadable"
+    ? `'${problem.path}' (${problem.reason})`
+    : `'${problem.path}' (not observed)`).join(", ");
+}
+
+/** Each frozen path with its observed digest, in freeze order, or every path
+ *  that could not be digested and why. */
 export function frozenPathDigests(
   contract: Pick<AcceptanceContract, "types" | "acceptance">,
-  digests: ReadonlyMap<string, ArtifactDigest | null>,
-): DomainResult<NonEmpty<FrozenPathDigest>, readonly string[]> {
+  observations: FrozenPathObservations,
+): DomainResult<NonEmpty<FrozenPathDigest>, NonEmpty<FrozenPathProblem>> {
   const paths = frozenPaths(contract);
-  const unreadable = paths.filter((path) => (digests.get(path) ?? null) === null);
-  if (unreadable.length > 0) return err(Object.freeze(unreadable));
-  const [head, ...tail] = paths;
-  const at = (path: string): FrozenPathDigest => freeze({ path, sha256: digests.get(path)! });
-  return ok(Object.freeze([at(head), ...tail.map(at)]));
+  const digests: FrozenPathDigest[] = [];
+  const problems: FrozenPathProblem[] = [];
+  for (const path of paths) {
+    const observation = observations.get(path);
+    if (observation === undefined) problems.push(freeze({ kind: "not-observed", path }));
+    else if (observation.kind === "unreadable") problems.push(freeze({ kind: "unreadable", path, reason: observation.reason }));
+    else digests.push(freeze({ path, sha256: observation.sha256 }));
+  }
+  const failed = nonEmpty(problems);
+  return failed === null ? ok(nonEmpty(digests)!) : err(failed);
 }
 
 /** One operator message naming every drifted frozen path. */
 export function renderFrozenPathDrift(drift: readonly FrozenPathDrift[]): string {
-  return "frozen acceptance drifted: " + drift.map(({ contract, path, actual }) =>
-    `${contract} '${path}' ${actual === null ? "is missing or unreadable" : "changed"}`).join("; ") +
+  const what = ({ actual }: FrozenPathDrift): string => actual === null
+    ? "was not observed"
+    : actual.kind === "unreadable" ? `is missing or unreadable (${actual.reason})` : "changed";
+  return "frozen acceptance drifted: " + drift.map((entry) => `${entry.contract} '${entry.path}' ${what(entry)}`).join("; ") +
     " — restore the frozen bytes, or record an operator Contract Revision (helper revise-contract)";
 }
 
@@ -634,19 +722,22 @@ export type FrozenPathDrift = Readonly<{
   contract: string;
   path: string;
   expected: ArtifactDigest;
-  actual: ArtifactDigest | null;
+  /** What the shell saw instead; null when it never observed the path. */
+  actual: FrozenPathObservation | null;
 }>;
 
-/** Every frozen path whose current bytes differ from the freeze, or vanished. */
+/** Every frozen path whose current bytes differ from the freeze, or could not be read. */
 export function frozenPathDrift(
   contracts: readonly AcceptanceContract[],
-  digests: ReadonlyMap<string, ArtifactDigest | null>,
+  observations: FrozenPathObservations,
 ): readonly FrozenPathDrift[] {
   return Object.freeze(contracts.flatMap((contract) => {
     if (contract.freeze.state === "awaiting-red") return [];
     return contract.freeze.paths.flatMap(({ path, sha256 }) => {
-      const actual = digests.get(path) ?? null;
-      return actual === sha256 ? [] : [freeze({ contract: contract.id, path, expected: sha256, actual })];
+      const actual = observations.get(path) ?? null;
+      return actual?.kind === "digest" && actual.sha256 === sha256
+        ? []
+        : [freeze({ contract: contract.id, path, expected: sha256, actual })];
     });
   }));
 }
@@ -677,11 +768,6 @@ const text = (raw: unknown, path: string): Parsed<string> =>
 
 const parseWave = (raw: unknown, path: string): Parsed<number> =>
   typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? ok(raw) : err(`${path} must be a positive integer`);
-
-const COVERABLE_ANCHOR = /^(?:FR|AS)-\d+$/;
-
-/** The id grammar of a plan contract. */
-export const CONTRACT_ID = /^CT-\d+$/;
 
 function list<T>(raw: unknown, path: string, item: (value: unknown, path: string) => Parsed<T>): Parsed<readonly T[]> {
   if (!Array.isArray(raw)) return err(`${path} must be an array`);
@@ -816,8 +902,11 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
   const contractTask = text(fields.contractTask, `${path}.contractTask`);
   const types = parseTypes(fields.types, `${path}.types`);
   const acceptance = nonEmptyList(fields.acceptance, `${path}.acceptance`, parseAcceptanceFile);
-  for (const parsed of [title, statement, contractTask, types, acceptance]) if (!parsed.ok) return parsed;
-  if (!title.ok || !statement.ok || !contractTask.ok || !types.ok || !acceptance.ok) return err(`${path} is malformed`);
+  if (!title.ok) return title;
+  if (!statement.ok) return statement;
+  if (!contractTask.ok) return contractTask;
+  if (!types.ok) return types;
+  if (!acceptance.ok) return acceptance;
   const files = acceptance.value;
   const paths = frozenPaths({ types: types.value, acceptance: files });
   if (new Set(paths).size !== paths.length) return err(`${path} freezes one path twice`);
@@ -880,26 +969,26 @@ function parseObservedTestcase(raw: unknown, path: string): Parsed<ObservedAccep
 }
 
 function parseGateExpectation(raw: unknown, path: string): Parsed<ContractGateExpectation> {
-  const record = exactRecord(raw, ["contract", "files", "phase", "dueWave", "roster"], path);
+  if (!isPlainRecord(raw) || (raw.phase !== "red" && raw.phase !== "green")) return err(`${path}.phase must be red or green`);
+  const green = raw.phase === "green";
+  const record = exactRecord(raw, green
+    ? ["contract", "files", "phase", "dueWave", "roster"]
+    : ["contract", "files", "phase", "dueWave"], path);
   if (!record.ok) return record;
-  const { contract, phase, dueWave, roster } = record.value;
+  const { contract, dueWave } = record.value;
   if (typeof contract !== "string" || !CONTRACT_ID.test(contract)) return err(`${path}.contract must be CT-n`);
-  if (phase !== "red" && phase !== "green") return err(`${path}.phase must be red or green`);
   const files = nonEmptyList(record.value.files, `${path}.files`, parseAcceptanceFile);
   if (!files.ok) return files;
   if (!isPlainRecord(dueWave) || Object.entries(dueWave).some(([anchor, due]) =>
     !COVERABLE_ANCHOR.test(anchor) || !parseWave(due, anchor).ok)) {
     return err(`${path}.dueWave must map FR-n/AS-n ids to positive Waves`);
   }
+  const base = { contract, files: files.value, dueWave: freeze({ ...(dueWave as Record<string, number>) }) };
+  if (!green) return ok(freeze({ ...base, phase: "red" }));
+  const roster = record.value.roster;
   const parsedRoster = roster === null ? ok(null) : parseRoster(roster, `${path}.roster`, files.value);
   if (!parsedRoster.ok) return parsedRoster;
-  return ok(freeze({
-    contract,
-    files: files.value,
-    phase,
-    dueWave: freeze({ ...(dueWave as Record<string, number>) }),
-    roster: parsedRoster.value,
-  }));
+  return ok(freeze({ ...base, phase: "green", roster: parsedRoster.value }));
 }
 
 /** Parse the expectation a persisted completion result was judged under. */

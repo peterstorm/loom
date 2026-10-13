@@ -21,6 +21,7 @@ import type { ReportTestcase } from "../../src/core/structured-test-report";
 import { authorizeWaveCompletionSuite, freezeVerificationManifest } from "../../src/core/verification-manifest";
 import type { ActiveWaveGateRegistration, PlanContract } from "../../src/types";
 import { value } from "../fixtures/parse-result";
+import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
 
 const digest = (fill: string): ArtifactDigest => fill.repeat(64) as ArtifactDigest;
 const REPORT_PATH = ".loom/completion-reports/verify.junit.xml";
@@ -112,11 +113,10 @@ function result(
 }
 
 const RED = [testcase("plain", "passed", "tests/core/other.test.ts"), testcase("payload > AS-003: one call wins", "failed")];
-const current = (expectation: AcceptanceExpectation) => ({ kind: "current" as const, expectation });
 
 describe("evaluateWaveCompletionSuite — acceptance at the Wave Gate", () => {
   it("accepts a contract-Wave run whose only failures are the RED acceptance testcases, and the receipt proves the excusal", () => {
-    const evaluation = evaluateWaveCompletionSuite(authority, result(1, RED), current(RED_EXPECTATION));
+    const evaluation = evaluateWaveCompletionSuite(authority, result(1, RED), RED_EXPECTATION);
     expect(evaluation.kind).toBe("accepted");
     if (evaluation.kind !== "accepted") return;
     expect(evaluation.receipt.acceptance?.expectation).toEqual(RED_EXPECTATION);
@@ -124,12 +124,12 @@ describe("evaluateWaveCompletionSuite — acceptance at the Wave Gate", () => {
     expect(parseAcceptedWaveCompletionReceipt(JSON.parse(JSON.stringify(evaluation.receipt)))).toEqual({ ok: true, value: evaluation.receipt });
     // A historical re-evaluation judges the receipt under the expectation it recorded.
     const { kind: _kind, resultDigest: _digest, ...body } = evaluation.receipt;
-    expect(evaluateWaveCompletionSuite(authority, { ...body, kind: "wave-completion-suite-result" }, { kind: "as-recorded" }).kind)
+    expect(evaluateAsRecorded(authority, { ...body, kind: "wave-completion-suite-result" }).kind)
       .toBe("accepted");
   });
 
   it("rejects acceptance that is not RED with the named acceptance failures", () => {
-    const evaluation = evaluateWaveCompletionSuite(authority, result(0, [testcase("payload > AS-003: one call wins", "passed")]), current(RED_EXPECTATION));
+    const evaluation = evaluateWaveCompletionSuite(authority, result(0, [testcase("payload > AS-003: one call wins", "passed")]), RED_EXPECTATION);
     expect(evaluation).toMatchObject({
       kind: "rejected",
       authorityFailures: [],
@@ -142,32 +142,41 @@ describe("evaluateWaveCompletionSuite — acceptance at the Wave Gate", () => {
   });
 
   it("keeps the non-zero exit when a failure leaves the acceptance files", () => {
-    const evaluation = evaluateWaveCompletionSuite(authority, result(1, [...RED, testcase("breaks", "failed", "tests/core/other.test.ts")]), current(RED_EXPECTATION));
+    const evaluation = evaluateWaveCompletionSuite(authority, result(1, [...RED, testcase("breaks", "failed", "tests/core/other.test.ts")]), RED_EXPECTATION);
     expect(evaluation).toMatchObject({ kind: "rejected", semanticFailures: [{ kind: "non-zero-exit", checkId: "project:verify" }] });
   });
 
   it("refuses a result judged under another expectation, and facts bound to another report", () => {
-    expect(evaluateWaveCompletionSuite(authority, result(1, null), current(RED_EXPECTATION))).toMatchObject({
+    expect(evaluateWaveCompletionSuite(authority, result(1, null), RED_EXPECTATION)).toMatchObject({
       kind: "rejected",
       authorityFailures: [{ kind: "acceptance-expectation-mismatch" }],
     });
-    expect(evaluateWaveCompletionSuite(authority, result(1, RED, RED_EXPECTATION, digest("e")), current(RED_EXPECTATION))).toMatchObject({
+    expect(evaluateWaveCompletionSuite(authority, result(1, RED, RED_EXPECTATION, digest("e")), RED_EXPECTATION)).toMatchObject({
       kind: "rejected",
       authorityFailures: [{ kind: "unbound-acceptance-facts", checkIds: ["project:verify"] }],
     });
   });
 
+  it("refuses an explicit acceptance observation for a gate that owes nothing: absence is the one encoding", () => {
+    const none = emptyAcceptanceExpectation(1);
+    const { acceptance: _acceptance, ...plain } = result(0, null);
+    expect(parseWaveCompletionSuiteResult({ ...plain, acceptance: { expectation: none, facts: [] } })).toMatchObject({
+      ok: false,
+      error: { errors: [expect.stringContaining("must be absent when the gate owes no contract anything")] },
+    });
+  });
+
   it("behaves exactly as before when the gate owes no contract", () => {
     const none = emptyAcceptanceExpectation(1);
-    expect(evaluateWaveCompletionSuite(authority, result(0, null), current(none)).kind).toBe("accepted");
-    expect(evaluateWaveCompletionSuite(authority, result(1, null), current(none))).toMatchObject({
+    expect(evaluateWaveCompletionSuite(authority, result(0, null), none).kind).toBe("accepted");
+    expect(evaluateWaveCompletionSuite(authority, result(1, null), none)).toMatchObject({
       kind: "rejected",
       semanticFailures: [{ kind: "non-zero-exit" }],
     });
   });
 
   it("refuses an accepted receipt whose non-zero exit its own acceptance does not excuse", () => {
-    const evaluation = evaluateWaveCompletionSuite(authority, result(1, RED), current(RED_EXPECTATION));
+    const evaluation = evaluateWaveCompletionSuite(authority, result(1, RED), RED_EXPECTATION);
     if (evaluation.kind !== "accepted") throw new Error("fixture must be accepted");
     const { resultDigest: _digest, acceptance: _acceptance, ...body } = evaluation.receipt;
     const forged = { ...body, resultDigest: sha256Hex(canonicalJson(body as unknown as JsonValue)) };
