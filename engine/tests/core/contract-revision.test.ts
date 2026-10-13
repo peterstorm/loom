@@ -10,7 +10,6 @@ import {
   type AcceptanceContract,
   type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
-
 import { digest, seen } from "../fixtures/acceptance-fixtures";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";

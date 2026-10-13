@@ -116,8 +116,13 @@ import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
 import type { LegacyWaveGateCompatibilityAuthority } from "./core/legacy-archive";
-import { frozenPaths, parseAcceptanceContracts, type AcceptanceContract } from "./core/acceptance-contract";
-import { pathsMatch } from "./core/plan-path-match";
+import {
+  contractWriter,
+  frozenPaths,
+  parseAcceptanceContracts,
+  type AcceptanceContract,
+  type ContractWriterProblem,
+} from "./core/acceptance-contract";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2216,10 +2221,22 @@ function parseTaskGraphHistoryFields(
   });
 }
 
+function renderWriterProblem(contract: AcceptanceContract, problem: ContractWriterProblem): string {
+  switch (problem.kind) {
+    case "unwritten":
+      return `frozen path '${problem.path}' is not in ${contract.contractTask}'s file_list`;
+    case "shared":
+      return `frozen path '${problem.path}' is in the file_list of ${problem.taskIds.join(" and ")}; only ${contract.contractTask} may write it`;
+    case "split":
+      return `frozen paths are written by ${problem.taskIds.join(" and ")}; only ${contract.contractTask} may write them`;
+  }
+}
+
 /**
  * The persisted contracts, parsed exactly and bound to the roster: each names
- * a Task that exists and whose file_list holds every path the contract
- * freezes. A contract whose writer vanished could never be observed RED.
+ * a Task that exists and is, by the one writer rule, the only Task listing
+ * every path the contract freezes; and a freeze names a Wave no earlier than
+ * that Task's. A contract whose writer vanished could never be observed RED.
  */
 function parseAcceptanceContractsField(
   raw: unknown,
@@ -2233,10 +2250,19 @@ function parseAcceptanceContractsField(
     if (writer === undefined) {
       return parseErr(`acceptance_contracts ${contract.id}: contract task ${contract.contractTask} is not in tasks`);
     }
-    const files = Array.isArray(writer.file_list) ? writer.file_list.filter((file): file is string => typeof file === "string") : [];
-    const unwritten = frozenPaths(contract).find((path) => !files.some((file) => pathsMatch(file, path)));
-    if (unwritten !== undefined) {
-      return parseErr(`acceptance_contracts ${contract.id}: frozen path '${unwritten}' is not in ${contract.contractTask}'s file_list`);
+    const views = tasks.map((task) => ({
+      id: String(task.id),
+      file_list: Array.isArray(task.file_list) ? task.file_list.filter((file): file is string => typeof file === "string") : [],
+    }));
+    const writes = contractWriter(frozenPaths(contract), views);
+    if (!writes.ok) {
+      return parseErr(`acceptance_contracts ${contract.id}: ${writes.error.map((problem) => renderWriterProblem(contract, problem)).join("; ")}`);
+    }
+    if (writes.value !== contract.contractTask) {
+      return parseErr(`acceptance_contracts ${contract.id}: the frozen paths are written by ${writes.value}, not contract task ${contract.contractTask}`);
+    }
+    if (contract.freeze.state === "frozen" && typeof writer.wave === "number" && contract.freeze.wave < writer.wave) {
+      return parseErr(`acceptance_contracts ${contract.id}: freeze.wave ${contract.freeze.wave} precedes contract task ${contract.contractTask}'s Wave ${writer.wave}`);
     }
   }
   return parseOk(parsed.value);

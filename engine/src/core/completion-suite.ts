@@ -1128,9 +1128,9 @@ export function evaluateWaveCompletionSuite(
   if (!canonicalStructuralEquals(expectation, recordedExpectation)) {
     authorityFailures.push(freeze({ kind: "acceptance-expectation-mismatch" }));
   }
-  const [firstUnbound, ...restUnbound] = unboundFactChecks(result.value.checks, recorded?.facts ?? []);
-  if (firstUnbound !== undefined) {
-    authorityFailures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: freezeArray([firstUnbound, ...restUnbound]) as NonEmpty<string> }));
+  const unbound = unboundFactChecks(result.value.checks, recorded?.facts ?? []);
+  if (unbound.length > 0) {
+    authorityFailures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: asNonEmpty(freezeArray(unbound)) }));
   }
 
   const infrastructureFailures: CompletionInfrastructureFailure[] = [];
@@ -1173,12 +1173,11 @@ export function evaluateWaveCompletionSuite(
         })
         .exhaustive();
     }
-    const [firstFailure, ...restFailures] = judgment.failures;
-    if (firstFailure !== undefined) {
+    if (judgment.failures.length > 0) {
       semanticFailures.push(freeze({
         kind: "acceptance-rejected",
         checkId: acceptanceCheckId(authority.value, recorded?.facts ?? []),
-        failures: freezeArray([firstFailure, ...restFailures]) as NonEmpty<AcceptanceFailure>,
+        failures: asNonEmpty(freezeArray(judgment.failures)),
       }));
     }
   }

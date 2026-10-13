@@ -771,7 +771,7 @@ On success, one locked write:
 
 - sets the freeze to `revised` with the new digests and appends a numbered revision (reason, previous and new digests, revalidated Task ids) — the old bytes stay auditable;
 - returns the current Wave's `implemented` claimants to `pending` with `revalidation_required`, keeping their proof and incrementing their review generation, exactly as a reopened Wave does — re-spawn them before starting the Wave Gate;
-- retires the current Wave's review and suite authority (`active_wave_completion_suite`, review runs, the Wave's spec-check) and resets its `tests_passed` and `reviews_complete`.
+- retires the current Wave's review and suite authority (`active_wave_completion_suite`, review runs, the Wave's spec-check) and resets its `tests_passed` and `reviews_complete` — and its `impl_complete` too when any claimant was returned to revalidation.
 
 The next Wave Gate judges the contract green against the new bytes and re-records its roster, which freezes it again.
 

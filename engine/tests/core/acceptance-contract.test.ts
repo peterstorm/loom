@@ -4,6 +4,7 @@ import {
   ACCEPTANCE_RED_WINDOW,
   acceptanceContractsFromPlan,
   acceptanceExpectation,
+  contractWriter,
   frozenPathDrift,
   frozenPaths,
   renderFrozenPathDrift,
@@ -117,6 +118,41 @@ describe("testcaseAcceptanceFile — attributing a JUnit testcase to a declared 
   it("never matches a different file that shares a suffix segment", () => {
     expect(testcaseAcceptanceFile([ACCEPTANCE], "load.acceptance.test.ts")).toBeNull();
     expect(testcaseAcceptanceFile([ACCEPTANCE], "tests/core/other.test.ts")).toBeNull();
+  });
+
+  it("prefers an exact path, and leaves a testcase two files suffix-match unattributed", () => {
+    expect(testcaseAcceptanceFile(["b/a/x.acceptance.test.ts", "a/x.acceptance.test.ts"], "a/x.acceptance.test.ts"))
+      .toBe("a/x.acceptance.test.ts");
+    expect(testcaseAcceptanceFile(["engine/a/x.acceptance.test.ts", "svc/a/x.acceptance.test.ts"], "a/x.acceptance.test.ts"))
+      .toBeNull();
+  });
+});
+
+describe("contractWriter — the one Task that writes every frozen path", () => {
+  const paths = [TYPES, ACCEPTANCE] as const;
+  const task = (id: string, file_list: readonly string[]) => ({ id, file_list });
+
+  it("names the one Task listing every frozen path exactly", () => {
+    expect(contractWriter(paths, [task("T1", [TYPES, `./${ACCEPTANCE}`]), task("T2", ["src/other.ts"])]))
+      .toEqual({ ok: true, value: "T1" });
+  });
+
+  it("refuses a Task that lists only a deeper path ending in the frozen one: the freeze hashes the declared path", () => {
+    expect(contractWriter(paths, [task("T1", [TYPES, `repo/${ACCEPTANCE}`])])).toEqual({
+      ok: false,
+      error: [{ kind: "unwritten", path: ACCEPTANCE }],
+    });
+  });
+
+  it("refuses a frozen path two Tasks list, and frozen paths split across Tasks", () => {
+    expect(contractWriter(paths, [task("T1", [TYPES, ACCEPTANCE]), task("T2", [ACCEPTANCE])])).toEqual({
+      ok: false,
+      error: [{ kind: "shared", path: ACCEPTANCE, taskIds: ["T1", "T2"] }],
+    });
+    expect(contractWriter(paths, [task("T1", [TYPES]), task("T2", [ACCEPTANCE])])).toEqual({
+      ok: false,
+      error: [{ kind: "split", taskIds: ["T1", "T2"] }],
+    });
   });
 });
 
@@ -299,5 +335,14 @@ describe("wire parsers — contracts and report facts round-trip exactly", () =>
     expect(projected).toMatchObject({ kind: "projected", otherFailures: 0 });
     expect(parseAcceptanceReportFacts(JSON.parse(JSON.stringify(projected)))).toEqual({ ok: true, value: projected });
     expect(parseAcceptanceReportFacts({ ...projected, otherFailures: -1 })).toMatchObject({ ok: false });
+    if (projected.kind !== "projected") throw new Error("fixture facts must project");
+    const passedWithFailure = {
+      ...projected,
+      testcases: [{ ...projected.testcases[0]!, outcome: "passed", failureType: "AssertionError" }],
+    };
+    expect(parseAcceptanceReportFacts(passedWithFailure)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("failureType is recorded only for a failed testcase"),
+    });
   });
 });

@@ -48,6 +48,19 @@ function populated(): TaskGraph {
   return result.value.state;
 }
 
+const ACCEPTANCE = "tests/load.acceptance.test.ts";
+const bytes = (fill: string) => [{ path: ACCEPTANCE, sha256: fill.repeat(64) }];
+const revision = (n: number, previous: string, paths: string) =>
+  ({ revision: n, reason: `fix ${n}`, previous: bytes(previous), paths: bytes(paths), revalidatedTaskIds: [] });
+const withTasks = (graph: Record<string, unknown>, map: (task: Record<string, unknown>) => Record<string, unknown>) =>
+  ({ ...graph, tasks: (graph.tasks as Record<string, unknown>[]).map(map) });
+
+/** A mutation of the populated graph that patches its one contract. */
+const withContract = (patch: Record<string, unknown>) => (graph: Record<string, unknown>): Record<string, unknown> => ({
+  ...graph,
+  acceptance_contracts: [{ ...(graph.acceptance_contracts as Record<string, unknown>[])[0], ...patch }],
+});
+
 describe("acceptance_contracts at the State File load boundary", () => {
   it("round-trips the contracts population stamped", () => {
     const graph = populated();
@@ -62,75 +75,40 @@ describe("acceptance_contracts at the State File load boundary", () => {
   });
 
   it.each<[string, (graph: Record<string, unknown>) => Record<string, unknown>, string]>([
-    ["a contract task missing from the roster", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{ ...(graph.acceptance_contracts as Record<string, unknown>[])[0], contractTask: "T9" }],
-    }), "contract task T9 is not in tasks"],
-    ["a frozen path its contract task does not list", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{
-        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
-        acceptance: [{ path: "tests/other.acceptance.test.ts", anchors: ["FR-001"] }],
-      }],
-    }), "frozen path 'tests/other.acceptance.test.ts' is not in T1's file_list"],
-    ["a malformed freeze", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{ ...(graph.acceptance_contracts as Record<string, unknown>[])[0], freeze: { state: "thawed" } }],
-    }), "freeze.state must be awaiting-red, frozen or revised"],
-    ["a contract with no acceptance files", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{ ...(graph.acceptance_contracts as Record<string, unknown>[])[0], acceptance: [] }],
-    }), "acceptance must be non-empty"],
-    ["an acceptance file deciding no Requirement", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{
-        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
-        acceptance: [{ path: "tests/load.acceptance.test.ts", anchors: [] }],
-      }],
-    }), "anchors must be non-empty"],
-    ["a revised freeze with no recorded revision", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{
-        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
-        freeze: { state: "revised", paths: [{ path: "tests/load.acceptance.test.ts", sha256: "a".repeat(64) }] },
-      }],
-    }), "freeze is revised but records no revision"],
-    ["a freeze whose bytes are not the last revision's", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{
-        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
-        freeze: { state: "revised", paths: [{ path: "tests/load.acceptance.test.ts", sha256: "a".repeat(64) }] },
-        revisions: [{
-          revision: 1,
-          reason: "fixed AS-001",
-          previous: [{ path: "tests/load.acceptance.test.ts", sha256: "b".repeat(64) }],
-          paths: [{ path: "tests/load.acceptance.test.ts", sha256: "c".repeat(64) }],
-          revalidatedTaskIds: [],
-        }],
-      }],
-    }), "freeze.paths must equal the last revision's paths"],
-    ["revisions recorded before any freeze", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{
-        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
-        revisions: [{
-          revision: 1,
-          reason: "fixed AS-001",
-          previous: [{ path: "tests/load.acceptance.test.ts", sha256: "b".repeat(64) }],
-          paths: [{ path: "tests/load.acceptance.test.ts", sha256: "c".repeat(64) }],
-          revalidatedTaskIds: [],
-        }],
-      }],
-    }), "revisions precede the freeze"],
-    ["a frozen path escaping the repository", (graph) => ({
-      ...graph,
-      acceptance_contracts: [{
-        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
-        acceptance: [{ path: "../load.acceptance.test.ts", anchors: ["FR-001"] }],
-      }],
-    }), "freezes '../load.acceptance.test.ts', which is not a repository-relative path"],
+    ["a contract task missing from the roster", withContract({ contractTask: "T9" }), "contract task T9 is not in tasks"],
+    ["a frozen path its contract task does not list",
+      withContract({ acceptance: [{ path: "tests/other.acceptance.test.ts", anchors: ["FR-001"] }] }),
+      "frozen path 'tests/other.acceptance.test.ts' is not in T1's file_list"],
+    ["a malformed freeze", withContract({ freeze: { state: "thawed" } }), "freeze.state must be awaiting-red, frozen or revised"],
+    ["a contract with no acceptance files", withContract({ acceptance: [] }), "acceptance must be non-empty"],
+    ["an acceptance file deciding no Requirement",
+      withContract({ acceptance: [{ path: ACCEPTANCE, anchors: [] }] }), "anchors must be non-empty"],
+    ["a revised freeze with no recorded revision",
+      withContract({ freeze: { state: "revised", paths: bytes("a") } }), "freeze is revised but records no revision"],
+    ["a freeze whose bytes are not the last revision's",
+      withContract({ freeze: { state: "revised", paths: bytes("a") }, revisions: [revision(1, "b", "c")] }),
+      "freeze.paths must equal the last revision's paths"],
+    ["revisions recorded before any freeze", withContract({ revisions: [revision(1, "b", "c")] }), "revisions precede the freeze"],
+    ["a revision that does not start from the bytes the one before it stamped",
+      withContract({ freeze: { state: "revised", paths: bytes("e") }, revisions: [revision(1, "b", "c"), revision(2, "d", "e")] }),
+      "revisions[1].previous must equal revision 1's paths"],
+    ["a frozen path escaping the repository",
+      withContract({ acceptance: [{ path: "../load.acceptance.test.ts", anchors: ["FR-001"] }] }),
+      "freezes '../load.acceptance.test.ts', which is not a repository-relative path"],
   ])("refuses %s", (_name, mutate, message) => {
     const raw = JSON.parse(JSON.stringify(populated())) as Record<string, unknown>;
     expect(parseTaskGraph(mutate(raw))).toMatchObject({ ok: false, error: expect.stringContaining(message) });
+  });
+
+  it("refuses a freeze stamped before its contract Task's Wave", () => {
+    const raw = JSON.parse(JSON.stringify(populated())) as Record<string, unknown>;
+    const shifted = withTasks(raw, (task) => ({ ...task, wave: (task.wave as number) + 1 }));
+    const frozen = withContract({
+      freeze: { state: "frozen", wave: 1, paths: bytes("a"), roster: [{ file: ACCEPTANCE, name: "FR-001: loads", anchors: ["FR-001"] }] },
+    })(shifted);
+    expect(parseTaskGraph(frozen)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("freeze.wave 1 precedes contract task T1's Wave 2"),
+    });
   });
 });

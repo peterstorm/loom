@@ -4,8 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import reviseContract from "../../../src/handlers/helpers/revise-contract";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
-import { parseArtifactDigest, type ArtifactDigest } from "../../../src/core/orchestration-contract";
-import { sha256Hex } from "../../../src/core/digest";
+import { contentDigest } from "../../fixtures/acceptance-fixtures";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import { WHITELISTED_HELPERS } from "../../../src/config";
@@ -51,11 +50,7 @@ const ACCEPTANCE = "tests/payload.acceptance.test.ts";
 const FROZEN_TYPES = "export type Payload = { readonly id: string };\n";
 const FROZEN_ACCEPTANCE = "it('AS-001: one call wins', () => expect(wins()).toBe(2));\n";
 
-const sha = (text: string): ArtifactDigest => {
-  const parsed = parseArtifactDigest(sha256Hex(text));
-  if (!parsed.ok) throw new Error("fixture digest must parse");
-  return parsed.value;
-};
+const sha = contentDigest;
 
 const task = (id: string, wave: number, status: "implemented" | "completed", anchors: readonly string[], files: readonly string[]): Task =>
   taskFixture({

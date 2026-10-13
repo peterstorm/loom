@@ -11,6 +11,13 @@ export function normalizePlanPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/** Exact equality of two plan paths after normalization — for a path that is
+ *  read from the repository as written, where a suffix match would name a
+ *  different file. */
+export function samePlanPath(a: string, b: string): boolean {
+  return normalizePlanPath(a) === normalizePlanPath(b);
+}
+
 /** Whether a normalized plan path stays inside the repository: relative, with
  *  no `..` segment, so `join(root, path)` cannot leave the root. */
 export function isRepoRelativePlanPath(p: string): boolean {

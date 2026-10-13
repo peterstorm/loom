@@ -22,8 +22,8 @@ import { authorizeWaveCompletionSuite, freezeVerificationManifest } from "../../
 import type { ActiveWaveGateRegistration, PlanContract } from "../../src/types";
 import { value } from "../fixtures/parse-result";
 import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
+import { digest } from "../fixtures/acceptance-fixtures";
 
-const digest = (fill: string): ArtifactDigest => fill.repeat(64) as ArtifactDigest;
 const REPORT_PATH = ".loom/completion-reports/verify.junit.xml";
 const REPORT_DIGEST = digest("d");
 const ACCEPTANCE = "engine/tests/acceptance/payload.acceptance.test.ts";

@@ -32,7 +32,7 @@ import {
   type NonEmpty,
 } from "./orchestration-contract";
 import { exactRecordErrors, isPlainRecord, parseExactRecord } from "./plain-record";
-import { isRepoRelativePlanPath, normalizePlanPath, pathsMatch } from "./plan-path-match";
+import { isRepoRelativePlanPath, normalizePlanPath, samePlanPath } from "./plan-path-match";
 import type { JunitTestcasesResult, ReportTestcaseOutcome } from "./structured-test-report";
 
 // ---------------------------------------------------------------------------
@@ -197,7 +197,9 @@ export function contractWriter(
 ): DomainResult<string, NonEmpty<ContractWriterProblem>> {
   const writers = paths.map((path) => ({
     path,
-    ids: tasks.filter((task) => (task.file_list ?? []).some((file) => pathsMatch(file, path))).map(({ id }) => id),
+    // Exact, not suffix-tolerant: the freeze hashes `root/path`, so the
+    // writer must list that very path, not a deeper one that merely ends in it.
+    ids: tasks.filter((task) => (task.file_list ?? []).some((file) => samePlanPath(file, path))).map(({ id }) => id),
   }));
   const problems: ContractWriterProblem[] = writers.flatMap(({ path, ids }): ContractWriterProblem[] => {
     const shared = nonEmpty(ids);
@@ -212,13 +214,17 @@ export function contractWriter(
   return err(nonEmpty(problems)!);
 }
 
+/** Whether a Task other than the contract Task claims any of these anchors. */
+const claims = (contract: Pick<AcceptanceContract, "contractTask">, task: ContractTaskView, anchors: readonly string[]): boolean =>
+  task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => anchors.includes(anchor));
+
 /** The Tasks that claim an anchor's completion, other than the contract Task. */
 function anchorClaimants(
   contract: Pick<AcceptanceContract, "contractTask">,
   anchor: string,
   tasks: readonly ContractTaskView[],
 ): readonly ContractTaskView[] {
-  return tasks.filter((task) => task.id !== contract.contractTask && (task.spec_anchors ?? []).includes(anchor));
+  return tasks.filter((task) => claims(contract, task, [anchor]));
 }
 
 /** The Wave of a contract's contract Task; undefined when the Task is not in the roster. */
@@ -235,8 +241,7 @@ export function contractClaimants<T extends ContractTaskView>(
   tasks: readonly T[],
 ): readonly T[] {
   const covered = coveredAnchors(contract);
-  return tasks.filter((task) =>
-    task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => covered.includes(anchor)));
+  return tasks.filter((task) => claims(contract, task, covered));
 }
 
 /** Each covered anchor's completion Wave; an anchor nobody claims is absent. */
@@ -323,19 +328,25 @@ export function redWindowTaskIds(
  * reports the test file relative to its root, so the declared repository path
  * may be longer; Surefire reports the class name, which maps to the declared
  * `.java`/`.kt` path. Matching is by whole path segments, never by suffix text.
+ * An exact path wins; otherwise a segment-suffix match attributes the testcase
+ * only when exactly one declared file matches — an ambiguous testcase is left
+ * unattributed, which fails closed rather than crediting the wrong contract.
  */
 export function testcaseAcceptanceFile(files: readonly string[], classname: string): string | null {
   const reported = normalizePlanPath(classname);
+  const exact = files.find((file) => normalizePlanPath(file) === reported);
+  if (exact !== undefined) return exact;
   const jvmClass = !reported.includes("/") && /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(reported)
     ? reported.split("$")[0]!.replace(/\./g, "/")
     : null;
-  return files.find((file) => {
+  const matches = files.filter((file) => {
     const declared = normalizePlanPath(file);
-    if (declared === reported || declared.endsWith(`/${reported}`)) return true;
+    if (declared.endsWith(`/${reported}`)) return true;
     if (jvmClass === null) return false;
     const withoutExtension = declared.replace(/\.[^./]+$/, "");
     return withoutExtension === jvmClass || withoutExtension.endsWith(`/${jvmClass}`);
-  }) ?? null;
+  });
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 const ANCHOR_MENTION = /\b((?:FR|AS)-\d+):/g;
@@ -430,7 +441,7 @@ export function graphAcceptanceExpectation(
 
 /** The expectation of a gate that owes no contract anything. */
 export function emptyAcceptanceExpectation(wave: number): AcceptanceExpectation {
-  return freeze({ wave, contracts: Object.freeze([]), unobservable: Object.freeze([]) });
+  return acceptanceExpectation([], [], wave);
 }
 
 /** Whether a gate owes any contract anything at all. */
@@ -940,8 +951,11 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
     revisions.push(revision.value);
   }
   // The freeze and its revision history must tell one story: a revision is
-  // recorded only after the freeze, and the bytes frozen now are the bytes
-  // the last revision stamped.
+  // recorded only after the freeze, each revision starts from the bytes the
+  // one before it stamped, and the bytes frozen now are the last revision's.
+  const broken = revisions.findIndex((revision, index) =>
+    index > 0 && !canonicalStructuralEquals(revision.previous, revisions[index - 1]!.paths));
+  if (broken !== -1) return err(`${path}.revisions[${broken}].previous must equal revision ${broken}'s paths`);
   const last = revisions.at(-1);
   if (last === undefined && frozen.value.state === "revised") return err(`${path}.freeze is revised but records no revision`);
   if (last !== undefined && frozen.value.state === "awaiting-red") return err(`${path}.revisions precede the freeze`);
@@ -987,6 +1001,7 @@ function parseObservedTestcase(raw: unknown, path: string): Parsed<ObservedAccep
       (failureType !== null && typeof failureType !== "string") || typeof collectionError !== "boolean") {
     return err(`${path} has an invalid file, name, outcome, failureType or collectionError`);
   }
+  if (failureType !== null && outcome !== "failed") return err(`${path}.failureType is recorded only for a failed testcase`);
   return ok(freeze({
     file,
     name,

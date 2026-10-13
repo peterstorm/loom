@@ -14,8 +14,7 @@ import {
   type CompletionCheckResult,
 } from "../../../src/core/completion-suite";
 import { evaluateAsRecorded } from "../../fixtures/completion-suite-evaluation";
-import { sha256Hex } from "../../../src/core/digest";
-import { parseArtifactDigest, type ArtifactDigest } from "../../../src/core/orchestration-contract";
+import { parseArtifactDigest } from "../../../src/core/orchestration-contract";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../../src/core/proof-obligations";
 import type { AcceptanceContract, AcceptanceTestcase } from "../../../src/core/acceptance-contract";
 import { runCompletionCheck as productionRunCompletionCheck } from "../../../src/orchestration/completion-check-runner";
@@ -38,6 +37,7 @@ import {
   type TaskGraph,
 } from "../../../src/types";
 import { satisfiedProof } from "../../fixtures/task-lifecycle";
+import { contentDigest } from "../../fixtures/acceptance-fixtures";
 
 const roots: string[] = [];
 const fakeReportDigest = (() => {
@@ -84,7 +84,6 @@ const proof = (() => {
   if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
   return evaluated;
 })();
-
 
 function completionScript(): string {
   return `
@@ -137,7 +136,7 @@ else if (mode === "mutate-workspace") {
 
 const ACCEPTANCE_FILE = "tests/payload.acceptance.test.ts";
 const ACCEPTANCE_SOURCE = "it('AS-001: decides AS-001', () => expect(wins()).toBe(2));\n";
-const ACCEPTANCE_DIGEST = sha256Hex(ACCEPTANCE_SOURCE) as ArtifactDigest;
+const ACCEPTANCE_DIGEST = contentDigest(ACCEPTANCE_SOURCE);
 const rosterEntry = (anchor: string): AcceptanceTestcase =>
   ({ file: ACCEPTANCE_FILE, name: `payload > ${anchor}: decides ${anchor}`, anchors: [anchor] });
 
@@ -182,7 +181,7 @@ const contractRevisions = (stage: ContractStage): AcceptanceContract["revisions"
   ? [{
       revision: 1,
       reason: "AS-002 asserted the wrong value",
-      previous: [{ path: ACCEPTANCE_FILE, sha256: sha256Hex("superseded bytes") as ArtifactDigest }],
+      previous: [{ path: ACCEPTANCE_FILE, sha256: contentDigest("superseded bytes") }],
       paths: [{ path: ACCEPTANCE_FILE, sha256: ACCEPTANCE_DIGEST }],
       revalidatedTaskIds: [],
     }]

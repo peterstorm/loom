@@ -258,7 +258,7 @@ function renderWriterProblem(problem: ContractWriterProblem): string {
 }
 
 /** A declared contract whose frozen paths have exactly one writer: its contract Task. */
-type ResolvedContract = Readonly<{ contract: PlanContract; contractTask: string; covered: readonly string[] }>;
+type ResolvedContract = Readonly<{ contractTask: string; covered: readonly string[] }>;
 
 /**
  * Contract checks: one contract Task writes every frozen path and nothing else
@@ -294,7 +294,7 @@ function contractErrors(contracts: readonly PlanContract[], tasks: readonly Reco
     }
     const contractTask = writer.value;
     const covered = coveredAnchors(declaration);
-    resolved.push({ contract, contractTask, covered });
+    resolved.push({ contractTask, covered });
     const contractRecord = byId.get(contractTask)!;
     for (const anchor of covered) {
       if (contractRecord.claims.includes(anchor)) {

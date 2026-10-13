@@ -72,3 +72,23 @@ The remediation runs against `run.pr84-review-src-1`; every changed path outside
 | rest | code-simplifier-1 | accepted | Shared `digest`/`seen` fixtures (`tests/fixtures/acceptance-fixtures.ts`); scenario Task builders stay local |
 | rest | code-simplifier-3, -5 | accepted | `acceptancePath` and `completionOutcome` helpers |
 | rest | code-simplifier-6 | accepted | Two overlapping residual bullets merged; refusal lists stay per audience |
+
+## Round 3
+
+- **Review runs:** `run.pr84-review-src-3` (25 `engine/src/**` files) and `run.pr84-review-rest-3` (41 test/doc/plan files), against `8bf75a39`.
+- **Adjudication:** 0 critical emitted, 0 surviving, 0 refuted; 14 + 7 advisories.
+- **Policy (published, DECLARED):** `run.pr84-policy-src-3` (`5f9b4f67…38ae`), `run.pr84-policy-rest-3` (`731caed3…0b19`).
+
+| Run | Finding | Decision | Fix / reason |
+|---|---|---|---|
+| src | code-reviewer-1 | accepted | `contractWriter` matches frozen paths exactly (`samePlanPath`), not by suffix — the freeze hashes `root/path`; the load boundary reuses `contractWriter` |
+| src | silent-failure-hunter-1 | dismissed | Documented report-only excusal; the receipt already records each exit code and every attributed testcase |
+| src | type-design-analyzer-1 | accepted | Revision chain: each `previous` equals the prior revision's `paths`; a frozen freeze's Wave is not before the contract Task's |
+| src | type-design-analyzer-2 | accepted | Persisted parser refuses a `failureType` on a testcase that did not fail |
+| src | architecture-tech-lead-1, -2, -3, code-simplifier-6 | deferred | Module split, one judge-and-bind function, core plan-binding validation, shared wire toolkit: one deepen session |
+| src | architecture-tech-lead-4 | accepted | `testcaseAcceptanceFile` prefers an exact path and leaves a testcase two files suffix-match unattributed (fails closed) |
+| src | code-simplifier-1, -2, -3, -4, -5 | accepted | One `claims` predicate; dead `ResolvedContract.contract`; load boundary via `contractWriter`; `asNonEmpty` reuse; `emptyAcceptanceExpectation` via `acceptanceExpectation` |
+| rest | comment-analyzer-1 | accepted | operations.md: `impl_complete` also resets when claimants revalidate |
+| rest | architecture-tech-lead-1 | deferred | Ledger seam mirrors amend-spec-trace; changing it is cross-helper |
+| rest | architecture-tech-lead-2, -3 | dismissed | Per-scenario contract literals; `evaluateAsRecorded` serves acceptance-independent tests, the mismatch path is pinned directly |
+| rest | code-simplifier-1, -2, -3 | accepted | Shared `digest`/`contentDigest`; `withContract`/`revision`/`bytes` helpers in the load table; blank lines |
