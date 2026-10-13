@@ -441,7 +441,7 @@ What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the
 _Avoid_: Snapshot, lock, baseline
 
 **Red Window**:
-The Waves from a contract Wave through the last Wave completing one of its covered Requirements. A testcase is *pending* until the Wave completing all its Requirements and *due* after; a pending failure is excused only at the Wave Gate, so Tasks in the window carry the engine-only regression waiver `acceptance-red-window` and the Wave Gate's suite is their regression authority.
+The Waves from a contract Wave through the last Wave completing one of its covered Requirements. A testcase is *pending* until the Wave completing all its Requirements and *due* after; a pending failure is excused only at the Wave Gate, so Tasks in the window that carry no regression waiver of their own get the engine-only regression waiver `acceptance-red-window` and the Wave Gate's suite is their regression authority.
 _Avoid_: Grace period, expected-failure list
 
 **Contract Revision**:

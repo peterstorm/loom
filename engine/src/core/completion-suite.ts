@@ -219,7 +219,6 @@ export type CompletionSemanticFailure =
   | Readonly<{ kind: "missing-report"; checkId: CompletionCheckId; path: ReviewPath }>
   | Readonly<{ kind: "acceptance-rejected"; checkId: CompletionCheckId; failures: NonEmpty<AcceptanceFailure> }>;
 
-
 export type AcceptedWaveCompletionReceipt = Readonly<{
   kind: "accepted-wave-completion-suite";
   runId: OrchestrationRunId;
@@ -820,10 +819,6 @@ function unboundFactChecks(
   });
 }
 
-/** The checks whose non-zero exit a recorded acceptance observation excuses. */
-function excusedChecks(acceptance: AcceptanceObservation | undefined): ReadonlySet<string> {
-  return new Set(acceptance === undefined ? [] : judgeAcceptance(acceptance.expectation, acceptance.facts).excusedCheckIds);
-}
 
 function parseAcceptedChecks(
   raw: unknown,
@@ -942,7 +937,12 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
   return total(() => {
     const acceptance = parseOptionalAcceptance(raw, "acceptedReceipt");
     if (!acceptance.ok) return acceptance;
-    const excused = excusedChecks(acceptance.value);
+    // One judgment decides both which non-zero exits are excused and whether
+    // the receipt records failures it could never have been accepted with.
+    const judgment = acceptance.value === undefined
+      ? null
+      : judgeAcceptance(acceptance.value.expectation, acceptance.value.facts);
+    const excused: ReadonlySet<string> = new Set(judgment?.excusedCheckIds ?? []);
     const envelope = parseExactWaveCompletionEnvelope(raw, {
       path: "acceptedReceipt",
       expectedKind: "accepted-wave-completion-suite",
@@ -962,7 +962,7 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
     if (acceptance.value !== undefined) {
       const unbound = unboundFactChecks(envelope.value.checks, acceptance.value.facts);
       if (unbound.length > 0) return failure([`acceptedReceipt.acceptance facts are unbound for ${unbound.join(", ")}`]);
-      if (judgeAcceptance(acceptance.value.expectation, acceptance.value.facts).failures.length > 0) {
+      if (judgment !== null && judgment.failures.length > 0) {
         return failure(["acceptedReceipt.acceptance records failures an accepted receipt cannot carry"]);
       }
     }
@@ -1039,7 +1039,7 @@ function acceptedReceipt(
     checks,
     ...(acceptance === undefined ? {} : { acceptance }),
   });
-  return freeze({ ...body, resultDigest: digest(body as unknown as JsonValue) });
+  return freeze({ ...body, resultDigest: digest(body) });
 }
 
 /** The check an acceptance rejection is reported against: the first whose

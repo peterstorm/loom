@@ -24,7 +24,8 @@ import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../
 import { contractWriter, coveredAnchors, frozenPaths, type ContractWriterProblem } from "../../core/acceptance-contract";
 import type { ContractProblem, OwnershipProblem, PlanContract, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
-import { changesFamily, invariantRoles, normalizePlanPath, pathsMatch, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
+import { changesFamily, invariantRoles, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
+import { normalizePlanPath, pathsMatch } from "../../core/plan-path-match";
 import { type ValidationResult, ok, fail } from "./validation-result";
 
 export type ModelFileRead =
@@ -238,6 +239,8 @@ function renderContractProblem(problem: ContractProblem): string {
     .with({ kind: "duplicate-acceptance" }, ({ path }) => `'${path}' is listed twice under '**Acceptance tests:**'`)
     .with({ kind: "supported-domain-not-acceptance" }, ({ path }) =>
       `'**Supported domain:** ${path}' is not one of the acceptance files`)
+    .with({ kind: "unsafe-path" }, ({ path }) =>
+      `'${path}' is not a repository-relative path — a frozen path may not be absolute or contain '..'`)
     .with({ kind: "missing-statement" }, () => "no '**Statement:**' — say what consumers rely on and what is refused")
     .exhaustive();
 }

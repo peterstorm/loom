@@ -10,7 +10,8 @@ import {
   type AcceptanceContract,
   type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
-import { parseArtifactDigest, type ArtifactDigest } from "../../src/core/orchestration-contract";
+
+import { digest, seen } from "../fixtures/acceptance-fixtures";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
@@ -21,12 +22,6 @@ import {
   satisfiedProof,
   taskFixture,
 } from "../fixtures/task-lifecycle";
-
-const digest = (fill: string): ArtifactDigest => {
-  const parsed = parseArtifactDigest(fill.repeat(64));
-  if (!parsed.ok) throw new Error("fixture digest must parse");
-  return parsed.value;
-};
 
 const TYPES = "src/payload-contract.ts";
 const ACCEPTANCE = "tests/payload.acceptance.test.ts";
@@ -93,7 +88,6 @@ function populated(overrides: Partial<TaskGraph> = {}): TaskGraph {
 }
 
 type Observations = ReadonlyMap<string, FrozenPathObservation>;
-const seen = (sha256: ArtifactDigest): FrozenPathObservation => ({ kind: "digest", sha256 });
 const observed = (types: FrozenPathObservation, acceptance: FrozenPathObservation): Observations =>
   new Map([[TYPES, types], [ACCEPTANCE, acceptance]]);
 

@@ -324,6 +324,24 @@ describe("parsePlanModels", () => {
       });
     });
 
+    it("normalizes the types file path like every other frozen path", () => {
+      expect(contract(WELL_FORMED.replace("`engine/src/core/payload-contract.ts`", "`./engine/src/core/payload-contract.ts`")).declaration)
+        .toMatchObject({ kind: "declared", types: { kind: "file", path: "engine/src/core/payload-contract.ts" } });
+    });
+
+    it.each([
+      ["an absolute types file", "**Types file:** `/etc/payload-contract.ts`\n", "/etc/payload-contract.ts"],
+      ["a types file escaping the repository", "**Types file:** `../outside/contract.ts`\n", "../outside/contract.ts"],
+    ])("refuses %s: a frozen path must stay inside the repository", (_name, typesLine, path) => {
+      expect(contract(`${typesLine}**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-001\n**Statement:** s\n`).declaration)
+        .toEqual({ kind: "malformed", problems: [{ kind: "unsafe-path", path }] });
+    });
+
+    it("refuses an acceptance file escaping the repository", () => {
+      expect(contract("**Types file:** none\n**No types reason:** r\n**Acceptance tests:**\n- t/../../x.acceptance.test.ts — AS-001\n**Statement:** s\n").declaration)
+        .toEqual({ kind: "malformed", problems: [{ kind: "unsafe-path", path: "t/../../x.acceptance.test.ts" }] });
+    });
+
     const ACCEPTANCE = "**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-001\n";
     const STATEMENT = "**Statement:** s\n";
     it.each<[string, string, readonly unknown[]]>([

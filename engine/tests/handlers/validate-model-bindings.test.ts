@@ -9,7 +9,7 @@ import {
   checkPlanModelBindings,
   type ModelBindingDeps,
 } from "../../src/handlers/helpers/validate-model-bindings";
-import { pathsMatch } from "../../src/core/plan-paths";
+import { pathsMatch } from "../../src/core/plan-path-match";
 import { parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
 import type { ContractProblem, InvariantOwnership, OwnershipProblem } from "../../src/types";
 

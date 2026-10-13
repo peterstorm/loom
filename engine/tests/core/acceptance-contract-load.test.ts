@@ -88,6 +88,47 @@ describe("acceptance_contracts at the State File load boundary", () => {
         acceptance: [{ path: "tests/load.acceptance.test.ts", anchors: [] }],
       }],
     }), "anchors must be non-empty"],
+    ["a revised freeze with no recorded revision", (graph) => ({
+      ...graph,
+      acceptance_contracts: [{
+        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
+        freeze: { state: "revised", paths: [{ path: "tests/load.acceptance.test.ts", sha256: "a".repeat(64) }] },
+      }],
+    }), "freeze is revised but records no revision"],
+    ["a freeze whose bytes are not the last revision's", (graph) => ({
+      ...graph,
+      acceptance_contracts: [{
+        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
+        freeze: { state: "revised", paths: [{ path: "tests/load.acceptance.test.ts", sha256: "a".repeat(64) }] },
+        revisions: [{
+          revision: 1,
+          reason: "fixed AS-001",
+          previous: [{ path: "tests/load.acceptance.test.ts", sha256: "b".repeat(64) }],
+          paths: [{ path: "tests/load.acceptance.test.ts", sha256: "c".repeat(64) }],
+          revalidatedTaskIds: [],
+        }],
+      }],
+    }), "freeze.paths must equal the last revision's paths"],
+    ["revisions recorded before any freeze", (graph) => ({
+      ...graph,
+      acceptance_contracts: [{
+        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
+        revisions: [{
+          revision: 1,
+          reason: "fixed AS-001",
+          previous: [{ path: "tests/load.acceptance.test.ts", sha256: "b".repeat(64) }],
+          paths: [{ path: "tests/load.acceptance.test.ts", sha256: "c".repeat(64) }],
+          revalidatedTaskIds: [],
+        }],
+      }],
+    }), "revisions precede the freeze"],
+    ["a frozen path escaping the repository", (graph) => ({
+      ...graph,
+      acceptance_contracts: [{
+        ...(graph.acceptance_contracts as Record<string, unknown>[])[0],
+        acceptance: [{ path: "../load.acceptance.test.ts", anchors: ["FR-001"] }],
+      }],
+    }), "freezes '../load.acceptance.test.ts', which is not a repository-relative path"],
   ])("refuses %s", (_name, mutate, message) => {
     const raw = JSON.parse(JSON.stringify(populated())) as Record<string, unknown>;
     expect(parseTaskGraph(mutate(raw))).toMatchObject({ ok: false, error: expect.stringContaining(message) });

@@ -52,7 +52,7 @@ import type {
   ContractTypes,
   PlanContract,
 } from "../types";
-import { normalizePlanPath } from "./plan-path-match";
+import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
 
 // The plan model data shapes live in types.ts (consumers that only need the
@@ -317,7 +317,7 @@ function contractTypes(block: string): Readonly<{ types: ContractTypes | null; p
       : { types: { kind: "none", reason }, problems: [] };
   }
   return reason === null
-    ? { types: { kind: "file", path: file }, problems: [] }
+    ? { types: { kind: "file", path: normalizePlanPath(file) }, problems: [] }
     : { types: null, problems: [{ kind: "reason-with-types-file" }] };
 }
 
@@ -367,10 +367,17 @@ function parseContract(block: string): ContractDeclaration {
     !files.some(({ path }) => path === normalizePlanPath(supportedDomain))
       ? [{ kind: "supported-domain-not-acceptance", path: supportedDomain }]
       : [];
+  // Frozen paths are hashed through `join(root, path)`: only a path that stays
+  // inside the repository may be frozen.
+  const declaredPaths = [...(types?.kind === "file" ? [types.path] : []), ...files.map(({ path }) => path)];
+  const unsafeProblems = declaredPaths
+    .filter((path) => !isRepoRelativePlanPath(path))
+    .map((path): ContractProblem => ({ kind: "unsafe-path", path }));
   const [first, ...rest]: readonly ContractProblem[] = [
     ...typeProblems,
     ...acceptanceProblems,
     ...domainProblems,
+    ...unsafeProblems,
     ...(statement === null ? [{ kind: "missing-statement" } as const] : []),
   ];
   if (first !== undefined) return { kind: "malformed", problems: [first, ...rest] };

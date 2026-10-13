@@ -18,7 +18,7 @@ import {
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { parseSpec } from "../../src/core/parse-spec";
-import { parseArtifactDigest, type ArtifactDigest } from "../../src/core/orchestration-contract";
+import { digest } from "../fixtures/acceptance-fixtures";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
@@ -30,12 +30,6 @@ import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-
-const digest = (fill: string): ArtifactDigest => {
-  const parsed = parseArtifactDigest(fill.repeat(64));
-  if (!parsed.ok) throw new Error("fixture digest must parse");
-  return parsed.value;
-};
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>

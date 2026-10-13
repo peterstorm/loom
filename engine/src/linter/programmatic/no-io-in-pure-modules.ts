@@ -156,6 +156,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // share with plan validation.
   "engine/src/core/acceptance-contract.ts",
   "engine/src/core/plan-path-match.ts",
+  "engine/src/core/task-revalidation.ts",
+  "engine/src/core/contract-revision.ts",
+  "engine/src/core/wave-gate-registration.ts",
   // Standalone read coverage (ADR-0022): the obligation, page verification and
   // admission decision, plus the deterministic diff the obligation is frozen
   // from. The Context Packet projection imports both.

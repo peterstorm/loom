@@ -1,17 +1,13 @@
 /**
- * How a path a plan declares (a lifecycle machine file, an invariant's owner,
- * siblings and matrix test) is matched against the paths Tasks declare in
- * their `file_list`. One rule, shared by plan-binding validation, the Wave
- * Gate's lifecycle artifact check and the implementation brief, so a path the
+ * The roles a Task's `file_list` plays in an owned invariant family (owner,
+ * sibling entry point, matrix test), matched with the one path rule in
+ * `plan-path-match.ts` that plan-binding validation, the Wave Gate's lifecycle
+ * artifact check and the implementation brief all share — so a path the
  * validator accepted is the same path the brief tells a Task it changes.
  */
 
 import type { InvariantOwnership, SiblingEntryPoint } from "../types";
 import { pathsMatch } from "./plan-path-match";
-
-// The matching rule itself is a leaf (no plan shapes), so modules the plan
-// model depends on can share it without an import cycle.
-export { normalizePlanPath, pathsMatch } from "./plan-path-match";
 
 export type OwnedInvariant = Extract<InvariantOwnership, { kind: "owned" }>;
 

@@ -15,7 +15,8 @@
 
 import {
   CONTRACT_ID,
-  coveredAnchors,
+  contractClaimants,
+  contractWave,
   frozenPathDigests,
   renderFrozenPathProblems,
   type AcceptanceContract,
@@ -110,14 +111,12 @@ export function reviseAcceptanceContract(
       "those files until its Wave Gate observes them red");
   }
   const completedWaves = new Set((graph.wave_gate_history ?? []).map(({ wave: completed }) => completed));
-  const contractWave = graph.tasks.find(({ id }) => id === contract.contractTask)?.wave;
-  if (contractWave === undefined || !completedWaves.has(contractWave)) {
-    return refuse("contract-wave-open", `${contract.id}'s contract Wave ${contractWave ?? "?"} has not completed; ` +
+  const writtenIn = contractWave(contract, graph.tasks);
+  if (writtenIn === undefined || !completedWaves.has(writtenIn)) {
+    return refuse("contract-wave-open", `${contract.id}'s contract Wave ${writtenIn ?? "?"} has not completed; ` +
       "finish it before revising what it froze");
   }
-  const covered = coveredAnchors(contract);
-  const claimants = graph.tasks.filter((task) =>
-    task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => covered.includes(anchor)));
+  const claimants = contractClaimants(contract, graph.tasks);
   const settled = claimants.filter((task) => completedWaves.has(task.wave));
   if (settled.length > 0) {
     return refuse("claimant-completed", `${contract.id} has claimants in completed Waves, verified against the frozen bytes: ` +

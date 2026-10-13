@@ -31,8 +31,8 @@ import {
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
-import { isPlainRecord } from "./plain-record";
-import { normalizePlanPath, pathsMatch } from "./plan-path-match";
+import { exactRecordErrors, isPlainRecord, parseExactRecord } from "./plain-record";
+import { isRepoRelativePlanPath, normalizePlanPath, pathsMatch } from "./plan-path-match";
 import type { JunitTestcasesResult, ReportTestcaseOutcome } from "./structured-test-report";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +62,7 @@ export type ContractProblem =
   | Readonly<{ kind: "invalid-anchor"; path: string; anchor: string }>
   | Readonly<{ kind: "duplicate-acceptance"; path: string }>
   | Readonly<{ kind: "supported-domain-not-acceptance"; path: string }>
+  | Readonly<{ kind: "unsafe-path"; path: string }>
   | Readonly<{ kind: "missing-statement" }>;
 
 /**
@@ -220,6 +221,24 @@ function anchorClaimants(
   return tasks.filter((task) => task.id !== contract.contractTask && (task.spec_anchors ?? []).includes(anchor));
 }
 
+/** The Wave of a contract's contract Task; undefined when the Task is not in the roster. */
+export function contractWave(
+  contract: Pick<AcceptanceContract, "contractTask">,
+  tasks: readonly ContractTaskView[],
+): number | undefined {
+  return tasks.find(({ id }) => id === contract.contractTask)?.wave;
+}
+
+/** The Tasks that claim any Requirement the contract covers, other than its contract Task. */
+export function contractClaimants<T extends ContractTaskView>(
+  contract: Pick<AcceptanceContract, "contractTask" | "acceptance">,
+  tasks: readonly T[],
+): readonly T[] {
+  const covered = coveredAnchors(contract);
+  return tasks.filter((task) =>
+    task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => covered.includes(anchor)));
+}
+
 /** Each covered anchor's completion Wave; an anchor nobody claims is absent. */
 function dueWaves(contract: AcceptanceContract, tasks: readonly ContractTaskView[]): Readonly<Record<string, number>> {
   return freeze(Object.fromEntries(coveredAnchors(contract).flatMap((anchor) => {
@@ -291,7 +310,7 @@ export function redWindowTaskIds(
 ): ReadonlySet<string> {
   const ids = new Set<string>();
   for (const contract of contracts) {
-    const start = tasks.find(({ id }) => id === contract.contractTask)?.wave;
+    const start = contractWave(contract, tasks);
     if (start === undefined) continue;
     const end = Math.max(start, ...Object.values(dueWaves(contract, tasks)));
     for (const task of tasks) if (task.wave >= start && task.wave <= end) ids.add(task.id);
@@ -369,14 +388,14 @@ export function acceptanceExpectation(
   const owed: ContractGateExpectation[] = [];
   const unobservable: Readonly<{ contract: string; reason: string }>[] = [];
   for (const contract of contracts) {
-    const contractWave = tasks.find(({ id }) => id === contract.contractTask)?.wave;
-    if (contractWave === undefined) {
+    const writtenIn = contractWave(contract, tasks);
+    if (writtenIn === undefined) {
       unobservable.push(freeze({ contract: contract.id, reason: `contract Task ${contract.contractTask} is not in the TaskGraph` }));
       continue;
     }
-    if (wave < contractWave) continue;
+    if (wave < writtenIn) continue;
     const base = { contract: contract.id, files: contract.acceptance, dueWave: dueWaves(contract, tasks) };
-    if (wave === contractWave) {
+    if (wave === writtenIn) {
       owed.push(freeze({ ...base, phase: "red" }));
       continue;
     }
@@ -384,7 +403,7 @@ export function acceptanceExpectation(
       case "awaiting-red":
         unobservable.push(freeze({
           contract: contract.id,
-          reason: `Wave ${contractWave} gated without observing ${contract.id}'s acceptance RED, so nothing is frozen to turn green`,
+          reason: `Wave ${writtenIn} gated without observing ${contract.id}'s acceptance RED, so nothing is frozen to turn green`,
         }));
         break;
       case "frozen":
@@ -755,12 +774,8 @@ export function frozenPathsToObserve(contracts: readonly AcceptanceContract[]): 
 type Parsed<T> = DomainResult<T, string>;
 
 function exactRecord(raw: unknown, keys: readonly string[], path: string): Parsed<Record<string, unknown>> {
-  if (!isPlainRecord(raw)) return err(`${path} must be a plain object`);
-  const surplus = Object.keys(raw).filter((key) => !keys.includes(key));
-  const missing = keys.filter((key) => !Object.prototype.hasOwnProperty.call(raw, key));
-  if (surplus.length > 0) return err(`${path} has unexpected field(s): ${surplus.sort().join(", ")}`);
-  if (missing.length > 0) return err(`${path} is missing field(s): ${missing.join(", ")}`);
-  return ok(raw);
+  const record = parseExactRecord(raw, keys, path);
+  return record.ok ? ok(record.value) : err(exactRecordErrors(record, path, "a plain object").join("; "));
 }
 
 const text = (raw: unknown, path: string): Parsed<string> =>
@@ -909,7 +924,9 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
   if (!acceptance.ok) return acceptance;
   const files = acceptance.value;
   const paths = frozenPaths({ types: types.value, acceptance: files });
-  if (new Set(paths).size !== paths.length) return err(`${path} freezes one path twice`);
+  if (new Set(paths.map(normalizePlanPath)).size !== paths.length) return err(`${path} freezes one path twice`);
+  const unsafe = paths.find((frozen) => !isRepoRelativePlanPath(frozen));
+  if (unsafe !== undefined) return err(`${path} freezes '${unsafe}', which is not a repository-relative path`);
   if (fields.supportedDomain !== null && !files.some(({ path: file }) => file === fields.supportedDomain)) {
     return err(`${path}.supportedDomain must be null or one of the acceptance files`);
   }
@@ -921,6 +938,15 @@ function parseContract(raw: unknown, path: string): Parsed<AcceptanceContract> {
     const revision = parseRevision(value, `${path}.revisions[${index}]`, index, paths);
     if (!revision.ok) return revision;
     revisions.push(revision.value);
+  }
+  // The freeze and its revision history must tell one story: a revision is
+  // recorded only after the freeze, and the bytes frozen now are the bytes
+  // the last revision stamped.
+  const last = revisions.at(-1);
+  if (last === undefined && frozen.value.state === "revised") return err(`${path}.freeze is revised but records no revision`);
+  if (last !== undefined && frozen.value.state === "awaiting-red") return err(`${path}.revisions precede the freeze`);
+  if (last !== undefined && frozen.value.state !== "awaiting-red" && !canonicalStructuralEquals(frozen.value.paths, last.paths)) {
+    return err(`${path}.freeze.paths must equal the last revision's paths`);
   }
   return ok(freeze({
     schemaVersion: 1,
@@ -944,7 +970,9 @@ export function parseAcceptanceContracts(raw: unknown): Parsed<readonly Acceptan
   const ids = contracts.value.map(({ id }) => id);
   if (new Set(ids).size !== ids.length) return err("acceptance_contracts must have unique ids");
   const paths = contracts.value.flatMap((contract) => frozenPaths(contract));
-  if (new Set(paths).size !== paths.length) return err("acceptance_contracts must not freeze one path in two contracts");
+  if (new Set(paths.map(normalizePlanPath)).size !== paths.length) {
+    return err("acceptance_contracts must not freeze one path in two contracts");
+  }
   return contracts;
 }
 

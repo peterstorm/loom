@@ -44,3 +44,31 @@ The remediation runs against `run.pr84-review-src-1`; every changed path outside
 ## Validation
 
 - `npm --prefix engine run verify` (typecheck, full Vitest suite, shell suites)
+
+## Round 2
+
+- **Review runs:** `run.pr84-review-src-2` (24 `engine/src/**` files) and `run.pr84-review-rest-2` (40 test/doc/plan files), against `60c9639a`.
+- **Adjudication:** 0 critical emitted, 0 surviving, 0 refuted; 13 + 10 advisories.
+- **Policy (published, DECLARED):** `run.pr84-policy-src-2` (`f80d9dde…1c47`), `run.pr84-policy-rest-2` (`d354d4cc…6b5a`).
+
+| Run | Finding | Decision | Fix / reason |
+|---|---|---|---|
+| src | silent-failure-hunter-1 | dismissed | Same documented report-only excusal limit; no engine observation attributes an exit cause beyond the report |
+| src | type-design-analyzer-1 | accepted | `parseContract` refuses `revised` without a revision, revisions before the freeze, and freeze paths that differ from the last revision's |
+| src | type-design-analyzer-2 | dismissed | No illegal state left: red has no roster; green `roster: null` is a legal named state read through `recordsRoster` |
+| src | type-design-analyzer-3, architecture-tech-lead-2 | accepted | Every contract path normalized at plan parse; absolute or `..` paths refused (`unsafe-path`) in the plan and the persisted parser; duplicates compared normalized |
+| src | architecture-tech-lead-1 | deferred | One contract-role function across five sites is a deepen-session interface change |
+| src | architecture-tech-lead-3 | accepted | `contract-revision.ts`, `task-revalidation.ts`, `wave-gate-registration.ts` enrolled in `DEFAULT_PURE_MODULES`; machine-purity closure green |
+| src | architecture-tech-lead-4 | deferred | Module split, as in round 1 |
+| src | code-simplifier-1 | accepted | `exactRecord` delegates to `plain-record`'s `parseExactRecord`/`exactRecordErrors` |
+| src | code-simplifier-2 | accepted | `contractWave` and `contractClaimants` owned by `acceptance-contract.ts`, reused by Contract Revision |
+| src | code-simplifier-3 | accepted | Receipt parser judges once |
+| src | code-simplifier-4 | accepted | Double cast and stray blank line removed |
+| src | code-simplifier-5 | accepted | `plan-paths` re-export deleted; callers import `plan-path-match` |
+| rest | code-reviewer-1, code-simplifier-2 | accepted | Imports before helpers in `acceptance-contract.test.ts` |
+| rest | silent-failure-hunter-1 | accepted | `recordedExpectation` throws on an unparseable recorded expectation |
+| rest | comment-analyzer-1, code-simplifier-4 | accepted | `revise-contract.test.ts` hashes through `sha256Hex` |
+| rest | comment-analyzer-2 | accepted | Red-window prose: authored regression waivers are kept |
+| rest | code-simplifier-1 | accepted | Shared `digest`/`seen` fixtures (`tests/fixtures/acceptance-fixtures.ts`); scenario Task builders stay local |
+| rest | code-simplifier-3, -5 | accepted | `acceptancePath` and `completionOutcome` helpers |
+| rest | code-simplifier-6 | accepted | Two overlapping residual bullets merged; refusal lists stay per audience |

@@ -257,7 +257,8 @@ them, and only then do other tasks write the code that turns them green.
    Requirements, and *due* from then on. A pending testcase's failure is
    excused only at the Wave Gate — never in a task's own run. So every task
    from the contract Wave through the last Wave completing a covered
-   Requirement gets the engine-only regression waiver `acceptance-red-window`,
+   Requirement that has no regression waiver of its own (an authored waiver
+   is kept) gets the engine-only regression waiver `acceptance-red-window`,
    and the Wave Gate's engine-run suite (which knows what is pending) is their
    regression authority. Every other failure still fails the gate.
 4. **Claimant Waves expect GREEN by Requirement.** Each due testcase must be
@@ -347,10 +348,9 @@ pending failures — into its brief.
   after the report was written — is invisible to that judgment and would be
   absorbed. So the test runner must be its own project check, or the last
   step of one, with no thresholds that fail the exit code: then the report
-  accounts for every way the exit can go non-zero.
-- **A check that runs the tests and then other steps** stops at the failing
-  test step in the contract Wave, so its later steps go unobserved there —
-  the same reason to keep the runner its own check or the last step.
+  accounts for every way the exit can go non-zero. A runner followed by
+  other steps also stops at the failing test step in the contract Wave, so
+  those later steps would go unobserved there.
 
 - **Import discipline is advisory-plus-lint.** "Dependents import the machine,
   never re-implement transitions" is enforced only where a paired checkable

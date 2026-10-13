@@ -11,6 +11,14 @@ export function normalizePlanPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/** Whether a normalized plan path stays inside the repository: relative, with
+ *  no `..` segment, so `join(root, path)` cannot leave the root. */
+export function isRepoRelativePlanPath(p: string): boolean {
+  const normalized = normalizePlanPath(p);
+  return normalized !== "" && !normalized.startsWith("/") && !/^[A-Za-z]:\//.test(normalized) &&
+    !normalized.split("/").includes("..");
+}
+
 /**
  * One-directional, suffix-tolerant match: the task path may be an absolute or
  * deeper form of the declared plan path, never the reverse — a bare-basename

@@ -176,6 +176,18 @@ const contractFreeze = (stage: ContractStage): AcceptanceContract["freeze"] => {
   }
 };
 
+/** The revision that produced a revised freeze: the operator re-stamped the
+ *  acceptance file over bytes the contract Wave had frozen earlier. */
+const contractRevisions = (stage: ContractStage): AcceptanceContract["revisions"] => stage === "after-revision"
+  ? [{
+      revision: 1,
+      reason: "AS-002 asserted the wrong value",
+      previous: [{ path: ACCEPTANCE_FILE, sha256: sha256Hex("superseded bytes") as ArtifactDigest }],
+      paths: [{ path: ACCEPTANCE_FILE, sha256: ACCEPTANCE_DIGEST }],
+      revalidatedTaskIds: [],
+    }]
+  : [];
+
 /** T1 writes the contract in Wave 1; T2 claims AS-001 in Wave 2; T3 claims AS-002 in Wave 3. */
 function contractTasks(stage: ContractStage): Task[] {
   const contractWave = stage === "contract-wave";
@@ -287,7 +299,7 @@ function buildFixture(mode: string, report: boolean, stage: ContractStage | null
     wave_gates: {},
     verification_manifest: manifest(mode, report),
     active_wave_gate: active,
-    ...(stage === null ? {} : { acceptance_contracts: [{ ...CONTRACT, freeze: contractFreeze(stage) }] }),
+    ...(stage === null ? {} : { acceptance_contracts: [{ ...CONTRACT, freeze: contractFreeze(stage), revisions: contractRevisions(stage) }] }),
   };
   const statePath = join(root, ".claude/state/active_task_graph.json");
   write(root, ".claude/state/active_task_graph.json", JSON.stringify(graph, null, 2));
@@ -725,13 +737,16 @@ describe("modern Wave completion suite shell", () => {
   });
 
   describe("acceptance contracts at the Wave Gate", () => {
+    /** The project check's recorded outcome in the installed receipt. */
+    const completionOutcome = (graph: TaskGraph) =>
+      graph.active_wave_completion_suite?.checks.find(({ checkId }) => checkId === "project:completion")?.outcome;
+
     it("accepts the contract Wave's expected RED and stamps the Acceptance Freeze with the receipt", async () => {
       const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
       const result = await ensure(f);
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
       const graph = f.manager.load();
-      expect(graph.active_wave_completion_suite?.checks.find(({ checkId }) => checkId === "project:completion")?.outcome)
-        .toMatchObject({ exitCode: 1 });
+      expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
       expect(graph.acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
       expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
     });
@@ -756,8 +771,7 @@ describe("modern Wave completion suite shell", () => {
       const result = await ensure(f);
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
       const graph = f.manager.load();
-      expect(graph.active_wave_completion_suite?.checks.find(({ checkId }) => checkId === "project:completion")?.outcome)
-        .toMatchObject({ exitCode: 1 });
+      expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
       expect(graph.acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
     });
 

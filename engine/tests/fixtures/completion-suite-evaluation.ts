@@ -11,12 +11,16 @@ import {
 import { isPlainRecord } from "../../src/core/plain-record";
 
 /** The expectation a raw result recorded, or the empty one it implies when it
- *  carries no acceptance observation (every result with no contract in play). */
+ *  records no acceptance (every result with no contract in play). A recorded
+ *  expectation that does not parse is a broken fixture, never "owes nothing". */
 export function recordedExpectation(result: unknown): AcceptanceExpectation {
-  const wave = isPlainRecord(result) && typeof result.wave === "number" ? result.wave : 1;
-  const acceptance = isPlainRecord(result) && isPlainRecord(result.acceptance) ? result.acceptance : null;
-  const recorded = acceptance === null ? null : parseAcceptanceExpectation(acceptance.expectation);
-  return recorded?.ok ? recorded.value : emptyAcceptanceExpectation(wave);
+  if (!isPlainRecord(result) || !Object.hasOwn(result, "acceptance")) {
+    return emptyAcceptanceExpectation(isPlainRecord(result) && typeof result.wave === "number" ? result.wave : 1);
+  }
+  const acceptance = result.acceptance;
+  const recorded = parseAcceptanceExpectation(isPlainRecord(acceptance) ? acceptance.expectation : undefined);
+  if (!recorded.ok) throw new Error(`fixture result records an unparseable acceptance expectation: ${recorded.error}`);
+  return recorded.value;
 }
 
 /** Judge a result under the expectation it recorded: the stance of every test

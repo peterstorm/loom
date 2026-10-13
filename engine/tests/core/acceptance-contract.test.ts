@@ -20,15 +20,12 @@ import {
   type AcceptanceReportFacts,
   type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
-import type { ArtifactDigest } from "../../src/core/orchestration-contract";
-
-const seen = (sha256: ArtifactDigest): FrozenPathObservation => ({ kind: "digest", sha256 });
-const observations = (entries: readonly (readonly [string, FrozenPathObservation])[]): ReadonlyMap<string, FrozenPathObservation> =>
-  new Map(entries);
 import type { ReportTestcase } from "../../src/core/structured-test-report";
 import type { PlanContract } from "../../src/types";
+import { digest, seen } from "../fixtures/acceptance-fixtures";
 
-const digest = (char: string): ArtifactDigest => char.repeat(64) as ArtifactDigest;
+const observations = (entries: readonly (readonly [string, FrozenPathObservation])[]): ReadonlyMap<string, FrozenPathObservation> =>
+  new Map(entries);
 const REPORT = digest("e");
 const ACCEPTANCE = "engine/tests/acceptance/payload.acceptance.test.ts";
 const TYPES = "engine/src/core/payload-contract.ts";
@@ -132,7 +129,7 @@ describe("acceptanceExpectation — what each Wave Gate owes a contract", () => 
     // RED carries no roster on the wire either: the parser refuses one.
     const withRoster = { ...red, contracts: [{ ...red.contracts[0], roster: null }] };
     expect(parseAcceptanceExpectation(JSON.parse(JSON.stringify(red)))).toEqual({ ok: true, value: red });
-    expect(parseAcceptanceExpectation(withRoster)).toMatchObject({ ok: false, error: expect.stringContaining("unexpected field(s): roster") });
+    expect(parseAcceptanceExpectation(withRoster)).toMatchObject({ ok: false, error: expect.stringContaining("contracts[0].roster is not allowed") });
     expect(acceptanceExpectation([contract(FROZEN)], TASKS, 2).contracts).toMatchObject([
       { contract: "CT-1", phase: "green", roster: ROSTER },
     ]);
@@ -281,10 +278,16 @@ describe("frozenPathDrift — bytes that changed outside any Task", () => {
 
 describe("wire parsers — contracts and report facts round-trip exactly", () => {
   it("round-trips every freeze state and refuses surplus or contradictory fields", () => {
-    for (const freeze of [{ state: "awaiting-red" } as const, FROZEN, { state: "revised", paths: FROZEN_PATHS } as const]) {
+    for (const freeze of [{ state: "awaiting-red" } as const, FROZEN]) {
       const value = [contract(freeze)];
       expect(parseAcceptanceContracts(JSON.parse(JSON.stringify(value)))).toEqual({ ok: true, value });
     }
+    // A revised freeze is only ever the product of a recorded revision.
+    const revised: AcceptanceContract = {
+      ...contract({ state: "revised", paths: FROZEN_PATHS }),
+      revisions: [{ revision: 1, reason: "AS-003 was wrong", previous: FROZEN_PATHS, paths: FROZEN_PATHS, revalidatedTaskIds: [] }],
+    };
+    expect(parseAcceptanceContracts(JSON.parse(JSON.stringify([revised])))).toEqual({ ok: true, value: [revised] });
     expect(parseAcceptanceContracts([{ ...contract(), surplus: true }])).toMatchObject({ ok: false });
     expect(parseAcceptanceContracts([contract(), contract()])).toMatchObject({ ok: false });
     expect(parseAcceptanceContracts([{ ...contract(), freeze: { state: "frozen", wave: 1, paths: [], roster: ROSTER } }])).toMatchObject({ ok: false });
