@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import amendSpecTrace from "../../../src/handlers/helpers/amend-spec-trace";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import amendSpecTrace, { createAmendSpecTraceHandler } from "../../../src/handlers/helpers/amend-spec-trace";
 import { parseSpec } from "../../../src/core/parse-spec";
 import { installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
@@ -10,6 +10,7 @@ import { StateManager, parseTaskGraph } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
 import { AMENDMENT_SPEC } from "../../fixtures/amendment-spec";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 import { activeWaveGateFixture, completedWaveGateFixture, taskFixture } from "../../fixtures/task-lifecycle";
 import { WHITELISTED_HELPERS } from "../../../src/config";
 import { guardStateFileDecision } from "../../../src/core/guard-state-file";
@@ -19,29 +20,10 @@ const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("fixture spec must parse");
 const FR_002_HASH = parsedSpec.value.frs[1]!.contentHash;
 
-/**
- * The real ledger, except that a test can make a subagent appear from the Nth
- * observation on: the only way to land between the helper's pre-lock check and
- * its in-lock re-check.
- */
-const ledger = vi.hoisted(() => ({ activeFromObservation: null as number | null, observations: 0 }));
-vi.mock("../../../src/machine/ledger", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../src/machine/ledger")>();
-  return {
-    ...actual,
-    anyActiveSubagent: (path: string) => {
-      ledger.observations += 1;
-      return (ledger.activeFromObservation !== null && ledger.observations >= ledger.activeFromObservation) ||
-        actual.anyActiveSubagent(path);
-    },
-  };
-});
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
 beforeEach(() => {
-  ledger.activeFromObservation = null;
-  ledger.observations = 0;
   inheritedEnvironment = ["LOOM_STATE_PATH", "LOOM_SUBAGENT_DIR"].map((key) => [key, process.env[key]] as const);
 });
 afterEach(() => {
@@ -152,12 +134,12 @@ describe("amend-spec-trace helper", () => {
   it("re-checks for a subagent under the lock and refuses without writing when one appeared", async () => {
     const { statePath } = fixture();
     const before = readFileSync(statePath, "utf8");
-    ledger.activeFromObservation = 2;
+    const subagent = appearsUnderTheLock();
 
-    const result = await amendSpecTrace(input(["FR-002"]), []);
+    const result = await createAmendSpecTraceHandler(subagent.probe)(input(["FR-002"]), []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") expect(result.message).toContain("became active before the spec trace amendment could commit");
-    expect(ledger.observations).toBe(2);
+    expect(subagent.observations()).toBe(2);
     expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 

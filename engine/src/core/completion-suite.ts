@@ -807,6 +807,21 @@ function parseOptionalAcceptance(raw: unknown, path: string): Parsed<AcceptanceO
     : success(undefined);
 }
 
+/** What a recorded acceptance observation decides: the checks whose non-zero
+ *  exit it excuses and the failures it records. An absent observation — a gate
+ *  owing no contract anything — excuses nothing and records nothing. The one
+ *  judgment the evaluator and the receipt parser share. */
+type RecordedAcceptanceVerdict = Readonly<{
+  excused: ReadonlySet<string>;
+  failures: readonly AcceptanceFailure[];
+}>;
+
+function recordedAcceptanceVerdict(acceptance: AcceptanceObservation | undefined): RecordedAcceptanceVerdict {
+  if (acceptance === undefined) return freeze({ excused: new Set<string>(), failures: freezeArray([]) });
+  const judgment = judgeAcceptance(acceptance.expectation, acceptance.facts);
+  return freeze({ excused: new Set(judgment.excusedCheckIds), failures: judgment.failures });
+}
+
 /** Facts whose check produced no report with the digest the facts were read from. */
 function unboundFactChecks(
   checks: readonly CompletionCheckResult[],
@@ -937,12 +952,11 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
   return total(() => {
     const acceptance = parseOptionalAcceptance(raw, "acceptedReceipt");
     if (!acceptance.ok) return acceptance;
-    // One judgment decides both which non-zero exits are excused and whether
-    // the receipt records failures it could never have been accepted with.
-    const judgment = acceptance.value === undefined
-      ? null
-      : judgeAcceptance(acceptance.value.expectation, acceptance.value.facts);
-    const excused: ReadonlySet<string> = new Set(judgment?.excusedCheckIds ?? []);
+    // The receipt proves itself: its own recorded observation decides which
+    // non-zero exits are excused and whether it carries failures it could
+    // never have been accepted with.
+    const verdict = recordedAcceptanceVerdict(acceptance.value);
+    const excused = verdict.excused;
     const envelope = parseExactWaveCompletionEnvelope(raw, {
       path: "acceptedReceipt",
       expectedKind: "accepted-wave-completion-suite",
@@ -962,7 +976,7 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
     if (acceptance.value !== undefined) {
       const unbound = unboundFactChecks(envelope.value.checks, acceptance.value.facts);
       if (unbound.length > 0) return failure([`acceptedReceipt.acceptance facts are unbound for ${unbound.join(", ")}`]);
-      if (judgment !== null && judgment.failures.length > 0) {
+      if (verdict.failures.length > 0) {
         return failure(["acceptedReceipt.acceptance records failures an accepted receipt cannot carry"]);
       }
     }
@@ -1135,8 +1149,8 @@ export function evaluateWaveCompletionSuite(
 
   const infrastructureFailures: CompletionInfrastructureFailure[] = [];
   const semanticFailures: CompletionSemanticFailure[] = [];
-  const judgment = judgeAcceptance(recordedExpectation, recorded?.facts ?? []);
-  const excused = new Set(judgment.excusedCheckIds);
+  const verdict = recordedAcceptanceVerdict(recorded);
+  const excused = verdict.excused;
   if (authorityFailures.length === 0) {
     for (const resultCheck of result.value.checks) {
       const expected = expectedById.get(resultCheck.checkId)!;
@@ -1173,11 +1187,11 @@ export function evaluateWaveCompletionSuite(
         })
         .exhaustive();
     }
-    if (judgment.failures.length > 0) {
+    if (verdict.failures.length > 0) {
       semanticFailures.push(freeze({
         kind: "acceptance-rejected",
         checkId: acceptanceCheckId(authority.value, recorded?.facts ?? []),
-        failures: asNonEmpty(freezeArray(judgment.failures)),
+        failures: asNonEmpty(freezeArray(verdict.failures)),
       }));
     }
   }

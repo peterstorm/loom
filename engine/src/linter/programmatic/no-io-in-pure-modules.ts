@@ -154,7 +154,15 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // Acceptance Contracts (G1): the plan shapes types.ts re-exports, the Wave
   // Gate's RED/GREEN judgment and the freeze, plus the path-matching leaf they
   // share with plan validation.
-  "engine/src/core/acceptance-contract.ts",
+  "engine/src/core/acceptance-contract/index.ts",
+  "engine/src/core/acceptance-contract/kernel.ts",
+  "engine/src/core/acceptance-contract/model.ts",
+  "engine/src/core/acceptance-contract/tasks.ts",
+  "engine/src/core/acceptance-contract/gate.ts",
+  "engine/src/core/acceptance-contract/freeze.ts",
+  "engine/src/core/acceptance-contract/wire.ts",
+  "engine/src/core/acceptance-contract/binding.ts",
+  "engine/src/core/task-dependencies.ts",
   "engine/src/core/plan-path-match.ts",
   "engine/src/core/task-revalidation.ts",
   "engine/src/core/contract-revision.ts",

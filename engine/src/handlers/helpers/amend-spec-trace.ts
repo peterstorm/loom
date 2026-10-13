@@ -19,46 +19,53 @@ function outcomeMessage(outcome: SpecTraceAmendmentOutcome): string {
     `Wave ${wave} review authority${retired} retired. Start the Wave Gate to review the amended scope.\n`;
 }
 
-const handler: HookHandler = async (stdin, args) => {
-  if (args.length > 0) return { kind: "error", message: "Usage: helper amend-spec-trace < amendment.json" };
+/** The shell's one collaborator besides the State File: whether a subagent is
+ *  active for this TaskGraph. Checked before the lock and again under it, so a
+ *  subagent that starts in between still refuses the amendment. */
+export type SubagentActivity = (statePath: string) => boolean;
 
-  let input: unknown;
-  try {
-    input = JSON.parse(stdin);
-  } catch (error) {
-    return {
-      kind: "error",
-      message: `Invalid spec trace amendment JSON: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+export function createAmendSpecTraceHandler(subagentActive: SubagentActivity = anyActiveSubagent): HookHandler {
+  return async (stdin, args) => {
+    if (args.length > 0) return { kind: "error", message: "Usage: helper amend-spec-trace < amendment.json" };
 
-  const statePath = taskGraphPath();
-  const manager = StateManager.fromPath(statePath);
-  if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
-  if (anyActiveSubagent(statePath)) {
-    return {
-      kind: "error",
-      message: "Spec trace amendment refused while a subagent is active for this TaskGraph; wait for it to settle and retry",
-    };
-  }
+    let input: unknown;
+    try {
+      input = JSON.parse(stdin);
+    } catch (error) {
+      return {
+        kind: "error",
+        message: `Invalid spec trace amendment JSON: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
 
-  try {
-    // Observed before the lock, like population: the locked transform reads no
-    // mutable source bytes, and the core refuses if spec_file moved meanwhile.
-    const specIndex = observeSpecIndex(manager.load().spec_file);
-    const outcome = await manager.updateAndReturn((locked) => {
-      if (anyActiveSubagent(statePath)) {
-        throw new Error("A subagent became active before the spec trace amendment could commit");
-      }
-      const amended = amendSpecTrace(locked, input, specIndex);
-      if (!amended.ok) throw new Error(amended.error.message);
-      return { state: amended.value.graph, value: amended.value };
-    });
-    process.stderr.write(outcomeMessage(outcome));
-    return { kind: "passthrough" };
-  } catch (error) {
-    return { kind: "error", message: error instanceof Error ? error.message : String(error) };
-  }
-};
+    const statePath = taskGraphPath();
+    const manager = StateManager.fromPath(statePath);
+    if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
+    if (subagentActive(statePath)) {
+      return {
+        kind: "error",
+        message: "Spec trace amendment refused while a subagent is active for this TaskGraph; wait for it to settle and retry",
+      };
+    }
 
-export default handler;
+    try {
+      // Observed before the lock, like population: the locked transform reads no
+      // mutable source bytes, and the core refuses if spec_file moved meanwhile.
+      const specIndex = observeSpecIndex(manager.load().spec_file);
+      const outcome = await manager.updateAndReturn((locked) => {
+        if (subagentActive(statePath)) {
+          throw new Error("A subagent became active before the spec trace amendment could commit");
+        }
+        const amended = amendSpecTrace(locked, input, specIndex);
+        if (!amended.ok) throw new Error(amended.error.message);
+        return { state: amended.value.graph, value: amended.value };
+      });
+      process.stderr.write(outcomeMessage(outcome));
+      return { kind: "passthrough" };
+    } catch (error) {
+      return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+}
+
+export default createAmendSpecTraceHandler();

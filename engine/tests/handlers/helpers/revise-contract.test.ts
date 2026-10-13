@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import reviseContract from "../../../src/handlers/helpers/revise-contract";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import reviseContract, { createReviseContractHandler } from "../../../src/handlers/helpers/revise-contract";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { contentDigest } from "../../fixtures/acceptance-fixtures";
 import { newWaveGate } from "../../../src/core/wave-gate-model";
@@ -12,29 +12,13 @@ import { guardStateFileDecision } from "../../../src/core/guard-state-file";
 import { KNOWN_HANDLERS, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import type { Task } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 import { completedWaveGateFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
 
-/** The real ledger, except that a test can make a subagent appear from the
- *  Nth observation on: the only way to land between the pre-lock check and
- *  the in-lock re-check. */
-const ledger = vi.hoisted(() => ({ activeFromObservation: null as number | null, observations: 0 }));
-vi.mock("../../../src/machine/ledger", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../src/machine/ledger")>();
-  return {
-    ...actual,
-    anyActiveSubagent: (path: string) => {
-      ledger.observations += 1;
-      return (ledger.activeFromObservation !== null && ledger.observations >= ledger.activeFromObservation) ||
-        actual.anyActiveSubagent(path);
-    },
-  };
-});
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
 beforeEach(() => {
-  ledger.activeFromObservation = null;
-  ledger.observations = 0;
   inheritedEnvironment = ["LOOM_STATE_PATH", "LOOM_SUBAGENT_DIR"].map((key) => [key, process.env[key]] as const);
 });
 afterEach(() => {
@@ -173,10 +157,11 @@ describe("revise-contract helper", () => {
     const { root, statePath } = fixture();
     write(root, TYPES, "export type Payload = { readonly id: number };\n");
     const before = readFileSync(statePath, "utf8");
-    ledger.activeFromObservation = 2;
+    const subagent = appearsUnderTheLock();
 
-    const result = await reviseContract("", ARGS);
+    const result = await createReviseContractHandler(subagent.probe)("", ARGS);
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("became active before the Contract Revision") });
+    expect(subagent.observations()).toBe(2);
     expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 
