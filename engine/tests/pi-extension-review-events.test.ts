@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
+import { recordedSubagentEvent, replayRecordedEvent } from "./fixtures/pi-recorded/recorded-subagent-result";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import {
   createImplementationAttemptAuthority,
@@ -684,6 +685,36 @@ describe("Pi extension review tool_result integration", () => {
 
     expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
+  });
+
+  it("captures a REAL recorded Pi tool_result through the extension handler, byte-exactly", async () => {
+    // Every other case here hand-builds its event. This one replays a code-reviewer
+    // result Pi actually recorded — spawn input, summary content, routing/usage,
+    // 90 intermediate messages, a final thinking block beside the payload — so a
+    // Pi envelope drift breaks live capture here, not only in production.
+    const event = recordedSubagentEvent();
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-recorded-tool-result");
+    const nativeId = await rosterId(event.toolCallId, 0, event.input.agent);
+    expect((await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    })).ok).toBe(true);
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const session = "019fca39-f989-7510-8e62-50dadbcad49a";
+    expect((await bindSession(session, staged)).ok).toBe(true);
+
+    const responses = await pi.emit("tool_result", { ...replayRecordedEvent(event, staged.request) }, {
+      sessionManager: { getSessionId: () => session },
+    });
+
+    expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(event.payload);
   });
 
   it("captures Pi tool_result bytes identically for a stored authority recorded under the retired qualified-local-review profile (FR-012)", async () => {
