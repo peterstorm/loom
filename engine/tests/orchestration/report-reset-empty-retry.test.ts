@@ -107,7 +107,10 @@ describe("remediation report reset agrees with the remediation candidate's ignor
     roots.push(home);
     writeFileSync(join(home, "global-ignore"), ".loom/\n");
     writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${join(home, "global-ignore")}\n`);
-    await withEnvOverlay({ HOME: home }, async () => {
+    // GIT_CONFIG_GLOBAL too: an ambient one (a CI image, a developer's
+    // isolated config) replaces `$HOME/.gitconfig` and would hide this file
+    // from the ambient-config control below.
+    await withEnvOverlay({ HOME: home, GIT_CONFIG_GLOBAL: join(home, ".gitconfig") }, async () => {
       // Control: an ambient-config Git honours the operator's global ignore file…
       expect(spawnSync("git", ["check-ignore", "-q", "--", REPORT_PATH], { cwd: root }).status).toBe(0);
       // …but the candidate audit's policy-bound check-ignore (its exact argv) does not.

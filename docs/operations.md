@@ -958,6 +958,30 @@ Failure stops later stages. The existing test scripts normalize `PI_CODING_AGENT
 
 Only TS6133/TS6192/TS6196 unused diagnostics on compiler-proven external raw TypeScript, excluding declaration files and explicit roots, are non-fatal. Each original file/position/code/message remains visible. Owned diagnostics, ordinary external dependency errors, config/input failures, and compiler infrastructure failures remain fatal. This intentionally replaces the old fail-open path grep; `skipLibCheck` cannot suppress raw-source unused diagnostics. `typecheck:unused` is an alias of the same complete gate, not a weaker path.
 
+### Test hermeticity
+
+A test that passes or fails because of the machine, the run order, or the seed is a defect. Fix its cause; never add a retry.
+
+- **Temp files.** The global setup `engine/tests/setup/run-temp-root.ts` points `TMPDIR` at one fresh `loom-vitest-run-*` directory per run before any worker starts. Workers and the `bun`/`git` children they spawn inherit it, and the directory is deleted when the run ends. A killed run leaves that one directory behind. When the code under test refuses symlinked paths, make the fixture directory with `canonicalTempDir`, because the macOS temp root sits behind the `/var` symlink.
+- **Shared directories.** `LOOM_SUBAGENT_DIR` keeps its production default `/tmp/claude-subagents`, because the guard tests pin bypasses against that literal path. That is the directory a live Claude Code session's hooks use. A suite that writes there uses unique session ids and registers each session for cleanup at the moment it creates the id (see `record-evidence.test.ts`). `pi-extension-review-events.test.ts` keeps its fixture under the Git-ignored `.loom/completion-reports/`, because its paths must sit inside the project; a killed run leaves one directory there.
+- **Host prerequisites.** `tests/pi/emission-installed-launcher.test.ts` needs the installed Pi subagent launcher under `~/.pi/agent/extensions/`. It is skipped only when `CI=true`; elsewhere a missing launcher fails loudly.
+- **Git config.** A test that fakes the operator's global Git config sets `GIT_CONFIG_GLOBAL` as well as `HOME`, because an ambient `GIT_CONFIG_GLOBAL` replaces `$HOME/.gitconfig`.
+- **Order.** Every test must pass in any order. When two tests are one observation split across a test boundary, the suite declares `describe(name, { shuffle: false }, …)`.
+- **Property tests.** Most property tests take a fresh random seed every run. A counterexample that turns up on CI is a real gap in the oracle or the code: add it as an explicit example and fix the cause. Never pin a seed to hide it.
+
+To check for environment dependence, run the unit suite under varied conditions and compare which tests fail:
+
+```bash
+cd engine
+npx vitest run --sequence.shuffle --sequence.seed=<n>      # run order
+TMPDIR=<path-through-a-symlink> npx vitest run             # macOS-style temp root
+TZ=Pacific/Kiritimati LC_ALL=C npx vitest run              # time zone and locale
+npx vitest run --maxWorkers=1 --minWorkers=1               # one worker, then many
+HOME=<empty-dir> GIT_CONFIG_GLOBAL=/dev/null npx vitest run # no operator config
+```
+
+The 2026-10-13 sweep ran each of these, plus every property-test file twice at 20× its declared runs on fresh seeds and a whole run with the clock moved 400 days ahead. A failing test in the empty-`HOME` run is expected only for the installed-launcher prerequisite above. A clock-shifting run cannot check file freshness, because Node reads file times with a system call that `libfaketime` does not intercept. Under it, a file written a moment ago looks as old as the shift.
+
 ### Focused iteration (not full-gate evidence)
 
 ```bash

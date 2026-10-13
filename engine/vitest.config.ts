@@ -28,14 +28,19 @@ import { platformWorkerBudget } from "./vitest-worker-budget";
  * `maxWorkers` is this host's `platformWorkerBudget`; that module documents
  * the per-platform caps.
  *
- * `globalSetup` (`tests/setup/fixture-pi-route.ts`) serves the one fake local
- * Pi route every fixture Pi session spawns onto, so the route-reachability
- * gate never consults the operator's real models.json.
+ * Global setup, once per run and in this order:
+ * - `run-temp-root` points TMPDIR at one fresh directory for the whole run and
+ *   removes it when the run ends, so no fixture scratch outlives its run or
+ *   leaks between runs. It goes first so the next setup's directory lands
+ *   inside it.
+ * - `fixture-pi-route` serves the one fake local Pi route every fixture Pi
+ *   session spawns onto, so the route-reachability gate never consults the
+ *   operator's real models.json.
  */
 export default defineConfig({
   test: {
     include: [...configDefaults.include, "../calibration/**/*.test.ts", "../probes/**/*.test.{ts,mjs}"],
-    globalSetup: ["./tests/setup/fixture-pi-route.ts"],
+    globalSetup: ["./tests/setup/run-temp-root.ts", "./tests/setup/fixture-pi-route.ts"],
     setupFiles: ["./tests/setup/scrub-parent-model.ts", "./tests/setup/task-update-yield.ts"],
     testTimeout: 15_000,
     maxWorkers: platformWorkerBudget(process.platform, availableParallelism()),
