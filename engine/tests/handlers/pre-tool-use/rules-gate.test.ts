@@ -134,6 +134,21 @@ describe("rules-gate handler", () => {
     expect((await handler(payload(), [])).kind).toBe("passthrough");
   });
 
+  it("blocks rather than dropping the rule requirements when the rules directory cannot be read", async () => {
+    // Only ENOENT proves a rule is absent. A rules directory behind a symlink
+    // loop is unreadable, not empty: the gate must not wave the edit through
+    // with no rule required at all.
+    const loop = join(dir, "rules-loop");
+    symlinkSync("rules-loop", loop);
+    process.env["LOOM_RULES_DIR"] = loop;
+    try {
+      expect((await handler(payload(), [])).kind).toBe("block");
+    } finally {
+      process.env["LOOM_RULES_DIR"] = rules;
+      rmSync(loop, { force: true });
+    }
+  });
+
   it("fails closed on malformed input, a missing transcript_path, and an unreadable transcript", async () => {
     expect((await handler("not json", [])).kind).toBe("block");
     expect((await handler(payload({ transcript_path: undefined }), [])).kind).toBe("block");

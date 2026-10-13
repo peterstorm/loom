@@ -9,7 +9,7 @@
  * silently authorizes inheriting a parent model.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +19,7 @@ import {
   type ModelRoutingConfig,
 } from "../core/model-routing";
 import { piHomeAgentDirectory, resolvePiAgentDirectory } from "../core/pi-agent-directory";
+import { observePathPresence } from "./path-presence";
 import type { PiRoutingContext } from "./render-pi-agent";
 
 /** The default Pi agent directory under the account's home directory. */
@@ -38,13 +39,16 @@ export type RoutingConfigLoad =
 /**
  * Load and parse the routing config from the active agent dir, falling back to
  * the home agent dir. Absent → `{ ok: true, config: null }` (no routing).
- * Present but malformed → `{ ok: false, error }`.
+ * Present but malformed or unreadable → `{ ok: false, error }`, never a
+ * fallback to the next candidate.
  */
 export function loadModelRoutingConfig(dir: string = activeAgentDir(), homeDir: string = homeAgentDir()): RoutingConfigLoad {
   const candidates = [join(dir, "model-routing.json")];
   if (dir !== homeDir) candidates.push(join(homeDir, "model-routing.json"));
   for (const path of candidates) {
-    if (!existsSync(path)) continue;
+    const presence = observePathPresence(path);
+    if (presence.kind === "absent") continue;
+    if (presence.kind === "unknown") return { ok: false, error: `cannot read routing config ${path}: ${presence.cause}` };
     let raw: unknown;
     try {
       raw = JSON.parse(readFileSync(path, "utf-8"));

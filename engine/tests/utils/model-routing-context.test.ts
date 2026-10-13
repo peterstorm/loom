@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
@@ -122,6 +122,16 @@ describe("model routing context shell", () => {
       writeFileSync(join(active, "model-routing.json"), "{not json");
       const loaded = loadModelRoutingConfig();
       expect(loaded).toMatchObject({ ok: false, error: expect.stringContaining("cannot parse routing config") });
+    });
+
+    it("fails closed on an unreadable active config and does not fall back to home", () => {
+      // Only ENOENT proves the active config is absent. A symlink loop is a
+      // present-but-unreadable config: falling back to the home config would
+      // apply a policy the operator never selected.
+      symlinkSync("model-routing.json", join(active, "model-routing.json"));
+      writeFileSync(join(home, ".pi", "agent", "model-routing.json"), JSON.stringify(VALID_CONFIG));
+      const loaded = loadModelRoutingConfig();
+      expect(loaded).toMatchObject({ ok: false, error: expect.stringContaining("model-routing.json") });
     });
 
     it("fails closed on an invalid schema and does not fall back to home", () => {

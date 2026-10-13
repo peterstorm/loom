@@ -27,6 +27,7 @@ import {
   type SegmentOp,
 } from "../core/shell-command";
 import { isShellQuoteChar, type ShellQuoteChar } from "../core/shell-quoting";
+import { scanSubstitutions } from "../core/shell-substitution";
 import type { Evidence, TestReportSummary } from "./types";
 
 /** The runner pattern must end at a token boundary: `npm testify` is not `npm test`. */
@@ -108,6 +109,14 @@ export interface ClassifiedTestCommand {
  */
 export function classifyTestCommandDetailed(command: string): ClassifiedTestCommand | null {
   const raw = splitCommandSegmentsWithOps(command);
+  // The splitter does not know substitutions: a separator inside `$(…)` or
+  // `<(…)` splits the line into "segments" bash never runs at top level, so
+  // `echo $(true; npm test >/dev/null) '5 passed'` looked like a test that
+  // owned `echo`'s exit and output. When emptying every substitution body
+  // changes the segmentation (or a substitution never closes), no segment's
+  // position can be trusted, and nothing classifies.
+  const blanked = scanSubstitutions(command, () => "");
+  if (blanked.unclosed || splitCommandSegmentsWithOps(blanked.rebuilt).length !== raw.length) return null;
   const segments = raw
     .map((s, rawIndex) => ({ text: stripComment(s.text).trim(), opBefore: s.opBefore, rawIndex }))
     .filter((s) => s.text !== "");

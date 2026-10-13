@@ -716,6 +716,18 @@ describe("review-panel helper CLI", () => {
     }
   });
 
+  it("refuses a run whose standalone session marker exists but cannot be read", () => {
+    // session.json decides whether a run binds to standalone evidence or to
+    // the active Task State File. Only ENOENT proves the marker is absent: a
+    // marker behind a symlink loop is present-but-unreadable, and reading it
+    // as "orchestration run" redirects the run into task state.
+    expect(buildBrief().status).toBe(0);
+    symlinkSync("session.json", join(runDir, "session.json"));
+    const result = buildManifest();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("session.json");
+  });
+
   it("rejects an unknown operation", () => {
     expect(run(["adjudicate", "--runs-root", REL_ROOT]).stderr).toContain("Usage: helper review-panel");
   });

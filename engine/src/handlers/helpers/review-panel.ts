@@ -63,6 +63,7 @@ import { finalizeStandaloneReview } from "../../core/standalone-review";
 import { parseStandalonePanelOutcomes } from "../../core/standalone-refutation-panel";
 import { serializeAdjudicatedStandaloneReview } from "../../core/standalone-review-records";
 import { loadEvidenceBoundAggregate } from "./standalone-review";
+import { observePathPresence } from "../../utils/path-presence";
 
 export function standaloneTallyPublishErrors(
   original: unknown,
@@ -166,9 +167,16 @@ function loadBrief(runDir: string): ParseResult<FindingBrief> {
 
   // session.json is created only for standalone runs. Use the run-local marker
   // rather than a tamperable source_kind field so a standalone operation can
-  // never be redirected into the active orchestration Task State File.
+  // never be redirected into the active orchestration Task State File. A
+  // marker that is present but unreadable leaves the run's authority unknown,
+  // so it refuses rather than reading as "orchestration run".
+  const sessionPath = join(runDir, "session.json");
+  const session = observePathPresence(sessionPath);
+  if (session.kind === "unknown") {
+    return { ok: false, errors: [`cannot observe ${sessionPath}: ${session.cause} — the run's review authority is unknown`] };
+  }
   let expected: FindingBrief;
-  if (existsSync(join(runDir, "session.json"))) {
+  if (session.kind === "present") {
     if (parsed.value.source !== "standalone") {
       return { ok: false, errors: ["standalone run brief must declare source_kind 'standalone'"] };
     }
