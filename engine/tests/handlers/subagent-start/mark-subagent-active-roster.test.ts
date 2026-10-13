@@ -123,7 +123,9 @@ afterAll(() => {
 });
 
 const start = (s: string, agentId: string | null = "a-1", agentType = "loom:code-implementer-agent") => {
-  const transcript = join(stateDir, `${s}.jsonl`);
+  // Encoded: the traversal test's hostile session id must not walk the
+  // fixture transcript out of stateDir (and past its cleanup).
+  const transcript = join(stateDir, `${encodeURIComponent(s)}.jsonl`);
   writeFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }) + "\n");
   return JSON.stringify({
     session_id: s,

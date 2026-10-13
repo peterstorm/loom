@@ -56,14 +56,19 @@ describe("guard-state-file — property tests", () => {
   });
 
   it("commands not referencing state files → always allow", () => {
+    // Process substitution is dynamic expansion too: its unknown output is an
+    // opaque wildcard that may name the one-segment `.loom` dir, so a bare
+    // `<()` command word blocks (macOS CI, counterexample `<()`).
+    expect(guardDecision("<()")).toBe("block");
     fc.assert(
       fc.property(
         fc.string({ minLength: 1, maxLength: 200 }).filter(
-          // Dynamic expansion and malformed quoting are intentionally blocked
-          // even when the literal source does not name a protected path.
+          // Dynamic expansion (`$…`, backticks, `<(…)`/`>(…)`) and malformed
+          // quoting are intentionally blocked even when the literal source
+          // does not name a protected path.
           (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") &&
             !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR) &&
-            !/[?*{}[\]`$\\'"\n\r]/.test(s),
+            !/[?*{}[\]`$\\'"\n\r]|[<>]\(/.test(s),
         ),
         (cmd) => {
           expect(guardDecision(cmd)).toBe("allow");

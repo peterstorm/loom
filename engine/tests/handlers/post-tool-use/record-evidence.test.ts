@@ -35,9 +35,16 @@ import {
 import { SUBAGENT_DIR } from "../../../src/config";
 
 const run = `record-evidence-${process.pid}-${Date.now()}`;
+// These sessions live in the shared SUBAGENT_DIR, so every session a test
+// mints is registered for cleanup at construction — a hand-kept list once
+// missed one and leaked its ledger into the operator's directory every run.
+const sessions = new Set<SessionId>();
 // Ledger API takes the branded SessionId; parse once at construction.
-const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["contended", "leaked", "ungated", "parallel", "unbound-caller", "forged-report", "honest-report", "one-call-forge", "dup-delivery", "stale-artifact"].map(sid);
+const sid = (name: string): SessionId => {
+  const session = parseSessionId(`${run}-${name}`)!;
+  sessions.add(session);
+  return session;
+};
 
 afterAll(() => {
   for (const s of sessions) {
