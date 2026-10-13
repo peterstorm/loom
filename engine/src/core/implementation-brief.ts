@@ -24,7 +24,7 @@ import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOut
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
-import { pathsMatch } from "./plan-paths";
+import { invariantRoles } from "./plan-paths";
 import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 
@@ -185,19 +185,18 @@ function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): 
  * validation has already refused a malformed one).
  */
 function invariantOwnership(fileList: readonly string[], invariants: readonly PlanInvariant[]): string {
-  const changes = (path: string): boolean => fileList.some((file) => pathsMatch(file, path));
   const blocks = invariants.flatMap((invariant) => {
     if (invariant.ownership.kind !== "owned") return [];
     const { owner, siblings, matrixTest } = invariant.ownership;
-    const changedSiblings = siblings.filter(({ path }) => changes(path));
+    const played = invariantRoles(fileList, invariant.ownership);
     const roles = [
-      ...(changes(owner)
+      ...(played.owner
         ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
         : []),
-      ...(changedSiblings.length > 0
-        ? [`- Sibling: you change ${changedSiblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
+      ...(played.siblings.length > 0
+        ? [`- Sibling: you change ${played.siblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
         : []),
-      ...(changes(matrixTest)
+      ...(played.matrixTest
         ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
         : []),
     ];

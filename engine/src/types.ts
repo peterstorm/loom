@@ -1178,8 +1178,10 @@ export interface TaskGraph {
 // parsed. They live here rather than in `core/parse-plan-models.ts` because
 // consumers that need only the shapes (`core/wave-gate-checks.ts`, which binds
 // lifecycle artifacts to a wave; the implementation brief) need not depend on
-// the grammar. `parse-plan-models.ts` re-exports them, so its public surface
-// is unchanged.
+// the grammar. `core/parse-plan-models.ts` re-exports only the shapes its
+// importers take through it (`PlanModels`, `PlanInvariant`, `Stray`); import
+// every other shape — the ownership ones included — from here. The `parsers`
+// barrel no longer exposes the plan grammar.
 
 export type InvariantTier = "checkable" | "advisory";
 
@@ -1254,12 +1256,13 @@ export type OwnershipProblem =
  * home, every other entry point that applies the rule, and the test that runs
  * the rule through all of them; an unowned one (a prohibition, an SLA) says
  * why it has no home. A declaration that is neither is `malformed`, carrying
- * every problem — never a half-filled owned or unowned value.
+ * at least one problem — never a half-filled owned or unowned value, and never
+ * a malformed one that cannot say why.
  */
 export type InvariantOwnership =
   | Readonly<{ kind: "owned"; owner: string; siblings: readonly SiblingEntryPoint[]; matrixTest: string }>
   | Readonly<{ kind: "unowned"; reason: string }>
-  | Readonly<{ kind: "malformed"; problems: readonly OwnershipProblem[] }>;
+  | Readonly<{ kind: "malformed"; problems: OrchestrationNonEmpty<OwnershipProblem> }>;
 
 export interface PlanInvariant {
   /** e.g. "INV-1" */

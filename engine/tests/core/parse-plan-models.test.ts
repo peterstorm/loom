@@ -208,6 +208,64 @@ describe("parsePlanModels", () => {
       });
     });
 
+    it("reports a malformed sibling line alongside a missing owner", () => {
+      expect(inv("**Sibling entry points:** b.ts, c.ts\n").ownership).toEqual({
+        kind: "malformed",
+        problems: [{ kind: "missing-owner" }, { kind: "malformed-sibling", line: "b.ts, c.ts" }],
+      });
+    });
+
+    // An empty label must never capture the next line as its value: the
+    // capture used to read `**Unowned reason:** r` as the owner module path.
+    it.each<[string, string, readonly unknown[]]>([
+      ["an empty owner above an unowned reason", "**Owner module:**\n**Unowned reason:** r\n", [{ kind: "missing-owner" }]],
+      ["an empty owner above the sibling label", "**Owner module:**\n**Sibling entry points:** none\n**Matrix test:** t.ts\n", [{ kind: "missing-owner" }]],
+      ["an empty matrix test above the statement", "**Owner module:** a.ts\n**Sibling entry points:** none\n**Matrix test:**\n**Statement:** s\n", [{ kind: "missing-matrix-test" }]],
+    ])("reads %s as absent, not as the next line", (_name, body, problems) => {
+      expect(inv(body).ownership).toEqual({ kind: "malformed", problems });
+    });
+
+    it("never lets an empty field label capture the next line, for any label", () => {
+      const models = parsePlanModels("## Invariants\n\n### INV-1: X\n\n**Tier:**\n**Statement:** s\n");
+      expect(models.invariants[0]).toMatchObject({ tier: { status: "absent" }, statement: "s" });
+    });
+
+    describe("the sibling list grammar", () => {
+      const owned = (siblingLines: string) =>
+        inv(`**Owner module:** a.ts\n**Sibling entry points:**\n${siblingLines}**Matrix test:** t.ts\n`).ownership;
+
+      it("allows blank lines between the label and its first item", () => {
+        expect(owned("\n\n- src/b.ts — reads it\n")).toEqual({
+          kind: "owned", owner: "a.ts", siblings: [{ path: "src/b.ts", note: "reads it" }], matrixTest: "t.ts",
+        });
+      });
+
+      it.each([["a hyphen", "-"], ["an en dash", "–"], ["an em dash", "—"]])("takes a note introduced by %s", (_name, dash) => {
+        expect(owned(`- src/b.ts ${dash} reads it\n`)).toMatchObject({ siblings: [{ path: "src/b.ts", note: "reads it" }] });
+      });
+
+      it("keeps hyphens inside a path", () => {
+        expect(owned("- src/my-file.ts\n")).toMatchObject({ siblings: [{ path: "src/my-file.ts", note: null }] });
+      });
+
+      it("parses CRLF items", () => {
+        const plan = "## Invariants\n\n### INV-1: X\n\n**Tier:** advisory\n**Owner module:** a.ts\n**Sibling entry points:**\n- src/b.ts — reads it\n- src/c.ts\n**Matrix test:** t.ts\n";
+        expect(parsePlanModels(plan.replace(/\n/g, "\r\n")).invariants[0]!.ownership).toEqual({
+          kind: "owned",
+          owner: "a.ts",
+          siblings: [{ path: "src/b.ts", note: "reads it" }, { path: "src/c.ts", note: null }],
+          matrixTest: "t.ts",
+        });
+      });
+
+      it.each([
+        ["a `none` item (none belongs on the label line)", "- none\n"],
+        ["a path containing a space", "- `src/a b.ts`\n"],
+      ])("refuses %s as a malformed sibling line", (_name, item) => {
+        expect(owned(item)).toEqual({ kind: "malformed", problems: [{ kind: "malformed-sibling", line: item.trimEnd() }] });
+      });
+    });
+
     it("flags ownership labels outside the Invariants section as strays", () => {
       const models = parsePlanModels("## Notes\n\n**Owner module:** a.ts\n**Sibling entry points:** none\n**Matrix test:** t.ts\n**Unowned reason:** r\n");
       for (const label of ["Owner module", "Sibling entry points", "Matrix test", "Unowned reason"]) {

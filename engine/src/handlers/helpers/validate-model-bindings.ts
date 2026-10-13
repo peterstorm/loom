@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
 import type { OwnershipProblem, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
-import { normalizePlanPath, pathsMatch } from "../../core/plan-paths";
+import { changesFamily, invariantRoles, normalizePlanPath, pathsMatch, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
 import { type ValidationResult, ok, fail } from "./validation-result";
 
 export type ModelFileRead =
@@ -97,6 +97,81 @@ function dependsOnAny(from: TaskRecord, targets: ReadonlySet<string>, byId: Read
   return false;
 }
 
+/** One Task with the roles its file_list plays in the family under check. */
+type RoledTask = Readonly<{ record: TaskRecord; roles: InvariantRoles }>;
+
+/** Every declared path with its role, in declaration order. */
+type DeclaredRole = readonly [role: string, path: string];
+
+function declaredRoles(ownership: OwnedInvariant): readonly DeclaredRole[] {
+  return [
+    ["owner module", ownership.owner],
+    ...ownership.siblings.map(({ path }) => ["sibling entry point", path] as const),
+    ["matrix test", ownership.matrixTest],
+  ];
+}
+
+/** A declared path must exist already, or be one a Task creates. */
+function unresolvedPathErrors(
+  label: string,
+  declared: readonly DeclaredRole[],
+  records: readonly TaskRecord[],
+  deps: ModelBindingDeps,
+): string[] {
+  return declared.flatMap(([role, path]) => {
+    if (records.some(({ files }) => files.some((file) => pathsMatch(file, path)))) return [];
+    const presence = deps.pathPresence(path);
+    return match(presence)
+      .with({ kind: "present" }, () => [])
+      .with({ kind: "unknown" }, ({ cause }) => [`${label}: cannot observe ${role} '${path}': ${cause}`])
+      .with({ kind: "absent" }, () => [
+        `${label}: ${role} '${path}' neither exists nor is in any task's file_list — fix the path, or add the task that creates it`,
+      ])
+      .exhaustive();
+  });
+}
+
+/** Each declared path plays exactly one role. */
+function duplicateRoleErrors(label: string, declared: readonly DeclaredRole[]): string[] {
+  const firstRole = new Map<string, string>();
+  return declared.flatMap(([role, path]) => {
+    const key = normalizePlanPath(path);
+    const earlier = firstRole.get(key);
+    if (earlier === undefined) {
+      firstRole.set(key, role);
+      return [];
+    }
+    return earlier === role
+      ? [`${label}: '${key}' is listed twice as a ${role}`]
+      : [`${label}: '${key}' is both the ${earlier} and a ${role} — give each path one role`];
+  });
+}
+
+/** A change to the owner or a sibling updates the family's matrix test. */
+function matrixTestErrors(label: string, ownership: OwnedInvariant, roled: readonly RoledTask[]): string[] {
+  const familyTasks = roled.filter(({ roles }) => changesFamily(roles));
+  if (familyTasks.length === 0 || roled.some(({ roles }) => roles.matrixTest)) return [];
+  return [
+    `${label}: ${familyTasks.map(({ record }) => record.id).join(", ")} touches the family but no task's file_list includes the matrix test ` +
+      `'${ownership.matrixTest}' — a change to the owner or a sibling must update the test that runs the rule through every entry point`,
+  ];
+}
+
+/** A sibling's Task reaches the owner's Task, so the owner exists before its callers. */
+function ownerFirstErrors(label: string, roled: readonly RoledTask[]): string[] {
+  const ownerIds = new Set(roled.filter(({ roles }) => roles.owner).map(({ record }) => record.id));
+  if (ownerIds.size === 0) return [];
+  const byId = new Map(roled.map(({ record }) => [record.id, record] as const));
+  return roled.flatMap(({ record, roles }) => {
+    const sibling = roles.siblings[0];
+    if (ownerIds.has(record.id) || sibling === undefined || dependsOnAny(record, ownerIds, byId)) return [];
+    return [
+      `${label}: ${record.id} changes sibling entry point '${sibling.path}' but does not reach the owner module's task — ` +
+        `it must depend on ${[...ownerIds].join(" or ")}, directly or transitively, so the owner exists before its callers`,
+    ];
+  });
+}
+
 /**
  * Ownership checks for one invariant: a malformed declaration names its
  * problems; an owned one must name paths that exist or that a task creates,
@@ -114,56 +189,14 @@ function ownershipErrors(
   if (ownership.kind === "malformed") return ownership.problems.map((problem) => `${label}: ${renderOwnershipProblem(problem)}`);
 
   const records = taskRecords(tasks);
-  const touches = (record: TaskRecord, path: string): boolean => record.files.some((file) => pathsMatch(file, path));
-  const errors: string[] = [];
-
-  const roles: readonly (readonly [string, string])[] = [
-    ["owner module", ownership.owner],
-    ...ownership.siblings.map(({ path }) => ["sibling entry point", path] as const),
-    ["matrix test", ownership.matrixTest],
+  const roled = records.map((record) => ({ record, roles: invariantRoles(record.files, ownership) }));
+  const declared = declaredRoles(ownership);
+  return [
+    ...unresolvedPathErrors(label, declared, records, deps),
+    ...duplicateRoleErrors(label, declared),
+    ...matrixTestErrors(label, ownership, roled),
+    ...ownerFirstErrors(label, roled),
   ];
-  for (const [role, path] of roles) {
-    if (records.some((record) => touches(record, path))) continue;
-    const presence = deps.pathPresence(path);
-    if (presence.kind === "unknown") errors.push(`${label}: cannot observe ${role} '${path}': ${presence.cause}`);
-    if (presence.kind === "absent") {
-      errors.push(`${label}: ${role} '${path}' neither exists nor is in any task's file_list — fix the path, or add the task that creates it`);
-    }
-  }
-
-  const firstRole = new Map<string, string>();
-  for (const [role, path] of roles) {
-    const key = normalizePlanPath(path);
-    const earlier = firstRole.get(key);
-    if (earlier === undefined) firstRole.set(key, role);
-    else if (earlier === role) errors.push(`${label}: '${key}' is listed twice as a ${role}`);
-    else errors.push(`${label}: '${key}' is both the ${earlier} and a ${role} — give each path one role`);
-  }
-
-  const family = [ownership.owner, ...ownership.siblings.map(({ path }) => path)];
-  const familyTasks = records.filter((record) => family.some((path) => touches(record, path)));
-  if (familyTasks.length > 0 && !records.some((record) => touches(record, ownership.matrixTest))) {
-    errors.push(
-      `${label}: ${familyTasks.map(({ id }) => id).join(", ")} touches the family but no task's file_list includes the matrix test ` +
-        `'${ownership.matrixTest}' — a change to the owner or a sibling must update the test that runs the rule through every entry point`,
-    );
-  }
-
-  const ownerTasks = records.filter((record) => touches(record, ownership.owner));
-  if (ownerTasks.length > 0) {
-    const ownerIds = new Set(ownerTasks.map(({ id }) => id));
-    const byId = new Map(records.map((record) => [record.id, record] as const));
-    for (const record of records) {
-      if (ownerIds.has(record.id)) continue;
-      const sibling = ownership.siblings.find(({ path }) => touches(record, path));
-      if (sibling === undefined || dependsOnAny(record, ownerIds, byId)) continue;
-      errors.push(
-        `${label}: ${record.id} changes sibling entry point '${sibling.path}' but does not reach the owner module's task — ` +
-          `it must depend on ${[...ownerIds].join(" or ")}, directly or transitively, so the owner exists before its callers`,
-      );
-    }
-  }
-  return errors;
 }
 
 export function validateModelBindings(

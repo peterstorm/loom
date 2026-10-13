@@ -31,7 +31,6 @@ import { match } from "ts-pattern";
 import type {
   BlockSection,
   InvariantOwnership,
-  InvariantTier,
   ModelSection,
   OwnershipProblem,
   PlanInvariant,
@@ -44,22 +43,12 @@ import type {
 } from "../types";
 
 // The plan model data shapes live in types.ts (consumers that only need the
-// shapes need not import the grammar). Re-exported here because they are part
-// of this module's established public surface. The grammar itself lives in
-// core/ — a domain grammar whose output carries invariants, like the Spec
-// Index — so the orchestration shell that renders implementation briefs may
-// parse the plan.
-export type {
-  BlockSection,
-  InvariantTier,
-  ModelSection,
-  PlanInvariant,
-  PlanInvariantTier,
-  PlanLifecycle,
-  PlanModels,
-  PlanPipeline,
-  Stray,
-};
+// shapes need not import the grammar). Only the shapes importers take through
+// this module are re-exported; every other shape is imported from types.ts.
+// The grammar itself lives in core/ — a domain grammar whose output carries
+// invariants, like the Spec Index — so the orchestration shell that renders
+// implementation briefs may parse the plan.
+export type { PlanInvariant, PlanModels, Stray };
 
 /** Human-readable description of a stray, for validation error messages. */
 export function renderStray(s: Stray): string {
@@ -166,9 +155,11 @@ function idBlocks(body: string, prefix: string): { id: string; title: string; bl
   });
 }
 
-/** Value of a `**{label}:** value` line inside a block, backticks stripped; null if absent */
+/** Value of a `**{label}:** value` line inside a block, backticks stripped;
+ *  null if the line is absent or its value is empty. The value never crosses
+ *  the line break: an empty label must not capture the next line. */
 function fieldValue(block: string, label: string): string | null {
-  const re = new RegExp(`^\\*\\*${label}:\\*\\*\\s*(.+)$`, "im");
+  const re = new RegExp(`^\\*\\*${label}:\\*\\*[ \\t]*(.*)$`, "im");
   const m = re.exec(block);
   if (!m) return null;
   const value = m[1].trim().replace(/^`(.*)`$/, "$1").trim();
@@ -216,8 +207,9 @@ type SiblingDeclaration =
 const SIBLING_LABEL = /^\*\*Sibling entry points:\*\*/i;
 const SIBLING_ITEM = /^-\s+`?([^`\s]+)`?(?:\s+[—–-]\s+(.+?))?\s*$/;
 
-/** `none` on the label line, or `- path — note` items on the lines after it,
- *  up to the first line that is not an item. */
+/** `none` on the label line, or `- path — note` items on the lines after it —
+ *  blank lines before the first item allowed — up to the first line that is
+ *  not an item. `none` belongs on the label line, never as an item. */
 function siblingDeclaration(block: string): SiblingDeclaration {
   const lines = block.split("\n").map((line) => line.replace(/\r$/, ""));
   const at = lines.findIndex((line) => SIBLING_LABEL.test(line));
@@ -225,11 +217,13 @@ function siblingDeclaration(block: string): SiblingDeclaration {
   const inline = lines[at]!.replace(SIBLING_LABEL, "").trim();
   if (inline.toLowerCase() === "none") return { status: "declared", entries: [] };
   if (inline !== "") return { status: "malformed", line: inline };
+  const after = lines.slice(at + 1);
+  const firstItem = after.findIndex((line) => line.trim() !== "");
   const entries: SiblingEntryPoint[] = [];
-  for (const line of lines.slice(at + 1)) {
+  for (const line of firstItem === -1 ? [] : after.slice(firstItem)) {
     if (!line.startsWith("- ")) break;
     const item = SIBLING_ITEM.exec(line);
-    if (item === null) return { status: "malformed", line };
+    if (item === null || item[1]!.toLowerCase() === "none") return { status: "malformed", line };
     entries.push({ path: item[1]!, note: item[2]?.trim() ?? null });
   }
   return entries.length === 0 ? { status: "empty" } : { status: "declared", entries };
@@ -237,40 +231,47 @@ function siblingDeclaration(block: string): SiblingDeclaration {
 
 /**
  * The block's ownership declaration as its three real states. Every problem
- * is collected, so one validation run names all of them; an owned or unowned
- * value exists only when the declaration is complete and consistent.
+ * decidable from the text is collected, so one validation run names all of
+ * them — without an owner line, only a malformed sibling line is decidable,
+ * since whether siblings and a matrix test are owed depends on the owner. An
+ * owned or unowned value exists only when the declaration is complete and
+ * consistent.
  */
 function parseOwnership(block: string): InvariantOwnership {
   const owner = fieldValue(block, "Owner module");
   const reason = fieldValue(block, "Unowned reason");
   const matrixTest = fieldValue(block, "Matrix test");
   const siblings = siblingDeclaration(block);
-  if (owner === null) return { kind: "malformed", problems: [{ kind: "missing-owner" }] };
+  const malformedSibling: readonly OwnershipProblem[] =
+    siblings.status === "malformed" ? [{ kind: "malformed-sibling", line: siblings.line }] : [];
+  if (owner === null) return { kind: "malformed", problems: [{ kind: "missing-owner" }, ...malformedSibling] };
 
   if (owner.toLowerCase() === "none") {
     const ownerLabels = [
       ...(siblings.status === "absent" ? [] : ["Sibling entry points"]),
       ...(matrixTest === null ? [] : ["Matrix test"]),
     ];
-    const problems: OwnershipProblem[] = [
-      ...(reason === null ? [{ kind: "unowned-without-reason" } as const] : []),
-      ...(ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels } as const] : []),
-    ];
-    return reason !== null && problems.length === 0 ? { kind: "unowned", reason } : { kind: "malformed", problems };
+    const labelProblems: readonly OwnershipProblem[] =
+      ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels }] : [];
+    if (reason === null) return { kind: "malformed", problems: [{ kind: "unowned-without-reason" }, ...labelProblems] };
+    const [first, ...rest] = labelProblems;
+    return first === undefined ? { kind: "unowned", reason } : { kind: "malformed", problems: [first, ...rest] };
   }
 
-  const problems: OwnershipProblem[] = [
+  if (reason === null && siblings.status === "declared" && matrixTest !== null) {
+    return { kind: "owned", owner, siblings: siblings.entries, matrixTest };
+  }
+  // Not owned, so at least one of these three is present.
+  const [first, ...rest]: readonly OwnershipProblem[] = [
     ...(reason === null ? [] : [{ kind: "reason-on-owned" } as const]),
     ...match(siblings)
       .with({ status: "declared" }, () => [])
-      .with({ status: "malformed" }, ({ line }) => [{ kind: "malformed-sibling", line } as const])
+      .with({ status: "malformed" }, () => malformedSibling)
       .with({ status: "absent" }, { status: "empty" }, () => [{ kind: "missing-siblings" } as const])
       .exhaustive(),
     ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
   ];
-  return siblings.status === "declared" && matrixTest !== null && problems.length === 0
-    ? { kind: "owned", owner, siblings: siblings.entries, matrixTest }
-    : { kind: "malformed", problems };
+  return { kind: "malformed", problems: [first!, ...rest] };
 }
 
 const CANONICAL_SECTIONS = ["Lifecycles", "Pipeline", "Invariants"] as const;
