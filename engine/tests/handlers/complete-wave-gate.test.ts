@@ -121,6 +121,7 @@ const MODEL_FREE_PLAN_MODELS = Object.freeze({
   lifecycles: Object.freeze([]),
   pipeline: null,
   invariants: Object.freeze([]),
+  contracts: Object.freeze([]),
   strays: Object.freeze([]),
 });
 
@@ -757,6 +758,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
             lifecycles: [{ id: "LC-1", title: "Order", machineFile: "src/order-machine.ts" }],
             pipeline: null,
             invariants: [],
+            contracts: [],
             strays: [],
           },
         };
@@ -813,6 +815,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
           lifecycles: [{ id: "LC-1", title: "X", machineFile: "src/machines/x.machine.json" }],
           pipeline: null,
           invariants: [],
+          contracts: [],
           strays: [],
         },
       }),
@@ -2625,6 +2628,7 @@ describe("protected active Wave Gate registration", () => {
           lifecycles: [{ id: "LC-1", title: "Wave", machineFile: relativeArtifact }],
           pipeline: null,
           invariants: [],
+          contracts: [],
           strays: [],
         },
       }),

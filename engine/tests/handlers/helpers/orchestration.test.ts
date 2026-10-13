@@ -120,7 +120,7 @@ afterEach(() => {
 const deps: GateDeps = {
   loadPlanModels: () => ({
     kind: "loaded",
-    models: { lifecycles: [], pipeline: null, invariants: [], strays: [] },
+    models: { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] },
   }),
   filePresence: () => ({ ok: true, exists: true }),
 };

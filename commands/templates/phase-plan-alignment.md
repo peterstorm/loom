@@ -56,6 +56,7 @@ Loom's standing policy: a model either executes or it doesn't exist (documented 
 - The plan describes a domain **lifecycle** in prose (state lists, transition narratives) WITHOUT a `## Lifecycles` section binding it to a `**Machine file:**`
 - The plan describes a multi-stage **pipeline** WITHOUT either a `## Pipeline` AuthoredDag binding or an explicit statement that the fugue bridge was declined
 - An `## Invariants` entry tiered `checkable` whose stated property a regex lint rule could not actually check (mis-tiered — should be `advisory`)
+- A `## Contracts` entry whose `**Types file:**` is an existing or implementation file rather than a new declarations-only file, or whose `**Acceptance tests:**` list a Requirement no test can decide (a measured or calibration Requirement)
 
 Do NOT flag the mere absence of these sections — they are opt-in; most features need none.
 

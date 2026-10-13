@@ -1,11 +1,30 @@
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { canonicalJson, type JsonValue } from "../../core/review-packet";
+import {
+  acceptanceExpectation,
+  frozenPathDrift,
+  frozenPathsToObserve,
+  observeAcceptanceFacts,
+  owesAcceptance,
+  renderAcceptanceFailure,
+  renderFrozenPathDrift,
+  stampAcceptanceFreezes,
+  unprojectableFacts,
+  type AcceptanceContract,
+  type AcceptanceExpectation,
+} from "../../core/acceptance-contract";
+import { parseJunitTestcases } from "../../core/structured-test-report";
+import { sha256Bytes } from "../../core/digest";
+import type { DomainResult } from "../../core/orchestration-contract";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
 import {
   FULL_TIER_LINT_CHECK_ID_TEXT,
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
   parseWaveCompletionSuiteResult,
+  type AcceptanceObservation,
   type AcceptedWaveCompletionReceipt,
   type AuthorizedWaveCompletionCheck,
   type AuthorizedWaveCompletionSuite,
@@ -354,9 +373,58 @@ function exactActiveAuthorityProblem(
     : "completion suite registered Task roster differs from the protected current-Wave roster";
 }
 
+
+/**
+ * The acceptance facts of every project check that produced its report, read
+ * back and bound to the digest the runner recorded — a report that changed
+ * after the check is unprojectable, never re-read as a different run. Absent
+ * when the gate owes no contract anything.
+ */
+function observeAcceptance(
+  root: CanonicalRepositoryRoot,
+  expectation: AcceptanceExpectation,
+  checks: readonly CompletionCheckResult[],
+): AcceptanceObservation | undefined {
+  if (!owesAcceptance(expectation)) return undefined;
+  const facts = checks.flatMap((check) => {
+    if (check.outcome.kind !== "observed" || check.outcome.report.kind !== "produced") return [];
+    const report = check.outcome.report;
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(readRunBytesNoFollow(join(root, report.path)));
+    } catch (cause) {
+      return [unprojectableFacts(check.checkId, report.digest,
+        `report ${report.path} could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`)];
+    }
+    if (sha256Bytes(bytes) !== report.digest) {
+      return [unprojectableFacts(check.checkId, report.digest, `report ${report.path} changed after the check produced it`)];
+    }
+    return [observeAcceptanceFacts(expectation, check.checkId, report.digest, parseJunitTestcases(bytes))];
+  });
+  return freeze({ expectation, facts: freezeArray(facts) });
+}
+
+/** The graph's contracts with what an accepted receipt observed stamped in:
+ *  the contract Wave's Acceptance Freeze, or a revised roster re-recorded. */
+function stampedContracts(
+  graph: TaskGraph,
+  receipt: AcceptedWaveCompletionReceipt,
+  root: CanonicalRepositoryRoot,
+): DomainResult<readonly AcceptanceContract[] | undefined, string> {
+  const contracts = graph.acceptance_contracts;
+  if (contracts === undefined || receipt.acceptance === undefined) return freeze({ ok: true as const, value: contracts });
+  return stampAcceptanceFreezes(
+    contracts,
+    receipt.acceptance.expectation,
+    receipt.acceptance.facts,
+    observeFrozenDigests(root, frozenPathsToObserve(contracts)),
+  );
+}
+
 function reusableReceipt(
   graph: TaskGraph,
   workspace: Extract<WaveWorkspaceObservation, { readonly kind: "observed" }>,
+  expectation: AcceptanceExpectation,
 ): AcceptedWaveCompletionReceipt | null {
   const active = graph.active_wave_gate;
   const manifest = graph.verification_manifest;
@@ -371,7 +439,7 @@ function reusableReceipt(
   const evaluation = evaluateWaveCompletionSuite(authority.value, {
     kind: "wave-completion-suite-result",
     ...resultAuthority,
-  });
+  }, { kind: "current", expectation });
   return evaluation.kind === "accepted" ? receipt.value : null;
 }
 
@@ -455,7 +523,14 @@ function evaluationDiagnostic(
     ...evaluation.infrastructureFailures.map((failure) => failure.kind),
     ...evaluation.semanticFailures.map((failure) => failure.kind),
   ];
-  return diagnostic(categories, checkIds, `Wave completion suite rejected: ${failureKinds.join(", ")}`);
+  const acceptance = evaluation.semanticFailures.flatMap((failure) =>
+    failure.kind === "acceptance-rejected" ? failure.failures.map(renderAcceptanceFailure) : []);
+  return diagnostic(
+    categories,
+    checkIds,
+    `Wave completion suite rejected: ${failureKinds.join(", ")}` +
+      (acceptance.length === 0 ? "" : `\n${acceptance.map((line) => `  - ${line}`).join("\n")}`),
+  );
 }
 
 function infrastructureEvaluationDiagnostic(
@@ -477,6 +552,7 @@ function completionResultArtifactPath(authority: AuthorizedWaveCompletionSuite):
 function replayCompletionResult(
   bytes: Uint8Array,
   authority: AuthorizedWaveCompletionSuite,
+  expectation: AcceptanceExpectation,
 ): ReplayedCompletionResult {
   const parsed = parsePersistedCompletionResultBytes(bytes, "persisted completion result");
   if (parsed.kind === "unavailable") {
@@ -486,7 +562,7 @@ function replayCompletionResult(
       message: parsed.reason,
     });
   }
-  const evaluation = evaluateWaveCompletionSuite(authority, parsed.result);
+  const evaluation = evaluateWaveCompletionSuite(authority, parsed.result, { kind: "current", expectation });
   if (evaluation.kind === "accepted") {
     return freeze({ kind: "accepted", receipt: evaluation.receipt });
   }
@@ -513,23 +589,34 @@ function canonicalResultBytes(result: WaveCompletionSuiteResult): readonly numbe
   return freezeArray([...new TextEncoder().encode(canonicalJson(json))]);
 }
 
+/** Install the receipt and, in the same locked write, the Acceptance Freeze it
+ *  observed: the frozen bytes are exactly the bytes the receipt judged. */
 async function installAcceptedReceipt(
   manager: StateManager,
   graph: TaskGraph,
   receipt: AcceptedWaveCompletionReceipt,
+  contracts: readonly AcceptanceContract[] | undefined,
 ): Promise<void> {
   const expectedActive = graph.active_wave_gate;
   const expectedManifest = graph.verification_manifest;
+  const expectedContracts = graph.acceptance_contracts;
   await manager.update((locked) => {
     if (!canonicalStructuralEquals(locked.active_wave_gate, expectedActive) ||
         !canonicalStructuralEquals(locked.verification_manifest, expectedManifest)) {
       throw new Error("protected Wave registration or verification manifest changed before receipt installation");
     }
+    if (!canonicalStructuralEquals(locked.acceptance_contracts, expectedContracts)) {
+      throw new Error("protected acceptance contracts changed before receipt installation");
+    }
     if (locked.active_wave_completion_suite !== undefined) {
       if (canonicalStructuralEquals(locked.active_wave_completion_suite, receipt)) return locked;
       throw new Error("a conflicting completion receipt already occupies the active Wave authority");
     }
-    return { ...locked, active_wave_completion_suite: receipt };
+    return {
+      ...locked,
+      active_wave_completion_suite: receipt,
+      ...(contracts === undefined ? {} : { acceptance_contracts: contracts }),
+    };
   });
 }
 
@@ -540,8 +627,10 @@ async function installAcceptedReceiptAndVerifyWorkspace(
   repositoryRoot: CanonicalRepositoryRoot,
   currentWorkspace: Extract<WaveWorkspaceObservation, { readonly kind: "observed" }>,
 ): Promise<EnsureWaveCompletionSuiteResult> {
+  const contracts = stampedContracts(graph, receipt, repositoryRoot);
+  if (!contracts.ok) return blocked(currentWorkspace, ["state"], [], `Acceptance Freeze refused: ${contracts.error}`);
   try {
-    await installAcceptedReceipt(manager, graph, receipt);
+    await installAcceptedReceipt(manager, graph, receipt, contracts.value);
   } catch (cause) {
     return blocked(currentWorkspace, ["state"], [], cause instanceof Error ? cause.message : String(cause));
   }
@@ -608,7 +697,12 @@ export async function ensureWaveCompletionSuite(
   if (before.kind === "unavailable") {
     return blocked(before, ["workspace"], [], `current Wave workspace unavailable: ${before.reason}`);
   }
-  if (reusableReceipt(graph, before) !== null) return accepted("reused", before);
+  // `exactActiveAuthorityProblem` proved the registration names this Wave.
+  const contracts = graph.acceptance_contracts ?? [];
+  const expectation = acceptanceExpectation(contracts, graph.tasks, registration.input.wave!);
+  const drift = frozenPathDrift(contracts, observeFrozenDigests(repositoryRoot, frozenPathsToObserve(contracts)));
+  if (drift.length > 0) return blocked(before, ["artifact"], [], renderFrozenPathDrift(drift));
+  if (reusableReceipt(graph, before, expectation) !== null) return accepted("reused", before);
 
   if (graph.active_wave_completion_suite !== undefined) {
     try {
@@ -639,7 +733,7 @@ export async function ensureWaveCompletionSuite(
     );
   }
   if (persistedBytes.value !== null) {
-    const replayed = replayCompletionResult(persistedBytes.value, authorized.value);
+    const replayed = replayCompletionResult(persistedBytes.value, authorized.value, expectation);
     if (replayed.kind === "accepted") {
       return installAcceptedReceiptAndVerifyWorkspace(
         manager,
@@ -674,6 +768,7 @@ export async function ensureWaveCompletionSuite(
     );
   }
   const checks = freezeArray([lintResult, ...projectResults.results]);
+  const acceptance = observeAcceptance(repositoryRoot, expectation, projectResults.results);
 
   const after = observeCurrentWaveWorkspace(graph, repositoryRoot);
   if (after.kind === "unavailable") {
@@ -698,12 +793,13 @@ export async function ensureWaveCompletionSuite(
     suiteDigest: authorized.value.suiteDigest,
     workspaceDigest: authorized.value.workspaceDigest,
     checks,
+    ...(acceptance === undefined ? {} : { acceptance }),
   });
   if (!parsedResult.ok) {
     return blocked(after, ["authority"], [], parsedResult.error.errors.join("; "));
   }
   const result = parsedResult.value;
-  const evaluation = evaluateWaveCompletionSuite(authorized.value, result);
+  const evaluation = evaluateWaveCompletionSuite(authorized.value, result, { kind: "current", expectation });
   if (evaluation.kind === "rejected" && evaluation.authorityFailures.length > 0) {
     const rejection = evaluationDiagnostic(evaluation);
     return blocked(after, rejection.categories, rejection.checkIds, rejection.message);

@@ -23,6 +23,16 @@ import {
 } from "./review-packet";
 import { sha256Hex } from "./digest";
 import {
+  emptyAcceptanceExpectation,
+  judgeAcceptance,
+  parseAcceptanceExpectation,
+  parseAcceptanceReportFacts,
+  type AcceptanceExpectation,
+  type AcceptanceFailure,
+  type AcceptanceReportFacts,
+} from "./acceptance-contract";
+import { canonicalStructuralEquals } from "./orchestration-contract";
+import {
   collectDenseArray,
   exactRecordErrors,
   isPlainRecord,
@@ -133,6 +143,17 @@ export type AuthorizedWaveCompletionSuite = Readonly<{
   checks: NonEmpty<AuthorizedWaveCompletionCheck>;
 }>;
 
+/**
+ * The acceptance a gate judged: the expectation derived from the protected
+ * graph and the facts observed from each check's report, bound to its digest.
+ * Absent means the gate owed no contract anything — the shape every result
+ * written before contracts existed already has.
+ */
+export type AcceptanceObservation = Readonly<{
+  expectation: AcceptanceExpectation;
+  facts: readonly AcceptanceReportFacts[];
+}>;
+
 export type WaveCompletionSuiteResult = Readonly<{
   kind: "wave-completion-suite-result";
   runId: OrchestrationRunId;
@@ -143,6 +164,7 @@ export type WaveCompletionSuiteResult = Readonly<{
   suiteDigest: ArtifactDigest;
   workspaceDigest: ArtifactDigest;
   checks: readonly CompletionCheckResult[];
+  acceptance?: AcceptanceObservation;
 }>;
 
 export type CompletionSuiteParseError = Readonly<{
@@ -162,7 +184,12 @@ export type CompletionAuthorityFailure =
       checkId: CompletionCheckId;
       expected: ReportPolicy;
       actual: CompletionReportOutcome;
-    }>;
+    }>
+  /** The result was judged under a different acceptance expectation than the
+   *  protected graph now derives for this gate. */
+  | Readonly<{ kind: "acceptance-expectation-mismatch" }>
+  /** Acceptance facts name a check whose produced report has another digest. */
+  | Readonly<{ kind: "unbound-acceptance-facts"; checkIds: NonEmpty<string> }>;
 
 export type CompletionAuthorityField =
   | "runId"
@@ -187,7 +214,15 @@ export type CompletionSemanticFailure =
   | Readonly<{ kind: "timed-out"; checkId: CompletionCheckId }>
   | Readonly<{ kind: "signal-termination"; checkId: CompletionCheckId; signal: CompletionSignal }>
   | Readonly<{ kind: "non-zero-exit"; checkId: CompletionCheckId; exitCode: number }>
-  | Readonly<{ kind: "missing-report"; checkId: CompletionCheckId; path: ReviewPath }>;
+  | Readonly<{ kind: "missing-report"; checkId: CompletionCheckId; path: ReviewPath }>
+  | Readonly<{ kind: "acceptance-rejected"; checkId: CompletionCheckId; failures: NonEmpty<AcceptanceFailure> }>;
+
+/** Which acceptance expectation a result is judged under: the one the
+ *  protected graph derives for the live gate, or — for a historical receipt —
+ *  the one it recorded when it was accepted. */
+export type AcceptanceAuthority =
+  | Readonly<{ kind: "current"; expectation: AcceptanceExpectation }>
+  | Readonly<{ kind: "as-recorded" }>;
 
 export type AcceptedWaveCompletionReceipt = Readonly<{
   kind: "accepted-wave-completion-suite";
@@ -199,6 +234,7 @@ export type AcceptedWaveCompletionReceipt = Readonly<{
   suiteDigest: ArtifactDigest;
   workspaceDigest: ArtifactDigest;
   checks: NonEmpty<CompletionCheckResult>;
+  acceptance?: AcceptanceObservation;
   resultDigest: ArtifactDigest;
 }>;
 
@@ -747,7 +783,54 @@ function parseCheckResults(raw: unknown, path: string): Parsed<readonly Completi
     : failure(results.errors);
 }
 
-function parseAcceptedChecks(raw: unknown, path: string): Parsed<NonEmpty<CompletionCheckResult>> {
+/** Parse the persisted acceptance observation: an exact expectation and one
+ *  facts record per check, at most. */
+function parseAcceptanceObservation(raw: unknown, path: string): Parsed<AcceptanceObservation> {
+  const record = exactRecord(raw, ["expectation", "facts"], path);
+  if (!record.ok) return record;
+  const expectation = parseAcceptanceExpectation(record.value.expectation, `${path}.expectation`);
+  if (!expectation.ok) return failure([expectation.error]);
+  if (!Array.isArray(record.value.facts)) return failure([`${path}.facts must be an array`]);
+  const facts: AcceptanceReportFacts[] = [];
+  for (const [index, entry] of record.value.facts.entries()) {
+    const parsed = parseAcceptanceReportFacts(entry, `${path}.facts[${index}]`);
+    if (!parsed.ok) return failure([parsed.error]);
+    facts.push(parsed.value);
+  }
+  const checkIds = facts.map(({ checkId }) => checkId);
+  if (new Set(checkIds).size !== checkIds.length) return failure([`${path}.facts names a check more than once`]);
+  return success(freeze({ expectation: expectation.value, facts: freezeArray(facts) }));
+}
+
+/** The optional `acceptance` field of a result or receipt envelope. */
+function parseOptionalAcceptance(raw: unknown, path: string): Parsed<AcceptanceObservation | undefined> {
+  return isPlainRecord(raw) && Object.hasOwn(raw, "acceptance")
+    ? parseAcceptanceObservation(raw.acceptance, `${path}.acceptance`)
+    : success(undefined);
+}
+
+/** Facts whose check produced no report with the digest the facts were read from. */
+function unboundFactChecks(
+  checks: readonly CompletionCheckResult[],
+  facts: readonly AcceptanceReportFacts[],
+): readonly string[] {
+  return facts.flatMap(({ checkId, reportDigest }) => {
+    const check = checks.find((candidate) => candidate.checkId === checkId);
+    const report = check?.outcome.kind === "observed" ? check.outcome.report : null;
+    return report?.kind === "produced" && report.digest === reportDigest ? [] : [checkId];
+  });
+}
+
+/** The checks whose non-zero exit a recorded acceptance observation excuses. */
+function excusedChecks(acceptance: AcceptanceObservation | undefined): ReadonlySet<string> {
+  return new Set(acceptance === undefined ? [] : judgeAcceptance(acceptance.expectation, acceptance.facts).excusedCheckIds);
+}
+
+function parseAcceptedChecks(
+  raw: unknown,
+  path: string,
+  excused: ReadonlySet<string>,
+): Parsed<NonEmpty<CompletionCheckResult>> {
   const parsed = parseCheckResults(raw, path);
   if (!parsed.ok) return parsed;
   const errors: string[] = [];
@@ -760,7 +843,8 @@ function parseAcceptedChecks(raw: unknown, path: string): Parsed<NonEmpty<Comple
       errors.push(`${path} check ${check.checkId} must have an observed successful outcome`);
       continue;
     }
-    if (check.outcome.exitCode !== 0 || check.outcome.timedOut || check.outcome.signal !== null ||
+    const exitAccepted = check.outcome.exitCode === 0 || (check.outcome.exitCode !== null && excused.has(check.checkId));
+    if (!exitAccepted || check.outcome.timedOut || check.outcome.signal !== null ||
         check.outcome.report.kind === "missing" || check.outcome.report.kind === "unreadable") {
       errors.push(`${path} check ${check.checkId} is not a successful completion result`);
     }
@@ -799,6 +883,11 @@ type WaveCompletionEnvelopeContract<Checks extends readonly CompletionCheckResul
     parseExtra: (record: UnknownRecord, path: string) => Parsed<Extra>;
   }>;
 
+/** `acceptance` joins the exact field set only when present: results and
+ *  receipts written before contracts existed carry no such field. */
+const optionalEnvelopeFields = (raw: unknown): readonly string[] =>
+  isPlainRecord(raw) && Object.hasOwn(raw, "acceptance") ? ["acceptance"] : [];
+
 /** Parse the exact authority envelope shared by accepted receipts and observed results. */
 function parseExactWaveCompletionEnvelope<
   Checks extends readonly CompletionCheckResult[],
@@ -810,7 +899,7 @@ function parseExactWaveCompletionEnvelope<
   const { path } = contract;
   const record = exactRecord(raw, [
     "kind", "runId", "wave", "revision", "authorityDigest", "manifestDigest", "suiteDigest",
-    "workspaceDigest", "checks", ...contract.extraFields,
+    "workspaceDigest", "checks", ...contract.extraFields, ...optionalEnvelopeFields(raw),
   ], path);
   if (!record.ok) return record;
   const runId = parseRunId(record.value.runId, `${path}.runId`);
@@ -844,20 +933,40 @@ function parseExactWaveCompletionEnvelope<
   }));
 }
 
-/** Rehydrate only a successful, non-empty, exact accepted roster with intact digest authority. */
+/**
+ * Rehydrate only a successful, non-empty, exact accepted roster with intact
+ * digest authority. A non-zero exit is successful only when the receipt's own
+ * acceptance observation excuses it — the receipt proves itself, so no reader
+ * has to trust the evaluator that minted it.
+ */
 export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<AcceptedWaveCompletionReceipt> {
   return total(() => {
+    const acceptance = parseOptionalAcceptance(raw, "acceptedReceipt");
+    if (!acceptance.ok) return acceptance;
+    const excused = excusedChecks(acceptance.value);
     const envelope = parseExactWaveCompletionEnvelope(raw, {
       path: "acceptedReceipt",
       expectedKind: "accepted-wave-completion-suite",
       extraFields: ["resultDigest"],
-      parseChecks: parseAcceptedChecks,
+      parseChecks: (checks, path) => parseAcceptedChecks(checks, path, excused),
       parseExtra: (record, path) => {
         const resultDigest = parseDigest(record.resultDigest, `${path}.resultDigest`);
-        return resultDigest.ok ? success(freeze({ resultDigest: resultDigest.value })) : resultDigest;
+        return resultDigest.ok
+          ? success(freeze({
+              resultDigest: resultDigest.value,
+              ...(acceptance.value === undefined ? {} : { acceptance: acceptance.value }),
+            }))
+          : resultDigest;
       },
     });
     if (!envelope.ok) return envelope;
+    if (acceptance.value !== undefined) {
+      const unbound = unboundFactChecks(envelope.value.checks, acceptance.value.facts);
+      if (unbound.length > 0) return failure([`acceptedReceipt.acceptance facts are unbound for ${unbound.join(", ")}`]);
+      if (judgeAcceptance(acceptance.value.expectation, acceptance.value.facts).failures.length > 0) {
+        return failure(["acceptedReceipt.acceptance records failures an accepted receipt cannot carry"]);
+      }
+    }
     const { resultDigest, ...authority } = envelope.value;
     const body = freeze({ kind: "accepted-wave-completion-suite" as const, ...authority });
     const expectedDigest = digest(body);
@@ -875,7 +984,11 @@ export function parseWaveCompletionSuiteResult(raw: unknown): Parsed<WaveComplet
       expectedKind: "wave-completion-suite-result",
       extraFields: [],
       parseChecks: parseCheckResults,
-      parseExtra: () => success(freeze({})),
+      parseExtra: () => {
+        const acceptance = parseOptionalAcceptance(raw, "suiteResult");
+        if (!acceptance.ok) return acceptance;
+        return success(freeze(acceptance.value === undefined ? {} : { acceptance: acceptance.value }));
+      },
     });
     return envelope.ok
       ? success(freeze({ kind: "wave-completion-suite-result", ...envelope.value }))
@@ -913,6 +1026,7 @@ function staleFields(
 function acceptedReceipt(
   authority: AuthorizedWaveCompletionSuite,
   checks: NonEmpty<CompletionCheckResult>,
+  acceptance: AcceptanceObservation | undefined,
 ): AcceptedWaveCompletionReceipt {
   const body = freeze({
     kind: "accepted-wave-completion-suite" as const,
@@ -924,18 +1038,37 @@ function acceptedReceipt(
     suiteDigest: authority.suiteDigest,
     workspaceDigest: authority.workspaceDigest,
     checks,
+    ...(acceptance === undefined ? {} : { acceptance }),
   });
-  return freeze({ ...body, resultDigest: digest(body) });
+  return freeze({ ...body, resultDigest: digest(body as unknown as JsonValue) });
+}
+
+/** The check an acceptance rejection is reported against: the first whose
+ *  report was observed, else the first that must write one. */
+function acceptanceCheckId(
+  authority: AuthorizedWaveCompletionSuite,
+  facts: readonly AcceptanceReportFacts[],
+): CompletionCheckId {
+  const observed = authority.checks.find(({ checkId }) => facts.some((fact) => fact.checkId === checkId));
+  const reporting = authority.checks.find(({ reportPolicy }) => reportPolicy.kind === "required-file");
+  return (observed ?? reporting ?? authority.checks[0]).checkId;
 }
 
 /**
  * Evaluate one untrusted observed result against exact frozen Wave authority.
  * Authority failures never get reinterpreted as check failures. Once authority
  * matches, every independent process fact contributes its own typed failure.
+ *
+ * Acceptance: the result must have been judged under the expectation the
+ * caller names (the live gate's, or the one a historical receipt recorded),
+ * and its facts must be bound to the very reports the checks produced. A
+ * check's non-zero exit is excused only when every failure in its report is a
+ * RED or pending acceptance testcase; any acceptance failure rejects.
  */
 export function evaluateWaveCompletionSuite(
   rawAuthority: AuthorizedWaveCompletionSuite,
   rawResult: unknown,
+  acceptanceAuthority: AcceptanceAuthority,
 ): CompletionSuiteEvaluation {
   const authority = parseAuthorizedWaveCompletionSuite(rawAuthority);
   if (!authority.ok) {
@@ -991,9 +1124,21 @@ export function evaluateWaveCompletionSuite(
       }
     }
   }
+  const recorded = result.value.acceptance;
+  const recordedExpectation = recorded?.expectation ?? emptyAcceptanceExpectation(result.value.wave);
+  if (acceptanceAuthority.kind === "current" &&
+      !canonicalStructuralEquals(acceptanceAuthority.expectation, recordedExpectation)) {
+    authorityFailures.push(freeze({ kind: "acceptance-expectation-mismatch" }));
+  }
+  const [firstUnbound, ...restUnbound] = unboundFactChecks(result.value.checks, recorded?.facts ?? []);
+  if (firstUnbound !== undefined) {
+    authorityFailures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: freezeArray([firstUnbound, ...restUnbound]) as NonEmpty<string> }));
+  }
 
   const infrastructureFailures: CompletionInfrastructureFailure[] = [];
   const semanticFailures: CompletionSemanticFailure[] = [];
+  const judgment = judgeAcceptance(recordedExpectation, recorded?.facts ?? []);
+  const excused = new Set(judgment.excusedCheckIds);
   if (authorityFailures.length === 0) {
     for (const resultCheck of result.value.checks) {
       const expected = expectedById.get(resultCheck.checkId)!;
@@ -1006,7 +1151,7 @@ export function evaluateWaveCompletionSuite(
           if (outcome.signal !== null) {
             semanticFailures.push(freeze({ kind: "signal-termination", checkId: resultCheck.checkId, signal: outcome.signal }));
           }
-          if (outcome.exitCode !== null && outcome.exitCode !== 0) {
+          if (outcome.exitCode !== null && outcome.exitCode !== 0 && !excused.has(resultCheck.checkId)) {
             semanticFailures.push(freeze({ kind: "non-zero-exit", checkId: resultCheck.checkId, exitCode: outcome.exitCode }));
           }
           if (outcome.exitCode === null && !outcome.timedOut && outcome.signal === null) {
@@ -1030,6 +1175,14 @@ export function evaluateWaveCompletionSuite(
         })
         .exhaustive();
     }
+    const [firstFailure, ...restFailures] = judgment.failures;
+    if (firstFailure !== undefined) {
+      semanticFailures.push(freeze({
+        kind: "acceptance-rejected",
+        checkId: acceptanceCheckId(authority.value, recorded?.facts ?? []),
+        failures: freezeArray([firstFailure, ...restFailures]) as NonEmpty<AcceptanceFailure>,
+      }));
+    }
   }
 
   if (authorityFailures.length > 0 || infrastructureFailures.length > 0 || semanticFailures.length > 0) {
@@ -1037,6 +1190,6 @@ export function evaluateWaveCompletionSuite(
   }
   return freeze({
     kind: "accepted",
-    receipt: acceptedReceipt(authority.value, asNonEmpty(result.value.checks)),
+    receipt: acceptedReceipt(authority.value, asNonEmpty(result.value.checks), recorded),
   });
 }

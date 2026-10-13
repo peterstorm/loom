@@ -14,8 +14,10 @@ import {
   type AuthorizedWaveCompletionCheck,
   type CompletionCheckResult,
 } from "../../../src/core/completion-suite";
+import { createHash } from "node:crypto";
 import { parseArtifactDigest } from "../../../src/core/orchestration-contract";
-import { evaluateTaskProof } from "../../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof } from "../../../src/core/proof-obligations";
+import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import {
   authorizeWaveCompletionSuite,
   freezeVerificationManifest,
@@ -80,6 +82,20 @@ const proof = (() => {
   return evaluated;
 })();
 
+const contractTaskProof = (() => {
+  const evaluated = evaluateTaskProof(
+    { newTestsRequired: true, declaredArtifacts: ["tests/payload.acceptance.test.ts"] },
+    {
+      taskCompleted: true,
+      testResult: { verdict: "trusted-pass" },
+      filesModified: ["tests/payload.acceptance.test.ts"],
+      newTestsWritten: true,
+    },
+  );
+  if (evaluated.state !== "satisfied") throw new Error("contract task proof fixture must be satisfied");
+  return evaluated;
+})();
+
 function completionScript(): string {
   return `
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -105,9 +121,41 @@ else if (mode === "missing-report") process.exit(0);
 else if (mode === "mutate-workspace") {
   writeFileSync("source.ts", "export const value = 2;\\n");
   writeFileSync(report, String(previous + 1));
+} else if (mode === "junit-red" || mode === "junit-green-early") {
+  const red = mode === "junit-red";
+  const outcome = red ? '<failure message="expected 2" type="AssertionError">expected 2</failure>' : "";
+  writeFileSync(report, [
+    '<?xml version="1.0" encoding="UTF-8" ?>',
+    \`<testsuites name="vitest tests" tests="2" failures="\${red ? 1 : 0}" errors="0">\`,
+    '<testsuite name="tests/other.test.ts" tests="1" failures="0" errors="0" skipped="0">',
+    '<testcase classname="tests/other.test.ts" name="plain"></testcase>',
+    '</testsuite>',
+    \`<testsuite name="tests/payload.acceptance.test.ts" tests="1" failures="\${red ? 1 : 0}" errors="0" skipped="0">\`,
+    \`<testcase classname="tests/payload.acceptance.test.ts" name="payload &gt; AS-001: one call wins">\${outcome}</testcase>\`,
+    '</testsuite>',
+    '</testsuites>',
+  ].join("\\n"));
+  process.exit(red ? 1 : 0);
 } else process.exit(3);
 `;
 }
+
+const ACCEPTANCE_FILE = "tests/payload.acceptance.test.ts";
+const ACCEPTANCE_SOURCE = "it('AS-001: one call wins', () => expect(wins()).toBe(2));\n";
+
+/** One contract written by T1 in Wave 1, completed by T2 in Wave 2. */
+const CONTRACT: AcceptanceContract = {
+  schemaVersion: 1,
+  id: "CT-1",
+  title: "Payload",
+  statement: "One valid call wins.",
+  contractTask: "T1",
+  types: { kind: "none", reason: "the slice declares no shared surface" },
+  acceptance: [{ path: ACCEPTANCE_FILE, anchors: ["AS-001"] }],
+  supportedDomain: null,
+  freeze: { state: "awaiting-red" },
+  revisions: [],
+};
 
 type Fixture = Readonly<{
   root: string;
@@ -116,7 +164,7 @@ type Fixture = Readonly<{
   registration: RegisteredWaveGateProgram;
 }>;
 
-function fixture(mode: string, report = true): Fixture {
+function fixture(mode: string, report = true, contract = false): Fixture {
   const root = canonicalTempDir("loom-wave-suite-");
   roots.push(root);
   git(root, "init", "-q");
@@ -125,6 +173,7 @@ function fixture(mode: string, report = true): Fixture {
   write(root, ".gitignore", ".loom/bin/\n.loom/completion-reports/\n");
   write(root, "source.ts", "export const value = 1;\n");
   write(root, "completion-check.mjs", completionScript());
+  if (contract) write(root, ACCEPTANCE_FILE, ACCEPTANCE_SOURCE);
   git(root, "add", "-A");
   git(root, "commit", "-qm", "fixture");
 
@@ -158,10 +207,22 @@ function fixture(mode: string, report = true): Fixture {
       review_status: "pending",
       critical_findings: [],
       advisory_findings: [],
-    }],
+      ...(contract ? { file_list: [ACCEPTANCE_FILE], proof: contractTaskProof } : {}),
+    }, ...(contract ? [{
+      id: "T2",
+      description: "turn the acceptance green",
+      agent: "code-implementer-agent" as const,
+      wave: 2,
+      status: "pending" as const,
+      proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/payload.ts"] }),
+      depends_on: ["T1"],
+      spec_anchors: ["AS-001"],
+      file_list: ["src/payload.ts"],
+    }] : [])],
     wave_gates: {},
     verification_manifest: manifest(mode, report),
     active_wave_gate: active,
+    ...(contract ? { acceptance_contracts: [CONTRACT] } : {}),
   };
   const statePath = join(root, ".claude/state/active_task_graph.json");
   write(root, ".claude/state/active_task_graph.json", JSON.stringify(graph, null, 2));
@@ -270,7 +331,7 @@ function acceptedReceiptForCurrentAuthority(f: Fixture) {
     ...authority,
     kind: "wave-completion-suite-result",
     checks,
-  });
+  }, { kind: "as-recorded" });
   if (evaluated.kind !== "accepted") throw new Error("replacement receipt fixture must be accepted");
   return evaluated.receipt;
 }
@@ -596,6 +657,54 @@ describe("modern Wave completion suite shell", () => {
     });
     expect(reportCount(f.root)).toBe(0);
     expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
+  });
+
+  describe("acceptance contracts at the Wave Gate", () => {
+    it("accepts the contract Wave's expected RED and stamps the Acceptance Freeze with the receipt", async () => {
+      const f = fixture("junit-red", true, true);
+      const result = await ensure(f);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      const graph = f.manager.load();
+      expect(graph.active_wave_completion_suite?.checks.find(({ checkId }) => checkId === "project:completion")?.outcome)
+        .toMatchObject({ exitCode: 1 });
+      expect(graph.acceptance_contracts?.[0]?.freeze).toEqual({
+        state: "frozen",
+        wave: 1,
+        paths: [{ path: ACCEPTANCE_FILE, sha256: createHash("sha256").update(ACCEPTANCE_SOURCE).digest("hex") }],
+        roster: [{ file: ACCEPTANCE_FILE, name: "payload > AS-001: one call wins", anchors: ["AS-001"] }],
+      });
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
+    });
+
+    it("blocks a contract Wave whose acceptance already passes, naming the testcase", async () => {
+      const f = fixture("junit-green-early", true, true);
+      const result = await ensure(f);
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          diagnostic: {
+            categories: ["semantic"],
+            message: expect.stringContaining("acceptance testcases pass before any claimant implemented them"),
+          },
+        },
+      });
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("blocks with artifact drift once a frozen acceptance file changes outside any Task", async () => {
+      const f = fixture("junit-red", true, true);
+      expect(await ensure(f)).toMatchObject({ ok: true });
+      write(f.root, ACCEPTANCE_FILE, "it.skip('AS-001: one call wins', () => {});\n");
+      expect(await ensure(f)).toMatchObject({
+        ok: false,
+        error: {
+          diagnostic: {
+            categories: ["artifact"],
+            message: expect.stringContaining(`frozen acceptance drifted: CT-1 '${ACCEPTANCE_FILE}' changed`),
+          },
+        },
+      });
+    });
   });
 
   it("fails closed when the protected TaskGraph path has no Git authority", async () => {

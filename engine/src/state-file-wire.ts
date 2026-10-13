@@ -116,6 +116,8 @@ import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
 import type { LegacyWaveGateCompatibilityAuthority } from "./core/legacy-archive";
+import { frozenPaths, parseAcceptanceContracts, type AcceptanceContract } from "./core/acceptance-contract";
+import { pathsMatch } from "./core/plan-path-match";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2214,6 +2216,32 @@ function parseTaskGraphHistoryFields(
   });
 }
 
+/**
+ * The persisted contracts, parsed exactly and bound to the roster: each names
+ * a Task that exists and whose file_list holds every path the contract
+ * freezes. A contract whose writer vanished could never be observed RED.
+ */
+function parseAcceptanceContractsField(
+  raw: unknown,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<readonly AcceptanceContract[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  const parsed = parseAcceptanceContracts(raw);
+  if (!parsed.ok) return parseErr(parsed.error);
+  for (const contract of parsed.value) {
+    const writer = tasks.find(({ id }) => id === contract.contractTask);
+    if (writer === undefined) {
+      return parseErr(`acceptance_contracts ${contract.id}: contract task ${contract.contractTask} is not in tasks`);
+    }
+    const files = Array.isArray(writer.file_list) ? writer.file_list.filter((file): file is string => typeof file === "string") : [];
+    const unwritten = frozenPaths(contract).find((path) => !files.some((file) => pathsMatch(file, path)));
+    if (unwritten !== undefined) {
+      return parseErr(`acceptance_contracts ${contract.id}: frozen path '${unwritten}' is not in ${contract.contractTask}'s file_list`);
+    }
+  }
+  return parseOk(parsed.value);
+}
+
 type ParsedTaskGraphParts = Readonly<{
   phaseArtifacts: Readonly<Record<string, string>>;
   skippedPhases: readonly Phase[];
@@ -2223,6 +2251,7 @@ type ParsedTaskGraphParts = Readonly<{
   specCheck: SpecCheck | undefined;
   specIndexObservation: SpecIndexObservation | undefined;
   proofBoundaryObservation: ProofBoundaryObservation | undefined;
+  acceptanceContracts: readonly AcceptanceContract[] | undefined;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
 }>;
@@ -2277,6 +2306,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
+    ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
   } as unknown as ParsedTaskGraph;
 }
 
@@ -2365,6 +2395,11 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     tasks.value as Record<string, unknown>[],
   );
   if (!history.ok) return parseErr(history.error);
+  const acceptanceContracts = parseAcceptanceContractsField(
+    obj.acceptance_contracts,
+    tasks.value as Record<string, unknown>[],
+  );
+  if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
 
   return parseOk(taskGraphFromParsedParts(obj, {
     ...documents.value,
@@ -2372,6 +2407,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     executingTasks: executingTasks.value,
     waveGates: migratedWaveGates,
     specCheck: specCheck.value,
+    acceptanceContracts: acceptanceContracts.value,
     authority: authority.value,
     history: history.value,
   }));

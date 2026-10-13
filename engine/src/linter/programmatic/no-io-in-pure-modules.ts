@@ -151,6 +151,11 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",
+  // Acceptance Contracts (G1): the plan shapes types.ts re-exports, the Wave
+  // Gate's RED/GREEN judgment and the freeze, plus the path-matching leaf they
+  // share with plan validation.
+  "engine/src/core/acceptance-contract.ts",
+  "engine/src/core/plan-path-match.ts",
   // Standalone read coverage (ADR-0022): the obligation, page verification and
   // admission decision, plus the deterministic diff the obligation is frozen
   // from. The Context Packet projection imports both.

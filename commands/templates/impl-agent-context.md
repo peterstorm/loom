@@ -113,6 +113,12 @@ The engine derives this from each dependency's settled, Wave-Gate-reviewed state
 
 The engine derives this section from the plan's `## Invariants`: a rule the plan gives one owner module is implemented there once and called from every sibling entry point. Never write a second copy of an owned rule; if the owner cannot serve your entry point, stop and report what it is missing.
 
+## Acceptance Contract — BINDING
+
+{acceptance_contract}
+
+The engine derives this section from the plan's `## Contracts` and the TaskGraph's Acceptance Freeze. A contract's types file and acceptance tests are written once, by its contract Task, and observed failing at that Task's Wave Gate; from then on every Wave Gate proves their bytes unchanged and the testcases of every completed Requirement passing.
+
 ## Files to Create/Modify
 
 {file_list}

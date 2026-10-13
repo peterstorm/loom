@@ -1,8 +1,8 @@
 # Executable Models Only — Standing Policy
 
 A standing policy the architecture, decompose, and implementation phases
-follow whenever a feature contains a real lifecycle, pipeline, or checkable
-invariant. (Introduced by deterministic-core-convergence v2, "Phase C" — but
+follow whenever a feature contains a real lifecycle, pipeline, checkable
+invariant, or test-decidable behavior contract. (Introduced by deterministic-core-convergence v2, "Phase C" — but
 it is policy, not a feature, and outlives that plan.)
 
 **The rule: a model either executes or it doesn't exist.** Descriptive models —
@@ -17,6 +17,7 @@ forms:
 | Pipeline (fetch → transform → LLM → review) | `AuthoredDag` sidecar; graph code **generated** by `fugue new --from`, never hand-written | fugue's `defineDag` validation + lint gauntlet |
 | Checkable invariant | Lint rule JSON in `.claude/linter/rules/` | loom's linter, fail-closed at PostToolUse on every edit |
 | Non-checkable invariant | Prose in the plan, tiered `advisory` | Nothing — and the plan says so honestly |
+| Behavior contract (what a slice must do, decidable by a test) | Declarations-only types file + dedicated acceptance tests, written **before** the code and frozen | The Wave Gate: observed RED, then GREEN by Requirement, bytes frozen in between |
 
 Everything else a model schema might capture (aggregate fields, command lists)
 is what the type system already is. Types + `spec_anchors` cover it.
@@ -53,9 +54,10 @@ in a `## Lifecycles` section:
 - The states/transitions table is for humans and impl agents; the machine file
   is the source of truth the moment it exists.
 - **Exact grammar**: these sections are regex-parsed. Headings
-  `## Lifecycles` / `## Pipeline` / `## Invariants` with no suffix or colon
-  (heading and label case is tolerated; block ids are uppercase-only);
-  blocks `### LC-<n>: <title>` / `### INV-<n>: <title>` (numeric id, colon);
+  `## Lifecycles` / `## Pipeline` / `## Invariants` / `## Contracts` with no
+  suffix or colon (heading and label case is tolerated; block ids are
+  uppercase-only); blocks `### LC-<n>: <title>` / `### INV-<n>: <title>` /
+  `### CT-<n>: <title>` (numeric id, colon);
   labels at column 0 with the colon inside the bold. Machine-file paths are
   repo-relative. Near-miss variants, unterminated code fences, and declared
   sections with no blocks are validation errors ("stray model markers"),
@@ -198,6 +200,88 @@ Task's role** — owner, sibling, matrix-test author — and the whole family in
 its implementation brief from the plan, so the instruction does not depend on
 a model copying plan text into `plan_context`.
 
+## 4. Contracts → frozen acceptance tests (contracts before code)
+
+An LLM implementer that writes its own tests after its own code grades its own
+homework: the tests encode whatever the code happens to do. A contract moves
+the decision earlier. One task writes the surface consumers import and the
+tests that decide the behavior, the engine proves those tests fail, freezes
+them, and only then do other tasks write the code that turns them green.
+
+```markdown
+## Contracts
+
+### CT-1: Payload submission
+
+**Types file:** `src/payload/payload-contract.ts`
+**Acceptance tests:**
+- `tests/payload.acceptance.test.ts` — AS-001, FR-002
+**Supported domain:** `tests/payload.acceptance.test.ts`
+**Statement:** One valid call wins; a second call is refused with AlreadySubmitted.
+
+### CT-2: Submission slice
+
+**Types file:** none
+**No types reason:** The slice consumes CT-1's surface.
+**Acceptance tests:**
+- `tests/submission.acceptance.test.ts` — AS-004
+**Statement:** End to end, an unauthenticated submission is refused.
+```
+
+- `**Types file:**` — a NEW file holding declarations only: types, sealed
+  ADTs, the function signatures consumers import. Never an implementation file
+  or a shared `types.ts`: its bytes freeze. Or `none` with a
+  `**No types reason:**`.
+- `**Acceptance tests:**` — NEW, dedicated test files, one `- path — FR-n,
+  AS-n` line each, naming only Requirements a test can decide. Every testcase
+  is named after the Requirement it decides (`AS-001: one call wins`); the
+  name prefix is how the engine attributes a testcase to its Requirement.
+- `**Supported domain:**` (optional) — the acceptance file whose testcases
+  hold the supported/unsupported input table and the relevant laws.
+- `**Statement:**` — the observable behavior, and what is refused.
+
+**The lifecycle the engine enforces:**
+
+1. **Population** persists each contract as an Acceptance Contract with its
+   one contract Task (the only Task writing every frozen path) and freeze state
+   `awaiting-red`. A plan with contracts is refused unless the verification
+   manifest has a project check that writes a JUnit report — the only way RED
+   and GREEN can be observed.
+2. **The contract Wave's gate expects RED.** Every acceptance testcase must be
+   collected (a file that fails to load is not a behavioral RED) and FAIL, and
+   nothing outside the acceptance files may fail. Each testcase must name a
+   covered Requirement, and each covered Requirement must have a testcase. The
+   accepted gate stamps the **Acceptance Freeze**: the sha256 of every frozen
+   path and the roster of testcases it observed red.
+3. **Red window.** A testcase is *pending* until the Wave completing all its
+   Requirements, and *due* from then on. A pending testcase's failure is
+   excused only at the Wave Gate — never in a task's own run. So every task
+   from the contract Wave through the last Wave completing a covered
+   Requirement gets the engine-only regression waiver `acceptance-red-window`,
+   and the Wave Gate's engine-run suite (which knows what is pending) is their
+   regression authority. Every other failure still fails the gate.
+4. **Claimant Waves expect GREEN by Requirement.** Each due testcase must be
+   present and passing; a roster testcase that no longer runs fails the gate.
+5. **Frozen means frozen.** Every gate re-hashes the frozen paths before it
+   reuses or installs a suite receipt; any drift blocks as an artifact
+   failure. Task byte-scope proof already stops a task writing a path outside
+   its `file_list`, and only the contract task lists the frozen paths.
+6. **Contract Revision** is the one way to change frozen bytes: the operator
+   edits them and runs `helper revise-contract --contract CT-n --reason "…"`.
+   It is refused while a Wave Gate is live, before the freeze, before the
+   contract Wave completes, while implementation is reserved, and while any
+   claimant sits in a completed Wave (reopen that Wave first). It re-stamps
+   the bytes, clears the roster so the next gate re-records it green, appends
+   an audited revision, returns the current Wave's implemented claimants to
+   revalidation, and retires the current Wave's review and suite authority.
+
+**Decompose** creates one contract task per `CT-N` (rule 12 of the decompose
+template); claimants depend on it and may waive new tests with
+`covered-by-acceptance-contract`. **The engine renders each Task's role** — the
+contract task's write-the-surface-and-stubs instructions, a claimant's frozen
+paths and the testcases it must turn green, a red-window task's note about
+pending failures — into its brief.
+
 ---
 
 ## Enforcement points (deterministic, wired)
@@ -235,6 +319,10 @@ a model copying plan text into `plan_context`.
    architecture phase artifact; a named-but-unreadable plan fails the gate.
    Only when state carries neither (legacy flows that never ran the
    architecture phase) is the check skipped, and it says so.
+6. **The Wave Gate's completion suite** judges every Acceptance Contract the
+   Wave owes something (RED in the contract Wave, GREEN by Requirement after),
+   stamps the Acceptance Freeze from the accepted receipt in the same locked
+   write, and blocks on frozen-path drift before reusing any receipt.
 
 ## Known residuals (honest limits)
 
@@ -245,6 +333,16 @@ a model copying plan text into `plan_context`.
   checks on it — is the mechanical correction.
 - **"The matrix test exists" is not "the matrix test is complete".** A test
   that covers only well-formed input still satisfies the path check.
+- **RED/GREEN is not discrimination.** A frozen acceptance test that a wrong
+  implementation also passes still turns green. Mutation checks against the
+  frozen tests are the follow-up (G5b).
+- **Acceptance is observed through JUnit only.** Testcases are attributed by
+  file (Vitest's relative `classname`, or a JVM class name) and by the
+  `FR-n:`/`AS-n:` name prefix; a report in another format cannot carry a
+  contract.
+- **A check that runs the tests and then other steps** stops at the failing
+  test step in the contract Wave, so its later steps go unobserved there.
+  Keep the test runner as its own project check.
 
 - **Import discipline is advisory-plus-lint.** "Dependents import the machine,
   never re-implement transitions" is enforced only where a paired checkable

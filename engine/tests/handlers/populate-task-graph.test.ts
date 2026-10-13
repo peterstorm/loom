@@ -959,3 +959,81 @@ describe("populate-task-graph — one spec_file precedence", () => {
   });
 
 });
+
+describe("populate-task-graph — Acceptance Contracts", () => {
+  const CONTRACT_PLAN = [
+    "# Plan",
+    "",
+    "## Contracts",
+    "",
+    "### CT-1: Payload",
+    "",
+    "**Types file:** `src/payload-contract.ts`",
+    "**Acceptance tests:**",
+    "- `tests/payload.acceptance.test.ts` — AS-001",
+    "**Statement:** One valid call wins.",
+    "",
+  ].join("\n");
+
+  function contractPlan(dir: string): string {
+    const planFile = join(dir, "plan.md");
+    writeFileSync(planFile, CONTRACT_PLAN);
+    return planFile;
+  }
+
+  const contractDecompose = (planFile: string): string => JSON.stringify({
+    spec_trace_version: 2,
+    plan_title: "t",
+    spec_file: "spec.md",
+    plan_file: planFile,
+    tasks: [
+      {
+        id: "T1", description: "contract", agent: "code-implementer-agent", wave: 1, depends_on: [],
+        spec_anchors: [], spec_contributions: ["AS-001"], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+        file_list: ["src/payload-contract.ts", "tests/payload.acceptance.test.ts", "src/payload.ts"],
+      },
+      {
+        id: "T2", description: "turn it green", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"],
+        spec_anchors: ["AS-001"], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+        file_list: ["src/payload-impl.ts"],
+      },
+    ],
+  });
+
+  const reportingManifest = () => ({
+    ...manifestDocument(),
+    checks: [{
+      ...manifestDocument().checks[0]!,
+      report: { kind: "required-file", path: ".loom/completion-reports/junit.xml" },
+    }],
+  });
+
+  it("refuses contracts when no project check writes a report that could observe RED and GREEN", async () => {
+    const dir = tempDir();
+    const plan = contractPlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir);
+    const before = stateBytes(statePath);
+
+    const result = await populate(contractDecompose(plan), []);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("The plan declares Contracts (CT-1)") });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("stamps the contract awaiting RED and waives the red window's task-level regression run", async () => {
+    const dir = tempDir();
+    const plan = contractPlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir, reportingManifest());
+
+    const result = await populate(contractDecompose(plan), []);
+
+    expect(result.kind, result.kind === "error" ? result.message : "").toBe("passthrough");
+    const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(graph.acceptance_contracts).toMatchObject([{ id: "CT-1", contractTask: "T1", freeze: { state: "awaiting-red" } }]);
+    for (const task of graph.tasks) {
+      expect(task.verification_policy?.regression).toEqual({ kind: "waived", reason: "acceptance-red-window" });
+    }
+  });
+});

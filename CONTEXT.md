@@ -397,7 +397,7 @@ The guard-state-file residual class where an interpreter's `-c`/`-e` inline prog
 _Avoid_: Nested interpreter, double interpreter, inner shell
 
 **Executable Model**:
-A model the system imports, runs, or enforces — a lifecycle machine, an AuthoredDag, or a lint rule. The only kind of model loom permits: a model either executes or it doesn't exist (`references/executable-models.md`).
+A model the system imports, runs, or enforces — a lifecycle machine, an AuthoredDag, a lint rule, or a frozen **Acceptance Contract**. The only kind of model loom permits: a model either executes or it doesn't exist (`references/executable-models.md`).
 _Avoid_: Behavioral model, descriptive model, structural diff (these name the forbidden alternative)
 
 **Lifecycle Machine**:
@@ -427,6 +427,26 @@ _Avoid_: Caller (too broad — not every caller applies the rule), consumer, cop
 **Matrix Test**:
 The test an owned invariant names (`**Matrix test:**`) that runs its rule through the owner and every **Sibling Entry Point**, so a divergent second copy fails it. Any Task change to the family must come with a change to its matrix test.
 _Avoid_: Parity test (one specific shape), integration test (says nothing about coverage)
+
+**Acceptance Contract**:
+A plan's `CT-N` declaration made executable: a declarations-only types file (or `none` with a reason) and dedicated acceptance test files, each naming the Requirements it decides, written before any implementation and persisted in the TaskGraph (`acceptance_contracts`). Its testcases are named after the Requirement they decide (`AS-003: …`); that name prefix is the only attribution.
+_Avoid_: Contract (alone — collides with **Wire Contract** and the orchestration contract), spec test, golden test
+
+**Contract Task**:
+The one Task whose `file_list` holds every frozen path of an **Acceptance Contract**. It writes the types, the acceptance tests and compiling stubs, contributes to the covered Requirements but never claims them, and its Wave Gate must observe every acceptance testcase collected and failing (RED).
+_Avoid_: Test task, scaffolding task
+
+**Acceptance Freeze**:
+What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift.
+_Avoid_: Snapshot, lock, baseline
+
+**Red Window**:
+The Waves from a contract Wave through the last Wave completing one of its covered Requirements. A testcase is *pending* until the Wave completing all its Requirements and *due* after; a pending failure is excused only at the Wave Gate, so Tasks in the window carry the engine-only regression waiver `acceptance-red-window` and the Wave Gate's suite is their regression authority.
+_Avoid_: Grace period, expected-failure list
+
+**Contract Revision**:
+The operator-only way to change an **Acceptance Contract**'s frozen bytes (`helper revise-contract`): it re-stamps them, clears the roster for the next gate to re-record, appends an audited revision, returns the current Wave's implemented claimants to revalidation and retires that Wave's review and suite authority. Refused while a Wave Gate is live, before the freeze or the contract Wave's completion, and while any claimant sits in a completed Wave.
+_Avoid_: Unfreeze, test fix, override
 
 **Git-Visible Leaf**:
 A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it, under the one Git execution policy (`utils/git-execution-policy.ts`: allow-listed environment, no ambient `GIT_*`, no system or global config, fsmonitor disabled). Every engine Git child runs under that policy, so no observer's ignore rules can depend on an operator's global ignore file — neither one named by `core.excludesFile` nor Git's implicit `~/.config/git/ignore` (`XDG_CONFIG_HOME` is pinned to `/dev/null`).
@@ -498,6 +518,8 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A Review Packet reviews the **Git-Visible Leaves** of a scoped directory plus the leaves at its base, so a deletion shows; its **Reviewed Workspace Observation** hashes only the **Git-Visible Leaves**, where a deleted leaf has no bytes
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 - Every plan invariant names its **Invariant Owner** (or why it has none); an owned one lists its **Sibling Entry Points** and **Matrix Test**, and the engine renders each **Task**'s role among them into its implementation brief
+- An **Acceptance Contract** has exactly one **Contract Task**; every **Task** claiming a covered Requirement depends on it, may not write a frozen path, and turns the frozen testcases green at its own Wave Gate
+- Only an accepted Wave Gate stamps an **Acceptance Freeze**, and only a **Contract Revision** changes one; a claimant in a completed **Wave** blocks the revision until that Wave is reopened
 
 ## Example Dialogue
 
@@ -518,3 +540,4 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - "lens" names two disjoint closed vocabularies with nothing in common but the idea of a committed single perspective: the five DESIGN lenses of `/loom --panel` (`simplicity-first`, `type-driven-fp`, `risk-security-first`, `performance-first`, `codebase-conventionist` — `PANEL_LENSES`, `references/panel-lenses.md`) and the five REFUTATION lenses of the wave gate's panel (`reproduction`, `intent`, `blast-radius`, `security`, `test-coverage` — `REVIEW_LENSES`, `references/review-lenses.md`). Resolved: say "design lens" or "refutation lens" wherever both panels are in scope; bare "lens" is fine inside one panel's own documentation, where only one vocabulary exists. They are deliberately NOT unified — a designer's lens shapes what it builds, a verifier's shapes what it tries to disprove.
 - "panel" alone is ambiguous between the two — resolved: "architecture panel" (`/loom --panel`) and "refutation panel" (wave gate Step 3.5). The shared machinery they both instantiate is "the panel kernel."
 - "machine" names two unrelated things: the **Lifecycle Machine** (a plan's `LC-N` domain lifecycle, in `engine/src/core/`) and the **Guarded Skill Machine** (a per-agent-type phase gate, defined in `machines/` and implemented in `engine/src/machine/`). The directory names are the trap — `core/*-machine.ts` is the first, `machine/` is the second. Resolved: always say "Lifecycle Machine" or "Guarded Skill Machine" when both could be meant; bare "machine" is fine inside one of the two subsystems' own documentation. They share no types and no code.
+- "contract" names three things: the plan's **Acceptance Contract** (`CT-N`, `core/acceptance-contract.ts`), the **Wire Contract** of an emission route, and the orchestration shared kernel (`core/orchestration-contract/`). Resolved: say "Acceptance Contract" (or "plan contract") for `CT-N`; never bare "contract" where another could be meant.

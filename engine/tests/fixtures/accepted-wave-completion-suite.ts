@@ -32,7 +32,7 @@ export function acceptedWaveCompletionSuite(
         report: { kind: "not-required" as const },
       },
     })),
-  });
+  }, { kind: "as-recorded" });
   if (evaluated.kind !== "accepted") throw new Error("completion-suite fixture was not accepted");
   return evaluated.receipt;
 }

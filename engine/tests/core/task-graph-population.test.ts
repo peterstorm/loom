@@ -11,7 +11,7 @@ import { defaultVerificationManifest } from "../../src/core/verification-manifes
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import { registerTaskExecutionBaseline } from "../../src/core/validate-task-execution";
 import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
-import { PHASES, type TaskGraph } from "../../src/types";
+import { PHASES, type PlanContract, type TaskGraph } from "../../src/types";
 
 const specSource = `# Feature: Population
 
@@ -97,8 +97,21 @@ const command = (overrides: Partial<TaskGraphPopulationCommand> = {}): TaskGraph
   observedSpecFile: "spec.md",
   force: false,
   proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
+  contracts: [],
   ...overrides,
 });
+
+const CONTRACT: PlanContract = {
+  id: "CT-1",
+  title: "Population contract",
+  declaration: {
+    kind: "declared",
+    types: { kind: "file", path: "src/population-contract.ts" },
+    acceptance: [{ path: "tests/population.acceptance.test.ts", anchors: ["AS-001"] }],
+    supportedDomain: null,
+    statement: "Population installs pending Tasks.",
+  },
+};
 
 describe("populateTaskGraph aggregate command", () => {
   it("installs sanitized pending Tasks, Requirement hashes, and exact Wave gates", () => {
@@ -414,6 +427,72 @@ describe("populateTaskGraph aggregate command", () => {
         }
       },
     ));
+  });
+});
+
+describe("populateTaskGraph stamps the plan's Acceptance Contracts", () => {
+  // T1 writes CT-1 in Wave 1; T2 completes AS-001 in Wave 2; T3 is later work.
+  const contractRoster = () => roster([
+    { ...authoredTask("T1", 1, []), file_list: ["src/population-contract.ts", "tests/population.acceptance.test.ts"] },
+    { ...authoredTask("T2", 2, ["AS-001"]), depends_on: ["T1"] },
+    authoredTask("T3", 3),
+  ]);
+
+  it("persists each contract awaiting RED and waives task-level regression only inside its red window", () => {
+    const result = populateTaskGraph(graph(), command({ tasks: contractRoster(), contracts: [CONTRACT] }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.state.acceptance_contracts).toEqual([{
+      schemaVersion: 1,
+      id: "CT-1",
+      title: "Population contract",
+      statement: "Population installs pending Tasks.",
+      contractTask: "T1",
+      types: { kind: "file", path: "src/population-contract.ts" },
+      acceptance: [{ path: "tests/population.acceptance.test.ts", anchors: ["AS-001"] }],
+      supportedDomain: null,
+      freeze: { state: "awaiting-red" },
+      revisions: [],
+    }]);
+    const regression = Object.fromEntries(result.value.state.tasks.map(({ id, verification_policy }) =>
+      [id, verification_policy?.regression]));
+    expect(regression).toEqual({
+      T1: { kind: "waived", reason: "acceptance-red-window" },
+      T2: { kind: "waived", reason: "acceptance-red-window" },
+      T3: { kind: "required" },
+    });
+    // The proof derives from the stamped policy: no regression obligation to fail.
+    expect(result.value.state.tasks[0]!.proof!.obligations.map(({ kind }) => kind)).not.toContain("regression-test-pass");
+    expect(result.value.state.tasks[2]!.proof!.obligations.map(({ kind }) => kind)).toContain("regression-test-pass");
+  });
+
+  it("keeps an authored regression waiver's own reason inside the window", () => {
+    const tasks = roster([
+      {
+        ...authoredTask("T1", 1, []),
+        file_list: ["src/population-contract.ts", "tests/population.acceptance.test.ts"],
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      },
+      { ...authoredTask("T2", 2, ["AS-001"]), depends_on: ["T1"] },
+    ]);
+    const result = populateTaskGraph(graph(), command({ tasks, contracts: [CONTRACT] }));
+    expect(result.ok && result.value.state.tasks[0]!.verification_policy?.regression)
+      .toEqual({ kind: "waived", reason: "documentation-only" });
+  });
+
+  it("refuses a contract no single Task writes, and drops stale contracts on re-population without one", () => {
+    expect(populateTaskGraph(graph(), command({ contracts: [CONTRACT] }))).toMatchObject({
+      ok: false,
+      error: { kind: "invalid-contracts" },
+    });
+    const first = populateTaskGraph(graph(), command({ tasks: contractRoster(), contracts: [CONTRACT] }));
+    if (!first.ok) throw new Error(first.error.message);
+    const repopulated = populateTaskGraph(first.value.state, command({ force: true }));
+    expect(repopulated.ok && repopulated.value.state.acceptance_contracts).toBeUndefined();
   });
 });
 

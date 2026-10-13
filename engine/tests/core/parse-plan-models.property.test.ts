@@ -45,6 +45,13 @@ function isWellShaped(models: PlanModels): boolean {
       ["owned", "unowned", "malformed"].includes(inv.ownership.kind) &&
       // A malformed declaration always says why.
       (inv.ownership.kind !== "malformed" || inv.ownership.problems.length > 0)) &&
+    Array.isArray(models.contracts) &&
+    models.contracts.every(({ id, declaration }) =>
+      /^CT-\d+$/.test(id) &&
+      // A malformed declaration always says why; a declared one always covers something.
+      (declaration.kind === "malformed"
+        ? declaration.problems.length > 0
+        : declaration.acceptance.every((file: Readonly<{ anchors: readonly string[] }>) => file.anchors.length > 0))) &&
     Array.isArray(models.strays) &&
     models.strays.every(isWellShapedStray)
   );
@@ -98,11 +105,32 @@ describe("parsePlanModels — properties", () => {
             "",
           ].join("\n");
 
+    const arbContract = fc.record({
+      n: fc.integer({ min: 1, max: 9 }),
+      // undefined = no shared types surface
+      types: fc.option(slug.map((s) => `src/${s}-contract.ts`), { nil: undefined }),
+      files: fc.uniqueArray(
+        fc.record({ file: slug, anchors: fc.uniqueArray(fc.integer({ min: 1, max: 40 }), { minLength: 1, maxLength: 3 }) }),
+        { minLength: 1, maxLength: 2, selector: (f) => f.file },
+      ),
+    });
+    const contractLines = (contract: { types: string | undefined; files: { file: string; anchors: number[] }[] }): string => [
+      contract.types === undefined
+        ? "**Types file:** none\n**No types reason:** consumes another contract"
+        : `**Types file:** \`${contract.types}\``,
+      "**Acceptance tests:**",
+      ...contract.files.map(({ file, anchors }) =>
+        `- \`tests/${file}.acceptance.test.ts\` — ${anchors.map((a) => `AS-${String(a).padStart(3, "0")}`).join(", ")}`),
+      "**Statement:** behaves",
+      "",
+    ].join("\n");
+
     fc.assert(
       fc.property(
         fc.uniqueArray(arbLifecycle, { maxLength: 3, selector: (l) => l.n }),
         fc.uniqueArray(arbInvariant, { maxLength: 3, selector: (i) => i.n }),
-        (lifecycles, invariants) => {
+        fc.uniqueArray(arbContract, { maxLength: 3, selector: (c) => c.n }),
+        (lifecycles, invariants, contracts) => {
           const parts: string[] = ["# Plan: Generated\n"];
           if (lifecycles.length > 0) {
             parts.push("## Lifecycles\n");
@@ -117,11 +145,24 @@ describe("parsePlanModels — properties", () => {
               parts.push(`### INV-${inv.n}: ${inv.title.trim() || "T"}\n\n**Tier:** ${inv.tier}\n${ruleLine}${ownershipLines(inv.owner)}`);
             }
           }
+          if (contracts.length > 0) {
+            parts.push("## Contracts\n");
+            for (const contract of contracts) parts.push(`### CT-${contract.n}: Contract\n\n${contractLines(contract)}`);
+          }
           const models = parsePlanModels(parts.join("\n"));
           return (
             models.strays.length === 0 &&
             models.lifecycles.length === lifecycles.length &&
             models.invariants.length === invariants.length &&
+            models.contracts.length === contracts.length &&
+            models.contracts.every(({ declaration }, i) =>
+              declaration.kind === "declared" &&
+              (contracts[i].types === undefined
+                ? declaration.types.kind === "none"
+                : declaration.types.kind === "file" && declaration.types.path === contracts[i].types) &&
+              declaration.acceptance.map(({ path, anchors }) => `${path}:${anchors.join(",")}`).join("|") ===
+                contracts[i].files.map(({ file, anchors }) =>
+                  `tests/${file}.acceptance.test.ts:${anchors.map((a) => `AS-${String(a).padStart(3, "0")}`).join(",")}`).join("|")) &&
             models.lifecycles.every((lc, i) => lc.machineFile === lifecycles[i].file) &&
             models.invariants.every((inv, i) => inv.tier.status === "ok" && inv.tier.tier === invariants[i].tier) &&
             models.invariants.every((inv, i) => {
@@ -153,7 +194,7 @@ describe("validateModelBindings — properties", () => {
     fc.assert(
       fc.property(fc.array(arbAdvisory, { maxLength: 5 }), (invariants) => {
         const result = validateModelBindings(
-          { lifecycles: [], pipeline: null, invariants, strays: [] },
+          { lifecycles: [], pipeline: null, invariants, contracts: [], strays: [] },
           [],
           NO_FILES
         );
@@ -177,7 +218,7 @@ describe("validateModelBindings — properties", () => {
         const tasks = states.flatMap((state, i) =>
           state === "bound" ? [{ id: `T${i + 1}`, file_list: [`src/m${i + 1}/machine.ts`] }] : []
         );
-        const models: PlanModels = { lifecycles, pipeline: null, invariants: [], strays: [] };
+        const models: PlanModels = { lifecycles, pipeline: null, invariants: [], contracts: [], strays: [] };
         const result = validateModelBindings(models, tasks, NO_FILES);
         const expected = states.filter((s) => s !== "bound").length;
         const actual = result.ok ? 0 : result.errors.length;
@@ -196,6 +237,7 @@ describe("validateModelBindings — properties", () => {
             lifecycles: [{ id: "LC-1", title: "T", machineFile: "src/machine.ts" }],
             pipeline: null,
             invariants: [],
+            contracts: [],
             strays: [],
           };
           const tasks = [...otherTasks, { id: "TX", file_list: ["src/machine.ts"] }];
@@ -207,7 +249,7 @@ describe("validateModelBindings — properties", () => {
   });
 
   it("hasModels is false only when validation is vacuous", () => {
-    const empty: PlanModels = { lifecycles: [], pipeline: null, invariants: [], strays: [] };
+    const empty: PlanModels = { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] };
     expect(hasModels(empty)).toBe(false);
     expect(validateModelBindings(empty, [], NO_FILES).ok).toBe(true);
   });

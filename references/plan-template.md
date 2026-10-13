@@ -143,6 +143,34 @@ and the matrix test that runs the rule through all of them — or
 
 ---
 
+## Contracts
+
+Only when the plan has a spec and a feature slice whose observable behavior a
+test can decide. Delete section if not. Each contract becomes one contract
+Task in an early Wave: it writes the declarations-only types file, the
+dedicated acceptance tests, and compiling stubs; its Wave Gate must observe
+every acceptance test FAIL. The Wave Gate then freezes those files, and every
+Task that completes a covered Requirement depends on the contract Task and
+must turn the same tests green without changing them.
+
+### CT-1: {Contract Title}
+
+**Types file:** `{path/to/feature-contract.ts}`
+**Acceptance tests:**
+- `{path/to/feature.acceptance.test.ts}` — AS-001, FR-001
+**Supported domain:** `{path/to/feature.acceptance.test.ts}`
+**Statement:** {the observable behavior consumers rely on, and what is refused}
+
+### CT-2: {Vertical Slice Title}
+
+**Types file:** none
+**No types reason:** {why the slice needs no shared surface — e.g. it consumes CT-1}
+**Acceptance tests:**
+- `{path/to/slice.acceptance.test.ts}` — AS-002
+**Statement:** {the end-to-end behavior, and the controls that must fail}
+
+---
+
 ## Implementation Phases
 
 Ordered by dependency. Maps directly to decompose waves.
@@ -219,7 +247,7 @@ Per component, not global.
 - Distinguish unit (pure) vs integration (I/O)
 - Note property tests where invariants exist
 
-**Executable Models (Lifecycles / Pipeline / Invariants):**
+**Executable Models (Lifecycles / Pipeline / Invariants / Contracts):**
 - Opt-in sections — most features need none of them. Absent = policy satisfied.
 - A model either executes or it doesn't exist: lifecycle → machine file the
   implementation imports; pipeline → AuthoredDag that generates the graph;
@@ -243,6 +271,17 @@ Per component, not global.
   several rules gets several invariants), and write the `**Statement:**` so it
   says which call sites the rule covers — otherwise the sibling list cannot be
   checked for completeness.
+- **Contracts** — `### CT-<n>: <title>` blocks under `## Contracts`. The
+  `**Types file:**` is a NEW file holding declarations only (types,
+  interfaces, sealed ADTs, the signatures consumers import) — never an
+  implementation file or a shared `types.ts`, because its bytes freeze; or
+  `none` plus `**No types reason:**`. `**Acceptance tests:**` lists NEW,
+  dedicated test files (`*.acceptance.test.ts` or the project's equivalent),
+  one `- path — FR-n, AS-n` line each, naming only Requirements a test can
+  decide (measured or calibration anchors stay off). `**Supported domain:**`,
+  when present, names the acceptance file holding the supported/unsupported
+  table as test cases. Several contracts per feature are normal; a vertical
+  slice with `**Types file:** none` carries the controls that must fail.
 - Full policy: `references/executable-models.md`
 
 **What NOT to include:**

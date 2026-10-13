@@ -674,7 +674,7 @@ function acceptedReceipt(
       },
     })),
   };
-  const evaluated = evaluateWaveCompletionSuite(authority, rawResult);
+  const evaluated = evaluateWaveCompletionSuite(authority, rawResult, { kind: "as-recorded" });
   if (evaluated.kind !== "accepted") throw new Error("fixture evaluation failed");
   return evaluated.receipt;
 }

@@ -64,7 +64,7 @@ describe("VerificationPolicy", () => {
       expect(parsed.errors).toEqual(expect.arrayContaining([
         "verification_policy.command is not allowed",
         "verification_policy.regression.extra is not allowed",
-        "verification_policy.regression.reason must be one of documentation-only, generated-artifact, legacy-new-tests-required-false",
+        "verification_policy.regression.reason must be one of documentation-only, generated-artifact, legacy-new-tests-required-false, acceptance-red-window",
       ]));
     }
   });
@@ -91,9 +91,26 @@ describe("VerificationPolicy", () => {
     if (!parsed.ok) {
       expect(parsed.errors).toEqual(expect.arrayContaining([
         "Task T1.verification_policy.regression.reason must be one of documentation-only, generated-artifact",
-        "Task T1.verification_policy.new_tests.reason must be one of existing-tests-sufficient, documentation-only, generated-artifact",
+        "Task T1.verification_policy.new_tests.reason must be one of existing-tests-sufficient, documentation-only, generated-artifact, covered-by-acceptance-contract",
       ]));
     }
+  });
+
+  it("admits the contract new-test waiver from decompose but keeps the red-window regression waiver engine-only", () => {
+    const covered = {
+      regression: { kind: "required" },
+      new_tests: { kind: "waived", reason: "covered-by-acceptance-contract" },
+    };
+    expect(parseTaskVerificationPolicy({ verification_policy: covered }, "Task T2", "authored").ok).toBe(true);
+    const redWindow = {
+      regression: { kind: "waived", reason: "acceptance-red-window" },
+      new_tests: { kind: "required" },
+    };
+    expect(parseTaskVerificationPolicy({ verification_policy: redWindow }, "Task T2", "authored")).toMatchObject({ ok: false });
+    expect(parseTaskVerificationPolicy({ verification_policy: redWindow }, "Task T2", "stored")).toMatchObject({
+      ok: true,
+      value: { policy: { regression: { kind: "waived", reason: "acceptance-red-window" } } },
+    });
   });
 
   it("accepts equivalent explicit and legacy semantics", () => {

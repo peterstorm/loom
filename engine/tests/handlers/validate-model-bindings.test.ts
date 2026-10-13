@@ -11,7 +11,7 @@ import {
 } from "../../src/handlers/helpers/validate-model-bindings";
 import { pathsMatch } from "../../src/core/plan-paths";
 import { parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
-import type { InvariantOwnership, OwnershipProblem } from "../../src/types";
+import type { ContractProblem, InvariantOwnership, OwnershipProblem } from "../../src/types";
 
 function errorsOf(r: { ok: true } | { ok: false; errors: readonly string[] }): readonly string[] {
   return r.ok ? [] : r.errors;
@@ -22,7 +22,7 @@ function expectError(r: { ok: true } | { ok: false; errors: readonly string[] },
   expect(errorsOf(r).some((e) => e.includes(substring))).toBe(true);
 }
 
-const NO_MODELS: PlanModels = { lifecycles: [], pipeline: null, invariants: [], strays: [] };
+const NO_MODELS: PlanModels = { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] };
 
 const NO_FILES: ModelBindingDeps = {
   readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }),
@@ -419,14 +419,124 @@ describe("validateModelBindings", () => {
     });
   });
 
+  describe("contracts", () => {
+    const CONTRACT_PLAN = [
+      "## Contracts",
+      "",
+      "### CT-1: Payload ingestion",
+      "",
+      "**Types file:** `src/payload-contract.ts`",
+      "**Acceptance tests:**",
+      "- `tests/payload.acceptance.test.ts` — AS-003, AS-004",
+      "**Statement:** One valid call wins; a refused call never supplies bytes.",
+      "",
+    ].join("\n");
+    const models = parsePlanModels(CONTRACT_PLAN);
+    const contractTask = task({
+      id: "T1",
+      file_list: ["src/payload-contract.ts", "tests/payload.acceptance.test.ts", "src/payload.ts"],
+      spec_contributions: ["AS-003", "AS-004"],
+    });
+    const claimant = (id: string, anchor: string, overrides: Record<string, unknown> = {}) =>
+      task({ id, wave: 2, depends_on: ["T1"], spec_anchors: [anchor], file_list: [`src/${id}.ts`], ...overrides });
+
+    it("accepts one contract Task writing every frozen path, with every covered Requirement claimed after it", () => {
+      const tasks = [contractTask, claimant("T2", "AS-003"), claimant("T3", "AS-004")];
+      expect(validateModelBindings(models, tasks, NO_FILES)).toEqual({ ok: true });
+    });
+
+    it("renders every problem of a malformed contract, naming it", () => {
+      const result = validateModelBindings({
+        ...NO_MODELS,
+        contracts: [{ id: "CT-2", title: "Slice", declaration: { kind: "malformed", problems: [{ kind: "missing-types" }, { kind: "missing-statement" }] } }],
+      }, [], NO_FILES);
+      expect(errorsOf(result)).toEqual([
+        expect.stringContaining(`CT-2 ("Slice"): no '**Types file:**' declared`),
+        expect.stringContaining(`CT-2 ("Slice"): no '**Statement:**'`),
+      ]);
+    });
+
+    it.each<[ContractProblem, string]>([
+      [{ kind: "missing-types" }, "no '**Types file:**' declared"],
+      [{ kind: "none-without-reason" }, "'**Types file:** none' needs a '**No types reason:**'"],
+      [{ kind: "reason-with-types-file" }, "declares both a types file and a '**No types reason:**'"],
+      [{ kind: "missing-acceptance" }, "no '**Acceptance tests:**' listed"],
+      [{ kind: "malformed-acceptance", line: "t.ts" }, "acceptance line 't.ts' is not '- path — FR-n, AS-n'"],
+      [{ kind: "invalid-anchor", path: "t.ts", anchor: "OOS-001" }, "'t.ts' names 'OOS-001', which a test cannot decide"],
+      [{ kind: "duplicate-acceptance", path: "t.ts" }, "'t.ts' is listed twice under '**Acceptance tests:**'"],
+      [{ kind: "supported-domain-not-acceptance", path: "d.ts" }, "'**Supported domain:** d.ts' is not one of the acceptance files"],
+      [{ kind: "missing-statement" }, "no '**Statement:**'"],
+    ])("renders the %o problem as its own remediation", (problem, message) => {
+      const result = validateModelBindings({
+        ...NO_MODELS,
+        contracts: [{ id: "CT-1", title: "X", declaration: { kind: "malformed", problems: [problem] } }],
+      }, [], NO_FILES);
+      expect(errorsOf(result)).toEqual([expect.stringContaining(`CT-1 ("X"): ${message}`)]);
+    });
+
+    it("refuses a frozen path no Task writes, or two Tasks write", () => {
+      const missing = validateModelBindings(models, [task({ id: "T1", file_list: ["src/payload-contract.ts"] }), claimant("T2", "AS-003"), claimant("T3", "AS-004")], NO_FILES);
+      expectError(missing, "'tests/payload.acceptance.test.ts' is in no task's file_list");
+      const shared = validateModelBindings(models, [contractTask, claimant("T2", "AS-003", { file_list: ["tests/payload.acceptance.test.ts"] }), claimant("T3", "AS-004")], NO_FILES);
+      expectError(shared, "'tests/payload.acceptance.test.ts' is in the file_list of T1 and T2");
+    });
+
+    it("refuses frozen paths split across Tasks", () => {
+      const result = validateModelBindings(models, [
+        task({ id: "T1", file_list: ["src/payload-contract.ts"] }),
+        task({ id: "T4", file_list: ["tests/payload.acceptance.test.ts"] }),
+        claimant("T2", "AS-003", { depends_on: ["T1", "T4"] }),
+        claimant("T3", "AS-004", { depends_on: ["T1", "T4"] }),
+      ], NO_FILES);
+      expectError(result, "frozen paths are written by T1 and T4");
+    });
+
+    it("refuses a contract Task that claims a covered Requirement — its tests are red by design", () => {
+      const result = validateModelBindings(models, [{ ...contractTask, spec_anchors: ["AS-003"] }, claimant("T3", "AS-004")], NO_FILES);
+      expectError(result, "T1 is CT-1's contract task but claims AS-003");
+    });
+
+    it("refuses a covered Requirement no Task claims, and a claimant that does not wait for the contract", () => {
+      const result = validateModelBindings(models, [contractTask, claimant("T3", "AS-004", { depends_on: [] })], NO_FILES);
+      expectError(result, "AS-003 is decided by CT-1's acceptance tests but no task claims it in spec_anchors");
+      expectError(result, "T3 claims AS-004, which CT-1 covers, but does not depend on its contract task T1");
+    });
+
+    it("accepts a claimant that reaches the contract Task transitively", () => {
+      const tasks = [contractTask, claimant("T2", "AS-003"), claimant("T3", "AS-004", { wave: 3, depends_on: ["T2"] })];
+      expect(validateModelBindings(models, tasks, NO_FILES).ok).toBe(true);
+    });
+
+    it("refuses one path frozen by two contracts", () => {
+      const twice = parsePlanModels(`${CONTRACT_PLAN}\n### CT-2: Again\n\n**Types file:** \`src/payload-contract.ts\`\n**Acceptance tests:**\n- \`tests/again.acceptance.test.ts\` — AS-005\n**Statement:** s\n`);
+      const tasks = [
+        { ...contractTask, file_list: [...(contractTask.file_list as string[]), "tests/again.acceptance.test.ts"] },
+        claimant("T2", "AS-003"), claimant("T3", "AS-004"), claimant("T5", "AS-005"),
+      ];
+      expectError(validateModelBindings(twice, tasks, NO_FILES), "'src/payload-contract.ts' is frozen by CT-1 and CT-2");
+    });
+
+    it("admits the covered-by-acceptance-contract new-test waiver only on a claimant of a contract it depends on", () => {
+      const waived = { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "covered-by-acceptance-contract" } };
+      const legit = [contractTask, claimant("T2", "AS-003", { verification_policy: waived }), claimant("T3", "AS-004")];
+      expect(validateModelBindings(models, legit, NO_FILES).ok).toBe(true);
+      const stray = [...legit, task({ id: "T5", wave: 2, depends_on: ["T1"], verification_policy: waived, file_list: ["src/t5.ts"] })];
+      expectError(validateModelBindings(models, stray, NO_FILES),
+        "T5 waives new tests as covered-by-acceptance-contract but claims no Requirement a contract it depends on covers");
+      // The waiver without any contract in the plan is refused too.
+      expectError(validateModelBindings(NO_MODELS, [task({ verification_policy: waived })], NO_FILES), "covered-by-acceptance-contract");
+    });
+  });
+
   it("accumulates errors across all model kinds", () => {
     const models: PlanModels = {
       lifecycles: [{ id: "LC-1", title: "A", machineFile: null }],
       pipeline: { dagFile: null, declaredNodes: [] },
       invariants: [invariant({ title: "B", tier: CHECKABLE })],
+      contracts: [{ id: "CT-1", title: "C", declaration: { kind: "malformed", problems: [{ kind: "missing-statement" }] } }],
       strays: [{ kind: "near-miss-heading", heading: "## Lifecycles:" }],
     };
-    expect(errorsOf(validateModelBindings(models, [], NO_FILES))).toHaveLength(4);
+    expect(errorsOf(validateModelBindings(models, [], NO_FILES))).toHaveLength(5);
   });
 });
 

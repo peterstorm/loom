@@ -2,8 +2,9 @@
  * Executable-models policy: validate that models declared in a plan bind to
  * executable artifacts, and that the task graph implements them.
  *
- * Opt-in: a plan with no `## Lifecycles` / `## Pipeline` / `## Invariants`
- * sections (and no stray model markers) produces zero checks. A plan that
+ * Opt-in: a plan with no `## Lifecycles` / `## Pipeline` / `## Invariants` /
+ * `## Contracts` sections (and no stray model markers) produces zero checks —
+ * except that a Task may not claim the contract new-test waiver. A plan that
  * declares a model must bind it — a descriptive model with nothing to run is
  * a validation error, not a warning. Near-miss declarations (see
  * PlanModels.strays) are errors too: a typo must not read as an opt-out.
@@ -20,7 +21,8 @@ import { match } from "ts-pattern";
 
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
-import type { OwnershipProblem, PlanInvariant } from "../../types";
+import { coveredAnchors, frozenPaths } from "../../core/acceptance-contract";
+import type { ContractProblem, OwnershipProblem, PlanContract, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
 import { changesFamily, invariantRoles, normalizePlanPath, pathsMatch, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
 import { type ValidationResult, ok, fail } from "./validation-result";
@@ -73,13 +75,36 @@ function renderOwnershipProblem(problem: OwnershipProblem): string {
     .exhaustive();
 }
 
-type TaskRecord = Readonly<{ id: string; files: readonly string[]; dependsOn: readonly string[] }>;
+type TaskRecord = Readonly<{
+  id: string;
+  files: readonly string[];
+  dependsOn: readonly string[];
+  /** Requirement Completion Claims (`spec_anchors`). */
+  claims: readonly string[];
+  /** The `verification_policy.new_tests` waiver reason, when waived. */
+  newTestWaiver: string | null;
+}>;
 
+const strings = (raw: unknown): readonly string[] =>
+  Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : [];
+
+function newTestWaiver(policy: unknown): string | null {
+  if (typeof policy !== "object" || policy === null) return null;
+  const newTests = (policy as Record<string, unknown>).new_tests;
+  if (typeof newTests !== "object" || newTests === null) return null;
+  const { kind, reason } = newTests as Record<string, unknown>;
+  return kind === "waived" && typeof reason === "string" ? reason : null;
+}
+
+/** Total over the raw roster: a repair input may carry entries that are not
+ *  records at all, which structural validation reports — never a crash here. */
 function taskRecords(tasks: readonly Record<string, unknown>[]): readonly TaskRecord[] {
-  return tasks.map((t) => ({
+  return tasks.filter((t): t is Record<string, unknown> => typeof t === "object" && t !== null).map((t) => ({
     id: typeof t.id === "string" ? t.id : "<unnamed task>",
-    files: Array.isArray(t.file_list) ? t.file_list.filter((f): f is string => typeof f === "string") : [],
-    dependsOn: Array.isArray(t.depends_on) ? t.depends_on.filter((d): d is string => typeof d === "string") : [],
+    files: strings(t.file_list),
+    dependsOn: strings(t.depends_on),
+    claims: strings(t.spec_anchors),
+    newTestWaiver: newTestWaiver(t.verification_policy),
   }));
 }
 
@@ -197,6 +222,104 @@ function ownershipErrors(
     ...matrixTestErrors(label, ownership, roled),
     ...ownerFirstErrors(label, roled),
   ];
+}
+
+function renderContractProblem(problem: ContractProblem): string {
+  return match(problem)
+    .with({ kind: "missing-types" }, () =>
+      "no '**Types file:**' declared — name the new declarations-only file consumers import, or 'none' with a '**No types reason:**'")
+    .with({ kind: "none-without-reason" }, () => "'**Types file:** none' needs a '**No types reason:**'")
+    .with({ kind: "reason-with-types-file" }, () => "declares both a types file and a '**No types reason:**' — keep one")
+    .with({ kind: "missing-acceptance" }, () =>
+      "no '**Acceptance tests:**' listed — a contract freezes at least one '- path — AS-n' acceptance file")
+    .with({ kind: "malformed-acceptance" }, ({ line }) => `acceptance line '${line}' is not '- path — FR-n, AS-n'`)
+    .with({ kind: "invalid-anchor" }, ({ path, anchor }) =>
+      `'${path}' names '${anchor}', which a test cannot decide — list only FR-n and AS-n Requirements`)
+    .with({ kind: "duplicate-acceptance" }, ({ path }) => `'${path}' is listed twice under '**Acceptance tests:**'`)
+    .with({ kind: "supported-domain-not-acceptance" }, ({ path }) =>
+      `'**Supported domain:** ${path}' is not one of the acceptance files`)
+    .with({ kind: "missing-statement" }, () => "no '**Statement:**' — say what consumers rely on and what is refused")
+    .exhaustive();
+}
+
+const COVERED_BY_CONTRACT = "covered-by-acceptance-contract";
+
+/** A declared contract whose frozen paths have exactly one writer: its contract Task. */
+type ResolvedContract = Readonly<{ contract: PlanContract; contractTask: string; covered: readonly string[] }>;
+
+/**
+ * Contract checks: one contract Task writes every frozen path and nothing else
+ * writes any; the contract Task claims none of the Requirements its red tests
+ * decide; every covered Requirement is claimed, and every claimant waits for
+ * the contract Task; no path is frozen twice; and the contract new-test waiver
+ * is admitted only on a claimant of a contract it depends on.
+ */
+function contractErrors(contracts: readonly PlanContract[], tasks: readonly Record<string, unknown>[]): string[] {
+  const records = taskRecords(tasks);
+  const byId = new Map(records.map((record) => [record.id, record] as const));
+  const errors: string[] = [];
+  const frozenBy = new Map<string, string>();
+  const resolved: ResolvedContract[] = [];
+  for (const contract of contracts) {
+    const label = `${contract.id} ("${contract.title}")`;
+    const declaration = contract.declaration;
+    if (declaration.kind === "malformed") {
+      errors.push(...declaration.problems.map((problem) => `${label}: ${renderContractProblem(problem)}`));
+      continue;
+    }
+    const paths = frozenPaths(declaration);
+    for (const path of paths) {
+      const key = normalizePlanPath(path);
+      const earlier = frozenBy.get(key);
+      if (earlier === undefined) frozenBy.set(key, contract.id);
+      else errors.push(`${label}: '${key}' is frozen by ${earlier} and ${contract.id} — a frozen path belongs to one contract`);
+    }
+    const writers = paths.map((path) => ({
+      path,
+      ids: records.filter(({ files }) => files.some((file) => pathsMatch(file, path))).map(({ id }) => id),
+    }));
+    const unwritten = writers.filter(({ ids }) => ids.length === 0);
+    const shared = writers.filter(({ ids }) => ids.length > 1);
+    errors.push(
+      ...unwritten.map(({ path }) => `${label}: '${path}' is in no task's file_list — decompose must emit the contract task that writes it`),
+      ...shared.map(({ path, ids }) =>
+        `${label}: '${path}' is in the file_list of ${ids.join(" and ")} — a frozen path has exactly one writer, the contract task`),
+    );
+    if (unwritten.length > 0 || shared.length > 0) continue;
+    const writerIds = [...new Set(writers.map(({ ids }) => ids[0]!))];
+    if (writerIds.length > 1) {
+      errors.push(`${label}: frozen paths are written by ${writerIds.join(" and ")} — one contract task writes the types file and every acceptance file`);
+      continue;
+    }
+    const contractTask = writerIds[0]!;
+    const covered = coveredAnchors(declaration);
+    resolved.push({ contract, contractTask, covered });
+    const contractRecord = byId.get(contractTask)!;
+    for (const anchor of covered) {
+      if (contractRecord.claims.includes(anchor)) {
+        errors.push(`${label}: ${contractTask} is ${contract.id}'s contract task but claims ${anchor} in spec_anchors — its tests ` +
+          "are red by design; list it in spec_contributions and let the task that turns it green claim it");
+      }
+      const claimants = records.filter(({ id, claims }) => id !== contractTask && claims.includes(anchor));
+      if (claimants.length === 0) {
+        errors.push(`${label}: ${anchor} is decided by ${contract.id}'s acceptance tests but no task claims it in spec_anchors — nothing would turn it green`);
+      }
+      for (const claimant of claimants) {
+        if (!dependsOnAny(claimant, new Set([contractTask]), byId)) {
+          errors.push(`${label}: ${claimant.id} claims ${anchor}, which ${contract.id} covers, but does not depend on its ` +
+            `contract task ${contractTask}, directly or transitively`);
+        }
+      }
+    }
+  }
+  for (const record of records.filter(({ newTestWaiver: reason }) => reason === COVERED_BY_CONTRACT)) {
+    const covering = resolved.some(({ contractTask, covered }) =>
+      record.claims.some((anchor) => covered.includes(anchor)) && dependsOnAny(record, new Set([contractTask]), byId));
+    if (!covering) {
+      errors.push(`${record.id} waives new tests as ${COVERED_BY_CONTRACT} but claims no Requirement a contract it depends on covers`);
+    }
+  }
+  return errors;
 }
 
 export function validateModelBindings(
@@ -324,6 +447,8 @@ export function validateModelBindings(
 
   for (const inv of models.invariants) errors.push(...ownershipErrors(inv, tasks, deps));
 
+  errors.push(...contractErrors(models.contracts, tasks));
+
   return errors.length === 0 ? ok() : fail(errors);
 }
 
@@ -373,9 +498,9 @@ export function checkPlanModelBindings(
     };
   }
   const models = parsePlanModels(read.content);
-  if (!hasModels(models)) return { kind: "opted-out", ok: true, models };
+  // A model-free plan still validates: a Task may not claim the contract
+  // new-test waiver when no contract exists to stand in for its tests.
   const result = validateModelBindings(models, tasks, deps);
-  return result.ok
-    ? { kind: "validated", ok: true, models }
-    : { kind: "invalid-bindings", ok: false, errors: result.errors, models };
+  if (!result.ok) return { kind: "invalid-bindings", ok: false, errors: result.errors, models };
+  return hasModels(models) ? { kind: "validated", ok: true, models } : { kind: "opted-out", ok: true, models };
 }

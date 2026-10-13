@@ -7,25 +7,11 @@
  */
 
 import type { InvariantOwnership, SiblingEntryPoint } from "../types";
+import { pathsMatch } from "./plan-path-match";
 
-/** Forward slashes, no leading `./`. */
-export function normalizePlanPath(p: string): string {
-  return p.replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-/**
- * One-directional, suffix-tolerant match: the task path may be an absolute or
- * deeper form of the declared plan path, never the reverse — a bare-basename
- * file_list entry must not satisfy a fully-pathed declaration. A declared
- * path with no directory segment only matches exactly.
- */
-export function pathsMatch(taskFile: string, declared: string): boolean {
-  const nt = normalizePlanPath(taskFile);
-  const nd = normalizePlanPath(declared);
-  if (nt === nd) return true;
-  if (!nd.includes("/")) return false;
-  return nt.endsWith(`/${nd}`);
-}
+// The matching rule itself is a leaf (no plan shapes), so modules the plan
+// model depends on can share it without an import cycle.
+export { normalizePlanPath, pathsMatch } from "./plan-path-match";
 
 export type OwnedInvariant = Extract<InvariantOwnership, { kind: "owned" }>;
 

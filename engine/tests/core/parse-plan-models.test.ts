@@ -77,6 +77,7 @@ describe("parsePlanModels", () => {
     expect(models.lifecycles).toEqual([]);
     expect(models.pipeline).toBeNull();
     expect(models.invariants).toEqual([]);
+    expect(models.contracts).toEqual([]);
     expect(models.strays).toEqual([]);
     expect(hasModels(models)).toBe(false);
   });
@@ -274,6 +275,131 @@ describe("parsePlanModels", () => {
     });
   });
 
+  describe("contracts — the acceptance a feature is built against", () => {
+    const contract = (body: string) =>
+      parsePlanModels(`## Contracts\n\n### CT-1: Payload ingestion\n\n${body}`).contracts[0]!;
+    const WELL_FORMED = [
+      "**Types file:** `engine/src/core/payload-contract.ts`",
+      "**Acceptance tests:**",
+      "- `engine/tests/acceptance/payload.acceptance.test.ts` — AS-003, AS-004, FR-007",
+      "- engine/tests/acceptance/payload-refusal.acceptance.test.ts — AS-019",
+      "**Supported domain:** engine/tests/acceptance/payload.acceptance.test.ts",
+      "**Statement:** One valid call wins; a refused call never supplies bytes.",
+      "",
+    ].join("\n");
+
+    it("parses a declared contract with its types file, acceptance files and supported domain", () => {
+      const models = parsePlanModels(`## Contracts\n\n### CT-1: Payload ingestion\n\n${WELL_FORMED}`);
+      expect(models.strays).toEqual([]);
+      expect(hasModels(models)).toBe(true);
+      expect(models.contracts).toEqual([{
+        id: "CT-1",
+        title: "Payload ingestion",
+        declaration: {
+          kind: "declared",
+          types: { kind: "file", path: "engine/src/core/payload-contract.ts" },
+          acceptance: [
+            { path: "engine/tests/acceptance/payload.acceptance.test.ts", anchors: ["AS-003", "AS-004", "FR-007"] },
+            { path: "engine/tests/acceptance/payload-refusal.acceptance.test.ts", anchors: ["AS-019"] },
+          ],
+          supportedDomain: "engine/tests/acceptance/payload.acceptance.test.ts",
+          statement: "One valid call wins; a refused call never supplies bytes.",
+        },
+      }]);
+    });
+
+    it("parses a contract with no shared types when it says why", () => {
+      expect(contract([
+        "**Types file:** none",
+        "**No types reason:** The slice consumes CT-1; it declares no surface of its own.",
+        "**Acceptance tests:**",
+        "- t/slice.acceptance.test.ts — AS-010",
+        "**Statement:** The slice runs end to end.",
+      ].join("\n")).declaration).toEqual({
+        kind: "declared",
+        types: { kind: "none", reason: "The slice consumes CT-1; it declares no surface of its own." },
+        acceptance: [{ path: "t/slice.acceptance.test.ts", anchors: ["AS-010"] }],
+        supportedDomain: null,
+        statement: "The slice runs end to end.",
+      });
+    });
+
+    const ACCEPTANCE = "**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-001\n";
+    const STATEMENT = "**Statement:** s\n";
+    it.each<[string, string, readonly unknown[]]>([
+      ["no types line", `${ACCEPTANCE}${STATEMENT}`, [{ kind: "missing-types" }]],
+      ["`none` without a reason", `**Types file:** none\n${ACCEPTANCE}${STATEMENT}`, [{ kind: "none-without-reason" }]],
+      ["a reason beside a types file", `**Types file:** t.ts\n**No types reason:** r\n${ACCEPTANCE}${STATEMENT}`, [{ kind: "reason-with-types-file" }]],
+      ["no acceptance label", `**Types file:** t.ts\n${STATEMENT}`, [{ kind: "missing-acceptance" }]],
+      ["an empty acceptance list", `**Types file:** t.ts\n**Acceptance tests:**\n${STATEMENT}`, [{ kind: "missing-acceptance" }]],
+      [
+        "an inline acceptance value",
+        `**Types file:** t.ts\n**Acceptance tests:** t/a.test.ts\n${STATEMENT}`,
+        [{ kind: "malformed-acceptance", line: "t/a.test.ts" }],
+      ],
+      [
+        "an acceptance file that covers no anchor",
+        `**Types file:** t.ts\n**Acceptance tests:**\n- t/a.acceptance.test.ts\n${STATEMENT}`,
+        [{ kind: "malformed-acceptance", line: "- t/a.acceptance.test.ts" }],
+      ],
+      [
+        "anchors a test cannot complete",
+        `**Types file:** t.ts\n**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-1x, OOS-002, AS-004\n${STATEMENT}`,
+        [
+          { kind: "invalid-anchor", path: "t/a.acceptance.test.ts", anchor: "AS-1x" },
+          { kind: "invalid-anchor", path: "t/a.acceptance.test.ts", anchor: "OOS-002" },
+        ],
+      ],
+      [
+        "the same acceptance file twice",
+        `**Types file:** t.ts\n**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-001\n- ./t/a.acceptance.test.ts — AS-002\n${STATEMENT}`,
+        [{ kind: "duplicate-acceptance", path: "t/a.acceptance.test.ts" }],
+      ],
+      [
+        "a supported domain that is not an acceptance file",
+        `**Types file:** t.ts\n${ACCEPTANCE}**Supported domain:** t/other.test.ts\n${STATEMENT}`,
+        [{ kind: "supported-domain-not-acceptance", path: "t/other.test.ts" }],
+      ],
+      ["no statement", `**Types file:** t.ts\n${ACCEPTANCE}`, [{ kind: "missing-statement" }]],
+    ])("represents %s as malformed with a named problem", (_name, body, problems) => {
+      expect(contract(body).declaration).toEqual({ kind: "malformed", problems });
+    });
+
+    it("collects every problem of one declaration, not just the first", () => {
+      expect(contract("**Types file:** none\n**Acceptance tests:**\n").declaration).toEqual({
+        kind: "malformed",
+        problems: [{ kind: "none-without-reason" }, { kind: "missing-acceptance" }, { kind: "missing-statement" }],
+      });
+    });
+
+    it("ends the acceptance list at the first line that is not an item", () => {
+      expect(contract(`**Types file:** t.ts\n**Acceptance tests:**\n\n- t/a.acceptance.test.ts — AS-001\n**Statement:** s\n- t/b.acceptance.test.ts — AS-002\n`).declaration)
+        .toMatchObject({ kind: "declared", acceptance: [{ path: "t/a.acceptance.test.ts", anchors: ["AS-001"] }] });
+    });
+
+    it("parses CRLF items", () => {
+      const plan = `## Contracts\n\n### CT-1: X\n\n${WELL_FORMED}`.replace(/\n/g, "\r\n");
+      expect(parsePlanModels(plan).contracts[0]!.declaration.kind).toBe("declared");
+    });
+
+    it("flags contract markers outside the Contracts section and malformed contract headings", () => {
+      const outside = parsePlanModels(
+        "## Notes\n\n### CT-1: Stray\n\n**Types file:** t.ts\n**No types reason:** r\n**Acceptance tests:**\n**Supported domain:** d.ts\n",
+      );
+      expect(outside.contracts).toEqual([]);
+      expect(outside.strays).toContainEqual({ kind: "misplaced-heading", heading: "CT-1: Stray", home: "Contracts" });
+      for (const label of ["Types file", "No types reason", "Acceptance tests", "Supported domain"]) {
+        expect(outside.strays).toContainEqual({ kind: "misplaced-label", label, home: "Contracts" });
+      }
+      const typo = parsePlanModels("## Contracts\n\n### CT-A: Typo\n\n**Types file:** none\n");
+      expect(typo.strays).toContainEqual({ kind: "bad-block-grammar", heading: "CT-A: Typo", section: "Contracts", prefix: "CT" });
+      expect(parsePlanModels("## Contract\n\n### CT-1: X\n").strays)
+        .toContainEqual({ kind: "near-miss-heading", heading: "## Contract" });
+      expect(parsePlanModels("## Contracts\n\nNone yet.\n").strays)
+        .toContainEqual({ kind: "empty-section", section: "Contracts" });
+    });
+  });
+
   it("tier matching is case-insensitive", () => {
     const models = parsePlanModels("## Invariants\n\n### INV-1: X\n\n**Tier:** Checkable\n**Rule file:** r.json\n");
     expect(models.invariants[0].tier).toEqual({ status: "ok", tier: "checkable" });
@@ -468,5 +594,9 @@ describe("template conformance — the shipped plan template parses cleanly", ()
     // The template shows both ownership forms, and both parse cleanly.
     expect(models.invariants[0].ownership.kind).toBe("owned");
     expect(models.invariants[1].ownership.kind).toBe("unowned");
+    // …and both contract forms: a dedicated types file, and none with a reason.
+    expect(models.contracts.map(({ declaration }) => declaration.kind)).toEqual(["declared", "declared"]);
+    expect(models.contracts.map(({ declaration }) => declaration.kind === "declared" ? declaration.types.kind : null))
+      .toEqual(["file", "none"]);
   });
 });

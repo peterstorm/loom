@@ -128,7 +128,7 @@ function acceptedReceipt(
             },
       },
     })),
-  });
+  }, { kind: "as-recorded" });
   if (evaluated.kind !== "accepted") throw new Error("suite fixture must be accepted");
   return evaluated.receipt;
 }
@@ -156,7 +156,7 @@ function deps(
   return {
     loadPlanModels: () => ({
       kind: "loaded",
-      models: { lifecycles: [], pipeline: null, invariants: [], strays: [] },
+      models: { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] },
     }),
     filePresence: () => ({ ok: true, exists: true }),
     ...(currentWaveWorkspace === undefined ? {} : { currentWaveWorkspace }),

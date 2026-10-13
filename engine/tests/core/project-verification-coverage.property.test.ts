@@ -63,7 +63,7 @@ describe("Project Verification Coverage projection", () => {
           checkId: check.checkId, scope: "wave",
           outcome: { kind: "observed", exitCode: 0, timedOut: false, signal: null, report: { kind: "not-required" } },
         })),
-      });
+      }, { kind: "as-recorded" });
       if (evaluation.kind !== "accepted") throw new Error("historical receipt fixture must be accepted");
       const receipt = evaluation.receipt;
       const before = JSON.stringify(receipt);
