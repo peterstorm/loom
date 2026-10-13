@@ -8,9 +8,10 @@
  * server answers, and Pi authenticates the inference itself.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { observePathPresence } from "./path-presence";
 import type { ModelRef } from "../core/model-routing";
 import {
   decideRouteReachability,
@@ -37,12 +38,14 @@ export type EndpointLookup =
 
 /**
  * The provider's endpoint from `<agentDir>/models.json`. An absent file or
- * provider is `endpoint: null`; a present but malformed file is an error, so
- * a broken config never reads as "no endpoint".
+ * provider is `endpoint: null`; a present but malformed or unreadable file is
+ * an error, so a broken config never reads as "no endpoint".
  */
 export function readRouteEndpoint(agentDir: string, provider: string): EndpointLookup {
   const path = join(agentDir, "models.json");
-  if (!existsSync(path)) return { ok: true, endpoint: null };
+  const presence = observePathPresence(path);
+  if (presence.kind === "absent") return { ok: true, endpoint: null };
+  if (presence.kind === "unknown") return { ok: false, error: `cannot read ${path}: ${presence.cause}` };
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf-8"));

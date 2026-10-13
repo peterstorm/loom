@@ -114,6 +114,40 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
     expect(classifyTestCommand("echo `; cargo test `; echo done")).toBeNull();
   });
 
+  it("kills the substitution forgery: a separator inside `$(…)` or `<(…)` never yields a test segment", () => {
+    // The runner runs in a subshell, so the line's exit and output are the
+    // outer command's — `echo`'s here, which prints whatever counters it likes.
+    expect(classifyTestCommand("echo $(true; npm test >/dev/null) 'Tests  5 passed (5)'")).toBeNull();
+    expect(classifyTestCommand("echo $(true\nbun test) ' 5 pass' ' 0 fail'")).toBeNull();
+    expect(classifyTestCommand("diff <(true; npm test) /dev/null")).toBeNull();
+    expect(mintTestRun("echo $(true; npm test >/dev/null) 'Tests  5 passed (5)'", 0)).toBeNull();
+    // An unclosed substitution cannot be segmented either:
+    expect(classifyTestCommand("npm test $(echo")).toBeNull();
+    // …while a substitution with no separator inside keeps its real position:
+    expect(classifyTestCommand("npm test $(echo --run)")).toBe("npm test $(echo --run)");
+    expect(classifyTestCommand("cd $(git rev-parse --show-toplevel) && npm test")).toBe("npm test");
+    // Deliberate trade-off (fail closed): a real top-level runner AFTER a
+    // substitution that itself contains a separator is not classified either,
+    // because segment positions are untrusted once the split crossed a
+    // substitution. A substitution-aware splitter would lift this.
+    expect(classifyTestCommand("cd $(a; b) && npm test")).toBeNull();
+  });
+
+  it("property: a runner after a separator inside a command substitution never classifies", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...TEST_COMMAND_PATTERNS),
+        fc.constantFrom(";", "&&", "||", "|", "\n", "&"),
+        fc.constantFrom("echo", "printf '%s'", "true"),
+        fc.constantFrom("", " ' 5 pass'", " 'Tests  5 passed (5)'"),
+        (pattern, sep, head, trailer) => {
+          expect(classifyTestCommand(`${head} $(true ${sep} ${pattern})${trailer}`)).toBeNull();
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
   it("comment strip is quote-aware: a quoted '#' is argument text, not a comment", () => {
     // Old behavior stripped from the quoted '#', leaving an unbalanced quote
     // that the fail-closed check then refused — legitimate evidence dropped.

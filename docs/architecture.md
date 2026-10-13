@@ -111,7 +111,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Area | Primary source | Responsibility |
 |---|---|---|
 | Spawn validation | `validate-phase-order.ts`, `validate-task-execution.ts`, `validate-template-substitution.ts` | Enforce lifecycle and prompt prerequisites |
-| Protected Bash policy | `guard-state-file.ts`, `shell-normalize.ts`, `shell-ansi-c.ts` | Detect guarded-path writes through shell syntax and fail closed |
+| Protected Bash policy | `guard-state-file.ts`, `shell-normalize.ts`, `shell-ansi-c.ts`, `shell-substitution.ts` (the one substitution-span scanner, shared with test-run classification in `machine/extract-evidence.ts`) | Detect guarded-path writes through shell syntax and fail closed |
 | Completion evidence | `proof-obligations.ts`, `wave-gate-model.ts` | Derive whether a Task earned `implemented` |
 | Finding lifecycle | `findings.ts`, `review-output.ts`, `review-packet.ts` | Stable identity, generations, packet-bound remediation verification |
 | Architecture panel | `panel-kernel.ts`, `panel-contract.ts`, `panel-program.ts` | Lenses, exact candidates/criteria, verdict validation, ranking, retries |
@@ -317,6 +317,8 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - guarded spawn routes fail closed on handler crashes;
 - Pi runtime/CLI version skew is rejected before Run Directory or TaskGraph mutation;
 - state and evidence paths are denied to arbitrary Bash writers;
+- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (moving the remaining raw `existsSync` checks onto it, with a lint ban, is tracked as G5a INV-1);
+- a test command counts as evidence only at a real top-level position: a runner inside `$(…)`/`<(…)` never owns the line's exit or output;
 - Run Directory paths must be direct children and are accessed no-follow;
 - model and Skill bindings are explicit;
 - exact rosters reject missing, duplicate, foreign, and surplus results;

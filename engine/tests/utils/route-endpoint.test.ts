@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -65,6 +65,14 @@ describe("readRouteEndpoint", () => {
     expect(readRouteEndpoint(agentDir("{not json"), LOCAL.provider)).toMatchObject({ ok: false, error: expect.stringContaining("cannot parse") });
     expect(readRouteEndpoint(agentDir({ providers: { [LOCAL.provider]: { baseUrl: 7 } } }), LOCAL.provider))
       .toMatchObject({ ok: false, error: expect.stringContaining("invalid") });
+  });
+
+  it("reports a models.json it cannot read instead of reading it as no endpoint", () => {
+    // Only ENOENT proves the file is absent. A symlink loop (ELOOP) is a
+    // present-but-unreadable config, the same broken-config class as bad JSON.
+    const dir = agentDir(undefined);
+    symlinkSync("models.json", join(dir, "models.json"));
+    expect(readRouteEndpoint(dir, LOCAL.provider)).toMatchObject({ ok: false, error: expect.stringContaining("models.json") });
   });
 });
 

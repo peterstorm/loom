@@ -172,6 +172,20 @@ describe("Pi test-evidence transcript adapter", () => {
       .toEqual({ ok: true, value: null });
   });
 
+  it("never credits a runner that ran inside a command substitution with the line's exit or output", () => {
+    // `$(…)` runs the test in a subshell: the line's exit is `echo`'s (always
+    // 0) and its output is whatever `echo` prints. Splitting on the `;` inside
+    // the substitution made `npm test …) <text>` look like the line's last
+    // segment, so injected counters minted a structured pass.
+    for (const forged of [
+      "echo $(true; npm test >/dev/null) 'Tests  5 passed (5)'",
+      "echo $(true; bun test 2>/dev/null) ' 5 pass' ' 0 fail'",
+    ]) {
+      expect(piStructuredTestResult(testRun("Tests  5 passed (5)\n 5 pass\n 0 fail\n", forged)), forged)
+        .toEqual({ ok: true, value: null });
+    }
+  });
+
   it.each([
     ["non-array payload", null],
     ["object payload", { role: "assistant", content: [] }],

@@ -44,6 +44,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/shell-ansi-c.ts",
   "engine/src/core/shell-normalize.ts",
   "engine/src/core/shell-quoting.ts",
+  "engine/src/core/shell-substitution.ts",
   // Defect-Family Accounting, including source authority, barrel re-exports,
   // and type dependencies. No directory-wide core/ or infrastructure waiver.
   "engine/src/core/defect-family-accounting.ts",

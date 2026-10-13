@@ -55,13 +55,15 @@
  * are named here, and tests/core/guard-state-file-walkers.test.ts pins the
  * contracts an independent reference walker would catch if any of them drift:
  *
- *  - scanSubstitutions — the ONE shared substitution traversal (quote state
- *    `'"' | "'" | null`; a `'` inside `"…"` is literal; `$(…)`/backticks stay
- *    LIVE inside double quotes; `<(…)`/`>(…)` is live only unquoted). Shared
- *    by blankSubstitutions + flattenSubstitutions so the two views cannot
- *    diverge.
- *  - findClosingParen / findClosingBacktick / findClosingBrace — span
- *    closers, quote-aware; used by every scanner that must skip a whole span.
+ *  - scanSubstitutions (core/shell-substitution) — the ONE shared substitution
+ *    traversal (quote state `'"' | "'" | null`; a `'` inside `"…"` is literal;
+ *    `$(…)`/backticks stay LIVE inside double quotes; `<(…)`/`>(…)` is live
+ *    only unquoted). Shared by blankSubstitutions + flattenSubstitutions so the
+ *    two views cannot diverge, and by test-evidence classification so the
+ *    guard and the evidence ledger agree on substitution spans.
+ *  - findClosingParen / findClosingBacktick (core/shell-substitution) and
+ *    findClosingBrace — span closers, quote-aware; used by every scanner that
+ *    must skip a whole span.
  *  - commandWords / splitFusedRedirect / unquote / commandArgs — the simple-
  *    command tokenizer feeding analyzeCommandHead; treats `( ) { }` as
  *    standalone tokens so compound syntax never hides a head.
@@ -83,6 +85,7 @@
 import type { HookResult } from "../types";
 import { normalizeShellVariants } from "./shell-normalize";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
+import { findClosingBacktick, findClosingParen, scanSubstitutions } from "./shell-substitution";
 import {
   WHITELISTED_HELPERS,
   stateFilePatterns,
@@ -394,80 +397,6 @@ function tokenGlobHitsGuardedDir(
   );
 }
 
-interface SubstitutionScan {
-  /** Substitution bodies, outermost-first (one nesting level). */
-  readonly bodies: readonly string[];
-  /** Text with each substitution replaced by `onBody(body)`. When `unclosed`,
-   *  this holds everything BEFORE the offending opener — the opener onward is
-   *  dropped (blank-to-end), which is maximal reveal for the matching view. */
-  readonly rebuilt: string;
-  /** An opener (`$(`, `<(`/`>(`, backtick) had no matching closer. */
-  readonly unclosed: boolean;
-}
-
-/**
- * The ONE quote-aware traversal of top-level command/process substitutions,
- * shared by `blankSubstitutions` (matching view) and `flattenSubstitutions`
- * (recursive judging) so the two can never diverge on quoting or opener set —
- * the "twin scanners diverged" class that recurred rounds 15–18. Quote state is
- * tracked as `'"' | "'" | null`, NOT a lone single-quote flag: a `'` inside
- * double quotes (`"it's"`) is a literal apostrophe that must NOT open a
- * single-quoted region (the round-20 regression that disabled the whole
- * substitution defense after any double-quoted apostrophe). Command
- * substitution `$(…)` and backticks stay LIVE inside double quotes (bash still
- * performs them); process substitution `<(…)`/`>(…)` is a substitution only when
- * UNQUOTED (bash does not perform it inside double quotes), so it is treated
- * literally there. `onBody` maps each body to its replacement; the caller
- * decides the unclosed policy from `scan.unclosed`.
- *
- * EXPORTED for the walker-divergence property net (tests/core/guard-state-file-walkers.test.ts):
- * a regression in THIS quote state machine silently disables the substitution
- * defense, and the property tests pin its span decisions against an
- * independent reference walker.
- */
-export function scanSubstitutions(text: string, onBody: (body: string) => string): SubstitutionScan {
-  const bodies: string[] = [];
-  let rebuilt = "";
-  let quote: '"' | "'" | null = null;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (quote === "'") {
-      rebuilt += c;
-      if (c === "'") quote = null; // inside '…': everything literal until the close
-      continue;
-    }
-    if (c === "\\") { rebuilt += c + (text[i + 1] ?? ""); i++; continue; }
-    // A `'` opens a single-quoted region ONLY when unquoted; inside `"…"` it is a
-    // literal apostrophe (`"it's"`) and MUST NOT flip to single-quote mode — doing
-    // so disabled every substitution after it (the round-20 regression). It falls
-    // through to be appended literally while `$(…)`/backticks below stay live.
-    if (c === "'" && quote === null) { quote = "'"; rebuilt += c; continue; }
-    if (c === '"') { quote = quote === '"' ? null : '"'; rebuilt += c; continue; }
-    const isCmdSub = c === "$" && text[i + 1] === "(";
-    const isProcSub = quote === null && (c === "<" || c === ">") && text[i + 1] === "(";
-    if (isCmdSub || isProcSub) {
-      const close = findClosingParen(text, i + 2);
-      if (close === -1) return { bodies, rebuilt, unclosed: true };
-      const body = text.slice(i + 2, close);
-      bodies.push(body);
-      rebuilt += onBody(body);
-      i = close;
-      continue;
-    }
-    if (c === "`") {
-      const close = findClosingBacktick(text, i + 1);
-      if (close === -1) return { bodies, rebuilt, unclosed: true };
-      const body = text.slice(i + 1, close);
-      bodies.push(body);
-      rebuilt += onBody(body);
-      i = close;
-      continue;
-    }
-    rebuilt += c;
-  }
-  return { bodies, rebuilt, unclosed: false };
-}
-
 /**
  * A matching view where command/process substitutions and backticks are
  * collapsed to EMPTY — one output a substitution can produce (`$(:)` → "",
@@ -714,36 +643,6 @@ export function flattenSubstitutions(
   const scan = scanSubstitutions(command, (body) => placeholderFor(body, scope));
   if (scan.unclosed) return null;
   return { bodies: scan.bodies, flattened: scan.rebuilt };
-}
-
-/** Index of the `)` closing a substitution opened before `start` — paren
- *  depth counted quote-aware (parens inside a quoted body don't count, and
- *  "quoted" includes a BACKTICK body: this scanner tracked only `"` and `'`
- *  where both its twins tracked all three, so `` $(`a)b`) `` closed here at the
- *  `)` inside the backtick). -1 when unclosed. */
-function findClosingParen(command: string, start: number): number {
-  let depth = 1;
-  return scanUnquoted<number>(command, start, (c, i) => {
-    if (c === "(") depth++;
-    if (c === ")") {
-      depth--;
-      if (depth === 0) return halt(i);
-    }
-    return CONTINUE;
-  }) ?? -1;
-}
-
-/** Index of the backtick closing a body opened before `start` (backslash-
- *  escape aware). -1 when unclosed. */
-function findClosingBacktick(command: string, start: number): number {
-  for (let i = start; i < command.length; i++) {
-    if (command[i] === "\\") {
-      i++;
-      continue;
-    }
-    if (command[i] === "`") return i;
-  }
-  return -1;
 }
 
 /** Segments grouped into pipe-chains: `|` links segments into one chain

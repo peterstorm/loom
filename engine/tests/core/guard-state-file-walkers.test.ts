@@ -4,9 +4,9 @@ import {
   analyzeCommandHead,
   blankSubstitutions,
   flattenSubstitutions,
-  scanSubstitutions,
   splitHeredocs,
 } from "../../src/core/guard-state-file";
+import { scanSubstitutions } from "../../src/core/shell-substitution";
 
 /**
  * Walker-divergence property net for guard-state-file's shell scanners.

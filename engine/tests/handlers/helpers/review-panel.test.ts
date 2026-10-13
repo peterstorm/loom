@@ -716,6 +716,45 @@ describe("review-panel helper CLI", () => {
     }
   });
 
+  it("refuses a run whose standalone session marker exists but cannot be read", () => {
+    // session.json decides whether a run binds to standalone evidence or to
+    // the active Task State File. Only ENOENT proves the marker is absent: a
+    // marker behind a symlink loop is present-but-unreadable, and reading it
+    // as "orchestration run" redirects the run into task state.
+    expect(buildBrief().status).toBe(0);
+    symlinkSync("session.json", join(runDir, "session.json"));
+    const result = buildManifest();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("session.json");
+  });
+
+  it("refuses to tally a run whose prior-tally marker exists but cannot be read", () => {
+    // A tally marker behind a symlink loop may be a prior tally: reading it as
+    // absent let the publish rename over it and adjudicate the run again.
+    stage();
+    writeVerdicts([["refuted", "upheld"], ["refuted", "upheld"], ["uncertain", "upheld"]]);
+    symlinkSync("outcomes.json", join(runDir, "outcomes.json"));
+    const result = run(["tally", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("already been tallied or has an incomplete prior tally");
+    expect(result.stderr).toContain("cannot observe");
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].refuted_findings ?? []).toHaveLength(0);
+  });
+
+  it("treats a tally closure that exists but cannot be read as a closed run", () => {
+    // The closure marker blocks verdict and tally replays; one behind a symlink
+    // loop may be a real closure, so it must close the run, not read as absent.
+    stage();
+    symlinkSync("tally-closure.json", join(runDir, "tally-closure.json"));
+    const verdict = run(
+      ["verdict", "--lens", "reproduction", "--runs-root", REL_ROOT, "--manifest", REL_MANIFEST],
+      verdictJson("reproduction", "refuted", "upheld"),
+    );
+    expect(verdict.status).toBe(1);
+    expect(verdict.stderr).toContain("already been tallied or has an incomplete prior tally");
+    expect(verdict.stderr).toContain("cannot read tally closure");
+  });
+
   it("rejects an unknown operation", () => {
     expect(run(["adjudicate", "--runs-root", REL_ROOT]).stderr).toContain("Usage: helper review-panel");
   });

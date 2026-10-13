@@ -4,7 +4,7 @@
  * update the docs if changed.
  */
 
-import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,7 @@ import { frozenSet } from "./core/frozen";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe, type GitProbeStep } from "./utils/git-probe";
+import { observePathPresence } from "./utils/path-presence";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from "./utils/git-execution-policy";
 import {
   describeGitOutcome,
@@ -466,29 +467,20 @@ function taskGraphRelative(): string {
 }
 
 /**
- * Fail-closed existence probe core: ENOENT is the ONLY absent answer.
- * `existsSync` returns `false` for ANY error — EACCES, ELOOP, ENOTDIR, EIO
- * all read as "no file" — so an unreadable task-graph path would silently
- * disarm the gates that arm on its presence. Non-ENOENT access errors
- * therefore mean "cannot prove absence": assume present, say why, and let
- * the gate fail closed. The operator line is built by `diagnostic` so each
+ * Fail-closed existence probe for gates that arm on a path's presence: it
+ * answers exactly as `pathMayExist` (`utils/path-presence` — ENOENT is the
+ * ONLY absent answer) and also writes a stderr line saying why when presence
+ * is unknown, so the gate fails closed visibly. The operator line is built by `diagnostic` so each
  * harness keeps its own name (and the ELOOP regression tests can tell the
- * probes apart) while the ENOENT-only-absent semantics live in exactly one
- * place.
+ * probes apart) while the ENOENT-only-absent semantics live in one place.
  */
 export function probePathFailClosed(
   path: string,
   diagnostic: (path: string, cause: string) => string,
 ): boolean {
-  try {
-    accessSync(path, fsConstants.F_OK);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    const cause = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${diagnostic(path, cause)}\n`);
-    return true;
-  }
+  const presence = observePathPresence(path);
+  if (presence.kind === "unknown") process.stderr.write(`${diagnostic(path, presence.cause)}\n`);
+  return presence.kind !== "absent";
 }
 
 /** Engine-side fail-closed existence probe (see `probePathFailClosed`). */
