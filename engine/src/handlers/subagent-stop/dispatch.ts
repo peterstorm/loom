@@ -33,7 +33,6 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import {
   PRODUCTION_STOP_CHECK_PORTS,
   runAcceptanceStopCheck,
-  type StopCheckOutcome,
   type StopCheckPorts,
 } from "./acceptance-stop-check";
 import {
@@ -331,21 +330,16 @@ export const runDispatch = async (
 
   // The Acceptance Stop Check runs before settlement and before cleanup: a
   // blocked stop keeps this same agent working, so nothing may settle the Task
-  // or release the agent's runtime bindings. It fails open on every fault.
+  // or release the agent's runtime bindings. The check is total and fails open.
   let stopCheckNote: string | undefined;
   if (category === "impl" && sidecarObservation.kind === "authority-observed") {
     const stopManager = manager;
-    let outcome: StopCheckOutcome;
-    try {
-      outcome = await runAcceptanceStopCheck({
-        graph: stopManager.load(),
-        stateFilePath: stopManager.getPath(),
-        taskId: sidecarObservation.sidecar.authority.taskId,
-        agentKey: `${sidecarObservation.sidecar.sessionId}.${sidecarObservation.sidecar.agentId}`,
-      }, stopCheckPorts);
-    } catch (error) {
-      outcome = { kind: "note", message: `acceptance stop check crashed and was skipped: ${error instanceof Error ? error.message : String(error)}` };
-    }
+    const outcome = await runAcceptanceStopCheck({
+      loadGraph: () => stopManager.load(),
+      stateFilePath: stopManager.getPath(),
+      taskId: sidecarObservation.sidecar.authority.taskId,
+      agentKey: `${sidecarObservation.sidecar.sessionId}.${sidecarObservation.sidecar.agentId}`,
+    }, stopCheckPorts);
     if (outcome.kind === "block") return { kind: "block", message: outcome.message };
     if (outcome.kind === "note") stopCheckNote = outcome.message;
   }

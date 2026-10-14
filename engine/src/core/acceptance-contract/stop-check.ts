@@ -22,29 +22,39 @@ import { claims, dueWaves } from "./tasks";
 /** One contract's testcases a claimant owes at its stop. */
 export type OwedAcceptance = Readonly<{ contractId: string; testcases: NonEmpty<AcceptanceTestcase> }>;
 
+declare const OWED_STOP_CHECK: unique symbol;
+
 /**
- * What a Task owes at its stop. `none` unless it claims a Requirement of a
- * frozen contract whose testcases are all due by its Wave; otherwise the owed
- * testcases, the acceptance files holding them, and the gate expectation that
- * attributes report testcases to those files.
+ * What a Task owes at its stop, judged per roster testcase: the testcases of
+ * frozen contracts that it claims and whose every anchor is due by its Wave.
+ * `none` when there is no such testcase; otherwise `owed` carries them, the
+ * acceptance files holding them, and the gate expectation that attributes
+ * report testcases to those files.
  */
-export type StopCheckExpectation =
-  | Readonly<{ kind: "none" }>
-  | Readonly<{
-      kind: "owed";
-      owed: NonEmpty<OwedAcceptance>;
-      files: NonEmpty<string>;
-      expectation: AcceptanceExpectation;
-    }>;
+export type OwedStopCheck = Readonly<{
+  kind: "owed";
+  owed: NonEmpty<OwedAcceptance>;
+  files: NonEmpty<string>;
+  expectation: AcceptanceExpectation;
+  /** Only stopCheckExpectation constructs this, so `files` and `expectation`
+   *  always agree with `owed`. */
+  readonly [OWED_STOP_CHECK]: true;
+}>;
+
+export type StopCheckExpectation = Readonly<{ kind: "none" }> | OwedStopCheck;
 
 /** One owed testcase the report shows not passing, and why. */
 export type FailingAcceptanceTestcase = Readonly<{
   contractId: string;
   file: string;
   name: string;
-  /** `failed` with the report's failure type, or `did-not-run` when the
-   *  file ran but this testcase was absent or failed to collect. */
-  outcome: Readonly<{ kind: "failed"; failureType: string | null }> | Readonly<{ kind: "did-not-run" }>;
+  /** `failed` with the report's failure type; `skipped` when the report ran it
+   *  as skipped; `did-not-run` when its file ran but the testcase was absent
+   *  or failed to collect. */
+  outcome:
+    | Readonly<{ kind: "failed"; failureType: string | null }>
+    | Readonly<{ kind: "skipped" }>
+    | Readonly<{ kind: "did-not-run" }>;
 }>;
 
 export type StopCheckVerdict =
@@ -75,12 +85,17 @@ export function stopCheckExpectation(
   if (owed === null) return NONE;
   const files = nonEmpty([...new Set(owed.flatMap(({ testcases }) => testcases.map(({ file }) => file)))])!;
   const owingContracts = contracts.filter(({ id }) => owed.some(({ contractId }) => contractId === id));
-  return freeze({ kind: "owed", owed, files, expectation: acceptanceExpectation(owingContracts, tasks, task.wave) });
+  return freeze({
+    kind: "owed",
+    owed,
+    files,
+    expectation: acceptanceExpectation(owingContracts, tasks, task.wave),
+  }) as OwedStopCheck;
 }
 
 /** The verdict of one runner report over the owed testcases. */
 export function judgeStopCheck(
-  check: Extract<StopCheckExpectation, { kind: "owed" }>,
+  check: OwedStopCheck,
   reportDigest: ArtifactDigest,
   projection: JunitTestcasesResult,
 ): StopCheckVerdict {
@@ -93,12 +108,25 @@ export function judgeStopCheck(
   const failing = nonEmpty(check.owed.flatMap(({ contractId, testcases }) => testcases.flatMap((entry): FailingAcceptanceTestcase[] => {
     const observed = ran.find(({ file, name }) => file === entry.file && name === entry.name);
     if (observed !== undefined && !observed.collectionError && observed.outcome === "passed") return [];
-    const outcome = observed === undefined || observed.collectionError
-      ? freeze({ kind: "did-not-run" as const })
-      : freeze({ kind: "failed" as const, failureType: observed.failureType });
+    const outcome: FailingAcceptanceTestcase["outcome"] = observed === undefined || observed.collectionError
+      ? freeze({ kind: "did-not-run" })
+      : observed.outcome === "skipped"
+        ? freeze({ kind: "skipped" })
+        : freeze({ kind: "failed", failureType: observed.failureType });
     return [freeze({ contractId, file: entry.file, name: entry.name, outcome })];
   })));
   return failing === null ? freeze({ kind: "passed" }) : freeze({ kind: "failing", testcases: failing });
+}
+
+function describeOutcome(outcome: FailingAcceptanceTestcase["outcome"]): string {
+  switch (outcome.kind) {
+    case "failed":
+      return outcome.failureType === null ? "failed" : `failed (${outcome.failureType})`;
+    case "skipped":
+      return "skipped";
+    case "did-not-run":
+      return "did not run";
+  }
 }
 
 /** The message the blocked agent reads: what is still failing, and what it may and may not do about it. */
@@ -107,8 +135,7 @@ export function renderStopCheckBlock(
   runnerOutput: string,
   blocksRemaining: number,
 ): string {
-  const lines = testcases.map(({ contractId, file, name, outcome }) =>
-    `- ${contractId}: '${name}' (${file}) — ${outcome.kind === "failed" ? `failed${outcome.failureType === null ? "" : ` (${outcome.failureType})`}` : "did not run"}`);
+  const lines = testcases.map(({ contractId, file, name, outcome }) => `- ${contractId}: '${name}' (${file}) — ${describeOutcome(outcome)}`);
   return [
     "LOOM ACCEPTANCE STOP CHECK: your Task claims Requirements whose frozen acceptance testcases are still not passing.",
     "Your Wave Gate requires them green. Keep working until they pass:",

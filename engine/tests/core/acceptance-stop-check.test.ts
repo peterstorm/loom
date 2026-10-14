@@ -79,6 +79,15 @@ describe("judgeStopCheck", () => {
     });
   });
 
+  it("names a skipped owed testcase as skipped, not failed", () => {
+    const verdict = judgeStopCheck(check, REPORT_DIGEST, report([testcase(roster[0].name, "skipped"), testcase(roster[1].name, "passed")]));
+    expect(verdict).toEqual({
+      kind: "failing",
+      testcases: [{ contractId: "CT-1", file: SURFACE.acceptance, name: roster[0].name, outcome: { kind: "skipped" } }],
+    });
+    if (verdict.kind === "failing") expect(renderStopCheckBlock(verdict.testcases, "", 1)).toContain(`'${roster[0].name}' (${SURFACE.acceptance}) — skipped`);
+  });
+
   it("is unobservable when the report ran none of the files, or could not be projected", () => {
     const elsewhere: ReportTestcase = { classname: "tests/other.test.ts", name: "x", outcome: "failed", failureType: "Error" };
     expect(judgeStopCheck(check, REPORT_DIGEST, report([elsewhere]))).toMatchObject({ kind: "unobservable" });

@@ -98,6 +98,7 @@ export {
   stopCheckExpectation,
   type FailingAcceptanceTestcase,
   type OwedAcceptance,
+  type OwedStopCheck,
   type StopCheckExpectation,
   type StopCheckVerdict,
 } from "./stop-check";

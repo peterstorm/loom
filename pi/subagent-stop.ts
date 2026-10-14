@@ -167,22 +167,18 @@ const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefin
 /**
  * The Acceptance Stop Check, report-only: Pi settles after the subagent has
  * ended, so a failing owed testcase is an operator note here, never a block.
- * Fails open; it never raises a processing error.
+ * The check is total, so it never raises a processing error.
  */
 async function reportAcceptanceStopCheck(manager: StateManager, taskId: string | null): Promise<void> {
   if (taskId === null) return;
-  try {
-    const outcome = await runAcceptanceStopCheck({
-      graph: manager.load(),
-      stateFilePath: manager.getPath(),
-      taskId,
-      agentKey: `pi.${taskId}`,
-    }, REPORT_ONLY_STOP_CHECK_PORTS);
-    const line = stopCheckReportLine(taskId, outcome);
-    if (line !== null) process.stderr.write(`loom(pi): ${line}\n`);
-  } catch (error) {
-    process.stderr.write(`loom(pi): acceptance stop check for ${taskId} was skipped: ${describeCause(error)}\n`);
-  }
+  const outcome = await runAcceptanceStopCheck({
+    loadGraph: () => manager.load(),
+    stateFilePath: manager.getPath(),
+    taskId,
+    agentKey: `pi.${taskId}`,
+  }, REPORT_ONLY_STOP_CHECK_PORTS);
+  const line = stopCheckReportLine(taskId, outcome);
+  if (line !== null) process.stderr.write(`loom(pi): ${line}\n`);
 }
 
 /** Write a notice's stderr line and return the processing error it raises. */

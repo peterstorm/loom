@@ -309,9 +309,13 @@ export function acceptanceRunnerCheck(
   return total(() => runnerCheck(runner, files, "acceptanceRunner"));
 }
 
-/** A runner must not share a report path with a Wave check, or one run would overwrite the other's evidence. */
-function runnerReportConflicts(runner: AcceptanceRunner, checks: readonly VerificationManifestCheck[], path: string): readonly string[] {
-  return checks.some(({ report }) => report.kind === "required-file" && report.path === runner.report.path)
+/**
+ * A runner must not share a report path with a Wave check, or one run would
+ * overwrite the other's evidence. Both the source and the frozen parse apply
+ * it, so a frozen manifest carries the invariant in its own parse.
+ */
+function runnerReportConflicts(runner: AcceptanceRunner, checkReports: readonly ReportPolicy[], path: string): readonly string[] {
+  return checkReports.some((report) => report.kind === "required-file" && report.path === runner.report.path)
     ? [`${path}.report.path ${runner.report.path} is also a Wave check's report path`]
     : [];
 }
@@ -354,7 +358,7 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
   if (!checks.ok) errors.push(...checks.error.errors);
   const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "verificationManifest.acceptanceRunner") : null;
   if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
-  if (runner?.ok && checks.ok) errors.push(...runnerReportConflicts(runner.value, checks.value, "verificationManifest.acceptanceRunner"));
+  if (runner?.ok && checks.ok) errors.push(...runnerReportConflicts(runner.value, checks.value.map(({ report }) => report), "verificationManifest.acceptanceRunner"));
   return errors.length === 0 && checks.ok && (runner === null || runner.ok)
     ? success(freeze({
         schemaVersion: runnerSchema ? VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION : VERIFICATION_MANIFEST_SCHEMA_VERSION,
@@ -544,6 +548,9 @@ export function parseFrozenVerificationManifest(raw: unknown): Parsed<FrozenVeri
     const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "frozenVerificationManifest.acceptanceRunner") : null;
     const errors = [...tagErrors, ...[source, checks].flatMap((result) => result.ok ? [] : result.error.errors)];
     if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
+    if (runner?.ok && checks.ok) {
+      errors.push(...runnerReportConflicts(runner.value, checks.value.map(({ reportPolicy }) => reportPolicy), "frozenVerificationManifest.acceptanceRunner"));
+    }
     if (source.ok && source.value.kind === "engine-default" && runner !== null) {
       errors.push("frozenVerificationManifest engine-default source cannot authorize an acceptance runner");
     }

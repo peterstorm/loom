@@ -90,12 +90,15 @@ function sidecar(statePath: string): void {
 
 const stop = JSON.stringify({ session_id: SESSION, agent_id: AGENT, agent_type: "code-implementer-agent", hook_event_name: "SubagentStop" });
 
-const blockingPorts = (): StopCheckPorts => ({
-  repositoryRoot: () => ({ ok: false, reason: "unused" }),
+/** Ports that never decide: the repository root is unavailable, so the check notes and the stop proceeds. */
+const inertPorts = (): StopCheckPorts => ({
+  repositoryRoot: () => ({ ok: false, reason: "repository root unavailable in this fixture" }),
+  acquireRunner: () => ({ kind: "acquired", release: () => undefined }),
   runCheck: async () => { throw new Error("unused"); },
   readReport: () => new Uint8Array(),
-  blocksIssued: () => 0,
+  blocksIssued: () => ({ kind: "count", blocks: 0 }),
   recordBlock: () => undefined,
+  clearBlocks: () => undefined,
 });
 
 describe("dispatch runs the Acceptance Stop Check before settlement", () => {
@@ -108,7 +111,7 @@ describe("dispatch runs the Acceptance Stop Check before settlement", () => {
     const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
     // The real check with a runner that reports the owed testcase failing.
     const ports: StopCheckPorts = {
-      ...blockingPorts(),
+      ...inertPorts(),
       repositoryRoot: () => {
         const parsed = parseCanonicalRepositoryRoot(root);
         return parsed.ok ? { ok: true, root: parsed.value } : { ok: false, reason: "root" };
@@ -147,11 +150,33 @@ describe("dispatch runs the Acceptance Stop Check before settlement", () => {
     const cleanupCalls: string[] = [];
     const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
 
-    const result = await runDispatch(stop, [], cleanup, blockingPorts());
+    const result = await runDispatch(stop, [], cleanup, inertPorts());
 
     expect(result.kind).not.toBe("block");
     // It reached settlement: the graph resolved, and cleanup ran after it.
     expect(JSON.stringify(result)).not.toContain("no task graph resolvable");
     expect(cleanupCalls).toHaveLength(1);
+    // The operator is told why the check did not decide.
+    if (result.kind === "passthrough") {
+      expect(result.systemMessage).toContain("did not decide (repository root unavailable in this fixture)");
+    }
+  });
+
+  it("turns a crashing check into an operator note and still settles", async () => {
+    const root = project();
+    const statePath = stateFile(root);
+    sidecar(statePath);
+    const cleanupCalls: string[] = [];
+    const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
+    const ports: StopCheckPorts = {
+      ...inertPorts(),
+      repositoryRoot: () => { throw new Error("git exploded"); },
+    };
+
+    const result = await runDispatch(stop, [], cleanup, ports);
+
+    expect(result.kind).not.toBe("block");
+    expect(cleanupCalls).toHaveLength(1);
+    if (result.kind === "passthrough") expect(result.systemMessage).toContain("crashed and did not decide: git exploded");
   });
 });

@@ -1,9 +1,12 @@
 /**
  * The Acceptance Stop Check's shell, driven through its ports: a claimant
  * with a failing owed testcase is blocked, a passing one is not, and every
- * path the check cannot decide fails open. Plus the manifest's runner grammar.
+ * path the check cannot decide fails open. Plus the production counter and
+ * runner lock, the Pi report-only form, and the manifest's runner grammar.
  */
-import { describe, expect, it } from "vitest";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { sha256Bytes } from "../../../src/core/digest";
 import {
   acceptanceRunnerCheck,
@@ -13,7 +16,11 @@ import {
 } from "../../../src/core/verification-manifest";
 import {
   ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
+  PRODUCTION_STOP_CHECK_PORTS,
+  REPORT_ONLY_STOP_CHECK_PORTS,
   runAcceptanceStopCheck,
+  stopCheckReportLine,
+  type BlockCount,
   type StopCheckPorts,
 } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
 import type { CompletionCheckRunnerResult } from "../../../src/orchestration/completion-check-runner";
@@ -34,8 +41,8 @@ const RUNNER = {
 };
 
 /** A source manifest; `null` declares no runner. */
-const manifestBytes = (runner: unknown = RUNNER, schemaVersion = 2): Uint8Array => new TextEncoder().encode(JSON.stringify({
-  schemaVersion, kind: "loom-verification-manifest", checks: [], ...(runner === null ? {} : { acceptanceRunner: runner }),
+const manifestBytes = (runner: unknown = RUNNER, schemaVersion = 2, checks: unknown[] = []): Uint8Array => new TextEncoder().encode(JSON.stringify({
+  schemaVersion, kind: "loom-verification-manifest", checks, ...(runner === null ? {} : { acceptanceRunner: runner }),
 }));
 
 function frozenManifest(): FrozenVerificationManifest {
@@ -64,6 +71,25 @@ describe("verification manifest acceptanceRunner", () => {
     const frozen = freezeVerificationManifest(manifestBytes(runner, schemaVersion));
     expect(frozen.ok).toBe(false);
     if (!frozen.ok) expect(frozen.error.errors.join("; ")).toContain(message);
+  });
+
+  it("refuses a runner sharing a Wave check's report path, at freezing and at rehydration", () => {
+    const waveCheck = {
+      id: "project:verify", scope: "wave", executable: "vitest", args: ["run"], cwd: ".", timeoutMs: 60_000,
+      report: { kind: "required-file", path: REPORT },
+    };
+    const source = freezeVerificationManifest(manifestBytes(RUNNER, 2, [waveCheck]));
+    expect(source.ok).toBe(false);
+    if (!source.ok) expect(source.error.errors.join("; ")).toContain("is also a Wave check's report path");
+
+    // A frozen form carrying the conflict (built from a conflict-free one) is refused by its own parse.
+    const clean = freezeVerificationManifest(manifestBytes(RUNNER, 2, [{ ...waveCheck, report: { kind: "required-file", path: ".loom/completion-reports/verify.junit.xml" } }]));
+    if (!clean.ok) throw new Error(clean.error.errors.join("; "));
+    const tampered = JSON.parse(JSON.stringify(clean.value)) as { projectChecks: { reportPolicy: { path: string } }[] };
+    tampered.projectChecks[0]!.reportPolicy.path = REPORT;
+    const rehydrated = parseFrozenVerificationManifest(tampered);
+    expect(rehydrated.ok).toBe(false);
+    if (!rehydrated.ok) expect(rehydrated.error.errors.join("; ")).toContain("frozenVerificationManifest.acceptanceRunner.report.path");
   });
 
   it("expands {files} into one argument per acceptance file and nothing else", () => {
@@ -101,9 +127,11 @@ const root = (() => {
   return parsed.value;
 })();
 
+/** In-memory ports; `reportBytes: null` makes the runner produce no report. */
 function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckPorts> = {}) {
   const blocks = new Map<string, number>();
   const runs: string[][] = [];
+  const locks = { acquired: 0, released: 0 };
   const run: StopCheckPorts["runCheck"] = async (check) => {
     runs.push([...check.args]);
     const report = reportBytes === null
@@ -119,29 +147,38 @@ function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckPorts
   };
   const value: StopCheckPorts = {
     repositoryRoot: () => ({ ok: true, root }),
+    acquireRunner: () => {
+      locks.acquired++;
+      return { kind: "acquired", release: () => { locks.released++; } };
+    },
     runCheck: run,
     readReport: () => reportBytes ?? new Uint8Array(),
-    blocksIssued: (key) => blocks.get(key) ?? 0,
-    recordBlock: (key) => { blocks.set(key, (blocks.get(key) ?? 0) + 1); },
+    blocksIssued: (key): BlockCount => ({ kind: "count", blocks: blocks.get(key) ?? 0 }),
+    recordBlock: (key, count) => { blocks.set(key, count); },
+    clearBlocks: (key) => { blocks.delete(key); },
     ...overrides,
   };
-  return { value, runs, blocks };
+  return { value, runs, blocks, locks };
 }
 
 const input = (taskId: string, overrides: Partial<TaskGraph> = {}) =>
-  ({ graph: graph(overrides), stateFilePath: "/repo/.claude/state/active_task_graph.json", taskId, agentKey: "session.agent" });
+  ({ loadGraph: () => graph(overrides), stateFilePath: "/repo/.claude/state/active_task_graph.json", taskId, agentKey: "session.agent" });
 
 describe("runAcceptanceStopCheck", () => {
-  it("blocks a claimant whose owed testcase still fails, running only its acceptance file", async () => {
+  it("blocks a claimant whose owed testcase still fails, running only its acceptance file under the runner lock", async () => {
     const fake = ports(junit("failed"));
     const outcome = await runAcceptanceStopCheck(input("T2"), fake.value);
     expect(outcome).toMatchObject({ kind: "block", message: expect.stringContaining(`'${ROSTER[0].name}'`) });
     expect(fake.runs).toEqual([["run", "--reporter=junit", `--outputFile=${REPORT}`, SURFACE.acceptance]]);
     expect(fake.blocks.get("session.agent")).toBe(1);
+    expect(fake.locks).toEqual({ acquired: 1, released: 1 });
   });
 
-  it("lets a claimant whose owed testcases pass stop", async () => {
-    expect(await runAcceptanceStopCheck(input("T2"), ports(junit("passed")).value)).toEqual({ kind: "passed" });
+  it("lets a claimant whose owed testcases pass stop, and forgets its blocks", async () => {
+    const fake = ports(junit("passed"));
+    fake.blocks.set("session.agent", 2);
+    expect(await runAcceptanceStopCheck(input("T2"), fake.value)).toEqual({ kind: "passed" });
+    expect(fake.blocks.has("session.agent")).toBe(false);
   });
 
   it("skips a non-claimant, a graph with no runner, and a contract not yet frozen", async () => {
@@ -163,6 +200,30 @@ describe("runAcceptanceStopCheck", () => {
       runCheck: async () => ({ ok: false, error: { kind: "containment-unsupported", message: "no process groups" } }),
     });
     expect(await runAcceptanceStopCheck(input("T2"), cancelled.value)).toMatchObject({ kind: "note", message: expect.stringContaining("no process groups") });
+    expect(cancelled.locks).toEqual({ acquired: 1, released: 1 });
+  });
+
+  it("does not run while another claimant holds the runner", async () => {
+    const fake = ports(junit("failed"), { acquireRunner: () => ({ kind: "held", reason: "another claimant's stop check (pid 7) is running the acceptance runner" }) });
+    expect(await runAcceptanceStopCheck(input("T2"), fake.value)).toMatchObject({ kind: "note", message: expect.stringContaining("pid 7") });
+    expect(fake.runs).toEqual([]);
+  });
+
+  it("names an unreadable block counter instead of reporting the cap, and never blocks without it", async () => {
+    const fake = ports(junit("failed"), { blocksIssued: () => ({ kind: "unreadable", reason: "counter.json is not JSON" }) });
+    const outcome = await runAcceptanceStopCheck(input("T2"), fake.value);
+    expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining("block counter is unreadable: counter.json is not JSON") });
+    expect(outcome).not.toMatchObject({ message: expect.stringContaining("cap") });
+    expect(fake.runs).toEqual([]);
+  });
+
+  it("turns a thrown fault, including an unloadable graph, into a note", async () => {
+    const unloadable = { ...input("T2"), loadGraph: () => { throw new Error("state file is corrupt"); } };
+    expect(await runAcceptanceStopCheck(unloadable, ports(junit("failed")).value))
+      .toMatchObject({ kind: "note", message: expect.stringContaining("crashed and did not decide: state file is corrupt") });
+    const throwing = ports(junit("failed"), { runCheck: async () => { throw new Error("spawn exploded"); } });
+    expect(await runAcceptanceStopCheck(input("T2"), throwing.value)).toMatchObject({ kind: "note", message: expect.stringContaining("spawn exploded") });
+    expect(throwing.locks).toEqual({ acquired: 1, released: 1 });
   });
 
   it(`stops blocking after ${ACCEPTANCE_STOP_CHECK_MAX_BLOCKS} blocks for the same agent`, async () => {
@@ -171,5 +232,85 @@ describe("runAcceptanceStopCheck", () => {
     for (let attempt = 0; attempt <= ACCEPTANCE_STOP_CHECK_MAX_BLOCKS; attempt++) outcomes.push(await runAcceptanceStopCheck(input("T2"), fake.value));
     expect(outcomes.map(({ kind }) => kind)).toEqual([...Array(ACCEPTANCE_STOP_CHECK_MAX_BLOCKS).fill("block"), "note"]);
     expect(outcomes.at(-1)).toMatchObject({ message: expect.stringContaining("block cap") });
+    expect(fake.blocks.has("session.agent")).toBe(false);
+  });
+});
+
+describe("production stop-check ports", () => {
+  const savedDir = process.env.LOOM_SUBAGENT_DIR;
+  const dirs: string[] = [];
+  const subagentDir = (): string => {
+    const dir = canonicalTempDir("loom-stop-check-subagents-");
+    dirs.push(dir);
+    process.env.LOOM_SUBAGENT_DIR = dir;
+    return dir;
+  };
+  afterEach(() => {
+    if (savedDir === undefined) delete process.env.LOOM_SUBAGENT_DIR;
+    else process.env.LOOM_SUBAGENT_DIR = savedDir;
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+  const counter = (dir: string, key: string) => join(dir, `${key}.acceptance-stop-check.json`);
+
+  it("counts, keeps agent keys independent, and clears", () => {
+    const dir = subagentDir();
+    const ports = PRODUCTION_STOP_CHECK_PORTS;
+    expect(ports.blocksIssued("s.a")).toEqual({ kind: "count", blocks: 0 });
+    ports.recordBlock("s.a", 1);
+    ports.recordBlock("s.a", 2);
+    ports.recordBlock("s.b", 1);
+    expect(ports.blocksIssued("s.a")).toEqual({ kind: "count", blocks: 2 });
+    expect(ports.blocksIssued("s.b")).toEqual({ kind: "count", blocks: 1 });
+    ports.clearBlocks("s.a");
+    expect(existsSync(counter(dir, "s.a"))).toBe(false);
+    expect(ports.blocksIssued("s.a")).toEqual({ kind: "count", blocks: 0 });
+    ports.clearBlocks("s.never");
+  });
+
+  it("reads a corrupt or malformed counter as unreadable, naming the file", () => {
+    const dir = subagentDir();
+    writeFileSync(counter(dir, "s.a"), "{not json");
+    writeFileSync(counter(dir, "s.b"), JSON.stringify({ blocks: -1 }));
+    expect(PRODUCTION_STOP_CHECK_PORTS.blocksIssued("s.a")).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("is not JSON") });
+    expect(PRODUCTION_STOP_CHECK_PORTS.blocksIssued("s.b")).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("non-negative integer") });
+  });
+
+  it("serializes the runner per repository, releases only its own lock, and reaps a dead holder's", () => {
+    const dir = subagentDir();
+    const first = PRODUCTION_STOP_CHECK_PORTS.acquireRunner(root);
+    expect(first.kind).toBe("acquired");
+    expect(PRODUCTION_STOP_CHECK_PORTS.acquireRunner(root)).toMatchObject({ kind: "held", reason: expect.stringContaining(`pid ${process.pid}`) });
+    if (first.kind === "acquired") first.release();
+    const second = PRODUCTION_STOP_CHECK_PORTS.acquireRunner(root);
+    expect(second.kind).toBe("acquired");
+
+    // A lock left by a process that is gone is stale.
+    const [lock] = readdirSync(dir).filter((name) => name.endsWith(".lock"));
+    const path = join(dir, lock!);
+    writeFileSync(path, JSON.stringify({ pid: 2 ** 22 + 12345, acquiredAt: Date.now() }));
+    if (second.kind === "acquired") second.release();
+    expect(readFileSync(path, "utf8")).toContain(String(2 ** 22 + 12345));
+    const reaped = PRODUCTION_STOP_CHECK_PORTS.acquireRunner(root);
+    expect(reaped.kind).toBe("acquired");
+    if (reaped.kind === "acquired") reaped.release();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("keeps no counter in the Pi report-only form", () => {
+    const dir = subagentDir();
+    REPORT_ONLY_STOP_CHECK_PORTS.recordBlock("pi.T2", 1);
+    expect(REPORT_ONLY_STOP_CHECK_PORTS.blocksIssued("pi.T2")).toEqual({ kind: "count", blocks: 0 });
+    REPORT_ONLY_STOP_CHECK_PORTS.clearBlocks("pi.T2");
+    expect(existsSync(counter(dir, "pi.T2"))).toBe(false);
+  });
+});
+
+describe("stopCheckReportLine", () => {
+  it("prints nothing for a skip and one operator line for every other outcome", () => {
+    expect(stopCheckReportLine("T2", { kind: "skip" })).toBeNull();
+    expect(stopCheckReportLine("T2", { kind: "passed" })).toBe("acceptance stop check: T2's owed acceptance testcases pass");
+    expect(stopCheckReportLine("T2", { kind: "note", message: "did not decide" })).toBe("did not decide");
+    expect(stopCheckReportLine("T2", { kind: "block", message: "still failing" }))
+      .toBe("acceptance stop check (report-only on Pi; the agent has already ended): T2 still failing");
   });
 });

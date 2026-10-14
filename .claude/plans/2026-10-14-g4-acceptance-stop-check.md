@@ -50,8 +50,8 @@ The Wave Gate's completion suite stays the only completion authority.
   - It also returns the acceptance files containing those testcases.
 - **`judgeStopCheck(expectation, facts)`** reuses `observeAcceptanceFacts` over the JUnit report. It returns one of:
   - `passed`;
-  - `failing` — a non-empty list of owed testcases with their failure text, bounded;
-  - `unobservable` — the report is missing or malformed, a testcase is absent, or the runner timed out, with the reason.
+  - `failing` — a non-empty list of owed testcases, each failed (with its failure type), skipped, or did-not-run (its file ran but the testcase was absent or failed to collect); only the runner output shown with it is truncated;
+  - `unobservable` — the report is missing or malformed or has no testcase of the owed files, or the runner timed out, with the reason.
 - **Fail-open rule.** `unobservable` never blocks; it is an operator note. Only `failing` blocks.
 
 ### 3. Shell: the SubagentStop hook
