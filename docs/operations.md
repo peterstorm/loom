@@ -701,7 +701,7 @@ When an implementation agent that claims a frozen Acceptance Contract's Requirem
   }
   ```
 
-- **The command.** `{files}` must be exactly one whole argument; the engine replaces it with the acceptance file paths, one argument each. The executable, argv and report follow the project-check rules: the allowlist, no shell, and a report beneath `.loom/completion-reports/` that no Wave check also uses. `timeoutMs` is at most 240000, inside the SubagentStop hook's 300 s timeout.
+- **The command.** `{files}` must be exactly one whole argument; the engine replaces it with the acceptance file paths, one argument each, written relative to the runner's `cwd` (with `"cwd": "engine"`, `engine/tests/x.test.ts` is passed as `tests/x.test.ts`). An owed file outside `cwd` cannot be named, so the check notes it and does not decide. The executable, argv and report follow the project-check rules: the allowlist, no shell, and a report beneath `.loom/completion-reports/` that no Wave check also uses. `timeoutMs` is at most 240000, inside the SubagentStop hook's 300 s timeout.
 - **Silent when off.** With no runner, or no owed testcase, the check does nothing and says nothing.
 - **Fails open.** In each of these cases the stop proceeds and the operator gets a `systemMessage` saying why the check did not decide:
   - another claimant's check holds the runner;

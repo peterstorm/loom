@@ -106,6 +106,20 @@ describe("verification manifest acceptanceRunner", () => {
     const check = acceptanceRunnerCheck(runner, ["tests/a.acceptance.test.ts", "tests/b.acceptance.test.ts"]);
     expect(check).toMatchObject({ ok: true, value: { args: ["run", "--reporter=junit", `--outputFile=${REPORT}`, "tests/a.acceptance.test.ts", "tests/b.acceptance.test.ts"] } });
   });
+
+  it("names each file relative to a runner cwd below the repository root, and refuses one outside it", () => {
+    const frozen = freezeVerificationManifest(manifestBytes({ ...RUNNER, executable: "npm", args: ["run", "test:acceptance", "--", "{files}"], cwd: "engine" }));
+    if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
+    const runner = frozen.value.acceptanceRunner!;
+    expect(acceptanceRunnerCheck(runner, ["engine/tests/acceptance/a.acceptance.test.ts"])).toMatchObject({
+      ok: true, value: { cwd: "engine", args: ["run", "test:acceptance", "--", "tests/acceptance/a.acceptance.test.ts"] },
+    });
+    const outside = acceptanceRunnerCheck(runner, ["engine/tests/a.acceptance.test.ts", "pi/b.acceptance.test.ts"]);
+    expect(outside.ok).toBe(false);
+    if (!outside.ok) expect(outside.error.errors.join("; ")).toBe("acceptanceRunner.cwd engine does not contain pi/b.acceptance.test.ts");
+    // A sibling directory sharing the prefix is outside too.
+    expect(acceptanceRunnerCheck(runner, ["engine-extra/a.test.ts"]).ok).toBe(false);
+  });
 });
 
 const ROSTER = [{ file: SURFACE.acceptance, name: "AS-001: one valid call wins", anchors: ["AS-001"] }] as const;
