@@ -51,6 +51,7 @@ export {
   contractWave,
   contractWriter,
   coveredAnchors,
+  dueWaves,
   frozenPaths,
   redWindowTaskIds,
   type ContractRole,
