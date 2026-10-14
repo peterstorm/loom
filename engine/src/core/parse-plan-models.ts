@@ -16,7 +16,8 @@
  *   - `## Contracts`   — `### CT-N: {title}` blocks, each naming a
  *                        declarations-only types file (or `none` with a
  *                        reason), the dedicated acceptance test files and the
- *                        Requirements each decides, and the statement
+ *                        Requirements each decides, optionally the entry
+ *                        point those tests drive, and the statement
  *                        consumers rely on; frozen once observed red
  *
  * The parser is total and pure: malformed declarations are represented, never
@@ -363,6 +364,8 @@ function parseContract(block: string): ContractDeclaration {
   const { types, problems: typeProblems } = contractTypes(block);
   const { files, problems: acceptanceProblems } = contractAcceptance(block);
   const supportedDomain = fieldValue(block, "Supported domain");
+  const rawEntryPoint = fieldValue(block, "Entry point");
+  const entryPoint = rawEntryPoint === null ? null : normalizePlanPath(rawEntryPoint);
   const statement = fieldValue(block, "Statement");
   const domainProblems: readonly ContractProblem[] =
     supportedDomain !== null && files.length > 0 &&
@@ -372,14 +375,20 @@ function parseContract(block: string): ContractDeclaration {
   // Frozen paths are hashed through `join(root, path)`: only a path that stays
   // inside the repository may be frozen.
   const declaredPaths = [...(types?.kind === "file" ? [types.path] : []), ...files.map(({ path }) => path)];
-  const unsafeProblems = declaredPaths
+  const unsafeProblems = [...declaredPaths, ...(entryPoint === null ? [] : [entryPoint])]
     .filter((path) => !isRepoRelativePlanPath(path))
     .map((path): ContractProblem => ({ kind: "unsafe-path", path }));
+  // The entry point is production code the claimants build; a frozen path
+  // cannot be it, because nothing may write a frozen path after the freeze.
+  const entryProblems: readonly ContractProblem[] = entryPoint !== null && declaredPaths.includes(entryPoint)
+    ? [{ kind: "entry-point-frozen", path: entryPoint }]
+    : [];
   const [first, ...rest]: readonly ContractProblem[] = [
     ...typeProblems,
     ...acceptanceProblems,
     ...domainProblems,
     ...unsafeProblems,
+    ...entryProblems,
     ...(statement === null ? [{ kind: "missing-statement" } as const] : []),
   ];
   if (first !== undefined) return { kind: "malformed", problems: [first, ...rest] };
@@ -391,6 +400,7 @@ function parseContract(block: string): ContractDeclaration {
     types: types!,
     acceptance: [head!, ...tail],
     supportedDomain: supportedDomain === null ? null : normalizePlanPath(supportedDomain),
+    entryPoint,
     statement: statement!,
   };
 }
@@ -462,6 +472,7 @@ function collectStrays(
     { label: "No types reason", s: contracts, home: "Contracts" },
     { label: "Acceptance tests", s: contracts, home: "Contracts" },
     { label: "Supported domain", s: contracts, home: "Contracts" },
+    { label: "Entry point", s: contracts, home: "Contracts" },
   ];
   for (const { label, s, home } of labelHomes) {
     for (const m of text.matchAll(new RegExp(`^\\*\\*${label}:\\*\\*[^\\n]*$`, "gim"))) {

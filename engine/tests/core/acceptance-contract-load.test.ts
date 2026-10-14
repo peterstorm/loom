@@ -3,6 +3,7 @@ import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from ".
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, TaskGraph } from "../../src/types";
+import { indexedSpec } from "../fixtures/spec-index-fixture";
 
 const CONTRACT: PlanContract = {
   id: "CT-1",
@@ -12,6 +13,7 @@ const CONTRACT: PlanContract = {
     types: { kind: "none", reason: "the slice consumes another surface" },
     acceptance: [{ path: "tests/load.acceptance.test.ts", anchors: ["FR-001"] }],
     supportedDomain: null,
+    entryPoint: null,
     statement: "Loads.",
   },
 };
@@ -36,12 +38,12 @@ function populated(): TaskGraph {
   ]);
   if (!roster.ok) throw new Error(roster.error);
   const result = populateTaskGraph({
-    current_phase: "decompose", phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: "plan.md",
+    current_phase: "decompose", phase_artifacts: {}, skipped_phases: [], spec_file: "spec.md", plan_file: "plan.md",
     tasks: [], wave_gates: {},
   }, {
     planTitle: "load", validatedPlanFile: "plan.md", tasks: roster.value,
     verificationManifest: defaultVerificationManifest(),
-    specIndex: { kind: "unavailable", reason: { kind: "no-spec-file" } }, observedSpecFile: null,
+    specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
     force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT],
   });
   if (!result.ok) throw new Error(result.error.message);

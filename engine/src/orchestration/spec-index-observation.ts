@@ -2,12 +2,11 @@
  * Decompose-time Spec Index observation.
  *
  * Distinct from the Wave Gate's observation on purpose. At the gate, a spec
- * that cannot be read is a refusal: evidence must name exact bytes. Here,
- * recording Requirement content hashes is an enhancement, so a missing,
- * unreadable, or non-canonical specification degrades to a stated reason instead
- * of failing an otherwise valid decompose. If a later gate projects the Spec,
- * absent hashes make drift unverifiable; continued projection failure refuses
- * settlement as projection-unavailable.
+ * that cannot be read is a refusal: evidence must name exact bytes. Here the
+ * read never throws: a missing, unreadable, or non-canonical specification is
+ * a stated reason, and population decides what it means — it refuses every
+ * reason but `no-spec-file`, and refuses that one too once a Task names a
+ * Requirement id.
  *
  * The read policy is all that differs between the two observers; the
  * bytes-to-availability projection they share lives in `projectSpecBytes`.

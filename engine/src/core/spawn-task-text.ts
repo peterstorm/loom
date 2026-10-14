@@ -105,6 +105,18 @@ function readObligationDelivery(diff: FrozenDiff): string {
     (obligated.length === 0 ? "No scoped file has a text diff; there is nothing to read.\n" : `Frozen diff to read (${obligated.length} file(s)):\n${obligated.join("")}`);
 }
 
+/**
+ * The payload kind a current v2 reviewer must emit. The issued schema admits
+ * both arms, so without this a Wave reviewer can copy the standalone example
+ * from its shared wire contract and be refused: four Wave reviewers did in the
+ * G1 live pilot.
+ */
+export function reviewerPayloadKindLine(standalone: boolean): string {
+  return standalone
+    ? "Your payload's \"kind\" is \"standalone-review\".\n"
+    : "Your payload's \"kind\" is \"wave-review\": copy \"packetId\" and \"generation\" from the Review Packet and assess every issued prior Finding in \"prior_findings\". A \"standalone-review\" payload is refused for this request.\n";
+}
+
 /** The exact per-version reviewer delivery bootstrap. */
 function reviewerDeliveryBootstrap(facts: SpawnTaskFacts, delivery: ReviewerDelivery): string {
   const request = facts.authority;
@@ -121,6 +133,7 @@ function reviewerDeliveryBootstrap(facts: SpawnTaskFacts, delivery: ReviewerDeli
       "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n")
     .with({ version: 2 }, ({ readObligation }) =>
       "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +
+      reviewerPayloadKindLine(facts.standalone) +
       (readObligation === null ? "" : readObligationDelivery(readObligation)))
     .with({ version: 1 }, ({ rolePath, wirePath }) =>
       `Read the issued Context Packet FIRST. This is an issued schema-1 reviewer request.\n` +

@@ -30,12 +30,14 @@ export type ContractProblem =
   | Readonly<{ kind: "duplicate-anchor"; path: string; anchor: string }>
   | Readonly<{ kind: "supported-domain-not-acceptance"; path: string }>
   | Readonly<{ kind: "unsafe-path"; path: string }>
+  | Readonly<{ kind: "entry-point-frozen"; path: string }>
   | Readonly<{ kind: "missing-statement" }>;
 
 /**
  * What a contract declares: the frozen types surface, the acceptance files and
  * the Requirements each decides, the file holding the supported/unsupported
- * table (when there is one), and the observable behavior consumers rely on. A
+ * table (when there is one), the production entry point the acceptance tests
+ * drive (when the plan names one), and the observable behavior consumers rely on. A
  * declaration that is not complete and consistent is `malformed`, carrying at
  * least one problem — never a half-filled declared value.
  */
@@ -45,6 +47,10 @@ export type ContractDeclaration =
       types: ContractTypes;
       acceptance: NonEmpty<ContractAcceptanceFile>;
       supportedDomain: string | null;
+      /** The production file the acceptance tests reach the code through. Plan
+       *  binding only: every claimant must write it or wait for a Task that
+       *  does. Never persisted, because the freeze does not depend on it. */
+      entryPoint: string | null;
       statement: string;
     }>
   | Readonly<{ kind: "malformed"; problems: NonEmpty<ContractProblem> }>;

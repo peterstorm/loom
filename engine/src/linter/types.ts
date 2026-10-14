@@ -34,6 +34,10 @@ export interface ProgrammaticRule {
   readonly description: string;
   readonly extensions: readonly string[];
   readonly handler: (content: string, filePath: string) => readonly Violation[];
+  /** The earliest tier the rule runs at. An `immediate` rule is single-file
+   *  and cheap enough for the per-edit budget, so it runs on every edit and
+   *  again at the Wave Gate; a `full` rule runs only at the Wave Gate. */
+  readonly tier: Tier;
   readonly fixHint: string;
   readonly enabled: boolean;
   readonly source: RuleSource;

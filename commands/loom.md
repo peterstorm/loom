@@ -569,7 +569,7 @@ For each wave:
 4. Re-read canonical status and loop through steps 1–4 for every subsequent `spawn-wave-implementation` or `await-wave-implementation` recovery. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget. Exit this loop only on `start-wave-gate` or `start-successor-wave-gate`; `escalate-wave-implementation` is terminal and stops execution.
 5. **Only after `start-wave-gate` (or `start-successor-wave-gate`, with its exact run id), RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
-7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`; record an accept/defer disposition before completion.
+7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`. The engine records only approval (`{"kind":"approve"}` through `decide`), so triage first: to fix a relevant advisory, abandon the run, re-dispatch the Task and start a fresh `/wave-gate`; approve once every advisory is fixed, deferred or dismissed with a reason.
 8. **Let the registered `/wave-gate` façade run the frozen quiescent completion suite automatically.** It starts only after all current-Wave Agents stop and Task proof/test checks pass, before review publication. Project commands come only from the protected Verification Manifest and run without a shell. The reserved `loom:full-tier-lint` check runs programmatic rules; the existing terminal lint invocation remains a migration canary. Semantic and infrastructure failures return distinct blocked diagnostics. Never run an alternative model-authored command or silence a failure by editing the authority that caught it.
 9. Once the suite, reviews, relevant advisory disposition, spec alignment, and protected completion commit pass: advance to the next Wave.
 
@@ -739,7 +739,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `validate-agent-skill.sh` | PreToolUse: Agent/Task/subagent | Validates agent skill preload |
 | `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch); binds an implementation Agent's exact attempt when its prompt is already on disk, else leaves it pending |
 | `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
-| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
+| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules plus the import-boundary programmatic rules; the other programmatic rules run at the wave gate) |
 | `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
 | `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
 | `dispatch.sh` | SubagentStop | Routes to the TS handlers below (`engine/src/handlers/subagent-stop/`) by agent type |

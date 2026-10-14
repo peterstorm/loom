@@ -303,6 +303,7 @@ describe("parsePlanModels", () => {
             { path: "engine/tests/acceptance/payload-refusal.acceptance.test.ts", anchors: ["AS-019"] },
           ],
           supportedDomain: "engine/tests/acceptance/payload.acceptance.test.ts",
+          entryPoint: null,
           statement: "One valid call wins; a refused call never supplies bytes.",
         },
       }]);
@@ -320,6 +321,7 @@ describe("parsePlanModels", () => {
         types: { kind: "none", reason: "The slice consumes CT-1; it declares no surface of its own." },
         acceptance: [{ path: "t/slice.acceptance.test.ts", anchors: ["AS-010"] }],
         supportedDomain: null,
+        entryPoint: null,
         statement: "The slice runs end to end.",
       });
     });

@@ -8,6 +8,7 @@ import {
   type TaskGraphPopulationCommand,
 } from "../../src/core/task-graph-population";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
+import { specIndexObservationOf } from "../../src/core/requirement-coverage";
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import { registerTaskExecutionBaseline } from "../../src/core/validate-task-execution";
 import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
@@ -109,6 +110,7 @@ const CONTRACT: PlanContract = {
     types: { kind: "file", path: "src/population-contract.ts" },
     acceptance: [{ path: "tests/population.acceptance.test.ts", anchors: ["AS-001"] }],
     supportedDomain: null,
+    entryPoint: null,
     statement: "Population installs pending Tasks.",
   },
 };
@@ -257,15 +259,25 @@ describe("populateTaskGraph aggregate command", () => {
     expect(existing.tasks[0]?.status).toBe("completed");
   });
 
+  it("persists and deeply freezes the prepared 'no spec file' observation of a plan with no Requirement trace", () => {
+    const availability = Object.freeze({
+      kind: "unavailable" as const,
+      reason: Object.freeze({ kind: "no-spec-file" as const }),
+    });
+    const result = populateTaskGraph(
+      graph({ spec_file: null }),
+      command({ authoredSpecFile: undefined, specIndex: availability, observedSpecFile: null, tasks: roster([authoredTask("T1", 1, [])]) }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const observation = result.value.state.spec_index_observation;
+    expect(observation).toEqual(availability);
+    expect(Object.isFrozen(observation)).toBe(true);
+    if (observation?.kind === "unavailable") expect(Object.isFrozen(observation.reason)).toBe(true);
+  });
+
   it.each([
-    {
-      label: "no spec file",
-      specFile: null,
-      availability: Object.freeze({
-        kind: "unavailable" as const,
-        reason: Object.freeze({ kind: "no-spec-file" as const }),
-      }),
-    },
     {
       label: "unreadable spec",
       specFile: "spec.md",
@@ -303,22 +315,25 @@ describe("populateTaskGraph aggregate command", () => {
         }),
       }),
     },
-  ])("persists and deeply freezes the prepared $label observation", ({ specFile, availability }) => {
+  ])("refuses a declared spec with a prepared $label observation, even with no Requirement trace", ({ specFile, availability }) => {
+    const existing = graph({ spec_file: specFile });
     const result = populateTaskGraph(
-      graph({ spec_file: specFile }),
+      existing,
       command({
         authoredSpecFile: undefined,
         specIndex: availability,
         observedSpecFile: specFile,
+        tasks: roster([authoredTask("T1", 1, [])]),
       }),
     );
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    const observation = result.value.state.spec_index_observation;
+    expect(result).toMatchObject({ ok: false, error: { kind: "spec-index-unavailable" } });
+    expect(existing.tasks).toEqual([]);
+    // The observation the refusal names still compacts and freezes deeply.
+    const observation = specIndexObservationOf(availability);
     expect(observation).toEqual(availability);
     expect(Object.isFrozen(observation)).toBe(true);
-    if (observation?.kind === "unavailable") {
+    if (observation.kind === "unavailable") {
       expect(Object.isFrozen(observation.reason)).toBe(true);
       if (observation.reason.kind === "unparsed") {
         expect(Object.isFrozen(observation.reason.errors)).toBe(true);
@@ -335,11 +350,14 @@ describe("populateTaskGraph aggregate command", () => {
     });
     const unavailable = Object.freeze({
       kind: "unavailable" as const,
-      reason: Object.freeze({ kind: "unreadable" as const, path: "spec.md", reason: "EIO" }),
+      reason: Object.freeze({ kind: "no-spec-file" as const }),
     });
     const result = populateTaskGraph(
-      graph({ spec_index_observation: stale }),
-      command({ specIndex: unavailable, force: true }),
+      graph({ spec_file: null, spec_index_observation: stale }),
+      command({
+        authoredSpecFile: undefined, specIndex: unavailable, observedSpecFile: null, force: true,
+        tasks: roster([authoredTask("T1", 1, [])]),
+      }),
     );
 
     expect(result.ok).toBe(true);

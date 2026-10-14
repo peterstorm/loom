@@ -62,6 +62,7 @@ const PLAN: PlanContract = {
     types: { kind: "none", reason: "slice" },
     acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003"] }],
     supportedDomain: null,
+    entryPoint: null,
     statement: "One valid call wins.",
   },
 };

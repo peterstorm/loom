@@ -664,7 +664,7 @@ Fix surviving criticals through implementation Agents, which increments Review G
 
 ### Wave Gate awaits advisory disposition
 
-Present the engine’s request and return exactly one disposition/reason object through `decide`. Do not classify advisories silently in parent reasoning.
+Present the advisories the engine's request references. The only decision a Wave Gate records is exactly `{"kind":"approve"}` through `decide`; any other object is refused without writing. To fix an advisory first, `abandon` the run with a reason, re-dispatch the Task, and start a fresh Wave Gate. Do not classify advisories silently in parent reasoning.
 
 ### Pi reports runtime version skew
 
@@ -677,6 +677,16 @@ A missing handshake means the Pi session predates this protocol or did not load 
 The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the completion suite changes into the worktree), but the lint rule code is the loaded runtime's, not the branch's. A branch that changes a rule, for example a new per-file capability grant in `no-cross-boundary-imports` for a `node:` builtin or an exact-specifier package, therefore fails the gate with a boundary refusal that its own rule would admit. The branch's files are correct; the runtime is older.
 
 This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
+
+### Population refuses the spec or a Requirement id
+
+`populate-task-graph` proves the authored trace against the Spec Index before writing anything. It refuses, naming the cause:
+
+- a declared `spec_file` that cannot be read, is not UTF-8, or does not parse as a canonical specification (every required section, including `## Appendix: Glossary`), even when no Task claims from it;
+- a Task whose `spec_anchors` or `spec_contributions` name an id the Spec Index does not define as a completable FR or AS entry (`NFR-`, `SC-` and Out-of-Scope ids included), listed as `T3 → NFR-001`;
+- any Requirement trace when the plan has no `spec_file`.
+
+Fix the specification or the decompose output and re-run population. The rule is the one `amend-spec-trace` applies to added ids (`unprovenRequirementTrace`), so an id population admits is one the Implementation Brief can render.
 
 ### Active graph uses the legacy Requirement trace contract
 
@@ -892,6 +902,10 @@ The gate proves context and articulation, never genuine adherence; the substance
 ```bash
 bun scripts/lint-project.ts engine/src
 ```
+
+### Rule tiers
+
+Regex rules run on every edit (the `immediate` tier, `lint-file` PostToolUse) and at the Wave Gate. Each programmatic rule declares its own earliest tier: `no-cross-boundary-imports` and `no-io-in-pure-modules` are `immediate`, so a forbidden import is refused when the file is written; the rest (`max-function-lines`, `exhaustive-discriminant-branching`, `no-nested-ternary`, `prefer-array-methods`, `fugue-generated-integrity`) run only in the `full` tier at the Wave Gate.
 
 ### Validate rule files
 

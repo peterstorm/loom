@@ -13,8 +13,11 @@ import {
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
   recordedAnchorHashes,
+  renderRequirementTraceEdges,
   specIndexObservationOf,
   specIndexPath,
+  specIndexUnavailableMessage,
+  unprovenRequirementTrace,
   type SpecIndexAvailability,
 } from "./requirement-coverage";
 
@@ -124,6 +127,8 @@ export type TaskGraphPopulationError = Readonly<{
     | "non-pending-tasks"
     | "spec-authority-changed"
     | "spec-observation-mismatch"
+    | "spec-index-unavailable"
+    | "unknown-requirement"
     | "invalid-contracts";
   message: string;
 }>;
@@ -151,6 +156,45 @@ function reject(
   message: string,
 ): TaskGraphPopulationResult {
   return Object.freeze({ ok: false, error: Object.freeze({ kind, message }) });
+}
+
+/**
+ * Population proves the authored trace against the Spec Index, as amendment
+ * does: an id the brief later refuses must not reach the TaskGraph. A declared
+ * spec that cannot be indexed is refused even when nothing claims from it, so
+ * a non-canonical spec is fixed before work starts rather than discovered when
+ * a Wave Gate projects it. Only a plan with no spec_file at all and no
+ * Requirement trace populates without one.
+ */
+function specIndexRefusal(
+  specIndex: SpecIndexAvailability,
+  tasks: readonly AuthoredTask[],
+): TaskGraphPopulationResult | null {
+  if (specIndex.kind === "unavailable" && specIndex.reason.kind !== "no-spec-file") {
+    return reject(
+      "spec-index-unavailable",
+      `TaskGraph population refused: ${specIndexUnavailableMessage(specIndex.reason)}. ` +
+        "Fix the specification, then re-run populate-task-graph.",
+    );
+  }
+  const edges = tasks.flatMap((task) =>
+    [...(task.spec_anchors ?? []), ...(task.spec_contributions ?? [])].map((id) => Object.freeze({ taskId: task.id, id })));
+  const unproven = unprovenRequirementTrace(specIndex, edges);
+  if (unproven === null) return null;
+  // Every other unavailable reason was refused above, so this arm only ever
+  // carries `no-spec-file`: a trace with no spec to prove it against.
+  return unproven.kind === "spec-index-unavailable"
+    ? reject(
+        "spec-index-unavailable",
+        "TaskGraph population refused: Tasks name Requirement ids but no Spec Index can prove they exist: " +
+          specIndexUnavailableMessage(unproven.reason),
+      )
+    : reject(
+        "unknown-requirement",
+        "TaskGraph population refused: Tasks name ids the Spec Index does not define as a completable FR or AS entry: " +
+          `${renderRequirementTraceEdges(unproven.edges)}. Remove them from spec_anchors/spec_contributions, ` +
+          "or add them to the specification.",
+      );
 }
 
 /**
@@ -253,6 +297,8 @@ export function populateTaskGraph(
         "population was being prepared; re-run populate-task-graph.",
     );
   }
+  const specRefusal = specIndexRefusal(command.specIndex, command.tasks);
+  if (specRefusal !== null) return specRefusal;
 
   const contracts = acceptanceContractsFromPlan(command.contracts, command.tasks);
   if (!contracts.ok) return reject("invalid-contracts", contracts.error.join("; "));

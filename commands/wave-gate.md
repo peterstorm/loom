@@ -54,8 +54,9 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   most eight requests per call, so partition larger batches into ordered
   chunks of at most eight without changing, dropping, or duplicating any
   request; resume only after every chunk finishes.
-- `await-user`: present the advisory disposition request exactly as supplied;
-  send the resulting JSON object through `decide`.
+- `await-user`: present the advisory findings the request references exactly as
+  supplied, and ask the operator whether to approve them. The only decision a
+  Wave Gate accepts is approval (below).
 - `blocked`: stop and report the diagnostic. Do not bypass or reconstruct it.
 - `done`: report the completion receipt and newly protected Wave state, alongside the canonical Project Verification Coverage described below. The receipt alone does not claim every project verification category passed.
 
@@ -67,16 +68,22 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration resume \
   --run "<same-run-id>"
 ```
 
-For an `await-user` action:
+For an `await-user` action the operator approves:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration decide \
   --runs-root ".claude/reviews/wave-gate-runs" \
   --run "<same-run-id>" \
   --request "<exact-decision-request-id>" <<'JSON'
-{"disposition":"defer","reason":"<operator reason>"}
+{"kind":"approve"}
 JSON
 ```
+
+The decision must be exactly `{"kind":"approve"}`; any other object is refused
+and nothing is recorded. Approval lets the gate continue past its advisories to
+lint and completion. To act on an advisory instead, do not decide: `abandon` the
+run with a reason, re-dispatch the affected Task to fix it, and start a fresh
+Wave Gate.
 
 Resume is idempotent. Pi and Claude persist exact native-id/request bindings and
 raw final bytes directly into engine-declared slots. Never write transcripts,

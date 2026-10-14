@@ -63,7 +63,10 @@ const GATES: ReadonlyArray<{
   },
   {
     name: "validate-task-execution",
-    handler: lazyHandler(() => import("../../../src/handlers/pre-tool-use/validate-task-execution")),
+    // Its own wave-order rule, without the sibling vetoes it composes first
+    // (each has its own row here; the composition is spawn-vetoes.test.ts's).
+    handler: async (stdin, args) =>
+      (await import("../../../src/handlers/pre-tool-use/validate-task-execution")).createValidateTaskExecutionHandler([])(stdin, args),
     toolInput: { subagent_type: "code-implementer-agent", prompt: "Task ID: T9", description: "wave-2 task" },
     expect: "current wave is 1",
   },

@@ -1,6 +1,8 @@
 /**
- * Programmatic rule registry — provides built-in programmatic rules
- * for the "full" tier execution.
+ * Programmatic rule registry — provides built-in programmatic rules. Every
+ * rule runs in the "full" tier; the import-boundary rules also run in the
+ * "immediate" tier, so a forbidden import is refused when it is written rather
+ * than when the Wave Gate starts.
  *
  * Rules are configured via project-local config (loaded from
  * .claude/linter/config.json or .pi/linter/config.json).
@@ -38,6 +40,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       description: "Enforce bounded context import boundaries — dependency arrows must point inward",
       extensions: [".ts", ".tsx", ".java"],
       handler: (content, filePath) => crossBoundaryHandler(content, filePath, boundaries),
+      tier: "immediate",
       fixHint: "Move this import to the correct layer or inject via a port",
       enabled: true,
       source: "default",
@@ -48,6 +51,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       description: "Disallow I/O operations in functional core modules",
       extensions: [".ts", ".tsx", ".java"],
       handler: (content, filePath) => ioInPureHandler(content, filePath, pureModules),
+      tier: "immediate",
       fixHint: "Extract I/O to the imperative shell or inject via a dependency parameter",
       enabled: true,
       source: "default",
@@ -58,6 +62,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       description: `Enforce maximum function body length (configured: ${maxLines} lines)`,
       extensions: [".ts", ".tsx", ".java"],
       handler: (content, filePath) => maxFunctionLinesHandler(content, filePath, maxLines, excludePatterns),
+      tier: "full",
       fixHint: "Decompose into smaller functions with single responsibilities",
       enabled: true,
       source: "default",
@@ -68,6 +73,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       description: "Verify `fugue new --from` generated files against their @fugue-integrity hash — hand-edits are tamper-evident",
       extensions: [".ts"],
       handler: (content, filePath) => fugueGeneratedIntegrityHandler(content, filePath),
+      tier: "full",
       fixHint: "Do not hand-edit generated code — change the AuthoredDag sidecar and run `fugue new --from` to regenerate",
       enabled: true,
       source: "default",
@@ -83,6 +89,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
         config.maxDiscriminantBranches ?? DEFAULT_MAX_DISCRIMINANT_BRANCHES,
         config.discriminantTags ?? DEFAULT_DISCRIMINANT_TAGS,
       ),
+      tier: "full",
       fixHint: "Use match(value).with(...).exhaustive() from ts-pattern, or a switch whose default binds the scrutinee to `never` — either makes a new union variant a compile error",
       enabled: true,
       source: "default",
@@ -93,6 +100,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       description: "A ternary whose else-branch opens another ternary — one level is the ceiling",
       extensions: [".ts", ".tsx"],
       handler: (content, filePath) => nestedTernaryHandler(content, filePath),
+      tier: "full",
       fixHint: "Use if with early returns, or match(...).exhaustive() when the branches are a discriminated union. Type-level conditionals are exempt.",
       enabled: true,
       source: "default",
@@ -103,6 +111,7 @@ export function createProgrammaticRules(config: ProgrammaticConfig = EMPTY_CONFI
       description: "A mutable accumulator whose loop only pushes into it is a map/filter written with extra state",
       extensions: [".ts", ".tsx"],
       handler: (content, filePath) => preferArrayMethodsHandler(content, filePath),
+      tier: "full",
       fixHint: "Use map/filter/flatMap and delete the mutable binding. Loops with break, continue, return, or await are exempt — the rewrite is not mechanical there.",
       enabled: true,
       source: "default",

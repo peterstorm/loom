@@ -24,11 +24,13 @@ import type {
 } from "../types";
 import type { NonEmpty } from "./orchestration-contract";
 import {
-  completableRequirementIds,
   recordedAnchorHashes,
+  renderRequirementTraceEdges,
   specIndexObservationOf,
   specIndexPath,
   specIndexUnavailableMessage,
+  unprovenRequirementTrace,
+  type RequirementTraceEdge,
   type SpecIndexAvailability,
 } from "./requirement-coverage";
 import {
@@ -136,7 +138,7 @@ function amendedTask(task: Task, change: SpecTraceAmendmentChange, specIndex: Sp
 }
 
 /** Every id the amendment introduces, per Task: new Completion Claims and new Contributions. */
-const introducedIds = (amended: readonly AmendedTrace[]): readonly Readonly<{ taskId: string; id: string }>[] =>
+const introducedIds = (amended: readonly AmendedTrace[]): readonly RequirementTraceEdge[] =>
   amended.flatMap(({ change: { taskId, before, after } }) => [
     ...added(before.spec_anchors, after.spec_anchors),
     ...added(before.spec_contributions, after.spec_contributions),
@@ -170,23 +172,18 @@ function specIndexRefusal(
   specIndex: SpecIndexAvailability,
   amended: readonly AmendedTrace[],
 ): SpecTraceAmendmentResult | null {
-  const introduced = introducedIds(amended);
-  if (introduced.length === 0) return null;
-  if (specIndex.kind === "unavailable") {
-    return refuse(
-      "spec-index-unavailable",
-      `${LABEL} adds Requirement ids but no Spec Index can prove they exist: ` +
-        specIndexUnavailableMessage(specIndex.reason),
-    );
-  }
-  const completable = completableRequirementIds(specIndex.index);
-  const unknown = introduced.filter(({ id }) => !completable.has(id));
-  return unknown.length === 0
-    ? null
+  const unproven = unprovenRequirementTrace(specIndex, introducedIds(amended));
+  if (unproven === null) return null;
+  return unproven.kind === "spec-index-unavailable"
+    ? refuse(
+        "spec-index-unavailable",
+        `${LABEL} adds Requirement ids but no Spec Index can prove they exist: ` +
+          specIndexUnavailableMessage(unproven.reason),
+      )
     : refuse(
         "unknown-requirement",
         `${LABEL} names ids the Spec Index does not define as a completable FR or AS entry: ` +
-          unknown.map(({ taskId, id }) => `${taskId} → ${id}`).join(", "),
+          renderRequirementTraceEdges(unproven.edges),
       );
 }
 

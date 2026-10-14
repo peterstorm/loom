@@ -26,29 +26,12 @@ export interface LoadOptions {
  * - projectDir may be null or non-existent (gracefully skipped)
  * - Project rules override defaults by name
  * - Project rules with enabled: false disable that rule entirely
- * - tier "immediate" returns only RegexRule[]
+ * - tier "immediate" returns regex rules plus the programmatic rules whose own
+ *   tier is "immediate"
  * - tier "full" returns all Rule[]
  * - Throws on malformed JSON (fail-closed)
  * - Throws on unsafe regex patterns (fail-closed via safety.ts)
  */
-export function loadRules(
-  defaultDir: string,
-  projectDir: string | null,
-  tier: "immediate",
-  options?: LoadOptions
-): readonly RegexRule[];
-export function loadRules(
-  defaultDir: string,
-  projectDir: string | null,
-  tier: "full",
-  options?: LoadOptions
-): readonly Rule[];
-export function loadRules(
-  defaultDir: string,
-  projectDir: string | null,
-  tier: Tier,
-  options?: LoadOptions
-): readonly Rule[];
 export function loadRules(
   defaultDir: string,
   projectDir: string | null,
@@ -77,12 +60,8 @@ export function loadRules(
   // Filter out disabled rules
   const enabled = merged.filter((rule) => rule.enabled);
 
-  // Apply tier filtering
-  if (tier === "immediate") {
-    return enabled.filter(isRegexRule);
-  }
-
-  // Full tier: include programmatic rules (also subject to project overrides)
+  // Programmatic rules (also subject to project overrides) run in a tier at
+  // or after their own: an immediate rule runs in both tiers.
   if (options?.includeProgrammatic !== false) {
     // Load project-local config for programmatic rules
     const projectConfig = loadProjectConfig(projectDir);
@@ -96,10 +75,12 @@ export function loadRules(
       return rule.enabled;
     });
 
-    return [...enabled, ...programmaticEnabled];
+    return tier === "immediate"
+      ? [...enabled.filter(isRegexRule), ...programmaticEnabled.filter((rule) => rule.tier === "immediate")]
+      : [...enabled, ...programmaticEnabled];
   }
 
-  return enabled;
+  return tier === "immediate" ? enabled.filter(isRegexRule) : enabled;
 }
 
 // --- Internal Functions ---
