@@ -48,6 +48,8 @@ export type ContractOptions = Readonly<{
   anchors: readonly [string, ...string[]];
   freeze: AcceptanceContract["freeze"];
   revisions?: AcceptanceContract["revisions"];
+  /** Several acceptance files; defaults to the surface's one file deciding `anchors`. */
+  acceptance?: AcceptanceContract["acceptance"];
 }>;
 
 export const contract = ({
@@ -58,6 +60,7 @@ export const contract = ({
   anchors,
   freeze,
   revisions = [],
+  acceptance = [{ path: files.acceptance, anchors }],
 }: ContractOptions): AcceptanceContract => ({
   schemaVersion: 1,
   id,
@@ -65,7 +68,7 @@ export const contract = ({
   statement: `${title} behaves as declared.`,
   contractTask,
   types: { kind: "file", path: files.types },
-  acceptance: [{ path: files.acceptance, anchors }],
+  acceptance,
   supportedDomain: null,
   freeze,
   revisions,

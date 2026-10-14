@@ -13,21 +13,14 @@ import {
 } from "../../src/linter/programmatic/no-io-in-pure-modules";
 import type { Task, TaskGraph } from "../../src/types";
 import { digest } from "../fixtures/acceptance-fixtures";
-import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { contract as contractFixture, task as fixtureTask, type ContractOptions } from "../fixtures/contract-status-fixtures";
+import { graphFixture } from "../fixtures/task-lifecycle";
 
 const REPO_ROOT = resolve(__dirname, "../../..");
 
+/** A Task writing only its own source file. */
 const task = (id: string, wave: number, anchors: readonly string[] = []): Task =>
-  taskFixture({
-    id,
-    description: id,
-    agent: "code-implementer-agent",
-    wave,
-    depends_on: [],
-    file_list: [`src/${id}.ts`],
-    spec_anchors: [...anchors],
-    spec_contributions: [],
-  });
+  fixtureTask(id, wave, [`src/${id}.ts`], anchors);
 
 const graph = (tasks: readonly Task[], contracts?: readonly AcceptanceContract[]): TaskGraph => ({
   ...graphFixture(tasks),
@@ -41,20 +34,11 @@ const PATHS: readonly [FrozenPathDigest, FrozenPathDigest] = [
   { path: ACCEPTANCE, sha256: digest("b") },
 ];
 
+/** A contract over the payload surface, deciding `anchors` (AS-001 by default). */
 const contract = (
-  overrides: Partial<AcceptanceContract> & Pick<AcceptanceContract, "id" | "freeze">,
+  options: Omit<ContractOptions, "surface" | "anchors">,
   anchors: readonly [string, ...string[]] = ["AS-001"],
-): AcceptanceContract => ({
-  schemaVersion: 1,
-  title: `${overrides.id} title`,
-  statement: "behaves as declared",
-  contractTask: "T1",
-  types: { kind: "file", path: TYPES },
-  acceptance: [{ path: ACCEPTANCE, anchors }],
-  supportedDomain: null,
-  revisions: [],
-  ...overrides,
-});
+): AcceptanceContract => contractFixture({ ...options, surface: { types: TYPES, acceptance: ACCEPTANCE }, anchors });
 
 const revision = (n: number): AcceptanceContract["revisions"][number] => ({
   revision: n,

@@ -18,3 +18,18 @@
 
 - **Support paths outside the reviewed scope:** `engine/tests/fixtures/contract-status-fixtures.ts`, this plan.
 - **Validation:** `npm --prefix engine run verify`
+
+## Round 2
+
+- **Review run:** `run.pr87-review-2` (17 files). 0 critical emitted, 0 surviving, 0 refuted; 5 advisories.
+- **Policy (published, DECLARED):** `run.pr87-policy-2`, initial revision, disposition digest `115d2555…91d3f`. All 5 accepted.
+
+| Finding | Decision | Fix |
+|---|---|---|
+| type-design-analyzer-1 | accepted | The frozen roster is `NonEmpty<AcceptanceTestcase>`, matching the model. A revised freeze with zero revisions stays excluded by the State File parser at load, and the view's `revisions` doc says so; the count is independent of freeze state (a re-frozen contract keeps it) |
+| comment-analyzer-1 | accepted | The plan states the shipped three-Wave layout (T3 in Wave 3, AS-001..AS-004 due at Wave 3) and marks the two-Wave text as pre-run |
+| comment-analyzer-2 | accepted | AD-1 reads `revised{paths}`, with the count once on the view |
+| comment-analyzer-3 | accepted | The types-file header names its one constant and says CT-1 froze it only during the pilot |
+| code-simplifier-1 | accepted | The core test uses the shared `task`/`contract` builders; the shared `contract` gains an optional multi-file `acceptance` |
+
+- **Validation:** `npm --prefix engine run verify`

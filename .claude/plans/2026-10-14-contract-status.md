@@ -5,7 +5,7 @@
 
 ## Summary
 
-`helper contract-status` prints every Acceptance Contract's freeze state, its roster, the due Wave of each covered anchor, and its revisions. It reads the State File once, never locks it and never writes it. The design is a pure view projection plus a renderer (`contractStatusView` gives the view ADT, `renderContractStatus` gives the lines) in `engine/src/core/contract-status.ts`, behind a thin read-only helper. This feature is the G1 live pilot (`.claude/plans/2026-10-14-g1-live-pilot.md`). It has two Waves and three Tasks, and contract CT-1 is frozen at Wave 1.
+`helper contract-status` prints every Acceptance Contract's freeze state, its roster, the due Wave of each covered anchor, and its revisions. It reads the State File once, never locks it and never writes it. The design is a pure view projection plus a renderer (`contractStatusView` gives the view ADT, `renderContractStatus` gives the lines) in `engine/src/core/contract-status.ts`, behind a thin read-only helper. This feature is the G1 live pilot (`.claude/plans/2026-10-14-g1-live-pilot.md`). It shipped in three Waves with three Tasks (T1 contract Task in Wave 1, T2 core in Wave 2, T3 helper in Wave 3), and contract CT-1 froze at Wave 1. This plan was written for two Waves; decompose moved T3 to Wave 3 because it depends on T2, and T3 claims AS-001..AS-004 because only its CLI route can turn the acceptance tests green.
 
 ---
 
@@ -13,7 +13,7 @@
 
 ### AD-1: View ADT plus renderer, chosen over a single string builder
 
-**Choice:** A two-step pure core. `contractStatusView(graph)` projects the parsed TaskGraph into `readonly ContractStatusView[]`. A freeze display union (`awaiting-red | frozen{wave, roster} | revised{revisions, paths}`) and a per-anchor `AnchorDue = {kind:"wave", wave} | {kind:"unclaimed"}` make every case explicit. `renderContractStatus(graph)` projects and then formats lines with an exhaustive `ts-pattern` match. The view types and both function signature types live in the frozen `engine/src/core/contract-status-types.ts`.
+**Choice:** A two-step pure core. `contractStatusView(graph)` projects the parsed TaskGraph into `readonly ContractStatusView[]`. A freeze display union (`awaiting-red | frozen{wave, roster} | revised{paths}`; the revision count lives once, on the view) and a per-anchor `AnchorDue = {kind:"wave", wave} | {kind:"unclaimed"}` make every case explicit. `renderContractStatus(graph)` projects and then formats lines with an exhaustive `ts-pattern` match. The view types and both function signature types live in the frozen `engine/src/core/contract-status-types.ts`.
 **Why:** "Unclaimed" and the three freeze states are real sum types. Naming them in the frozen surface means the renderer cannot drop a case. It also lets unit tests check derivation (due Waves) separately from formatting. The user picked this at the approach gate (it was also the recommendation).
 **Rejected:**
 - Single `renderContractStatus` string builder — mixes the due/unclaimed derivation into string building, so tests can only assert on text.
@@ -47,7 +47,7 @@ engine/src/linter/programmatic/no-io-in-pure-modules.ts      — MODIFY, enroll 
 engine/tests/core/contract-status.test.ts                    — NEW, unit + property tests of the pure core
 ```
 
-### Helper shell (Wave 2)
+### Helper shell (Wave 3 as shipped; planned as Wave 2)
 
 ```
 engine/src/handlers/helpers/contract-status.ts               — NEW, read-only handler
@@ -70,6 +70,7 @@ CONTEXT.md                                                   — MODIFY, glossar
 
 ```
 import type { AcceptanceTestcase, FrozenPathDigest } from "./acceptance-contract";
+import type { NonEmpty } from "./orchestration-contract";
 import type { TaskGraph } from "../types";   // core/ may not import state-file-wire (full-tier lint); the loaded ParsedTaskGraph is assignable to TaskGraph
 
 export type AnchorDue =
@@ -80,7 +81,7 @@ export type CoveredAnchorStatus = Readonly<{ anchor: string; due: AnchorDue }>;
 
 export type ContractFreezeStatus =
   | Readonly<{ state: "awaiting-red" }>
-  | Readonly<{ state: "frozen"; wave: number; roster: readonly AcceptanceTestcase[] }>
+  | Readonly<{ state: "frozen"; wave: number; roster: NonEmpty<AcceptanceTestcase> }>
   | Readonly<{ state: "revised"; paths: readonly FrozenPathDigest[] }>;   // the count lives once, on the view
 
 export type ContractStatusView = Readonly<{
@@ -175,7 +176,7 @@ Acceptance test shape (T1): every testcase spawns the real entry point, `bun eng
 - T3, the helper, route and docs (claims AS-004; depends on T1 and T2, because the handler imports `renderContractStatus`). Implement the handler and add the route to `KNOWN_HANDLERS.helper` only. Write handler tests that pin the route memberships. Update `commands/loom.md`, `docs/operations.md` and `CONTEXT.md`.
   - **Files:** `engine/src/handlers/helpers/contract-status.ts`, `engine/src/handler-routes.ts`, `engine/tests/handlers/helpers/contract-status.test.ts`, `commands/loom.md`, `docs/operations.md`, `CONTEXT.md`
 
-Note for decompose: T3 imports T2's export, so T3 depends on T2 inside Wave 2. If parallelism within the Wave matters more, T3 can code against `RenderContractStatusFn` from the frozen types file, but its tests need T2. Keep the dependency. Wave 1 through Wave 2 is the red window, so all three Tasks carry `acceptance-red-window`.
+Note for decompose (pre-run): T3 imports T2's export, so T3 depends on T2. As shipped, T3 ran in Wave 3. If parallelism within the Wave matters more, T3 can code against `RenderContractStatusFn` from the frozen types file, but its tests need T2. Keep the dependency. Wave 1 through the last claimant Wave (Wave 3 as shipped) is the red window, so all three Tasks carry `acceptance-red-window`.
 
 ---
 
@@ -201,5 +202,5 @@ Regression: `npm run verify` (typecheck, unit, smoke). The existing `tests/machi
 ## Verification
 
 1. `cd engine && npm run typecheck`
-2. `npm run verify` from the repo root (the `project:verify` check). At the Wave 1 gate the CT-1 testcases are observed RED and the contract is frozen. At the Wave 2 gate all four anchors are due and passing, and the frozen digests are intact.
-3. Manually, during the pilot: `bun engine/src/cli.ts helper contract-status` against the live `.claude/state/active_task_graph.json` after Wave 1. It should show CT-1 frozen at Wave 1, with AS-001..003 due at Wave 2 (T2) and AS-004 due at Wave 2 (T3).
+2. `npm run verify` from the repo root (the `project:verify` check). At the Wave 1 gate the CT-1 testcases are observed RED and the contract is frozen. At the Wave 3 gate (as shipped) all four anchors are due and passing, and the frozen digests are intact.
+3. Manually, during the pilot: `bun engine/src/cli.ts helper contract-status` against the live `.claude/state/active_task_graph.json` after Wave 1. It should show CT-1 frozen at Wave 1, with AS-001..AS-004 all due at Wave 3 (T3), as the run showed.
