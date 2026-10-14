@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  ACCEPTANCE_RED_WINDOW,
   acceptanceContractsFromPlan,
   acceptanceExpectation,
   contractBindingErrors,
+  contractClaimants,
   contractRole,
   contractWriter,
   frozenPathDrift,
@@ -26,6 +26,7 @@ import {
 } from "../../src/core/acceptance-contract";
 import type { ReportTestcase } from "../../src/core/structured-test-report";
 import type { PlanContract } from "../../src/types";
+import { ACCEPTANCE_RED_WINDOW } from "../../src/core/verification-policy";
 import { digest, seen } from "../fixtures/acceptance-fixtures";
 
 const observations = (entries: readonly (readonly [string, FrozenPathObservation])[]): ReadonlyMap<string, FrozenPathObservation> =>
@@ -156,6 +157,13 @@ describe("contractRole — the one rule for a Task's part in a contract", () => 
     const window = redWindowTaskIds([contract()], tasks);
     for (const task of tasks) {
       expect(contractRole(contract(), task, tasks).kind !== "none").toBe(window.has(task.id));
+    }
+  });
+
+  it("agrees with contractClaimants on who is a claimant", () => {
+    const claimants = new Set(contractClaimants(contract(), tasks).map(({ id }) => id));
+    for (const task of tasks) {
+      expect(contractRole(contract(), task, tasks).kind === "claimant").toBe(claimants.has(task.id));
     }
   });
 });

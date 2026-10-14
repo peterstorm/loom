@@ -43,3 +43,25 @@ One move: the observation constructor uses the module's `freeze`/`freezeArray` h
 ## Validation
 
 - `npm --prefix engine run verify` — 495 files, 12,495 tests (1 skipped), 23/23 shell suites
+
+## Round 2 (after #84 merged as `3a69d9b6`; #85 retargeted to `main`)
+
+- **Review run:** `run.pr85-review-2` (result `095af87a…7a55`), the full 34-file branch diff against `origin/main` in one run. silent-failure-hunter's first attempt was refused for unread pages and its retry was admitted.
+- **Adjudication:** 0 critical emitted, 0 surviving, 0 refuted; 14 advisories (code-reviewer and pr-test-analyzer aside from one test gap reported none).
+- **Policy (published, DECLARED):** `run.pr85-policy-2`, initial revision, disposition digest `7797dcc7…8a5a`. All 14 accepted.
+
+| Finding | Decision | Fix |
+|---|---|---|
+| silent-failure-hunter-1, pr-test-analyzer-1 | accepted | Test: a malformed policy carrying the contract waiver gives binding no waiver, and the policy parser validate-task-graph runs refuses it |
+| type-design-analyzer-1, architecture-tech-lead-2 | accepted | Private `claimedAnchors` in `tasks.ts` is the one claimant rule; `claims` and `contractRole` both derive from it; `contractRole` is pinned against `contractClaimants` |
+| type-design-analyzer-2, architecture-tech-lead-1, code-simplifier-1 | accepted | `QuiescentOperation` closed union with per-operation settle wording (upgrade's "exact roster" restored); `createUpgradeSpecTraceHandler(subagentActive)` with an under-the-lock race test |
+| architecture-tech-lead-3 | accepted | `AcceptanceObservation`, `acceptanceObservation`, `RecordedAcceptanceVerdict` and `recordedAcceptanceVerdict` moved to `acceptance-contract/gate.ts` (exported by the index); `completion-suite.ts` keeps the envelope parse |
+| comment-analyzer-1 | accepted | Deepen plan move 3 reworded |
+| comment-analyzer-2 | accepted | `index.ts` comment no longer lists sibling-only exports |
+| comment-analyzer-3 | accepted | `docs/architecture.md` row names `kernel.ts`, `task-dependencies.ts` and the observation's new home |
+| code-simplifier-2 | accepted | `renderContractProblem` no longer exported |
+| code-simplifier-3 | accepted | `ACCEPTANCE_RED_WINDOW` re-exports removed; population, the brief and the test import it from `verification-policy.ts` |
+| code-simplifier-4 | accepted | `decidedAnchors` helper shared by `observedRoster` and `excused` |
+
+- **Support paths outside the reviewed scope:** `engine/src/core/task-graph-population.ts`, `engine/tests/handlers/helpers/upgrade-spec-trace.test.ts`.
+- **Validation:** `npm --prefix engine run verify` — 495 files, 12,498 tests (1 skipped), 23/23 shell suites.

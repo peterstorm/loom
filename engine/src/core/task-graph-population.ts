@@ -1,10 +1,11 @@
 import type { Phase, PlanContract, Task, TaskGraph } from "../types";
-import { ACCEPTANCE_RED_WINDOW, acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-contract";
+import { acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import { derivePendingTaskProof } from "./proof-obligations";
 import {
+  ACCEPTANCE_RED_WINDOW,
   serializeVerificationPolicy,
   taskVerificationPolicy,
   type VerificationPolicy,

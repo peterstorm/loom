@@ -26,10 +26,11 @@ change, and the existing suites are the oracle.
    reads it instead of sniffing the persisted regression-waiver reason, so a
    Task inside the window that authored its own waiver still gets the
    bystander note.
-3. **One acceptance verdict.** `completion-suite.ts` judges and binds a
-   recorded observation in one function (`recordedAcceptanceVerdict`): the
-   excused checks, the failures and the unbound facts. The evaluator and the
-   receipt parser both call it.
+3. **One acceptance verdict.** One function (`recordedAcceptanceVerdict`,
+   now in `acceptance-contract/gate.ts` beside `judgeAcceptance`) judges a
+   recorded observation: the excused checks and the failures. The evaluator
+   and the receipt parser both call it; binding facts to their check's report
+   stays in `completion-suite.ts`'s `unboundFactChecks`.
 4. **Plan-binding contract validation in core.** `contractBindingErrors`
    moves from `handlers/helpers/validate-model-bindings.ts` to
    `acceptance-contract/binding.ts`, over a typed task view. The handler

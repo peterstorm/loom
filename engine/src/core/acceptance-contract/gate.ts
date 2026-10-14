@@ -211,14 +211,17 @@ export type AcceptanceJudgment = Readonly<{
 const sameTestcase = (left: TestcaseRef, right: TestcaseRef): boolean =>
   left.file === right.file && left.name === right.name;
 
+/** The anchors a testcase decides among those its own acceptance file declares. */
+const decidedAnchors = (expected: ContractGateExpectation, testcase: TestcaseRef): readonly string[] =>
+  testcaseAnchors(testcase.name, expected.files.find(({ path }) => path === testcase.file)?.anchors ?? []);
+
 /** The real (collected) testcases of one contract's files that name an
  *  anchor, deduplicated, in report order. */
 export function observedRoster(expected: ContractGateExpectation, observed: readonly ObservedAcceptanceTestcase[]): readonly AcceptanceTestcase[] {
   const roster: AcceptanceTestcase[] = [];
   for (const testcase of observed) {
     if (testcase.collectionError || roster.some((entry) => sameTestcase(entry, testcase))) continue;
-    const fileAnchors = expected.files.find(({ path }) => path === testcase.file)?.anchors ?? [];
-    const anchors = nonEmpty(testcaseAnchors(testcase.name, fileAnchors));
+    const anchors = nonEmpty(decidedAnchors(expected, testcase));
     if (anchors !== null) roster.push(freeze({ file: testcase.file, name: testcase.name, anchors }));
   }
   return roster;
@@ -295,8 +298,7 @@ function excused(expectation: AcceptanceExpectation, fact: AcceptanceReportFacts
     const expected = expectation.contracts.find(({ files }) => files.some(({ path }) => path === testcase.file));
     if (expected === undefined) return false;
     if (expected.phase === "red") return true;
-    const fileAnchors = expected.files.find(({ path }) => path === testcase.file)?.anchors ?? [];
-    const anchors = testcaseAnchors(testcase.name, fileAnchors);
+    const anchors = decidedAnchors(expected, testcase);
     return anchors.length > 0 && !isDue(expected, anchors, expectation.wave);
   });
 }
@@ -313,6 +315,47 @@ export function judgeAcceptance(
     failures: Object.freeze(failures),
     excusedCheckIds: Object.freeze(facts.filter((fact) => excused(expectation, fact)).map(({ checkId }) => checkId)),
   });
+}
+
+/**
+ * The acceptance a gate judged: the expectation derived from the protected
+ * graph and the facts observed from each check's report, bound to its digest.
+ * Absent means the gate owed no contract anything — the shape every result
+ * written before contracts existed already has — and is the only encoding of
+ * that: only `acceptanceObservation` mints one, and it returns none for an
+ * expectation that owes nothing.
+ */
+declare const owingObservation: unique symbol;
+export type AcceptanceObservation = Readonly<{
+  expectation: AcceptanceExpectation;
+  facts: readonly AcceptanceReportFacts[];
+}> & Readonly<{ [owingObservation]: true }>;
+
+/** The observation a gate records, or undefined when its expectation owes no
+ *  contract anything. Facts are one per check; the producer reads one report
+ *  per check and the parser refuses a check named twice. */
+export function acceptanceObservation(
+  expectation: AcceptanceExpectation,
+  facts: readonly AcceptanceReportFacts[],
+): AcceptanceObservation | undefined {
+  return owesAcceptance(expectation)
+    ? freeze({ expectation, facts: Object.freeze([...facts]) }) as AcceptanceObservation
+    : undefined;
+}
+
+/** The checks whose non-zero exit an observation excuses, and the failures it records. */
+export type RecordedAcceptanceVerdict = Readonly<{
+  excused: ReadonlySet<string>;
+  failures: readonly AcceptanceFailure[];
+}>;
+
+/** What a recorded acceptance observation decides — the one judgment the
+ *  completion-suite evaluator and receipt parser share. An absent observation,
+ *  a gate owing no contract anything, excuses nothing and records nothing. */
+export function recordedAcceptanceVerdict(acceptance: AcceptanceObservation | undefined): RecordedAcceptanceVerdict {
+  if (acceptance === undefined) return freeze({ excused: new Set<string>(), failures: Object.freeze([]) });
+  const judgment = judgeAcceptance(acceptance.expectation, acceptance.facts);
+  return freeze({ excused: new Set(judgment.excusedCheckIds), failures: judgment.failures });
 }
 
 /** One-line operator rendering of an acceptance failure. */

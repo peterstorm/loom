@@ -9,7 +9,7 @@ describe("subagent quiescence — refuse before the lock, re-check under it", ()
   it("refuses an operation while a subagent is active, naming it", () => {
     expect(subagentActiveRefusal(quiet, "graph.json", "spec trace upgrade")).toBeNull();
     expect(subagentActiveRefusal(active, "graph.json", "spec trace upgrade")).toBe(
-      "Spec trace upgrade refused while a subagent is active for this TaskGraph; wait for it to settle and retry",
+      "Spec trace upgrade refused while a subagent is active for this TaskGraph; wait for the exact roster to settle and retry",
     );
   });
 

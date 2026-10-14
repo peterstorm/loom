@@ -15,7 +15,7 @@ import {
 } from "../../core/spec-trace-migration";
 import { inspectRunDirectoryEntry, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import { parseRegisteredFacadeProgram } from "./programs";
-import { assertQuiescentUnderLock, subagentActiveRefusal } from "./subagent-quiescence";
+import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
 
 const RETIRE_FLAG = "--retire-abandoned-run";
 
@@ -146,59 +146,61 @@ function sameRetirementProof(left: RetirementProof, right: RetirementProof): boo
     left.abandonment.supersededBy === right.abandonment.supersededBy;
 }
 
-const handler: HookHandler = async (stdin, args) => {
-  if (args.length > 1 || (args[0] !== undefined && args[0] !== RETIRE_FLAG)) {
-    return { kind: "error", message: `Usage: helper upgrade-spec-trace [${RETIRE_FLAG}]` };
-  }
-  const retireAbandonedRun = args[0] === RETIRE_FLAG;
+export function createUpgradeSpecTraceHandler(subagentActive: SubagentActivity = anyActiveSubagent): HookHandler {
+  return async (stdin, args) => {
+    if (args.length > 1 || (args[0] !== undefined && args[0] !== RETIRE_FLAG)) {
+      return { kind: "error", message: `Usage: helper upgrade-spec-trace [${RETIRE_FLAG}]` };
+    }
+    const retireAbandonedRun = args[0] === RETIRE_FLAG;
 
-  let input: unknown;
-  try {
-    input = JSON.parse(stdin);
-  } catch (error) {
-    return {
-      kind: "error",
-      message: `Invalid spec trace upgrade JSON: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+    let input: unknown;
+    try {
+      input = JSON.parse(stdin);
+    } catch (error) {
+      return {
+        kind: "error",
+        message: `Invalid spec trace upgrade JSON: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
 
-  const statePath = taskGraphPath();
-  const manager = StateManager.fromPath(statePath);
-  if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
-  const refusal = subagentActiveRefusal(anyActiveSubagent, statePath, "spec trace upgrade");
-  if (refusal !== null) return { kind: "error", message: refusal };
+    const statePath = taskGraphPath();
+    const manager = StateManager.fromPath(statePath);
+    if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
+    const refusal = subagentActiveRefusal(subagentActive, statePath, "spec trace upgrade");
+    if (refusal !== null) return { kind: "error", message: refusal };
 
-  try {
-    const preRead = manager.load();
-    const preProof = retireAbandonedRun && preRead.active_wave_gate !== undefined
-      ? proveAbandonedActiveWaveGate(preRead)
-      : null;
-    if (preProof !== null && !preProof.ok) return { kind: "error", message: preProof.message };
+    try {
+      const preRead = manager.load();
+      const preProof = retireAbandonedRun && preRead.active_wave_gate !== undefined
+        ? proveAbandonedActiveWaveGate(preRead)
+        : null;
+      if (preProof !== null && !preProof.ok) return { kind: "error", message: preProof.message };
 
-    const outcome = await manager.updateAndReturn((locked) => {
-      assertQuiescentUnderLock(anyActiveSubagent, statePath, "spec trace upgrade");
-      if (!retireAbandonedRun || locked.active_wave_gate === undefined) {
-        const prepared = prepareSpecTraceUpgrade(locked, input);
+      const outcome = await manager.updateAndReturn((locked) => {
+        assertQuiescentUnderLock(subagentActive, statePath, "spec trace upgrade");
+        if (!retireAbandonedRun || locked.active_wave_gate === undefined) {
+          const prepared = prepareSpecTraceUpgrade(locked, input);
+          if (!prepared.ok) throw new Error(prepared.error.message);
+          return { state: prepared.value.graph, value: prepared.value.kind };
+        }
+
+        const lockedProof = proveAbandonedActiveWaveGate(locked);
+        if (!lockedProof.ok) throw new Error(lockedProof.message);
+        if (preProof === null || !sameRetirementProof(preProof.value, lockedProof.value)) {
+          throw new Error("Protected Wave Gate authority or abandonment supersession changed before locked retirement proof");
+        }
+        const prepared = prepareAbandonedWaveGateSpecTraceUpgrade(locked, input, lockedProof.value.abandonment);
         if (!prepared.ok) throw new Error(prepared.error.message);
         return { state: prepared.value.graph, value: prepared.value.kind };
-      }
+      });
+      process.stderr.write(outcome === "already-v2"
+        ? "Spec trace graph already uses the exact requested v2 ownership\n"
+        : "Spec trace graph upgraded atomically to v2\n");
+      return { kind: "passthrough" };
+    } catch (error) {
+      return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+}
 
-      const lockedProof = proveAbandonedActiveWaveGate(locked);
-      if (!lockedProof.ok) throw new Error(lockedProof.message);
-      if (preProof === null || !sameRetirementProof(preProof.value, lockedProof.value)) {
-        throw new Error("Protected Wave Gate authority or abandonment supersession changed before locked retirement proof");
-      }
-      const prepared = prepareAbandonedWaveGateSpecTraceUpgrade(locked, input, lockedProof.value.abandonment);
-      if (!prepared.ok) throw new Error(prepared.error.message);
-      return { state: prepared.value.graph, value: prepared.value.kind };
-    });
-    process.stderr.write(outcome === "already-v2"
-      ? "Spec trace graph already uses the exact requested v2 ownership\n"
-      : "Spec trace graph upgraded atomically to v2\n");
-    return { kind: "passthrough" };
-  } catch (error) {
-    return { kind: "error", message: error instanceof Error ? error.message : String(error) };
-  }
-};
-
-export default handler;
+export default createUpgradeSpecTraceHandler();

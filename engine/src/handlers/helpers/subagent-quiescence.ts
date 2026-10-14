@@ -10,20 +10,33 @@
  *  answers in the helpers' tests. */
 export type SubagentActivity = (statePath: string) => boolean;
 
-/** The pre-lock refusal for `operation` (e.g. "Contract Revision"), or null
- *  when no subagent is active. */
+/** The helpers that follow the protocol. */
+export type QuiescentOperation = "Contract Revision" | "spec trace amendment" | "spec trace upgrade";
+
+/** What each operation tells the operator to wait for before retrying. */
+const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
+  "Contract Revision": "wait for it to settle and retry",
+  "spec trace amendment": "wait for it to settle and retry",
+  "spec trace upgrade": "wait for the exact roster to settle and retry",
+});
+
+/** The pre-lock refusal for `operation`, or null when no subagent is active. */
 export function subagentActiveRefusal(
   subagentActive: SubagentActivity,
   statePath: string,
-  operation: string,
+  operation: QuiescentOperation,
 ): string | null {
   if (!subagentActive(statePath)) return null;
   const subject = operation.charAt(0).toUpperCase() + operation.slice(1);
-  return `${subject} refused while a subagent is active for this TaskGraph; wait for it to settle and retry`;
+  return `${subject} refused while a subagent is active for this TaskGraph; ${SETTLE[operation]}`;
 }
 
 /** The in-lock re-check: throws, aborting the locked update, when a subagent
  *  became active after the pre-lock check. */
-export function assertQuiescentUnderLock(subagentActive: SubagentActivity, statePath: string, operation: string): void {
+export function assertQuiescentUnderLock(
+  subagentActive: SubagentActivity,
+  statePath: string,
+  operation: QuiescentOperation,
+): void {
   if (subagentActive(statePath)) throw new Error(`A subagent became active before the ${operation} could commit`);
 }

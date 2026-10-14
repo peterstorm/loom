@@ -70,13 +70,23 @@ export function renderContractWriterProblem(problem: ContractWriterProblem): str
     .exhaustive();
 }
 
-/** Whether a Task other than the contract Task claims any of these anchors —
- *  the one claimant rule derivation and plan-binding validation share. */
+/** Which of these anchors a Task claims, in its spec_anchors order; none for
+ *  the contract Task, whose tests are red by design — the one claimant rule
+ *  derivation, the contract role and plan-binding validation share. */
+function claimedAnchors(
+  contract: Pick<AcceptanceContract, "contractTask">,
+  task: Pick<ContractTaskView, "id" | "spec_anchors">,
+  anchors: readonly string[],
+): readonly string[] {
+  return task.id === contract.contractTask ? [] : (task.spec_anchors ?? []).filter((anchor) => anchors.includes(anchor));
+}
+
+/** Whether a Task other than the contract Task claims any of these anchors. */
 export const claims = (
   contract: Pick<AcceptanceContract, "contractTask">,
   task: Pick<ContractTaskView, "id" | "spec_anchors">,
   anchors: readonly string[],
-): boolean => task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => anchors.includes(anchor));
+): boolean => claimedAnchors(contract, task, anchors).length > 0;
 
 /** The Wave of a contract's contract Task; undefined when the Task is not in the roster. */
 export function contractWave(
@@ -195,8 +205,7 @@ export function contractRole(
   tasks: readonly ContractTaskView[],
 ): ContractRole {
   if (task.id === contract.contractTask) return freeze({ kind: "contract-task" });
-  const covered = coveredAnchors(contract);
-  const anchors = nonEmpty((task.spec_anchors ?? []).filter((anchor) => covered.includes(anchor)));
+  const anchors = nonEmpty(claimedAnchors(contract, task, coveredAnchors(contract)));
   if (anchors !== null) return freeze({ kind: "claimant", anchors });
   return inWindow(redWindow(contract, tasks), task) ? freeze({ kind: "red-window" }) : freeze({ kind: "none" });
 }

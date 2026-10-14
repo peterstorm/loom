@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   acceptanceContractsFromPlan,
   acceptanceExpectation,
+  acceptanceObservation,
   emptyAcceptanceExpectation,
   observeAcceptanceFacts,
   type AcceptanceContract,
   type AcceptanceExpectation,
 } from "../../src/core/acceptance-contract";
 import {
-  acceptanceObservation,
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseWaveCompletionSuiteResult,

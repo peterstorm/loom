@@ -24,9 +24,9 @@ import type { ParsedSpec } from "./parse-spec";
 import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOutputs } from "./predecessor-output";
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
-import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
+import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { invariantRoles } from "./plan-paths";
-import { ACCEPTANCE_RED_WINDOW, contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
+import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 

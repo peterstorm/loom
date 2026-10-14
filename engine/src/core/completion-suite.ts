@@ -23,13 +23,14 @@ import {
 } from "./review-packet";
 import { sha256Hex } from "./digest";
 import {
+  acceptanceObservation,
   emptyAcceptanceExpectation,
-  judgeAcceptance,
-  owesAcceptance,
   parseAcceptanceExpectation,
   parseAcceptanceReportFacts,
+  recordedAcceptanceVerdict,
   type AcceptanceExpectation,
   type AcceptanceFailure,
+  type AcceptanceObservation,
   type AcceptanceReportFacts,
 } from "./acceptance-contract";
 import { canonicalStructuralEquals } from "./orchestration-contract";
@@ -143,32 +144,6 @@ export type AuthorizedWaveCompletionSuite = Readonly<{
   workspaceDigest: ArtifactDigest;
   checks: NonEmpty<AuthorizedWaveCompletionCheck>;
 }>;
-
-/**
- * The acceptance a gate judged: the expectation derived from the protected
- * graph and the facts observed from each check's report, bound to its digest.
- * Absent means the gate owed no contract anything — the shape every result
- * written before contracts existed already has — and is the only encoding of
- * that: only `acceptanceObservation` mints one, and it returns none for an
- * expectation that owes nothing.
- */
-declare const owingObservation: unique symbol;
-export type AcceptanceObservation = Readonly<{
-  expectation: AcceptanceExpectation;
-  facts: readonly AcceptanceReportFacts[];
-}> & Readonly<{ [owingObservation]: true }>;
-
-/** The observation a gate records, or undefined when its expectation owes no
- *  contract anything. Facts are one per check; the producer reads one report
- *  per check and the parser refuses a check named twice. */
-export function acceptanceObservation(
-  expectation: AcceptanceExpectation,
-  facts: readonly AcceptanceReportFacts[],
-): AcceptanceObservation | undefined {
-  return owesAcceptance(expectation)
-    ? freeze({ expectation, facts: freezeArray(facts) }) as AcceptanceObservation
-    : undefined;
-}
 
 export type WaveCompletionSuiteResult = Readonly<{
   kind: "wave-completion-suite-result";
@@ -819,21 +794,6 @@ function parseOptionalAcceptance(raw: unknown, path: string): Parsed<AcceptanceO
   return isPlainRecord(raw) && Object.hasOwn(raw, "acceptance")
     ? parseAcceptanceObservation(raw.acceptance, `${path}.acceptance`)
     : success(undefined);
-}
-
-/** The checks whose non-zero exit an observation excuses, and the failures it records. */
-type RecordedAcceptanceVerdict = Readonly<{
-  excused: ReadonlySet<string>;
-  failures: readonly AcceptanceFailure[];
-}>;
-
-/** What a recorded acceptance observation decides — the one judgment the
- *  evaluator and the receipt parser share. An absent observation, a gate owing
- *  no contract anything, excuses nothing and records nothing. */
-function recordedAcceptanceVerdict(acceptance: AcceptanceObservation | undefined): RecordedAcceptanceVerdict {
-  if (acceptance === undefined) return freeze({ excused: new Set<string>(), failures: freezeArray([]) });
-  const judgment = judgeAcceptance(acceptance.expectation, acceptance.facts);
-  return freeze({ excused: new Set(judgment.excusedCheckIds), failures: judgment.failures });
 }
 
 /** Facts whose check produced no report with the digest the facts were read from. */

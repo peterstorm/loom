@@ -24,11 +24,11 @@
  * path digests; this module decides and returns data.
  */
 
-// The curated public surface: what callers outside these modules use. Each
-// sub-module exports what its siblings need (dueWaves, recordsRoster,
-// observedRoster, the kernel helpers); only this file is the interface.
+// The curated public surface: what callers outside these modules use. The
+// sub-modules export more than this file re-exports, for their siblings; only
+// this file is the interface. The red-window waiver reason belongs to the
+// verification-policy vocabulary and is imported from there.
 export {
-  ACCEPTANCE_RED_WINDOW,
   CONTRACT_ID,
   COVERABLE_ANCHOR,
   type AcceptanceContract,
@@ -58,20 +58,24 @@ export {
 } from "./tasks";
 export {
   acceptanceExpectation,
+  acceptanceObservation,
   emptyAcceptanceExpectation,
   graphAcceptanceExpectation,
   judgeAcceptance,
   observeAcceptanceFacts,
   owesAcceptance,
+  recordedAcceptanceVerdict,
   renderAcceptanceFailure,
   testcaseAcceptanceFile,
   unprojectableFacts,
   type AcceptanceExpectation,
   type AcceptanceFailure,
   type AcceptanceJudgment,
+  type AcceptanceObservation,
   type AcceptanceReportFacts,
   type ContractGateExpectation,
   type ObservedAcceptanceTestcase,
+  type RecordedAcceptanceVerdict,
 } from "./gate";
 export {
   frozenPathDigests,

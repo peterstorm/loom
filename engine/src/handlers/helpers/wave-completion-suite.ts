@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { canonicalJson, type JsonValue } from "../../core/review-packet";
 import {
+  acceptanceObservation,
   frozenPathDrift,
   graphAcceptanceExpectation,
   frozenPathsToObserve,
@@ -12,6 +13,7 @@ import {
   unprojectableFacts,
   type AcceptanceContract,
   type AcceptanceExpectation,
+  type AcceptanceObservation,
 } from "../../core/acceptance-contract";
 import { parseJunitTestcases } from "../../core/structured-test-report";
 import { sha256Bytes } from "../../core/digest";
@@ -20,12 +22,10 @@ import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
 import {
   FULL_TIER_LINT_CHECK_ID_TEXT,
-  acceptanceObservation,
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
   parseWaveCompletionSuiteResult,
-  type AcceptanceObservation,
   type AcceptedWaveCompletionReceipt,
   type AuthorizedWaveCompletionCheck,
   type AuthorizedWaveCompletionSuite,

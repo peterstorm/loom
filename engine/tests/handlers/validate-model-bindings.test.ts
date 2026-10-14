@@ -10,6 +10,7 @@ import {
   type ModelBindingDeps,
 } from "../../src/handlers/helpers/validate-model-bindings";
 import { pathsMatch } from "../../src/core/plan-path-match";
+import { parseTaskVerificationPolicy } from "../../src/core/verification-policy";
 import { parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
 import type { ContractProblem, InvariantOwnership, OwnershipProblem } from "../../src/types";
 
@@ -526,6 +527,19 @@ describe("validateModelBindings", () => {
         "T5 waives new tests as covered-by-acceptance-contract but claims no Requirement a contract it depends on covers");
       // The waiver without any contract in the plan is refused too.
       expectError(validateModelBindings(NO_MODELS, [task({ verification_policy: waived })], NO_FILES), "covered-by-acceptance-contract");
+    });
+
+    it("reads no waiver from a malformed policy, which task-graph validation's policy parser refuses instead", () => {
+      const malformed = { regression: { kind: "sometimes" }, new_tests: { kind: "waived", reason: "covered-by-acceptance-contract" } };
+      const tasks = [contractTask, claimant("T2", "AS-003"), claimant("T3", "AS-004"),
+        task({ id: "T5", wave: 2, depends_on: ["T1"], verification_policy: malformed, file_list: ["src/t5.ts"] })];
+      // Binding sees no waiver here, so it does not report T5 ...
+      expect(validateModelBindings(models, tasks, NO_FILES).ok).toBe(true);
+      // ... and the gap is closed by the parser validate-task-graph runs on every Task.
+      expect(parseTaskVerificationPolicy({ verification_policy: malformed }, "Task T5", "authored")).toMatchObject({
+        ok: false,
+        errors: [expect.stringContaining("Task T5.verification_policy.regression")],
+      });
     });
   });
 

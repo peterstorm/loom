@@ -25,7 +25,7 @@ export type ContractBindingTask = Readonly<{
   newTestWaiver: NewTestWaiverReason | null;
 }>;
 
-export function renderContractProblem(problem: ContractProblem): string {
+function renderContractProblem(problem: ContractProblem): string {
   return match(problem)
     .with({ kind: "missing-types" }, () =>
       "no '**Types file:**' declared — name the new declarations-only file consumers import, or 'none' with a '**No types reason:**'")
