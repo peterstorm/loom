@@ -680,6 +680,44 @@ The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the
 
 This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
 
+### Acceptance Stop Check (claimants)
+
+When an implementation agent that claims a frozen Acceptance Contract's Requirement tries to stop, the engine runs that contract's acceptance files before settling the Task. If a testcase the agent owes is still not passing, the stop is blocked and the same agent keeps working with the failures in front of it. A testcase is owed when it decides one of the agent's claims and all its anchors are due by the Task's Wave.
+
+- **Opt in** with a schema-2 `.loom/verification-manifest.json` that declares an `acceptanceRunner`. The runner is frozen at population, like the project checks:
+
+  ```json
+  {
+    "schemaVersion": 2,
+    "kind": "loom-verification-manifest",
+    "checks": [ … ],
+    "acceptanceRunner": {
+      "executable": "vitest",
+      "args": ["run", "--reporter=junit", "--outputFile=.loom/completion-reports/acceptance.junit.xml", "{files}"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "report": { "kind": "required-file", "path": ".loom/completion-reports/acceptance.junit.xml" }
+    }
+  }
+  ```
+
+- **The command.** `{files}` must be exactly one whole argument; the engine replaces it with the acceptance file paths, one argument each. The executable, argv and report follow the project-check rules: the allowlist, no shell, and a report beneath `.loom/completion-reports/` that no Wave check also uses. `timeoutMs` is at most 240000, inside the SubagentStop hook's 300 s timeout.
+- **Silent when off.** With no runner, or no owed testcase, the check does nothing and says nothing.
+- **Fails open.** In each of these cases the stop proceeds and the operator gets a `systemMessage` saying why the check did not decide:
+  - another claimant's check holds the runner;
+  - the runner cannot start or finish, times out, or is killed by a signal (a killed runner's report is partial, so it is not judged);
+  - the report is missing or changed;
+  - the report has no testcase of the acceptance files;
+  - the block counter cannot be read;
+  - the agent has reached its 3-block cap;
+  - the check itself fails.
+
+  A runner lock that will not release is appended to the note, or turns a pass into a note.
+- **One run per repository at a time.** Every claimant shares the runner's one report path, and the runner resets that file before each launch. Checks are therefore serialized by a lock under the subagent directory. If a claimant stops while a sibling's check is running, its own check does not run, and the Wave Gate judges that claimant. A lock whose holder process has exited, or that is older than the longest permitted run plus 60 s, is reclaimed. Reclaiming renames the lock aside and deletes it only if it still holds the stale bytes. If another stop reclaimed it first and took a fresh lock, the renamed lock is linked back and this stop does not run.
+- **Cap.** An agent is blocked at most 3 times; its next stop proceeds with a `systemMessage` naming the cap. The count is kept per spawned agent under the subagent directory, never in the TaskGraph, and is cleared once that agent's stop proceeds.
+- **Not completion evidence.** Nothing is recorded as a test result or proof; the Wave Gate's completion suite stays the only authority.
+- **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is printed as a `loom(pi):` line and never blocks.
+
 ### Population refuses the spec or a Requirement id
 
 `populate-task-graph` proves the authored trace against the Spec Index before writing anything. It refuses, naming the cause:

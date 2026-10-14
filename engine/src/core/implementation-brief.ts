@@ -264,6 +264,7 @@ function claimantBlock(contract: AcceptanceContract, claims: readonly string[]):
           ...mine.map(({ name, file }) => `- \`${name}\` (\`${file}\`)`)].join("\n")
       : `Turn green every acceptance testcase that names ${claims.join(", ")}; your Wave Gate requires them passing.`,
     "Testcases of Requirements completed in later Waves may still fail. If an acceptance test is wrong, stop and report it: only an operator Contract Revision changes a frozen file.",
+    "When the project declares an acceptance runner, the engine runs these testcases when you stop and keeps you working while one you owe still fails.",
   ].join("\n");
 }
 

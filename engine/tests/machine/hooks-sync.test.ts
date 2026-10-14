@@ -13,6 +13,7 @@ import { GATE_WIRED_TOOLS } from "../../src/machine/types";
 import { FILE_MODIFYING_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../src/core/tool-vocabulary";
 import { KNOWN_HANDLERS } from "../../src/handler-routes";
 import { TYPE_DIAGNOSTICS_DEADLINE_MS } from "../../src/config";
+import { MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS } from "../../src/core/verification-manifest";
 
 interface HookEntry {
   readonly matcher?: string;
@@ -201,6 +202,21 @@ describe("type diagnostics ↔ hooks.json (PostToolUse advisory wiring)", () => 
         const timeoutSeconds = (hook as { timeout?: number }).timeout;
         expect(timeoutSeconds, "type-diagnostics.sh needs an explicit timeout").toBeDefined();
         expect(timeoutSeconds! * 1000).toBeGreaterThan(TYPE_DIAGNOSTICS_DEADLINE_MS + 5_000);
+      }
+    }
+  });
+});
+
+describe("Acceptance Stop Check ↔ hooks.json (SubagentStop budget)", () => {
+  it("the SubagentStop hook timeout outlasts the longest permitted acceptance runner, with room to settle after it", () => {
+    const entries = entriesWiring("SubagentStop", "dispatch.sh");
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      for (const hook of entry.hooks.filter((h) => h.command.includes("dispatch.sh"))) {
+        const timeoutSeconds = (hook as { timeout?: number }).timeout;
+        expect(timeoutSeconds, "the SubagentStop dispatch needs an explicit timeout").toBeDefined();
+        // Killed mid-run, the hook would neither fail open nor release its runner lock until it went stale.
+        expect(timeoutSeconds! * 1000).toBeGreaterThanOrEqual(MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS + 60_000);
       }
     }
   });

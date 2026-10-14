@@ -93,6 +93,16 @@ export {
 export { parseAcceptanceContracts, parseAcceptanceExpectation, parseAcceptanceReportFacts } from "./wire";
 export { contractBindingErrors, type ContractBindingTask } from "./binding";
 export {
+  judgeStopCheck,
+  renderStopCheckBlock,
+  stopCheckExpectation,
+  type FailingAcceptanceTestcase,
+  type OwedAcceptance,
+  type OwedStopCheck,
+  type StopCheckExpectation,
+  type StopCheckVerdict,
+} from "./stop-check";
+export {
   pendingFreezeAdvisories,
   renderPendingFreezeAdvisories,
   type PendingFreezeAdvisory,

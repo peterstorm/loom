@@ -48,6 +48,12 @@ import {
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import { parseIsoInstant } from "../engine/src/core/implementation-completion";
 import {
+  REPORT_ONLY_STOP_CHECK_PORTS,
+  runAcceptanceStopCheck,
+  stopCheckReportLine,
+  type StopCheckPorts,
+} from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
+import {
   applyFailedPiResult,
   applyImplementationPiResult,
   applyPhaseAgentPiResult,
@@ -158,6 +164,31 @@ function implementationWriteBoundaryFor(
 const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefined): readonly string[] =>
   (reservation?.items ?? []).flatMap((item) =>
     item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []);
+
+/**
+ * The Acceptance Stop Check, report-only: Pi settles after the subagent has
+ * ended, so a failing owed testcase is an operator note here, never a block.
+ * The check is total, so it never raises a processing error. Returns the
+ * operator line it printed, or null when it printed nothing.
+ */
+export async function reportAcceptanceStopCheck(
+  manager: Readonly<{ load: () => TaskGraph; getPath: () => string }>,
+  taskId: string | null,
+  ports: StopCheckPorts = REPORT_ONLY_STOP_CHECK_PORTS,
+): Promise<string | null> {
+  if (taskId === null) return null;
+  const outcome = await runAcceptanceStopCheck({
+    loadGraph: () => manager.load(),
+    stateFilePath: manager.getPath(),
+    taskId,
+    agentKey: `pi.${taskId}`,
+  }, ports);
+  const line = stopCheckReportLine(taskId, outcome);
+  if (line === null) return null;
+  const printed = `loom(pi): ${line}`;
+  process.stderr.write(`${printed}\n`);
+  return printed;
+}
 
 /** Write a notice's stderr line and return the processing error it raises. */
 const emitNotice = (notice: PiResultNotice): readonly string[] => {
@@ -813,6 +844,7 @@ async function processPiResult(
         phaseArtifactBaseDir: projectBoundary.root,
       }));
     case "implementation":
+      await reportAcceptanceStopCheck(mgr, reservedItem?.taskId ?? null);
       return emit(await applyImplementationPiResult({
         store,
         repository,

@@ -165,6 +165,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/acceptance-contract/wire.ts",
   "engine/src/core/acceptance-contract/binding.ts",
   "engine/src/core/acceptance-contract/freeze-notice.ts",
+  "engine/src/core/acceptance-contract/stop-check.ts",
   "engine/src/core/task-dependencies.ts",
   "engine/src/core/plan-path-match.ts",
   "engine/src/core/task-revalidation.ts",

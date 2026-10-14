@@ -31,6 +31,11 @@ import storeReviewerFindings from "./store-reviewer-findings";
 import { runStoreSpecCheckFindings } from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import {
+  PRODUCTION_STOP_CHECK_PORTS,
+  runAcceptanceStopCheck,
+  type StopCheckPorts,
+} from "./acceptance-stop-check";
+import {
   snapshotImplementationAttemptSidecar,
   type ImplementationAuthorityObservation,
 } from "../../implementation-attempt-sidecar";
@@ -81,10 +86,25 @@ function bindPendingImplementationAtStop(
   });
 }
 
+/** The session's TaskGraph manager, or the fault (if any) that kept it from resolving. */
+type SessionManagerResolution =
+  | Readonly<{ kind: "resolved"; manager: StateManager }>
+  | Readonly<{ kind: "unresolved"; cause?: unknown }>;
+
+function resolveSessionManager(sessionId: string | undefined): SessionManagerResolution {
+  try {
+    const manager = StateManager.fromSession(sessionId);
+    return manager === null ? { kind: "unresolved" } : { kind: "resolved", manager };
+  } catch (cause) {
+    return { kind: "unresolved", cause };
+  }
+}
+
 export const runDispatch = async (
   stdin: string,
   args: string[],
   cleanup: HookHandler = cleanupSubagentFlag,
+  stopCheckPorts: StopCheckPorts = PRODUCTION_STOP_CHECK_PORTS,
 ): Promise<HookResult> => {
   const parsedInput = parseSubagentStopStdin(stdin);
   if (!parsedInput.ok) {
@@ -314,10 +334,23 @@ export const runDispatch = async (
 
   // Known Loom categories require exact TaskGraph authority. Only an explicitly
   // named custom agent may legitimately have no graph and pass through.
-  try {
-    if (StateManager.fromSession(input.session_id) === null) return unresolvedTaskGraph();
-  } catch (error) {
-    return unresolvedTaskGraph(error);
+  const resolution = resolveSessionManager(input.session_id);
+  if (resolution.kind === "unresolved") return unresolvedTaskGraph(resolution.cause);
+  const { manager } = resolution;
+
+  // The Acceptance Stop Check runs before settlement and before cleanup: a
+  // blocked stop keeps this same agent working, so nothing may settle the Task
+  // or release the agent's runtime bindings. The check is total and fails open.
+  let stopCheckNote: string | undefined;
+  if (category === "impl" && sidecarObservation.kind === "authority-observed") {
+    const outcome = await runAcceptanceStopCheck({
+      loadGraph: () => manager.load(),
+      stateFilePath: manager.getPath(),
+      taskId: sidecarObservation.sidecar.authority.taskId,
+      agentKey: `${sidecarObservation.sidecar.sessionId}.${sidecarObservation.sidecar.agentId}`,
+    }, stopCheckPorts);
+    if (outcome.kind === "block") return { kind: "block", message: outcome.message };
+    if (outcome.kind === "note") stopCheckNote = outcome.message;
   }
 
   const childFailure: HookResult | null = await match(category)
@@ -350,7 +383,7 @@ export const runDispatch = async (
     return { kind: "error", message: `${cleanupFailure}${categoryMessage}` };
   }
   if (childFailure !== null) return childFailure;
-  return { kind: "passthrough" };
+  return stopCheckNote === undefined ? { kind: "passthrough" } : { kind: "passthrough", systemMessage: stopCheckNote };
 };
 
 const handler: HookHandler = (stdin, args) => runDispatch(stdin, args);

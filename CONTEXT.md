@@ -440,6 +440,10 @@ _Avoid_: Test task, scaffolding task
 The production file an **Acceptance Contract**'s tests reach the code through — a route, a handler, a CLI command — declared by the plan's optional `**Entry point:**`. Never a frozen path. Plan binding refuses a claimant of a covered Requirement that neither writes it nor depends, directly or transitively, on a Task that does, because its tests could not pass before it exists. The **Contract Task** never counts as its writer: what it lists there is at most a compiling stub. Plan-only: it is not persisted on the contract.
 _Avoid_: Entry point (alone — collides with **Sibling Entry Point**)
 
+**Acceptance Stop Check**:
+At a claimant implementation agent's SubagentStop, the engine runs the frozen acceptance files that decide its claims through the operator-declared `acceptanceRunner` (verification manifest schema 2). If a testcase it owes, one due by its Wave, is not passing, the engine blocks the stop so the same agent keeps working: Claude Code exit 2, at most 3 blocks per agent. It fails open on anything it cannot observe, is report-only on Pi, and is never completion evidence: the Wave Gate's completion suite stays the authority.
+_Avoid_: Stop gate, pre-gate (it gates nothing the Wave Gate owns)
+
 **Acceptance Freeze**:
 What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift. Because the stamp lands when the contract Wave's gate completes, after its advisory decision, status names the advisories on frozen paths at that pause (`acceptance-freeze-pending`): they can still be fixed by re-dispatching the contract Task, but only by a **Contract Revision** after approval.
 _Avoid_: Snapshot, lock, baseline
