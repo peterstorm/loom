@@ -35,6 +35,8 @@ import {
 
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;
+/** Source schema 2 adds the optional `acceptanceRunner`; schema 1 stays valid and means none. */
+export const VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION = 2 as const;
 export const VERIFICATION_MANIFEST_KIND = "loom-verification-manifest" as const;
 
 type ProjectWaveCompletionCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
@@ -57,10 +59,35 @@ export type VerificationManifestCheck = Readonly<{
   report: ReportPolicy;
 }>;
 
+/** The one whole argument the acceptance runner's file list replaces. */
+export const ACCEPTANCE_RUNNER_FILES_PLACEHOLDER = "{files}" as const;
+/** The check id the runner's expanded command carries through the completion runner. */
+export const ACCEPTANCE_RUNNER_CHECK_ID = "project:acceptance-runner" as const;
+/** The Acceptance Stop Check runs inside a SubagentStop hook whose own timeout
+ *  is 300 s (hooks.json); a run must finish well inside it. */
+export const MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS = 240_000;
+
+/**
+ * The operator-declared command that runs only some acceptance files: exactly
+ * one whole `{files}` argument the engine replaces with the file paths, one
+ * argument each, and a JUnit report beneath the protected report root. It is
+ * the only way the Acceptance Stop Check runs anything; absent means the check
+ * is off.
+ */
+export type AcceptanceRunner = Readonly<{
+  executable: string;
+  args: readonly string[];
+  cwd: RepositoryRelativePath;
+  timeoutMs: CompletionTimeoutMs;
+  report: Extract<ReportPolicy, { kind: "required-file" }>;
+}>;
+
 export type VerificationManifest = Readonly<{
-  schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION;
+  schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION | typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
   kind: typeof VERIFICATION_MANIFEST_KIND;
   checks: readonly VerificationManifestCheck[];
+  /** Present only in schema 2, and only when the operator declares one. */
+  acceptanceRunner?: AcceptanceRunner;
 }>;
 
 export type FrozenVerificationManifest = Readonly<{
@@ -69,6 +96,9 @@ export type FrozenVerificationManifest = Readonly<{
   source: VerificationManifestSource;
   manifestDigest: ArtifactDigest;
   projectChecks: readonly ProjectWaveCompletionCheck[];
+  /** Absent on graphs frozen before the runner existed, and whenever the
+   *  operator declared none: either way the stop check is off. */
+  acceptanceRunner?: AcceptanceRunner;
 }>;
 
 export type ProjectVerificationCoverage =
@@ -207,6 +237,85 @@ function parseCheck(raw: unknown, path: string): Parsed<VerificationManifestChec
   return success(sourceCheck(authorized.value));
 }
 
+/** A stand-in file used only to validate the runner's command shape. */
+const RUNNER_SHAPE_FILE = "acceptance-runner-shape.test.ts";
+
+/** The runner's command with `files` in place of the placeholder, as authorized project-command authority. */
+function runnerCheck(
+  runner: Readonly<{ executable: unknown; args: readonly string[]; cwd: unknown; timeoutMs: unknown; report: unknown }>,
+  files: readonly string[],
+  path: string,
+): Parsed<ProjectWaveCompletionCheck> {
+  const authorized = parseAuthorizedWaveCompletionCheck({
+    kind: "project-command",
+    checkId: ACCEPTANCE_RUNNER_CHECK_ID,
+    scope: "wave",
+    executable: runner.executable,
+    args: runner.args.flatMap((arg) => arg === ACCEPTANCE_RUNNER_FILES_PLACEHOLDER ? files : [arg]),
+    cwd: runner.cwd,
+    timeoutMs: runner.timeoutMs,
+    reportPolicy: runner.report,
+  }, path);
+  if (!authorized.ok) return failure(authorized.error.errors);
+  return authorized.value.kind === "project-command" ? success(authorized.value) : failure([`${path} must be a project command`]);
+}
+
+function parseAcceptanceRunner(raw: unknown, path: string): Parsed<AcceptanceRunner> {
+  const record = exactRecord(raw, ["executable", "args", "cwd", "timeoutMs", "report"], path);
+  if (!record.ok) return record;
+  const rawArgs = record.value.args;
+  if (!Array.isArray(rawArgs) || !rawArgs.every((arg): arg is string => typeof arg === "string")) {
+    return failure([`${path}.args must be an array of strings`]);
+  }
+  const errors: string[] = [];
+  const placeholders = rawArgs.filter((arg) => arg === ACCEPTANCE_RUNNER_FILES_PLACEHOLDER).length;
+  if (placeholders !== 1) {
+    errors.push(`${path}.args must contain exactly one whole "${ACCEPTANCE_RUNNER_FILES_PLACEHOLDER}" argument, found ${placeholders}`);
+  }
+  if (rawArgs.some((arg) => arg !== ACCEPTANCE_RUNNER_FILES_PLACEHOLDER && arg.includes(ACCEPTANCE_RUNNER_FILES_PLACEHOLDER))) {
+    errors.push(`${path}.args may use "${ACCEPTANCE_RUNNER_FILES_PLACEHOLDER}" only as a whole argument`);
+  }
+  const { executable, cwd, timeoutMs, report } = record.value;
+  const shape = runnerCheck({ executable, args: rawArgs, cwd, timeoutMs, report }, [RUNNER_SHAPE_FILE], path);
+  if (!shape.ok) errors.push(...shape.error.errors);
+  if (shape.ok) {
+    const { reportPolicy } = shape.value;
+    if (reportPolicy.kind !== "required-file" || !reportPolicy.path.startsWith(`${COMPLETION_REPORT_ROOT}/`)) {
+      errors.push(`${path}.report must be a required-file beneath protected ${COMPLETION_REPORT_ROOT}/`);
+    }
+    if (shape.value.timeoutMs > MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS) {
+      errors.push(`${path}.timeoutMs must be at most ${MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS}, inside the stop hook's own timeout`);
+    }
+  }
+  if (errors.length > 0 || !shape.ok || shape.value.reportPolicy.kind !== "required-file") return failure(errors);
+  return success(freeze({
+    executable: shape.value.executable,
+    args: freezeArray(rawArgs),
+    cwd: shape.value.cwd,
+    timeoutMs: shape.value.timeoutMs,
+    report: shape.value.reportPolicy,
+  }));
+}
+
+/**
+ * The runner's exact command over these acceptance files, as authority the
+ * completion check runner executes. Each file becomes one argument; nothing
+ * else is interpolated.
+ */
+export function acceptanceRunnerCheck(
+  runner: AcceptanceRunner,
+  files: NonEmpty<string>,
+): Parsed<ProjectWaveCompletionCheck> {
+  return total(() => runnerCheck(runner, files, "acceptanceRunner"));
+}
+
+/** A runner must not share a report path with a Wave check, or one run would overwrite the other's evidence. */
+function runnerReportConflicts(runner: AcceptanceRunner, checks: readonly VerificationManifestCheck[], path: string): readonly string[] {
+  return checks.some(({ report }) => report.kind === "required-file" && report.path === runner.report.path)
+    ? [`${path}.report.path ${runner.report.path} is also a Wave check's report path`]
+    : [];
+}
+
 function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationManifestCheck[]> {
   const collected = collectDenseArray(raw, path, (value, elementPath) => toElementResult(parseCheck(value, elementPath)));
   if (collected.kind === "not-array") return failure([`${path} must be an array`]);
@@ -223,22 +332,35 @@ function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationMa
 }
 
 function parseDocument(raw: unknown): Parsed<VerificationManifest> {
-  const record = exactRecord(raw, ["schemaVersion", "kind", "checks"], "verificationManifest");
+  const schemaVersion = isPlainRecord(raw) ? raw.schemaVersion : undefined;
+  const runnerSchema = schemaVersion === VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
+  if (schemaVersion !== VERIFICATION_MANIFEST_SCHEMA_VERSION && !runnerSchema && isPlainRecord(raw)) {
+    return failure([
+      `verificationManifest.schemaVersion must equal ${VERIFICATION_MANIFEST_SCHEMA_VERSION} or ${VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION}`,
+    ]);
+  }
+  const hasRunner = runnerSchema && isPlainRecord(raw) && Object.hasOwn(raw, "acceptanceRunner");
+  const record = exactRecord(
+    raw,
+    ["schemaVersion", "kind", "checks", ...(hasRunner ? ["acceptanceRunner"] : [])],
+    "verificationManifest",
+  );
   if (!record.ok) return record;
   const errors: string[] = [];
-  if (record.value.schemaVersion !== VERIFICATION_MANIFEST_SCHEMA_VERSION) {
-    errors.push(`verificationManifest.schemaVersion must equal ${VERIFICATION_MANIFEST_SCHEMA_VERSION}`);
-  }
   if (record.value.kind !== VERIFICATION_MANIFEST_KIND) {
     errors.push(`verificationManifest.kind must equal ${VERIFICATION_MANIFEST_KIND}`);
   }
   const checks = parseChecks(record.value.checks, "verificationManifest.checks");
   if (!checks.ok) errors.push(...checks.error.errors);
-  return errors.length === 0 && checks.ok
+  const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "verificationManifest.acceptanceRunner") : null;
+  if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
+  if (runner?.ok && checks.ok) errors.push(...runnerReportConflicts(runner.value, checks.value, "verificationManifest.acceptanceRunner"));
+  return errors.length === 0 && checks.ok && (runner === null || runner.ok)
     ? success(freeze({
-        schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
+        schemaVersion: runnerSchema ? VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION : VERIFICATION_MANIFEST_SCHEMA_VERSION,
         kind: VERIFICATION_MANIFEST_KIND,
         checks: checks.value,
+        ...(runner === null ? {} : { acceptanceRunner: runner.value }),
       }))
     : failure(errors);
 }
@@ -254,9 +376,22 @@ function digestJson(value: JsonValue): ArtifactDigest {
   return parsed.value;
 }
 
+/** A frozen runner's canonical digest form. Absent runners add no key, so
+ *  manifests frozen before the runner existed keep their digests. */
+function runnerAuthorityJson(runner: AcceptanceRunner): JsonValue {
+  return {
+    executable: runner.executable,
+    args: runner.args,
+    cwd: runner.cwd,
+    timeoutMs: runner.timeoutMs,
+    report: { kind: runner.report.kind, path: runner.report.path },
+  };
+}
+
 function manifestAuthorityJson(
   source: VerificationManifestSource,
   checks: readonly ProjectWaveCompletionCheck[],
+  runner: AcceptanceRunner | null,
 ): JsonValue {
   const projectChecks: readonly JsonValue[] = checks.map((check): JsonValue => ({
     kind: check.kind,
@@ -275,20 +410,23 @@ function manifestAuthorityJson(
       ? { kind: source.kind }
       : { kind: source.kind, path: source.path, digest: source.digest },
     projectChecks,
+    ...(runner === null ? {} : { acceptanceRunner: runnerAuthorityJson(runner) }),
   };
 }
 
 function frozenManifest(
   source: VerificationManifestSource,
   rawChecks: readonly ProjectWaveCompletionCheck[],
+  runner: AcceptanceRunner | null = null,
 ): FrozenVerificationManifest {
   const projectChecks = freezeArray([...rawChecks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
   return freeze({
     schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
     kind: "frozen-verification-manifest",
     source,
-    manifestDigest: digestJson(manifestAuthorityJson(source, projectChecks)),
+    manifestDigest: digestJson(manifestAuthorityJson(source, projectChecks, runner)),
     projectChecks,
+    ...(runner === null ? {} : { acceptanceRunner: runner }),
   });
 }
 
@@ -327,7 +465,7 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<FrozenVeri
       path: VERIFICATION_MANIFEST_SOURCE_PATH,
       digest: rawByteDigest(bytes),
     });
-    return success(frozenManifest(source, parsed.value.checks.map(projectCheck)));
+    return success(frozenManifest(source, parsed.value.checks.map(projectCheck), parsed.value.acceptanceRunner ?? null));
   });
 }
 
@@ -386,9 +524,10 @@ function parseProjectChecks(raw: unknown): Parsed<readonly ProjectWaveCompletion
 /** Rehydrate only exact frozen authority whose canonical digest still matches. */
 export function parseFrozenVerificationManifest(raw: unknown): Parsed<FrozenVerificationManifest> {
   return total(() => {
+    const hasRunner = isPlainRecord(raw) && Object.hasOwn(raw, "acceptanceRunner");
     const record = exactRecord(
       raw,
-      ["schemaVersion", "kind", "source", "manifestDigest", "projectChecks"],
+      ["schemaVersion", "kind", "source", "manifestDigest", "projectChecks", ...(hasRunner ? ["acceptanceRunner"] : [])],
       "frozenVerificationManifest",
     );
     if (!record.ok) return record;
@@ -402,13 +541,18 @@ export function parseFrozenVerificationManifest(raw: unknown): Parsed<FrozenVeri
     const source = parseSource(record.value.source);
     const checks = parseProjectChecks(record.value.projectChecks);
     const declaredDigest = parseArtifactDigest(record.value.manifestDigest);
+    const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "frozenVerificationManifest.acceptanceRunner") : null;
     const errors = [...tagErrors, ...[source, checks].flatMap((result) => result.ok ? [] : result.error.errors)];
+    if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
+    if (source.ok && source.value.kind === "engine-default" && runner !== null) {
+      errors.push("frozenVerificationManifest engine-default source cannot authorize an acceptance runner");
+    }
     if (!declaredDigest.ok) errors.push(`frozenVerificationManifest.manifestDigest: ${declaredDigest.error.message}`);
     if (source.ok && source.value.kind === "engine-default" && checks.ok && checks.value.length > 0) {
       errors.push("frozenVerificationManifest engine-default source cannot authorize project checks");
     }
-    if (errors.length > 0 || !source.ok || !checks.ok || !declaredDigest.ok) return failure(errors);
-    const canonical = frozenManifest(source.value, checks.value);
+    if (errors.length > 0 || !source.ok || !checks.ok || !declaredDigest.ok || (runner !== null && !runner.ok)) return failure(errors);
+    const canonical = frozenManifest(source.value, checks.value, runner === null ? null : runner.value);
     return canonical.manifestDigest === declaredDigest.value
       ? success(canonical)
       : failure(["frozenVerificationManifest.manifestDigest does not match its canonical authority"]);

@@ -680,6 +680,33 @@ The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the
 
 This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
 
+### Acceptance Stop Check (claimants)
+
+When an implementation agent that claims a frozen Acceptance Contract's Requirement tries to stop, the engine runs that contract's acceptance files before settling the Task. If a testcase the agent owes is still not passing, the stop is blocked and the same agent keeps working with the failures in front of it. A testcase is owed when it decides one of the agent's claims and all its anchors are due by the Task's Wave.
+
+- **Opt in** with a schema-2 `.loom/verification-manifest.json` that declares an `acceptanceRunner`. The runner is frozen at population, like the project checks:
+
+  ```json
+  {
+    "schemaVersion": 2,
+    "kind": "loom-verification-manifest",
+    "checks": [ … ],
+    "acceptanceRunner": {
+      "executable": "vitest",
+      "args": ["run", "--reporter=junit", "--outputFile=.loom/completion-reports/acceptance.junit.xml", "{files}"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "report": { "kind": "required-file", "path": ".loom/completion-reports/acceptance.junit.xml" }
+    }
+  }
+  ```
+
+- **The command.** `{files}` must be exactly one whole argument; the engine replaces it with the acceptance file paths, one argument each. The executable, argv and report follow the project-check rules: the allowlist, no shell, and a report beneath `.loom/completion-reports/` that no Wave check also uses. `timeoutMs` is at most 240000, inside the SubagentStop hook's 300 s timeout.
+- **Fails open.** No runner, no owed testcase, a runner that cannot start or finish, a missing or changed report, or a report without the acceptance files: in every case the stop proceeds, and the operator gets a `systemMessage`.
+- **Cap.** An agent is blocked at most 3 times. The count is kept per spawned agent under the subagent directory, never in the TaskGraph.
+- **Not completion evidence.** Nothing is recorded as a test result or proof; the Wave Gate's completion suite stays the only authority.
+- **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is printed as a `loom(pi):` line and never blocks.
+
 ### Population refuses the spec or a Requirement id
 
 `populate-task-graph` proves the authored trace against the Spec Index before writing anything. It refuses, naming the cause:

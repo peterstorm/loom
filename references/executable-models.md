@@ -275,6 +275,10 @@ them, and only then do other tasks write the code that turns them green.
    regression authority. Every other failure still fails the gate.
 4. **Claimant Waves expect GREEN by Requirement.** Each due testcase must be
    present and passing; a roster testcase that no longer runs fails the gate.
+   With an `acceptanceRunner` in the verification manifest (schema 2), each
+   claimant meets this earlier: the **Acceptance Stop Check** runs its owed
+   testcases when its agent stops and keeps that agent working while one
+   fails (`docs/operations.md`). It is advisory to the gate, never evidence.
 5. **Frozen means frozen.** Every gate re-hashes the frozen paths before it
    reuses or installs a suite receipt; any drift blocks as an artifact
    failure. Task byte-scope proof already stops a task writing a path outside

@@ -48,6 +48,11 @@ import {
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import { parseIsoInstant } from "../engine/src/core/implementation-completion";
 import {
+  REPORT_ONLY_STOP_CHECK_PORTS,
+  runAcceptanceStopCheck,
+  stopCheckReportLine,
+} from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
+import {
   applyFailedPiResult,
   applyImplementationPiResult,
   applyPhaseAgentPiResult,
@@ -158,6 +163,27 @@ function implementationWriteBoundaryFor(
 const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefined): readonly string[] =>
   (reservation?.items ?? []).flatMap((item) =>
     item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []);
+
+/**
+ * The Acceptance Stop Check, report-only: Pi settles after the subagent has
+ * ended, so a failing owed testcase is an operator note here, never a block.
+ * Fails open; it never raises a processing error.
+ */
+async function reportAcceptanceStopCheck(manager: StateManager, taskId: string | null): Promise<void> {
+  if (taskId === null) return;
+  try {
+    const outcome = await runAcceptanceStopCheck({
+      graph: manager.load(),
+      stateFilePath: manager.getPath(),
+      taskId,
+      agentKey: `pi.${taskId}`,
+    }, REPORT_ONLY_STOP_CHECK_PORTS);
+    const line = stopCheckReportLine(taskId, outcome);
+    if (line !== null) process.stderr.write(`loom(pi): ${line}\n`);
+  } catch (error) {
+    process.stderr.write(`loom(pi): acceptance stop check for ${taskId} was skipped: ${describeCause(error)}\n`);
+  }
+}
 
 /** Write a notice's stderr line and return the processing error it raises. */
 const emitNotice = (notice: PiResultNotice): readonly string[] => {
@@ -813,6 +839,7 @@ async function processPiResult(
         phaseArtifactBaseDir: projectBoundary.root,
       }));
     case "implementation":
+      await reportAcceptanceStopCheck(mgr, reservedItem?.taskId ?? null);
       return emit(await applyImplementationPiResult({
         store,
         repository,

@@ -31,6 +31,12 @@ import storeReviewerFindings from "./store-reviewer-findings";
 import { runStoreSpecCheckFindings } from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import {
+  PRODUCTION_STOP_CHECK_PORTS,
+  runAcceptanceStopCheck,
+  type StopCheckOutcome,
+  type StopCheckPorts,
+} from "./acceptance-stop-check";
+import {
   snapshotImplementationAttemptSidecar,
   type ImplementationAuthorityObservation,
 } from "../../implementation-attempt-sidecar";
@@ -85,6 +91,7 @@ export const runDispatch = async (
   stdin: string,
   args: string[],
   cleanup: HookHandler = cleanupSubagentFlag,
+  stopCheckPorts: StopCheckPorts = PRODUCTION_STOP_CHECK_PORTS,
 ): Promise<HookResult> => {
   const parsedInput = parseSubagentStopStdin(stdin);
   if (!parsedInput.ok) {
@@ -314,10 +321,33 @@ export const runDispatch = async (
 
   // Known Loom categories require exact TaskGraph authority. Only an explicitly
   // named custom agent may legitimately have no graph and pass through.
+  let manager: StateManager | null;
   try {
-    if (StateManager.fromSession(input.session_id) === null) return unresolvedTaskGraph();
+    manager = StateManager.fromSession(input.session_id);
+    if (manager === null) return unresolvedTaskGraph();
   } catch (error) {
     return unresolvedTaskGraph(error);
+  }
+
+  // The Acceptance Stop Check runs before settlement and before cleanup: a
+  // blocked stop keeps this same agent working, so nothing may settle the Task
+  // or release the agent's runtime bindings. It fails open on every fault.
+  let stopCheckNote: string | undefined;
+  if (category === "impl" && sidecarObservation.kind === "authority-observed") {
+    const stopManager = manager;
+    let outcome: StopCheckOutcome;
+    try {
+      outcome = await runAcceptanceStopCheck({
+        graph: stopManager.load(),
+        stateFilePath: stopManager.getPath(),
+        taskId: sidecarObservation.sidecar.authority.taskId,
+        agentKey: `${sidecarObservation.sidecar.sessionId}.${sidecarObservation.sidecar.agentId}`,
+      }, stopCheckPorts);
+    } catch (error) {
+      outcome = { kind: "note", message: `acceptance stop check crashed and was skipped: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (outcome.kind === "block") return { kind: "block", message: outcome.message };
+    if (outcome.kind === "note") stopCheckNote = outcome.message;
   }
 
   const childFailure: HookResult | null = await match(category)
@@ -350,7 +380,7 @@ export const runDispatch = async (
     return { kind: "error", message: `${cleanupFailure}${categoryMessage}` };
   }
   if (childFailure !== null) return childFailure;
-  return { kind: "passthrough" };
+  return stopCheckNote === undefined ? { kind: "passthrough" } : { kind: "passthrough", systemMessage: stopCheckNote };
 };
 
 const handler: HookHandler = (stdin, args) => runDispatch(stdin, args);
