@@ -23,13 +23,14 @@ import {
 } from "./review-packet";
 import { sha256Hex } from "./digest";
 import {
+  acceptanceObservation,
   emptyAcceptanceExpectation,
-  judgeAcceptance,
-  owesAcceptance,
   parseAcceptanceExpectation,
   parseAcceptanceReportFacts,
+  recordedAcceptanceVerdict,
   type AcceptanceExpectation,
   type AcceptanceFailure,
+  type AcceptanceObservation,
   type AcceptanceReportFacts,
 } from "./acceptance-contract";
 import { canonicalStructuralEquals } from "./orchestration-contract";
@@ -142,18 +143,6 @@ export type AuthorizedWaveCompletionSuite = Readonly<{
   suiteDigest: ArtifactDigest;
   workspaceDigest: ArtifactDigest;
   checks: NonEmpty<AuthorizedWaveCompletionCheck>;
-}>;
-
-/**
- * The acceptance a gate judged: the expectation derived from the protected
- * graph and the facts observed from each check's report, bound to its digest.
- * Absent means the gate owed no contract anything — the shape every result
- * written before contracts existed already has — and is the only encoding of
- * that: the parser refuses an observation whose expectation owes nothing.
- */
-export type AcceptanceObservation = Readonly<{
-  expectation: AcceptanceExpectation;
-  facts: readonly AcceptanceReportFacts[];
 }>;
 
 export type WaveCompletionSuiteResult = Readonly<{
@@ -785,9 +774,6 @@ function parseAcceptanceObservation(raw: unknown, path: string): Parsed<Acceptan
   if (!record.ok) return record;
   const expectation = parseAcceptanceExpectation(record.value.expectation, `${path}.expectation`);
   if (!expectation.ok) return failure([expectation.error]);
-  if (!owesAcceptance(expectation.value)) {
-    return failure([`${path} must be absent when the gate owes no contract anything`]);
-  }
   if (!Array.isArray(record.value.facts)) return failure([`${path}.facts must be an array`]);
   const facts: AcceptanceReportFacts[] = [];
   for (const [index, entry] of record.value.facts.entries()) {
@@ -797,7 +783,10 @@ function parseAcceptanceObservation(raw: unknown, path: string): Parsed<Acceptan
   }
   const checkIds = facts.map(({ checkId }) => checkId);
   if (new Set(checkIds).size !== checkIds.length) return failure([`${path}.facts names a check more than once`]);
-  return success(freeze({ expectation: expectation.value, facts: freezeArray(facts) }));
+  const observation = acceptanceObservation(expectation.value, facts);
+  return observation === undefined
+    ? failure([`${path} must be absent when the gate owes no contract anything`])
+    : success(observation);
 }
 
 /** The optional `acceptance` field of a result or receipt envelope. */
@@ -818,7 +807,6 @@ function unboundFactChecks(
     return report?.kind === "produced" && report.digest === reportDigest ? [] : [checkId];
   });
 }
-
 
 function parseAcceptedChecks(
   raw: unknown,
@@ -937,17 +925,15 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
   return total(() => {
     const acceptance = parseOptionalAcceptance(raw, "acceptedReceipt");
     if (!acceptance.ok) return acceptance;
-    // One judgment decides both which non-zero exits are excused and whether
-    // the receipt records failures it could never have been accepted with.
-    const judgment = acceptance.value === undefined
-      ? null
-      : judgeAcceptance(acceptance.value.expectation, acceptance.value.facts);
-    const excused: ReadonlySet<string> = new Set(judgment?.excusedCheckIds ?? []);
+    // The receipt proves itself: its own recorded observation decides which
+    // non-zero exits are excused and whether it carries failures it could
+    // never have been accepted with.
+    const verdict = recordedAcceptanceVerdict(acceptance.value);
     const envelope = parseExactWaveCompletionEnvelope(raw, {
       path: "acceptedReceipt",
       expectedKind: "accepted-wave-completion-suite",
       extraFields: ["resultDigest"],
-      parseChecks: (checks, path) => parseAcceptedChecks(checks, path, excused),
+      parseChecks: (checks, path) => parseAcceptedChecks(checks, path, verdict.excused),
       parseExtra: (record, path) => {
         const resultDigest = parseDigest(record.resultDigest, `${path}.resultDigest`);
         return resultDigest.ok
@@ -962,7 +948,7 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
     if (acceptance.value !== undefined) {
       const unbound = unboundFactChecks(envelope.value.checks, acceptance.value.facts);
       if (unbound.length > 0) return failure([`acceptedReceipt.acceptance facts are unbound for ${unbound.join(", ")}`]);
-      if (judgment !== null && judgment.failures.length > 0) {
+      if (verdict.failures.length > 0) {
         return failure(["acceptedReceipt.acceptance records failures an accepted receipt cannot carry"]);
       }
     }
@@ -1135,8 +1121,7 @@ export function evaluateWaveCompletionSuite(
 
   const infrastructureFailures: CompletionInfrastructureFailure[] = [];
   const semanticFailures: CompletionSemanticFailure[] = [];
-  const judgment = judgeAcceptance(recordedExpectation, recorded?.facts ?? []);
-  const excused = new Set(judgment.excusedCheckIds);
+  const verdict = recordedAcceptanceVerdict(recorded);
   if (authorityFailures.length === 0) {
     for (const resultCheck of result.value.checks) {
       const expected = expectedById.get(resultCheck.checkId)!;
@@ -1149,7 +1134,7 @@ export function evaluateWaveCompletionSuite(
           if (outcome.signal !== null) {
             semanticFailures.push(freeze({ kind: "signal-termination", checkId: resultCheck.checkId, signal: outcome.signal }));
           }
-          if (outcome.exitCode !== null && outcome.exitCode !== 0 && !excused.has(resultCheck.checkId)) {
+          if (outcome.exitCode !== null && outcome.exitCode !== 0 && !verdict.excused.has(resultCheck.checkId)) {
             semanticFailures.push(freeze({ kind: "non-zero-exit", checkId: resultCheck.checkId, exitCode: outcome.exitCode }));
           }
           if (outcome.exitCode === null && !outcome.timedOut && outcome.signal === null) {
@@ -1173,11 +1158,11 @@ export function evaluateWaveCompletionSuite(
         })
         .exhaustive();
     }
-    if (judgment.failures.length > 0) {
+    if (verdict.failures.length > 0) {
       semanticFailures.push(freeze({
         kind: "acceptance-rejected",
         checkId: acceptanceCheckId(authority.value, recorded?.facts ?? []),
-        failures: asNonEmpty(freezeArray(judgment.failures)),
+        failures: asNonEmpty(freezeArray(verdict.failures)),
       }));
     }
   }

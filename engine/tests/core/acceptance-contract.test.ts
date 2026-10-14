@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  ACCEPTANCE_RED_WINDOW,
   acceptanceContractsFromPlan,
   acceptanceExpectation,
+  contractBindingErrors,
+  contractClaimants,
+  contractRole,
   contractWriter,
   frozenPathDrift,
   frozenPaths,
@@ -19,10 +21,12 @@ import {
   type AcceptanceContract,
   type AcceptanceExpectation,
   type AcceptanceReportFacts,
+  type ContractBindingTask,
   type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
 import type { ReportTestcase } from "../../src/core/structured-test-report";
 import type { PlanContract } from "../../src/types";
+import { ACCEPTANCE_RED_WINDOW } from "../../src/core/verification-policy";
 import { digest, seen } from "../fixtures/acceptance-fixtures";
 
 const observations = (entries: readonly (readonly [string, FrozenPathObservation])[]): ReadonlyMap<string, FrozenPathObservation> =>
@@ -89,7 +93,16 @@ describe("acceptanceContractsFromPlan — the contract the graph persists", () =
       { id: "T1", wave: 1, file_list: [TYPES], spec_anchors: [] },
       { id: "T2", wave: 1, file_list: [ACCEPTANCE], spec_anchors: [] },
     ]);
-    expect(split).toMatchObject({ ok: false });
+    // Population renders the same typed writer problems plan validation does.
+    expect(split).toEqual({
+      ok: false,
+      error: ["CT-1: frozen paths are written by T1 and T2 — one contract task writes the types file and every acceptance file"],
+    });
+    const unwritten = acceptanceContractsFromPlan([PLAN_CONTRACT], [{ id: "T1", wave: 1, file_list: [TYPES], spec_anchors: [] }]);
+    expect(unwritten).toEqual({
+      ok: false,
+      error: [`CT-1: '${ACCEPTANCE}' is in no task's file_list — decompose must emit the contract task that writes it`],
+    });
     const malformed = acceptanceContractsFromPlan(
       [{ id: "CT-2", title: "X", declaration: { kind: "malformed", problems: [{ kind: "missing-statement" }] } }],
       TASKS,
@@ -102,6 +115,56 @@ describe("redWindowTaskIds — the Tasks a red acceptance suite would fail", () 
   it("covers every Task from the contract Wave through the Wave that completes its last anchor", () => {
     expect([...redWindowTaskIds([contract()], TASKS)].sort()).toEqual(["T1", "T2", "T3"]);
     expect(ACCEPTANCE_RED_WINDOW).toBe("acceptance-red-window");
+  });
+});
+
+describe("contractBindingErrors — the Task graph binds every contract", () => {
+  const view = (id: string, overrides: Partial<ContractBindingTask> = {}): ContractBindingTask =>
+    ({ id, file_list: [], spec_anchors: [], depends_on: [], newTestWaiver: null, ...overrides });
+  const bound = [
+    view("T1", { file_list: [TYPES, ACCEPTANCE] }),
+    view("T2", { spec_anchors: ["AS-003"], depends_on: ["T1"] }),
+    view("T3", { spec_anchors: ["AS-004"], depends_on: ["T2"], newTestWaiver: "covered-by-acceptance-contract" }),
+  ];
+
+  it("accepts a graph where every claimant waits for the contract Task, directly or transitively", () => {
+    expect(contractBindingErrors([PLAN_CONTRACT], bound)).toEqual([]);
+  });
+
+  it("names a claimant that does not wait for the contract Task, and a covered Requirement no Task claims", () => {
+    const errors = contractBindingErrors([PLAN_CONTRACT], [bound[0]!, view("T2", { spec_anchors: ["AS-003"] })]);
+    expect(errors).toEqual([
+      expect.stringContaining("T2 claims AS-003, which CT-1 covers, but does not depend on its contract task T1"),
+      expect.stringContaining("AS-004 is decided by CT-1's acceptance tests but no task claims it"),
+    ]);
+  });
+});
+
+describe("contractRole — the one rule for a Task's part in a contract", () => {
+  const extra = { id: "T5", wave: 2, file_list: ["engine/src/bystander.ts"], spec_anchors: [] } as const;
+  const tasks = [...TASKS, extra];
+
+  it.each([
+    ["the contract Task", "T1", { kind: "contract-task" }],
+    ["a claimant, with the anchors it completes", "T2", { kind: "claimant", anchors: ["AS-003"] }],
+    ["a Task inside the red window", "T5", { kind: "red-window" }],
+    ["a Task after the red window", "T4", { kind: "none" }],
+  ])("names %s", (_name, id, role) => {
+    expect(contractRole(contract(), tasks.find((task) => task.id === id)!, tasks)).toEqual(role);
+  });
+
+  it("agrees with redWindowTaskIds on who runs inside the window", () => {
+    const window = redWindowTaskIds([contract()], tasks);
+    for (const task of tasks) {
+      expect(contractRole(contract(), task, tasks).kind !== "none").toBe(window.has(task.id));
+    }
+  });
+
+  it("agrees with contractClaimants on who is a claimant", () => {
+    const claimants = new Set(contractClaimants(contract(), tasks).map(({ id }) => id));
+    for (const task of tasks) {
+      expect(contractRole(contract(), task, tasks).kind === "claimant").toBe(claimants.has(task.id));
+    }
   });
 });
 
@@ -327,6 +390,19 @@ describe("wire parsers — contracts and report facts round-trip exactly", () =>
     expect(parseAcceptanceContracts([{ ...contract(), surplus: true }])).toMatchObject({ ok: false });
     expect(parseAcceptanceContracts([contract(), contract()])).toMatchObject({ ok: false });
     expect(parseAcceptanceContracts([{ ...contract(), freeze: { state: "frozen", wave: 1, paths: [], roster: ROSTER } }])).toMatchObject({ ok: false });
+  });
+
+  it("refuses an anchor named twice in an acceptance file or a roster entry, as the plan grammar does", () => {
+    const twiceInFile = { ...contract(), acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003", "AS-003", "AS-004"] }] };
+    expect(parseAcceptanceContracts([twiceInFile])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("anchors names an anchor more than once"),
+    });
+    const twiceInRoster = contract({ ...FROZEN, roster: [{ ...ROSTER[0], anchors: ["AS-003", "AS-003"] }, ROSTER[1]] });
+    expect(parseAcceptanceContracts([twiceInRoster])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("anchors names an anchor more than once"),
+    });
   });
 
   it("round-trips projected and unprojectable facts", () => {

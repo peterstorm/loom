@@ -151,10 +151,20 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",
-  // Acceptance Contracts (G1): the plan shapes types.ts re-exports, the Wave
-  // Gate's RED/GREEN judgment and the freeze, plus the path-matching leaf they
-  // share with plan validation.
-  "engine/src/core/acceptance-contract.ts",
+  // Acceptance Contracts: every acceptance-contract/ module (the plan shapes
+  // types.ts re-exports, plan binding, the Wave Gate's RED/GREEN judgment, the
+  // freeze and the persisted parsers), the transitive-dependency rule and the
+  // path-matching leaf they share with plan validation, and the pure Contract
+  // Revision, claimant revalidation and Wave Gate registration transitions.
+  "engine/src/core/acceptance-contract/index.ts",
+  "engine/src/core/acceptance-contract/kernel.ts",
+  "engine/src/core/acceptance-contract/model.ts",
+  "engine/src/core/acceptance-contract/tasks.ts",
+  "engine/src/core/acceptance-contract/gate.ts",
+  "engine/src/core/acceptance-contract/freeze.ts",
+  "engine/src/core/acceptance-contract/wire.ts",
+  "engine/src/core/acceptance-contract/binding.ts",
+  "engine/src/core/task-dependencies.ts",
   "engine/src/core/plan-path-match.ts",
   "engine/src/core/task-revalidation.ts",
   "engine/src/core/contract-revision.ts",

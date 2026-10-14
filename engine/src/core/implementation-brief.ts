@@ -24,9 +24,9 @@ import type { ParsedSpec } from "./parse-spec";
 import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOutputs } from "./predecessor-output";
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
-import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
+import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { invariantRoles } from "./plan-paths";
-import { ACCEPTANCE_RED_WINDOW, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
+import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 
@@ -227,7 +227,7 @@ function invariantOwnership(fileList: readonly string[], invariants: readonly Pl
 
 /** The contract Task's instructions: write the frozen surface and stubs, so
  *  that the contract Wave's gate observes every acceptance testcase RED. */
-function contractTaskBlock(contract: AcceptanceContract): readonly string[] {
+function contractTaskBlock(contract: AcceptanceContract): string {
   return [
     `**${contract.id}: ${contract.title}** — you are its contract Task.`,
     contract.statement,
@@ -244,12 +244,12 @@ function contractTaskBlock(contract: AcceptanceContract): readonly string[] {
     "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.",
     "",
     "Your Wave Gate passes only if every acceptance testcase is collected and fails, and nothing else fails. It then freezes these files: no later Task may change them, and only an operator Contract Revision can. Do not implement the behavior.",
-  ];
+  ].join("\n");
 }
 
 /** A claimant's instructions: the frozen paths are read-only, and the
  *  testcases deciding its claims must pass at its Wave Gate. */
-function claimantBlock(contract: AcceptanceContract, claims: readonly string[]): readonly string[] {
+function claimantBlock(contract: AcceptanceContract, claims: readonly string[]): string {
   const roster = contract.freeze.state === "frozen" ? contract.freeze.roster : [];
   const mine = roster.filter(({ anchors }) => anchors.some((anchor) => claims.includes(anchor)));
   return [
@@ -264,32 +264,37 @@ function claimantBlock(contract: AcceptanceContract, claims: readonly string[]):
           ...mine.map(({ name, file }) => `- \`${name}\` (\`${file}\`)`)].join("\n")
       : `Turn green every acceptance testcase that names ${claims.join(", ")}; your Wave Gate requires them passing.`,
     "Testcases of Requirements completed in later Waves may still fail. If an acceptance test is wrong, stop and report it: only an operator Contract Revision changes a frozen file.",
-  ];
+  ].join("\n");
 }
 
-/** A red-window bystander's note: which pending failures are not its own. */
-function bystanderBlock(contract: AcceptanceContract): readonly string[] {
+/** A red-window bystander's note: which pending failures are not its own. The
+ *  waiver sentence appears only when the engine stamped the waiver — a Task
+ *  that authored its own regression waiver keeps that reason. */
+function bystanderBlock(contract: AcceptanceContract, task: Task): string {
   const files = contract.acceptance.map(({ path }) => `\`${path}\``).join(", ");
-  return [
-    `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
-      `Your regression run is waived for that reason (\`${ACCEPTANCE_RED_WINDOW}\`); the Wave Gate's suite judges everything else. Failures anywhere else are yours to fix.`,
-  ];
+  const regression = taskVerificationPolicy(task).regression;
+  const waived = regression.kind === "waived" && regression.reason === ACCEPTANCE_RED_WINDOW
+    ? `Your regression run is waived for that reason (\`${ACCEPTANCE_RED_WINDOW}\`); the Wave Gate's suite judges everything else.`
+    : "The Wave Gate's suite, which knows which testcases are pending, judges them.";
+  return `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
+    `${waived} Failures anywhere else are yours to fix.`;
 }
 
 /**
- * The Task's role in every Acceptance Contract: its contract Task, a claimant
- * of a Requirement it covers, or a Task inside its red window — each gets the
- * instructions its proof and Wave Gate will hold it to.
+ * The Task's role in every Acceptance Contract — its contract Task, a claimant
+ * of a Requirement it covers, or a Task inside its red window — read from the
+ * one role rule, and the instructions its proof and Wave Gate hold it to.
  */
-function acceptanceContractSection(task: Task, contracts: readonly AcceptanceContract[]): string {
-  const claims = task.spec_anchors ?? [];
-  const policy = taskVerificationPolicy(task);
-  const inRedWindow = policy.regression.kind === "waived" && policy.regression.reason === ACCEPTANCE_RED_WINDOW;
+function acceptanceContractSection(task: Task, contracts: readonly AcceptanceContract[], roster: readonly Task[]): string {
+  const tasks = roster.some(({ id }) => id === task.id) ? roster : [...roster, task];
   const blocks = contracts.flatMap((contract) => {
-    if (contract.contractTask === task.id) return [contractTaskBlock(contract).join("\n")];
-    const claimed = claims.filter((anchor) => coveredAnchors(contract).includes(anchor));
-    if (claimed.length > 0) return [claimantBlock(contract, claimed).join("\n")];
-    return inRedWindow ? [bystanderBlock(contract).join("\n")] : [];
+    const role = contractRole(contract, task, tasks);
+    switch (role.kind) {
+      case "contract-task": return [contractTaskBlock(contract)];
+      case "claimant": return [claimantBlock(contract, role.anchors)];
+      case "red-window": return [bystanderBlock(contract, task)];
+      case "none": return [];
+    }
   });
   return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
 }
@@ -367,7 +372,7 @@ export function renderImplementationBrief(
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
     invariant_ownership: invariantOwnership(task.file_list ?? [], input.invariants),
-    acceptance_contract: acceptanceContractSection(task, input.contracts),
+    acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",
   };

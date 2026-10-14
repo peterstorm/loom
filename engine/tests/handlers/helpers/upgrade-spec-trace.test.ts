@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import upgradeSpecTrace from "../../../src/handlers/helpers/upgrade-spec-trace";
+import upgradeSpecTrace, { createUpgradeSpecTraceHandler } from "../../../src/handlers/helpers/upgrade-spec-trace";
 import { prepareSpecTraceUpgrade } from "../../../src/core/spec-trace-migration";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
@@ -14,6 +14,7 @@ import { installWaveGateRegistration } from "../../../src/core/wave-gate-registr
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
 import { findingId } from "../../fixtures/finding-id";
+import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
@@ -266,6 +267,20 @@ describe("upgrade-spec-trace helper", () => {
     expect(after.spec_trace_version).toBe(2);
     expect(after.tasks[0]?.findings).toEqual([finding]);
     expect(after.orphaned_wave_gate_history?.[0]?.runId).toBe("run.old");
+  });
+
+  it("refuses while a subagent is active, and re-checks under the lock without writing when one appeared", async () => {
+    const { statePath } = fixture();
+    const before = readFileSync(statePath, "utf8");
+    expect(await createUpgradeSpecTraceHandler(() => true)(JSON.stringify(input), [])).toEqual({
+      kind: "error",
+      message: "Spec trace upgrade refused while a subagent is active for this TaskGraph; wait for the exact roster to settle and retry",
+    });
+    const subagent = appearsUnderTheLock();
+    const raced = await createUpgradeSpecTraceHandler(subagent.probe)(JSON.stringify(input), []);
+    expect(raced).toMatchObject({ kind: "error", message: expect.stringContaining("became active before the spec trace upgrade could commit") });
+    expect(subagent.observations()).toBe(2);
+    expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 
   it("keeps default active authority refusal when the retirement flag is absent", async () => {

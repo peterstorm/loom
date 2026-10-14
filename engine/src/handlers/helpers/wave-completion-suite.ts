@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { canonicalJson, type JsonValue } from "../../core/review-packet";
 import {
+  acceptanceObservation,
   frozenPathDrift,
   graphAcceptanceExpectation,
   frozenPathsToObserve,
@@ -12,6 +13,7 @@ import {
   unprojectableFacts,
   type AcceptanceContract,
   type AcceptanceExpectation,
+  type AcceptanceObservation,
 } from "../../core/acceptance-contract";
 import { parseJunitTestcases } from "../../core/structured-test-report";
 import { sha256Bytes } from "../../core/digest";
@@ -24,7 +26,6 @@ import {
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
   parseWaveCompletionSuiteResult,
-  type AcceptanceObservation,
   type AcceptedWaveCompletionReceipt,
   type AuthorizedWaveCompletionCheck,
   type AuthorizedWaveCompletionSuite,
@@ -400,7 +401,7 @@ function observeAcceptance(
     }
     return [observeAcceptanceFacts(expectation, check.checkId, report.digest, parseJunitTestcases(bytes))];
   });
-  return freeze({ expectation, facts: freezeArray(facts) });
+  return acceptanceObservation(expectation, facts);
 }
 
 /** The graph's contracts with what an accepted receipt observed stamped in:

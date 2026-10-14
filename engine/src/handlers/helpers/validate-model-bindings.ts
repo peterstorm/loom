@@ -21,8 +21,10 @@ import { match } from "ts-pattern";
 
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
-import { contractWriter, coveredAnchors, frozenPaths, type ContractWriterProblem } from "../../core/acceptance-contract";
-import type { ContractProblem, OwnershipProblem, PlanContract, PlanInvariant } from "../../types";
+import { contractBindingErrors, type ContractBindingTask } from "../../core/acceptance-contract";
+import { dependsOnAny } from "../../core/task-dependencies";
+import { parseVerificationPolicy, type NewTestWaiverReason } from "../../core/verification-policy";
+import type { OwnershipProblem, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
 import { changesFamily, invariantRoles, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
 import { normalizePlanPath, pathsMatch } from "../../core/plan-path-match";
@@ -83,18 +85,17 @@ type TaskRecord = Readonly<{
   /** Requirement Completion Claims (`spec_anchors`). */
   claims: readonly string[];
   /** The `verification_policy.new_tests` waiver reason, when waived. */
-  newTestWaiver: string | null;
+  newTestWaiver: NewTestWaiverReason | null;
 }>;
 
 const strings = (raw: unknown): readonly string[] =>
   Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : [];
 
-function newTestWaiver(policy: unknown): string | null {
-  if (typeof policy !== "object" || policy === null) return null;
-  const newTests = (policy as Record<string, unknown>).new_tests;
-  if (typeof newTests !== "object" || newTests === null) return null;
-  const { kind, reason } = newTests as Record<string, unknown>;
-  return kind === "waived" && typeof reason === "string" ? reason : null;
+/** The authored new-test waiver, read through the one policy parser; a
+ *  malformed policy waives nothing here, and structural validation reports it. */
+function newTestWaiver(policy: unknown): NewTestWaiverReason | null {
+  const parsed = parseVerificationPolicy(policy);
+  return parsed.ok && parsed.value.newTests.kind === "waived" ? parsed.value.newTests.reason : null;
 }
 
 /** Total over the raw roster: a repair input may carry entries that are not
@@ -107,20 +108,6 @@ function taskRecords(tasks: readonly Record<string, unknown>[]): readonly TaskRe
     claims: strings(t.spec_anchors),
     newTestWaiver: newTestWaiver(t.verification_policy),
   }));
-}
-
-/** Whether `from` depends on any of `targets`, directly or transitively. */
-function dependsOnAny(from: TaskRecord, targets: ReadonlySet<string>, byId: ReadonlyMap<string, TaskRecord>): boolean {
-  const seen = new Set<string>();
-  const queue = [...from.dependsOn];
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (targets.has(id)) return true;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    queue.push(...(byId.get(id)?.dependsOn ?? []));
-  }
-  return false;
 }
 
 /** One Task with the roles its file_list plays in the family under check. */
@@ -190,7 +177,7 @@ function ownerFirstErrors(label: string, roled: readonly RoledTask[]): string[] 
   const byId = new Map(roled.map(({ record }) => [record.id, record] as const));
   return roled.flatMap(({ record, roles }) => {
     const sibling = roles.siblings[0];
-    if (ownerIds.has(record.id) || sibling === undefined || dependsOnAny(record, ownerIds, byId)) return [];
+    if (ownerIds.has(record.id) || sibling === undefined || dependsOnAny(record.dependsOn, ownerIds, (id) => byId.get(id)?.dependsOn ?? [])) return [];
     return [
       `${label}: ${record.id} changes sibling entry point '${sibling.path}' but does not reach the owner module's task — ` +
         `it must depend on ${[...ownerIds].join(" or ")}, directly or transitively, so the owner exists before its callers`,
@@ -225,102 +212,10 @@ function ownershipErrors(
   ];
 }
 
-function renderContractProblem(problem: ContractProblem): string {
-  return match(problem)
-    .with({ kind: "missing-types" }, () =>
-      "no '**Types file:**' declared — name the new declarations-only file consumers import, or 'none' with a '**No types reason:**'")
-    .with({ kind: "none-without-reason" }, () => "'**Types file:** none' needs a '**No types reason:**'")
-    .with({ kind: "reason-with-types-file" }, () => "declares both a types file and a '**No types reason:**' — keep one")
-    .with({ kind: "missing-acceptance" }, () =>
-      "no '**Acceptance tests:**' listed — a contract freezes at least one '- path — AS-n' acceptance file")
-    .with({ kind: "malformed-acceptance" }, ({ line }) => `acceptance line '${line}' is not '- path — FR-n, AS-n'`)
-    .with({ kind: "invalid-anchor" }, ({ path, anchor }) =>
-      `'${path}' names '${anchor}', which a test cannot decide — list only FR-n and AS-n Requirements`)
-    .with({ kind: "duplicate-acceptance" }, ({ path }) => `'${path}' is listed twice under '**Acceptance tests:**'`)
-    .with({ kind: "supported-domain-not-acceptance" }, ({ path }) =>
-      `'**Supported domain:** ${path}' is not one of the acceptance files`)
-    .with({ kind: "unsafe-path" }, ({ path }) =>
-      `'${path}' is not a repository-relative path — a frozen path may not be absolute or contain '..'`)
-    .with({ kind: "missing-statement" }, () => "no '**Statement:**' — say what consumers rely on and what is refused")
-    .exhaustive();
-}
-
-const COVERED_BY_CONTRACT = "covered-by-acceptance-contract";
-
-function renderWriterProblem(problem: ContractWriterProblem): string {
-  return match(problem)
-    .with({ kind: "unwritten" }, ({ path }) => `'${path}' is in no task's file_list — decompose must emit the contract task that writes it`)
-    .with({ kind: "shared" }, ({ path, taskIds }) =>
-      `'${path}' is in the file_list of ${taskIds.join(" and ")} — a frozen path has exactly one writer, the contract task`)
-    .with({ kind: "split" }, ({ taskIds }) =>
-      `frozen paths are written by ${taskIds.join(" and ")} — one contract task writes the types file and every acceptance file`)
-    .exhaustive();
-}
-
-/** A declared contract whose frozen paths have exactly one writer: its contract Task. */
-type ResolvedContract = Readonly<{ contractTask: string; covered: readonly string[] }>;
-
-/**
- * Contract checks: one contract Task writes every frozen path and nothing else
- * writes any; the contract Task claims none of the Requirements its red tests
- * decide; every covered Requirement is claimed, and every claimant waits for
- * the contract Task; no path is frozen twice; and the contract new-test waiver
- * is admitted only on a claimant of a contract it depends on.
- */
-function contractErrors(contracts: readonly PlanContract[], tasks: readonly Record<string, unknown>[]): string[] {
-  const records = taskRecords(tasks);
-  const byId = new Map(records.map((record) => [record.id, record] as const));
-  const errors: string[] = [];
-  const frozenBy = new Map<string, string>();
-  const resolved: ResolvedContract[] = [];
-  for (const contract of contracts) {
-    const label = `${contract.id} ("${contract.title}")`;
-    const declaration = contract.declaration;
-    if (declaration.kind === "malformed") {
-      errors.push(...declaration.problems.map((problem) => `${label}: ${renderContractProblem(problem)}`));
-      continue;
-    }
-    const paths = frozenPaths(declaration);
-    for (const path of paths) {
-      const key = normalizePlanPath(path);
-      const earlier = frozenBy.get(key);
-      if (earlier === undefined) frozenBy.set(key, contract.id);
-      else errors.push(`${label}: '${key}' is frozen by ${earlier} and ${contract.id} — a frozen path belongs to one contract`);
-    }
-    const writer = contractWriter(paths, records.map(({ id, files }) => ({ id, file_list: files })));
-    if (!writer.ok) {
-      errors.push(...writer.error.map((problem) => `${label}: ${renderWriterProblem(problem)}`));
-      continue;
-    }
-    const contractTask = writer.value;
-    const covered = coveredAnchors(declaration);
-    resolved.push({ contractTask, covered });
-    const contractRecord = byId.get(contractTask)!;
-    for (const anchor of covered) {
-      if (contractRecord.claims.includes(anchor)) {
-        errors.push(`${label}: ${contractTask} is ${contract.id}'s contract task but claims ${anchor} in spec_anchors — its tests ` +
-          "are red by design; list it in spec_contributions and let the task that turns it green claim it");
-      }
-      const claimants = records.filter(({ id, claims }) => id !== contractTask && claims.includes(anchor));
-      if (claimants.length === 0) {
-        errors.push(`${label}: ${anchor} is decided by ${contract.id}'s acceptance tests but no task claims it in spec_anchors — nothing would turn it green`);
-      }
-      for (const claimant of claimants) {
-        if (!dependsOnAny(claimant, new Set([contractTask]), byId)) {
-          errors.push(`${label}: ${claimant.id} claims ${anchor}, which ${contract.id} covers, but does not depend on its ` +
-            `contract task ${contractTask}, directly or transitively`);
-        }
-      }
-    }
-  }
-  for (const record of records.filter(({ newTestWaiver: reason }) => reason === COVERED_BY_CONTRACT)) {
-    const covering = resolved.some(({ contractTask, covered }) =>
-      record.claims.some((anchor) => covered.includes(anchor)) && dependsOnAny(record, new Set([contractTask]), byId));
-    if (!covering) {
-      errors.push(`${record.id} waives new tests as ${COVERED_BY_CONTRACT} but claims no Requirement a contract it depends on covers`);
-    }
-  }
-  return errors;
+/** The raw roster narrowed to what contract binding reads. */
+function contractBindingTasks(tasks: readonly Record<string, unknown>[]): readonly ContractBindingTask[] {
+  return taskRecords(tasks).map(({ id, files, dependsOn, claims, newTestWaiver: waiver }) =>
+    ({ id, file_list: files, spec_anchors: claims, depends_on: dependsOn, newTestWaiver: waiver }));
 }
 
 export function validateModelBindings(
@@ -448,7 +343,7 @@ export function validateModelBindings(
 
   for (const inv of models.invariants) errors.push(...ownershipErrors(inv, tasks, deps));
 
-  errors.push(...contractErrors(models.contracts, tasks));
+  errors.push(...contractBindingErrors(models.contracts, contractBindingTasks(tasks)));
 
   return errors.length === 0 ? ok() : fail(errors);
 }

@@ -381,17 +381,34 @@ describe("renderImplementationBrief", () => {
       expect(section).toContain("only an operator Contract Revision changes a frozen file");
     });
 
+    // T3 writes CT-1 in Wave 1 and T6 completes AS-001 in Wave 3, so a Wave 2 Task runs inside the red window.
+    const WINDOW_ROSTER: readonly Task[] = [
+      ...ROSTER,
+      task({ id: "T6", wave: 3, depends_on: ["T3"], spec_anchors: ["AS-001"], spec_contributions: [], file_list: ["engine/src/t6.ts"] }),
+    ];
+    const bystanderTask = (regressionReason: "acceptance-red-window" | "documentation-only") => task({
+      spec_anchors: [], spec_contributions: [], file_list: ["engine/src/other.ts"],
+      verification_policy: {
+        regression: { kind: "waived", reason: regressionReason },
+        new_tests: { kind: "required" },
+      },
+    });
+
     it("tells a red-window bystander which pending failures are not its own", () => {
-      const bystander = task({
-        spec_anchors: [], spec_contributions: [], file_list: ["engine/src/other.ts"],
-        verification_policy: {
-          regression: { kind: "waived", reason: "acceptance-red-window" },
-          new_tests: { kind: "required" },
-        },
-      });
-      const section = render(bystander, [FROZEN_CONTRACT]);
+      const section = render(bystanderTask("acceptance-red-window"), [FROZEN_CONTRACT], WINDOW_ROSTER);
       expect(section).toContain("**CT-1: Brief rendering contract** — its acceptance testcases in `engine/tests/acceptance/brief.acceptance.test.ts` may still fail");
+      expect(section).toContain("Your regression run is waived for that reason (`acceptance-red-window`)");
       expect(section).toContain("Failures anywhere else are yours to fix.");
+    });
+
+    it("gives the bystander note to a Task in the window that authored its own regression waiver, without claiming the engine's", () => {
+      const section = render(bystanderTask("documentation-only"), [FROZEN_CONTRACT], WINDOW_ROSTER);
+      expect(section).toContain("may still fail in a full-suite run");
+      expect(section).not.toContain("Your regression run is waived");
+    });
+
+    it("says nothing to a Task outside the red window", () => {
+      expect(render(bystanderTask("documentation-only"), [FROZEN_CONTRACT], ROSTER)).toBe(NO_ACCEPTANCE_CONTRACT);
     });
   });
 

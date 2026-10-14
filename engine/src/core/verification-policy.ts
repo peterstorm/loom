@@ -4,6 +4,10 @@ const AUTHORED_REGRESSION_WAIVER_REASONS = [
   "documentation-only",
   "generated-artifact",
 ] as const;
+
+/** The engine-only regression waiver stamped on red-window Tasks. */
+export const ACCEPTANCE_RED_WINDOW = "acceptance-red-window" as const;
+
 /**
  * Engine-only reasons: population stamps `acceptance-red-window` on a Task
  * whose full-suite run would see a contract's still-pending acceptance
@@ -13,18 +17,20 @@ const AUTHORED_REGRESSION_WAIVER_REASONS = [
 export const REGRESSION_WAIVER_REASONS = [
   ...AUTHORED_REGRESSION_WAIVER_REASONS,
   "legacy-new-tests-required-false",
-  "acceptance-red-window",
+  ACCEPTANCE_RED_WINDOW,
 ] as const;
 export type RegressionWaiverReason = (typeof REGRESSION_WAIVER_REASONS)[number];
 
 /** `covered-by-acceptance-contract`: the Task completes Requirements a frozen
  *  contract's acceptance tests decide, so those are its new tests; plan
  *  validation admits it only on a claimant of a contract it depends on. */
+export const COVERED_BY_ACCEPTANCE_CONTRACT = "covered-by-acceptance-contract" as const;
+
 const AUTHORED_NEW_TEST_WAIVER_REASONS = [
   "existing-tests-sufficient",
   "documentation-only",
   "generated-artifact",
-  "covered-by-acceptance-contract",
+  COVERED_BY_ACCEPTANCE_CONTRACT,
 ] as const;
 export const NEW_TEST_WAIVER_REASONS = [
   ...AUTHORED_NEW_TEST_WAIVER_REASONS,

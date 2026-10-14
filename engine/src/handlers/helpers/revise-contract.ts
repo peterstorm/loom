@@ -12,6 +12,7 @@ import { anyActiveSubagent } from "../../machine/ledger";
 import { frozenPathsToObserve } from "../../core/acceptance-contract";
 import { parseContractRevisionArgs, reviseAcceptanceContract, type RevisedContract } from "../../core/contract-revision";
 import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
+import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
 import { resolveCanonicalGitRepositoryRoot } from "../../utils/workspace-digest";
 
 function outcomeMessage({ contract, revision }: RevisedContract): string {
@@ -22,43 +23,41 @@ function outcomeMessage({ contract, revision }: RevisedContract): string {
     "The next Wave Gate re-records its acceptance roster green.\n";
 }
 
-const handler: HookHandler = async (_stdin, args) => {
-  const request = parseContractRevisionArgs(args);
-  if (!request.ok) return { kind: "error", message: request.error };
+const OPERATION = "Contract Revision";
 
-  const statePath = taskGraphPath();
-  const manager = StateManager.fromPath(statePath);
-  if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
-  if (anyActiveSubagent(statePath)) {
-    return {
-      kind: "error",
-      message: "Contract Revision refused while a subagent is active for this TaskGraph; wait for it to settle and retry",
-    };
-  }
-  const repository = resolveCanonicalGitRepositoryRoot(dirname(resolve(manager.getPath())));
-  if (!repository.ok) {
-    const reason = "message" in repository.error ? repository.error.message : repository.error.kind;
-    return { kind: "error", message: `Contract Revision needs the TaskGraph's Git repository: ${reason}` };
-  }
+export function createReviseContractHandler(subagentActive: SubagentActivity = anyActiveSubagent): HookHandler {
+  return async (_stdin, args) => {
+    const request = parseContractRevisionArgs(args);
+    if (!request.ok) return { kind: "error", message: request.error };
 
-  try {
-    // Observed before the lock, like the Wave Gate's stamp: the locked
-    // transform reads no mutable bytes, and refuses as stale if the contracts
-    // under the lock name a path this observation never read.
-    const observations = observeFrozenDigests(repository.value, frozenPathsToObserve(manager.load().acceptance_contracts ?? []));
-    const outcome = await manager.updateAndReturn((locked) => {
-      if (anyActiveSubagent(statePath)) {
-        throw new Error("A subagent became active before the Contract Revision could commit");
-      }
-      const revised = reviseAcceptanceContract(locked, request.value, observations);
-      if (!revised.ok) throw new Error(revised.error.message);
-      return { state: revised.value.graph, value: revised.value };
-    });
-    process.stderr.write(outcomeMessage(outcome));
-    return { kind: "passthrough" };
-  } catch (error) {
-    return { kind: "error", message: error instanceof Error ? error.message : String(error) };
-  }
-};
+    const statePath = taskGraphPath();
+    const manager = StateManager.fromPath(statePath);
+    if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
+    const refusal = subagentActiveRefusal(subagentActive, statePath, OPERATION);
+    if (refusal !== null) return { kind: "error", message: refusal };
+    const repository = resolveCanonicalGitRepositoryRoot(dirname(resolve(manager.getPath())));
+    if (!repository.ok) {
+      const reason = "message" in repository.error ? repository.error.message : repository.error.kind;
+      return { kind: "error", message: `Contract Revision needs the TaskGraph's Git repository: ${reason}` };
+    }
 
-export default handler;
+    try {
+      // Observed before the lock, like the Wave Gate's stamp: the locked
+      // transform reads no mutable bytes, and refuses as stale if the contracts
+      // under the lock name a path this observation never read.
+      const observations = observeFrozenDigests(repository.value, frozenPathsToObserve(manager.load().acceptance_contracts ?? []));
+      const outcome = await manager.updateAndReturn((locked) => {
+        assertQuiescentUnderLock(subagentActive, statePath, OPERATION);
+        const revised = reviseAcceptanceContract(locked, request.value, observations);
+        if (!revised.ok) throw new Error(revised.error.message);
+        return { state: revised.value.graph, value: revised.value };
+      });
+      process.stderr.write(outcomeMessage(outcome));
+      return { kind: "passthrough" };
+    } catch (error) {
+      return { kind: "error", message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+}
+
+export default createReviseContractHandler();
