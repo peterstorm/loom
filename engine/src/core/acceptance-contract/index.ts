@@ -92,3 +92,8 @@ export {
 } from "./freeze";
 export { parseAcceptanceContracts, parseAcceptanceExpectation, parseAcceptanceReportFacts } from "./wire";
 export { contractBindingErrors, type ContractBindingTask } from "./binding";
+export {
+  pendingFreezeAdvisories,
+  renderPendingFreezeAdvisories,
+  type PendingFreezeAdvisory,
+} from "./freeze-notice";

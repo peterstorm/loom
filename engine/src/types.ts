@@ -762,6 +762,9 @@ export type StatusReasonKind =
   | "review-evidence-failure"
   | "refutation-required"
   | "advisory-decision-required"
+  /** Some of the awaited advisories touch files this Wave Gate's Acceptance
+   *  Freeze stamps on completion: approving freezes them as they are. */
+  | "acceptance-freeze-pending"
   | "review-spawn-required"
   | "blocked-diagnostic"
   | "engine-resume-required"

@@ -260,7 +260,11 @@ them, and only then do other tasks write the code that turns them green.
    nothing outside the acceptance files may fail. Each testcase must name a
    covered Requirement, and each covered Requirement must have a testcase. The
    accepted gate stamps the **Acceptance Freeze**: the sha256 of every frozen
-   path and the roster of testcases it observed red.
+   path and the roster of testcases it observed red. The stamp lands at
+   completion, after the advisory decision, so status lists the advisories on
+   frozen paths at that pause (`acceptance-freeze-pending`). Fix the relevant
+   ones by re-dispatching the contract Task before approving; afterwards, only
+   a Contract Revision can change those bytes.
 3. **Red window.** A testcase is *pending* until the Wave completing all its
    Requirements, and *due* from then on. A pending testcase's failure is
    excused only at the Wave Gate — never in a task's own run. So every task

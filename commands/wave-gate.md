@@ -85,6 +85,13 @@ lint and completion. To act on an advisory instead, do not decide: `abandon` the
 run with a reason, re-dispatch the affected Task to fix it, and start a fresh
 Wave Gate.
 
+At a contract Wave's pause, read `helper orchestration status` before deciding.
+An `acceptance-freeze-pending` reason names every advisory on a file this
+gate's Acceptance Freeze stamps when it completes. Approving freezes those files
+as they are, and changing them afterwards needs a Contract Revision. So present
+those advisories first, and fix the relevant ones by re-dispatching the contract
+Task before approving.
+
 Resume is idempotent. Pi and Claude persist exact native-id/request bindings and
 raw final bytes directly into engine-declared slots. Never write transcripts,
 build manifests, select models, tally findings, mutate the protected State File,

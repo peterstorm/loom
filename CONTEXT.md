@@ -441,7 +441,7 @@ The production file an **Acceptance Contract**'s tests reach the code through �
 _Avoid_: Entry point (alone — collides with **Sibling Entry Point**)
 
 **Acceptance Freeze**:
-What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift.
+What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift. Because the stamp lands when the contract Wave's gate completes, after its advisory decision, status names the advisories on frozen paths at that pause (`acceptance-freeze-pending`): they can still be fixed by re-dispatching the contract Task, but only by a **Contract Revision** after approval.
 _Avoid_: Snapshot, lock, baseline
 
 **Red Window**:

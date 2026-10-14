@@ -51,6 +51,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { deriveWaveAdvisoryNextAction } from "./wave-gate-preparation";
+import { pendingFreezeAdvisories, renderPendingFreezeAdvisories } from "./acceptance-contract";
 import {
   deriveFindingCounts,
   deriveTestReadiness,
@@ -237,11 +238,23 @@ function nextActionReason(
   return statusReason("run-complete", `Wave Gate run ${action.runId} is complete`);
 }
 
+/**
+ * At the advisory pause, the advisories that touch files this gate's
+ * Acceptance Freeze stamps on completion: the decision freezes them, so the
+ * operator must see that before approving. Empty at every other stage.
+ */
+function acceptanceFreezeReasons(snapshot: WaveReadinessSnapshot): readonly StatusReason[] {
+  if (snapshot.nextActionAuthority?.kind !== "advisory-decision") return [];
+  const pending = pendingFreezeAdvisories(snapshot.graph.acceptance_contracts ?? [], snapshot.graph.tasks, snapshot.wave);
+  return pending.length === 0 ? [] : [statusReason("acceptance-freeze-pending", renderPendingFreezeAdvisories(pending))];
+}
+
 /** Exactly one action, selected only from the shared readiness snapshot. A
  * copied/stale proof fails closed even if a caller bypasses deriveWaveReadiness. */
 export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDecision {
   let action: NextActionDecision["action"];
   let actionReason: StatusReason;
+  let freezeReasons: readonly StatusReason[] = [];
   if (!isCanonicalWaveReadiness(snapshot) || !snapshotActionProofIsExact(snapshot)) {
     const message = "Wave next action proof is stale or disconnected from the exact protected snapshot";
     action = invalidAuthorityBlockedAction(snapshot.registration.runId, message);
@@ -249,6 +262,7 @@ export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDec
   } else if (snapshot.nextActionAuthority !== null) {
     action = snapshot.nextActionAuthority.action;
     actionReason = nextActionReason(snapshot.nextActionAuthority, action);
+    freezeReasons = acceptanceFreezeReasons(snapshot);
   } else {
     action = engineResumeAction(snapshot.registration.runId);
     actionReason = statusReason(
@@ -258,7 +272,7 @@ export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDec
   }
   return canonicalRecord({
     action,
-    reasons: Object.freeze([...snapshot.reasons, actionReason]) as NonEmpty<StatusReason>,
+    reasons: Object.freeze([...snapshot.reasons, actionReason, ...freezeReasons]) as NonEmpty<StatusReason>,
   });
 }
 

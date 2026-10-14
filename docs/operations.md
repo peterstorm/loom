@@ -666,6 +666,8 @@ Fix surviving criticals through implementation Agents, which increments Review G
 
 Present the advisories the engine's request references. The only decision a Wave Gate records is exactly `{"kind":"approve"}` through `decide`; any other object is refused without writing. To fix an advisory first, `abandon` the run with a reason, re-dispatch the Task, and start a fresh Wave Gate. Do not classify advisories silently in parent reasoning.
 
+In a contract Wave, `helper orchestration status` adds an `acceptance-freeze-pending` reason at this pause. It lists every advisory whose file is a frozen path of a contract still `awaiting-red` there. Approval lets the gate complete and stamp the Acceptance Freeze over those bytes, so after it each fix needs a Contract Revision. Fix a relevant advisory before approving: abandon the run, re-dispatch the contract Task, and start a fresh Wave Gate. The reason is a status projection only; the decision request and its identity are unchanged.
+
 ### Pi reports runtime version skew
 
 Do not repair state. The mutating CLI route compared the Runtime Revision published by Pi's loaded extension with the current checkout and refused before writing. Run `/reload` (or fully restart Pi while preserving the session), then retry the same idempotent operation. Canonical `orchestration status` remains available during skew.
