@@ -243,7 +243,8 @@ them, and only then do other tasks write the code that turns them green.
   reach the code through: a route, a handler, a CLI command. Not a frozen path.
   Plan validation refuses a Task that claims a covered Requirement but neither
   writes the entry point nor depends, directly or transitively, on a Task that
-  does — its tests could not pass before the entry point exists. Declare it
+  does — its tests could not pass before the entry point exists. The contract
+  Task never counts as its writer (it lists at most a stub). Declare it
   whenever the tests drive the code through something a later Task builds.
 - `**Statement:**` — the observable behavior, and what is refused.
 

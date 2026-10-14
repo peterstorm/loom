@@ -56,6 +56,10 @@ function renderContractProblem(problem: ContractProblem): string {
  * claimant that runs before the entry point exists is told to turn green tests
  * it cannot reach. Each claimant must write the entry point itself or wait,
  * directly or transitively, for a Task that does.
+ *
+ * The contract Task is never a writer: what it lists there is at most a
+ * compiling stub, not the production entry point, and every claimant already
+ * waits for it — counting it would make the rule vacuous.
  */
 function entryPointErrors(
   label: string,
@@ -66,11 +70,12 @@ function entryPointErrors(
   waitsForAny: (task: ContractBindingTask, ids: ReadonlySet<string>) => boolean,
 ): readonly string[] {
   const writers = new Set(tasks
-    .filter((task) => task.file_list.some((file) => artifactCovers(normalizePlanPath(file), entryPoint)))
+    .filter((task) => task.id !== contractTask &&
+      task.file_list.some((file) => artifactCovers(normalizePlanPath(file), entryPoint)))
     .map(({ id }) => id));
   if (writers.size === 0) {
-    return [`${label}: entry point '${entryPoint}' is in no task's file_list — decompose must emit the task that builds ` +
-      "what the acceptance tests drive"];
+    return [`${label}: entry point '${entryPoint}' is in no task's file_list other than the contract task's — decompose ` +
+      "must emit the task that builds what the acceptance tests drive"];
   }
   return tasks.flatMap((task) => {
     const anchors = task.id === contractTask ? [] : task.spec_anchors.filter((anchor) => covered.includes(anchor));

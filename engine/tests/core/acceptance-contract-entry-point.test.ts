@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { contractBindingErrors, type ContractBindingTask } from "../../src/core/acceptance-contract";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { acceptanceContractsFromPlan, contractBindingErrors, type ContractBindingTask } from "../../src/core/acceptance-contract";
+import validateTaskGraph from "../../src/handlers/helpers/validate-task-graph";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import type { PlanContract } from "../../src/types";
 
@@ -121,5 +125,79 @@ describe("contractBindingErrors — claimants wait for the entry point", () => {
         const errors = contractBindingErrors([CONTRACT], chain);
         expect(errors.some((error) => error.includes("neither writes the entry point"))).toBe(claimantAt < writerAt);
       }));
+  });
+});
+
+describe("the entry point never counts the contract Task as its writer", () => {
+  it("names a claimant that waits only for a contract-Task stub of the entry point", () => {
+    // Every claimant already waits for the contract Task, so a stub it lists
+    // would satisfy the rule vacuously; the production writer is T3.
+    const tasks = [
+      view("T1", { file_list: [TYPES, ACCEPTANCE, ROUTE] }),
+      view("T2", { spec_anchors: ["AS-003"], depends_on: ["T1"] }),
+      view("T3", { spec_anchors: ["AS-004"], depends_on: ["T1"], file_list: [ROUTE] }),
+    ];
+    expect(contractBindingErrors([CONTRACT], tasks)).toEqual([
+      expect.stringContaining(`T2 claims AS-003 but neither writes the entry point '${ROUTE}' nor depends on T3`),
+    ]);
+  });
+
+  it("refuses an entry point only the contract Task lists", () => {
+    const tasks = [
+      view("T1", { file_list: [TYPES, ACCEPTANCE, ROUTE] }),
+      view("T2", { spec_anchors: ["AS-003", "AS-004"], depends_on: ["T1"] }),
+    ];
+    expect(contractBindingErrors([CONTRACT], tasks)).toEqual([
+      expect.stringContaining(`entry point '${ROUTE}' is in no task's file_list other than the contract task's`),
+    ]);
+  });
+});
+
+describe("the entry point is plan-only", () => {
+  it("never reaches the persisted Acceptance Contract", () => {
+    const built = acceptanceContractsFromPlan([CONTRACT], [{ id: "T1", wave: 1, file_list: [TYPES, ACCEPTANCE], spec_anchors: [] }]);
+    expect(built.ok).toBe(true);
+    if (built.ok) expect(built.value[0]).not.toHaveProperty("entryPoint");
+  });
+});
+
+describe("validate-task-graph reaches the entry-point rule from a plan on disk", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const PLAN = [
+    "# Plan", "", "## Contracts", "", "### CT-1: Payload ingestion", "",
+    `**Types file:** \`${TYPES}\``,
+    "**Acceptance tests:**",
+    `- \`${ACCEPTANCE}\` — AS-003, AS-004`,
+    `**Entry point:** \`${ROUTE}\``,
+    "**Statement:** One valid call wins.", "",
+  ].join("\n");
+
+  const graphTask = (id: string, wave: number, fileList: string[], anchors: string[], dependsOn: string[]) => ({
+    id, description: id, agent: "code-implementer-agent", wave, status: "pending", depends_on: dependsOn,
+    spec_anchors: anchors, new_tests_required: true, plan_context: "", file_list: fileList,
+  });
+
+  it("refuses the pilot's T2 through the real handler", async () => {
+    const dir = canonicalTempDir("loom-entry-point-");
+    dirs.push(dir);
+    const planFile = join(dir, "plan.md");
+    writeFileSync(planFile, PLAN);
+    const graph = JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [], plan_title: "t", spec_file: "spec.md", plan_file: planFile,
+      tasks: [
+        graphTask("T1", 1, [TYPES, ACCEPTANCE], [], []),
+        graphTask("T2", 2, ["engine/src/core/payload.ts"], ["AS-003"], ["T1"]),
+        graphTask("T3", 3, [ROUTE], ["AS-004"], ["T2"]),
+      ],
+    });
+    const result = await validateTaskGraph(graph, ["-"]);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toContain(`T2 claims AS-003 but neither writes the entry point '${ROUTE}' nor depends on T3`);
+    }
   });
 });

@@ -11,7 +11,7 @@
  * Options:
  *   --init          Create .claude/linter/rules/ with starter config (interactive)
  *   --tier=full     Run full tier (default: full)
- *   --tier=immediate  Run immediate tier only (regex rules, fast)
+ *   --tier=immediate  Run immediate tier only (regex rules and the import-boundary rules, fast)
  *   --json          Output raw JSON violations
  *   --summary       Show only summary counts
  *   --fix-hints     Show fix hints (default: true)

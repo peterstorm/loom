@@ -1,8 +1,8 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { CANONICAL_SPEC } from "../fixtures/spec-index-fixture";
+import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 import handler from "../../src/handlers/helpers/validate-task-graph";
 import populate from "../../src/handlers/helpers/populate-task-graph";
 import {
@@ -695,12 +695,10 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
 
   /** A decompose payload over a canonical specification written beside the plan. */
   function decomposeJson(planFile: string, fileList: string[]): string {
-    const specFile = join(dirname(planFile), "spec.md");
-    writeFileSync(specFile, CANONICAL_SPEC);
     return JSON.stringify({
       spec_trace_version: 2,
       plan_title: "t",
-      spec_file: specFile,
+      spec_file: canonicalSpecBeside(planFile),
       plan_file: planFile,
       tasks: [{
         id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1,

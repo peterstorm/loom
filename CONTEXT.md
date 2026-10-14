@@ -241,7 +241,7 @@ The shared vocabulary between developers and domain experts within a bounded con
 _Avoid_: Glossary (it's more than a glossary — it's the living language of the system)
 
 **Tier**:
-An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits, regex-only, cooperative 50ms per-file deadline) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
+An execution scope that determines which lint rules apply. "Immediate" (PostToolUse after edits: regex rules plus the programmatic rules whose own tier is immediate — the two import-boundary rules — under a cooperative 50ms per-file deadline) or "full" (Wave Gate/explicit scan, all rules including programmatic structural analysis).
 _Avoid_: Level, mode, severity
 
 **Aggregate**:
@@ -437,7 +437,7 @@ The one Task whose `file_list` holds every frozen path of an **Acceptance Contra
 _Avoid_: Test task, scaffolding task
 
 **Contract Entry Point**:
-The production file an **Acceptance Contract**'s tests reach the code through — a route, a handler, a CLI command — declared by the plan's optional `**Entry point:**`. Never a frozen path. Plan binding refuses a claimant of a covered Requirement that neither writes it nor depends, directly or transitively, on a Task that does, because its tests could not pass before it exists. Plan-only: it is not persisted on the contract.
+The production file an **Acceptance Contract**'s tests reach the code through — a route, a handler, a CLI command — declared by the plan's optional `**Entry point:**`. Never a frozen path. Plan binding refuses a claimant of a covered Requirement that neither writes it nor depends, directly or transitively, on a Task that does, because its tests could not pass before it exists. The **Contract Task** never counts as its writer: what it lists there is at most a compiling stub. Plan-only: it is not persisted on the contract.
 _Avoid_: Entry point (alone — collides with **Sibling Entry Point**)
 
 **Acceptance Freeze**:
@@ -476,7 +476,7 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A **Requirement Contribution** never enters Wave Gate completion scope; the **Requirement Completion Claim** does
 - Every **Requirement Contribution** has exactly one same-or-later completion Wave, and none may occur after completion
 - A **Wave Gate** validates all **Tasks** in a **Wave** before the next **Wave** begins
-- A **Tier** determines which lint rules execute: "immediate" runs regex-only after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
+- A **Tier** determines which lint rules execute: "immediate" runs regex rules and the immediate-tier programmatic rules after edits, "full" runs all rules at Wave Gate boundaries or explicit scans
 - An **Agent** executes exactly one **Task** or one **Phase**
 - Every Loom-owned **Agent** resolves one explicit requested **LLM Profile** before spawn; Pi launcher overrides are explicit at the transport boundary
 - An interactive Pi phase **Agent** runs through the **Interactive Phase Transport**; every headless role remains on the normal subagent transport

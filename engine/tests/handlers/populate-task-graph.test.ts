@@ -21,7 +21,7 @@ import {
   freezeVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
-import { CANONICAL_SPEC } from "../fixtures/spec-index-fixture";
+import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 
 /**
  * Exercises the REAL populate-task-graph overwrite guard through the handler's
@@ -125,13 +125,6 @@ const REQUIRED_VERIFICATION = Object.freeze({
   regression: Object.freeze({ kind: "required" as const }),
   new_tests: Object.freeze({ kind: "required" as const }),
 });
-
-/** A canonical specification beside the plan; its path. */
-function canonicalSpecBeside(planFile: string): string {
-  const specFile = join(dirname(planFile), "spec.md");
-  writeFileSync(specFile, CANONICAL_SPEC);
-  return specFile;
-}
 
 /** A decompose payload whose spec is a canonical specification beside the
  *  plan, so population proves its (empty) trace and reaches the guard under test. */

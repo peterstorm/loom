@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadRules, lintFile } from "../../src/linter/index";
-import type { Rule } from "../../src/linter/types";
+import type { LintResult, Rule } from "../../src/linter/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const DEFAULT_RULES_DIR = resolve(__dirname, "../../../lint-rules");
@@ -19,6 +19,16 @@ const cleanup: string[] = [];
 afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+/** Writes `content` as the pilot's core types file and lints it in the immediate tier. */
+function lintCoreFile(content: string): LintResult {
+  const root = canonicalTempDir("immediate-boundary-");
+  cleanup.push(root);
+  const file = join(root, "engine", "src", "core", "contract-status-types.ts");
+  mkdirSync(join(root, "engine", "src", "core"), { recursive: true });
+  writeFileSync(file, content);
+  return lintFile(file, "immediate", DEFAULT_RULES_DIR, null, 5_000);
+}
 
 describe("immediate tier programmatic rules", () => {
   it("are exactly the rules whose own tier is immediate: the two import-boundary rules", () => {
@@ -36,22 +46,18 @@ describe("immediate tier programmatic rules", () => {
     ]));
   });
 
-  it("refuse the pilot's forbidden core/ import when the file is edited", () => {
-    const root = canonicalTempDir("immediate-boundary-");
-    cleanup.push(root);
-    const file = join(root, "engine", "src", "core", "contract-status-types.ts");
-    mkdirSync(join(root, "engine", "src", "core"), { recursive: true });
-    writeFileSync(file, 'import type { ParsedTaskGraph } from "../state-file-wire";\nexport type View = ParsedTaskGraph;\n');
-    const result = lintFile(file, "immediate", DEFAULT_RULES_DIR, null, 5_000);
-    expect(result).toMatchObject({ kind: "violations", violations: [expect.objectContaining({ rule: "no-cross-boundary-imports" })] });
-  });
-
-  it("pass the allowed import the pilot's fix used", () => {
-    const root = canonicalTempDir("immediate-boundary-");
-    cleanup.push(root);
-    const file = join(root, "engine", "src", "core", "contract-status-types.ts");
-    mkdirSync(join(root, "engine", "src", "core"), { recursive: true });
-    writeFileSync(file, 'import type { TaskGraph } from "../types";\nexport type View = TaskGraph;\n');
-    expect(lintFile(file, "immediate", DEFAULT_RULES_DIR, null, 5_000)).toEqual({ kind: "pass" });
+  it.each([
+    {
+      label: "refuse the pilot's forbidden core/ import when the file is edited",
+      content: 'import type { ParsedTaskGraph } from "../state-file-wire";\nexport type View = ParsedTaskGraph;\n',
+      expected: { kind: "violations", violations: [expect.objectContaining({ rule: "no-cross-boundary-imports" })] },
+    },
+    {
+      label: "pass the allowed import the pilot's fix used",
+      content: 'import type { TaskGraph } from "../types";\nexport type View = TaskGraph;\n',
+      expected: { kind: "pass" },
+    },
+  ])("$label", ({ content, expected }) => {
+    expect(lintCoreFile(content)).toMatchObject(expected);
   });
 });

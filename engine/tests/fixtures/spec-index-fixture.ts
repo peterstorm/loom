@@ -4,6 +4,8 @@
  * Requirement trace is proven against the same index population requires.
  */
 
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parseSpec } from "../../src/core/parse-spec";
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
@@ -34,6 +36,14 @@ export const CANONICAL_SPEC = `# Feature: Fixture
 |------|------------|
 | Fixture | A test input |
 `;
+
+/** Writes the canonical specification as `spec.md` beside a plan file; its path.
+ *  The decompose payload names it as `spec_file`, so population proves the trace. */
+export function canonicalSpecBeside(planFile: string): string {
+  const specFile = join(dirname(planFile), "spec.md");
+  writeFileSync(specFile, CANONICAL_SPEC);
+  return specFile;
+}
 
 /** The Spec Index of `source` observed at `path`. */
 export function indexedSpec(path: string, source: string = CANONICAL_SPEC): SpecIndexAvailability {

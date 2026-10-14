@@ -240,7 +240,7 @@ describe("lintFile", () => {
   });
 
   describe("tier filtering", () => {
-    it("immediate tier only loads regex rules", () => {
+    it("immediate tier loads the regex rules", () => {
       const filePath = join(tempDir, "code.ts");
       writeFileSync(filePath, "console.log('test');\n");
 

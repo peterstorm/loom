@@ -9,9 +9,9 @@
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { validateTaskExecution } from "../task-execution";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
-import { firstSpawnVeto, SPAWN_VETOES } from "./spawn-vetoes";
+import { firstSpawnVeto, SPAWN_VETOES, type SpawnVetoEntry } from "./spawn-vetoes";
 
-export function createValidateTaskExecutionHandler(vetoes: typeof SPAWN_VETOES = SPAWN_VETOES): HookHandler {
+export function createValidateTaskExecutionHandler(vetoes: readonly SpawnVetoEntry[] = SPAWN_VETOES): HookHandler {
   return async (stdin) => {
     let input: PreToolUseInput;
     try {

@@ -18,8 +18,11 @@ import validateTemplateSubstitution from "./validate-template-substitution";
 import validateAgentModel from "./validate-agent-model";
 import validateAgentSkill from "./validate-agent-skill";
 
+/** One spawn veto: its hook route name (the hooks.json shim it mirrors) and handler. */
+export type SpawnVetoEntry = Readonly<{ name: string; handler: HookHandler }>;
+
 /** The vetoes in evaluation order, each named as its own hook route. */
-export const SPAWN_VETOES: readonly Readonly<{ name: string; handler: HookHandler }>[] = Object.freeze([
+export const SPAWN_VETOES: readonly SpawnVetoEntry[] = Object.freeze([
   { name: "validate-phase-order", handler: validatePhaseOrder },
   { name: "validate-template-substitution", handler: validateTemplateSubstitution },
   { name: "validate-agent-model", handler: validateAgentModel },
@@ -34,7 +37,7 @@ export type SpawnVeto = Extract<HookResult, { kind: "block" | "error" }>;
  *  already surfaces it. */
 export async function firstSpawnVeto(
   stdin: string,
-  vetoes: readonly Readonly<{ name: string; handler: HookHandler }>[] = SPAWN_VETOES,
+  vetoes: readonly SpawnVetoEntry[] = SPAWN_VETOES,
 ): Promise<SpawnVeto | null> {
   for (const { handler } of vetoes) {
     const result = await handler(stdin, []);

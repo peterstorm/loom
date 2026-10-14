@@ -37,12 +37,6 @@ export function loadRules(
   projectDir: string | null,
   tier: Tier,
   options?: LoadOptions
-): readonly Rule[];
-export function loadRules(
-  defaultDir: string,
-  projectDir: string | null,
-  tier: Tier,
-  options?: LoadOptions
 ): readonly Rule[] {
   // Validate defaultDir exists (installation error if missing)
   if (!existsSync(defaultDir)) {

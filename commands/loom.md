@@ -739,7 +739,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `validate-agent-skill.sh` | PreToolUse: Agent/Task/subagent | Validates agent skill preload |
 | `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch); binds an implementation Agent's exact attempt when its prompt is already on disk, else leaves it pending |
 | `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
-| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
+| `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules plus the import-boundary programmatic rules; the other programmatic rules run at the wave gate) |
 | `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |
 | `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
 | `dispatch.sh` | SubagentStop | Routes to the TS handlers below (`engine/src/handlers/subagent-stop/`) by agent type |

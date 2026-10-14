@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { git, write } from "../fixtures/git-repository";
 import type { TaskGraph } from "../../src/types";
-import { CANONICAL_SPEC } from "../fixtures/spec-index-fixture";
+import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
 
 /**
  * Population's proof boundary: an absent boundary is reported in the
@@ -71,16 +71,10 @@ function project(repository: boolean): Readonly<{ dir: string; statePath: string
 }
 
 /** A decompose payload over a canonical specification written beside the plan. */
-const decompose = (planFile: string): string => {
-  const specFile = join(dirname(planFile), "spec.md");
-  writeFileSync(specFile, CANONICAL_SPEC);
-  return decomposePayload(planFile, specFile);
-};
-
-const decomposePayload = (planFile: string, specFile: string): string => JSON.stringify({
+const decompose = (planFile: string): string => JSON.stringify({
   spec_trace_version: 2,
   plan_title: "t",
-  spec_file: specFile,
+  spec_file: canonicalSpecBeside(planFile),
   plan_file: planFile,
   tasks: [{
     id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],

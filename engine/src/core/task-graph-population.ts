@@ -181,6 +181,8 @@ function specIndexRefusal(
     [...(task.spec_anchors ?? []), ...(task.spec_contributions ?? [])].map((id) => Object.freeze({ taskId: task.id, id })));
   const unproven = unprovenRequirementTrace(specIndex, edges);
   if (unproven === null) return null;
+  // Every other unavailable reason was refused above, so this arm only ever
+  // carries `no-spec-file`: a trace with no spec to prove it against.
   return unproven.kind === "spec-index-unavailable"
     ? reject(
         "spec-index-unavailable",
