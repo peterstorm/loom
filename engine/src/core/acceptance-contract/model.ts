@@ -27,6 +27,7 @@ export type ContractProblem =
   | Readonly<{ kind: "malformed-acceptance"; line: string }>
   | Readonly<{ kind: "invalid-anchor"; path: string; anchor: string }>
   | Readonly<{ kind: "duplicate-acceptance"; path: string }>
+  | Readonly<{ kind: "duplicate-anchor"; path: string; anchor: string }>
   | Readonly<{ kind: "supported-domain-not-acceptance"; path: string }>
   | Readonly<{ kind: "unsafe-path"; path: string }>
   | Readonly<{ kind: "missing-statement" }>;
@@ -105,8 +106,9 @@ export type ContractTaskView = Readonly<{
   spec_anchors?: readonly string[];
 }>;
 
-/** The engine-only regression waiver stamped on red-window Tasks. */
-export const ACCEPTANCE_RED_WINDOW = "acceptance-red-window" as const;
+/** The engine-only regression waiver stamped on red-window Tasks; the
+ *  verification-policy vocabulary owns it. */
+export { ACCEPTANCE_RED_WINDOW } from "../verification-policy";
 
 /** The Requirement ids a contract may cover — only a functional Requirement or
  *  an Acceptance Scenario can be decided by a test, never an Out-of-Scope

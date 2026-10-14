@@ -92,7 +92,16 @@ describe("acceptanceContractsFromPlan — the contract the graph persists", () =
       { id: "T1", wave: 1, file_list: [TYPES], spec_anchors: [] },
       { id: "T2", wave: 1, file_list: [ACCEPTANCE], spec_anchors: [] },
     ]);
-    expect(split).toMatchObject({ ok: false });
+    // Population renders the same typed writer problems plan validation does.
+    expect(split).toEqual({
+      ok: false,
+      error: ["CT-1: frozen paths are written by T1 and T2 — one contract task writes the types file and every acceptance file"],
+    });
+    const unwritten = acceptanceContractsFromPlan([PLAN_CONTRACT], [{ id: "T1", wave: 1, file_list: [TYPES], spec_anchors: [] }]);
+    expect(unwritten).toEqual({
+      ok: false,
+      error: [`CT-1: '${ACCEPTANCE}' is in no task's file_list — decompose must emit the contract task that writes it`],
+    });
     const malformed = acceptanceContractsFromPlan(
       [{ id: "CT-2", title: "X", declaration: { kind: "malformed", problems: [{ kind: "missing-statement" }] } }],
       TASKS,
@@ -373,6 +382,19 @@ describe("wire parsers — contracts and report facts round-trip exactly", () =>
     expect(parseAcceptanceContracts([{ ...contract(), surplus: true }])).toMatchObject({ ok: false });
     expect(parseAcceptanceContracts([contract(), contract()])).toMatchObject({ ok: false });
     expect(parseAcceptanceContracts([{ ...contract(), freeze: { state: "frozen", wave: 1, paths: [], roster: ROSTER } }])).toMatchObject({ ok: false });
+  });
+
+  it("refuses an anchor named twice in an acceptance file or a roster entry, as the plan grammar does", () => {
+    const twiceInFile = { ...contract(), acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003", "AS-003", "AS-004"] }] };
+    expect(parseAcceptanceContracts([twiceInFile])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("anchors names an anchor more than once"),
+    });
+    const twiceInRoster = contract({ ...FROZEN, roster: [{ ...ROSTER[0], anchors: ["AS-003", "AS-003"] }, ROSTER[1]] });
+    expect(parseAcceptanceContracts([twiceInRoster])).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("anchors names an anchor more than once"),
+    });
   });
 
   it("round-trips projected and unprojectable facts", () => {

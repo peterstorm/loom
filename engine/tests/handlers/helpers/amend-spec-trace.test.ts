@@ -20,7 +20,6 @@ const parsedSpec = parseSpec(AMENDMENT_SPEC);
 if (!parsedSpec.ok) throw new Error("fixture spec must parse");
 const FR_002_HASH = parsedSpec.value.frs[1]!.contentHash;
 
-
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
 beforeEach(() => {

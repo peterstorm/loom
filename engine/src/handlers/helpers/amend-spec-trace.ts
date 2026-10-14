@@ -10,6 +10,7 @@ import { StateManager } from "../../state-manager";
 import { anyActiveSubagent } from "../../machine/ledger";
 import { amendSpecTrace, type SpecTraceAmendmentOutcome } from "../../core/spec-trace-amendment";
 import { observeSpecIndex } from "../../orchestration/spec-index-observation";
+import { assertQuiescentUnderLock, subagentActiveRefusal, type SubagentActivity } from "./subagent-quiescence";
 
 function outcomeMessage(outcome: SpecTraceAmendmentOutcome): string {
   if (outcome.kind === "unchanged") return "Spec trace already matches the requested ownership; nothing written\n";
@@ -19,10 +20,7 @@ function outcomeMessage(outcome: SpecTraceAmendmentOutcome): string {
     `Wave ${wave} review authority${retired} retired. Start the Wave Gate to review the amended scope.\n`;
 }
 
-/** The shell's one collaborator besides the State File: whether a subagent is
- *  active for this TaskGraph. Checked before the lock and again under it, so a
- *  subagent that starts in between still refuses the amendment. */
-export type SubagentActivity = (statePath: string) => boolean;
+const OPERATION = "spec trace amendment";
 
 export function createAmendSpecTraceHandler(subagentActive: SubagentActivity = anyActiveSubagent): HookHandler {
   return async (stdin, args) => {
@@ -41,21 +39,15 @@ export function createAmendSpecTraceHandler(subagentActive: SubagentActivity = a
     const statePath = taskGraphPath();
     const manager = StateManager.fromPath(statePath);
     if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
-    if (subagentActive(statePath)) {
-      return {
-        kind: "error",
-        message: "Spec trace amendment refused while a subagent is active for this TaskGraph; wait for it to settle and retry",
-      };
-    }
+    const refusal = subagentActiveRefusal(subagentActive, statePath, OPERATION);
+    if (refusal !== null) return { kind: "error", message: refusal };
 
     try {
       // Observed before the lock, like population: the locked transform reads no
       // mutable source bytes, and the core refuses if spec_file moved meanwhile.
       const specIndex = observeSpecIndex(manager.load().spec_file);
       const outcome = await manager.updateAndReturn((locked) => {
-        if (subagentActive(statePath)) {
-          throw new Error("A subagent became active before the spec trace amendment could commit");
-        }
+        assertQuiescentUnderLock(subagentActive, statePath, OPERATION);
         const amended = amendSpecTrace(locked, input, specIndex);
         if (!amended.ok) throw new Error(amended.error.message);
         return { state: amended.value.graph, value: amended.value };

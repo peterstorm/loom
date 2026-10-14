@@ -342,6 +342,8 @@ function contractAcceptance(block: string): Readonly<{ files: readonly ContractA
     const anchors = item[2]!.split(",").map((anchor) => anchor.trim()).filter((anchor) => anchor !== "");
     problems.push(...anchors.filter((anchor) => !COVERABLE_ANCHOR.test(anchor))
       .map((anchor): ContractProblem => ({ kind: "invalid-anchor", path, anchor })));
+    problems.push(...[...new Set(anchors.filter((anchor, index) => anchors.indexOf(anchor) !== index))]
+      .map((anchor): ContractProblem => ({ kind: "duplicate-anchor", path, anchor })));
     if (seen.has(path)) problems.push({ kind: "duplicate-acceptance", path });
     seen.add(path);
     const [first, ...rest] = anchors.filter((anchor) => COVERABLE_ANCHOR.test(anchor));

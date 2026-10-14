@@ -369,6 +369,11 @@ describe("parsePlanModels", () => {
         ],
       ],
       [
+        "the same anchor twice in one acceptance file",
+        `**Types file:** t.ts\n**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-001, AS-002, AS-001\n${STATEMENT}`,
+        [{ kind: "duplicate-anchor", path: "t/a.acceptance.test.ts", anchor: "AS-001" }],
+      ],
+      [
         "the same acceptance file twice",
         `**Types file:** t.ts\n**Acceptance tests:**\n- t/a.acceptance.test.ts — AS-001\n- ./t/a.acceptance.test.ts — AS-002\n${STATEMENT}`,
         [{ kind: "duplicate-acceptance", path: "t/a.acceptance.test.ts" }],

@@ -15,7 +15,6 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { appearsUnderTheLock } from "../../fixtures/subagent-activity";
 import { completedWaveGateFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
 
-
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
 beforeEach(() => {

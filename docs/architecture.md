@@ -97,7 +97,7 @@ Important parser boundaries include:
 - `state-manager.ts` — parses the complete protected TaskGraph before use;
 - `parsers/parse-phase-artifacts.ts` — derives phase artifacts from completed Agent output;
 - `core/parse-plan-models.ts` — parses exact lifecycle, pipeline, invariant (including ownership), and contract declarations;
-- `core/acceptance-contract/wire.ts` — parses persisted Acceptance Contracts and their freeze, and the acceptance observation a suite receipt carries;
+- `core/acceptance-contract/wire.ts` — parses persisted Acceptance Contracts and their freeze, and the gate expectation and per-check report facts a suite result or receipt records (`core/completion-suite.ts` parses the observation envelope around them);
 - `core/structured-test-report.ts` — projects a strict JUnit report into testcases for acceptance judgment;
 - `core/review-output.ts` and `core/findings.ts` — parse, identify, reconcile, and classify review Findings;
 - `core/review-packet.ts` — parses immutable code-review scope packets;

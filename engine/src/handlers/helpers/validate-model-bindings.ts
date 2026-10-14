@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
 import { contractBindingErrors, type ContractBindingTask } from "../../core/acceptance-contract";
 import { dependsOnAny } from "../../core/task-dependencies";
+import { parseVerificationPolicy, type NewTestWaiverReason } from "../../core/verification-policy";
 import type { OwnershipProblem, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
 import { changesFamily, invariantRoles, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
@@ -84,18 +85,17 @@ type TaskRecord = Readonly<{
   /** Requirement Completion Claims (`spec_anchors`). */
   claims: readonly string[];
   /** The `verification_policy.new_tests` waiver reason, when waived. */
-  newTestWaiver: string | null;
+  newTestWaiver: NewTestWaiverReason | null;
 }>;
 
 const strings = (raw: unknown): readonly string[] =>
   Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : [];
 
-function newTestWaiver(policy: unknown): string | null {
-  if (typeof policy !== "object" || policy === null) return null;
-  const newTests = (policy as Record<string, unknown>).new_tests;
-  if (typeof newTests !== "object" || newTests === null) return null;
-  const { kind, reason } = newTests as Record<string, unknown>;
-  return kind === "waived" && typeof reason === "string" ? reason : null;
+/** The authored new-test waiver, read through the one policy parser; a
+ *  malformed policy waives nothing here, and structural validation reports it. */
+function newTestWaiver(policy: unknown): NewTestWaiverReason | null {
+  const parsed = parseVerificationPolicy(policy);
+  return parsed.ok && parsed.value.newTests.kind === "waived" ? parsed.value.newTests.reason : null;
 }
 
 /** Total over the raw roster: a repair input may carry entries that are not

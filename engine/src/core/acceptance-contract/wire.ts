@@ -63,6 +63,13 @@ function nonEmptyList<T>(raw: unknown, path: string, item: (value: unknown, path
   return values.ok ? ok(nonEmpty(values.value)!) : values;
 }
 
+/** A non-empty anchor list naming each anchor once, as the plan grammar does. */
+function anchorList(raw: unknown, path: string, item: (value: unknown, path: string) => Parsed<string>): Parsed<NonEmpty<string>> {
+  const anchors = nonEmptyList(raw, path, item);
+  if (!anchors.ok) return anchors;
+  return new Set(anchors.value).size === anchors.value.length ? anchors : err(`${path} names an anchor more than once`);
+}
+
 function parseTypes(raw: unknown, path: string): Parsed<ContractTypes> {
   if (isPlainRecord(raw) && raw.kind === "file") {
     const record = exactRecord(raw, ["kind", "path"], path);
@@ -84,7 +91,7 @@ function parseAcceptanceFile(raw: unknown, path: string): Parsed<ContractAccepta
   if (!record.ok) return record;
   const file = text(record.value.path, `${path}.path`);
   if (!file.ok) return file;
-  const anchors = nonEmptyList(record.value.anchors, `${path}.anchors`, (value, anchorPath) =>
+  const anchors = anchorList(record.value.anchors, `${path}.anchors`, (value, anchorPath) =>
     typeof value === "string" && COVERABLE_ANCHOR.test(value) ? ok(value) : err(`${anchorPath} must be an FR-n or AS-n id`));
   if (!anchors.ok) return anchors;
   return ok(freeze({ path: file.value, anchors: anchors.value }));
@@ -113,7 +120,7 @@ function parseRoster(raw: unknown, path: string, files: readonly ContractAccepta
     const name = text(record.value.name, `${entryPath}.name`);
     if (file === undefined) return err(`${entryPath}.file must be one of the contract's acceptance files`);
     if (!name.ok) return name;
-    const anchors = nonEmptyList(record.value.anchors, `${entryPath}.anchors`, (anchor, anchorPath) =>
+    const anchors = anchorList(record.value.anchors, `${entryPath}.anchors`, (anchor, anchorPath) =>
       typeof anchor === "string" && file.anchors.includes(anchor) ? ok(anchor) : err(`${anchorPath} must be one of the file's anchors`));
     return anchors.ok ? ok(freeze({ file: file.path, name: name.value, anchors: anchors.value })) : anchors;
   });

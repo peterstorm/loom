@@ -20,6 +20,7 @@ import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
 import {
   FULL_TIER_LINT_CHECK_ID_TEXT,
+  acceptanceObservation,
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
@@ -400,7 +401,7 @@ function observeAcceptance(
     }
     return [observeAcceptanceFacts(expectation, check.checkId, report.digest, parseJunitTestcases(bytes))];
   });
-  return freeze({ expectation, facts: freezeArray(facts) });
+  return acceptanceObservation(expectation, facts);
 }
 
 /** The graph's contracts with what an accepted receipt observed stamped in:

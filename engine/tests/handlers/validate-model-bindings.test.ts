@@ -464,6 +464,7 @@ describe("validateModelBindings", () => {
       [{ kind: "malformed-acceptance", line: "t.ts" }, "acceptance line 't.ts' is not '- path — FR-n, AS-n'"],
       [{ kind: "invalid-anchor", path: "t.ts", anchor: "OOS-001" }, "'t.ts' names 'OOS-001', which a test cannot decide"],
       [{ kind: "duplicate-acceptance", path: "t.ts" }, "'t.ts' is listed twice under '**Acceptance tests:**'"],
+      [{ kind: "duplicate-anchor", path: "t.ts", anchor: "AS-1" }, "'t.ts' names 'AS-1' twice — list each Requirement once per file"],
       [{ kind: "supported-domain-not-acceptance", path: "d.ts" }, "'**Supported domain:** d.ts' is not one of the acceptance files"],
       [{ kind: "missing-statement" }, "no '**Statement:**'"],
     ])("renders the %o problem as its own remediation", (problem, message) => {

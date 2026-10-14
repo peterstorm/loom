@@ -5,6 +5,7 @@
  * population stamps.
  */
 
+import { match } from "ts-pattern";
 import type { DomainResult, NonEmpty } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
 import { err, freeze, nonEmpty, ok } from "./kernel";
@@ -57,18 +58,25 @@ export function contractWriter(
   return err(nonEmpty(problems)!);
 }
 
-/** Whether a Task other than the contract Task claims any of these anchors. */
-const claims = (contract: Pick<AcceptanceContract, "contractTask">, task: ContractTaskView, anchors: readonly string[]): boolean =>
-  task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => anchors.includes(anchor));
-
-/** The Tasks that claim an anchor's completion, other than the contract Task. */
-function anchorClaimants(
-  contract: Pick<AcceptanceContract, "contractTask">,
-  anchor: string,
-  tasks: readonly ContractTaskView[],
-): readonly ContractTaskView[] {
-  return tasks.filter((task) => claims(contract, task, [anchor]));
+/** One writer problem as the operator message plan validation and population
+ *  both report. */
+export function renderContractWriterProblem(problem: ContractWriterProblem): string {
+  return match(problem)
+    .with({ kind: "unwritten" }, ({ path }) => `'${path}' is in no task's file_list — decompose must emit the contract task that writes it`)
+    .with({ kind: "shared" }, ({ path, taskIds }) =>
+      `'${path}' is in the file_list of ${taskIds.join(" and ")} — a frozen path has exactly one writer, the contract task`)
+    .with({ kind: "split" }, ({ taskIds }) =>
+      `frozen paths are written by ${taskIds.join(" and ")} — one contract task writes the types file and every acceptance file`)
+    .exhaustive();
 }
+
+/** Whether a Task other than the contract Task claims any of these anchors —
+ *  the one claimant rule derivation and plan-binding validation share. */
+export const claims = (
+  contract: Pick<AcceptanceContract, "contractTask">,
+  task: Pick<ContractTaskView, "id" | "spec_anchors">,
+  anchors: readonly string[],
+): boolean => task.id !== contract.contractTask && (task.spec_anchors ?? []).some((anchor) => anchors.includes(anchor));
 
 /** The Wave of a contract's contract Task; undefined when the Task is not in the roster. */
 export function contractWave(
@@ -90,7 +98,7 @@ export function contractClaimants<T extends ContractTaskView>(
 /** Each covered anchor's completion Wave; an anchor nobody claims is absent. */
 export function dueWaves(contract: AcceptanceContract, tasks: readonly ContractTaskView[]): Readonly<Record<string, number>> {
   return freeze(Object.fromEntries(coveredAnchors(contract).flatMap((anchor) => {
-    const waves = anchorClaimants(contract, anchor, tasks).map(({ wave }) => wave);
+    const waves = tasks.filter((task) => claims(contract, task, [anchor])).map(({ wave }) => wave);
     return waves.length === 0 ? [] : [[anchor, Math.max(...waves)] as const];
   })));
 }
@@ -113,7 +121,7 @@ export function acceptanceContractsFromPlan(
     }
     const writer = contractWriter(frozenPaths(declaration), tasks);
     if (!writer.ok) {
-      errors.push(`${planContract.id}: the frozen paths do not have exactly one writer; exactly one contract Task must write them all`);
+      errors.push(...writer.error.map((problem) => `${planContract.id}: ${renderContractWriterProblem(problem)}`));
       return [];
     }
     return [freeze({
@@ -167,8 +175,8 @@ export function redWindowTaskIds(
   return new Set(tasks.filter((task) => windows.some((window) => inWindow(window, task))).map(({ id }) => id));
 }
 
-/** A Task's role in one Acceptance Contract — the one rule the brief, the
- *  revision and population read. */
+/** A Task's role in one Acceptance Contract — the one rule the implementation
+ *  brief reads; redWindowTaskIds is its set-valued sibling for population. */
 export type ContractRole =
   | Readonly<{ kind: "contract-task" }>
   | Readonly<{ kind: "claimant"; anchors: NonEmpty<string> }>

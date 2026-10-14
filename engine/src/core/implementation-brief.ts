@@ -227,7 +227,7 @@ function invariantOwnership(fileList: readonly string[], invariants: readonly Pl
 
 /** The contract Task's instructions: write the frozen surface and stubs, so
  *  that the contract Wave's gate observes every acceptance testcase RED. */
-function contractTaskBlock(contract: AcceptanceContract): readonly string[] {
+function contractTaskBlock(contract: AcceptanceContract): string {
   return [
     `**${contract.id}: ${contract.title}** — you are its contract Task.`,
     contract.statement,
@@ -244,12 +244,12 @@ function contractTaskBlock(contract: AcceptanceContract): readonly string[] {
     "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.",
     "",
     "Your Wave Gate passes only if every acceptance testcase is collected and fails, and nothing else fails. It then freezes these files: no later Task may change them, and only an operator Contract Revision can. Do not implement the behavior.",
-  ];
+  ].join("\n");
 }
 
 /** A claimant's instructions: the frozen paths are read-only, and the
  *  testcases deciding its claims must pass at its Wave Gate. */
-function claimantBlock(contract: AcceptanceContract, claims: readonly string[]): readonly string[] {
+function claimantBlock(contract: AcceptanceContract, claims: readonly string[]): string {
   const roster = contract.freeze.state === "frozen" ? contract.freeze.roster : [];
   const mine = roster.filter(({ anchors }) => anchors.some((anchor) => claims.includes(anchor)));
   return [
@@ -264,22 +264,20 @@ function claimantBlock(contract: AcceptanceContract, claims: readonly string[]):
           ...mine.map(({ name, file }) => `- \`${name}\` (\`${file}\`)`)].join("\n")
       : `Turn green every acceptance testcase that names ${claims.join(", ")}; your Wave Gate requires them passing.`,
     "Testcases of Requirements completed in later Waves may still fail. If an acceptance test is wrong, stop and report it: only an operator Contract Revision changes a frozen file.",
-  ];
+  ].join("\n");
 }
 
 /** A red-window bystander's note: which pending failures are not its own. The
  *  waiver sentence appears only when the engine stamped the waiver — a Task
  *  that authored its own regression waiver keeps that reason. */
-function bystanderBlock(contract: AcceptanceContract, task: Task): readonly string[] {
+function bystanderBlock(contract: AcceptanceContract, task: Task): string {
   const files = contract.acceptance.map(({ path }) => `\`${path}\``).join(", ");
   const regression = taskVerificationPolicy(task).regression;
   const waived = regression.kind === "waived" && regression.reason === ACCEPTANCE_RED_WINDOW
     ? `Your regression run is waived for that reason (\`${ACCEPTANCE_RED_WINDOW}\`); the Wave Gate's suite judges everything else.`
     : "The Wave Gate's suite, which knows which testcases are pending, judges them.";
-  return [
-    `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
-      `${waived} Failures anywhere else are yours to fix.`,
-  ];
+  return `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
+    `${waived} Failures anywhere else are yours to fix.`;
 }
 
 /**
@@ -292,9 +290,9 @@ function acceptanceContractSection(task: Task, contracts: readonly AcceptanceCon
   const blocks = contracts.flatMap((contract) => {
     const role = contractRole(contract, task, tasks);
     switch (role.kind) {
-      case "contract-task": return [contractTaskBlock(contract).join("\n")];
-      case "claimant": return [claimantBlock(contract, role.anchors).join("\n")];
-      case "red-window": return [bystanderBlock(contract, task).join("\n")];
+      case "contract-task": return [contractTaskBlock(contract)];
+      case "claimant": return [claimantBlock(contract, role.anchors)];
+      case "red-window": return [bystanderBlock(contract, task)];
       case "none": return [];
     }
   });

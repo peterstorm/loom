@@ -11,8 +11,9 @@
 import { match } from "ts-pattern";
 import { normalizePlanPath } from "../plan-path-match";
 import { dependsOnAny } from "../task-dependencies";
+import { COVERED_BY_ACCEPTANCE_CONTRACT, type NewTestWaiverReason } from "../verification-policy";
 import type { ContractProblem, PlanContract } from "./model";
-import { contractWriter, coveredAnchors, frozenPaths, type ContractWriterProblem } from "./tasks";
+import { claims, contractWriter, coveredAnchors, frozenPaths, renderContractWriterProblem } from "./tasks";
 
 /** The Task fields contract binding reads, already narrowed from raw input. */
 export type ContractBindingTask = Readonly<{
@@ -21,10 +22,8 @@ export type ContractBindingTask = Readonly<{
   spec_anchors: readonly string[];
   depends_on: readonly string[];
   /** The Task's authored new-test waiver reason, or null. */
-  newTestWaiver: string | null;
+  newTestWaiver: NewTestWaiverReason | null;
 }>;
-
-const COVERED_BY_CONTRACT = "covered-by-acceptance-contract";
 
 export function renderContractProblem(problem: ContractProblem): string {
   return match(problem)
@@ -38,21 +37,12 @@ export function renderContractProblem(problem: ContractProblem): string {
     .with({ kind: "invalid-anchor" }, ({ path, anchor }) =>
       `'${path}' names '${anchor}', which a test cannot decide — list only FR-n and AS-n Requirements`)
     .with({ kind: "duplicate-acceptance" }, ({ path }) => `'${path}' is listed twice under '**Acceptance tests:**'`)
+    .with({ kind: "duplicate-anchor" }, ({ path, anchor }) => `'${path}' names '${anchor}' twice — list each Requirement once per file`)
     .with({ kind: "supported-domain-not-acceptance" }, ({ path }) =>
       `'**Supported domain:** ${path}' is not one of the acceptance files`)
     .with({ kind: "unsafe-path" }, ({ path }) =>
       `'${path}' is not a repository-relative path — a frozen path may not be absolute or contain '..'`)
     .with({ kind: "missing-statement" }, () => "no '**Statement:**' — say what consumers rely on and what is refused")
-    .exhaustive();
-}
-
-function renderWriterProblem(problem: ContractWriterProblem): string {
-  return match(problem)
-    .with({ kind: "unwritten" }, ({ path }) => `'${path}' is in no task's file_list — decompose must emit the contract task that writes it`)
-    .with({ kind: "shared" }, ({ path, taskIds }) =>
-      `'${path}' is in the file_list of ${taskIds.join(" and ")} — a frozen path has exactly one writer, the contract task`)
-    .with({ kind: "split" }, ({ taskIds }) =>
-      `frozen paths are written by ${taskIds.join(" and ")} — one contract task writes the types file and every acceptance file`)
     .exhaustive();
 }
 
@@ -83,7 +73,7 @@ export function contractBindingErrors(
     }
     const writer = contractWriter(paths, tasks);
     if (!writer.ok) {
-      errors.push(...writer.error.map((problem) => `${label}: ${renderWriterProblem(problem)}`));
+      errors.push(...writer.error.map((problem) => `${label}: ${renderContractWriterProblem(problem)}`));
       continue;
     }
     const contractTask = writer.value;
@@ -95,7 +85,7 @@ export function contractBindingErrors(
         errors.push(`${label}: ${contractTask} is ${contract.id}'s contract task but claims ${anchor} in spec_anchors — its tests ` +
           "are red by design; list it in spec_contributions and let the task that turns it green claim it");
       }
-      const claimants = tasks.filter(({ id, spec_anchors }) => id !== contractTask && spec_anchors.includes(anchor));
+      const claimants = tasks.filter((task) => claims({ contractTask }, task, [anchor]));
       if (claimants.length === 0) {
         errors.push(`${label}: ${anchor} is decided by ${contract.id}'s acceptance tests but no task claims it in spec_anchors — nothing would turn it green`);
       }
@@ -107,11 +97,11 @@ export function contractBindingErrors(
       }
     }
   }
-  for (const task of tasks.filter(({ newTestWaiver }) => newTestWaiver === COVERED_BY_CONTRACT)) {
+  for (const task of tasks.filter(({ newTestWaiver }) => newTestWaiver === COVERED_BY_ACCEPTANCE_CONTRACT)) {
     const covering = resolved.some(({ contractTask, covered }) =>
       task.spec_anchors.some((anchor) => covered.includes(anchor)) && waitsFor(task, contractTask));
     if (!covering) {
-      errors.push(`${task.id} waives new tests as ${COVERED_BY_CONTRACT} but claims no Requirement a contract it depends on covers`);
+      errors.push(`${task.id} waives new tests as ${COVERED_BY_ACCEPTANCE_CONTRACT} but claims no Requirement a contract it depends on covers`);
     }
   }
   return Object.freeze(errors);

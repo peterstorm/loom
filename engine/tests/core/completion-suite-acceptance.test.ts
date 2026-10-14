@@ -8,6 +8,7 @@ import {
   type AcceptanceExpectation,
 } from "../../src/core/acceptance-contract";
 import {
+  acceptanceObservation,
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseWaveCompletionSuiteResult,
@@ -164,6 +165,9 @@ describe("evaluateWaveCompletionSuite — acceptance at the Wave Gate", () => {
       ok: false,
       error: { errors: [expect.stringContaining("must be absent when the gate owes no contract anything")] },
     });
+    // The one constructor mints no observation for such a gate, and one for a gate that owes.
+    expect(acceptanceObservation(none, [])).toBeUndefined();
+    expect(acceptanceObservation(RED_EXPECTATION, [])).toEqual({ expectation: RED_EXPECTATION, facts: [] });
   });
 
   it("behaves exactly as before when the gate owes no contract", () => {

@@ -15,6 +15,7 @@ import {
 } from "../../core/spec-trace-migration";
 import { inspectRunDirectoryEntry, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import { parseRegisteredFacadeProgram } from "./programs";
+import { assertQuiescentUnderLock, subagentActiveRefusal } from "./subagent-quiescence";
 
 const RETIRE_FLAG = "--retire-abandoned-run";
 
@@ -164,12 +165,8 @@ const handler: HookHandler = async (stdin, args) => {
   const statePath = taskGraphPath();
   const manager = StateManager.fromPath(statePath);
   if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
-  if (anyActiveSubagent(statePath)) {
-    return {
-      kind: "error",
-      message: "Spec trace upgrade refused while a subagent is active for this TaskGraph; wait for the exact roster to settle and retry",
-    };
-  }
+  const refusal = subagentActiveRefusal(anyActiveSubagent, statePath, "spec trace upgrade");
+  if (refusal !== null) return { kind: "error", message: refusal };
 
   try {
     const preRead = manager.load();
@@ -179,9 +176,7 @@ const handler: HookHandler = async (stdin, args) => {
     if (preProof !== null && !preProof.ok) return { kind: "error", message: preProof.message };
 
     const outcome = await manager.updateAndReturn((locked) => {
-      if (anyActiveSubagent(statePath)) {
-        throw new Error("A subagent became active before the spec trace upgrade could commit");
-      }
+      assertQuiescentUnderLock(anyActiveSubagent, statePath, "spec trace upgrade");
       if (!retireAbandonedRun || locked.active_wave_gate === undefined) {
         const prepared = prepareSpecTraceUpgrade(locked, input);
         if (!prepared.ok) throw new Error(prepared.error.message);
