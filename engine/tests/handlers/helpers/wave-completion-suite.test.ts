@@ -10,12 +10,14 @@ import { dirname, join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  evaluateWaveCompletionSuite,
   type AuthorizedWaveCompletionCheck,
   type CompletionCheckResult,
 } from "../../../src/core/completion-suite";
+import { evaluateAsRecorded } from "../../fixtures/completion-suite-evaluation";
 import { parseArtifactDigest } from "../../../src/core/orchestration-contract";
-import { evaluateTaskProof } from "../../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof } from "../../../src/core/proof-obligations";
+import type { AcceptanceContract, AcceptanceTestcase } from "../../../src/core/acceptance-contract";
+import { runCompletionCheck as productionRunCompletionCheck } from "../../../src/orchestration/completion-check-runner";
 import {
   authorizeWaveCompletionSuite,
   freezeVerificationManifest,
@@ -31,8 +33,11 @@ import { StateManager } from "../../../src/state-manager";
 import {
   parseNewTestEvidence,
   type ActiveWaveGateRegistration,
+  type Task,
   type TaskGraph,
 } from "../../../src/types";
+import { satisfiedProof } from "../../fixtures/task-lifecycle";
+import { contentDigest } from "../../fixtures/acceptance-fixtures";
 
 const roots: string[] = [];
 const fakeReportDigest = (() => {
@@ -105,8 +110,123 @@ else if (mode === "missing-report") process.exit(0);
 else if (mode === "mutate-workspace") {
   writeFileSync("source.ts", "export const value = 2;\\n");
   writeFileSync(report, String(previous + 1));
+} else if (mode.startsWith("junit:")) {
+  // junit:AS-001=fail,AS-002=pass — one acceptance testcase per anchor, plus
+  // one passing ordinary testcase; the runner exits 1 when any case fails.
+  const cases = mode.slice("junit:".length).split(",").map((entry) => entry.split("="));
+  const failing = cases.filter(([, outcome]) => outcome === "fail").length;
+  const testcase = ([anchor, outcome]) =>
+    '<testcase classname="tests/payload.acceptance.test.ts" name="payload &gt; ' + anchor + ': decides ' + anchor + '">' +
+    (outcome === "fail" ? '<failure message="expected" type="AssertionError">expected</failure>' : '') + '</testcase>';
+  writeFileSync(report, [
+    '<?xml version="1.0" encoding="UTF-8" ?>',
+    '<testsuites name="vitest tests" tests="' + (cases.length + 1) + '" failures="' + failing + '" errors="0">',
+    '<testsuite name="tests/other.test.ts" tests="1" failures="0" errors="0" skipped="0">',
+    '<testcase classname="tests/other.test.ts" name="plain"></testcase>',
+    '</testsuite>',
+    '<testsuite name="tests/payload.acceptance.test.ts" tests="' + cases.length + '" failures="' + failing + '" errors="0" skipped="0">',
+    ...cases.map(testcase),
+    '</testsuite>',
+    '</testsuites>',
+  ].join("\\n"));
+  process.exit(failing > 0 ? 1 : 0);
 } else process.exit(3);
 `;
+}
+
+const ACCEPTANCE_FILE = "tests/payload.acceptance.test.ts";
+const ACCEPTANCE_SOURCE = "it('AS-001: decides AS-001', () => expect(wins()).toBe(2));\n";
+const ACCEPTANCE_DIGEST = contentDigest(ACCEPTANCE_SOURCE);
+const rosterEntry = (anchor: string): AcceptanceTestcase =>
+  ({ file: ACCEPTANCE_FILE, name: `payload > ${anchor}: decides ${anchor}`, anchors: [anchor] });
+
+/**
+ * One contract written by T1 in Wave 1. AS-001 is completed by T2 in Wave 2
+ * and AS-002 by T3 in Wave 3, so at Wave 2's gate AS-001 is due and AS-002
+ * still pending.
+ */
+const CONTRACT: AcceptanceContract = {
+  schemaVersion: 1,
+  id: "CT-1",
+  title: "Payload",
+  statement: "One valid call wins.",
+  contractTask: "T1",
+  types: { kind: "none", reason: "the slice declares no shared surface" },
+  acceptance: [{ path: ACCEPTANCE_FILE, anchors: ["AS-001", "AS-002"] }],
+  supportedDomain: null,
+  freeze: { state: "awaiting-red" },
+  revisions: [],
+};
+
+/** Which gate a contract fixture registers: the contract Wave's (RED), a
+ *  claimant Wave's against the frozen roster, or the first gate after a
+ *  Contract Revision. */
+type ContractStage = "contract-wave" | "claimant-wave" | "after-revision";
+
+const contractFreeze = (stage: ContractStage): AcceptanceContract["freeze"] => {
+  const paths = [{ path: ACCEPTANCE_FILE, sha256: ACCEPTANCE_DIGEST }] as const;
+  switch (stage) {
+    case "contract-wave":
+      return { state: "awaiting-red" };
+    case "claimant-wave":
+      return { state: "frozen", wave: 1, paths, roster: [rosterEntry("AS-001"), rosterEntry("AS-002")] };
+    case "after-revision":
+      return { state: "revised", paths };
+  }
+};
+
+/** The revision that produced a revised freeze: the operator re-stamped the
+ *  acceptance file over bytes the contract Wave had frozen earlier. */
+const contractRevisions = (stage: ContractStage): AcceptanceContract["revisions"] => stage === "after-revision"
+  ? [{
+      revision: 1,
+      reason: "AS-002 asserted the wrong value",
+      previous: [{ path: ACCEPTANCE_FILE, sha256: contentDigest("superseded bytes") }],
+      paths: [{ path: ACCEPTANCE_FILE, sha256: ACCEPTANCE_DIGEST }],
+      revalidatedTaskIds: [],
+    }]
+  : [];
+
+/** T1 writes the contract in Wave 1; T2 claims AS-001 in Wave 2; T3 claims AS-002 in Wave 3. */
+function contractTasks(stage: ContractStage): Task[] {
+  const contractWave = stage === "contract-wave";
+  return [{
+    id: "T1",
+    description: "write the contract",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: contractWave ? "implemented" : "completed",
+    proof: satisfiedProof([ACCEPTANCE_FILE]),
+    depends_on: [],
+    file_list: [ACCEPTANCE_FILE],
+    review_status: contractWave ? "pending" : "passed",
+    critical_findings: [],
+    advisory_findings: [],
+  }, {
+    id: "T2",
+    description: "turn AS-001 green",
+    agent: "code-implementer-agent",
+    wave: 2,
+    ...(contractWave
+      ? { status: "pending" as const, proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/payload.ts"] }) }
+      : { status: "implemented" as const, proof: satisfiedProof(["src/payload.ts"]) }),
+    depends_on: ["T1"],
+    spec_anchors: ["AS-001"],
+    file_list: ["src/payload.ts"],
+    review_status: "pending",
+    critical_findings: [],
+    advisory_findings: [],
+  }, {
+    id: "T3",
+    description: "turn AS-002 green",
+    agent: "code-implementer-agent",
+    wave: 3,
+    status: "pending",
+    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/second.ts"] }),
+    depends_on: ["T1"],
+    spec_anchors: ["AS-002"],
+    file_list: ["src/second.ts"],
+  }];
 }
 
 type Fixture = Readonly<{
@@ -117,6 +237,16 @@ type Fixture = Readonly<{
 }>;
 
 function fixture(mode: string, report = true): Fixture {
+  return buildFixture(mode, report, null);
+}
+
+/** A repository whose TaskGraph carries CT-1 at `stage`, gating the stage's Wave. */
+function contractFixture(mode: string, stage: ContractStage): Fixture {
+  return buildFixture(mode, true, stage);
+}
+
+function buildFixture(mode: string, report: boolean, stage: ContractStage | null): Fixture {
+  const wave = stage === null || stage === "contract-wave" ? 1 : 2;
   const root = canonicalTempDir("loom-wave-suite-");
   roots.push(root);
   git(root, "init", "-q");
@@ -125,6 +255,10 @@ function fixture(mode: string, report = true): Fixture {
   write(root, ".gitignore", ".loom/bin/\n.loom/completion-reports/\n");
   write(root, "source.ts", "export const value = 1;\n");
   write(root, "completion-check.mjs", completionScript());
+  if (stage !== null) {
+    write(root, ACCEPTANCE_FILE, ACCEPTANCE_SOURCE);
+    write(root, "src/payload.ts", "export const wins = () => 2;\n");
+  }
   git(root, "add", "-A");
   git(root, "commit", "-qm", "fixture");
 
@@ -132,7 +266,7 @@ function fixture(mode: string, report = true): Fixture {
     schemaVersion: 1,
     kind: "active-wave-gate",
     runId: "run.wave-suite" as ActiveWaveGateRegistration["runId"],
-    wave: 1,
+    wave,
     authorityDigest: "a".repeat(64) as ActiveWaveGateRegistration["authorityDigest"],
     revision: 0,
     runsRoot: join(root, ".claude/reviews/wave-gate-runs"),
@@ -140,28 +274,31 @@ function fixture(mode: string, report = true): Fixture {
   };
   const graph: TaskGraph = {
     current_phase: "execute",
-    current_wave: 1,
+    current_wave: wave,
     phase_artifacts: {},
     skipped_phases: [],
     spec_file: null,
     plan_file: null,
-    tasks: [{
-      id: "T1",
-      description: "run completion suite",
-      agent: "code-implementer-agent",
-      wave: 1,
-      status: "implemented",
-      proof,
-      depends_on: [],
-      test_result: { verdict: "trusted-pass" },
-      new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
-      review_status: "pending",
-      critical_findings: [],
-      advisory_findings: [],
-    }],
+    tasks: stage === null
+      ? [{
+          id: "T1",
+          description: "run completion suite",
+          agent: "code-implementer-agent",
+          wave: 1,
+          status: "implemented",
+          proof,
+          depends_on: [],
+          test_result: { verdict: "trusted-pass" },
+          new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
+          review_status: "pending",
+          critical_findings: [],
+          advisory_findings: [],
+        }]
+      : contractTasks(stage),
     wave_gates: {},
     verification_manifest: manifest(mode, report),
     active_wave_gate: active,
+    ...(stage === null ? {} : { acceptance_contracts: [{ ...CONTRACT, freeze: contractFreeze(stage), revisions: contractRevisions(stage) }] }),
   };
   const statePath = join(root, ".claude/state/active_task_graph.json");
   write(root, ".claude/state/active_task_graph.json", JSON.stringify(graph, null, 2));
@@ -172,8 +309,8 @@ function fixture(mode: string, report = true): Fixture {
   const registration: RegisteredWaveGateProgram = Object.freeze({
     schemaVersion: 1,
     kind: "wave-gate",
-    input: Object.freeze({ wave: 1 }),
-    taskIds: Object.freeze(["T1"]),
+    input: Object.freeze({ wave }),
+    taskIds: Object.freeze([wave === 1 ? "T1" : "T2"]),
     authorityDigest: active.authorityDigest,
   });
   return { root, manager: new StateManager(statePath), handle: created.value, registration };
@@ -266,7 +403,7 @@ function resultArtifactRelativePath(f: Fixture): string {
 function acceptedReceiptForCurrentAuthority(f: Fixture) {
   const authority = resultArtifactAuthority(f);
   const checks = authority.checks.map(successfulCheckResult);
-  const evaluated = evaluateWaveCompletionSuite(authority, {
+  const evaluated = evaluateAsRecorded(authority, {
     ...authority,
     kind: "wave-completion-suite-result",
     checks,
@@ -596,6 +733,119 @@ describe("modern Wave completion suite shell", () => {
     });
     expect(reportCount(f.root)).toBe(0);
     expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
+  });
+
+  describe("acceptance contracts at the Wave Gate", () => {
+    /** The project check's recorded outcome in the installed receipt. */
+    const completionOutcome = (graph: TaskGraph) =>
+      graph.active_wave_completion_suite?.checks.find(({ checkId }) => checkId === "project:completion")?.outcome;
+
+    it("accepts the contract Wave's expected RED and stamps the Acceptance Freeze with the receipt", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      const result = await ensure(f);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      const graph = f.manager.load();
+      expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
+      expect(graph.acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
+    });
+
+    it("blocks a contract Wave whose acceptance already passes, naming the testcase", async () => {
+      const f = contractFixture("junit:AS-001=pass,AS-002=fail", "contract-wave");
+      const result = await ensure(f);
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          diagnostic: {
+            categories: ["semantic"],
+            message: expect.stringContaining("acceptance testcases pass before any claimant implemented them"),
+          },
+        },
+      });
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("accepts a claimant Wave whose due testcase passes while a pending one still fails, leaving the freeze alone", async () => {
+      const f = contractFixture("junit:AS-001=pass,AS-002=fail", "claimant-wave");
+      const result = await ensure(f);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      const graph = f.manager.load();
+      expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
+      expect(graph.acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
+    });
+
+    it("blocks a claimant Wave whose due testcase still fails, naming it", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "claimant-wave");
+      expect(await ensure(f)).toMatchObject({
+        ok: false,
+        error: {
+          diagnostic: {
+            categories: ["semantic"],
+            message: expect.stringContaining("due acceptance testcases are not passing: 'payload > AS-001: decides AS-001'"),
+          },
+        },
+      });
+      expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
+    });
+
+    it("re-records the roster green at the first gate after a Contract Revision, freezing the revised bytes", async () => {
+      const f = contractFixture("junit:AS-001=pass,AS-002=fail", "after-revision");
+      const result = await ensure(f);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({
+        state: "frozen",
+        wave: 2,
+        paths: [{ path: ACCEPTANCE_FILE, sha256: ACCEPTANCE_DIGEST }],
+        roster: [rosterEntry("AS-001"), rosterEntry("AS-002")],
+      });
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
+    });
+
+    it("refuses to install when the protected contracts change while the checks run", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      const runCompletionCheck: RunCompletionCheck = async (check, repositoryRoot) => {
+        const execution = await productionRunCompletionCheck(check, repositoryRoot);
+        await f.manager.update((locked) => ({
+          ...locked,
+          acceptance_contracts: locked.acceptance_contracts?.map((contract) => ({ ...contract, title: "Payload (retitled)" })),
+        }));
+        return execution;
+      };
+      const result = await ensureWaveCompletionSuite({
+        handle: f.handle,
+        manager: f.manager,
+        graph: f.manager.load(),
+        registration: f.registration,
+        runCompletionCheck,
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          diagnostic: {
+            categories: ["state"],
+            message: expect.stringContaining("protected acceptance contracts changed before receipt installation"),
+          },
+        },
+      });
+      const graph = f.manager.load();
+      expect(graph.active_wave_completion_suite).toBeUndefined();
+      expect(graph.acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("blocks with artifact drift once a frozen acceptance file changes outside any Task", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true });
+      write(f.root, ACCEPTANCE_FILE, "it.skip('AS-001: decides AS-001', () => {});\n");
+      expect(await ensure(f)).toMatchObject({
+        ok: false,
+        error: {
+          diagnostic: {
+            categories: ["artifact"],
+            message: expect.stringContaining(`frozen acceptance drifted: CT-1 '${ACCEPTANCE_FILE}' changed`),
+          },
+        },
+      });
+    });
   });
 
   it("fails closed when the protected TaskGraph path has no Git authority", async () => {

@@ -2,9 +2,8 @@ import { argumentValue } from "./cli-args";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
 import { newWaveGate, reconcileWaveBlock } from "../../core/wave-gate-model";
-import { derivePendingTaskProof } from "../../core/proof-obligations";
 import { parseTaskId } from "../../core/task-id";
-import { taskVerificationPolicy } from "../../core/verification-policy";
+import { returnToRevalidation } from "../../core/task-revalidation";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
 import { readWaveReviewContext, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
@@ -222,30 +221,7 @@ export function reopenCompletedWave(
     completionReceipt: completed.completionReceipt,
     reopenedTaskIds: Object.freeze([...proof.taskIds]),
   });
-  const tasks = graph.tasks.map((task): Task => {
-    if (!proof.taskIds.includes(task.id)) return task;
-    const historicalProof = task.proof ?? derivePendingTaskProof({
-      verificationPolicy: taskVerificationPolicy(task),
-      declaredArtifacts: task.file_list ?? [],
-    });
-    return {
-      ...task,
-      // Reopening invalidates accepted completion/review authority and requires
-      // fresh Proof. Retained Findings and test evidence remain active
-      // remediation/audit inputs wherever gate and status projections read them;
-      // only a fresh implementation settlement clears this revalidation marker.
-      status: "pending",
-      proof: historicalProof,
-      revalidation_required: true,
-      legacy_missing_proof: undefined,
-      review_status: "pending",
-      review_generation: (task.review_generation ?? 0) + 1,
-      review_run: undefined,
-      accepted_review_authority: undefined,
-      review_error: undefined,
-      review_evidence_failures: undefined,
-    };
-  });
+  const tasks = graph.tasks.map((task) => proof.taskIds.includes(task.id) ? returnToRevalidation(task) : task);
   const gate = {
     ...(graph.wave_gates[String(request.wave)] ?? newWaveGate()),
     impl_complete: false,

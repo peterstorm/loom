@@ -6,7 +6,6 @@ import {
   MIN_COMPLETION_CHECK_TIMEOUT_MS,
   completionSuiteDigest,
   createAuthorizedWaveCompletionSuite,
-  evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseAuthorizedWaveCompletionCheck,
   parseAuthorizedWaveCompletionSuite,
@@ -22,6 +21,7 @@ import {
   type AcceptedWaveCompletionReceipt,
   type CompletionCheckResult,
 } from "../../src/core/completion-suite";
+import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
 import { canonicalJson } from "../../src/core/review-packet";
 import { sha256Hex } from "../../src/core/digest";
 import { value } from "../fixtures/parse-result";
@@ -112,7 +112,7 @@ function permute<T>(values: readonly T[], seed: number): readonly T[] {
   return [...values.slice(offset), ...values.slice(0, offset)].reverse();
 }
 
-function expectRejectedForAuthority(result: ReturnType<typeof evaluateWaveCompletionSuite>, kind: string): void {
+function expectRejectedForAuthority(result: ReturnType<typeof evaluateAsRecorded>, kind: string): void {
   expect(result.kind).toBe("rejected");
   if (result.kind === "rejected") {
     expect(result.authorityFailures.some((failure) => failure.kind === kind)).toBe(true);
@@ -124,7 +124,7 @@ function withRawReport(check: CompletionCheckResult, report: unknown): unknown {
 }
 
 function acceptedReceiptFor(authority: AuthorizedWaveCompletionSuite): AcceptedWaveCompletionReceipt {
-  const evaluated = evaluateWaveCompletionSuite(authority, passingResult(authority));
+  const evaluated = evaluateAsRecorded(authority, passingResult(authority));
   if (evaluated.kind !== "accepted") throw new Error("fixture evaluation failed");
   return evaluated.receipt;
 }
@@ -424,7 +424,7 @@ describe("pure completion-suite evaluator properties", () => {
         ...ids.map((id, index) => projectCheck(id, index % 2 === 0 ? "required" : "not-required")),
       ]);
       const exact = passingResult(authority) as { checks: readonly CompletionCheckResult[] };
-      const evaluated = evaluateWaveCompletionSuite(authority, passingResult(authority, permute(exact.checks, seed)));
+      const evaluated = evaluateAsRecorded(authority, passingResult(authority, permute(exact.checks, seed)));
       expect(evaluated.kind).toBe("accepted");
       if (evaluated.kind === "accepted") {
         expect(evaluated.receipt.checks.map((check) => check.checkId))
@@ -440,11 +440,11 @@ describe("pure completion-suite evaluator properties", () => {
       const index = Math.abs(seed) % exact.length;
 
       expectRejectedForAuthority(
-        evaluateWaveCompletionSuite(authority, passingResult(authority, exact.filter((_, candidate) => candidate !== index))),
+        evaluateAsRecorded(authority, passingResult(authority, exact.filter((_, candidate) => candidate !== index))),
         "missing-check-results",
       );
       expectRejectedForAuthority(
-        evaluateWaveCompletionSuite(authority, passingResult(authority, [
+        evaluateAsRecorded(authority, passingResult(authority, [
           ...exact,
           {
             checkId: value(parseCompletionCheckId("surplus:check")),
@@ -458,7 +458,7 @@ describe("pure completion-suite evaluator properties", () => {
         "surplus-check-results",
       );
       expectRejectedForAuthority(
-        evaluateWaveCompletionSuite(authority, passingResult(authority, [...exact, exact[index]!])),
+        evaluateAsRecorded(authority, passingResult(authority, [...exact, exact[index]!])),
         "duplicate-check-results",
       );
     }));
@@ -477,7 +477,7 @@ describe("pure completion-suite evaluator properties", () => {
       workspaceDigest: digest("9"),
     };
     fc.assert(fc.property(fc.constantFrom(...Object.entries(staleValues)), ([field, value]) => {
-      const evaluated = evaluateWaveCompletionSuite(authority, { ...base, [field]: value });
+      const evaluated = evaluateAsRecorded(authority, { ...base, [field]: value });
       expectRejectedForAuthority(evaluated, "stale-result");
       if (evaluated.kind === "rejected") {
         const stale = evaluated.authorityFailures.find((failure) => failure.kind === "stale-result");
@@ -490,7 +490,7 @@ describe("pure completion-suite evaluator properties", () => {
     const authority = authorityFor([lintCheck]);
     const exact = (passingResult(authority) as { checks: readonly CompletionCheckResult[] }).checks;
     expectRejectedForAuthority(
-      evaluateWaveCompletionSuite(authority, passingResult(authority, [{ ...exact[0]!, scope: "task" }])),
+      evaluateAsRecorded(authority, passingResult(authority, [{ ...exact[0]!, scope: "task" }])),
       "wrong-check-scope",
     );
   });
@@ -505,7 +505,7 @@ describe("pure completion-suite evaluator properties", () => {
         report: { kind: "not-required" },
       },
     }]);
-    const evaluated = evaluateWaveCompletionSuite(authority, result);
+    const evaluated = evaluateAsRecorded(authority, result);
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
       expect(evaluated.authorityFailures).toEqual([]);
@@ -521,7 +521,7 @@ describe("pure completion-suite evaluator properties", () => {
       scope: "wave",
       outcome: { kind: "spawn-failed", message: "ENOENT" },
     }));
-    const evaluated = evaluateWaveCompletionSuite(authority, passingResult(authority, [spawnFailure]));
+    const evaluated = evaluateAsRecorded(authority, passingResult(authority, [spawnFailure]));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
       expect(evaluated.authorityFailures).toEqual([]);
@@ -539,7 +539,7 @@ describe("pure completion-suite evaluator properties", () => {
             outcome: { ...check.outcome, report: { kind: "missing" as const, path: ".loom/completion-reports/completion.json" } },
           }
         : check);
-    const evaluated = evaluateWaveCompletionSuite(authority, passingResult(authority, checks));
+    const evaluated = evaluateAsRecorded(authority, passingResult(authority, checks));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
       expect(evaluated.authorityFailures).toEqual([]);
@@ -566,7 +566,7 @@ describe("pure completion-suite evaluator properties", () => {
             },
           }
         : check);
-    const evaluated = evaluateWaveCompletionSuite(authority, passingResult(authority, checks));
+    const evaluated = evaluateAsRecorded(authority, passingResult(authority, checks));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
       expect(evaluated.authorityFailures).toEqual([]);
@@ -594,7 +594,7 @@ describe("pure completion-suite evaluator properties", () => {
       const checks = requiredChecks.map((check, index) =>
         index === requiredIndex ? withRawReport(requiredCheck, report) : check);
       expectRejectedForAuthority(
-        evaluateWaveCompletionSuite(requiredAuthority, passingResult(requiredAuthority, checks)),
+        evaluateAsRecorded(requiredAuthority, passingResult(requiredAuthority, checks)),
         "report-policy-mismatch",
       );
     }
@@ -610,7 +610,7 @@ describe("pure completion-suite evaluator properties", () => {
       const checks = noReportChecks.map((check, index) =>
         index === noReportIndex ? withRawReport(noReportCheck, report) : check);
       expectRejectedForAuthority(
-        evaluateWaveCompletionSuite(noReportAuthority, passingResult(noReportAuthority, checks)),
+        evaluateAsRecorded(noReportAuthority, passingResult(noReportAuthority, checks)),
         "report-policy-mismatch",
       );
     }
@@ -631,7 +631,7 @@ describe("pure completion-suite evaluator properties", () => {
             },
           }
         : check);
-    const evaluated = evaluateWaveCompletionSuite(authority, passingResult(authority, checks));
+    const evaluated = evaluateAsRecorded(authority, passingResult(authority, checks));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
       expect(evaluated.semanticFailures.map((failure) => failure.kind)).toEqual([
@@ -648,8 +648,8 @@ describe("pure completion-suite evaluator properties", () => {
         ...(passingResult(authority, permute(exact.checks, seed)) as Record<string, unknown>),
       };
       const before = JSON.stringify(input);
-      const first = evaluateWaveCompletionSuite(authority, input);
-      const second = evaluateWaveCompletionSuite(authority, input);
+      const first = evaluateAsRecorded(authority, input);
+      const second = evaluateAsRecorded(authority, input);
       expect(second).toEqual(first);
       expect(JSON.stringify(input)).toBe(before);
       expect(first.kind).toBe("accepted");

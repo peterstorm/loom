@@ -37,7 +37,7 @@ Fallback: `general-purpose`
 
 ## Decompose Rules
 
-1. **Impl tasks include tests.** Do NOT create separate test tasks for new code. `code-implementer-agent` and `frontend-agent` write both impl AND tests. Separate test tasks cause deadlocks.
+1. **Impl tasks include tests.** Do NOT create separate test tasks for new code. `code-implementer-agent` and `frontend-agent` write both impl AND tests. Separate test tasks cause deadlocks. The one exception is a plan Contract's contract task (Rule 12): it writes acceptance tests that later tasks turn green, by design.
 2. **Test-only agent** (`ts-test-agent`): only for adding tests to EXISTING code lacking coverage.
 3. **Sizing** — decompose further if:
    - Task touches >5 files
@@ -92,6 +92,15 @@ Fallback: `general-purpose`
     - A Task cannot contribute to and complete the same Requirement. Multiple completion Tasks are allowed only in the same culmination Wave.
     - Every contribution must have exactly one completion Wave at or after it; no contribution may appear after completion.
 11. **Protected verification paths:** Decompose NEVER assigns the operator manifest `.loom/verification-manifest.json` or any engine report path beneath `.loom/completion-reports/` to a Task's `file_list`. These paths are engine/operator-owned, not implementation artifacts. This rule does not prohibit unrelated `.loom/` paths.
+12. **Contract tasks (contracts before code):** For each `### CT-N:` block in the plan's `## Contracts` section (skip rule if section absent):
+    - Create exactly one **contract task** in an early wave, before any task that completes a Requirement the contract's acceptance files list. `agent`: `code-implementer-agent`; `verification_policy`: `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}`.
+    - Its `file_list` MUST include every frozen path: the `**Types file:**` (unless `none`) and every `**Acceptance tests:**` path, exactly as declared — plus the stub files the acceptance tests import. No other task may list a frozen path: the contract task is their only writer.
+    - It lists the covered Requirements in `spec_contributions`, never in `spec_anchors`: it writes the tests, it does not satisfy them. Its wave gate passes only when every acceptance testcase is collected and FAILS.
+    - Each task completing a covered Requirement (that Requirement in its `spec_anchors`) MUST depend, directly or transitively, on the contract task. Its tests are the frozen acceptance tests, so it MAY waive new tests: `"new_tests":{"kind":"waived","reason":"covered-by-acceptance-contract"}` — only when it claims a covered Requirement of a contract it depends on, and only when the frozen tests cover everything it adds.
+    - Do NOT copy the contract into `plan_context`: the engine renders each task's role (contract task, claimant, or a task running beside not-yet-green acceptance tests) into its brief from the plan and the freeze.
+    - Never author the regression waiver `acceptance-red-window`. The engine stamps it on every task from the contract wave through the last wave completing a covered Requirement that does not already carry its own regression waiver (an authored `documentation-only` or `generated-artifact` waiver is kept), because those tasks' full-suite runs see pending acceptance tests fail; the Wave Gate's suite is their regression authority.
+
+    Validation refuses a contract no single task writes, a frozen path written by any other task, a contract task claiming a covered Requirement, a covered Requirement no task claims, a claimant that does not depend on the contract task, and a misused `covered-by-acceptance-contract` waiver. Population also refuses contracts unless `.loom/verification-manifest.json` has a project check writing a JUnit report (`"report": {"kind": "required-file", ...}`): RED and GREEN are observed only through that report.
 
 ---
 
@@ -147,6 +156,6 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON.
 | `depends_on` | yes | string[] | Task IDs from earlier waves only |
 | `spec_anchors` | yes | string[] | Requirement Completion Claims fully satisfied by this Wave (can be empty `[]`) |
 | `spec_contributions` | yes | string[] | Partial Requirement Contributions; never completion scope (can be empty `[]`) |
-| `verification_policy` | yes | object | Exact union shape per Rule 4: each requirement is `{"kind": "required"}` or `{"kind": "waived", "reason": "<typed reason>"}`; typed reasons are `existing-tests-sufficient`, `documentation-only`, `generated-artifact` |
+| `verification_policy` | yes | object | Exact union shape per Rule 4: each requirement is `{"kind": "required"}` or `{"kind": "waived", "reason": "<typed reason>"}`; typed reasons are `existing-tests-sufficient`, `documentation-only`, `generated-artifact`, and (new tests only, Rule 12) `covered-by-acceptance-contract` |
 | `plan_context` | yes | string | Key points from plan for this task (can be empty `""`) |
 | `file_list` | yes | string[] | Files to create/modify (can be empty `[]`) |

@@ -1,6 +1,8 @@
 import {
   derivePendingTaskProof,
   evaluateProofObligations,
+  evaluateTaskProof,
+  type SatisfiedTaskProof,
   type TaskProof,
 } from "../../src/core/proof-obligations";
 import { labelledValue } from "./parse-result";
@@ -78,6 +80,17 @@ export function completedWaveGateFixture(input: Readonly<{
       stateDigest: "e".repeat(64),
     },
   }));
+}
+
+/** A satisfied Proof for a Task that changed exactly its declared files, with
+ *  trusted test evidence and new tests written. */
+export function satisfiedProof(files: readonly string[]): SatisfiedTaskProof {
+  const evaluated = evaluateTaskProof(
+    { newTestsRequired: true, declaredArtifacts: files },
+    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: files, newTestsWritten: true },
+  );
+  if (evaluated.state !== "satisfied") throw new Error("satisfied proof fixture must be satisfied");
+  return evaluated;
 }
 
 /** Canonical modern pending lifecycle fixture for tests outside Proof-specific suites. */

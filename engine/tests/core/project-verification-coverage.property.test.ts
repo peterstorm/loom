@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { evaluateWaveCompletionSuite } from "../../src/core/completion-suite";
+import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -54,7 +54,7 @@ describe("Project Verification Coverage projection", () => {
       const authority = value(authorizeWaveCompletionSuite(manifest(checkIds), {
         runId: "run.coverage-property", wave: 1, revision: 0, authorityDigest: "a".repeat(64),
       }, "b".repeat(64)));
-      const evaluation = evaluateWaveCompletionSuite(authority, {
+      const evaluation = evaluateAsRecorded(authority, {
         kind: "wave-completion-suite-result",
         runId: authority.runId, wave: authority.wave, revision: authority.revision,
         authorityDigest: authority.authorityDigest, manifestDigest: authority.manifestDigest,

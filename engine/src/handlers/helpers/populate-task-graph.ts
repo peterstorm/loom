@@ -30,6 +30,7 @@ import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-
 import { observeExactHead } from "../../utils/git";
 import { runGit } from "../../utils/git-execution-policy";
 import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
+import { acceptanceObservationProblem } from "../../core/acceptance-contract";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -412,6 +413,8 @@ const handler: HookHandler = async (stdin, args) => {
   if (!preparedManifest.ok) {
     return { kind: "error", message: `Verification manifest authority unavailable: ${preparedManifest.error}` };
   }
+  const observationProblem = acceptanceObservationProblem(bindings.models.contracts, preparedManifest.value.projectChecks);
+  if (observationProblem !== null) return { kind: "error", message: observationProblem };
 
   // The Spec Index is observed here, beside the manifest, for the same reason:
   // the locked transform stamps a prepared value and never reads mutable source
@@ -447,6 +450,7 @@ const handler: HookHandler = async (stdin, args) => {
     ...(issue === undefined ? {} : { issue }),
     ...(repo === undefined ? {} : { repo }),
     proofBoundary,
+    contracts: bindings.models.contracts,
   });
   const preflight = populateTaskGraph(existingState, command);
   if (!preflight.ok) return { kind: "error", message: preflight.error.message };

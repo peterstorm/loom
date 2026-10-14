@@ -13,6 +13,11 @@
  *                        `advisory` (prose, never enforced), each declaring its
  *                        owner module, sibling entry points and matrix test —
  *                        or `**Owner module:** none` with a reason
+ *   - `## Contracts`   — `### CT-N: {title}` blocks, each naming a
+ *                        declarations-only types file (or `none` with a
+ *                        reason), the dedicated acceptance test files and the
+ *                        Requirements each decides, and the statement
+ *                        consumers rely on; frozen once observed red
  *
  * The parser is total and pure: malformed declarations are represented, never
  * thrown. Malformed *field lines* become null fields; malformed or misplaced
@@ -40,7 +45,15 @@ import type {
   PlanPipeline,
   SiblingEntryPoint,
   Stray,
+  BlockPrefix,
+  ContractAcceptanceFile,
+  ContractDeclaration,
+  ContractProblem,
+  ContractTypes,
+  PlanContract,
 } from "../types";
+import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
+import { COVERABLE_ANCHOR } from "./acceptance-contract";
 
 // The plan model data shapes live in types.ts (consumers that only need the
 // shapes need not import the grammar). Only the shapes importers take through
@@ -48,7 +61,7 @@ import type {
 // The grammar itself lives in core/ — a domain grammar whose output carries
 // invariants, like the Spec Index — so the orchestration shell that renders
 // implementation briefs may parse the plan.
-export type { PlanInvariant, PlanModels, Stray };
+export type { PlanContract, PlanInvariant, PlanModels, Stray };
 
 /** Human-readable description of a stray, for validation error messages. */
 export function renderStray(s: Stray): string {
@@ -65,7 +78,7 @@ export function renderStray(s: Stray): string {
     .with(
       { kind: "near-miss-heading" },
       ({ heading }) =>
-        `near-miss section heading '${heading}' — model sections must be exactly '## Lifecycles', '## Pipeline', or '## Invariants'`,
+        `near-miss section heading '${heading}' — model sections must be exactly '## Lifecycles', '## Pipeline', '## Invariants', or '## Contracts'`,
     )
     .with(
       { kind: "bad-block-grammar" },
@@ -90,6 +103,7 @@ export function hasModels(models: PlanModels): boolean {
     models.lifecycles.length > 0 ||
     models.pipeline !== null ||
     models.invariants.length > 0 ||
+    models.contracts.length > 0 ||
     models.strays.length > 0
   );
 }
@@ -196,6 +210,27 @@ function parseTier(raw: string | null): PlanInvariantTier {
   return { status: "unrecognized", raw };
 }
 
+/** A list-valued label in one block: absent, a value on the label line, or
+ *  the `- ` item lines after it — blank lines before the first item allowed —
+ *  up to the first line that is not an item. */
+type LabelledList =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "inline"; value: string }>
+  | Readonly<{ kind: "items"; items: readonly string[] }>;
+
+function labelledList(block: string, label: RegExp): LabelledList {
+  const lines = block.split("\n").map((line) => line.replace(/\r$/, ""));
+  const at = lines.findIndex((line) => label.test(line));
+  if (at === -1) return { kind: "absent" };
+  const inline = lines[at]!.replace(label, "").trim();
+  if (inline !== "") return { kind: "inline", value: inline };
+  const after = lines.slice(at + 1);
+  const firstItem = after.findIndex((line) => line.trim() !== "");
+  const rest = firstItem === -1 ? [] : after.slice(firstItem);
+  const end = rest.findIndex((line) => !line.startsWith("- "));
+  return { kind: "items", items: end === -1 ? rest : rest.slice(0, end) };
+}
+
 /** The `**Sibling entry points:**` declaration of one block, in its four real
  *  states. `none` is a declared empty list; a bare label with no items is not. */
 type SiblingDeclaration =
@@ -207,21 +242,18 @@ type SiblingDeclaration =
 const SIBLING_LABEL = /^\*\*Sibling entry points:\*\*/i;
 const SIBLING_ITEM = /^-\s+`?([^`\s]+)`?(?:\s+[—–-]\s+(.+?))?\s*$/;
 
-/** `none` on the label line, or `- path — note` items on the lines after it —
- *  blank lines before the first item allowed — up to the first line that is
- *  not an item. `none` belongs on the label line, never as an item. */
+/** `none` on the label line, or `- path — note` items. `none` belongs on the
+ *  label line, never as an item. */
 function siblingDeclaration(block: string): SiblingDeclaration {
-  const lines = block.split("\n").map((line) => line.replace(/\r$/, ""));
-  const at = lines.findIndex((line) => SIBLING_LABEL.test(line));
-  if (at === -1) return { status: "absent" };
-  const inline = lines[at]!.replace(SIBLING_LABEL, "").trim();
-  if (inline.toLowerCase() === "none") return { status: "declared", entries: [] };
-  if (inline !== "") return { status: "malformed", line: inline };
-  const after = lines.slice(at + 1);
-  const firstItem = after.findIndex((line) => line.trim() !== "");
+  const list = labelledList(block, SIBLING_LABEL);
+  if (list.kind === "absent") return { status: "absent" };
+  if (list.kind === "inline") {
+    return list.value.toLowerCase() === "none"
+      ? { status: "declared", entries: [] }
+      : { status: "malformed", line: list.value };
+  }
   const entries: SiblingEntryPoint[] = [];
-  for (const line of firstItem === -1 ? [] : after.slice(firstItem)) {
-    if (!line.startsWith("- ")) break;
+  for (const line of list.items) {
     const item = SIBLING_ITEM.exec(line);
     if (item === null || item[1]!.toLowerCase() === "none") return { status: "malformed", line };
     entries.push({ path: item[1]!, note: item[2]?.trim() ?? null });
@@ -274,7 +306,94 @@ function parseOwnership(block: string): InvariantOwnership {
   return { kind: "malformed", problems: [first!, ...rest] };
 }
 
-const CANONICAL_SECTIONS = ["Lifecycles", "Pipeline", "Invariants"] as const;
+/** The types surface, three states plus the problems decidable from the text. */
+function contractTypes(block: string): Readonly<{ types: ContractTypes | null; problems: readonly ContractProblem[] }> {
+  const file = fieldValue(block, "Types file");
+  const reason = fieldValue(block, "No types reason");
+  if (file === null) return { types: null, problems: [{ kind: "missing-types" }] };
+  if (file.toLowerCase() === "none") {
+    return reason === null
+      ? { types: null, problems: [{ kind: "none-without-reason" }] }
+      : { types: { kind: "none", reason }, problems: [] };
+  }
+  return reason === null
+    ? { types: { kind: "file", path: normalizePlanPath(file) }, problems: [] }
+    : { types: null, problems: [{ kind: "reason-with-types-file" }] };
+}
+
+const ACCEPTANCE_LABEL = /^\*\*Acceptance tests:\*\*/i;
+const ACCEPTANCE_ITEM = /^-\s+`?([^`\s]+)`?\s+[—–-]\s+(.+?)\s*$/;
+
+/** The `- path — FR-n, AS-n` items, every problem in them, and no file twice. */
+function contractAcceptance(block: string): Readonly<{ files: readonly ContractAcceptanceFile[]; problems: readonly ContractProblem[] }> {
+  const list = labelledList(block, ACCEPTANCE_LABEL);
+  if (list.kind === "absent") return { files: [], problems: [{ kind: "missing-acceptance" }] };
+  if (list.kind === "inline") return { files: [], problems: [{ kind: "malformed-acceptance", line: list.value }] };
+  const files: ContractAcceptanceFile[] = [];
+  const problems: ContractProblem[] = [];
+  const seen = new Set<string>();
+  for (const line of list.items) {
+    const item = ACCEPTANCE_ITEM.exec(line);
+    if (item === null) {
+      problems.push({ kind: "malformed-acceptance", line });
+      continue;
+    }
+    const path = normalizePlanPath(item[1]!);
+    const anchors = item[2]!.split(",").map((anchor) => anchor.trim()).filter((anchor) => anchor !== "");
+    problems.push(...anchors.filter((anchor) => !COVERABLE_ANCHOR.test(anchor))
+      .map((anchor): ContractProblem => ({ kind: "invalid-anchor", path, anchor })));
+    if (seen.has(path)) problems.push({ kind: "duplicate-acceptance", path });
+    seen.add(path);
+    const [first, ...rest] = anchors.filter((anchor) => COVERABLE_ANCHOR.test(anchor));
+    if (first !== undefined) files.push({ path, anchors: [first, ...rest] });
+  }
+  return files.length === 0 && problems.length === 0
+    ? { files, problems: [{ kind: "missing-acceptance" }] }
+    : { files, problems };
+}
+
+/**
+ * One contract block as its two real states. Every problem decidable from the
+ * text is collected, so one validation run names all of them; a declared value
+ * exists only when the declaration is complete and consistent.
+ */
+function parseContract(block: string): ContractDeclaration {
+  const { types, problems: typeProblems } = contractTypes(block);
+  const { files, problems: acceptanceProblems } = contractAcceptance(block);
+  const supportedDomain = fieldValue(block, "Supported domain");
+  const statement = fieldValue(block, "Statement");
+  const domainProblems: readonly ContractProblem[] =
+    supportedDomain !== null && files.length > 0 &&
+    !files.some(({ path }) => path === normalizePlanPath(supportedDomain))
+      ? [{ kind: "supported-domain-not-acceptance", path: supportedDomain }]
+      : [];
+  // Frozen paths are hashed through `join(root, path)`: only a path that stays
+  // inside the repository may be frozen.
+  const declaredPaths = [...(types?.kind === "file" ? [types.path] : []), ...files.map(({ path }) => path)];
+  const unsafeProblems = declaredPaths
+    .filter((path) => !isRepoRelativePlanPath(path))
+    .map((path): ContractProblem => ({ kind: "unsafe-path", path }));
+  const [first, ...rest]: readonly ContractProblem[] = [
+    ...typeProblems,
+    ...acceptanceProblems,
+    ...domainProblems,
+    ...unsafeProblems,
+    ...(statement === null ? [{ kind: "missing-statement" } as const] : []),
+  ];
+  if (first !== undefined) return { kind: "malformed", problems: [first, ...rest] };
+  // No problem means every part parsed: types and statement are present and
+  // at least one acceptance file was listed.
+  const [head, ...tail] = files;
+  return {
+    kind: "declared",
+    types: types!,
+    acceptance: [head!, ...tail],
+    supportedDomain: supportedDomain === null ? null : normalizePlanPath(supportedDomain),
+    statement: statement!,
+  };
+}
+
+const CANONICAL_SECTIONS = ["Lifecycles", "Pipeline", "Invariants", "Contracts"] as const;
 
 function inRange(index: number, s: Section | null): boolean {
   return s !== null && index >= s.start && index < s.end;
@@ -286,12 +405,13 @@ function collectStrays(
   lifecycles: Section | null,
   pipeline: Section | null,
   invariants: Section | null,
+  contracts: Section | null,
 ): Stray[] {
   const strays: Stray[] = [];
 
   // Near-miss `##` section headings: start with a model-section word but
   // don't match the canonical heading exactly.
-  for (const m of text.matchAll(/^##\s+((?:lifecycles?|pipelines?|invariants?)\b[^\n]*)$/gim)) {
+  for (const m of text.matchAll(/^##\s+((?:lifecycles?|pipelines?|invariants?|contracts?)\b[^\n]*)$/gim)) {
     const line = m[0].trim();
     const exact = CANONICAL_SECTIONS.some((name) =>
       new RegExp(`^##\\s+${name}\\s*$`, "i").test(line)
@@ -302,9 +422,10 @@ function collectStrays(
   }
 
   // `###` headings inside a model section must match the block grammar.
-  const blockGrammar: Array<{ s: Section | null; prefix: "LC" | "INV"; section: BlockSection }> = [
+  const blockGrammar: Array<{ s: Section | null; prefix: BlockPrefix; section: BlockSection }> = [
     { s: lifecycles, prefix: "LC", section: "Lifecycles" },
     { s: invariants, prefix: "INV", section: "Invariants" },
+    { s: contracts, prefix: "CT", section: "Contracts" },
   ];
   for (const { s, prefix, section: sectionName } of blockGrammar) {
     if (s === null) continue;
@@ -316,17 +437,12 @@ function collectStrays(
     }
   }
 
-  // LC/INV-shaped headings outside their sections.
-  for (const m of text.matchAll(/^###\s+((?:LC|INV)[-\s][^\n]*)$/gim)) {
+  // LC/INV/CT-shaped headings outside their sections.
+  for (const m of text.matchAll(/^###\s+((?:LC|INV|CT)[-\s][^\n]*)$/gim)) {
     const idx = m.index ?? 0;
-    const isLC = /^lc/i.test(m[1]);
-    const home = isLC ? lifecycles : invariants;
-    if (!inRange(idx, home)) {
-      strays.push({
-        kind: "misplaced-heading",
-        heading: m[1].trim(),
-        home: isLC ? "Lifecycles" : "Invariants",
-      });
+    const home = blockGrammar.find(({ prefix }) => new RegExp(`^${prefix}[-\\s]`, "i").test(m[1]))!;
+    if (!inRange(idx, home.s)) {
+      strays.push({ kind: "misplaced-heading", heading: m[1].trim(), home: home.section });
     }
   }
 
@@ -340,6 +456,10 @@ function collectStrays(
     { label: "Unowned reason", s: invariants, home: "Invariants" },
     { label: "Sibling entry points", s: invariants, home: "Invariants" },
     { label: "Matrix test", s: invariants, home: "Invariants" },
+    { label: "Types file", s: contracts, home: "Contracts" },
+    { label: "No types reason", s: contracts, home: "Contracts" },
+    { label: "Acceptance tests", s: contracts, home: "Contracts" },
+    { label: "Supported domain", s: contracts, home: "Contracts" },
   ];
   for (const { label, s, home } of labelHomes) {
     for (const m of text.matchAll(new RegExp(`^\\*\\*${label}:\\*\\*[^\\n]*$`, "gim"))) {
@@ -391,12 +511,22 @@ export function parsePlanModels(markdown: string): PlanModels {
         ownership: parseOwnership(block),
       }));
 
+  const contractsSection = section(text, "Contracts");
+  const contracts: PlanContract[] = contractsSection === null
+    ? []
+    : idBlocks(contractsSection.body, "CT").map(({ id, title, block }) => ({
+        id,
+        title,
+        declaration: parseContract(block),
+      }));
+
   const strays: Stray[] = [
     ...(unterminated ? [{ kind: "unterminated-fence" } as const] : []),
     ...emptySectionStray(lifecyclesSection, "Lifecycles"),
     ...emptySectionStray(invariantsSection, "Invariants"),
-    ...collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection),
+    ...emptySectionStray(contractsSection, "Contracts"),
+    ...collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection, contractsSection),
   ];
 
-  return { lifecycles, pipeline, invariants, strays };
+  return { lifecycles, pipeline, invariants, contracts, strays };
 }

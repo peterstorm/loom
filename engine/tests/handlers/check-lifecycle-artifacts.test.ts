@@ -25,7 +25,7 @@ function waveTask(fileList: string[]): Task {
 }
 
 function loaded(lifecycles: PlanModels["lifecycles"]): PlanModelsSource {
-  return { kind: "loaded", models: { lifecycles, pipeline: null, invariants: [], strays: [] } };
+  return { kind: "loaded", models: { lifecycles, pipeline: null, invariants: [], contracts: [], strays: [] } };
 }
 
 describe("checkLifecycleArtifacts (wave-gate evidence check)", () => {

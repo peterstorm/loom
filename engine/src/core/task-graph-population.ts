@@ -1,4 +1,5 @@
-import type { Phase, Task, TaskGraph } from "../types";
+import type { Phase, PlanContract, Task, TaskGraph } from "../types";
+import { ACCEPTANCE_RED_WINDOW, acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
@@ -6,6 +7,7 @@ import { derivePendingTaskProof } from "./proof-obligations";
 import {
   serializeVerificationPolicy,
   taskVerificationPolicy,
+  type VerificationPolicy,
 } from "./verification-policy";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
@@ -109,6 +111,8 @@ export type TaskGraphPopulationCommand = Readonly<{
    *  records why Git could not capture it; the graph persists either arm as
    *  its `proof_boundary_observation`. */
   proofBoundary: PopulationProofBoundary;
+  /** The validated plan's `## Contracts`; empty when the plan declares none. */
+  contracts: readonly PlanContract[];
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
@@ -118,7 +122,8 @@ export type TaskGraphPopulationError = Readonly<{
     | "phase-not-populatable"
     | "non-pending-tasks"
     | "spec-authority-changed"
-    | "spec-observation-mismatch";
+    | "spec-observation-mismatch"
+    | "invalid-contracts";
   message: string;
 }>;
 
@@ -147,12 +152,25 @@ function reject(
   return Object.freeze({ ok: false, error: Object.freeze({ kind, message }) });
 }
 
+/**
+ * Inside a contract's red window a full-suite run sees the contract's pending
+ * acceptance testcases fail, so a required task-level regression obligation
+ * could never be met; the Wave Gate's acceptance-aware suite is the authority
+ * instead. An authored waiver keeps its own reason.
+ */
+function windowPolicy(policy: VerificationPolicy, inRedWindow: boolean): VerificationPolicy {
+  return inRedWindow && policy.regression.kind === "required"
+    ? Object.freeze({ ...policy, regression: Object.freeze({ kind: "waived" as const, reason: ACCEPTANCE_RED_WINDOW }) })
+    : policy;
+}
+
 function sanitizeTask(
   task: AuthoredTask,
   specIndex: SpecIndexAvailability,
   proofBoundary: PopulationProofBoundary,
+  inRedWindow: boolean,
 ): Task {
-  const verificationPolicy = taskVerificationPolicy(task);
+  const verificationPolicy = windowPolicy(taskVerificationPolicy(task), inRedWindow);
   const proofBaseline = proofBoundary.kind === "captured" ? proofBoundary.baselines.get(task.id) : undefined;
   const completionAnchors = Object.freeze([...(task.spec_anchors ?? [])]);
   const anchorHashes = specIndex.kind === "indexed"
@@ -235,6 +253,10 @@ export function populateTaskGraph(
     );
   }
 
+  const contracts = acceptanceContractsFromPlan(command.contracts, command.tasks);
+  if (!contracts.ok) return reject("invalid-contracts", contracts.error.join("; "));
+  const redWindow = redWindowTaskIds(contracts.value, command.tasks);
+
   const waves = taskWaves(command.tasks);
   const waveGates = Object.freeze(Object.fromEntries(
     waves.map((wave) => [String(wave), newWaveGate()] as const),
@@ -251,6 +273,7 @@ export function populateTaskGraph(
     spec_trace_amendments: _staleSpecTraceAmendments,
     spec_index_observation: _staleSpecIndexObservation,
     proof_boundary_observation: _staleProofBoundaryObservation,
+    acceptance_contracts: _staleAcceptanceContracts,
     ...existingWithoutWaveAuthority
   } = existing;
   const state: TaskGraph = Object.freeze({
@@ -263,7 +286,9 @@ export function populateTaskGraph(
     spec_file: lockedSpecFile,
     spec_index_observation: specIndexObservationOf(command.specIndex),
     proof_boundary_observation: proofBoundaryObservationOf(command.proofBoundary),
-    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(task, command.specIndex, command.proofBoundary))),
+    tasks: Object.freeze(command.tasks.map((task) =>
+      sanitizeTask(task, command.specIndex, command.proofBoundary, redWindow.has(task.id)))),
+    ...(contracts.value.length === 0 ? {} : { acceptance_contracts: contracts.value }),
     current_wave: 1,
     executing_tasks: Object.freeze([]),
     wave_gates: waveGates,

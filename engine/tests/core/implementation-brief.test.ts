@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import {
+  NO_ACCEPTANCE_CONTRACT,
   NO_CODE_RULES,
   NO_INVARIANT_OWNERSHIP,
   NO_RETRY_CONTEXT,
@@ -17,7 +18,7 @@ import {
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
 import { NO_PREDECESSORS } from "../../src/core/predecessor-output";
 import { parseSpec } from "../../src/core/parse-spec";
-import type { ArtifactDigest } from "../../src/core/orchestration-contract";
+import { digest } from "../fixtures/acceptance-fixtures";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
@@ -28,6 +29,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
+import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
@@ -63,7 +65,7 @@ if (!parsed.ok) throw new Error("spec fixture must parse");
 const SPEC: SpecIndexAvailability = {
   kind: "indexed",
   path: "/repo/.claude/specs/brief/spec.md",
-  contentDigest: "a".repeat(64) as ArtifactDigest,
+  contentDigest: digest("a"),
   index: parsed.value,
 };
 const NO_SPEC_FILE: SpecIndexAvailability = { kind: "unavailable", reason: { kind: "no-spec-file" } };
@@ -109,6 +111,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   rules: RULES,
   roster: ROSTER,
   invariants: [],
+  contracts: [],
   ...overrides,
 });
 
@@ -128,6 +131,37 @@ const PROBE_FAMILY: PlanInvariant = {
 
 const ownershipSection = (prompt: string): string =>
   prompt.split("## Invariant Ownership — BINDING\n\n")[1]?.split("\n\nThe engine derives this section")[0] ?? "";
+
+const contractSection = (prompt: string): string =>
+  prompt.split("## Acceptance Contract — BINDING\n\n")[1]?.split("\n\nThe engine derives this section")[0] ?? "";
+
+const CONTRACT: AcceptanceContract = {
+  schemaVersion: 1,
+  id: "CT-1",
+  title: "Brief rendering contract",
+  statement: "A rendered brief is admissible by construction.",
+  contractTask: "T3",
+  types: { kind: "file", path: "engine/src/core/brief-contract.ts" },
+  acceptance: [{ path: "engine/tests/acceptance/brief.acceptance.test.ts", anchors: ["FR-001", "AS-001"] }],
+  supportedDomain: "engine/tests/acceptance/brief.acceptance.test.ts",
+  freeze: { state: "awaiting-red" },
+  revisions: [],
+};
+const FROZEN_CONTRACT: AcceptanceContract = {
+  ...CONTRACT,
+  freeze: {
+    state: "frozen",
+    wave: 1,
+    paths: [
+      { path: "engine/src/core/brief-contract.ts", sha256: digest("a") },
+      { path: "engine/tests/acceptance/brief.acceptance.test.ts", sha256: digest("b") },
+    ],
+    roster: [
+      { file: "engine/tests/acceptance/brief.acceptance.test.ts", name: "brief > FR-001: renders", anchors: ["FR-001"] },
+      { file: "engine/tests/acceptance/brief.acceptance.test.ts", name: "brief > AS-001: admitted", anchors: ["AS-001"] },
+    ],
+  },
+};
 
 describe("ruleDocumentsFor", () => {
   it.each<[string, readonly string[], readonly RuleDocument[]]>([
@@ -311,6 +345,56 @@ describe("renderImplementationBrief", () => {
     });
   });
 
+  describe("acceptance contract", () => {
+    const render = (value: Task, contracts: readonly AcceptanceContract[], roster: readonly Task[] = ROSTER): string => {
+      const rendered = renderImplementationBrief(input(value, { contracts, roster }));
+      if (!rendered.ok) throw new Error(rendered.error.message);
+      return contractSection(rendered.value.prompt);
+    };
+
+    it("states that no contract involves a Task outside every contract", () => {
+      expect(render(task({ spec_anchors: ["FR-001"] }), [])).toBe(NO_ACCEPTANCE_CONTRACT);
+    });
+
+    it("tells the contract Task to write the frozen surface and stubs, and that its gate needs every testcase red", () => {
+      const contractTask = task({
+        id: "T3", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: ["FR-001", "AS-001"],
+        file_list: ["engine/src/core/brief-contract.ts", "engine/tests/acceptance/brief.acceptance.test.ts", "engine/src/core/brief.ts"],
+      });
+      const section = render(contractTask, [CONTRACT], []);
+      expect(section).toContain("**CT-1: Brief rendering contract** — you are its contract Task.");
+      expect(section).toContain("A rendered brief is admissible by construction.");
+      expect(section).toContain("- Types file `engine/src/core/brief-contract.ts` — declarations only");
+      expect(section).toContain("  - `engine/tests/acceptance/brief.acceptance.test.ts` — FR-001, AS-001");
+      expect(section).toContain("Supported domain: `engine/tests/acceptance/brief.acceptance.test.ts`");
+      expect(section).toContain("Stub every function the acceptance tests import");
+      expect(section).toContain("every acceptance testcase is collected and fails");
+    });
+
+    it("tells a claimant which frozen testcases it turns green, and that frozen files are read-only", () => {
+      const section = render(task({ spec_anchors: ["AS-001"], spec_contributions: [] }), [FROZEN_CONTRACT]);
+      expect(section).toContain("**CT-1: Brief rendering contract** — you complete AS-001 (contract Task T3).");
+      expect(section).toContain("Frozen — read them, never write them");
+      expect(section).toContain("- `engine/src/core/brief-contract.ts`");
+      expect(section).toContain("- `brief > AS-001: admitted` (`engine/tests/acceptance/brief.acceptance.test.ts`)");
+      expect(section).not.toContain("brief > FR-001: renders");
+      expect(section).toContain("only an operator Contract Revision changes a frozen file");
+    });
+
+    it("tells a red-window bystander which pending failures are not its own", () => {
+      const bystander = task({
+        spec_anchors: [], spec_contributions: [], file_list: ["engine/src/other.ts"],
+        verification_policy: {
+          regression: { kind: "waived", reason: "acceptance-red-window" },
+          new_tests: { kind: "required" },
+        },
+      });
+      const section = render(bystander, [FROZEN_CONTRACT]);
+      expect(section).toContain("**CT-1: Brief rendering contract** — its acceptance testcases in `engine/tests/acceptance/brief.acceptance.test.ts` may still fail");
+      expect(section).toContain("Failures anywhere else are yours to fix.");
+    });
+  });
+
   it("substitutes the template in one pass, never re-scanning Task text for variables", () => {
     const value = task({ description: "Keep the literal {task_id} in docs" });
     const rendered = renderImplementationBrief(input(value));
@@ -347,7 +431,7 @@ describe("renderImplementationBrief", () => {
       "a spec file that is not UTF-8",
       {
         kind: "unavailable",
-        reason: { kind: "invalid-encoding", path: "/repo/spec.md", contentDigest: "b".repeat(64) as ArtifactDigest, reason: "bad byte" },
+        reason: { kind: "invalid-encoding", path: "/repo/spec.md", contentDigest: digest("b"), reason: "bad byte" },
       },
       "spec file /repo/spec.md is not valid UTF-8: bad byte",
     ],
@@ -358,7 +442,7 @@ describe("renderImplementationBrief", () => {
         reason: {
           kind: "unparsed",
           path: "/repo/spec.md",
-          contentDigest: "c".repeat(64) as ArtifactDigest,
+          contentDigest: digest("c"),
           errors: [{ kind: "no-acceptance-block" }],
         },
       },

@@ -7,8 +7,9 @@
  * engine derived for it (`deriveTaskImplementationDispatch`), the Spec Index
  * text of its Requirement claims, its dependencies' settled output
  * (`predecessorOutputs`), the Agent Catalog's declared skill, the binding
- * rule documents its file list selects, and the ownership of every plan
- * invariant whose family it changes. The renderer then proves the
+ * rule documents its file list selects, the ownership of every plan
+ * invariant whose family it changes, and its role in every Acceptance
+ * Contract it writes, completes, or runs beside. The renderer then proves the
  * result passes the same spawn-gate checks the harness will apply — no
  * residual template variable, and the canonical `**Task ID:**` binding naming
  * this Task — so a rendered brief is admissible by construction rather than by
@@ -25,6 +26,7 @@ import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requi
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { invariantRoles } from "./plan-paths";
+import { ACCEPTANCE_RED_WINDOW, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 
@@ -65,6 +67,8 @@ export const NO_RETRY_CONTEXT = "None — semantic attempt 1.";
 export const NO_SCENARIO_TEST_NAMES = "None — this Task claims no Acceptance Scenario.";
 /** Literal substituted for `{invariant_ownership}` when no owned invariant names a file the Task changes. */
 export const NO_INVARIANT_OWNERSHIP = "None — no plan invariant names a file this Task changes.";
+/** Literal substituted for `{acceptance_contract}` when no contract involves the Task. */
+export const NO_ACCEPTANCE_CONTRACT = "None — no plan contract involves this Task.";
 
 /** The template variables the implementation brief template must declare —
  *  exactly these, so a drifted template is refused rather than half-rendered. */
@@ -84,6 +88,7 @@ const BRIEF_VARIABLES = [
   "scenario_test_names",
   "plan_context",
   "invariant_ownership",
+  "acceptance_contract",
   "file_list",
   "plan_file_path",
 ] as const;
@@ -104,6 +109,8 @@ export type ImplementationBriefInput = Readonly<{
   rules: ReadonlyMap<RuleDocument, string>;
   /** The invariants the protected plan declares; empty when there is no plan. */
   invariants: readonly PlanInvariant[];
+  /** The TaskGraph's Acceptance Contracts, with their freeze; empty when none. */
+  contracts: readonly AcceptanceContract[];
 }>;
 
 export type ImplementationBrief = Readonly<{
@@ -218,6 +225,75 @@ function invariantOwnership(fileList: readonly string[], invariants: readonly Pl
   return blocks.length === 0 ? NO_INVARIANT_OWNERSHIP : blocks.join("\n\n");
 }
 
+/** The contract Task's instructions: write the frozen surface and stubs, so
+ *  that the contract Wave's gate observes every acceptance testcase RED. */
+function contractTaskBlock(contract: AcceptanceContract): readonly string[] {
+  return [
+    `**${contract.id}: ${contract.title}** — you are its contract Task.`,
+    contract.statement,
+    "",
+    "Write the frozen surface, and nothing that implements it:",
+    contract.types.kind === "file"
+      ? `- Types file \`${contract.types.path}\` — declarations only: the types, interfaces, sealed ADTs and function signatures consumers import. No logic: its bytes freeze.`
+      : `- No shared types file: ${contract.types.reason}`,
+    "- Acceptance tests — dedicated files. Name every testcase after the Requirement it decides (`AS-003: …`), and give every listed Requirement at least one:",
+    ...contract.acceptance.map(({ path, anchors }) => `  - \`${path}\` — ${anchors.join(", ")}`),
+    ...(contract.supportedDomain === null
+      ? []
+      : [`- Supported domain: \`${contract.supportedDomain}\` holds the supported/unsupported table, and the relevant laws, as test cases.`]),
+    "- Stub every function the acceptance tests import, in this Task's other files, so the tests compile and FAIL by assertion or by a thrown \"not implemented\" — never by a missing import or a file that fails to load.",
+    "",
+    "Your Wave Gate passes only if every acceptance testcase is collected and fails, and nothing else fails. It then freezes these files: no later Task may change them, and only an operator Contract Revision can. Do not implement the behavior.",
+  ];
+}
+
+/** A claimant's instructions: the frozen paths are read-only, and the
+ *  testcases deciding its claims must pass at its Wave Gate. */
+function claimantBlock(contract: AcceptanceContract, claims: readonly string[]): readonly string[] {
+  const roster = contract.freeze.state === "frozen" ? contract.freeze.roster : [];
+  const mine = roster.filter(({ anchors }) => anchors.some((anchor) => claims.includes(anchor)));
+  return [
+    `**${contract.id}: ${contract.title}** — you complete ${claims.join(", ")} (contract Task ${contract.contractTask}).`,
+    contract.statement,
+    "",
+    "Frozen — read them, never write them; a write fails your byte-scope proof:",
+    ...frozenPaths(contract).map((path) => `- \`${path}\``),
+    "",
+    mine.length > 0
+      ? ["Turn these acceptance testcases green; your Wave Gate requires them passing:",
+          ...mine.map(({ name, file }) => `- \`${name}\` (\`${file}\`)`)].join("\n")
+      : `Turn green every acceptance testcase that names ${claims.join(", ")}; your Wave Gate requires them passing.`,
+    "Testcases of Requirements completed in later Waves may still fail. If an acceptance test is wrong, stop and report it: only an operator Contract Revision changes a frozen file.",
+  ];
+}
+
+/** A red-window bystander's note: which pending failures are not its own. */
+function bystanderBlock(contract: AcceptanceContract): readonly string[] {
+  const files = contract.acceptance.map(({ path }) => `\`${path}\``).join(", ");
+  return [
+    `**${contract.id}: ${contract.title}** — its acceptance testcases in ${files} may still fail in a full-suite run until the Tasks completing ${coveredAnchors(contract).join(", ")} land. ` +
+      `Your regression run is waived for that reason (\`${ACCEPTANCE_RED_WINDOW}\`); the Wave Gate's suite judges everything else. Failures anywhere else are yours to fix.`,
+  ];
+}
+
+/**
+ * The Task's role in every Acceptance Contract: its contract Task, a claimant
+ * of a Requirement it covers, or a Task inside its red window — each gets the
+ * instructions its proof and Wave Gate will hold it to.
+ */
+function acceptanceContractSection(task: Task, contracts: readonly AcceptanceContract[]): string {
+  const claims = task.spec_anchors ?? [];
+  const policy = taskVerificationPolicy(task);
+  const inRedWindow = policy.regression.kind === "waived" && policy.regression.reason === ACCEPTANCE_RED_WINDOW;
+  const blocks = contracts.flatMap((contract) => {
+    if (contract.contractTask === task.id) return [contractTaskBlock(contract).join("\n")];
+    const claimed = claims.filter((anchor) => coveredAnchors(contract).includes(anchor));
+    if (claimed.length > 0) return [claimantBlock(contract, claimed).join("\n")];
+    return inRedWindow ? [bystanderBlock(contract).join("\n")] : [];
+  });
+  return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
+}
+
 /**
  * Render one Task's implementation brief, or refuse with the exact reason the
  * brief could not be admissible.
@@ -291,6 +367,7 @@ export function renderImplementationBrief(
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
     invariant_ownership: invariantOwnership(task.file_list ?? [], input.invariants),
+    acceptance_contract: acceptanceContractSection(task, input.contracts),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",
   };

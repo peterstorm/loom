@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="5" failures="3" errors="0" time="0.009350921">
+    <testsuite name="tests/green.test.ts" timestamp="2026-10-13T13:58:14.398Z" hostname="probe" tests="2" failures="0" errors="0" skipped="1" time="0.001671311">
+        <testcase classname="tests/green.test.ts" name="plain" time="0.000999026">
+        </testcase>
+        <testcase classname="tests/green.test.ts" name="skipped one" time="0">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="tests/acceptance/broken.acceptance.test.ts" timestamp="2026-10-13T13:58:14.399Z" hostname="probe" tests="1" failures="1" errors="0" skipped="0" time="0">
+        <testcase classname="tests/acceptance/broken.acceptance.test.ts" name="tests/acceptance/broken.acceptance.test.ts" time="0">
+            <failure message="Cannot find module &apos;../../missing&apos; imported from &apos;tests/acceptance/broken.acceptance.test.ts&apos;" type="Error">
+Error: Cannot find module &apos;../../missing&apos; imported from &apos;tests/acceptance/broken.acceptance.test.ts&apos;
+ ❯ tests/acceptance/broken.acceptance.test.ts:2:1
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+Serialized Error: { code: &apos;ERR_MODULE_NOT_FOUND&apos; }
+Caused by: Error: Failed to load url ../../missing (resolved id: ../../missing) in tests/acceptance/broken.acceptance.test.ts. Does the file exist?
+ ❯ loadAndTransform ../../../../../..node_modules/vite/dist/node/chunks/config.js:22663:33
+            </failure>
+        </testcase>
+    </testsuite>
+    <testsuite name="tests/acceptance/red.acceptance.test.ts" timestamp="2026-10-13T13:58:14.403Z" hostname="probe" tests="2" failures="2" errors="0" skipped="0" time="0.00767961">
+        <testcase classname="tests/acceptance/red.acceptance.test.ts" name="contract &gt; AS-001: subtracts" time="0.006097391">
+            <failure message="expected +0 to be 2 // Object.is equality" type="AssertionError">
+AssertionError: expected +0 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 0
+
+ ❯ tests/acceptance/red.acceptance.test.ts:4:53
+            </failure>
+        </testcase>
+        <testcase classname="tests/acceptance/red.acceptance.test.ts" name="contract &gt; AS-002: throws stub" time="0.000551102">
+            <failure message="unimplemented" type="Error">
+Error: unimplemented
+ ❯ unimpl sub.ts:2:45
+ ❯ tests/acceptance/red.acceptance.test.ts:5:44
+            </failure>
+        </testcase>
+    </testsuite>
+</testsuites>

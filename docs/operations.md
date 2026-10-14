@@ -746,6 +746,35 @@ On success, one locked write:
 
 Task status, proof, attempt history, test evidence, Findings, Refutations, Resolutions and completed history are untouched, so nothing is re-implemented. Start the Wave Gate next: it issues fresh packets over the amended trace, and spec-check and reviewers judge the new scope. The State File boundary refuses a graph whose trace contradicts a Task's latest amendment, or whose amendment history for a Task does not chain, and re-population drops the audit together with the Tasks it described.
 
+### A frozen acceptance test or contract types file is wrong
+
+An Acceptance Contract's frozen paths (its types file and acceptance tests) change only through an operator Contract Revision. A Wave Gate that finds them changed blocks with `frozen acceptance drifted: CT-n '<path>' changed`; a claimant that finds a frozen test wrong stops and reports it. Either restore the frozen bytes, or edit the frozen files yourself and record the revision:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper revise-contract \
+  --contract CT-1 --reason "AS-003 asserted the wrong error variant"
+```
+
+The helper hashes the frozen paths as they are now, then commits under the TaskGraph lock. It refuses, without writing, when:
+
+- the arguments are not exactly `--contract CT-<n>` and a non-blank `--reason` of at most 512 characters;
+- the contract is not in the TaskGraph, or the graph is not in the execute Phase;
+- any Task is executing or a subagent is active;
+- a Wave Gate is live — abandon it with `helper orchestration abandon` first; an abandoned tombstone is accepted and retired;
+- the contract is still `awaiting-red`: its contract Task owns the files until its Wave Gate observes them red;
+- the contract Wave has not completed;
+- any Task claiming a covered Requirement sits in a completed Wave — that Wave was verified against the old bytes, so reopen it first (`helper reopen-completed-wave`, above);
+- a frozen path is missing or unreadable (the refusal names the read error, e.g. a symlink the no-follow read refuses), or the bytes did not change;
+- the contracts changed between the helper's observation and its lock, so it never read a path the locked contract freezes (`observation-stale`) — retry.
+
+On success, one locked write:
+
+- sets the freeze to `revised` with the new digests and appends a numbered revision (reason, previous and new digests, revalidated Task ids) — the old bytes stay auditable;
+- returns the current Wave's `implemented` claimants to `pending` with `revalidation_required`, keeping their proof and incrementing their review generation, exactly as a reopened Wave does — re-spawn them before starting the Wave Gate;
+- retires the current Wave's review and suite authority (`active_wave_completion_suite`, review runs, the Wave's spec-check) and resets its `tests_passed` and `reviews_complete` — and its `impl_complete` too when any claimant was returned to revalidation.
+
+The next Wave Gate judges the contract green against the new bytes and re-records its roster, which freezes it again.
+
 ### State is malformed
 
 Use only when the load boundary explicitly directs recovery:

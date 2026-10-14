@@ -116,6 +116,13 @@ import { PHASE_ORDER } from "./config";
 import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
 import type { LegacyWaveGateCompatibilityAuthority } from "./core/legacy-archive";
+import {
+  contractWriter,
+  frozenPaths,
+  parseAcceptanceContracts,
+  type AcceptanceContract,
+  type ContractWriterProblem,
+} from "./core/acceptance-contract";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2214,6 +2221,53 @@ function parseTaskGraphHistoryFields(
   });
 }
 
+function renderWriterProblem(contract: AcceptanceContract, problem: ContractWriterProblem): string {
+  switch (problem.kind) {
+    case "unwritten":
+      return `frozen path '${problem.path}' is not in ${contract.contractTask}'s file_list`;
+    case "shared":
+      return `frozen path '${problem.path}' is in the file_list of ${problem.taskIds.join(" and ")}; only ${contract.contractTask} may write it`;
+    case "split":
+      return `frozen paths are written by ${problem.taskIds.join(" and ")}; only ${contract.contractTask} may write them`;
+  }
+}
+
+/**
+ * The persisted contracts, parsed exactly and bound to the roster: each names
+ * a Task that exists and is, by the one writer rule, the only Task listing
+ * every path the contract freezes; and a freeze names a Wave no earlier than
+ * that Task's. A contract whose writer vanished could never be observed RED.
+ */
+function parseAcceptanceContractsField(
+  raw: unknown,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<readonly AcceptanceContract[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  const parsed = parseAcceptanceContracts(raw);
+  if (!parsed.ok) return parseErr(parsed.error);
+  for (const contract of parsed.value) {
+    const writer = tasks.find(({ id }) => id === contract.contractTask);
+    if (writer === undefined) {
+      return parseErr(`acceptance_contracts ${contract.id}: contract task ${contract.contractTask} is not in tasks`);
+    }
+    const views = tasks.map((task) => ({
+      id: String(task.id),
+      file_list: Array.isArray(task.file_list) ? task.file_list.filter((file): file is string => typeof file === "string") : [],
+    }));
+    const writes = contractWriter(frozenPaths(contract), views);
+    if (!writes.ok) {
+      return parseErr(`acceptance_contracts ${contract.id}: ${writes.error.map((problem) => renderWriterProblem(contract, problem)).join("; ")}`);
+    }
+    if (writes.value !== contract.contractTask) {
+      return parseErr(`acceptance_contracts ${contract.id}: the frozen paths are written by ${writes.value}, not contract task ${contract.contractTask}`);
+    }
+    if (contract.freeze.state === "frozen" && typeof writer.wave === "number" && contract.freeze.wave < writer.wave) {
+      return parseErr(`acceptance_contracts ${contract.id}: freeze.wave ${contract.freeze.wave} precedes contract task ${contract.contractTask}'s Wave ${writer.wave}`);
+    }
+  }
+  return parseOk(parsed.value);
+}
+
 type ParsedTaskGraphParts = Readonly<{
   phaseArtifacts: Readonly<Record<string, string>>;
   skippedPhases: readonly Phase[];
@@ -2223,6 +2277,7 @@ type ParsedTaskGraphParts = Readonly<{
   specCheck: SpecCheck | undefined;
   specIndexObservation: SpecIndexObservation | undefined;
   proofBoundaryObservation: ProofBoundaryObservation | undefined;
+  acceptanceContracts: readonly AcceptanceContract[] | undefined;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
 }>;
@@ -2277,6 +2332,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
+    ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
   } as unknown as ParsedTaskGraph;
 }
 
@@ -2365,6 +2421,11 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     tasks.value as Record<string, unknown>[],
   );
   if (!history.ok) return parseErr(history.error);
+  const acceptanceContracts = parseAcceptanceContractsField(
+    obj.acceptance_contracts,
+    tasks.value as Record<string, unknown>[],
+  );
+  if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
 
   return parseOk(taskGraphFromParsedParts(obj, {
     ...documents.value,
@@ -2372,6 +2433,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     executingTasks: executingTasks.value,
     waveGates: migratedWaveGates,
     specCheck: specCheck.value,
+    acceptanceContracts: acceptanceContracts.value,
     authority: authority.value,
     history: history.value,
   }));

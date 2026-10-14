@@ -27,6 +27,7 @@ import type { FrozenVerificationManifest, ProjectVerificationCoverage } from "./
 import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
+import type { AcceptanceContract, PlanContract } from "./core/acceptance-contract";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 import type {
@@ -1167,6 +1168,12 @@ export interface TaskGraph {
   /** Append-only audit of in-place v2 trace amendments; each Task's latest
    *  change must agree with its current trace. Dropped by re-population. */
   readonly spec_trace_amendments?: readonly SpecTraceAmendment[];
+  /**
+   * The plan's Contracts, stamped at population: each one's contract Task,
+   * frozen paths and covered Requirements, and its Acceptance Freeze. Absent
+   * when the plan declares no contract; re-population replaces it.
+   */
+  readonly acceptance_contracts?: readonly AcceptanceContract[];
   readonly updated_at?: string;
 }
 
@@ -1197,7 +1204,10 @@ export type PlanInvariantTier =
   | { readonly status: "unrecognized"; readonly raw: string };
 
 /** Model sections that carry `### ` id-blocks. */
-export type BlockSection = "Lifecycles" | "Invariants";
+export type BlockSection = "Lifecycles" | "Invariants" | "Contracts";
+
+/** The id prefix of each block section's `### {prefix}-N: title` headings. */
+export type BlockPrefix = "LC" | "INV" | "CT";
 
 /** All canonical model sections. */
 export type ModelSection = BlockSection | "Pipeline";
@@ -1215,7 +1225,7 @@ export type Stray =
       readonly kind: "bad-block-grammar";
       readonly heading: string;
       readonly section: BlockSection;
-      readonly prefix: "LC" | "INV";
+      readonly prefix: BlockPrefix;
     }
   | { readonly kind: "misplaced-heading"; readonly heading: string; readonly home: BlockSection }
   | { readonly kind: "misplaced-label"; readonly label: string; readonly home: ModelSection };
@@ -1278,10 +1288,23 @@ export interface PlanInvariant {
   readonly ownership: InvariantOwnership;
 }
 
+// The contract shapes are owned by core/acceptance-contract, the module that
+// makes them executable; they are re-exported here beside the other plan
+// shapes, and that module imports nothing from this file.
+export type {
+  ContractAcceptanceFile,
+  ContractDeclaration,
+  ContractProblem,
+  ContractTypes,
+  PlanContract,
+} from "./core/acceptance-contract";
+
 export interface PlanModels {
   readonly lifecycles: readonly PlanLifecycle[];
   readonly pipeline: PlanPipeline | null;
   readonly invariants: readonly PlanInvariant[];
+  /** `## Contracts` blocks: the acceptance each feature slice is built against. */
+  readonly contracts: readonly PlanContract[];
   /**
    * Near-miss / misplaced model markers: section headings that almost match
    * (`## Lifecycles:`, `## Pipelines`), `###` blocks inside a model section

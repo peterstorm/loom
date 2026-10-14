@@ -96,7 +96,9 @@ Important parser boundaries include:
 - `runtime-compatibility.ts` — binds fresh Pi-launched CLI mutators to the exact extension/engine bytes loaded in memory;
 - `state-manager.ts` — parses the complete protected TaskGraph before use;
 - `parsers/parse-phase-artifacts.ts` — derives phase artifacts from completed Agent output;
-- `core/parse-plan-models.ts` — parses exact lifecycle, pipeline, and invariant (including ownership) declarations;
+- `core/parse-plan-models.ts` — parses exact lifecycle, pipeline, invariant (including ownership), and contract declarations;
+- `core/acceptance-contract.ts` — parses persisted Acceptance Contracts and their freeze, and the acceptance observation a suite receipt carries;
+- `core/structured-test-report.ts` — projects a strict JUnit report into testcases for acceptance judgment;
 - `core/review-output.ts` and `core/findings.ts` — parse, identify, reconcile, and classify review Findings;
 - `core/review-packet.ts` — parses immutable code-review scope packets;
 - `core/panel-contract.ts` / `core/review-panel.ts` — validate architecture and refutation verdicts;
@@ -120,6 +122,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Standalone lineage (P5) | `standalone-lineage-contract.ts` (wire contract below the aggregate) plus the `standalone-review.ts` cohesive owner; `standalone-successor-reviewer.ts` is a consumed named entry surface | Original identity/history, explicit policy/source joins, complete current assessment and canonical projections |
 | Advisory publication (P5) | `standalone-disposition-machine.ts` | No-agent immutable DECLARED publication and exact effect reconciliation |
 | Wave Gate | `wave-gate-machine.ts` (LC-1 reducer, proof-carrying readiness snapshot, next-action proof, completion commit), `wave-gate-checks.ts` (gate evaluation), `wave-completion-suite-readiness.ts`, `wave-gate-preparation.ts` (refutation/advisory actions), `wave-gate-registration.ts` (admission, install with abandoned-run supersession, review-authority reset), `wave-status-facts.ts`, `loom-status.ts` (canonical status read model), `task-implementation-dispatch.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
+| Acceptance Contracts | `acceptance-contract.ts` (population, Wave Gate expectation, RED/GREEN judgment, Acceptance Freeze, drift), `contract-revision.ts` (operator Contract Revision) | Contracts before code: frozen acceptance tests observed red, then green by Requirement |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths, audit/stage/install lifecycle |
 | Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts` (derived agent sets, phase map, producer kinds), `pi-spawn-input.ts` (Pi `subagent` input parse), `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, and deterministic calibration scoring |
 | Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |
@@ -192,7 +195,7 @@ The active feature lifecycle lives at:
 - Claude Code: `.claude/state/active_task_graph.json`
 - Pi: `.pi/state/active_task_graph.json`
 
-`StateManager` is the only general writer. It uses a lock, temporary-file/rename publication, and mode `0444` at rest. Hooks and a narrow helper allowlist mediate changes. The graph contains phase artifacts, skipped phases, Tasks/Waves, proof results, review generations/runs, Findings, Wave Gate records, and GitHub tracking metadata.
+`StateManager` is the only general writer. It uses a lock, temporary-file/rename publication, and mode `0444` at rest. Hooks and a narrow helper allowlist mediate changes. The graph contains phase artifacts, skipped phases, Tasks/Waves, proof results, review generations/runs, Findings, Wave Gate records, Acceptance Contracts with their freeze and revisions, and GitHub tracking metadata.
 
 Under Pi, the extension hashes `engine/src/`, `pi/`, and runtime package metadata when it loads. Mutating CLI routes hash the checkout again before dynamic import, while `StateManager` repeats the check immediately before any chmod/lock/write. A missing or unequal Runtime Revision refuses the operation with a `/reload`/restart diagnostic. Status remains available during skew. This prevents a fresh CLI writer from emitting state that the stale in-memory extension cannot parse.
 

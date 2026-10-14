@@ -29,7 +29,9 @@ import {
   defaultVerificationManifest,
   deriveProjectVerificationCoverage,
 } from "./verification-manifest";
-import { canonicalRecord, type DomainResult, type NonEmpty } from "./orchestration-contract";
+import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
+import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
+
 
 function exactCompletionSuiteError(
   registration: ActiveWaveGateRegistration,
@@ -67,6 +69,10 @@ function exactCompletionSuiteError(
       ? actual.outcome.report.kind === "not-required"
       : actual.outcome.report.kind === "produced" && actual.outcome.report.path === expected.reportPolicy.path;
     if (!reportMatches) return `accepted suite check ${actual.checkId} contradicts its report policy`;
+  }
+  const judged = parsed.value.acceptance?.expectation ?? emptyAcceptanceExpectation(registration.wave);
+  if (!canonicalStructuralEquals(judged, graphAcceptanceExpectation(graph, registration.wave))) {
+    return "accepted suite was judged under a different acceptance expectation than the protected contracts derive";
   }
   return null;
 }
@@ -211,7 +217,11 @@ function deriveCompletionSuiteOutcome(
         manifestDigest,
       );
     }
-    const evaluation = evaluateWaveCompletionSuite(authorized.value, currentResult.result);
+    const evaluation = evaluateWaveCompletionSuite(
+      authorized.value,
+      currentResult.result,
+      graphAcceptanceExpectation(graph, source.registration.wave),
+    );
     if (evaluation.kind === "accepted") {
       return requiredWaveCompletionSuite(
         "accepted-suite-missing",

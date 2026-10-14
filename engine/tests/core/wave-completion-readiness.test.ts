@@ -9,11 +9,11 @@ import {
   renderLoomStatusJson,
 } from "../../src/core/loom-status";
 import {
-  evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   type AcceptedWaveCompletionReceipt,
   type WaveCompletionSuiteResult,
 } from "../../src/core/completion-suite";
+import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
@@ -101,7 +101,7 @@ function acceptedReceipt(
   reportByteLength = 10,
 ): AcceptedWaveCompletionReceipt {
   const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest));
-  const evaluated = evaluateWaveCompletionSuite(authority, {
+  const evaluated = evaluateAsRecorded(authority, {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
     wave: authority.wave,
@@ -156,7 +156,7 @@ function deps(
   return {
     loadPlanModels: () => ({
       kind: "loaded",
-      models: { lifecycles: [], pipeline: null, invariants: [], strays: [] },
+      models: { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] },
     }),
     filePresence: () => ({ ok: true, exists: true }),
     ...(currentWaveWorkspace === undefined ? {} : { currentWaveWorkspace }),

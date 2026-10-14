@@ -4,16 +4,27 @@ const AUTHORED_REGRESSION_WAIVER_REASONS = [
   "documentation-only",
   "generated-artifact",
 ] as const;
+/**
+ * Engine-only reasons: population stamps `acceptance-red-window` on a Task
+ * whose full-suite run would see a contract's still-pending acceptance
+ * testcases fail, and the Wave Gate's acceptance-aware suite becomes its
+ * regression authority. An authored payload can never claim either.
+ */
 export const REGRESSION_WAIVER_REASONS = [
   ...AUTHORED_REGRESSION_WAIVER_REASONS,
   "legacy-new-tests-required-false",
+  "acceptance-red-window",
 ] as const;
 export type RegressionWaiverReason = (typeof REGRESSION_WAIVER_REASONS)[number];
 
+/** `covered-by-acceptance-contract`: the Task completes Requirements a frozen
+ *  contract's acceptance tests decide, so those are its new tests; plan
+ *  validation admits it only on a claimant of a contract it depends on. */
 const AUTHORED_NEW_TEST_WAIVER_REASONS = [
   "existing-tests-sufficient",
   "documentation-only",
   "generated-artifact",
+  "covered-by-acceptance-contract",
 ] as const;
 export const NEW_TEST_WAIVER_REASONS = [
   ...AUTHORED_NEW_TEST_WAIVER_REASONS,

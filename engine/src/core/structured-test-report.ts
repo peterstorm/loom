@@ -64,7 +64,8 @@ export type StructuredReportErrorReason =
   | "invalid-utf8"
   | "unrecognized-format"
   | "ambiguous-format"
-  | "malformed-counts";
+  | "malformed-counts"
+  | "malformed-testcase";
 
 export type StructuredReportError = Readonly<{
   kind: "invalid-structured-test-report";
@@ -317,6 +318,81 @@ export function parseStructuredTestReportBytes(bytes: Uint8Array): StructuredRep
   return summary === null
     ? reportFailure("malformed-counts", "structured test report has missing, inconsistent, or unsafe counts")
     : reportSuccess(summary);
+}
+
+// --- Per-testcase projection ---
+
+export type ReportTestcaseOutcome = "passed" | "failed" | "skipped";
+
+/**
+ * One JUnit testcase: what it belongs to (`classname` — the test file under
+ * Vitest, the test class under Surefire), its name (Vitest prefixes the
+ * enclosing `describe` titles, joined by ` > `), how it ended, and the type of
+ * its first `<failure>`/`<error>` (`AssertionError` for a behavioral failure,
+ * `Error` for a thrown stub or a file that never loaded).
+ */
+export type ReportTestcase = Readonly<{
+  classname: string;
+  name: string;
+  outcome: ReportTestcaseOutcome;
+  failureType: string | null;
+}>;
+
+export type JunitTestcasesResult = DomainResult<readonly ReportTestcase[], StructuredReportError>;
+
+function testcaseElements(element: ReportElement): readonly ReportElement[] {
+  return element.name === "testcase" ? [element] : reportChildren(element).flatMap(testcaseElements);
+}
+
+/** A skipped case is skipped even when it also carries a failure: Node's
+ *  failing TODO case, which the count parser reads the same way. */
+function projectTestcase(element: ReportElement): ReportTestcase | null {
+  const name = element.attributes.name;
+  const classname = element.attributes.classname;
+  if (name === undefined || name.trim() === "" || classname === undefined || classname.trim() === "") return null;
+  const skipped = element.children.some((child) => child.name === "skipped");
+  const failure = element.children.find((child) => child.name === "failure" || child.name === "error");
+  return Object.freeze({
+    classname,
+    name,
+    outcome: skipped ? "skipped" : failure === undefined ? "passed" : "failed",
+    failureType: skipped || failure === undefined ? null : failure.attributes.type ?? null,
+  });
+}
+
+/**
+ * Every testcase of a JUnit report, in document order. The report must first
+ * pass the strict structured-report parser, so the projection never describes
+ * a report whose counts the gate would refuse; a Vitest JSON report is refused
+ * by name, since it carries no per-testcase file attribution here.
+ */
+export function parseJunitTestcases(bytes: Uint8Array): JunitTestcasesResult {
+  const summary = parseStructuredTestReportBytes(bytes);
+  if (!summary.ok) return summary;
+  if (summary.value.source !== "junit-xml") {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        kind: "invalid-structured-test-report",
+        reason: "unrecognized-format",
+        message: "per-testcase observation needs a JUnit XML report; this report is Vitest JSON",
+      }),
+    });
+  }
+  const root = parseJunitDocument(new TextDecoder("utf-8", { fatal: true }).decode(bytes)).root;
+  const elements = root === null ? [] : testcaseElements(root);
+  const projected = elements.map(projectTestcase);
+  const unnamed = projected.filter((testcase) => testcase === null).length;
+  return unnamed > 0
+    ? Object.freeze({
+        ok: false,
+        error: Object.freeze({
+          kind: "invalid-structured-test-report",
+          reason: "malformed-testcase",
+          message: `${unnamed} JUnit testcase(s) lack a name or classname`,
+        }),
+      })
+    : Object.freeze({ ok: true, value: Object.freeze(projected as ReportTestcase[]) });
 }
 
 /** Merge summaries from multiple report files of one run. The inputs must

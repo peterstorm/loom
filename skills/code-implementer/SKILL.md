@@ -46,6 +46,15 @@ Before writing code, verify:
 
 ## During Implementation
 
+### Tests First
+
+Write the test that decides the behavior before the code that provides it, and watch it fail for the right reason — a failing assertion, not a missing import. A test written after the code tends to encode whatever the code happens to do.
+
+When the brief's **Acceptance Contract** section gives this Task a role, that role is binding:
+- **Contract task** — write the declarations-only types file, the acceptance tests (each named after the Requirement it decides, `AS-003: …`), and stubs that compile and fail. Do not implement the behavior: the Wave Gate passes only when every acceptance test is collected and fails, then freezes those files.
+- **Claimant** — the frozen acceptance tests are your specification. Read them first, never edit them, and make the listed testcases pass. If one is wrong, stop and report it; only an operator Contract Revision may change it.
+- **Red-window task** — acceptance tests that later Waves complete may fail in your full-suite run; that is expected and the Wave Gate judges it. Every other failure is yours.
+
 ### Structure Code as Functional Core + Imperative Shell
 
 Follow the package structure defined in `java-patterns.md` or `typescript-patterns.md` → "Package Structure".
