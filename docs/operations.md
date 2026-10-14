@@ -705,13 +705,16 @@ When an implementation agent that claims a frozen Acceptance Contract's Requirem
 - **Silent when off.** With no runner, or no owed testcase, the check does nothing and says nothing.
 - **Fails open.** In each of these cases the stop proceeds and the operator gets a `systemMessage` saying why the check did not decide:
   - another claimant's check holds the runner;
-  - the runner cannot start or finish;
+  - the runner cannot start or finish, times out, or is killed by a signal (a killed runner's report is partial, so it is not judged);
   - the report is missing or changed;
   - the report has no testcase of the acceptance files;
   - the block counter cannot be read;
+  - the agent has reached its 3-block cap;
   - the check itself fails.
-- **One run per repository at a time.** Every claimant shares the runner's one report path, and the runner resets that file before each launch. Checks are therefore serialized by a lock under the subagent directory. If a claimant stops while a sibling's check is running, its own check does not run, and the Wave Gate judges that claimant. A lock whose holder process has exited, or that is older than the longest permitted run plus 60 s, is reclaimed.
-- **Cap.** An agent is blocked at most 3 times. The count is kept per spawned agent under the subagent directory, never in the TaskGraph, and is cleared once that agent's stop proceeds.
+
+  A runner lock that will not release is appended to the note, or turns a pass into a note.
+- **One run per repository at a time.** Every claimant shares the runner's one report path, and the runner resets that file before each launch. Checks are therefore serialized by a lock under the subagent directory. If a claimant stops while a sibling's check is running, its own check does not run, and the Wave Gate judges that claimant. A lock whose holder process has exited, or that is older than the longest permitted run plus 60 s, is reclaimed. Reclaiming renames the lock aside and deletes it only if it still holds the stale bytes. If another stop reclaimed it first and took a fresh lock, the renamed lock is linked back and this stop does not run.
+- **Cap.** An agent is blocked at most 3 times; its next stop proceeds with a `systemMessage` naming the cap. The count is kept per spawned agent under the subagent directory, never in the TaskGraph, and is cleared once that agent's stop proceeds.
 - **Not completion evidence.** Nothing is recorded as a test result or proof; the Wave Gate's completion suite stays the only authority.
 - **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is printed as a `loom(pi):` line and never blocks.
 

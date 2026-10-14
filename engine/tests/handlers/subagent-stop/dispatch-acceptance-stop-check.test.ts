@@ -93,7 +93,7 @@ const stop = JSON.stringify({ session_id: SESSION, agent_id: AGENT, agent_type: 
 /** Ports that never decide: the repository root is unavailable, so the check notes and the stop proceeds. */
 const inertPorts = (): StopCheckPorts => ({
   repositoryRoot: () => ({ ok: false, reason: "repository root unavailable in this fixture" }),
-  acquireRunner: () => ({ kind: "acquired", release: () => undefined }),
+  acquireRunner: () => ({ kind: "acquired", release: () => null }),
   runCheck: async () => { throw new Error("unused"); },
   readReport: () => new Uint8Array(),
   blocksIssued: () => ({ kind: "count", blocks: 0 }),

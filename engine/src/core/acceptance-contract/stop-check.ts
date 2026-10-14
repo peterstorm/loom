@@ -49,8 +49,9 @@ export type FailingAcceptanceTestcase = Readonly<{
   file: string;
   name: string;
   /** `failed` with the report's failure type; `skipped` when the report ran it
-   *  as skipped; `did-not-run` when its file ran but the testcase was absent
-   *  or failed to collect. */
+   *  as skipped; `did-not-run` when the report holds no passing or failing
+   *  record of it: absent, failed to collect, or its file produced no
+   *  testcase while another owed file did. */
   outcome:
     | Readonly<{ kind: "failed"; failureType: string | null }>
     | Readonly<{ kind: "skipped" }>

@@ -9,18 +9,21 @@
  * arrived with `stop_hook_active: true` and the same agent id). Everything
  * else fails OPEN, and `runAcceptanceStopCheck` is total: no runner or no owed
  * testcase is a silent skip; a runner another claimant holds, a runner that
- * cannot run, a report that cannot be read, an unreadable block counter, the
+ * cannot run, times out or is killed, a report that cannot be read, a runner
+ * lock that will not release, an unreadable block counter, the
  * block cap, or any thrown fault is a note, and the stop proceeds for the Wave
  * Gate to judge. Nothing here is completion evidence; it never writes the
  * TaskGraph.
  */
 
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   judgeStopCheck,
   renderStopCheckBlock,
   stopCheckExpectation,
+  type OwedStopCheck,
 } from "../../core/acceptance-contract";
 import { MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS, acceptanceRunnerCheck } from "../../core/verification-manifest";
 import { parseJunitTestcases } from "../../core/structured-test-report";
@@ -58,7 +61,8 @@ export type BlockCount =
  * a stop that finds another claimant's run in flight does not decide.
  */
 export type RunnerLock =
-  | Readonly<{ kind: "acquired"; release: () => void }>
+  /** `release` returns why the lock could not be released, or null. */
+  | Readonly<{ kind: "acquired"; release: () => string | null }>
   | Readonly<{ kind: "held"; reason: string }>;
 
 /** The I/O the check needs, injectable for tests. */
@@ -85,6 +89,8 @@ export type StopCheckInput = Readonly<{
 
 const describe = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
 const tail = (text: string): string => text.length <= OUTPUT_TAIL_CHARS ? text : `…${text.slice(-OUTPUT_TAIL_CHARS)}`;
+const didNotDecide = (taskId: string, why: string): StopCheckOutcome =>
+  ({ kind: "note", message: `acceptance stop check for ${taskId} did not decide (${why}); the stop proceeds and the Wave Gate judges` });
 
 /** Decide the stop. Total: every fault becomes a note, and a stop that proceeds clears the agent's block count. */
 export async function runAcceptanceStopCheck(input: StopCheckInput, ports: StopCheckPorts): Promise<StopCheckOutcome> {
@@ -112,8 +118,7 @@ async function decideStop(input: StopCheckInput, ports: StopCheckPorts): Promise
   const check = stopCheckExpectation(graph.acceptance_contracts ?? [], graph.tasks, task);
   if (check.kind === "none") return { kind: "skip" };
 
-  const note = (why: string): StopCheckOutcome =>
-    ({ kind: "note", message: `acceptance stop check for ${input.taskId} did not decide (${why}); the stop proceeds and the Wave Gate judges` });
+  const note = (why: string): StopCheckOutcome => didNotDecide(input.taskId, why);
   const issued = ports.blocksIssued(input.agentKey);
   // Without a trustworthy count the cap cannot be enforced, so the check must not block.
   if (issued.kind === "unreadable") return note(`its block counter is unreadable: ${issued.reason}`);
@@ -129,33 +134,70 @@ async function decideStop(input: StopCheckInput, ports: StopCheckPorts): Promise
 
   const lock = ports.acquireRunner(root);
   if (lock.kind === "held") return note(lock.reason);
+  let decided: StopCheckOutcome;
+  let releaseFault: string | null;
   try {
-    const run = await ports.runCheck(command.value, root);
-    if (!run.ok) return note(`the runner did not complete: ${run.error.message}`);
-    const outcome = run.value.checkResult.outcome;
-    if (outcome.kind === "spawn-failed") return note(`the runner could not start: ${outcome.message}`);
-    if (outcome.report.kind !== "produced") return note(`the runner produced no report (${outcome.report.kind})`);
-
-    let bytes: Uint8Array;
-    try {
-      bytes = ports.readReport(join(root, outcome.report.path));
-    } catch (cause) {
-      return note(`the report could not be read back: ${describe(cause)}`);
-    }
-    if (sha256Bytes(bytes) !== outcome.report.digest) return note("the report changed after the runner produced it");
-
-    const verdict = judgeStopCheck(check, outcome.report.digest, parseJunitTestcases(bytes));
-    if (verdict.kind === "passed") return { kind: "passed" };
-    if (verdict.kind === "unobservable") return note(verdict.reason);
-    const blocks = issued.blocks + 1;
-    ports.recordBlock(input.agentKey, blocks);
-    const output = [run.value.diagnostics.stdoutTail, run.value.diagnostics.stderrTail].filter((part) => part.trim() !== "").join("\n");
-    return {
-      kind: "block",
-      message: renderStopCheckBlock(verdict.testcases, tail(output), ACCEPTANCE_STOP_CHECK_MAX_BLOCKS - blocks),
-    };
+    decided = await runAndJudge(input, ports, check, command.value, root, issued.blocks);
   } finally {
-    lock.release();
+    releaseFault = lock.release();
+  }
+  return withReleaseFault(input.taskId, decided, releaseFault);
+}
+
+/** Run the owed files under the held lock and judge the report. */
+async function runAndJudge(
+  input: StopCheckInput,
+  ports: StopCheckPorts,
+  check: OwedStopCheck,
+  command: Parameters<typeof runCompletionCheck>[0],
+  root: CanonicalRepositoryRoot,
+  blocksIssued: number,
+): Promise<StopCheckOutcome> {
+  const note = (why: string): StopCheckOutcome => didNotDecide(input.taskId, why);
+  const run = await ports.runCheck(command, root);
+  if (!run.ok) return note(`the runner did not complete: ${run.error.message}`);
+  const outcome = run.value.checkResult.outcome;
+  if (outcome.kind === "spawn-failed") return note(`the runner could not start: ${outcome.message}`);
+  // A report a killed runner left behind is partial: its absent testcases say nothing about the agent.
+  if (outcome.timedOut) return note("the runner timed out");
+  if (outcome.signal !== null) return note(`the runner was killed by ${outcome.signal}`);
+  if (outcome.report.kind !== "produced") return note(`the runner produced no report (${outcome.report.kind})`);
+
+  let bytes: Uint8Array;
+  try {
+    bytes = ports.readReport(join(root, outcome.report.path));
+  } catch (cause) {
+    return note(`the report could not be read back: ${describe(cause)}`);
+  }
+  if (sha256Bytes(bytes) !== outcome.report.digest) return note("the report changed after the runner produced it");
+
+  const verdict = judgeStopCheck(check, outcome.report.digest, parseJunitTestcases(bytes));
+  if (verdict.kind === "passed") return { kind: "passed" };
+  if (verdict.kind === "unobservable") return note(verdict.reason);
+  const blocks = blocksIssued + 1;
+  ports.recordBlock(input.agentKey, blocks);
+  const output = [run.value.diagnostics.stdoutTail, run.value.diagnostics.stderrTail].filter((part) => part.trim() !== "").join("\n");
+  return {
+    kind: "block",
+    message: renderStopCheckBlock(verdict.testcases, tail(output), ACCEPTANCE_STOP_CHECK_MAX_BLOCKS - blocks),
+  };
+}
+
+/**
+ * Tell the operator about a lock that would not release. A block cannot carry
+ * an operator note, and needs none: the lock names this hook's pid, so the
+ * next stop reclaims it once this process has exited.
+ */
+function withReleaseFault(taskId: string, outcome: StopCheckOutcome, fault: string | null): StopCheckOutcome {
+  if (fault === null) return outcome;
+  switch (outcome.kind) {
+    case "block":
+    case "skip":
+      return outcome;
+    case "passed":
+      return { kind: "note", message: `acceptance stop check: ${taskId}'s owed acceptance testcases pass, but ${fault}` };
+    case "note":
+      return { kind: "note", message: `${outcome.message}; ${fault}` };
   }
 }
 
@@ -203,21 +245,62 @@ const processAlive = (pid: number): boolean => {
   }
 };
 
-/** Why the lock at `path` is still live, or null when its holder is gone or it is stale. */
-function liveHolder(path: string): string | null {
+/** Who holds the lock at `path`: a live stop, a dead or expired one (with the bytes it left), or nobody. */
+type LockHolder =
+  | Readonly<{ kind: "live"; reason: string }>
+  | Readonly<{ kind: "stale"; bytes: string }>
+  | Readonly<{ kind: "gone" }>;
+
+function lockHolder(path: string): LockHolder {
+  let bytes: string;
+  try {
+    bytes = readFileSync(path, "utf8");
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return { kind: "gone" };
+    throw error;
+  }
   let holder: unknown;
   try {
-    holder = JSON.parse(readFileSync(path, "utf8"));
-  } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
+    holder = JSON.parse(bytes);
+  } catch {
     // A lock caught mid-write, or a foreign one: judged by its age alone.
-    return Date.now() - statSync(path).mtimeMs < RUNNER_LOCK_STALE_MS ? `the runner lock ${path} is unreadable but recent` : null;
+    return Date.now() - statSync(path).mtimeMs < RUNNER_LOCK_STALE_MS
+      ? { kind: "live", reason: `the runner lock ${path} is unreadable but recent` }
+      : { kind: "stale", bytes };
   }
   const { pid, acquiredAt } = typeof holder === "object" && holder !== null ? holder as Record<string, unknown> : {};
-  if (typeof pid !== "number" || typeof acquiredAt !== "number") return null;
-  return processAlive(pid) && Date.now() - acquiredAt < RUNNER_LOCK_STALE_MS
-    ? `another claimant's stop check (pid ${pid}) is running the acceptance runner`
-    : null;
+  return typeof pid === "number" && typeof acquiredAt === "number" && processAlive(pid) && Date.now() - acquiredAt < RUNNER_LOCK_STALE_MS
+    ? { kind: "live", reason: `another claimant's stop check (pid ${pid}) is running the acceptance runner` }
+    : { kind: "stale", bytes };
+}
+
+/**
+ * Reap the stale lock that held `stale`, as one compare-and-delete: claim
+ * whatever is at `path` by an atomic rename, delete it only if it still holds
+ * those bytes, and otherwise link it back, because another stop reaped the
+ * stale lock and took a fresh one first. `retaken` means that happened. The
+ * one race left needs a third stop to lock in the instant between the rename
+ * and the link-back; the Wave Gate still judges every claimant.
+ */
+export function reapStaleRunnerLock(path: string, stale: string): "reaped" | "retaken" {
+  const claimed = `${path}.reap.${process.pid}.${randomUUID()}`;
+  try {
+    renameSync(path, claimed);
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return "reaped";
+    throw error;
+  }
+  try {
+    if (readFileSync(claimed, "utf8") === stale) return "reaped";
+    try {
+      linkSync(claimed, path);
+    } catch (error) {
+      if (errnoCode(error) !== "EEXIST") throw error;
+    }
+    return "retaken";
+  } finally {
+    rmSync(claimed, { force: true });
+  }
 }
 
 function acquireRunnerLock(root: CanonicalRepositoryRoot): RunnerLock {
@@ -229,20 +312,21 @@ function acquireRunnerLock(root: CanonicalRepositoryRoot): RunnerLock {
       writeFileSync(path, token, { flag: "wx", mode: 0o600 });
       return {
         kind: "acquired",
-        // Remove only our own lock: a stale-reaped one may now belong to another stop.
+        // Remove only our own lock: a reaped one may now belong to another stop.
         release: () => {
           try {
             if (readFileSync(path, "utf8") === token) rmSync(path, { force: true });
-          } catch {
-            // Already gone: nothing to release.
+            return null;
+          } catch (error) {
+            return errnoCode(error) === "ENOENT" ? null : `the runner lock ${path} could not be released: ${describe(error)}`;
           }
         },
       };
     } catch (error) {
       if (errnoCode(error) !== "EEXIST") throw error;
-      const live = liveHolder(path);
-      if (live !== null) return { kind: "held", reason: live };
-      rmSync(path, { force: true });
+      const holder = lockHolder(path);
+      if (holder.kind === "live") return { kind: "held", reason: holder.reason };
+      if (holder.kind === "stale" && reapStaleRunnerLock(path, holder.bytes) === "retaken") break;
     }
   }
   return { kind: "held", reason: `the runner lock ${path} was retaken while this stop reaped a stale one` };

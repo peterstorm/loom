@@ -51,6 +51,7 @@ import {
   REPORT_ONLY_STOP_CHECK_PORTS,
   runAcceptanceStopCheck,
   stopCheckReportLine,
+  type StopCheckPorts,
 } from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
 import {
   applyFailedPiResult,
@@ -167,18 +168,26 @@ const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefin
 /**
  * The Acceptance Stop Check, report-only: Pi settles after the subagent has
  * ended, so a failing owed testcase is an operator note here, never a block.
- * The check is total, so it never raises a processing error.
+ * The check is total, so it never raises a processing error. Returns the
+ * operator line it printed, or null when it printed nothing.
  */
-async function reportAcceptanceStopCheck(manager: StateManager, taskId: string | null): Promise<void> {
-  if (taskId === null) return;
+export async function reportAcceptanceStopCheck(
+  manager: Readonly<{ load: () => TaskGraph; getPath: () => string }>,
+  taskId: string | null,
+  ports: StopCheckPorts = REPORT_ONLY_STOP_CHECK_PORTS,
+): Promise<string | null> {
+  if (taskId === null) return null;
   const outcome = await runAcceptanceStopCheck({
     loadGraph: () => manager.load(),
     stateFilePath: manager.getPath(),
     taskId,
     agentKey: `pi.${taskId}`,
-  }, REPORT_ONLY_STOP_CHECK_PORTS);
+  }, ports);
   const line = stopCheckReportLine(taskId, outcome);
-  if (line !== null) process.stderr.write(`loom(pi): ${line}\n`);
+  if (line === null) return null;
+  const printed = `loom(pi): ${line}`;
+  process.stderr.write(`${printed}\n`);
+  return printed;
 }
 
 /** Write a notice's stderr line and return the processing error it raises. */

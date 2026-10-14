@@ -41,13 +41,14 @@ export const VERIFICATION_MANIFEST_KIND = "loom-verification-manifest" as const;
 
 type ProjectWaveCompletionCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "project-command" }>;
 
-export type VerificationManifestSource =
-  | Readonly<{ kind: "engine-default" }>
-  | Readonly<{
-      kind: "operator-file";
-      path: typeof VERIFICATION_MANIFEST_SOURCE_PATH;
-      digest: ArtifactDigest;
-    }>;
+type EngineDefaultSource = Readonly<{ kind: "engine-default" }>;
+type OperatorFileSource = Readonly<{
+  kind: "operator-file";
+  path: typeof VERIFICATION_MANIFEST_SOURCE_PATH;
+  digest: ArtifactDigest;
+}>;
+
+export type VerificationManifestSource = EngineDefaultSource | OperatorFileSource;
 
 export type VerificationManifestCheck = Readonly<{
   id: CompletionCheckId;
@@ -82,24 +83,39 @@ export type AcceptanceRunner = Readonly<{
   report: Extract<ReportPolicy, { kind: "required-file" }>;
 }>;
 
-export type VerificationManifest = Readonly<{
-  schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION | typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
+type VerificationManifestBase = Readonly<{
   kind: typeof VERIFICATION_MANIFEST_KIND;
   checks: readonly VerificationManifestCheck[];
-  /** Present only in schema 2, and only when the operator declares one. */
-  acceptanceRunner?: AcceptanceRunner;
 }>;
 
-export type FrozenVerificationManifest = Readonly<{
+/** Schema 1 cannot declare a runner; schema 2 may, and declares one only when the operator does. */
+export type VerificationManifest =
+  | VerificationManifestBase & Readonly<{ schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION; acceptanceRunner?: never }>
+  | VerificationManifestBase & Readonly<{ schemaVersion: typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION; acceptanceRunner?: AcceptanceRunner }>;
+
+type FrozenVerificationManifestBase = Readonly<{
   schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION;
   kind: "frozen-verification-manifest";
-  source: VerificationManifestSource;
   manifestDigest: ArtifactDigest;
-  projectChecks: readonly ProjectWaveCompletionCheck[];
-  /** Absent on graphs frozen before the runner existed, and whenever the
-   *  operator declared none: either way the stop check is off. */
-  acceptanceRunner?: AcceptanceRunner;
 }>;
+
+/**
+ * The engine-default form authorizes nothing: no project check and no runner.
+ * An operator-file form's runner is absent on graphs frozen before the runner
+ * existed, and whenever the operator declared none: either way the stop check
+ * is off.
+ */
+export type FrozenVerificationManifest =
+  | FrozenVerificationManifestBase & Readonly<{
+      source: EngineDefaultSource;
+      projectChecks: readonly [];
+      acceptanceRunner?: never;
+    }>
+  | FrozenVerificationManifestBase & Readonly<{
+      source: OperatorFileSource;
+      projectChecks: readonly ProjectWaveCompletionCheck[];
+      acceptanceRunner?: AcceptanceRunner;
+    }>;
 
 export type ProjectVerificationCoverage =
   | Readonly<{
@@ -335,15 +351,20 @@ function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationMa
   return errors.length === 0 ? success(freezeArray(checks)) : failure(errors);
 }
 
+/** Whether a raw document names an `acceptanceRunner` key, so the exact record admits it. */
+const declaresRunner = (raw: unknown): boolean => isPlainRecord(raw) && Object.hasOwn(raw, "acceptanceRunner");
+
 function parseDocument(raw: unknown): Parsed<VerificationManifest> {
-  const schemaVersion = isPlainRecord(raw) ? raw.schemaVersion : undefined;
+  // A non-record falls through to exactRecord, which names the shape error.
+  const schemaVersion = isPlainRecord(raw) ? raw.schemaVersion : VERIFICATION_MANIFEST_SCHEMA_VERSION;
   const runnerSchema = schemaVersion === VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
-  if (schemaVersion !== VERIFICATION_MANIFEST_SCHEMA_VERSION && !runnerSchema && isPlainRecord(raw)) {
+  if (schemaVersion !== VERIFICATION_MANIFEST_SCHEMA_VERSION && !runnerSchema) {
     return failure([
       `verificationManifest.schemaVersion must equal ${VERIFICATION_MANIFEST_SCHEMA_VERSION} or ${VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION}`,
     ]);
   }
-  const hasRunner = runnerSchema && isPlainRecord(raw) && Object.hasOwn(raw, "acceptanceRunner");
+  // Schema 1 never admits the key, so a schema-1 runner is refused as an unknown field.
+  const hasRunner = runnerSchema && declaresRunner(raw);
   const record = exactRecord(
     raw,
     ["schemaVersion", "kind", "checks", ...(hasRunner ? ["acceptanceRunner"] : [])],
@@ -359,14 +380,16 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
   const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "verificationManifest.acceptanceRunner") : null;
   if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
   if (runner?.ok && checks.ok) errors.push(...runnerReportConflicts(runner.value, checks.value.map(({ report }) => report), "verificationManifest.acceptanceRunner"));
-  return errors.length === 0 && checks.ok && (runner === null || runner.ok)
-    ? success(freeze({
-        schemaVersion: runnerSchema ? VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION : VERIFICATION_MANIFEST_SCHEMA_VERSION,
+  if (errors.length > 0 || !checks.ok || (runner !== null && !runner.ok)) return failure(errors);
+  const manifest: VerificationManifest = runnerSchema
+    ? freeze({
+        schemaVersion: VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION,
         kind: VERIFICATION_MANIFEST_KIND,
         checks: checks.value,
         ...(runner === null ? {} : { acceptanceRunner: runner.value }),
-      }))
-    : failure(errors);
+      })
+    : freeze({ schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION, kind: VERIFICATION_MANIFEST_KIND, checks: checks.value });
+  return success(manifest);
 }
 
 /** Parse the exact source JSON value without retaining caller-owned references. */
@@ -418,12 +441,30 @@ function manifestAuthorityJson(
   };
 }
 
-function frozenManifest(
-  source: VerificationManifestSource,
-  rawChecks: readonly ProjectWaveCompletionCheck[],
-  runner: AcceptanceRunner | null = null,
-): FrozenVerificationManifest {
-  const projectChecks = freezeArray([...rawChecks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
+const ENGINE_DEFAULT_SOURCE: EngineDefaultSource = freeze({ kind: "engine-default" as const });
+
+/** What a frozen manifest is sealed from: the engine default carries nothing to authorize. */
+type FrozenAuthority =
+  | Readonly<{ kind: "engine-default" }>
+  | Readonly<{
+      kind: "operator-file";
+      source: OperatorFileSource;
+      checks: readonly ProjectWaveCompletionCheck[];
+      runner: AcceptanceRunner | null;
+    }>;
+
+function frozenManifest(authority: FrozenAuthority): FrozenVerificationManifest {
+  if (authority.kind === "engine-default") {
+    return freeze({
+      schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
+      kind: "frozen-verification-manifest",
+      source: ENGINE_DEFAULT_SOURCE,
+      manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], null)),
+      projectChecks: Object.freeze([] as const),
+    });
+  }
+  const { source, runner } = authority;
+  const projectChecks = freezeArray([...authority.checks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
   return freeze({
     schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
     kind: "frozen-verification-manifest",
@@ -434,8 +475,7 @@ function frozenManifest(
   });
 }
 
-const ENGINE_DEFAULT_SOURCE = freeze({ kind: "engine-default" as const });
-const ENGINE_DEFAULT_MANIFEST = frozenManifest(ENGINE_DEFAULT_SOURCE, []);
+const ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default" });
 
 /** Freeze the absent-source compatibility authority. It can never accept project commands. */
 export function defaultVerificationManifest(): FrozenVerificationManifest {
@@ -469,7 +509,12 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<FrozenVeri
       path: VERIFICATION_MANIFEST_SOURCE_PATH,
       digest: rawByteDigest(bytes),
     });
-    return success(frozenManifest(source, parsed.value.checks.map(projectCheck), parsed.value.acceptanceRunner ?? null));
+    return success(frozenManifest({
+      kind: "operator-file",
+      source,
+      checks: parsed.value.checks.map(projectCheck),
+      runner: parsed.value.acceptanceRunner ?? null,
+    }));
   });
 }
 
@@ -528,7 +573,7 @@ function parseProjectChecks(raw: unknown): Parsed<readonly ProjectWaveCompletion
 /** Rehydrate only exact frozen authority whose canonical digest still matches. */
 export function parseFrozenVerificationManifest(raw: unknown): Parsed<FrozenVerificationManifest> {
   return total(() => {
-    const hasRunner = isPlainRecord(raw) && Object.hasOwn(raw, "acceptanceRunner");
+    const hasRunner = declaresRunner(raw);
     const record = exactRecord(
       raw,
       ["schemaVersion", "kind", "source", "manifestDigest", "projectChecks", ...(hasRunner ? ["acceptanceRunner"] : [])],
@@ -559,7 +604,9 @@ export function parseFrozenVerificationManifest(raw: unknown): Parsed<FrozenVeri
       errors.push("frozenVerificationManifest engine-default source cannot authorize project checks");
     }
     if (errors.length > 0 || !source.ok || !checks.ok || !declaredDigest.ok || (runner !== null && !runner.ok)) return failure(errors);
-    const canonical = frozenManifest(source.value, checks.value, runner === null ? null : runner.value);
+    const canonical = source.value.kind === "engine-default"
+      ? frozenManifest({ kind: "engine-default" })
+      : frozenManifest({ kind: "operator-file", source: source.value, checks: checks.value, runner: runner === null ? null : runner.value });
     return canonical.manifestDigest === declaredDigest.value
       ? success(canonical)
       : failure(["frozenVerificationManifest.manifestDigest does not match its canonical authority"]);

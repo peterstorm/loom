@@ -4,12 +4,13 @@
  * path the check cannot decide fails open. Plus the production counter and
  * runner lock, the Pi report-only form, and the manifest's runner grammar.
  */
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { sha256Bytes } from "../../../src/core/digest";
 import {
   acceptanceRunnerCheck,
+  defaultVerificationManifest,
   freezeVerificationManifest,
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
@@ -18,6 +19,7 @@ import {
   ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
   PRODUCTION_STOP_CHECK_PORTS,
   REPORT_ONLY_STOP_CHECK_PORTS,
+  reapStaleRunnerLock,
   runAcceptanceStopCheck,
   stopCheckReportLine,
   type BlockCount,
@@ -92,6 +94,13 @@ describe("verification manifest acceptanceRunner", () => {
     if (!rehydrated.ok) expect(rehydrated.error.errors.join("; ")).toContain("frozenVerificationManifest.acceptanceRunner.report.path");
   });
 
+  it("refuses a frozen engine-default form that carries a runner", () => {
+    const tampered = { ...JSON.parse(JSON.stringify(defaultVerificationManifest())), acceptanceRunner: frozenManifest().acceptanceRunner };
+    const rehydrated = parseFrozenVerificationManifest(tampered);
+    expect(rehydrated.ok).toBe(false);
+    if (!rehydrated.ok) expect(rehydrated.error.errors.join("; ")).toContain("engine-default source cannot authorize an acceptance runner");
+  });
+
   it("expands {files} into one argument per acceptance file and nothing else", () => {
     const runner = frozenManifest().acceptanceRunner!;
     const check = acceptanceRunnerCheck(runner, ["tests/a.acceptance.test.ts", "tests/b.acceptance.test.ts"]);
@@ -149,7 +158,7 @@ function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckPorts
     repositoryRoot: () => ({ ok: true, root }),
     acquireRunner: () => {
       locks.acquired++;
-      return { kind: "acquired", release: () => { locks.released++; } };
+      return { kind: "acquired", release: () => { locks.released++; return null; } };
     },
     runCheck: run,
     readReport: () => reportBytes ?? new Uint8Array(),
@@ -201,6 +210,37 @@ describe("runAcceptanceStopCheck", () => {
     });
     expect(await runAcceptanceStopCheck(input("T2"), cancelled.value)).toMatchObject({ kind: "note", message: expect.stringContaining("no process groups") });
     expect(cancelled.locks).toEqual({ acquired: 1, released: 1 });
+  });
+
+  it.each([
+    ["timed out", { timedOut: true, signal: "SIGKILL" }, "the runner timed out"],
+    ["was killed", { timedOut: false, signal: "SIGTERM" }, "the runner was killed by SIGTERM"],
+  ])("does not judge the partial report of a runner that %s", async (_label, killed, message) => {
+    const fake = ports(junit("failed"));
+    const run = fake.value.runCheck;
+    const killedRun: StopCheckPorts["runCheck"] = async (check, at) => {
+      const result = await run(check, at);
+      if (!result.ok || result.value.checkResult.outcome.kind !== "observed") throw new Error("fixture");
+      const outcome = { ...result.value.checkResult.outcome, ...killed };
+      return { ok: true, value: { ...result.value, checkResult: { ...result.value.checkResult, outcome } } } as CompletionCheckRunnerResult;
+    };
+    const outcome = await runAcceptanceStopCheck(input("T2"), { ...fake.value, runCheck: killedRun });
+    expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(message) });
+    expect(fake.blocks.has("session.agent")).toBe(false);
+    expect(fake.locks).toEqual({ acquired: 1, released: 1 });
+  });
+
+  it("tells the operator about a runner lock that will not release, and still blocks a failing claimant", async () => {
+    const stuck = (reportBytes: Uint8Array) => ports(reportBytes, {
+      acquireRunner: () => ({ kind: "acquired", release: () => "the runner lock x.lock could not be released: EACCES" }),
+    });
+    expect(await runAcceptanceStopCheck(input("T2"), stuck(junit("passed")).value)).toEqual({
+      kind: "note",
+      message: "acceptance stop check: T2's owed acceptance testcases pass, but the runner lock x.lock could not be released: EACCES",
+    });
+    const noted = await runAcceptanceStopCheck(input("T2"), { ...stuck(junit("passed")).value, readReport: () => junit("failed") });
+    expect(noted).toMatchObject({ kind: "note", message: expect.stringMatching(/changed after the runner produced it.*; the runner lock x\.lock could not be released/) });
+    expect(await runAcceptanceStopCheck(input("T2"), stuck(junit("failed")).value)).toMatchObject({ kind: "block" });
   });
 
   it("does not run while another claimant holds the runner", async () => {
@@ -294,6 +334,43 @@ describe("production stop-check ports", () => {
     expect(reaped.kind).toBe("acquired");
     if (reaped.kind === "acquired") reaped.release();
     expect(existsSync(path)).toBe(false);
+  });
+
+  it("reaps a stale lock only while it still holds the stale bytes, and hands back one another stop took", () => {
+    const dir = subagentDir();
+    const path = join(dir, "acceptance-stop-check.test.lock");
+    const stale = JSON.stringify({ pid: 2 ** 22 + 12345, acquiredAt: 0 });
+    const fresh = JSON.stringify({ pid: process.pid, acquiredAt: Date.now() });
+    const leftovers = () => readdirSync(dir).filter((name) => name.includes(".reap."));
+
+    writeFileSync(path, stale);
+    expect(reapStaleRunnerLock(path, stale)).toBe("reaped");
+    expect(existsSync(path)).toBe(false);
+
+    // Another stop reaped the stale lock and took a fresh one before this stop's reap.
+    writeFileSync(path, fresh);
+    expect(reapStaleRunnerLock(path, stale)).toBe("retaken");
+    expect(readFileSync(path, "utf8")).toBe(fresh);
+
+    rmSync(path);
+    expect(reapStaleRunnerLock(path, stale)).toBe("reaped");
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("reports a lock it cannot release instead of swallowing the fault, and treats an absent one as released", () => {
+    const dir = subagentDir();
+    const lock = PRODUCTION_STOP_CHECK_PORTS.acquireRunner(root);
+    if (lock.kind !== "acquired") throw new Error("lock fixture");
+    expect(lock.release()).toBeNull();
+    expect(lock.release()).toBeNull();
+
+    const unreadable = PRODUCTION_STOP_CHECK_PORTS.acquireRunner(root);
+    if (unreadable.kind !== "acquired") throw new Error("lock fixture");
+    const [name] = readdirSync(dir).filter((entry) => entry.endsWith(".lock"));
+    const path = join(dir, name!);
+    rmSync(path);
+    mkdirSync(path);
+    expect(unreadable.release()).toMatch(/could not be released: .*EISDIR/);
   });
 
   it("keeps no counter in the Pi report-only form", () => {

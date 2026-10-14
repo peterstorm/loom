@@ -86,6 +86,20 @@ function bindPendingImplementationAtStop(
   });
 }
 
+/** The session's TaskGraph manager, or the fault (if any) that kept it from resolving. */
+type SessionManagerResolution =
+  | Readonly<{ kind: "resolved"; manager: StateManager }>
+  | Readonly<{ kind: "unresolved"; cause?: unknown }>;
+
+function resolveSessionManager(sessionId: string | undefined): SessionManagerResolution {
+  try {
+    const manager = StateManager.fromSession(sessionId);
+    return manager === null ? { kind: "unresolved" } : { kind: "resolved", manager };
+  } catch (cause) {
+    return { kind: "unresolved", cause };
+  }
+}
+
 export const runDispatch = async (
   stdin: string,
   args: string[],
@@ -320,23 +334,18 @@ export const runDispatch = async (
 
   // Known Loom categories require exact TaskGraph authority. Only an explicitly
   // named custom agent may legitimately have no graph and pass through.
-  let manager: StateManager | null;
-  try {
-    manager = StateManager.fromSession(input.session_id);
-    if (manager === null) return unresolvedTaskGraph();
-  } catch (error) {
-    return unresolvedTaskGraph(error);
-  }
+  const resolution = resolveSessionManager(input.session_id);
+  if (resolution.kind === "unresolved") return unresolvedTaskGraph(resolution.cause);
+  const { manager } = resolution;
 
   // The Acceptance Stop Check runs before settlement and before cleanup: a
   // blocked stop keeps this same agent working, so nothing may settle the Task
   // or release the agent's runtime bindings. The check is total and fails open.
   let stopCheckNote: string | undefined;
   if (category === "impl" && sidecarObservation.kind === "authority-observed") {
-    const stopManager = manager;
     const outcome = await runAcceptanceStopCheck({
-      loadGraph: () => stopManager.load(),
-      stateFilePath: stopManager.getPath(),
+      loadGraph: () => manager.load(),
+      stateFilePath: manager.getPath(),
       taskId: sidecarObservation.sidecar.authority.taskId,
       agentKey: `${sidecarObservation.sidecar.sessionId}.${sidecarObservation.sidecar.agentId}`,
     }, stopCheckPorts);
