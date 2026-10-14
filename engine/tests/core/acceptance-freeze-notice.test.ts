@@ -126,6 +126,14 @@ describe("status at the contract Wave's advisory pause", () => {
     }));
   });
 
+  it("adds no notice once the advisories are approved and the run is past the pause", () => {
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graphAtPause(SURFACE.types, [awaiting()]) }, deps, null, {
+      kind: "present", runId: "freeze-notice-run", path: "/runs/freeze-notice-run", advisoryApproval: { kind: "approved" },
+    });
+    expect(status.next.action.kind).not.toBe("await-user");
+    expect(status.next.reasons.some(({ kind }) => kind === "acceptance-freeze-pending")).toBe(false);
+  });
+
   it("adds no notice when the advisories touch no frozen path, or the contract already froze", () => {
     for (const graph of [graphAtPause("src/other.ts", [awaiting()]), graphAtPause(SURFACE.types, [frozen()])]) {
       const status = statusOf(graph);

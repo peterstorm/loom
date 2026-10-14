@@ -11,13 +11,15 @@
  * the operator sees the choice before making it.
  */
 
+import type { FindingSeverity } from "../findings-shape";
+import type { NonEmpty } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
 import { freeze } from "./kernel";
 import type { AcceptanceContract, ContractTaskView } from "./model";
 import { contractWave, frozenPaths } from "./tasks";
 
 /** The Finding fields this projection reads. */
-export type FreezeNoticeFinding = Readonly<{ id: string; severity: string; file: string | null }>;
+export type FreezeNoticeFinding = Readonly<{ id: string; severity: FindingSeverity; file: string | null }>;
 
 /** A Task as this projection reads it: its Wave and its current Findings. */
 export type FreezeNoticeTask = ContractTaskView & Readonly<{ findings?: readonly FreezeNoticeFinding[] }>;
@@ -45,17 +47,16 @@ export function pendingFreezeAdvisories(
     .filter((contract) => contract.freeze.state === "awaiting-red" && contractWave(contract, tasks) === wave)
     .flatMap((contract) => {
       const paths = frozenPaths(contract);
-      return waveTasks.flatMap((task) => (task.findings ?? []).flatMap((finding): PendingFreezeAdvisory[] => {
-        const path = finding.severity === "advisory" && finding.file !== null
-          ? paths.find((frozen) => samePlanPath(frozen, finding.file!))
-          : undefined;
-        return path === undefined ? [] : [freeze({ contractId: contract.id, taskId: task.id, findingId: finding.id, path })];
+      return waveTasks.flatMap((task) => (task.findings ?? []).flatMap(({ id, severity, file }): PendingFreezeAdvisory[] => {
+        if (severity !== "advisory" || file === null) return [];
+        const path = paths.find((frozen) => samePlanPath(frozen, file));
+        return path === undefined ? [] : [freeze({ contractId: contract.id, taskId: task.id, findingId: id, path })];
       }));
     }));
 }
 
 /** The operator notice for a non-empty set: what approval does, and how to fix first. */
-export function renderPendingFreezeAdvisories(advisories: readonly PendingFreezeAdvisory[]): string {
+export function renderPendingFreezeAdvisories(advisories: NonEmpty<PendingFreezeAdvisory>): string {
   const listed = advisories.map(({ contractId, taskId, findingId, path }) => `${findingId} (${taskId}, ${contractId}: ${path})`);
   return `${advisories.length} advisory finding(s) touch files the Acceptance Freeze stamps when this Wave Gate completes: ` +
     `${listed.join("; ")}. Approving freezes them as they are, and changing them later needs a Contract Revision. ` +
