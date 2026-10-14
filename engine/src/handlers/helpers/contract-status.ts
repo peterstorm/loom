@@ -24,13 +24,15 @@ export function createContractStatusHandler(write: (text: string) => void = toSt
     const manager = StateManager.fromPath(statePath);
     if (manager === null) return { kind: "error", message: `No task graph at ${statePath}` };
 
-    let lines: readonly string[];
+    // Only the load boundary may refuse: the renderer is pure and total, so a
+    // throw from it is a defect and must crash rather than read as a refusal.
+    let graph: ReturnType<StateManager["load"]>;
     try {
-      lines = renderContractStatus(manager.load());
+      graph = manager.load();
     } catch (error) {
       return { kind: "error", message: error instanceof Error ? error.message : String(error) };
     }
-    write(`${lines.join("\n")}\n`);
+    write(`${renderContractStatus(graph).join("\n")}\n`);
     return { kind: "passthrough" };
   };
 }

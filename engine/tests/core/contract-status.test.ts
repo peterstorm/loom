@@ -94,7 +94,7 @@ describe("contractStatusView", () => {
       contract({ id: "CT-1", freeze: { state: "revised", paths: PATHS }, revisions: [revision(1), revision(2), revision(3)] }),
     ]));
 
-    expect(view!.freeze).toEqual({ state: "revised", revisions: 3, paths: PATHS });
+    expect(view!.freeze).toEqual({ state: "revised", paths: PATHS });
     expect(view!.revisions).toBe(3);
   });
 

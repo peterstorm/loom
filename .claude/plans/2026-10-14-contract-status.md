@@ -24,7 +24,7 @@
 - **Corrupt graph.** A present but unparseable or unreadable State File gives an error exit carrying the `StateManager.load()` message, the same way `revise-contract` does. It is not treated as missing. A missing graph (`StateManager.fromPath` returns `null`) is refused with the path it looked for. On a parsed graph the core never throws.
 - **Output channel.** Lines go to stdout, joined with `\n` and ending in a newline, with exit 0 (`passthrough`). Refusals use `{ kind: "error" }`.
 - **Revised contracts.** A `revised` freeze carries no roster (`AcceptanceFreeze.revised` drops it until the next Wave Gate re-records it). It renders as `revised (N revisions); roster cleared until the next Wave Gate re-records it`, followed by its frozen paths.
-- **Due-Wave rule has one owner.** `dueWaves` (`engine/src/core/acceptance-contract/tasks.ts:109`, the latest Wave of a claiming Task, absent when nobody claims it) is exported from the curated `engine/src/core/acceptance-contract/index.ts` and reused. It is not re-derived. An absent anchor maps to `{kind:"unclaimed"}`.
+- **Due-Wave rule has one owner.** `dueWaves` (in `engine/src/core/acceptance-contract/tasks.ts`, the latest Wave of a claiming Task, absent when nobody claims it) is exported from the curated `engine/src/core/acceptance-contract/index.ts` and reused. It is not re-derived. An absent anchor maps to `{kind:"unclaimed"}`.
 - **Defaults confirmed in the interview.** Pure functional core with errors at the boundary. Simplicity is the primary axis. Stateless, synchronous, one read. No persistence or migration. Greenfield helper. No new dependencies (`ts-pattern` and `fast-check` are already present). Ships inside the engine. Spec OOS-001..003 are excluded. No lifecycle, pipeline or invariant models.
 
 ---
@@ -70,7 +70,7 @@ CONTEXT.md                                                   — MODIFY, glossar
 
 ```
 import type { AcceptanceTestcase, FrozenPathDigest } from "./acceptance-contract";
-import type { ParsedTaskGraph } from "../state-file-wire";   // type-only
+import type { TaskGraph } from "../types";   // core/ may not import state-file-wire (full-tier lint); the loaded ParsedTaskGraph is assignable to TaskGraph
 
 export type AnchorDue =
   | Readonly<{ kind: "wave"; wave: number }>
@@ -81,7 +81,7 @@ export type CoveredAnchorStatus = Readonly<{ anchor: string; due: AnchorDue }>;
 export type ContractFreezeStatus =
   | Readonly<{ state: "awaiting-red" }>
   | Readonly<{ state: "frozen"; wave: number; roster: readonly AcceptanceTestcase[] }>
-  | Readonly<{ state: "revised"; revisions: number; paths: readonly FrozenPathDigest[] }>;
+  | Readonly<{ state: "revised"; paths: readonly FrozenPathDigest[] }>;   // the count lives once, on the view
 
 export type ContractStatusView = Readonly<{
   id: string;
@@ -92,8 +92,8 @@ export type ContractStatusView = Readonly<{
   revisions: number;
 }>;
 
-export type ContractStatusViewFn = (graph: ParsedTaskGraph) => readonly ContractStatusView[];
-export type RenderContractStatusFn = (graph: ParsedTaskGraph) => readonly string[];
+export type ContractStatusViewFn = (graph: TaskGraph) => readonly ContractStatusView[];
+export type RenderContractStatusFn = (graph: TaskGraph) => readonly string[];
 
 export const NO_ACCEPTANCE_CONTRACTS = "no Acceptance Contracts";   // the single FR-006 line
 ```
@@ -144,7 +144,7 @@ LOOM_STATE_PATH / taskGraphPath() → StateManager.fromPath → load() (parse; n
   → contractStatusView (pure) → renderContractStatus (pure) → stdout, exit 0
 ```
 
-The only I/O is the single read and the write to stdout. Everything between them is a function of `ParsedTaskGraph`.
+The only I/O is the single read and the write to stdout. Everything between them is a function of the loaded TaskGraph.
 
 ---
 

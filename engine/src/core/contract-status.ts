@@ -22,14 +22,13 @@ import {
   type RenderContractStatusFn,
 } from "./contract-status-types";
 
-/** The freeze as the operator reads it; a revised freeze carries the revision
- *  count because its roster is cleared until the next Wave Gate. */
+/** The freeze as the operator reads it; a revised freeze keeps only its
+ *  re-stamped paths, because its roster is cleared until the next Wave Gate. */
 function freezeStatus(contract: AcceptanceContract): ContractFreezeStatus {
   return match(contract.freeze)
     .with({ state: "awaiting-red" }, (): ContractFreezeStatus => Object.freeze({ state: "awaiting-red" }))
     .with({ state: "frozen" }, ({ wave, roster }): ContractFreezeStatus => Object.freeze({ state: "frozen", wave, roster }))
-    .with({ state: "revised" }, ({ paths }): ContractFreezeStatus =>
-      Object.freeze({ state: "revised", revisions: contract.revisions.length, paths }))
+    .with({ state: "revised" }, ({ paths }): ContractFreezeStatus => Object.freeze({ state: "revised", paths }))
     .exhaustive();
 }
 
@@ -37,11 +36,10 @@ function freezeStatus(contract: AcceptanceContract): ContractFreezeStatus {
  *  unclaimed when no Task other than the contract Task claims it. */
 function coveredStatus(contract: AcceptanceContract, tasks: readonly ContractTaskView[]): readonly CoveredAnchorStatus[] {
   const waves = dueWaves(contract, tasks);
-  return Object.freeze(coveredAnchors(contract).map((anchor): CoveredAnchorStatus => {
-    const wave = Object.hasOwn(waves, anchor) ? waves[anchor] : undefined;
-    const due: AnchorDue = wave === undefined ? { kind: "unclaimed" } : { kind: "wave", wave };
-    return Object.freeze({ anchor, due: Object.freeze(due) });
-  }));
+  return Object.freeze(coveredAnchors(contract).map((anchor): CoveredAnchorStatus => Object.freeze({
+    anchor,
+    due: Object.freeze<AnchorDue>(Object.hasOwn(waves, anchor) ? { kind: "wave", wave: waves[anchor]! } : { kind: "unclaimed" }),
+  })));
 }
 
 export const contractStatusView: ContractStatusViewFn = (graph) =>
@@ -56,14 +54,14 @@ export const contractStatusView: ContractStatusViewFn = (graph) =>
 
 const revisionCount = (count: number): string => `${count} ${count === 1 ? "revision" : "revisions"}`;
 
-function freezeLines(freeze: ContractFreezeStatus): readonly string[] {
+function freezeLines({ freeze, revisions }: ContractStatusView): readonly string[] {
   return match(freeze)
     .with({ state: "awaiting-red" }, () => ["awaiting RED"])
     .with({ state: "frozen" }, ({ wave, roster }) => [
       `frozen at Wave ${wave}`,
       ...roster.map(({ file, name, anchors }) => `${file} › ${name} — ${anchors.join(", ")}`),
     ])
-    .with({ state: "revised" }, ({ revisions, paths }) => [
+    .with({ state: "revised" }, ({ paths }) => [
       `revised (${revisionCount(revisions)}); roster cleared until the next Wave Gate re-records it`,
       ...paths.map(({ path }) => path),
     ])
@@ -79,7 +77,7 @@ const coveredLine = ({ anchor, due }: CoveredAnchorStatus): string =>
 function contractLines(view: ContractStatusView): readonly string[] {
   return [
     `${view.id}  ${view.title}  (contract Task ${view.contractTask})`,
-    ...freezeLines(view.freeze),
+    ...freezeLines(view),
     ...view.covered.map(coveredLine),
     ...(view.revisions > 0 ? [`revisions: ${view.revisions}`] : []),
   ];

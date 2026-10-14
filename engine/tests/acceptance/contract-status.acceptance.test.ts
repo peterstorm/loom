@@ -9,16 +9,23 @@
  * load.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AcceptanceContract, FrozenPathDigest } from "../../src/core/acceptance-contract";
+import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { NO_ACCEPTANCE_CONTRACTS } from "../../src/core/contract-status-types";
 import type { Task } from "../../src/types";
-import { digest } from "../fixtures/acceptance-fixtures";
-import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { graphFixture, protectedGraphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import {
+  contract,
+  frozenPaths as paths,
+  gitProject,
+  stateFileJson,
+  statePathIn,
+  surface,
+  task,
+  writeStateFile,
+} from "../fixtures/contract-status-fixtures";
 
 const REPO_ROOT = resolve(__dirname, "../../..");
 const CLI = "engine/src/cli.ts";
@@ -45,71 +52,11 @@ function contractStatus(statePath: string): Run {
 const lines = (stdout: string): readonly string[] => stdout.replace(/\n$/, "").split("\n");
 
 /** A fresh Git repository to hold one State File. */
-function project(): string {
-  const root = canonicalTempDir("loom-contract-status-");
-  cleanup.push(root);
-  execFileSync("git", ["init", "-q"], { cwd: root });
-  return root;
-}
+const project = (): string => gitProject("loom-contract-status-", cleanup);
 
 /** Write a TaskGraph the production parser admits; returns its State File path. */
-function stateFile(tasks: readonly Task[], contracts?: readonly AcceptanceContract[]): string {
-  const raw = {
-    spec_trace_version: 2,
-    ...graphFixture(tasks),
-    ...(contracts === undefined ? {} : { acceptance_contracts: contracts }),
-  };
-  protectedGraphFixture(JSON.parse(JSON.stringify(raw)));
-  const statePath = join(project(), ".loom", "active_task_graph.json");
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, JSON.stringify(raw));
-  return statePath;
-}
-
-const task = (id: string, wave: number, files: readonly string[], anchors: readonly string[] = []): Task =>
-  taskFixture({
-    id,
-    description: id,
-    agent: "code-implementer-agent",
-    wave,
-    depends_on: [],
-    file_list: [...files],
-    spec_anchors: [...anchors],
-    spec_contributions: [],
-  });
-
-type Surface = Readonly<{ types: string; acceptance: string }>;
-
-const surface = (slug: string): Surface => ({
-  types: `src/${slug}-types.ts`,
-  acceptance: `tests/${slug}.acceptance.test.ts`,
-});
-
-const paths = ({ types, acceptance }: Surface, fill: string): readonly [FrozenPathDigest, FrozenPathDigest] => [
-  { path: types, sha256: digest(fill) },
-  { path: acceptance, sha256: digest(fill) },
-];
-
-const contract = (
-  id: string,
-  title: string,
-  contractTask: string,
-  files: Surface,
-  anchors: readonly [string, ...string[]],
-  freeze: AcceptanceContract["freeze"],
-  revisions: AcceptanceContract["revisions"] = [],
-): AcceptanceContract => ({
-  schemaVersion: 1,
-  id,
-  title,
-  statement: `${title} behaves as declared.`,
-  contractTask,
-  types: { kind: "file", path: files.types },
-  acceptance: [{ path: files.acceptance, anchors }],
-  supportedDomain: null,
-  freeze,
-  revisions,
-});
+const stateFile = (tasks: readonly Task[], contracts?: readonly AcceptanceContract[]): string =>
+  writeStateFile(project(), stateFileJson(tasks, contracts));
 
 describe("helper contract-status (CT-1)", () => {
   it("AS-001: shows each contract's id, title and contract Task, one awaiting RED and one frozen at its Wave", () => {
@@ -123,12 +70,19 @@ describe("helper contract-status (CT-1)", () => {
         task("T4", 3, ["src/payload.ts"], ["AS-002"]),
       ],
       [
-        contract("CT-1", "Ledger balance", "T1", ledger, ["AS-001"], { state: "awaiting-red" }),
-        contract("CT-2", "Payload shape", "T2", payload, ["AS-002"], {
-          state: "frozen",
-          wave: 2,
-          paths: paths(payload, "a"),
-          roster: [{ file: payload.acceptance, name: "payload > AS-002: one call wins", anchors: ["AS-002"] }],
+        contract({ id: "CT-1", title: "Ledger balance", surface: ledger, anchors: ["AS-001"], freeze: { state: "awaiting-red" } }),
+        contract({
+          id: "CT-2",
+          title: "Payload shape",
+          contractTask: "T2",
+          surface: payload,
+          anchors: ["AS-002"],
+          freeze: {
+            state: "frozen",
+            wave: 2,
+            paths: paths(payload, "a"),
+            roster: [{ file: payload.acceptance, name: "payload > AS-002: one call wins", anchors: ["AS-002"] }],
+          },
         }),
       ],
     );
@@ -156,14 +110,20 @@ describe("helper contract-status (CT-1)", () => {
         task("T3", 3, ["src/payload.ts"], ["AS-001"]),
       ],
       [
-        contract("CT-1", "Payload shape", "T1", payload, ["AS-001", "AS-002", "AS-003"], {
-          state: "frozen",
-          wave: 1,
-          paths: paths(payload, "b"),
-          roster: [
-            { file: payload.acceptance, name: "payload > AS-001: AS-002: one call wins", anchors: ["AS-001", "AS-002"] },
-            { file: payload.acceptance, name: "payload > AS-003: a refusal names the field", anchors: ["AS-003"] },
-          ],
+        contract({
+          id: "CT-1",
+          title: "Payload shape",
+          surface: payload,
+          anchors: ["AS-001", "AS-002", "AS-003"],
+          freeze: {
+            state: "frozen",
+            wave: 1,
+            paths: paths(payload, "b"),
+            roster: [
+              { file: payload.acceptance, name: "payload > AS-001: AS-002: one call wins", anchors: ["AS-001", "AS-002"] },
+              { file: payload.acceptance, name: "payload > AS-003: a refusal names the field", anchors: ["AS-003"] },
+            ],
+          },
         }),
       ],
     );
@@ -197,10 +157,17 @@ describe("helper contract-status (CT-1)", () => {
         task("T2", 2, ["src/payload.ts"], ["AS-001"]),
       ],
       [
-        contract("CT-1", "Payload shape", "T1", payload, ["AS-001"], { state: "revised", paths: second }, [
-          { revision: 1, reason: "AS-001 asserted the wrong variant", previous: original, paths: first, revalidatedTaskIds: ["T2"] },
-          { revision: 2, reason: "AS-001 named the wrong field", previous: first, paths: second, revalidatedTaskIds: ["T2"] },
-        ]),
+        contract({
+          id: "CT-1",
+          title: "Payload shape",
+          surface: payload,
+          anchors: ["AS-001"],
+          freeze: { state: "revised", paths: second },
+          revisions: [
+            { revision: 1, reason: "AS-001 asserted the wrong variant", previous: original, paths: first, revalidatedTaskIds: ["T2"] },
+            { revision: 2, reason: "AS-001 named the wrong field", previous: first, paths: second, revalidatedTaskIds: ["T2"] },
+          ],
+        }),
       ],
     );
 
@@ -227,7 +194,7 @@ describe("helper contract-status (CT-1)", () => {
   });
 
   it("AS-004: with no TaskGraph it refuses with the path it looked for", () => {
-    const statePath = join(project(), ".loom", "active_task_graph.json");
+    const statePath = statePathIn(project());
 
     const run = contractStatus(statePath);
 

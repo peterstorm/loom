@@ -4,6 +4,8 @@
 
 **Timebox:** one sitting, about half a day. Two Waves, three Tasks, one PR review round.
 
+> **As run (2026-10-14).** The final plan (`.claude/plans/2026-10-14-contract-status.md`) refined two things below. T1 wrote no implementation stubs, because the acceptance tests reach the code only through the route T3 adds, so they failed by assertion until then. The CT-1 statement also surfaces an unparseable TaskGraph's error rather than refusing only a missing one. The run used three Waves (T2 core, T3 helper), not two, and had no ADR wave. Results are in the vault G1 design note under "Live pilot results".
+
 ## The feature
 
 Operators cannot see contract state today: freeze state, roster, which Requirement is due when, revisions. Add a read-only helper:

@@ -20,15 +20,17 @@ export type CoveredAnchorStatus = Readonly<{ anchor: string; due: AnchorDue }>;
 /**
  * The Acceptance Freeze as the operator reads it. `frozen` names its Wave and
  * the roster observed red; `revised` carries no roster (a Contract Revision
- * clears it until the next Wave Gate re-records it), only the revision count
- * and the re-stamped paths.
+ * clears it until the next Wave Gate re-records it), only the re-stamped
+ * paths. The revision count lives once, on the view.
  */
 export type ContractFreezeStatus =
   | Readonly<{ state: "awaiting-red" }>
   | Readonly<{ state: "frozen"; wave: number; roster: readonly AcceptanceTestcase[] }>
-  | Readonly<{ state: "revised"; revisions: number; paths: readonly FrozenPathDigest[] }>;
+  | Readonly<{ state: "revised"; paths: readonly FrozenPathDigest[] }>;
 
-/** One Acceptance Contract's status, in TaskGraph order. */
+/** One Acceptance Contract's status, in TaskGraph order. `revisions` is the
+ *  number of recorded Contract Revisions, the one source for every count the
+ *  renderer prints. */
 export type ContractStatusView = Readonly<{
   id: string;
   title: string;

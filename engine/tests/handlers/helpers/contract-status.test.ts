@@ -1,6 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import contractStatus, { createContractStatusHandler } from "../../../src/handlers/helpers/contract-status";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
@@ -8,9 +7,16 @@ import { NO_ACCEPTANCE_CONTRACTS } from "../../../src/core/contract-status-types
 import { WHITELISTED_HELPERS } from "../../../src/config";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import type { Task } from "../../../src/types";
-import { digest } from "../../fixtures/acceptance-fixtures";
-import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
-import { graphFixture, protectedGraphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import {
+  contract as contractFixture,
+  frozenPaths,
+  gitProject,
+  stateFileJson,
+  statePathIn,
+  task,
+  writeStateFile,
+  type ContractSurface,
+} from "../../fixtures/contract-status-fixtures";
 
 const cleanup: string[] = [];
 let inheritedStatePath: string | undefined;
@@ -29,59 +35,31 @@ const ACCEPTANCE = "tests/payload.acceptance.test.ts";
 const CT2_TYPES = "src/ledger-types.ts";
 const CT2_ACCEPTANCE = "tests/ledger.acceptance.test.ts";
 
-const task = (id: string, wave: number, files: readonly string[], anchors: readonly string[] = []): Task =>
-  taskFixture({
-    id, description: id, agent: "code-implementer-agent", wave, depends_on: [],
-    file_list: [...files], spec_anchors: [...anchors], spec_contributions: [],
-  });
+const PAYLOAD: ContractSurface = { types: TYPES, acceptance: ACCEPTANCE };
 
 const contract = (
   id: string,
   anchors: readonly [string, ...string[]],
   freeze: AcceptanceContract["freeze"],
   revisions: AcceptanceContract["revisions"] = [],
-  surface: Readonly<{ types: string; acceptance: string }> = { types: TYPES, acceptance: ACCEPTANCE },
-): AcceptanceContract => ({
-  schemaVersion: 1,
-  id,
-  title: `${id} title`,
-  statement: `${id} behaves as declared.`,
-  contractTask: "T1",
-  types: { kind: "file", path: surface.types },
-  acceptance: [{ path: surface.acceptance, anchors }],
-  supportedDomain: null,
-  freeze,
-  revisions,
-});
+  surface: ContractSurface = PAYLOAD,
+): AcceptanceContract => contractFixture({ id, anchors, freeze, revisions, surface });
 
-const PATHS = [{ path: TYPES, sha256: digest("a") }, { path: ACCEPTANCE, sha256: digest("a") }] as const;
-const CT2_PATHS = [{ path: CT2_TYPES, sha256: digest("b") }, { path: CT2_ACCEPTANCE, sha256: digest("b") }] as const;
+const CT2: ContractSurface = { types: CT2_TYPES, acceptance: CT2_ACCEPTANCE };
+const PATHS = frozenPaths(PAYLOAD, "a");
+const CT2_PATHS = frozenPaths(CT2, "b");
 
-function project(): string {
-  const root = canonicalTempDir("loom-contract-status-handler-");
-  cleanup.push(root);
-  execFileSync("git", ["init", "-q"], { cwd: root });
-  return root;
-}
+const project = (): string => gitProject("loom-contract-status-handler-", cleanup);
 
 /** Writes raw State File text; returns its path and points LOOM_STATE_PATH at it. */
 function stateFileText(text: string): string {
-  const statePath = join(project(), ".loom", "active_task_graph.json");
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, text);
+  const statePath = writeStateFile(project(), text);
   process.env.LOOM_STATE_PATH = statePath;
   return statePath;
 }
 
-function stateFile(tasks: readonly Task[], contracts?: readonly AcceptanceContract[]): string {
-  const raw = {
-    spec_trace_version: 2,
-    ...graphFixture(tasks),
-    ...(contracts === undefined ? {} : { acceptance_contracts: contracts }),
-  };
-  protectedGraphFixture(JSON.parse(JSON.stringify(raw)));
-  return stateFileText(JSON.stringify(raw));
-}
+const stateFile = (tasks: readonly Task[], contracts?: readonly AcceptanceContract[]): string =>
+  stateFileText(stateFileJson(tasks, contracts));
 
 type Captured = { readonly writes: string[]; readonly write: (text: string) => void };
 const captured = (): Captured => {
@@ -114,7 +92,7 @@ describe("contract-status helper", () => {
       contract("CT-2", ["AS-002"], {
         state: "frozen", wave: 1, paths: CT2_PATHS,
         roster: [{ file: CT2_ACCEPTANCE, name: "ledger > AS-002: wins", anchors: ["AS-002"] }],
-      }, [], { types: CT2_TYPES, acceptance: CT2_ACCEPTANCE }),
+      }, [], CT2),
     ]);
     const sink = captured();
 
@@ -173,7 +151,7 @@ describe("contract-status helper", () => {
   });
 
   it("AS-004: a missing TaskGraph is refused with the path it looked for and writes nothing", async () => {
-    const statePath = join(project(), ".loom", "active_task_graph.json");
+    const statePath = statePathIn(project());
     process.env.LOOM_STATE_PATH = statePath;
     const sink = captured();
 
