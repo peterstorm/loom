@@ -257,6 +257,17 @@ describe("runAcceptanceStopCheck", () => {
     expect(await runAcceptanceStopCheck(input("T2"), stuck(junit("failed")).value)).toMatchObject({ kind: "block" });
   });
 
+  it("lets the stop proceed with a note, running nothing, when an owed file is outside the runner's cwd", async () => {
+    const elsewhere = freezeVerificationManifest(manifestBytes({ ...RUNNER, cwd: "engine" }));
+    if (!elsewhere.ok) throw new Error(elsewhere.error.errors.join("; "));
+    const fake = ports(junit("failed"));
+    const outcome = await runAcceptanceStopCheck(input("T2", { verification_manifest: elsewhere.value }), fake.value);
+    expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(`acceptanceRunner.cwd engine does not contain ${SURFACE.acceptance}`) });
+    expect(fake.runs).toEqual([]);
+    expect(fake.locks).toEqual({ acquired: 0, released: 0 });
+    expect(fake.blocks.has("session.agent")).toBe(false);
+  });
+
   it("does not run while another claimant holds the runner", async () => {
     const fake = ports(junit("failed"), { acquireRunner: () => ({ kind: "held", reason: "another claimant's stop check (pid 7) is running the acceptance runner" }) });
     expect(await runAcceptanceStopCheck(input("T2"), fake.value)).toMatchObject({ kind: "note", message: expect.stringContaining("pid 7") });
