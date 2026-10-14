@@ -448,6 +448,10 @@ _Avoid_: Grace period, expected-failure list
 The operator-only way to change an **Acceptance Contract**'s frozen bytes (`helper revise-contract`): it re-stamps them, clears the roster for the next gate to re-record, appends an audited revision, returns the current Wave's implemented claimants to revalidation and retires that Wave's review and suite authority. Refused while a Wave Gate is live, before the freeze or the contract Wave's completion, and while any claimant sits in a completed Wave.
 _Avoid_: Unfreeze, test fix, override
 
+**Contract Status**:
+The read-only view of every **Acceptance Contract** in a TaskGraph (`helper contract-status`): its id, title and **Contract Task**, its **Acceptance Freeze** state (awaiting RED, frozen at a Wave with its roster, or revised with its revision count), and each covered Requirement's due Wave — the latest Wave of a Task claiming it — or unclaimed. A pure function of the parsed TaskGraph (`core/contract-status.ts`); the helper never writes the State File or takes its lock.
+_Avoid_: Contract report, freeze dump, contract list
+
 **Git-Visible Leaf**:
 A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it, under the one Git execution policy (`utils/git-execution-policy.ts`: allow-listed environment, no ambient `GIT_*`, no system or global config, fsmonitor disabled). Every engine Git child runs under that policy, so no observer's ignore rules can depend on an operator's global ignore file — neither one named by `core.excludesFile` nor Git's implicit `~/.config/git/ignore` (`XDG_CONFIG_HOME` is pinned to `/dev/null`).
 _Avoid_: Directory listing, file walk, pathspec match

@@ -775,6 +775,23 @@ On success, one locked write:
 
 The next Wave Gate judges the contract green against the new bytes and re-records its roster, which freezes it again.
 
+### Where does each Acceptance Contract stand?
+
+Before revising a contract, or to see which acceptance testcases are still allowed to fail, print the Contract Status:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper contract-status
+```
+
+It takes no arguments. For each Acceptance Contract, in TaskGraph order, it prints:
+
+- `CT-n  <title>  (contract Task Tn)`;
+- the freeze state: `awaiting RED`, `frozen at Wave N` followed by every roster testcase as `<file> › <name> — <anchors>`, or `revised (k revisions); roster cleared until the next Wave Gate re-records it` followed by the re-stamped paths;
+- each covered Requirement as `AS-00n due Wave N` (the latest Wave of a Task that claims it) or `AS-00n unclaimed`;
+- `revisions: k` when the contract has any Contract Revision.
+
+A TaskGraph without contracts prints the single line `no Acceptance Contracts`. The helper is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 with `No task graph at <path>` when no TaskGraph exists, and with the load boundary's error when the graph is unreadable or corrupt — a corrupt graph is never reported as missing.
+
 ### State is malformed
 
 Use only when the load boundary explicitly directs recovery:

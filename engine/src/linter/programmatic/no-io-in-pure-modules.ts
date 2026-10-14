@@ -169,6 +169,10 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/task-revalidation.ts",
   "engine/src/core/contract-revision.ts",
   "engine/src/core/wave-gate-registration.ts",
+  // Contract Status: the read-only projection of each contract's freeze, roster
+  // and due Waves, and the frozen CT-1 surface it implements.
+  "engine/src/core/contract-status.ts",
+  "engine/src/core/contract-status-types.ts",
   // Standalone read coverage (ADR-0022): the obligation, page verification and
   // admission decision, plus the deterministic diff the obligation is frozen
   // from. The Context Packet projection imports both.
