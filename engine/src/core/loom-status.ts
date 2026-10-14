@@ -51,6 +51,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { deriveWaveAdvisoryNextAction } from "./wave-gate-preparation";
+import { pendingFreezeAdvisories, renderPendingFreezeAdvisories } from "./acceptance-contract";
 import {
   deriveFindingCounts,
   deriveTestReadiness,
@@ -214,51 +215,66 @@ function engineResumeAction(runId: OrchestrationRunId): EngineResumeAction {
 }
 
 
-/** Why the proven authority selected this action. One arm per authority kind. */
-function nextActionReason(
+/**
+ * At the advisory pause, the advisories on files this gate's Acceptance Freeze
+ * stamps on completion: the decision freezes them, so the operator must see
+ * that before approving.
+ */
+function acceptanceFreezeReasons(snapshot: WaveReadinessSnapshot): readonly StatusReason[] {
+  const [first, ...rest] = pendingFreezeAdvisories(snapshot.graph.acceptance_contracts ?? [], snapshot.graph.tasks, snapshot.wave);
+  return first === undefined ? [] : [statusReason("acceptance-freeze-pending", renderPendingFreezeAdvisories([first, ...rest]))];
+}
+
+/** Why the proven authority selected this action. One arm per authority kind;
+ *  only the advisory arm can carry a second reason, the freeze notice. */
+function nextActionReasons(
+  snapshot: WaveReadinessSnapshot,
   authority: WaveGateNextAction,
   action: NextActionDecision["action"],
-): StatusReason {
+): NonEmpty<StatusReason> {
   if (authority.kind === "advisory-decision") {
-    return statusReason(
-      "advisory-decision-required",
-      `${action.kind === "await-user" ? action.request.advisories.length : 0} advisory artifact(s) require a user decision`,
-    );
+    return [
+      statusReason(
+        "advisory-decision-required",
+        `${action.kind === "await-user" ? action.request.advisories.length : 0} advisory artifact(s) require a user decision`,
+      ),
+      ...acceptanceFreezeReasons(snapshot),
+    ];
   }
   if (authority.kind === "review-batch") {
-    return statusReason(
+    return [statusReason(
       "review-spawn-required",
       `${action.kind === "spawn-batch" ? action.requests.length : 0} exact review request(s) are ready to spawn`,
-    );
+    )];
   }
   if (authority.kind === "blocked") {
-    return statusReason("blocked-diagnostic", action.kind === "blocked" ? action.diagnostic.message : "Wave Gate is blocked");
+    return [statusReason("blocked-diagnostic", action.kind === "blocked" ? action.diagnostic.message : "Wave Gate is blocked")];
   }
-  return statusReason("run-complete", `Wave Gate run ${action.runId} is complete`);
+  return [statusReason("run-complete", `Wave Gate run ${action.runId} is complete`)];
 }
 
 /** Exactly one action, selected only from the shared readiness snapshot. A
  * copied/stale proof fails closed even if a caller bypasses deriveWaveReadiness. */
 export function deriveNextAction(snapshot: WaveReadinessSnapshot): NextActionDecision {
   let action: NextActionDecision["action"];
-  let actionReason: StatusReason;
+  let actionReasons: NonEmpty<StatusReason>;
   if (!isCanonicalWaveReadiness(snapshot) || !snapshotActionProofIsExact(snapshot)) {
     const message = "Wave next action proof is stale or disconnected from the exact protected snapshot";
     action = invalidAuthorityBlockedAction(snapshot.registration.runId, message);
-    actionReason = statusReason("authority-contradiction", message);
+    actionReasons = [statusReason("authority-contradiction", message)];
   } else if (snapshot.nextActionAuthority !== null) {
     action = snapshot.nextActionAuthority.action;
-    actionReason = nextActionReason(snapshot.nextActionAuthority, action);
+    actionReasons = nextActionReasons(snapshot, snapshot.nextActionAuthority, action);
   } else {
     action = engineResumeAction(snapshot.registration.runId);
-    actionReason = statusReason(
+    actionReasons = [statusReason(
       "engine-resume-required",
       `Resume Wave Gate run ${snapshot.registration.runId}; this recovery is retry eligible and consumes no semantic attempt`,
-    );
+    )];
   }
   return canonicalRecord({
     action,
-    reasons: Object.freeze([...snapshot.reasons, actionReason]) as NonEmpty<StatusReason>,
+    reasons: Object.freeze([...snapshot.reasons, ...actionReasons]) as NonEmpty<StatusReason>,
   });
 }
 
