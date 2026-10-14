@@ -161,8 +161,11 @@ export type TaskExecutionRosterObservation =
  * window. The grace is a deliberately conservative fixed bound relative to
  * normal dispatch/queue latency; the transport exposes no enforceable upper
  * latency guarantee, so an exceptionally delayed unrostered spawn can outlive
- * it. A reservation stranded by a veto simply
- * ages past the window and is reclaimed on the first spawn attempt after it.
+ * it. Claude Code's reservation hook runs every sibling spawn veto before it
+ * reserves, so a vetoed spawn no longer strands one there; a reservation can
+ * still be stranded by a spawn that passed every hook but never started, or by
+ * a veto outside that composition, and it ages past the window and is
+ * reclaimed on the first spawn attempt after it.
  * A long-RUNNING task is protected independently: its agent is roster-active,
  * so `anyActive` shields it regardless of age.
  */

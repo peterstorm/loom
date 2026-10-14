@@ -91,16 +91,18 @@ Fallback: `general-purpose`
     - `spec_anchors` is a Requirement Completion Claim: the containing Wave MUST fully satisfy that Requirement. Assign it only to the culminating Task/Wave.
     - A Task cannot contribute to and complete the same Requirement. Multiple completion Tasks are allowed only in the same culmination Wave.
     - Every contribution must have exactly one completion Wave at or after it; no contribution may appear after completion.
+    - Both arrays name only `FR-NNN` and `AS-NNN` ids the spec defines. Non-functional requirements, success criteria (`NFR-`, `SC-`) and Out-of-Scope entries cannot be claimed or contributed to; population refuses any id the Spec Index does not define as a completable entry, and refuses a spec that does not parse as canonical.
 11. **Protected verification paths:** Decompose NEVER assigns the operator manifest `.loom/verification-manifest.json` or any engine report path beneath `.loom/completion-reports/` to a Task's `file_list`. These paths are engine/operator-owned, not implementation artifacts. This rule does not prohibit unrelated `.loom/` paths.
 12. **Contract tasks (contracts before code):** For each `### CT-N:` block in the plan's `## Contracts` section (skip rule if section absent):
     - Create exactly one **contract task** in an early wave, before any task that completes a Requirement the contract's acceptance files list. `agent`: `code-implementer-agent`; `verification_policy`: `{"regression":{"kind":"required"},"new_tests":{"kind":"required"}}`.
     - Its `file_list` MUST include every frozen path: the `**Types file:**` (unless `none`) and every `**Acceptance tests:**` path, exactly as declared — plus the stub files the acceptance tests import. No other task may list a frozen path: the contract task is their only writer.
     - It lists the covered Requirements in `spec_contributions`, never in `spec_anchors`: it writes the tests, it does not satisfy them. Its wave gate passes only when every acceptance testcase is collected and FAILS.
+    - When the contract declares an `**Entry point:**`, a task claiming a covered Requirement MUST write that file or depend, directly or transitively, on a task that does: its acceptance tests reach the code through it, so they cannot pass earlier. Put the claim on the task that builds the entry point, or on one after it.
     - Each task completing a covered Requirement (that Requirement in its `spec_anchors`) MUST depend, directly or transitively, on the contract task. Its tests are the frozen acceptance tests, so it MAY waive new tests: `"new_tests":{"kind":"waived","reason":"covered-by-acceptance-contract"}` — only when it claims a covered Requirement of a contract it depends on, and only when the frozen tests cover everything it adds.
     - Do NOT copy the contract into `plan_context`: the engine renders each task's role (contract task, claimant, or a task running beside not-yet-green acceptance tests) into its brief from the plan and the freeze.
     - Never author the regression waiver `acceptance-red-window`. The engine stamps it on every task from the contract wave through the last wave completing a covered Requirement that does not already carry its own regression waiver (an authored `documentation-only` or `generated-artifact` waiver is kept), because those tasks' full-suite runs see pending acceptance tests fail; the Wave Gate's suite is their regression authority.
 
-    Validation refuses a contract no single task writes, a frozen path written by any other task, a contract task claiming a covered Requirement, a covered Requirement no task claims, a claimant that does not depend on the contract task, and a misused `covered-by-acceptance-contract` waiver. Population also refuses contracts unless `.loom/verification-manifest.json` has a project check writing a JUnit report (`"report": {"kind": "required-file", ...}`): RED and GREEN are observed only through that report.
+    Validation refuses a contract no single task writes, a frozen path written by any other task, a contract task claiming a covered Requirement, a covered Requirement no task claims, a claimant that does not depend on the contract task, a claimant that neither writes the declared entry point nor waits for its writer, and a misused `covered-by-acceptance-contract` waiver. Population also refuses contracts unless `.loom/verification-manifest.json` has a project check writing a JUnit report (`"report": {"kind": "required-file", ...}`): RED and GREEN are observed only through that report.
 
 ---
 
@@ -123,7 +125,7 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON.
       "agent": "code-implementer-agent",
       "wave": 1,
       "depends_on": [],
-      "spec_anchors": ["FR-001", "SC-001"],
+      "spec_anchors": ["FR-001", "AS-001"],
       "spec_contributions": [],
       "verification_policy": {
         "regression": { "kind": "required" },

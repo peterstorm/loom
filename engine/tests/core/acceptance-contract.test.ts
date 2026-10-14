@@ -43,6 +43,7 @@ const PLAN_CONTRACT: PlanContract = {
     types: { kind: "file", path: TYPES },
     acceptance: [{ path: ACCEPTANCE, anchors: ["AS-003", "AS-004"] }],
     supportedDomain: ACCEPTANCE,
+    entryPoint: null,
     statement: "One valid call wins.",
   },
 };

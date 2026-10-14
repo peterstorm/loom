@@ -21,6 +21,7 @@ import {
   freezeVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
+import { CANONICAL_SPEC } from "../fixtures/spec-index-fixture";
 
 /**
  * Exercises the REAL populate-task-graph overwrite guard through the handler's
@@ -125,11 +126,21 @@ const REQUIRED_VERIFICATION = Object.freeze({
   new_tests: Object.freeze({ kind: "required" as const }),
 });
 
+/** A canonical specification beside the plan; its path. */
+function canonicalSpecBeside(planFile: string): string {
+  const specFile = join(dirname(planFile), "spec.md");
+  writeFileSync(specFile, CANONICAL_SPEC);
+  return specFile;
+}
+
+/** A decompose payload whose spec is a canonical specification beside the
+ *  plan, so population proves its (empty) trace and reaches the guard under test. */
 function decomposeJson(planFile: string): string {
+  const specFile = canonicalSpecBeside(planFile);
   return JSON.stringify({
     spec_trace_version: 2,
     plan_title: "t",
-    spec_file: "spec.md",
+    spec_file: specFile,
     plan_file: planFile,
     tasks: [{ id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/other.ts"] }],
   });
@@ -525,7 +536,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     const forged = JSON.stringify({
       spec_trace_version: 2,
       plan_title: "t",
-      spec_file: "spec.md",
+      spec_file: canonicalSpecBeside(plan),
       plan_file: plan,
       tasks: [{
         id: "T9", description: "impl", agent: "code-implementer-agent", wave: 1,
@@ -691,7 +702,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
 
   it("sanitizes and persists arbitrary valid v2 Contribution/Completion ownership", async () => {
     await fc.assert(fc.asyncProperty(
-      fc.integer({ min: 1, max: 1_000_000 }).map((n) => `FR-${n}`),
+      fc.constantFrom("FR-001", "FR-002", "AS-001", "AS-002"),
       async (anchor) => {
         const dir = tempDir();
         const plan = modelFreePlan(dir);
@@ -699,7 +710,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
         const payload = JSON.stringify({
           spec_trace_version: 2,
           plan_title: "property trace",
-          spec_file: "spec.md",
+          spec_file: canonicalSpecBeside(plan),
           plan_file: plan,
           tasks: [
             {
@@ -771,11 +782,9 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
 | Spec Index | A deterministic projection of specification entries |
 `;
 
-  /** Populate one graph whose spec file holds `spec`, claiming `anchors`. */
-  async function populatedTask(
-    spec: string | null,
-    anchors: readonly string[],
-  ): Promise<Task> {
+  /** Populate one graph whose spec file holds `spec` (none written when null),
+   *  claiming `anchors`; the result and the State File path. */
+  async function populateWith(spec: string | null, anchors: readonly string[]) {
     const dir = tempDir();
     const plan = modelFreePlan(dir);
     writeManifest(dir);
@@ -793,13 +802,25 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
         verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
       }],
     });
-    const result = await populate(decompose, []);
+    return { result: await populate(decompose, []), statePath };
+  }
+
+  async function populatedTask(spec: string, anchors: readonly string[]): Promise<Task> {
+    const { result, statePath } = await populateWith(spec, anchors);
     if (result.kind === "error") throw new Error(result.message);
     expect(result.kind).toBe("passthrough");
     const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
     const task = graph.tasks[0];
     if (task === undefined) throw new Error("populate must persist the decomposed Task");
     return task;
+  }
+
+  /** The refusal message; asserts nothing was written. */
+  async function refusal(spec: string | null, anchors: readonly string[]): Promise<string> {
+    const { result, statePath } = await populateWith(spec, anchors);
+    expect((JSON.parse(stateBytes(statePath)) as TaskGraph).tasks).toEqual([]);
+    if (result.kind !== "error") throw new Error("population must be refused");
+    return result.message;
   }
 
   it("records the Spec Index hash for every claim the specification defines", async () => {
@@ -810,50 +831,25 @@ describe("populate-task-graph — engine-derived Requirement content hashes", ()
     }
   });
 
-  it("omits identifiers the specification does not define", async () => {
-    const task = await populatedTask(canonicalSpec, ["FR-001", "FR-404"]);
-    expect(Object.keys(task.spec_anchor_hashes ?? {})).toEqual(["FR-001"]);
+  it("refuses identifiers the specification does not define, writing nothing", async () => {
+    expect(await refusal(canonicalSpec, ["FR-001", "FR-404"])).toContain(
+      "Tasks name ids the Spec Index does not define as a completable FR or AS entry: T1 → FR-404");
   });
 
-  it("records nothing rather than guessing when the spec does not project, and says why", async () => {
-    // A project without a canonical specification still decomposes. A later
-    // successful projection reports unrecorded hashes as unverifiable; continued
-    // projection failure blocks settlement. The REASON is
-    // what distinguishes this from a missing file, so assert it: without that,
-    // this test and the one below assert the identical thing.
-    const stderr: string[] = [];
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      stderr.push(String(chunk));
-      return true;
-    });
-    try {
-      const task = await populatedTask("# not a specification", ["FR-001"]);
-      expect(task.spec_anchor_hashes).toBeUndefined();
-    } finally {
-      spy.mockRestore();
-    }
-    expect(stderr.join("")).toContain("is not a canonical specification");
-    expect(stderr.join("")).toContain("drift will be unverifiable");
-    expect(stderr.join("")).toContain("continued projection unavailability blocks settlement");
+  it("refuses a declared spec that does not project, and says why", async () => {
+    // The REASON distinguishes this from a missing file, so assert it: without
+    // that, this test and the one below assert the identical thing.
+    const message = await refusal("# not a specification", ["FR-001"]);
+    expect(message).toContain("is not a canonical specification");
+    expect(message).toContain("missing required section ## Appendix: Glossary");
   });
 
-  it("records nothing when the spec file does not exist, and says so distinctly", async () => {
-    // `populatedTask(null, ...)` leaves the graph pointing at a "spec.md" that
-    // was never written: an unreadable spec is a stated reason, not a refusal —
-    // and a DIFFERENT reason from the non-canonical case above.
-    const stderr: string[] = [];
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      stderr.push(String(chunk));
-      return true;
-    });
-    try {
-      const task = await populatedTask(null, ["FR-001"]);
-      expect(task.spec_anchor_hashes).toBeUndefined();
-    } finally {
-      spy.mockRestore();
-    }
-    expect(stderr.join("")).toContain("could not be read");
-    expect(stderr.join("")).not.toContain("is not a canonical specification");
+  it("refuses a declared spec file that does not exist, and says so distinctly", async () => {
+    // `populateWith(null, ...)` leaves the graph pointing at a "spec.md" that
+    // was never written — a DIFFERENT reason from the non-canonical case above.
+    const message = await refusal(null, ["FR-001"]);
+    expect(message).toContain("could not be read");
+    expect(message).not.toContain("is not a canonical specification");
   });
 
   it("cannot be pre-stamped by the decompose payload", async () => {
@@ -924,6 +920,9 @@ describe("populate-task-graph — one spec_file precedence", () => {
       "| Spec Index | A deterministic projection of specification entries |", "",
     ].join("\n");
     writeFileSync(specFile, spec, "utf8");
+    // The diverted document is canonical too, so the pre-lock preparation
+    // proves its trace and only the locked guard can refuse.
+    writeFileSync(join(dir, "other-spec.md"), spec, "utf8");
     const statePath = writeState(dir, plan, [], { spec_file: specFile });
     const decompose = JSON.stringify({
       spec_trace_version: 2,
@@ -984,7 +983,7 @@ describe("populate-task-graph — Acceptance Contracts", () => {
   const contractDecompose = (planFile: string): string => JSON.stringify({
     spec_trace_version: 2,
     plan_title: "t",
-    spec_file: "spec.md",
+    spec_file: canonicalSpecBeside(planFile),
     plan_file: planFile,
     tasks: [
       {

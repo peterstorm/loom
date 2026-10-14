@@ -34,6 +34,7 @@ const programmaticRule: ProgrammaticRule = {
   description: "Disallow deeply nested code",
   extensions: [".ts"],
   handler: () => [],
+  tier: "full",
   fixHint: "Extract nested logic into functions",
   enabled: true,
   source: "project",

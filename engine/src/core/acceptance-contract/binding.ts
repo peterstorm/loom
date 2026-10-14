@@ -4,11 +4,14 @@
  * writes every frozen path and nothing else writes any; the contract Task
  * claims none of the Requirements its red tests decide; every covered
  * Requirement is claimed, and every claimant waits for the contract Task; no
- * path is frozen by two contracts; and the contract new-test waiver is
- * admitted only on a claimant of a contract it depends on.
+ * path is frozen by two contracts; every claimant writes the contract's entry
+ * point or waits for a Task that does, when the plan names one; and the
+ * contract new-test waiver is admitted only on a claimant of a contract it
+ * depends on.
  */
 
 import { match } from "ts-pattern";
+import { artifactCovers } from "../path-coverage";
 import { normalizePlanPath } from "../plan-path-match";
 import { dependsOnAny } from "../task-dependencies";
 import { COVERED_BY_ACCEPTANCE_CONTRACT, type NewTestWaiverReason } from "../verification-policy";
@@ -42,8 +45,40 @@ function renderContractProblem(problem: ContractProblem): string {
       `'**Supported domain:** ${path}' is not one of the acceptance files`)
     .with({ kind: "unsafe-path" }, ({ path }) =>
       `'${path}' is not a repository-relative path — a frozen path may not be absolute or contain '..'`)
+    .with({ kind: "entry-point-frozen" }, ({ path }) =>
+      `'**Entry point:** ${path}' is a frozen path — name the production file the acceptance tests drive, which claimants write`)
     .with({ kind: "missing-statement" }, () => "no '**Statement:**' — say what consumers rely on and what is refused")
     .exhaustive();
+}
+
+/**
+ * A claimant's acceptance tests reach the code through the entry point, so a
+ * claimant that runs before the entry point exists is told to turn green tests
+ * it cannot reach. Each claimant must write the entry point itself or wait,
+ * directly or transitively, for a Task that does.
+ */
+function entryPointErrors(
+  label: string,
+  entryPoint: string,
+  contractTask: string,
+  covered: readonly string[],
+  tasks: readonly ContractBindingTask[],
+  waitsForAny: (task: ContractBindingTask, ids: ReadonlySet<string>) => boolean,
+): readonly string[] {
+  const writers = new Set(tasks
+    .filter((task) => task.file_list.some((file) => artifactCovers(normalizePlanPath(file), entryPoint)))
+    .map(({ id }) => id));
+  if (writers.size === 0) {
+    return [`${label}: entry point '${entryPoint}' is in no task's file_list — decompose must emit the task that builds ` +
+      "what the acceptance tests drive"];
+  }
+  return tasks.flatMap((task) => {
+    const anchors = task.id === contractTask ? [] : task.spec_anchors.filter((anchor) => covered.includes(anchor));
+    if (anchors.length === 0 || writers.has(task.id) || waitsForAny(task, writers)) return [];
+    return [`${label}: ${task.id} claims ${anchors.join(", ")} but neither writes the entry point '${entryPoint}' nor depends ` +
+      `on ${[...writers].join(" or ")}, directly or transitively — its acceptance tests cannot pass before the entry point ` +
+      "exists; move the claim to a task that waits for it"];
+  });
 }
 
 /** Every way the Tasks fail to bind the plan's contracts, as operator messages. */
@@ -52,8 +87,9 @@ export function contractBindingErrors(
   tasks: readonly ContractBindingTask[],
 ): readonly string[] {
   const byId = new Map(tasks.map((task) => [task.id, task] as const));
-  const waitsFor = (task: ContractBindingTask, contractTask: string): boolean =>
-    dependsOnAny(task.depends_on, new Set([contractTask]), (id) => byId.get(id)?.depends_on ?? []);
+  const waitsForAny = (task: ContractBindingTask, ids: ReadonlySet<string>): boolean =>
+    dependsOnAny(task.depends_on, ids, (id) => byId.get(id)?.depends_on ?? []);
+  const waitsFor = (task: ContractBindingTask, contractTask: string): boolean => waitsForAny(task, new Set([contractTask]));
   const errors: string[] = [];
   const frozenBy = new Map<string, string>();
   const resolved: Readonly<{ contractTask: string; covered: readonly string[] }>[] = [];
@@ -95,6 +131,9 @@ export function contractBindingErrors(
             `contract task ${contractTask}, directly or transitively`);
         }
       }
+    }
+    if (declaration.entryPoint !== null) {
+      errors.push(...entryPointErrors(label, declaration.entryPoint, contractTask, covered, tasks, waitsForAny));
     }
   }
   for (const task of tasks.filter(({ newTestWaiver }) => newTestWaiver === COVERED_BY_ACCEPTANCE_CONTRACT)) {

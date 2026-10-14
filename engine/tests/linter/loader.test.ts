@@ -191,17 +191,25 @@ describe("loadRules", () => {
   });
 
   describe("tier filtering", () => {
-    it("tier 'immediate' returns only RegexRule[]", () => {
+    it("tier 'immediate' returns only RegexRule[] when programmatic rules are excluded", () => {
       writeRule(defaultDir, "regex.json", makeValidRule({
         name: "regex-rule",
         kind: "regex",
         pattern: "foo",
       }));
 
-      const rules = loadRules(defaultDir, null, "immediate");
+      const rules = loadRules(defaultDir, null, "immediate", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(1);
       expect(rules[0].kind).toBe("regex");
+    });
+
+    it("tier 'immediate' adds only the programmatic rules whose own tier is immediate", () => {
+      writeRule(defaultDir, "regex.json", makeValidRule({ name: "regex-rule", kind: "regex", pattern: "foo" }));
+
+      const rules = loadRules(defaultDir, null, "immediate");
+
+      expect(rules.map(({ name }) => name)).toEqual(["regex-rule", "no-cross-boundary-imports", "no-io-in-pure-modules"]);
     });
 
     it("tier 'full' returns all enabled rules", () => {
@@ -220,7 +228,7 @@ describe("loadRules", () => {
       writeRule(defaultDir, "a.json", makeValidRule({ name: "rule-a", pattern: "aaa" }));
       writeRule(defaultDir, "b.json", makeValidRule({ name: "rule-b", pattern: "bbb" }));
 
-      const rules = loadRules(defaultDir, null, "immediate");
+      const rules = loadRules(defaultDir, null, "immediate", { includeProgrammatic: false });
 
       expect(rules).toHaveLength(2);
       expect(rules.every((r) => r.kind === "regex")).toBe(true);

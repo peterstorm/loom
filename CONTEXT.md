@@ -436,6 +436,10 @@ _Avoid_: Contract (alone — collides with **Wire Contract** and the orchestrati
 The one Task whose `file_list` holds every frozen path of an **Acceptance Contract**. It writes the types, the acceptance tests and compiling stubs, contributes to the covered Requirements but never claims them, and its Wave Gate must observe every acceptance testcase collected and failing (RED).
 _Avoid_: Test task, scaffolding task
 
+**Contract Entry Point**:
+The production file an **Acceptance Contract**'s tests reach the code through — a route, a handler, a CLI command — declared by the plan's optional `**Entry point:**`. Never a frozen path. Plan binding refuses a claimant of a covered Requirement that neither writes it nor depends, directly or transitively, on a Task that does, because its tests could not pass before it exists. Plan-only: it is not persisted on the contract.
+_Avoid_: Entry point (alone — collides with **Sibling Entry Point**)
+
 **Acceptance Freeze**:
 What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift.
 _Avoid_: Snapshot, lock, baseline

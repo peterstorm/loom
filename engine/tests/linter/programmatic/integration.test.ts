@@ -27,10 +27,10 @@ describe("programmatic rules integration", () => {
     ]);
   });
 
-  it("immediate tier does NOT include programmatic rules", () => {
+  it("immediate tier includes only the programmatic rules whose own tier is immediate", () => {
     const rules = loadRules(realDefaultDir, null, "immediate");
     const programmatic = rules.filter((r: Rule) => r.kind === "programmatic");
-    expect(programmatic.length).toBe(0);
+    expect(programmatic.map(({ name }) => name).sort()).toEqual(["no-cross-boundary-imports", "no-io-in-pure-modules"]);
   });
 
   it("includeProgrammatic: false excludes them", () => {

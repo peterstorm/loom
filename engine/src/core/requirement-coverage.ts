@@ -92,10 +92,10 @@ export type CoverageRow = Readonly<{
  * Why no Spec Index was available. An absent projection is an honest absence
  * with a stated reason — never a pass, and never silence.
  *
- * `unreadable` arises only where a missing spec is not itself a failure — at
- * decompose, where recording Requirement hashes is an enhancement. The Wave
- * Gate's own observation refuses outright instead, because gate evidence must
- * name exact bytes.
+ * `unreadable` arises only from the decompose-time observer, which never
+ * throws; population then refuses it as a stated reason. The Wave Gate's own
+ * observation refuses outright instead, because gate evidence must name exact
+ * bytes.
  */
 export type SpecIndexUnavailableReason =
   | Readonly<{ kind: "no-spec-file" }>
@@ -1045,6 +1045,36 @@ export function completableRequirementIds(index: ParsedSpec): ReadonlySet<string
     .filter(([, indexed]) => indexed.family === "completable")
     .map(([id]) => id));
 }
+
+/** One Task→Requirement edge a trace introduces: a Completion Claim or a Contribution. */
+export type RequirementTraceEdge = Readonly<{ taskId: string; id: string }>;
+
+/** Why introduced trace edges cannot be admitted: no Spec Index can prove them,
+ *  or the Spec Index defines no completable entry for some of them. */
+export type UnprovenRequirementTrace =
+  | Readonly<{ kind: "spec-index-unavailable"; reason: SpecIndexUnavailableReason }>
+  | Readonly<{ kind: "unknown-requirement"; edges: NonEmpty<RequirementTraceEdge> }>;
+
+/**
+ * The one admission rule for new Task→Requirement edges, shared by population
+ * and trace amendment: every introduced id must be a completable FR or AS entry
+ * of the observed Spec Index. Without it an edge the Implementation Brief later
+ * refuses could be written into the TaskGraph and surface only at dispatch.
+ */
+export function unprovenRequirementTrace(
+  specIndex: SpecIndexAvailability,
+  edges: readonly RequirementTraceEdge[],
+): UnprovenRequirementTrace | null {
+  if (edges.length === 0) return null;
+  if (specIndex.kind === "unavailable") return Object.freeze({ kind: "spec-index-unavailable", reason: specIndex.reason });
+  const completable = completableRequirementIds(specIndex.index);
+  const [first, ...rest] = edges.filter(({ id }) => !completable.has(id));
+  return first === undefined ? null : Object.freeze({ kind: "unknown-requirement", edges: Object.freeze([first, ...rest] as const) });
+}
+
+/** The edges as `T1 → FR-009` operator text. */
+export const renderRequirementTraceEdges = (edges: readonly RequirementTraceEdge[]): string =>
+  edges.map(({ taskId, id }) => `${taskId} → ${id}`).join(", ");
 
 /**
  * The spec file an observation was taken from, whichever way it turned out.

@@ -217,6 +217,7 @@ them, and only then do other tasks write the code that turns them green.
 **Acceptance tests:**
 - `tests/payload.acceptance.test.ts` — AS-001, FR-002
 **Supported domain:** `tests/payload.acceptance.test.ts`
+**Entry point:** `src/payload/submit-route.ts`
 **Statement:** One valid call wins; a second call is refused with AlreadySubmitted.
 
 ### CT-2: Submission slice
@@ -238,6 +239,12 @@ them, and only then do other tasks write the code that turns them green.
   name prefix is how the engine attributes a testcase to its Requirement.
 - `**Supported domain:**` (optional) — the acceptance file whose testcases
   hold the supported/unsupported input table and the relevant laws.
+- `**Entry point:**` (optional) — the production file the acceptance tests
+  reach the code through: a route, a handler, a CLI command. Not a frozen path.
+  Plan validation refuses a Task that claims a covered Requirement but neither
+  writes the entry point nor depends, directly or transitively, on a Task that
+  does — its tests could not pass before the entry point exists. Declare it
+  whenever the tests drive the code through something a later Task builds.
 - `**Statement:**` — the observable behavior, and what is refused.
 
 **The lifecycle the engine enforces:**

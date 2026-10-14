@@ -230,6 +230,33 @@ GOOD_DECOMPOSE='{
 # empty plan declares no models and therefore produces zero binding checks.
 mkdir -p "$PTEST_DIR/.claude/plans"
 : > "$PTEST_DIR/.claude/plans/test.md"
+# The spec_file must be a canonical specification: population refuses a
+# declared spec it cannot index before it writes anything.
+mkdir -p "$PTEST_DIR/.claude/specs/test"
+cat > "$PTEST_DIR/.claude/specs/test/spec.md" << 'SPEC'
+# Feature: Smoke
+
+## User Scenarios
+
+### US1: [P1] Populate a graph
+
+**Acceptance Scenarios:**
+- AS-001: Given a decompose payload, When population runs, Then the graph is populated
+
+## Functional Requirements
+
+- FR-001: System MUST populate the TaskGraph
+
+## Out of Scope
+
+- OOS-001: Anything else
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| TaskGraph | Protected orchestration state |
+SPEC
 
 # Reset state (may be chmod 444 after previous write)
 chmod 644 "$PTEST_DIR/.claude/state/active_task_graph.json" 2>/dev/null || true
@@ -255,6 +282,8 @@ fi
 # the optional manifest lookup without a Git root.
 mkdir -p "$PPI_DIR/.pi/state" "$PPI_DIR/.claude/plans"
 cp "$PTEST_DIR/.claude/plans/test.md" "$PPI_DIR/.claude/plans/test.md"
+mkdir -p "$PPI_DIR/.claude/specs/test"
+cp "$PTEST_DIR/.claude/specs/test/spec.md" "$PPI_DIR/.claude/specs/test/spec.md"
 cat > "$PPI_DIR/.pi/state/active_task_graph.json" << 'EOF'
 {
   "current_phase": "decompose",

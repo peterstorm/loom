@@ -44,6 +44,7 @@ function makeProgrammaticRule(
     description: "A programmatic test rule",
     extensions: [".ts"],
     handler: (_content: string, _filePath: string) => [],
+    tier: "full",
     fixHint: "Fix it",
     enabled: true,
     source: "default",

@@ -418,9 +418,9 @@ const handler: HookHandler = async (stdin, args) => {
 
   // The Spec Index is observed here, beside the manifest, for the same reason:
   // the locked transform stamps a prepared value and never reads mutable source
-  // bytes itself. Unlike the manifest this one degrades: if a later Wave Gate
-  // can project the Spec, missing recorded hashes make drift unverifiable; if
-  // projection remains unavailable, settlement blocks as projection-unavailable.
+  // bytes itself. The transform refuses a declared spec it cannot index and any
+  // Requirement id the index does not define; only a plan with no spec_file
+  // and no Requirement trace reaches the warning below.
   const observedSpecFile = resolvedSpecFile(existingState.spec_file, decompose.spec_file);
   const specIndex = observeSpecIndex(observedSpecFile);
   if (specIndex.kind === "unavailable") {

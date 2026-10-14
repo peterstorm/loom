@@ -159,6 +159,7 @@ must turn the same tests green without changing them.
 **Acceptance tests:**
 - `{path/to/feature.acceptance.test.ts}` — AS-001, FR-001
 **Supported domain:** `{path/to/feature.acceptance.test.ts}`
+**Entry point:** `{path/to/the/production/file/the/tests/drive.ts}`
 **Statement:** {the observable behavior consumers rely on, and what is refused}
 
 ### CT-2: {Vertical Slice Title}
@@ -280,7 +281,10 @@ Per component, not global.
   one `- path — FR-n, AS-n` line each, naming only Requirements a test can
   decide (measured or calibration anchors stay off). `**Supported domain:**`,
   when present, names the acceptance file holding the supported/unsupported
-  table as test cases. Several contracts per feature are normal; a vertical
+  table as test cases. `**Entry point:**`, when present, names the production
+  file the acceptance tests reach the code through (a CLI route, a handler);
+  every Task claiming a covered Requirement must write it or depend on the
+  Task that does. Several contracts per feature are normal; a vertical
   slice with `**Types file:** none` carries the controls that must fail.
 - Full policy: `references/executable-models.md`
 
