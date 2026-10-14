@@ -315,14 +315,32 @@ function parseAcceptanceRunner(raw: unknown, path: string): Parsed<AcceptanceRun
 
 /**
  * The runner's exact command over these acceptance files, as authority the
- * completion check runner executes. Each file becomes one argument; nothing
+ * completion check runner executes. Each file becomes one argument, written
+ * relative to the runner's `cwd` because that is where it launches; nothing
  * else is interpolated.
  */
 export function acceptanceRunnerCheck(
   runner: AcceptanceRunner,
   files: NonEmpty<string>,
 ): Parsed<ProjectWaveCompletionCheck> {
-  return total(() => runnerCheck(runner, files, "acceptanceRunner"));
+  return total(() => {
+    const relative = filesFromRunnerCwd(runner.cwd, files);
+    return relative.ok ? runnerCheck(runner, relative.value, "acceptanceRunner") : relative;
+  });
+}
+
+/**
+ * Repository-relative files as the runner sees them from its `cwd`. A file
+ * outside that directory cannot be named to a runner that only collects
+ * beneath it, so it is refused rather than passed through unmatched.
+ */
+function filesFromRunnerCwd(cwd: RepositoryRelativePath, files: readonly string[]): Parsed<readonly string[]> {
+  if (cwd === ".") return success(files);
+  const prefix = `${cwd}/`;
+  const outside = files.filter((file) => !file.startsWith(prefix));
+  return outside.length > 0
+    ? failure([`acceptanceRunner.cwd ${cwd} does not contain ${outside.join(", ")}`])
+    : success(freezeArray(files.map((file) => file.slice(prefix.length))));
 }
 
 /**
