@@ -13,7 +13,7 @@
  */
 
 import { match } from "ts-pattern";
-import type { HookHandler } from "../../types";
+import type { HookHandler, TaskGraph } from "../../types";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { renderStopCheckPlan } from "../../core/acceptance-contract/stop-check-plan";
@@ -52,7 +52,7 @@ export function createStopCheckPlanHandler(
 
     // Only the load boundary may refuse: the renderer is pure and total, so a
     // throw from it is a defect and must crash rather than read as a refusal.
-    let graph: ReturnType<StateManager["load"]>;
+    let graph: TaskGraph;
     try {
       graph = manager.load();
     } catch (error) {

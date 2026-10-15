@@ -54,7 +54,9 @@ The runner is frozen at population, so it must exist before the TaskGraph does.
 
 ## Spec (written by hand; `/loom --skip-specify`)
 
-`.claude/specs/2026-10-14-stop-check-plan/spec.md`:
+`.claude/specs/2026-10-14-stop-check-plan/spec.md`. The outline below is the pre-pilot draft; the committed spec is the requirement authority, and its numbering differs (FR-002 forbids re-derivation, FR-003 is the off-reason, FR-005 the refusals, and AS-003 adds the command-refused cause for an owed file outside the runner cwd). Measurements trace to the committed ids.
+
+Draft outline:
 
 - **FR-001** Report the owed check for a claimant: each contract's owed testcases, the acceptance files, the expanded runner argv, and the report path.
   - **AS-001** A claimant of a frozen contract lists every owed testcase under its contract, and the argv holds each file as one argument in place of `{files}`.

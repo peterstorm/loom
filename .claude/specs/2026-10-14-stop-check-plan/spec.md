@@ -46,7 +46,7 @@ G4 slice 1 runs the frozen acceptance runner at a claimant's SubagentStop and bl
 
 ## Non-Functional Requirements
 
-- NFR-001: The helper follows the existing whitelisted-helper pattern (route in `handler-routes.ts`, one handler, a pure core module enrolled in the purity check), as `helper contract-status` does
+- NFR-001: The helper follows the existing read-only helper pattern (route in `KNOWN_HANDLERS.helper` only, not `WHITELISTED_HELPERS`; one handler; a pure core module enrolled in the purity check), as `helper contract-status` does
 
 ## Success Criteria
 

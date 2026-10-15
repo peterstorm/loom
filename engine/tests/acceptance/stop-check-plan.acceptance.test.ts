@@ -11,9 +11,7 @@
  * (plan AD-4): the helper's own tests pin that it prints exactly these lines.
  */
 
-import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
-import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { renderStopCheckPlan } from "../../src/core/acceptance-contract/stop-check-plan";
@@ -32,11 +30,9 @@ import {
   awaitingRedContract,
   frozenContract,
   frozenRunnerManifest,
+  runStopCheckPlanCli,
   stopCheckGraph,
 } from "../fixtures/stop-check-plan-fixtures";
-
-const REPO_ROOT = resolve(__dirname, "../../..");
-const CLI = "engine/src/cli.ts";
 
 const LEDGER_TYPES = "engine/src/core/ledger-types.ts";
 const LEDGER = "engine/tests/acceptance/ledger.acceptance.test.ts";
@@ -223,20 +219,6 @@ describe("stop-check-plan rendering (CT-1)", () => {
   });
 });
 
-type Run = Readonly<{ stdout: string; stderr: string; status: number | null }>;
-
-/** The real entry point, run exactly as an operator types it. */
-function stopCheckPlan(statePath: string, taskId: string): Run {
-  const result = spawnSync("bun", [CLI, "helper", "stop-check-plan", "--task", taskId], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, LOOM_STATE_PATH: statePath },
-    input: "",
-    encoding: "utf-8",
-    timeout: 30_000,
-  });
-  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", status: result.status };
-}
-
 /** A fresh Git repository to hold one State File. */
 const project = (): string => gitProject("loom-stop-check-plan-", cleanup);
 
@@ -249,7 +231,7 @@ describe("helper stop-check-plan refusals (CT-1)", () => {
     });
     const statePath = writeStateFile(project(), json);
 
-    const run = stopCheckPlan(statePath, "T9");
+    const run = runStopCheckPlanCli(statePath, "T9");
 
     expect(run.stdout).toBe("");
     expect(run.stderr).toContain(`${UNKNOWN_TASK_PREFIX} T9 in the TaskGraph`);
@@ -261,7 +243,7 @@ describe("helper stop-check-plan refusals (CT-1)", () => {
   it("AS-004: with no TaskGraph it refuses with the path it looked for, with a non-zero exit", () => {
     const statePath = statePathIn(project());
 
-    const run = stopCheckPlan(statePath, "T1");
+    const run = runStopCheckPlanCli(statePath, "T1");
 
     expect(run.stdout).toBe("");
     expect(run.stderr).toContain(statePath);

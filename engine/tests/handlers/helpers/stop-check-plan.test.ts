@@ -1,6 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import stopCheckPlan, { createStopCheckPlanHandler } from "../../../src/handlers/helpers/stop-check-plan";
 import { renderStopCheckPlan } from "../../../src/core/acceptance-contract/stop-check-plan";
@@ -10,10 +9,7 @@ import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired
 import { StateManager } from "../../../src/state-manager";
 import type { HookResult, TaskGraph } from "../../../src/types";
 import { gitProject, statePathIn, task, writeStateFile } from "../../fixtures/contract-status-fixtures";
-import { frozenContract, frozenRunnerManifest, stopCheckGraph } from "../../fixtures/stop-check-plan-fixtures";
-
-const REPO_ROOT = resolve(__dirname, "../../../..");
-const CLI = "engine/src/cli.ts";
+import { frozenContract, frozenRunnerManifest, runStopCheckPlanCli, stopCheckGraph } from "../../fixtures/stop-check-plan-fixtures";
 
 const LEDGER_TYPES = "engine/src/core/ledger-types.ts";
 const LEDGER = "engine/tests/acceptance/ledger.acceptance.test.ts";
@@ -231,13 +227,7 @@ describe("stop-check-plan through the real CLI", () => {
     const expected = renderStopCheckPlan(manager.load(), "T2");
     if (expected.kind !== "rendered") throw new Error("fixture Task T2 is unknown to the renderer");
 
-    const result = spawnSync("bun", [CLI, "helper", "stop-check-plan", "--task", "T2"], {
-      cwd: REPO_ROOT,
-      env: { ...process.env, LOOM_STATE_PATH: statePath },
-      input: "",
-      encoding: "utf-8",
-      timeout: 30_000,
-    });
+    const result = runStopCheckPlanCli(statePath, "T2");
 
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe(`${expected.lines.join("\n")}\n`);

@@ -10,6 +10,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { AcceptanceContract, AcceptanceTestcase } from "../../src/core/acceptance-contract";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { stopCheckExpectation } from "../../src/core/acceptance-contract/stop-check";
 import { renderStopCheckPlan, stopCheckPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
 import {
@@ -207,8 +208,6 @@ describe("renderStopCheckPlan", () => {
 const ANCHORS: NonEmpty<string> = ["AS-001", "AS-002", "AS-003"];
 const FILE_POOL = [LEDGER, REPLAY, OUTSIDE] as const;
 const TASK_IDS = ["T1", "T2", "T3", "T4"] as const;
-
-type NonEmpty<T> = readonly [T, ...T[]];
 
 /** A non-empty, duplicate-free subset of `pool`, built head-first so no cast is needed. */
 const nonEmptySubsetArb = (pool: NonEmpty<string>): fc.Arbitrary<NonEmpty<string>> =>

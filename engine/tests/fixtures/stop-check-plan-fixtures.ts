@@ -10,6 +10,8 @@
  * `contract-status-fixtures.ts`.
  */
 
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 import type {
   AcceptanceContract,
   AcceptanceTestcase,
@@ -109,4 +111,20 @@ export function stopCheckGraph({ tasks, contracts, manifest }: StopCheckGraphInp
     ...(manifest === undefined ? {} : { verification_manifest: manifest }),
   });
   return Object.freeze({ graph: protectedGraphFixture(JSON.parse(json)), json });
+}
+
+const REPO_ROOT = resolve(__dirname, "../../..");
+
+export type StopCheckPlanRun = Readonly<{ stdout: string; stderr: string; status: number | null }>;
+
+/** The real entry point, run from the repository root exactly as an operator types it. */
+export function runStopCheckPlanCli(statePath: string, taskId: string): StopCheckPlanRun {
+  const result = spawnSync("bun", ["engine/src/cli.ts", "helper", "stop-check-plan", "--task", taskId], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, LOOM_STATE_PATH: statePath },
+    input: "",
+    encoding: "utf-8",
+    timeout: 30_000,
+  });
+  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", status: result.status };
 }
