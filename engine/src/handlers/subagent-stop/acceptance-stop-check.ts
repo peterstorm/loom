@@ -19,13 +19,9 @@
 import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import {
-  judgeStopCheck,
-  renderStopCheckBlock,
-  stopCheckExpectation,
-  type OwedStopCheck,
-} from "../../core/acceptance-contract";
-import { MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS, acceptanceRunnerCheck } from "../../core/verification-manifest";
+import { judgeStopCheck, renderStopCheckBlock, type OwedStopCheck } from "../../core/acceptance-contract";
+import { planStopCheck, type AcceptanceRunnerCommand, type StopCheckPlan } from "../../core/acceptance-contract/stop-check-plan";
+import { MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS } from "../../core/verification-manifest";
 import { parseJunitTestcases } from "../../core/structured-test-report";
 import { sha256Bytes, sha256Hex } from "../../core/digest";
 import type { TaskGraph } from "../../types";
@@ -110,14 +106,26 @@ export async function runAcceptanceStopCheck(input: StopCheckInput, ports: StopC
   return outcome;
 }
 
+/**
+ * What the TaskGraph alone decides comes from `planStopCheck`, the same plan
+ * `helper stop-check-plan` prints; this adds only per-stop state, in order:
+ * the block counter and cap, the repository root, then the runner lock.
+ */
 async function decideStop(input: StopCheckInput, ports: StopCheckPorts): Promise<StopCheckOutcome> {
-  const graph = input.loadGraph();
-  const runner = graph.verification_manifest?.acceptanceRunner;
-  const task = graph.tasks.find(({ id }) => id === input.taskId);
-  if (runner === undefined || task === undefined) return { kind: "skip" };
-  const check = stopCheckExpectation(graph.acceptance_contracts ?? [], graph.tasks, task);
-  if (check.kind === "none") return { kind: "skip" };
+  const plan = planStopCheck(input.loadGraph(), input.taskId);
+  switch (plan.kind) {
+    case "unknown-task":
+      return { kind: "skip" };
+    case "off":
+      return plan.reason.kind === "command-refused"
+        ? didNotDecide(input.taskId, `the runner command is invalid for these files: ${plan.reason.errors.join("; ")}`)
+        : { kind: "skip" };
+    case "on":
+      return decideOwedStop(input, ports, plan);
+  }
+}
 
+async function decideOwedStop(input: StopCheckInput, ports: StopCheckPorts, plan: Extract<StopCheckPlan, { kind: "on" }>): Promise<StopCheckOutcome> {
   const note = (why: string): StopCheckOutcome => didNotDecide(input.taskId, why);
   const issued = ports.blocksIssued(input.agentKey);
   // Without a trustworthy count the cap cannot be enforced, so the check must not block.
@@ -129,15 +137,13 @@ async function decideStop(input: StopCheckInput, ports: StopCheckPorts): Promise
   const resolvedRoot = ports.repositoryRoot(input.stateFilePath);
   if (!resolvedRoot.ok) return note(resolvedRoot.reason);
   const root = resolvedRoot.root;
-  const command = acceptanceRunnerCheck(runner, check.files);
-  if (!command.ok) return note(`the runner command is invalid for these files: ${command.error.errors.join("; ")}`);
 
   const lock = ports.acquireRunner(root);
   if (lock.kind === "held") return note(lock.reason);
   let decided: StopCheckOutcome;
   let releaseFault: string | null;
   try {
-    decided = await runAndJudge(input, ports, check, command.value, root, issued.blocks);
+    decided = await runAndJudge(input, ports, plan.check, plan.command, root, issued.blocks);
   } finally {
     releaseFault = lock.release();
   }
@@ -149,7 +155,7 @@ async function runAndJudge(
   input: StopCheckInput,
   ports: StopCheckPorts,
   check: OwedStopCheck,
-  command: Parameters<typeof runCompletionCheck>[0],
+  command: AcceptanceRunnerCommand,
   root: CanonicalRepositoryRoot,
   blocksIssued: number,
 ): Promise<StopCheckOutcome> {
