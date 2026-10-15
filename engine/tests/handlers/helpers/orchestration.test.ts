@@ -4823,6 +4823,16 @@ describe("orchestration CLI", () => {
       for (const rendered of [status.stdout, customPathStatus]) {
         expect(rendered).not.toContain("workspace integrity cannot be observed");
       }
+      // The re-proof is real, not a pass: reviewed bytes that drift while the
+      // gate waits fail the prerequisite, and restoring them clears it.
+      const reviewed = join(root, "src", "x.ts");
+      const reviewedBytes = readFileSync(reviewed);
+      writeFileSync(reviewed, "export const x = 2;\n");
+      expect(await currentOrchestrationStatus(["--json", "--runs-root", runsRoot], statePath))
+        .toContain("FAILED: accepted Review Packet authority is stale");
+      writeFileSync(reviewed, reviewedBytes);
+      expect(await currentOrchestrationStatus(["--json", "--runs-root", runsRoot], statePath))
+        .not.toContain("accepted Review Packet authority is stale");
 
       const decided = (await runCli(
         ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", awaiting.request.requestId],

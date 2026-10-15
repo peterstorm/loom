@@ -484,8 +484,9 @@ function describeCompletionFailure(failure: ImplementationCompletionFailure): st
 }
 
 /** A settled transition as an operator reads it: its kind and, for a failed
- *  attempt, every failure with its detail. Both harnesses print it and the
- *  Task's `failure_reason` stores it. */
+ *  attempt, each failure's kind; a byte-scope violation also names the
+ *  offending paths. Both harnesses print it and the Task's `failure_reason`
+ *  stores it. */
 export function describeSettlement(transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>): string {
   switch (transition.kind) {
     case "implemented":

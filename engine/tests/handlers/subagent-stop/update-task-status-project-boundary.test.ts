@@ -137,6 +137,7 @@ describe("Claude SubagentStop project boundary", () => {
     sessionId: string;
     authority: ImplementationAttemptAuthority;
     transcript: string;
+    worktree: string;
   }> {
     const { checkout, worktree, statePath } = linkedWorktrees();
     process.env.CLAUDE_PROJECT_DIR = checkout;
@@ -173,8 +174,38 @@ describe("Claude SubagentStop project boundary", () => {
         type: "tool_use", id: "tool-1", name: "Write", input: { file_path: "src/artifact.ts" },
       }] },
     }) + "\n");
-    return { statePath, sessionId, authority, transcript };
+    return { statePath, sessionId, authority, transcript, worktree };
   }
+
+  it("prints a byte-scope settlement naming the path written outside the Task's declared files", async () => {
+    const { statePath, sessionId, authority, transcript, worktree } = await armedImplementationWorktree("scope");
+    writeFileSync(join(worktree, "src", "artifact.ts"), "export const value = 2;\n");
+    writeFileSync(join(worktree, "src", "foreign.ts"), "export const stray = true;\n");
+    writeFileSync(transcript, ["src/artifact.ts", "src/foreign.ts"].map((file_path, index) => JSON.stringify({
+      type: "assistant", message: { role: "assistant", content: [{
+        type: "tool_use", id: `tool-${index}`, name: "Write", input: { file_path },
+      }] },
+    })).join("\n") + "\n");
+    const observation: ImplementationAuthorityObservation = {
+      kind: "authority-observed",
+      sidecar: {
+        schemaVersion: 1, kind: "claude-implementation-attempt-sidecar",
+        sessionId: sessionId as never, agentId: "agent-1" as never,
+        canonicalTaskGraphPath: statePath, authority,
+      },
+    };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: sessionId, agent_id: "agent-1", agent_type: "code-implementer-agent",
+      agent_transcript_path: transcript,
+    }), [], { kind: "snapshot", events: [] }, observation);
+
+    const settlement = "retry-required: task-byte-scope-violation (outside the declared files: src/foreign.ts)";
+    expect(result, JSON.stringify(result)).toMatchObject({ kind: "passthrough" });
+    expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain(`Task T1 settlement: ${settlement}.\n`);
+    expect(JSON.parse(readFileSync(statePath, "utf8")).tasks[0].failure_reason).toBe(settlement);
+  }, 30_000);
 
   it("preserves the State File byte-for-byte when the boundary observation throws without a bound modern authority", async () => {
     // A LEGACY-shaped graph: the handler refuses an unobserved modern attempt
