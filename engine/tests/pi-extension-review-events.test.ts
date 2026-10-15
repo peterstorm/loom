@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { recordedSubagentEvent, replayRecordedEvent } from "./fixtures/pi-recorded/recorded-subagent-result";
@@ -223,18 +223,62 @@ function replacementAttemptContext(
   };
 }
 
-function writeState(state: unknown): void {
+function writeState(state: unknown, path: string = statePath): void {
   try {
-    chmodSync(statePath, 0o644);
+    chmodSync(path, 0o644);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  writeFileSync(statePath, JSON.stringify(state, null, 2));
+  writeFileSync(path, JSON.stringify(state, null, 2));
 }
 
 function restoreEnv(key: string, previous: string | undefined): void {
   if (previous === undefined) delete process.env[key];
   else process.env[key] = previous;
+}
+
+type TaskGraphRepository = Readonly<{ root: string; statePath: string }>;
+
+/**
+ * Run `body` against a throwaway Git repository whose TaskGraph sits at the
+ * canonical `.claude/state/` layout, so settlement observes Task bytes HERE.
+ *
+ * The shared graph lives under the live checkout (`.loom/completion-reports`),
+ * so its project root IS the checkout: a test that writes Task artifacts
+ * against it writes into the real repository, and a killed run strands those
+ * bytes there as out-of-scope writes for the next real orchestration (G4 pilot
+ * F6). This repository lives under the per-run TMPDIR instead, so even a
+ * killed run leaves nothing a live checkout can see.
+ */
+async function withTaskGraphRepository(
+  prefix: string,
+  tracked: Readonly<Record<string, string>>,
+  body: (repository: TaskGraphRepository) => Promise<void>,
+): Promise<void> {
+  const root = canonicalTempDir(prefix);
+  const repositoryStatePath = join(root, ".claude", "state", "active_task_graph.json");
+  const previous = process.env.LOOM_STATE_PATH;
+  try {
+    // Ignored like the live checkout's, so the graph's own writes are never Task bytes.
+    for (const [path, bytes] of Object.entries({ ".gitignore": ".claude/state/\n", ...tracked })) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), bytes);
+    }
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["add", "-A"], { cwd: root });
+    execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+    mkdirSync(dirname(repositoryStatePath), { recursive: true });
+    process.env.LOOM_STATE_PATH = repositoryStatePath;
+    await body({ root, statePath: repositoryStatePath });
+  } finally {
+    restoreEnv("LOOM_STATE_PATH", previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** Fails before a Task artifact is written if a re-rooted test drifts back into the live checkout. */
+function expectOutsideLiveCheckout(path: string): void {
+  expect(relative(ROOT, path).startsWith(".."), `${path} must not be inside the live checkout ${ROOT}`).toBe(true);
 }
 
 mkdirSync(dirname(statePath), { recursive: true });
@@ -5174,44 +5218,45 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("invalidates stale implemented evidence when a changed retry has malformed Pi messages", async () => {
-    const artifactRelative = `.tmp-pi-malformed-attempt-${process.pid}.ts`;
-    const artifactPath = join(ROOT, artifactRelative);
-    const planPath = join(temp, "malformed-changed-attempt-plan.md");
-    writeFileSync(planPath, "# Plan\n");
-    writeFileSync(artifactPath, "export const value = 1;\n");
-    const greenProof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
-      { taskCompleted: true, filesModified: [artifactRelative] },
-    );
-    writeState({
-      ...initialGraph(),
-      phase_artifacts: { architecture: planPath },
-      skipped_phases: ["plan-alignment"],
-      plan_file: planPath,
-      wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
-      spec_check: {
-        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      tasks: [{
-        ...initialGraph().tasks[0],
-        status: "implemented",
-        proof: greenProof,
-        test_result: { verdict: "trusted-pass" },
-        test_evidence: "trusted green run",
-        new_tests_required: false,
-        review_status: "passed",
-        file_list: [artifactRelative],
-        files_modified: [artifactRelative],
-      }],
-    });
-    const pi = await extension();
-    const context = {
-      cwd: ROOT,
-      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42e" },
-    };
-    const toolCallId = "call-malformed-changed-attempt";
-    try {
+    await withTaskGraphRepository("loom-pi-malformed-attempt-", {}, async (repository) => {
+      const artifactRelative = `.tmp-pi-malformed-attempt-${process.pid}.ts`;
+      const artifactPath = join(repository.root, artifactRelative);
+      expectOutsideLiveCheckout(artifactPath);
+      const planPath = join(temp, "malformed-changed-attempt-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeFileSync(artifactPath, "export const value = 1;\n");
+      const greenProof = evaluateTaskProof(
+        { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
+        { taskCompleted: true, filesModified: [artifactRelative] },
+      );
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+        wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
+        spec_check: {
+          wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+          critical_findings: [], high_findings: [], medium_findings: [],
+        },
+        tasks: [{
+          ...initialGraph().tasks[0],
+          status: "implemented",
+          proof: greenProof,
+          test_result: { verdict: "trusted-pass" },
+          test_evidence: "trusted green run",
+          new_tests_required: false,
+          review_status: "passed",
+          file_list: [artifactRelative],
+          files_modified: [artifactRelative],
+        }],
+      }, repository.statePath);
+      const pi = await extension();
+      const context = {
+        cwd: repository.root,
+        sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42e" },
+      };
+      const toolCallId = "call-malformed-changed-attempt";
       expect(await pi.emit("tool_call", {
         toolName: "subagent",
         toolCallId,
@@ -5237,7 +5282,7 @@ describe("Pi extension review tool_result integration", () => {
         },
       }, context);
 
-      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      const state = JSON.parse(readFileSync(repository.statePath, "utf-8"));
       expect(state.executing_tasks).toEqual([]);
       expect(state.tasks[0]).toMatchObject({
         status: "pending",
@@ -5256,56 +5301,55 @@ describe("Pi extension review tool_result integration", () => {
         tests_passed: null,
         reviews_complete: false,
       });
-    } finally {
-      rmSync(artifactPath, { force: true });
-    }
+    });
   });
 
   it("invalidates stale implementation, review, spec, and wave evidence after failed changed bytes", async () => {
-    const artifactRelative = `.tmp-pi-failed-attempt-${process.pid}.ts`;
-    const artifactPath = join(ROOT, artifactRelative);
-    const planPath = join(temp, "failed-changed-attempt-plan.md");
-    writeFileSync(planPath, "# Plan\n");
-    writeFileSync(artifactPath, "export const value = 1;\n");
-    const greenProof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
-      { taskCompleted: true, filesModified: [artifactRelative] },
-    );
-    expect(greenProof.state).toBe("satisfied");
-    writeState({
-      ...initialGraph(),
-      phase_artifacts: { architecture: planPath },
-      skipped_phases: ["plan-alignment"],
-      plan_file: planPath,
-      executing_tasks: [],
-      wave_gates: {
-        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-      spec_check: {
-        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      tasks: [{
-        ...initialGraph().tasks[0],
-        status: "implemented",
-        proof: greenProof,
-        test_result: { verdict: "trusted-pass" },
-        test_evidence: "trusted green run",
-        new_tests_required: false,
-        review_status: "passed",
-        review_error: undefined,
-        review_evidence_failures: undefined,
-        file_list: [artifactRelative],
-        files_modified: [artifactRelative],
-      }],
-    });
-    const pi = await extension();
-    const context = {
-      cwd: ROOT,
-      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42b" },
-    };
-    const toolCallId = "call-failed-changed-attempt";
-    try {
+    await withTaskGraphRepository("loom-pi-failed-attempt-", {}, async (repository) => {
+      const artifactRelative = `.tmp-pi-failed-attempt-${process.pid}.ts`;
+      const artifactPath = join(repository.root, artifactRelative);
+      expectOutsideLiveCheckout(artifactPath);
+      const planPath = join(temp, "failed-changed-attempt-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeFileSync(artifactPath, "export const value = 1;\n");
+      const greenProof = evaluateTaskProof(
+        { newTestsRequired: false, declaredArtifacts: [artifactRelative] },
+        { taskCompleted: true, filesModified: [artifactRelative] },
+      );
+      expect(greenProof.state).toBe("satisfied");
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+        executing_tasks: [],
+        wave_gates: {
+          "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+        },
+        spec_check: {
+          wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+          critical_findings: [], high_findings: [], medium_findings: [],
+        },
+        tasks: [{
+          ...initialGraph().tasks[0],
+          status: "implemented",
+          proof: greenProof,
+          test_result: { verdict: "trusted-pass" },
+          test_evidence: "trusted green run",
+          new_tests_required: false,
+          review_status: "passed",
+          review_error: undefined,
+          review_evidence_failures: undefined,
+          file_list: [artifactRelative],
+          files_modified: [artifactRelative],
+        }],
+      }, repository.statePath);
+      const pi = await extension();
+      const context = {
+        cwd: repository.root,
+        sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42b" },
+      };
+      const toolCallId = "call-failed-changed-attempt";
       const call = await pi.emit("tool_call", {
         toolName: "subagent",
         toolCallId,
@@ -5332,7 +5376,7 @@ describe("Pi extension review tool_result integration", () => {
         },
       }, context);
 
-      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      const state = JSON.parse(readFileSync(repository.statePath, "utf-8"));
       expect(state.executing_tasks).toEqual([]);
       expect(state.tasks[0]).toMatchObject({
         status: "pending",
@@ -5353,53 +5397,53 @@ describe("Pi extension review tool_result integration", () => {
         tests_passed: null,
         reviews_complete: false,
       });
-    } finally {
-      rmSync(artifactPath, { force: true });
-    }
+    });
   });
 
   it("invalidates stale evidence without treating repository-wide failed-attempt paths as task attribution", async () => {
-    const declaredRelative = `.tmp-pi-failed-declared-${process.pid}.ts`;
-    const undeclaredRelative = `.tmp-pi-failed-undeclared-${process.pid}.ts`;
-    const declaredPath = join(ROOT, declaredRelative);
-    const undeclaredPath = join(ROOT, undeclaredRelative);
-    const planPath = join(temp, "failed-undeclared-attempt-plan.md");
-    writeFileSync(planPath, "# Plan\n");
-    writeFileSync(declaredPath, "export const declared = true;\n");
-    const greenProof = evaluateTaskProof(
-      { newTestsRequired: false, declaredArtifacts: [declaredRelative] },
-      { taskCompleted: true, filesModified: [declaredRelative] },
-    );
-    writeState({
-      ...initialGraph(),
-      phase_artifacts: { architecture: planPath },
-      skipped_phases: ["plan-alignment"],
-      plan_file: planPath,
-      wave_gates: {
-        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
-      },
-      spec_check: {
-        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
-      },
-      tasks: [{
-        ...initialGraph().tasks[0],
-        status: "implemented",
-        proof: greenProof,
-        test_result: { verdict: "trusted-pass" },
-        new_tests_required: false,
-        review_status: "passed",
-        file_list: [declaredRelative],
-        files_modified: [declaredRelative],
-      }],
-    });
-    const pi = await extension();
-    const context = {
-      cwd: ROOT,
-      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42f" },
-    };
-    const toolCallId = "call-failed-undeclared-attempt";
-    try {
+    await withTaskGraphRepository("loom-pi-failed-undeclared-", {}, async (repository) => {
+      const declaredRelative = `.tmp-pi-failed-declared-${process.pid}.ts`;
+      const undeclaredRelative = `.tmp-pi-failed-undeclared-${process.pid}.ts`;
+      const declaredPath = join(repository.root, declaredRelative);
+      const undeclaredPath = join(repository.root, undeclaredRelative);
+      expectOutsideLiveCheckout(declaredPath);
+      expectOutsideLiveCheckout(undeclaredPath);
+      const planPath = join(temp, "failed-undeclared-attempt-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeFileSync(declaredPath, "export const declared = true;\n");
+      const greenProof = evaluateTaskProof(
+        { newTestsRequired: false, declaredArtifacts: [declaredRelative] },
+        { taskCompleted: true, filesModified: [declaredRelative] },
+      );
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+        wave_gates: {
+          "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+        },
+        spec_check: {
+          wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
+          critical_findings: [], high_findings: [], medium_findings: [],
+        },
+        tasks: [{
+          ...initialGraph().tasks[0],
+          status: "implemented",
+          proof: greenProof,
+          test_result: { verdict: "trusted-pass" },
+          new_tests_required: false,
+          review_status: "passed",
+          file_list: [declaredRelative],
+          files_modified: [declaredRelative],
+        }],
+      }, repository.statePath);
+      const pi = await extension();
+      const context = {
+        cwd: repository.root,
+        sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad42f" },
+      };
+      const toolCallId = "call-failed-undeclared-attempt";
       expect(await pi.emit("tool_call", {
         toolName: "subagent",
         toolCallId,
@@ -5425,7 +5469,7 @@ describe("Pi extension review tool_result integration", () => {
         },
       }, context);
 
-      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      const state = JSON.parse(readFileSync(repository.statePath, "utf-8"));
       expect(state.tasks[0]).toMatchObject({
         status: "pending",
         revalidation_required: true,
@@ -5444,38 +5488,39 @@ describe("Pi extension review tool_result integration", () => {
         tests_passed: null,
         reviews_complete: false,
       });
-    } finally {
-      rmSync(declaredPath, { force: true });
-      rmSync(undeclaredPath, { force: true });
-    }
+    });
   });
 
   it("does not let a failed parallel task inherit a sibling's new test", async () => {
-    const siblingTestRelative = `engine/tests/.tmp-pi-sibling-${process.pid}.test.ts`;
-    const siblingTestPath = join(ROOT, siblingTestRelative);
-    const planPath = join(temp, "parallel-attribution-plan.md");
-    writeFileSync(planPath, "# Plan\n");
-    writeState({
-      ...initialGraph(),
-      phase_artifacts: { architecture: planPath },
-      skipped_phases: ["plan-alignment"],
-      plan_file: planPath,
-      tasks: [
-        {
-          id: "T1", description: "fails", agent: "code-implementer-agent", wave: 1,
-          status: "pending", depends_on: [], file_list: ["pi/extension.ts"], new_tests_required: true,
-        },
-        {
-          id: "T2", description: "writes test", agent: "code-implementer-agent", wave: 1,
-          status: "pending", depends_on: [], file_list: ["README.md"], new_tests_required: false,
-        },
-      ],
-    });
-    const pi = await extension();
-    const session = "019fca39-f989-7510-8e62-50dadbcad437";
-    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
-    const toolCallId = "call-parallel-attribution";
-    try {
+    // Both declared artifacts are tracked in the live checkout; commit stand-ins
+    // so the re-rooted baseline has the same tracked-and-unchanged shape.
+    const tracked = { "pi/extension.ts": "export {};\n", "README.md": "# Fixture\n" };
+    await withTaskGraphRepository("loom-pi-parallel-attribution-", tracked, async (repository) => {
+      const siblingTestRelative = `engine/tests/.tmp-pi-sibling-${process.pid}.test.ts`;
+      const siblingTestPath = join(repository.root, siblingTestRelative);
+      expectOutsideLiveCheckout(siblingTestPath);
+      const planPath = join(temp, "parallel-attribution-plan.md");
+      writeFileSync(planPath, "# Plan\n");
+      writeState({
+        ...initialGraph(),
+        phase_artifacts: { architecture: planPath },
+        skipped_phases: ["plan-alignment"],
+        plan_file: planPath,
+        tasks: [
+          {
+            id: "T1", description: "fails", agent: "code-implementer-agent", wave: 1,
+            status: "pending", depends_on: [], file_list: ["pi/extension.ts"], new_tests_required: true,
+          },
+          {
+            id: "T2", description: "writes test", agent: "code-implementer-agent", wave: 1,
+            status: "pending", depends_on: [], file_list: ["README.md"], new_tests_required: false,
+          },
+        ],
+      }, repository.statePath);
+      const pi = await extension();
+      const session = "019fca39-f989-7510-8e62-50dadbcad437";
+      const context = { cwd: repository.root, sessionManager: { getSessionId: () => session } };
+      const toolCallId = "call-parallel-attribution";
       expect(await pi.emit("tool_call", {
         toolName: "subagent",
         toolCallId,
@@ -5487,6 +5532,7 @@ describe("Pi extension review tool_result integration", () => {
           ],
         },
       }, context)).toEqual([undefined]);
+      mkdirSync(dirname(siblingTestPath), { recursive: true });
       writeFileSync(siblingTestPath, "import { expect, it } from 'vitest'; it('sibling', () => expect(true).toBe(true));\n");
 
       await pi.emit("tool_result", {
@@ -5501,13 +5547,11 @@ describe("Pi extension review tool_result integration", () => {
         },
       }, context);
 
-      const [failed] = JSON.parse(readFileSync(statePath, "utf-8")).tasks;
+      const [failed] = JSON.parse(readFileSync(repository.statePath, "utf-8")).tasks;
       expect(failed.status).toBe("pending");
       expect(failed.files_modified ?? []).not.toContain(siblingTestRelative);
       expect(failed.new_tests_written).not.toBe(true);
-    } finally {
-      rmSync(siblingTestPath, { force: true });
-    }
+    });
   });
 
   it("guards Bash state writes when only the child session pointer binds a graph", async () => {

@@ -58,6 +58,7 @@ import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
+  describeSettlement,
   isWaveComplete,
   settleUnavailableImplementation,
   type ImplementationSettlementApplicationResult,
@@ -556,7 +557,7 @@ export const runUpdateTaskStatus = async (
         `update-task-status: ${authority.taskId} result ignored (${modernSettlement.reason}); current authority preserved\n`,
       );
     }
-    process.stderr.write(`Task ${authority.taskId} settlement: ${modernSettlement.transition.kind}.\n`);
+    process.stderr.write(`Task ${authority.taskId} settlement: ${describeSettlement(modernSettlement.transition)}.\n`);
     const updated = modernSettlement.state;
     const currentWave = updated.current_wave ?? 1;
     if (isWaveComplete(updated, currentWave)) {

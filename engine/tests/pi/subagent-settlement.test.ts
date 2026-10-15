@@ -4,7 +4,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { TaskGraph, WaveSpecCheckDocumentsAuthority } from "../../src/types";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, type TaskGraph, type WaveSpecCheckDocumentsAuthority } from "../../src/types";
+import { buildTaskLocalByteObservation, settleObservedImplementation } from "../../src/core/implementation-application";
+import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 import { parseTaskGraph } from "../../src/state-manager";
 import { resolveReviewFindings, reviewResolutionLog, type ReviewResolution } from "../../src/core/review-output";
@@ -27,6 +29,7 @@ import {
   reduceLockedPiPhaseResult,
   reduceLockedReviewEvidence,
   reducePiSpecCheckResult,
+  renderExactPiSettlement,
   renderFailedReviewEvidence,
   renderReviewEvidence,
   resolveImplementationTaskId,
@@ -208,6 +211,51 @@ describe("pendingMalformedTranscriptState", () => {
     expect(next.tasks[0]?.active_implementation_attempt).toBe(released ? undefined : authority);
     expect(next.tasks[1]).toBe(state.tasks[1]);
     expect(state.executing_tasks).toEqual(["T1", "T2"]);
+  });
+});
+
+describe("renderExactPiSettlement", () => {
+  const authority = attemptAuthority("T1", "pi-scope-violation");
+  const observedAt = parseIsoInstant("2026-08-24T00:01:00.000Z");
+  if (!observedAt.ok) throw new Error("fixture instant failed");
+  const settled = (parserModifiedPaths: readonly string[]) => settleObservedImplementation(
+    attemptGraph(authority),
+    authority,
+    observedAt.value,
+    { taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
+    TRUSTED_LEDGER_ONLY_POLICY,
+    buildTaskLocalByteObservation({
+      authority,
+      attemptBaseline: [],
+      currentAttemptScope: [],
+      proofBaseline: [],
+      currentProofScope: [],
+      parserModifiedPaths,
+      priorAttributedPaths: [],
+      repositoryChangedPaths: [],
+      siblingOwnedPaths: [],
+    }),
+  );
+
+  it("names the paths a byte-scope violation wrote outside the declared files, beside the proof failures", () => {
+    const application = settled(["foreign.ts", ".tmp-pi-leak.ts"]);
+    expect(application.kind).toBe("applied");
+    if (application.kind !== "applied") return;
+    const settlement = "retry-required: test-result-missing, new-tests-not-observed, " +
+      "task-byte-scope-violation (outside the declared files: .tmp-pi-leak.ts, foreign.ts)";
+    expect(renderExactPiSettlement("T1", ["prior"], { application }))
+      .toEqual(outcome(["prior", `loom(pi): T1 settlement: ${settlement}`]));
+    expect(application.state.tasks[0]?.failure_reason).toBe(settlement);
+  });
+
+  it("renders an ignored result and an Oracle error without a settlement line", () => {
+    const state = attemptGraph(authority);
+    expect(renderExactPiSettlement("T1", [], { application: { kind: "ignored", state, reason: "stale" } }))
+      .toEqual(outcome(["loom(pi): T1 result ignored (stale)"]));
+    const error = { kind: "invalid-task" as const, errors: ["bad"] as const };
+    const diagnostic = `loom(pi): exact Oracle settlement failed for T1: ${JSON.stringify(error)} — current attempt preserved`;
+    expect(renderExactPiSettlement("T1", [], { application: { kind: "error", state, error } }))
+      .toEqual(outcome([diagnostic], [diagnostic]));
   });
 });
 

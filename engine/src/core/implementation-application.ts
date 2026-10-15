@@ -21,6 +21,7 @@ import {
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type ImplementationCompletionError,
+  type ImplementationCompletionFailure,
   type ImplementationCompletionTransition,
   type IsoInstant,
   type TaskCompletionSuiteResult,
@@ -464,14 +465,38 @@ export type ImplementationTransitionApplication =
   | Readonly<{ kind: "applied"; state: TaskGraph; transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }> }>
   | Readonly<{ kind: "ignored"; state: TaskGraph; reason: "stale" | "duplicate" | "already-completed" }>;
 
-function transitionFailureKinds(transition: Exclude<ImplementationCompletionTransition, { kind: "implemented" | "ignored" }>): readonly string[] {
-  if (transition.kind === "infrastructure-blocked") {
-    return transition.failures.map((failure) => failure.kind);
+/** How many offending paths a settlement names before it counts the rest. */
+export const NAMED_SCOPE_VIOLATION_PATHS = 10;
+
+/** One semantic failure as an operator reads it. A byte-scope violation names
+ *  the paths written outside the Task's declared files, so the cause can be
+ *  fixed without re-deriving it from the attempt's byte observation. */
+function describeCompletionFailure(failure: ImplementationCompletionFailure): string {
+  switch (failure.kind) {
+    case "proof-obligation-failure":
+      return failure.failure.kind;
+    case "task-byte-scope-violation": {
+      const named = failure.paths.slice(0, NAMED_SCOPE_VIOLATION_PATHS).join(", ");
+      const unnamed = failure.paths.length - NAMED_SCOPE_VIOLATION_PATHS;
+      return `${failure.kind} (outside the declared files: ${named}${unnamed > 0 ? ` and ${unnamed} more` : ""})`;
+    }
   }
-  return transition.failures.map((failure) => {
-    if (failure.kind === "proof-obligation-failure") return failure.failure.kind;
-    return failure.kind;
-  });
+}
+
+/** A settled transition as an operator reads it: its kind and, for a failed
+ *  attempt, each failure's kind; a byte-scope violation also names the
+ *  offending paths. Both harnesses print it and the Task's `failure_reason`
+ *  stores it. */
+export function describeSettlement(transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>): string {
+  switch (transition.kind) {
+    case "implemented":
+      return transition.kind;
+    case "infrastructure-blocked":
+      return `${transition.kind}: ${transition.failures.map((failure) => failure.kind).join(", ")}`;
+    case "retry-required":
+    case "escalation-required":
+      return `${transition.kind}: ${transition.failures.map(describeCompletionFailure).join(", ")}`;
+  }
 }
 
 function clearAttempt(task: Task): Task {
@@ -540,7 +565,7 @@ function transitionedTask(
       ...common,
       status: "pending" as const,
       legacy_missing_proof: undefined,
-      failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
+      failure_reason: describeSettlement(transition),
       retry_count: transition.kind === "retry-required" ? 1 : 2,
       ...evidenceFields(facts.normalizedEvidence),
     };
@@ -555,7 +580,7 @@ function transitionedTask(
     proof: task.proof,
     revalidation_required: true,
     legacy_missing_proof: undefined,
-    failure_reason: `infrastructure-blocked: ${transitionFailureKinds(transition).join(", ")}`,
+    failure_reason: describeSettlement(transition),
   };
 }
 
