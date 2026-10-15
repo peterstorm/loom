@@ -20,7 +20,8 @@ import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeF
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { judgeStopCheck, renderStopCheckBlock, type OwedStopCheck } from "../../core/acceptance-contract";
-import { planStopCheck, type AcceptanceRunnerCommand, type StopCheckPlan } from "../../core/acceptance-contract/stop-check-plan";
+// Not in the barrel: re-exporting it there would close an import cycle (see the module's header).
+import { planStopCheck, type AcceptanceRunnerCommand, type StopCheckPlan } from "../../core/acceptance-contract/stop-check-planner";
 import { MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS } from "../../core/verification-manifest";
 import { parseJunitTestcases } from "../../core/structured-test-report";
 import { sha256Bytes, sha256Hex } from "../../core/digest";

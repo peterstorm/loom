@@ -9,7 +9,7 @@
 
 ## Change
 
-- `planStopCheck(graph, taskId)` in `core/acceptance-contract/stop-check-plan.ts` is the one pure decision of everything the TaskGraph alone decides about a stop: `unknown-task | off(reason) | on(check, command, reportPath)`.
+- `planStopCheck(graph, taskId)` in its own module `core/acceptance-contract/stop-check-planner.ts` is the one pure decision of everything the TaskGraph alone decides about a stop: `unknown-task | off(reason) | on(check, command, reportPath)`.
 - `stopCheckPlanView` is now a pure projection of the plan into the frozen CT-1 view. The view types and line grammar are unchanged.
 - The hook's `decideStop` consumes the plan and adds only per-stop state, in this order: block counter and cap, repository root, runner lock.
 
