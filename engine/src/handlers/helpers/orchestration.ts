@@ -216,7 +216,7 @@ function usage(): HookResult {
       "          --runs-root <root> --run <run-directory> selects read-only Run inspection",
       "  brief   [--task <task-id>] [--prompt]",
       "          (pure read: engine-rendered implementation brief + spawn invocation for each owed dispatch;",
-      "          Pi spawns pass the LOOM_IMPLEMENTATION_BRIEF marker, --prompt adds the full brief for Claude Code)",
+      "          both harnesses pass the LOOM_IMPLEMENTATION_BRIEF marker, which the spawn gate expands; --prompt adds the full brief to read)",
       "  inspect --runs-root <root> --run <run-directory> [--json]",
       "          (pure read: program, state, per-slot capture and rejection diagnostics, event tail)",
       "          --lineage returns authenticated source identity, complete Finding Origins, counts and advisory inventory",
@@ -604,23 +604,26 @@ export type BriefInvocation = Readonly<{
   agent: string;
   dispatch: ImplementationBrief["dispatch"];
   pi: Readonly<{ agent: string; task: string }>;
-  claude: Readonly<{ subagent_type: string; model: string; description: string }>;
+  claude: Readonly<{ subagent_type: string; model: string; description: string; prompt: string }>;
+  /** The rendered brief itself, for reading; no spawn passes it. */
   prompt?: string;
 }>;
 
 /**
- * Pure harness projection of one rendered brief. Pi passes the brief MARKER
- * as the task; the Loom extension expands it to the rendered brief before any
- * gate reads the prompt. Claude Code has no expansion seam, so `withPrompt`
- * carries the rendered brief to pass verbatim.
+ * Pure harness projection of one rendered brief. Both harnesses pass the
+ * brief MARKER, never the brief: the Loom Pi extension, and on Claude Code the
+ * `validate-task-execution` PreToolUse hook, expand it to the rendered brief
+ * before any gate judges the prompt. `withPrompt` adds the rendered brief for
+ * an operator to read.
  */
 export function briefInvocation(brief: ImplementationBrief, claudeModel: string, withPrompt: boolean): BriefInvocation {
+  const marker = `${IMPLEMENTATION_BRIEF_MARKER}: ${brief.taskId}`;
   return Object.freeze({
     taskId: brief.taskId,
     agent: brief.agent,
     dispatch: brief.dispatch,
-    pi: Object.freeze({ agent: brief.agent, task: `${IMPLEMENTATION_BRIEF_MARKER}: ${brief.taskId}` }),
-    claude: Object.freeze({ subagent_type: brief.agent, model: claudeModel, description: `Implement ${brief.taskId}` }),
+    pi: Object.freeze({ agent: brief.agent, task: marker }),
+    claude: Object.freeze({ subagent_type: brief.agent, model: claudeModel, description: `Implement ${brief.taskId}`, prompt: marker }),
     ...(withPrompt ? { prompt: brief.prompt } : {}),
   });
 }

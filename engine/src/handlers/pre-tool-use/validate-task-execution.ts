@@ -4,14 +4,30 @@
  * Claude Code wrapper — delegates to core/. It is the one spawn gate that
  * writes state (the execution reservation), so it first runs every read-only
  * spawn veto and reserves only when all of them admit the spawn.
+ *
+ * It is also the one hook that expands an implementation brief marker
+ * (`implementation-brief-marker.ts`): the vetoes and the reservation judge the
+ * rendered brief, and the admitted call is rewritten to carry it, so the child
+ * receives exactly the bytes every gate judged.
  */
 
-import type { HookHandler, PreToolUseInput } from "../../types";
+import { preToolUseRewriteResult, type HookHandler, type HookResult, type PreToolUseInput } from "../../types";
 import { validateTaskExecution } from "../task-execution";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { firstSpawnVeto, SPAWN_VETOES, type SpawnVetoEntry } from "./spawn-vetoes";
+import { expandBriefMarker, renderActiveTaskBrief, type RenderTaskBrief } from "./implementation-brief-marker";
 
-export function createValidateTaskExecutionHandler(vetoes: readonly SpawnVetoEntry[] = SPAWN_VETOES): HookHandler {
+/** An admitted marker spawn proceeds with the brief as its prompt; every other result stands. */
+function rewrittenToBrief(result: HookResult, toolInput: Readonly<Record<string, unknown>>): HookResult {
+  return result.kind === "allow" || result.kind === "passthrough"
+    ? preToolUseRewriteResult(toolInput, result.systemMessage)
+    : result;
+}
+
+export function createValidateTaskExecutionHandler(
+  vetoes: readonly SpawnVetoEntry[] = SPAWN_VETOES,
+  render: RenderTaskBrief = renderActiveTaskBrief,
+): HookHandler {
   return async (stdin) => {
     let input: PreToolUseInput;
     try {
@@ -27,14 +43,20 @@ export function createValidateTaskExecutionHandler(vetoes: readonly SpawnVetoEnt
     }
     if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
 
-    const veto = await firstSpawnVeto(stdin, vetoes);
+    const expansion = expandBriefMarker(input, render);
+    if (expansion.kind === "refused") return { kind: "block", message: `validate-task-execution: ${expansion.message}` };
+    const judged = expansion.kind === "expanded" ? expansion.stdin : stdin;
+    const toolInput = expansion.kind === "expanded" ? expansion.toolInput : input.tool_input;
+
+    const veto = await firstSpawnVeto(judged, vetoes);
     if (veto !== null) return veto;
 
-    return validateTaskExecution({
-      agentType: (input.tool_input?.subagent_type as string) ?? (input.tool_input?.agent as string) ?? "",
-      prompt: (input.tool_input?.prompt as string) ?? (input.tool_input?.task as string) ?? "",
-      description: (input.tool_input?.description as string) ?? "",
+    const result = await validateTaskExecution({
+      agentType: (toolInput?.subagent_type as string) ?? (toolInput?.agent as string) ?? "",
+      prompt: (toolInput?.prompt as string) ?? (toolInput?.task as string) ?? "",
+      description: (toolInput?.description as string) ?? "",
     });
+    return expansion.kind === "expanded" ? rewrittenToBrief(result, expansion.toolInput) : result;
   };
 }
 

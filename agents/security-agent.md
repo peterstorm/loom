@@ -8,6 +8,8 @@ skills:
   - security-expert
 ---
 
+**Unexpanded brief marker.** If your entire task is the single line `LOOM_IMPLEMENTATION_BRIEF: T<n>`, Loom failed to expand it into your implementation brief. Make no change: reply only that the brief marker was not expanded, and stop.
+
 You are a security specialist. Follow the guidance from the preloaded `security-expert` skill.
 
 For the assigned task:
