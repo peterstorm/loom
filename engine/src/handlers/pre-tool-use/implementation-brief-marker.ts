@@ -13,9 +13,10 @@
  * - `validate-task-execution` expands the marker, runs every spawn veto and
  *   the reservation on the expanded bytes, and is the one hook that rewrites
  *   the call;
- * - each sibling gate that reads the prompt expands the marker itself
+ * - every sibling spawn veto expands the marker itself
  *   (`withBriefMarkerExpanded`), so it judges the brief rather than the marker,
- *   and refuses a marker it cannot expand.
+ *   and refuses a marker it cannot expand. A test drives every `SPAWN_VETOES`
+ *   entry, so a new veto that forgets the wrap fails the suite.
  *
  * Every refusal blocks: a marker that cannot render, or whose spawn names
  * another agent than the Task's, never reaches the child as a bare marker.
@@ -40,7 +41,6 @@ export type BriefMarkerExpansion =
   | Readonly<{ kind: "no-marker" }>
   | Readonly<{
       kind: "expanded";
-      taskId: string;
       /** The call's input with `prompt` replaced by the rendered brief. */
       toolInput: Readonly<Record<string, unknown>>;
       /** The hook payload the gates judge: the original with `toolInput`. */
@@ -67,7 +67,7 @@ export function expandBriefMarker(input: PreToolUseInput, render: RenderTaskBrie
     return refused(`BLOCKED: the brief marker spawns ${JSON.stringify(requested ?? null)} but ${taskId} is assigned to ${rendered.value.agent}`);
   }
   const toolInput = Object.freeze({ ...input.tool_input, prompt: rendered.value.prompt });
-  return Object.freeze({ kind: "expanded", taskId, toolInput, stdin: JSON.stringify({ ...input, tool_input: toolInput }) });
+  return Object.freeze({ kind: "expanded", toolInput, stdin: JSON.stringify({ ...input, tool_input: toolInput }) });
 }
 
 /** The production renderer: the active TaskGraph and this Loom package's rules. */

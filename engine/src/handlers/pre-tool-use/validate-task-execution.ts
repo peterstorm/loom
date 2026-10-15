@@ -45,18 +45,18 @@ export function createValidateTaskExecutionHandler(
 
     const expansion = expandBriefMarker(input, render);
     if (expansion.kind === "refused") return { kind: "block", message: `validate-task-execution: ${expansion.message}` };
-    const judged = expansion.kind === "expanded" ? expansion.stdin : stdin;
-    const toolInput = expansion.kind === "expanded" ? expansion.toolInput : input.tool_input;
+    const expanded = expansion.kind === "expanded" ? expansion : null;
+    const toolInput = expanded?.toolInput ?? input.tool_input;
 
-    const veto = await firstSpawnVeto(judged, vetoes);
+    const veto = await firstSpawnVeto(expanded?.stdin ?? stdin, vetoes);
     if (veto !== null) return veto;
 
     const result = await validateTaskExecution({
-      agentType: (toolInput?.subagent_type as string) ?? (toolInput?.agent as string) ?? "",
-      prompt: (toolInput?.prompt as string) ?? (toolInput?.task as string) ?? "",
-      description: (toolInput?.description as string) ?? "",
+      agentType: (toolInput.subagent_type as string) ?? (toolInput.agent as string) ?? "",
+      prompt: (toolInput.prompt as string) ?? (toolInput.task as string) ?? "",
+      description: (toolInput.description as string) ?? "",
     });
-    return expansion.kind === "expanded" ? rewrittenToBrief(result, expansion.toolInput) : result;
+    return expanded === null ? result : rewrittenToBrief(result, expanded.toolInput);
   };
 }
 

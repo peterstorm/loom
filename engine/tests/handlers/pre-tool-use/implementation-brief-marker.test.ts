@@ -13,6 +13,7 @@ import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ImplementationBrief } from "../../../src/core/implementation-brief";
 import { expandBriefMarker, withBriefMarkerExpanded, type RenderTaskBrief } from "../../../src/handlers/pre-tool-use/implementation-brief-marker";
+import { SPAWN_VETOES } from "../../../src/handlers/pre-tool-use/spawn-vetoes";
 import validateTaskExecution, { createValidateTaskExecutionHandler } from "../../../src/handlers/pre-tool-use/validate-task-execution";
 import { hookSuccessStdout, preToolUseRewriteResult, type HookHandler, type PreToolUseInput } from "../../../src/types";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
@@ -41,7 +42,6 @@ describe("expandBriefMarker", () => {
     const expansion = expandBriefMarker(input, rendering(brief("**Task ID:** T2\nthe brief")));
     expect(expansion).toEqual({
       kind: "expanded",
-      taskId: "T2",
       toolInput: { ...input.tool_input, prompt: "**Task ID:** T2\nthe brief" },
       stdin: JSON.stringify({ ...input, tool_input: { ...input.tool_input, prompt: "**Task ID:** T2\nthe brief" } }),
     });
@@ -49,7 +49,7 @@ describe("expandBriefMarker", () => {
   });
 
   it("accepts the marker with surrounding whitespace, as the Pi expansion does", () => {
-    expect(expandBriefMarker(spawnInput(`\n  ${MARKER}  \n`), rendering(brief("b")))).toMatchObject({ kind: "expanded", taskId: "T2" });
+    expect(expandBriefMarker(spawnInput(`\n  ${MARKER}  \n`), rendering(brief("b")))).toMatchObject({ kind: "expanded", toolInput: { prompt: "b" } });
   });
 
   it("leaves a prompt that is not exactly one marker alone, without rendering anything", () => {
@@ -226,29 +226,98 @@ describe("validate-task-execution with a brief marker", () => {
   });
 });
 
+describe("every spawn veto judges the expanded brief", () => {
+  it.each(SPAWN_VETOES.map(({ name, handler }) => [name, handler] as const))(
+    "%s refuses a marker it cannot expand, naming itself (a new veto that forgets the wrap fails here)",
+    async (name, handler) => {
+      activeGraph();
+      // T1 is completed, so it is owed no dispatch and its brief never renders.
+      expect(await handler(JSON.stringify(spawnInput("LOOM_IMPLEMENTATION_BRIEF: T1")), [])).toEqual({
+        kind: "block",
+        message: `${name}: BLOCKED: the implementation brief marker for T1 cannot expand: Task T1 is completed; it is owed no implementation dispatch`,
+      });
+    },
+  );
+});
+
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+const CLI = join(PACKAGE_ROOT, "engine", "src", "cli.ts");
+
+/** One real hook process, as Claude Code runs it, against `statePath`, from
+ *  its project root made a Git repository (the reservation captures a baseline). */
+function runHook(route: string, stdin: string, statePath: string) {
+  const project = dirname(dirname(dirname(statePath)));
+  for (const args of [["init", "-q"], ["-c", "user.email=loom@example.test", "-c", "user.name=Loom", "commit", "-q", "--allow-empty", "-m", "fixture"]]) {
+    spawnSync("git", args, { cwd: project });
+  }
+  const subagents = canonicalTempDir("loom-brief-marker-subagents-");
+  roots.push(subagents);
+  const result = spawnSync("bun", [CLI, "pre-tool-use", route], {
+    input: stdin,
+    encoding: "utf-8",
+    cwd: project,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, LOOM_STATE_PATH: statePath, LOOM_SUBAGENT_DIR: subagents },
+  });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+describe("the real hook processes", () => {
+  it("validate-task-execution exits 0 and prints the rewrite Claude Code applies", () => {
+    const run = runHook("validate-task-execution", JSON.stringify(spawnInput(MARKER)), activeGraph());
+    expect(run.status, run.stderr).toBe(0);
+    const output = JSON.parse(run.stdout) as { hookSpecificOutput: { hookEventName: string; updatedInput: { prompt: string } } };
+    expect(output.hookSpecificOutput.hookEventName).toBe("PreToolUse");
+    expect(output.hookSpecificOutput.updatedInput.prompt).toContain("**Task ID:** T2");
+  });
+
+  it("validate-agent-skill admits a marker because its brief, not the marker, names the skill", () => {
+    const statePath = activeGraph();
+    const admitted = runHook("validate-agent-skill", JSON.stringify(spawnInput(MARKER)), statePath);
+    expect(admitted.status, admitted.stderr).toBe(0);
+    // Control: the same gate refuses a one-line prompt that is not a marker, so
+    // the admission above came from the expansion.
+    const refused = runHook("validate-agent-skill", JSON.stringify(spawnInput(`${MARKER} please`)), statePath);
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain("doesn't reference required skill");
+  });
+});
+
 describe("validate-task-execution.sh without a TaskGraph", () => {
-  const SHIM = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "hooks", "scripts", "validate-task-execution.sh");
-  const run = (stdin: string) => {
+  const SHIM = join(PACKAGE_ROOT, "hooks", "scripts", "validate-task-execution.sh");
+  const run = (stdin: string, pluginRoot = PACKAGE_ROOT) => {
     const project = canonicalTempDir("loom-shim-project-");
     roots.push(project);
     const result = spawnSync("bash", [SHIM], {
       input: stdin,
       encoding: "utf-8",
-      env: { PATH: process.env.PATH, HOME: process.env.HOME, CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_ROOT: "/nonexistent" },
+      cwd: project,
+      env: {
+        PATH: process.env.PATH, HOME: process.env.HOME, CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_ROOT: pluginRoot,
+        LOOM_STATE_PATH: join(project, ".claude", "state", "active_task_graph.json"), LOOM_SUBAGENT_DIR: join(project, "subagents"),
+      },
     });
     return { status: result.status, stderr: result.stderr };
   };
 
-  it("blocks a marker spawn, compact or pretty-printed, because nothing can expand it", () => {
-    for (const stdin of [JSON.stringify(spawnInput(MARKER)), JSON.stringify(spawnInput(` ${MARKER}`), null, 2)]) {
+  it("blocks a marker through the engine's one parser, including JSON-escaped whitespace and pretty-printed input", () => {
+    for (const stdin of [
+      JSON.stringify(spawnInput(MARKER)),
+      JSON.stringify(spawnInput(`\n\t${MARKER}\n`)),
+      JSON.stringify(spawnInput(` ${MARKER}`), null, 2),
+    ]) {
       const result = run(stdin);
-      expect(result.status).toBe(2);
-      expect(result.stderr).toContain("an implementation brief marker cannot expand without an active TaskGraph");
+      expect(result.status, stdin).toBe(2);
+      expect(result.stderr).toContain("the implementation brief marker for T2 cannot expand");
     }
   });
 
-  it("lets every other spawn through, as before", () => {
-    expect(run(JSON.stringify(spawnInput("**Task ID:** T2 the brief")))).toEqual({ status: 0, stderr: "" });
-    expect(run(JSON.stringify(spawnInput(`describe ${MARKER}`)))).toEqual({ status: 0, stderr: "" });
+  it("lets a prompt that only mentions the marker through, judged by the engine", () => {
+    for (const prompt of [`${MARKER} please`, `describe ${MARKER}`]) {
+      expect(run(JSON.stringify(spawnInput(prompt))).status, prompt).toBe(0);
+    }
+  });
+
+  it("never starts the engine for a spawn that does not mention the marker", () => {
+    expect(run(JSON.stringify(spawnInput("**Task ID:** T2 the brief")), "/nonexistent")).toEqual({ status: 0, stderr: "" });
   });
 });

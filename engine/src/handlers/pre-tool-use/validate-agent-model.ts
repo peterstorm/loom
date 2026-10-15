@@ -38,6 +38,7 @@ import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";
 import { validatePiAgentDefinitionFile } from "../../utils/render-pi-agent";
 import { activeAgentDir, buildPiRoutingContext } from "../../utils/model-routing-context";
 import { piAgentDefinitionPath } from "../../core/pi-agent-directory";
+import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 
 type PiAgentDefinitionLookup =
   | Readonly<{ kind: "found"; path: string }>
@@ -312,4 +313,5 @@ function grandfatheredModelAuthorization(
       };
 }
 
-export default handler;
+// A brief marker is judged as the brief it expands to, like every spawn veto.
+export default withBriefMarkerExpanded("validate-agent-model", handler);

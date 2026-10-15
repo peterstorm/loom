@@ -127,17 +127,26 @@ export const preToolUseRewriteResult = (
 /** The hook results that let the tool call proceed (exit 0). */
 export type HookSuccess = Extract<HookResult, { kind: "allow" | "passthrough" | "post-tool-use-context" | "pre-tool-use-rewrite" }>;
 
+/** The event-specific part of a success's stdout, if its arm has one. */
+function hookSpecificOutputOf(result: HookSuccess): Readonly<Record<string, unknown>> | undefined {
+  switch (result.kind) {
+    case "allow":
+    case "passthrough":
+      return undefined;
+    case "post-tool-use-context":
+      return { hookEventName: "PostToolUse", additionalContext: result.context };
+    case "pre-tool-use-rewrite":
+      return { hookEventName: "PreToolUse", updatedInput: result.updatedInput };
+  }
+}
+
 /** The JSON a successful hook writes to stdout, or null when it has nothing to
  *  say. Successful hooks have stderr swallowed, so stdout JSON is the only
  *  channel that reaches the operator (`systemMessage`), the model
  *  (`hookSpecificOutput.additionalContext`), or the tool call itself
  *  (`hookSpecificOutput.updatedInput`). */
 export function hookSuccessStdout(result: HookSuccess): string | null {
-  const hookSpecificOutput = result.kind === "post-tool-use-context"
-    ? { hookEventName: "PostToolUse", additionalContext: result.context }
-    : result.kind === "pre-tool-use-rewrite"
-      ? { hookEventName: "PreToolUse", updatedInput: result.updatedInput }
-      : undefined;
+  const hookSpecificOutput = hookSpecificOutputOf(result);
   if (result.systemMessage === undefined && hookSpecificOutput === undefined) return null;
   return JSON.stringify({
     ...(result.systemMessage === undefined ? {} : { systemMessage: result.systemMessage }),
