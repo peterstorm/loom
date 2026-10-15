@@ -15,13 +15,7 @@ import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { renderStopCheckPlan } from "../../src/core/acceptance-contract/stop-check-plan";
-import {
-  STOP_CHECK_OFF,
-  STOP_CHECK_OFF_REASON_TEXT,
-  STOP_CHECK_ON,
-  UNKNOWN_TASK_PREFIX,
-  type StopCheckOffReason,
-} from "../../src/core/stop-check-plan-types";
+import { STOP_CHECK_ON, UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { acceptanceRunnerCheck } from "../../src/core/verification-manifest";
 import type { Task } from "../../src/types";
 import { gitProject, statePathIn, task, writeStateFile } from "../fixtures/contract-status-fixtures";
@@ -30,6 +24,7 @@ import {
   awaitingRedContract,
   frozenContract,
   frozenRunnerManifest,
+  offLine,
   runStopCheckPlanCli,
   stopCheckGraph,
 } from "../fixtures/stop-check-plan-fixtures";
@@ -58,10 +53,6 @@ const ledgerContract = (): AcceptanceContract => frozenContract({
     { file: LEDGER, name: CREDIT, anchors: ["AS-001"] },
   ],
 });
-
-/** The single line an `off` view renders for a reason without errors. */
-const offLine = (taskId: string, wave: number, reason: StopCheckOffReason["kind"]): string =>
-  `${taskId} (Wave ${wave}): ${STOP_CHECK_OFF} — ${STOP_CHECK_OFF_REASON_TEXT[reason]}`;
 
 /** The rendered lines of `taskId`, failing the test if the renderer refused it. */
 function renderedLines(input: Parameters<typeof stopCheckGraph>[0], taskId: string): readonly string[] {

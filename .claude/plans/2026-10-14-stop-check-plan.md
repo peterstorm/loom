@@ -291,6 +291,8 @@ At the Wave 1 gate, every testcase is collected and fails on its assertions, so 
   - Write the fixture module. It reuses `task`, `contract`, `surface`, `gitProject`, `writeStateFile` and `statePathIn` from `contract-status-fixtures.ts`, and adds:
     - `frozenRunnerManifest(runner?)`, built with `freezeVerificationManifest`, as in `tests/handlers/subagent-stop/acceptance-stop-check.test.ts`;
     - a parser-proven graph builder that takes `{tasks, contracts, manifest}` and returns both the parsed `TaskGraph` and its JSON text.
+
+    As committed after the pilot, the module also exports `ENGINE_RUNNER`, `frozenContract`, `awaitingRedContract`, the `offLine` formatter and `runStopCheckPlanCli`. PR #94 review rounds 1 and 2 moved `runStopCheckPlanCli` and `offLine` here so the acceptance, core and handler tests share one copy.
   - Write the acceptance file described under Contracts, with testcase names prefixed `AS-00n: …`.
   - Write the AD-5 compiling stub.
   - Enroll both core paths in `DEFAULT_PURE_MODULES`.

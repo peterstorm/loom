@@ -13,13 +13,7 @@ import type { AcceptanceContract, AcceptanceTestcase } from "../../src/core/acce
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { stopCheckExpectation } from "../../src/core/acceptance-contract/stop-check";
 import { renderStopCheckPlan, stopCheckPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
-import {
-  STOP_CHECK_OFF,
-  STOP_CHECK_OFF_REASON_TEXT,
-  STOP_CHECK_ON,
-  UNKNOWN_TASK_PREFIX,
-  type StopCheckPlanView,
-} from "../../src/core/stop-check-plan-types";
+import { STOP_CHECK_ON, UNKNOWN_TASK_PREFIX, type StopCheckPlanView } from "../../src/core/stop-check-plan-types";
 import { acceptanceRunnerCheck, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import type { Task, TaskGraph } from "../../src/types";
 import { task } from "../fixtures/contract-status-fixtures";
@@ -29,6 +23,7 @@ import {
   awaitingRedContract,
   frozenContract,
   frozenRunnerManifest,
+  offLine,
 } from "../fixtures/stop-check-plan-fixtures";
 import { graphFixture } from "../fixtures/task-lifecycle";
 
@@ -70,9 +65,6 @@ const claimant = (anchors: readonly string[] = ["AS-001"]): readonly Task[] => [
   task("T1", 1, [TYPES, LEDGER, REPLAY]),
   task("T2", 2, ["engine/src/core/ledger.ts"], anchors),
 ];
-
-const offLine = (taskId: string, wave: number, reason: keyof typeof STOP_CHECK_OFF_REASON_TEXT): string =>
-  `${taskId} (Wave ${wave}): ${STOP_CHECK_OFF} — ${STOP_CHECK_OFF_REASON_TEXT[reason]}`;
 
 describe("stopCheckPlanView", () => {
   it("is unknown-task for an id absent from the TaskGraph", () => {
@@ -260,7 +252,30 @@ function liveCheckRuns(graph: TaskGraph, taskId: string): boolean {
   return check.kind === "owed" && acceptanceRunnerCheck(runner, check.files).ok;
 }
 
+/** Whether `value` and every object or array reachable from it is frozen. */
+function isDeeplyFrozen(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return true;
+  return Object.isFrozen(value) && Object.values(value).every(isDeeplyFrozen);
+}
+
+/** Freezes `value` recursively, as the State File parser does to every TaskGraph it admits. */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    Object.values(value).forEach(deepFreeze);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 describe("stop-check-plan properties", () => {
+  it("adds no mutable structure: over a frozen graph, every view and rendering is deeply frozen", () => {
+    fc.assert(fc.property(graphArb, idArb, (graph, taskId) => {
+      const frozen = deepFreeze(graph);
+      expect(isDeeplyFrozen(stopCheckPlanView(frozen, taskId))).toBe(true);
+      expect(isDeeplyFrozen(renderStopCheckPlan(frozen, taskId))).toBe(true);
+    }));
+  });
+
   it("never throws, over every generated graph and id", () => {
     fc.assert(fc.property(graphArb, idArb, (graph, taskId) => {
       expect(() => renderStopCheckPlan(graph, taskId)).not.toThrow();

@@ -19,6 +19,7 @@ import type {
   FrozenPathDigest,
 } from "../../src/core/acceptance-contract";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
+import { STOP_CHECK_OFF, STOP_CHECK_OFF_REASON_TEXT, type StopCheckOffReason } from "../../src/core/stop-check-plan-types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import type { Task, TaskGraph } from "../../src/types";
 import { digest } from "./acceptance-fixtures";
@@ -112,6 +113,10 @@ export function stopCheckGraph({ tasks, contracts, manifest }: StopCheckGraphInp
   });
   return Object.freeze({ graph: protectedGraphFixture(JSON.parse(json)), json });
 }
+
+/** The single line an `off` view renders for a reason without errors. */
+export const offLine = (taskId: string, wave: number, reason: StopCheckOffReason["kind"]): string =>
+  `${taskId} (Wave ${wave}): ${STOP_CHECK_OFF} — ${STOP_CHECK_OFF_REASON_TEXT[reason]}`;
 
 const REPO_ROOT = resolve(__dirname, "../../..");
 
