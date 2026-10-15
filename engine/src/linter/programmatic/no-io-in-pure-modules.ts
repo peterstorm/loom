@@ -175,6 +175,10 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // and due Waves, and the frozen CT-1 surface it implements.
   "engine/src/core/contract-status.ts",
   "engine/src/core/contract-status-types.ts",
+  // Stop-Check Plan: the read-only projection of what the Acceptance Stop
+  // Check would do at one Task's stop, and the frozen CT-1 surface it implements.
+  "engine/src/core/acceptance-contract/stop-check-plan.ts",
+  "engine/src/core/stop-check-plan-types.ts",
   // Standalone read coverage (ADR-0022): the obligation, page verification and
   // admission decision, plus the deterministic diff the obligation is frozen
   // from. The Context Packet projection imports both.
