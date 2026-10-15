@@ -8,6 +8,7 @@ import {
   validateTemplateSubstitution,
 } from "../../../src/core/validate-template-substitution";
 import validateTemplateSubstitutionHandler from "../../../src/handlers/pre-tool-use/validate-template-substitution";
+import { ACCEPTANCE_RUNNER_FILES_PLACEHOLDER } from "../../../src/core/verification-manifest";
 
 /**
  * Tests for the template substitution validation logic.
@@ -40,7 +41,7 @@ describe("validate-template-substitution — property tests", () => {
     fc.assert(
       fc.property(
         fc.stringMatching(/^[a-z][a-z0-9_]{3,15}$/).filter(
-          (s) => !["type", "id", "name", "system"].includes(s),
+          (s) => !["type", "id", "name", "system", "files"].includes(s),
         ),
         (varName) => {
           const prompt = `Do something with {${varName}}`;
@@ -93,6 +94,15 @@ describe("validate-template-substitution — edge cases", () => {
     // the rules' package-structure diagrams contain literal `infra/{system}/`
     // and `└── {system}/`. Those are content, not unsubstituted variables.
     expect(validateTemplate("Adapter lives in infra/{system}/ under └── {system}/")).toBe("allow");
+  });
+
+  it("{files} → allow — the acceptance runner's own argument placeholder, not a template variable", () => {
+    // A Spec Requirement describing the runner ("each file in place of `{files}`")
+    // reaches every claimant's engine-rendered brief verbatim. The exemption is
+    // the manifest grammar's own constant, so the two cannot drift apart.
+    expect(ACCEPTANCE_RUNNER_FILES_PLACEHOLDER).toBe("{files}");
+    expect(validateTemplate("the argv holds each file as one argument in place of `{files}`")).toBe("allow");
+    expect(validateTemplate("in place of {files} for {task_id}")).toBe("block");
   });
 
   it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {
