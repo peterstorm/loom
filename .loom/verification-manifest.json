@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "kind": "loom-verification-manifest",
   "checks": [
     {
@@ -17,5 +17,20 @@
         "path": ".loom/completion-reports/verify.junit.xml"
       }
     }
-  ]
+  ],
+  "acceptanceRunner": {
+    "executable": "npm",
+    "args": [
+      "run",
+      "test:acceptance",
+      "--",
+      "{files}"
+    ],
+    "cwd": "engine",
+    "timeoutMs": 120000,
+    "report": {
+      "kind": "required-file",
+      "path": ".loom/completion-reports/acceptance.junit.xml"
+    }
+  }
 }

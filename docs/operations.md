@@ -842,6 +842,30 @@ It takes no arguments. For each Acceptance Contract, in TaskGraph order, it prin
 
 A TaskGraph without contracts prints the single line `no Acceptance Contracts`. The helper is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 with `No task graph at <path>` when no TaskGraph exists, and with the load boundary's error when the graph is unreadable or corrupt — a corrupt graph is never reported as missing.
 
+### What will the Acceptance Stop Check run at a Task's stop?
+
+Before dispatching a claimant, or when a stop check keeps an Agent working and you want to see why, print the Stop-Check Plan for that Task:
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper stop-check-plan --task T2
+```
+
+It takes exactly one argument, `--task <id>`. When the check is on, it prints:
+
+- `T2 (Wave 2): acceptance stop check on`;
+- each owed testcase, grouped under its contract id, as `  <file> › <name>`. A roster testcase is owed only when every anchor it carries is due by the Task's Wave;
+- `files:` followed by each owed acceptance file, repository-relative;
+- `cwd: <runner cwd>`, then `argv: [...]` as JSON, with `{files}` already expanded so each owed file is one argument relative to the cwd, then `report: <report path>`.
+
+When the check is off, it prints one line, `T2 (Wave 2): acceptance stop check off — <reason>`. The reason is one of: no acceptance runner is frozen in the TaskGraph, the Task owes no frozen acceptance testcase due by its Wave (a contract still awaiting RED owes nothing), or the runner command could not be formed for the owed files. In the last case the runner's refusal follows on indented lines.
+
+The owed testcases, files and argv come from the same `stopCheckExpectation` and `acceptanceRunnerCheck` the live check calls, so they match what the check would run. At the stop itself the live check also consults state the plan does not read: the Agent's block counter (after 3 blocks it stops blocking), the repository root, and the runner lock (a sibling claimant may hold it). When one of those stops the check, the hook emits a note, the stop proceeds, and the plan still reads `on`. The helper never runs the runner. It is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 on any of these:
+
+- `--task` is missing or has no value, or an argument is left unconsumed;
+- no TaskGraph exists (`No task graph at <path>`);
+- the graph is unreadable or corrupt (the load boundary's error; a corrupt graph is never reported as missing);
+- the Task id is not in the TaskGraph (`No task <id> in the TaskGraph`). A typo never reads as "nothing owed".
+
 ### State is malformed
 
 Use only when the load boundary explicitly directs recovery:
