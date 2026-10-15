@@ -3,8 +3,8 @@
  *
  * AS-001..AS-003 call the public pure renderer `renderStopCheckPlan` on
  * TaskGraphs the production State File parser admits, each carrying a
- * verification manifest frozen by the production freezer, and assert the
- * exact output lines. AS-004 spawns `bun engine/src/cli.ts helper
+ * verification manifest frozen by the production freezer (or none, for the
+ * AS-003 no-manifest case), and assert the exact output lines. AS-004 spawns `bun engine/src/cli.ts helper
  * stop-check-plan --task <id>` from the repository root with LOOM_STATE_PATH
  * naming a fixture State File in a canonical temp dir, and asserts the
  * refusal and the exit code. No Entry point is declared for the pure cases
