@@ -4816,6 +4816,13 @@ describe("orchestration CLI", () => {
         kind: "await-user",
         request: { requestId: awaiting.request.requestId },
       });
+      // The paused Task carries accepted review authority, so status must
+      // re-prove it against the reviewed bytes rather than report it as
+      // unobservable (G4 pilot finding F8).
+      expect((JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph).tasks[0]?.accepted_review_authority).toBeDefined();
+      for (const rendered of [status.stdout, customPathStatus]) {
+        expect(rendered).not.toContain("workspace integrity cannot be observed");
+      }
 
       const decided = (await runCli(
         ["decide", "--runs-root", runsRoot, "--run", runDir, "--request", awaiting.request.requestId],

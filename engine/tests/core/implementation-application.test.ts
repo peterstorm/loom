@@ -3,6 +3,8 @@ import fc from "fast-check";
 import {
   applyImplementationCompletionTransition,
   buildTaskLocalByteObservation,
+  describeSettlement,
+  NAMED_SCOPE_VIOLATION_PATHS,
   normalizeImplementationEvidence,
   settleObservedImplementation,
   settleUnavailableImplementation,
@@ -633,6 +635,68 @@ describe("exact transition application", () => {
     );
     expect(duplicate).toMatchObject({ kind: "ignored", reason: "duplicate" });
     expect(duplicate.state).toBe(first.state);
+  });
+
+  it("property: a byte-scope settlement names the first ten offending paths and counts the rest", () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 25 }), (count) => {
+      const attempt = authority(1, `scope-description-${count}`);
+      const foreign = Array.from({ length: count }, (_, index) => `foreign/${String(index).padStart(2, "0")}.ts`);
+      const result = expectApplied(settleObservedImplementation(
+        graph(pendingTask(attempt)),
+        attempt,
+        "2026-08-24T00:03:45.000Z" as never,
+        completedEvidence,
+        TRUSTED_LEDGER_ONLY_POLICY,
+        observedBytes(attempt, { parserModifiedPaths: ["src/a.ts", ...foreign] }),
+      ));
+      const named = foreign.slice(0, NAMED_SCOPE_VIOLATION_PATHS).join(", ");
+      const rest = count > NAMED_SCOPE_VIOLATION_PATHS ? ` and ${count - NAMED_SCOPE_VIOLATION_PATHS} more` : "";
+      const expected = `retry-required: task-byte-scope-violation (outside the declared files: ${named}${rest})`;
+      expect(result.transition.kind).toBe("retry-required");
+      expect(describeSettlement(result.transition)).toBe(expected);
+      expect(result.state.tasks[0]?.failure_reason).toBe(expected);
+    }));
+  });
+
+  it("describes a proof failure by its kind alone, exactly as failure_reason records it", () => {
+    const attempt = authority(1, "proof-description");
+    const result = expectApplied(settleObservedImplementation(
+      graph(pendingTask(attempt, {
+        proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
+        new_tests_required: true,
+      })),
+      attempt,
+      "2026-08-24T00:03:50.000Z" as never,
+      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt),
+    ));
+    expect(describeSettlement(result.transition)).toBe("retry-required: regression-tests-failed, new-tests-not-observed");
+    expect(result.state.tasks[0]?.failure_reason).toBe(describeSettlement(result.transition));
+  });
+
+  it("describes implemented and infrastructure settlements by kind, the latter with its failure kinds", () => {
+    const attempt = authority(1, "kind-description");
+    const implemented = expectApplied(settleObservedImplementation(
+      graph(pendingTask(attempt)),
+      attempt,
+      "2026-08-24T00:03:55.000Z" as never,
+      completedEvidence,
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt),
+    ));
+    expect(describeSettlement(implemented.transition)).toBe("implemented");
+
+    const blocked = authority(1, "infrastructure-description");
+    const infrastructure = expectApplied(settleUnavailableImplementation(
+      graph(pendingTask(blocked)),
+      blocked,
+      "2026-08-24T00:03:58.000Z" as never,
+      "transcript unreadable",
+    ));
+    expect(describeSettlement(infrastructure.transition))
+      .toBe("infrastructure-blocked: implementation-observation-unavailable, task-byte-scope-unavailable");
+    expect(infrastructure.state.tasks[0]?.failure_reason).toBe(describeSettlement(infrastructure.transition));
   });
 
   it("property: infrastructure receipts never consume a semantic attempt", () => {

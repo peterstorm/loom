@@ -75,7 +75,7 @@ import { readFileSync } from "node:fs";
 import { recordReadCoverageObservation, runReadCoverage } from "../../orchestration/standalone-read-coverage-evidence";
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { dirname, join, resolve } from "node:path";
-import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
+import { observeTaskGraphProjectBoundary, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { homedir } from "node:os";
@@ -103,6 +103,7 @@ import type {
   HookHandler,
   HookResult,
   LoomStatus,
+  Task,
   WaveCompletionResultObservation,
 } from "../../types";
 import { deriveWaveReadiness } from "../../core/wave-gate-machine";
@@ -117,6 +118,7 @@ import {
   type StatusDeps,
 } from "../../core/loom-status";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
+import { observeReviewedWorkspace } from "./reviewed-workspace";
 import {
   observeCurrentWaveCompletionResult,
   observeCurrentWaveWorkspace,
@@ -240,11 +242,21 @@ function usage(): HookResult {
 }
 
 
-/** The real filesystem seams status reads through. */
-const productionGateDeps: GateDeps = {
-  loadPlanModels: loadPlanModelsSource,
-  filePresence: inspectFilePresence,
-};
+/**
+ * The real filesystem seams status reads through. The reviewed-workspace
+ * observer reads the TaskGraph's own project, the bytes a Wave Gate re-proves,
+ * so a paused gate's status never reports accepted review evidence as
+ * unobservable. A Git failure throws inside the observer, and the check reports
+ * that fail-closed.
+ */
+function statusGateDeps(statePath: string): GateDeps {
+  return Object.freeze({
+    loadPlanModels: loadPlanModelsSource,
+    filePresence: inspectFilePresence,
+    reviewedWorkspace: (tasks: readonly Task[]) =>
+      observeReviewedWorkspace(tasks, observeTaskGraphProjectBoundary(statePath).root),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // status
@@ -453,6 +465,7 @@ function statusCompletionResult(
 async function observedAdvisoryApprovalFromParsed(
   parsed: ReturnType<typeof parseStatusGraph>,
   observation: ActiveRunDirectoryObservation,
+  gateDeps: GateDeps,
   workspace: NonNullable<GateDeps["currentWaveWorkspace"]>,
   boundHandle?: RunDirHandle,
 ): Promise<AdvisoryApprovalObservation> {
@@ -467,9 +480,9 @@ async function observedAdvisoryApprovalFromParsed(
   const opened = openStatusObservationHandle(observation, boundHandle);
   if (!opened.ok) return unavailable(opened.message);
   const readiness = deriveWaveReadiness(parsed.value, parsed.value.verification_manifest === undefined
-    ? productionGateDeps
+    ? gateDeps
     : Object.freeze({
-        ...productionGateDeps,
+        ...gateDeps,
         currentWaveWorkspace: workspace,
         currentWaveCompletionResult: observeCurrentWaveCompletionResult(
           opened.value,
@@ -513,7 +526,7 @@ export async function observedAdvisoryApproval(
 ): Promise<AdvisoryApprovalObservation> {
   const parsed = parseStatusGraph(rawGraph);
   const workspace = statusWorkspaceObservation(parsed, statePath);
-  return observedAdvisoryApprovalFromParsed(parsed, observation, workspace, boundHandle);
+  return observedAdvisoryApprovalFromParsed(parsed, observation, statusGateDeps(statePath), workspace, boundHandle);
 }
 
 function implementationReservationObservation(
@@ -555,8 +568,9 @@ async function deriveCurrentOrchestrationStatus(
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
   const workspace = statusWorkspaceObservation(parsedGraph, statePath);
   const completionResult = statusCompletionResult(parsedGraph, binding, workspace);
+  const gateDeps = statusGateDeps(statePath);
   const statusDeps: StatusDeps = Object.freeze({
-    ...productionGateDeps,
+    ...gateDeps,
     currentWaveWorkspace: workspace,
     currentWaveCompletionResult: completionResult,
     implementationReservations: implementationReservationObservation(parsedGraph, statePath),
@@ -565,7 +579,7 @@ async function deriveCurrentOrchestrationStatus(
   const observation: ActiveRunDirectoryObservation = binding.kind === "bound"
     ? Object.freeze({
         ...base,
-        advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, workspace, binding.handle),
+        advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, gateDeps, workspace, binding.handle),
       })
     : base;
   return deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation);

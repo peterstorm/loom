@@ -35,7 +35,10 @@ import {
 import { PHASES } from "../engine/src/core/phases";
 import type { Phase, TaskGraph, WaveSpecCheckDocumentsAuthority } from "../engine/src/types";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
-import type { ImplementationSettlementApplicationResult } from "../engine/src/core/implementation-application";
+import {
+  describeSettlement,
+  type ImplementationSettlementApplicationResult,
+} from "../engine/src/core/implementation-application";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import {
   inferSoleExecutingTask,
@@ -512,7 +515,7 @@ export function renderExactPiSettlement(
     return outcome([...priorLog, `loom(pi): ${taskId} result ignored (${applied.reason})`]);
   }
   const reason = settled.infrastructureReason;
-  const log = [...priorLog, `loom(pi): ${taskId} settlement: ${applied.transition.kind}`];
+  const log = [...priorLog, `loom(pi): ${taskId} settlement: ${describeSettlement(applied.transition)}`];
   if (applied.transition.kind === "infrastructure-blocked" && reason !== undefined) {
     log.push(`loom(pi): ${reason}`);
   }
