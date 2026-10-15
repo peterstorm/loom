@@ -268,6 +268,20 @@ describe("runAcceptanceStopCheck", () => {
     expect(fake.blocks.has("session.agent")).toBe(false);
   });
 
+  it("notes a refused command before reading the block counter or resolving the repository root", async () => {
+    const elsewhere = freezeVerificationManifest(manifestBytes({ ...RUNNER, cwd: "engine" }));
+    if (!elsewhere.ok) throw new Error(elsewhere.error.errors.join("; "));
+    const fake = ports(junit("failed"), {
+      blocksIssued: () => ({ kind: "unreadable", reason: "counter.json is not JSON" }),
+      repositoryRoot: () => ({ ok: false, reason: "the protected TaskGraph's repository root is unavailable" }),
+    });
+    const outcome = await runAcceptanceStopCheck(input("T2", { verification_manifest: elsewhere.value }), fake.value);
+    expect(outcome).toEqual({
+      kind: "note",
+      message: `acceptance stop check for T2 did not decide (the runner command is invalid for these files: acceptanceRunner.cwd engine does not contain ${SURFACE.acceptance}); the stop proceeds and the Wave Gate judges`,
+    });
+  });
+
   it("does not run while another claimant holds the runner", async () => {
     const fake = ports(junit("failed"), { acquireRunner: () => ({ kind: "held", reason: "another claimant's stop check (pid 7) is running the acceptance runner" }) });
     expect(await runAcceptanceStopCheck(input("T2"), fake.value)).toMatchObject({ kind: "note", message: expect.stringContaining("pid 7") });

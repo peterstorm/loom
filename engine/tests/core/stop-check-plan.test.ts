@@ -4,7 +4,8 @@
  * would act on, and `renderStopCheckPlan` prints it in the frozen line
  * grammar. Every owed fact is compared against `stopCheckExpectation` and
  * `acceptanceRunnerCheck` called on the same graph, so the tests pin reuse
- * (FR-002) rather than a second derivation.
+ * (FR-002) rather than a second derivation. A property runs the live check
+ * itself over every generated graph, so the plan and the check cannot drift.
  */
 
 import fc from "fast-check";
@@ -13,9 +14,16 @@ import type { AcceptanceContract, AcceptanceTestcase } from "../../src/core/acce
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { stopCheckExpectation } from "../../src/core/acceptance-contract/stop-check";
 import { renderStopCheckPlan, stopCheckPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
-import { STOP_CHECK_ON, UNKNOWN_TASK_PREFIX, type StopCheckPlanView } from "../../src/core/stop-check-plan-types";
+import { STOP_CHECK_ON, UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { acceptanceRunnerCheck, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import {
+  runAcceptanceStopCheck,
+  type StopCheckOutcome,
+  type StopCheckPorts,
+} from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import type { Task, TaskGraph } from "../../src/types";
+import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { task } from "../fixtures/contract-status-fixtures";
 import {
   ACCEPTANCE_REPORT,
@@ -243,13 +251,36 @@ const graphArb: fc.Arbitrary<TaskGraph> = fc.tuple(tasksArb, contractsArb, manif
 
 const idArb = fc.constantFrom(...TASK_IDS, "T9");
 
-/** What the live check would do, computed from the two owner functions directly. */
-function liveCheckRuns(graph: TaskGraph, taskId: string): boolean {
-  const runner = graph.verification_manifest?.acceptanceRunner;
-  const target = graph.tasks.find(({ id }) => id === taskId);
-  if (runner === undefined || target === undefined) return false;
-  const check = stopCheckExpectation(graph.acceptance_contracts ?? [], graph.tasks, target);
-  return check.kind === "owed" && acceptanceRunnerCheck(runner, check.files).ok;
+const LIVE_ROOT = (() => {
+  const parsed = parseCanonicalRepositoryRoot(canonicalTempDir("loom-stop-check-plan-root-"));
+  if (!parsed.ok) throw new Error("root fixture");
+  return parsed.value;
+})();
+
+type LiveStop = Readonly<{ outcome: StopCheckOutcome; launched: readonly Readonly<{ argv: readonly string[]; cwd: string }>[] }>;
+
+/**
+ * The live Acceptance Stop Check run once at `taskId`'s stop, with per-stop
+ * state that never stops it: no block issued yet, a resolved repository root
+ * and a free runner lock. It records each command it would launch; the launch
+ * fails, so nothing is judged and nothing is blocked.
+ */
+async function liveStop(graph: TaskGraph, taskId: string): Promise<LiveStop> {
+  const launched: { argv: readonly string[]; cwd: string }[] = [];
+  const ports: StopCheckPorts = {
+    repositoryRoot: () => ({ ok: true, root: LIVE_ROOT }),
+    acquireRunner: () => ({ kind: "acquired", release: () => null }),
+    runCheck: async (check) => {
+      launched.push({ argv: [check.executable, ...check.args], cwd: check.cwd });
+      return { ok: false, error: { kind: "containment-unsupported", message: "not launched by this test" } };
+    },
+    readReport: () => new Uint8Array(),
+    blocksIssued: () => ({ kind: "count", blocks: 0 }),
+    recordBlock: () => undefined,
+    clearBlocks: () => undefined,
+  };
+  const outcome = await runAcceptanceStopCheck({ loadGraph: () => graph, stateFilePath: "/repo/.claude/state/active_task_graph.json", taskId, agentKey: "s.a" }, ports);
+  return { outcome, launched };
 }
 
 /** Whether `value` and every object or array reachable from it is frozen. */
@@ -292,10 +323,20 @@ describe("stop-check-plan properties", () => {
     }));
   });
 
-  it("is on exactly when a runner exists, the Task owes testcases and the command forms", () => {
-    fc.assert(fc.property(graphArb, idArb, (graph, taskId) => {
-      const view: StopCheckPlanView = stopCheckPlanView(graph, taskId);
-      expect(view.kind === "on").toBe(liveCheckRuns(graph, taskId));
+  it("agrees with the live check: on exactly when it launches the planned command, command-refused exactly when it notes the refusal, otherwise it skips", async () => {
+    await fc.assert(fc.asyncProperty(graphArb, idArb, async (graph, taskId) => {
+      const view = stopCheckPlanView(graph, taskId);
+      const { outcome, launched } = await liveStop(graph, taskId);
+      if (view.kind === "on") {
+        expect(launched).toEqual([{ argv: view.command.argv, cwd: view.command.cwd }]);
+        return;
+      }
+      expect(launched).toEqual([]);
+      if (view.kind === "off" && view.reason.kind === "command-refused") {
+        expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(view.reason.errors.join("; ")) });
+      } else {
+        expect(outcome).toEqual({ kind: "skip" });
+      }
     }));
   });
 

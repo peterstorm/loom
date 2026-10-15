@@ -175,8 +175,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // and due Waves, and the frozen CT-1 surface it implements.
   "engine/src/core/contract-status.ts",
   "engine/src/core/contract-status-types.ts",
-  // Stop-Check Plan: the read-only projection of what the Acceptance Stop
-  // Check would do at one Task's stop, and the frozen CT-1 surface it implements.
+  // Stop-Check Plan: the plan the Acceptance Stop Check and its read-only view
+  // share, the view itself, and the frozen CT-1 surface it implements.
+  "engine/src/core/acceptance-contract/stop-check-planner.ts",
   "engine/src/core/acceptance-contract/stop-check-plan.ts",
   "engine/src/core/stop-check-plan-types.ts",
   // Standalone read coverage (ADR-0022): the obligation, page verification and
