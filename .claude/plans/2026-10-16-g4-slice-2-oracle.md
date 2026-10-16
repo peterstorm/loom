@@ -68,7 +68,7 @@ A collection error is distinguishable from a behavioral failure in both formats:
   - `affectedRunner`, with the same form checks as `acceptanceRunner`, `{files}` as one whole argument, a `required-file` JUnit report beneath `.loom/completion-reports/`, `timeoutMs <= MAX_AFFECTED_RUNNER_TIMEOUT_MS = 120_000`, and a report path distinct from `acceptanceRunner`'s and every Wave check's;
   - `testFileSuffixes: NonEmpty<string>`.
 - **Frozen manifest.** Every freeze made from now on, engine default included, carries `testFiles: { source: "operator-manifest" | "engine-default"; suffixes: NonEmpty<string> }`. It enters the manifest digest. `affectedRunner` enters the digest only when it is declared.
-- **Obligation derivation.** `deriveProofObligations` takes `redThenGreen: "owed-if-new-tests" | "not-owed"`. Every caller computes it from `graph.verification_manifest?.testFiles !== undefined`. Population, the `state-file-wire` obligation-match check, `task-revalidation` and the reconcile helper all apply it.
+- **Obligation derivation.** `deriveProofObligations` takes `redThenGreen: RedThenGreenEra`, defined as `"owed-if-new-tests" | "not-owed"`. Only `redThenGreenEra(manifest: FrozenVerificationManifest | undefined): RedThenGreenEra` in `engine/src/core/proof-obligations.ts` computes it, from the presence of `testFiles` (INV-6). Population, the `state-file-wire` obligation-match check, `task-revalidation` and the reconcile helper all call `redThenGreenEra(graph.verification_manifest)`. None of them tests `testFiles` presence inline.
 
 An old TaskGraph has no `testFiles`, so its re-derived obligations stay exactly as they were (FR-005). Claimants already carry `newTests: waived(covered-by-acceptance-contract)`, so they are never obligated (FR-010).
 **Why:** The frozen classification already has to exist (FR-014), and its presence is exactly "populated after this feature", so no second marker field is needed. Digest changes reach only new freezes (FR-016, AS-019).
@@ -199,7 +199,18 @@ The planner filters changed files to those beneath `affectedRunner.cwd` before c
 ChangedFiles = { kind: "none" } | { kind: "some"; files: NonEmpty<RepositoryRelativePath> }
 ```
 
-The pure `changedFilesFromLedger(events, repositoryRoot)` derives the epoch's FileWrite paths, deduplicated in first-write order and kept only when inside the repository. The shell then drops paths that are absent at stop time (FR-019).
+One pure module derives the changed files: `engine/src/core/changed-files.ts`, which owns INV-7. It exposes:
+
+```
+changedFilesAtStop(events, repositoryRoot, exists: (repositoryRelativePath) => boolean): ChangedFiles
+```
+
+It takes the epoch's FileWrite paths, deduplicated in first-write order and kept only when inside the repository. It then drops every path for which the injected `exists` predicate is false (absent at stop time, FR-019), and parses the rest into `ChangedFiles`. A renamed file's new path arrives as its own `mv`/`cp` destination FileWrite (FR-034). The three shells supply only the `exists` predicate and the epoch events:
+- `dispatch.ts`, from the evidence snapshot;
+- `pi/subagent-stop.ts`, from `piChildEvidence`;
+- `helper stop-check-plan`, from `liveAttemptEvidence`.
+
+None of them filters or dedupes itself.
 
 `planStopCheck(graph, taskId)` stays as a wrapper returning `planStopChecks(...).acceptance`, so the live hook keeps compiling until T10 switches it. T10 removes the wrapper.
 **Why:** The live hook and the helper both consume one total pure plan (FR-027, SC-002). The filesystem fact enters only through the parsed `ChangedFiles` value.
@@ -244,7 +255,7 @@ The outcome type exposes only `skip | passed | block | note` and carries no comp
 
 `acceptance-contract/stop-check-plan.ts` renders the unchanged acceptance lines, then an `affected tests:` section. That section shows either the changed files, `cwd`, `argv` and `report`, or `affected stop check off — <one reason>` (FR-028, AS-032, AS-033).
 
-`helper stop-check-plan` resolves the Task's live attempt epoch read-only, through a `liveAttemptEvidence(taskId)` port. That port finds the Claude implementation sidecar whose authority names the Task, or the Pi reservation slot's grant, and reads the epoch's events through `changedFilesFromLedger` plus an existence check. With no live attempt, the changed files are `none`. The helper's refusals stay as they are (FR-029).
+`helper stop-check-plan` resolves the Task's live attempt epoch read-only, through a `liveAttemptEvidence(taskId)` port. That port finds the Claude implementation sidecar whose authority names the Task, or the Pi reservation slot's grant, and derives the changed files from that epoch's events through `changedFilesAtStop`. With no live attempt, the changed files are `none`. The helper's refusals stay as they are (FR-029).
 
 `engine/src/core/stop-check-plan-types.ts` (the old CT-1) is not edited.
 **Why:** It is a frozen contract file, and the new view is additive.
@@ -318,6 +329,7 @@ engine/src/machine/test-report.ts               — re-exports
 engine/src/machine/evidence.ts                  — parseReportField reads `files` (absent → unrecorded; malformed/unreconciled → report null)
 engine/src/machine/report-discovery.ts          — findReport returns summaries carrying per-file results from every source
 engine/tests/core/structured-test-report-files.test.ts           — unit + property tests (reconcile laws, merge associativity)
+engine/tests/core/report-summary-reconcile.matrix.test.ts        — INV-8 matrix: the same consistent/inconsistent per-file fixtures through every parser, mergeSummaries, parseReportField and findReport
 engine/tests/machine/evidence-per-file-readback.test.ts          — legacy/malformed/round-trip read-back
 ```
 
@@ -356,20 +368,23 @@ engine/tests/machine/extract-shell-write-targets.test.ts — mv/cp cases (extend
 ### I6 core (T7)
 
 ```
-engine/src/core/red-then-green.ts               — judgeRedThenGreen (pure), changedFilesFromLedger-independent
+engine/src/core/red-then-green.ts               — judgeRedThenGreen (pure)
 engine/src/core/proof-obligations.ts            — obligation/failure/evidence variants, parsers, redThenGreen derivation input, evaluation arm
 engine/src/core/implementation-completion.ts    — proofFailureKind for the new failure; observation parser admits redThenGreen
 engine/src/core/task-graph-population.ts        — passes the I6-era marker
 engine/src/core/task-revalidation.ts            — passes the I6-era marker
 engine/src/state-file-wire.ts                   — obligation-match check passes the marker
 engine/tests/core/red-then-green.property.test.ts      — permutation property tests (SC-001)
+engine/tests/core/red-then-green-era.matrix.test.ts    — INV-6 matrix: legacy and I6-era frozen manifests through population, state-file-wire, revalidation and reconcile give the same owed/not-owed answer
 engine/tests/core/proof-obligations-red-then-green.test.ts
 ```
 
 ### Planner and affected core (T8)
 
 ```
-engine/src/core/acceptance-contract/stop-check-planner.ts — planStopChecks + changedFilesFromLedger; planStopCheck kept as wrapper
+engine/src/core/acceptance-contract/stop-check-planner.ts — planStopChecks; planStopCheck kept as wrapper
+engine/src/core/changed-files.ts                — NEW pure changedFilesAtStop (INV-7 owner), added to DEFAULT_PURE_MODULES
+engine/tests/core/changed-files.test.ts         — dedupe order, outside-repository drop, absence filter, rename via mv destination
 engine/src/core/affected-stop-check.ts          — judgeAffectedRun, renderStopChecksBlock, renderAffectedBlock
 engine/src/core/acceptance-contract/stop-check-plan.ts — renderStopChecksPlan (acceptance lines + affected section)
 engine/src/linter/programmatic/no-io-in-pure-modules.ts — adds the planner, the plan view and affected-stop-check.ts
@@ -401,6 +416,7 @@ engine/src/core/acceptance-contract/stop-check-planner.ts — removes the planSt
 engine/tests/handlers/stop-checks.test.ts              — injected-port tests (timeouts, budget, caps, lock)
 engine/tests/handlers/stop-checks-isolation.test.ts     — INV-3 isolation (settlement byte-identical under every affected outcome)
 engine/tests/core/stop-check-planner-parity.matrix.test.ts — INV-1 matrix (hook vs helper vs Pi)
+engine/tests/handlers/changed-files.matrix.test.ts     — INV-7 matrix: one ledger + filesystem fixture through dispatch, Pi subagent-stop and the helper gives identical ChangedFiles
 ```
 
 ### Docs and Loom's manifest (T11)
@@ -505,7 +521,7 @@ function judgeRedThenGreen(events: readonly Evidence[], classification: TestFile
 **Interface:**
 
 ```
-function changedFilesFromLedger(events: readonly Evidence[], repositoryRoot: string): readonly RepositoryRelativePath[];
+function changedFilesAtStop(events: readonly Evidence[], repositoryRoot: string, exists: (path: RepositoryRelativePath) => boolean): ChangedFiles; // changed-files.ts
 function planStopChecks(graph: TaskGraph, taskId: string, changed: ChangedFiles): StopChecksPlan;
 function judgeAffectedRun(projection: JunitTestcasesResult): AffectedRunVerdict;
 function renderStopChecksBlock(parts: StopChecksBlockParts): string;
@@ -540,7 +556,7 @@ function runStopChecks(input: StopChecksInput, ports: StopChecksPorts): Promise<
 ```
 I6:  tool call ─(Claude hook | Pi child)→ HarnessToolCall → extractEvidence(+findReport per-file) → recordToolEvidence → ledger
      SubagentStop / Pi batch settle → LedgerObservation(epoch) → judgeRedThenGreen(classifyTaskFiles(file_list, frozen testFiles)) → ObservedProofEvidence.redThenGreen → evaluateProofObligations → retry | implemented
-I7:  stop → changedFilesFromLedger(epoch) ∖ absent → ChangedFiles → planStopChecks → [lock] acceptance run → affected run (deadline) → judge → combined block | note | pass
+I7:  stop → changedFilesAtStop(epoch, root, exists) → ChangedFiles → planStopChecks → [lock] acceptance run → affected run (deadline) → judge → combined block | note | pass
 view: helper stop-check-plan → liveAttemptEvidence → ChangedFiles → renderStopChecksPlan (same planStopChecks)
 ```
 
@@ -603,6 +619,47 @@ The only transformations that touch the filesystem are report discovery, ledger 
 **Statement:** A report's file identity (a path relative to some runner cwd, an absolute path, or a JVM class) maps to a declared repository path only through `attributeReportedFile`, at every call site listed. It is advisory because the JVM and suffix rules are not expressible as a regex prohibition.
 
 ---
+
+### INV-6: One I6-era test
+
+**Tier:** checkable
+**Rule file:** `.claude/linter/rules/inv-6-one-red-then-green-era-test.json`
+**Owner module:** `engine/src/core/proof-obligations.ts`
+**Sibling entry points:**
+- `engine/src/core/task-graph-population.ts` — derives a new Task's pending proof
+- `engine/src/state-file-wire.ts` — checks that stored obligations match a re-derivation at TaskGraph load
+- `engine/src/core/task-revalidation.ts` — re-derives a revalidated Task's pending proof
+- `engine/src/handlers/helpers/reconcile-implementation-proof.ts` — re-evaluates proof from stored evidence
+**Matrix test:** `engine/tests/core/red-then-green-era.matrix.test.ts`
+**Statement:** Whether a TaskGraph owes `red-then-green` (when a Task also requires new tests) is decided only by `redThenGreenEra(graph.verification_manifest)`. It returns `owed-if-new-tests` exactly when the frozen manifest carries `testFiles`, and `not-owed` otherwise. All four listed sites pass its answer to `deriveProofObligations`, so a pre-feature TaskGraph is never newly obligated (FR-005), and claimants stay unobligated through their `newTests` waiver (FR-010). The rule refuses an inline `testFiles ===/!== undefined|null` test outside `proof-obligations.ts` and `verification-manifest.ts` (which parses and freezes the field) and test files. The matrix feeds a legacy and an I6-era frozen manifest through every site and asserts the same derived obligations.
+
+### INV-7: One changed-files derivation at stop
+
+**Tier:** advisory
+**Owner module:** `engine/src/core/changed-files.ts`
+**Sibling entry points:**
+- `engine/src/handlers/subagent-stop/dispatch.ts` — Claude live stop, epoch events from the evidence snapshot
+- `pi/subagent-stop.ts` — Pi report-only stop, epoch events from `piChildEvidence`
+- `engine/src/handlers/helpers/stop-check-plan.ts` — the plan view, epoch events from `liveAttemptEvidence`
+**Matrix test:** `engine/tests/handlers/changed-files.matrix.test.ts`
+**Statement:** A Task's changed files at stop come only from `changedFilesAtStop(events, repositoryRoot, exists)`, with these steps owned by that one module (FR-019, FR-034):
+- take the epoch's FileWrite paths, deduplicated in first-write order;
+- drop paths outside the repository;
+- drop paths absent at stop time, using the injected existence predicate;
+- parse the result into `ChangedFiles`.
+
+The three listed shells supply only epoch events and the predicate; none filters, dedupes or relativizes paths itself. The matrix runs one ledger-plus-filesystem fixture through all three and asserts identical `ChangedFiles`, a deleted file, a renamed file and an outside-repository write included. It is advisory because "does not re-filter" is not a regex prohibition. It complements INV-1: the planner consumes `ChangedFiles` and never derives it.
+
+### INV-8: One report-summary constructor reconciles per-file results
+
+**Tier:** checkable
+**Rule file:** `.claude/linter/rules/inv-8-sole-report-summary-constructor.json`
+**Owner module:** `engine/src/core/structured-test-report.ts`
+**Sibling entry points:**
+- `engine/src/machine/evidence.ts` — ledger read-back (`parseReportField`) re-mints the summary through it
+- `engine/src/machine/report-discovery.ts` — capture: every report source returns only summaries it constructed
+**Matrix test:** `engine/tests/core/report-summary-reconcile.matrix.test.ts`
+**Statement:** A `TestReportSummary` exists only as the output of `parseReportSummary`, which runs `reconcileFileResults` before branding. That covers the summary and its per-file results, on both harnesses (FR-001, FR-003). Inside the owner, every format parser and `mergeSummaries` funnel through it. Outside it, the ledger read-back and capture only call it. The rule refuses a brand cast `as TestReportSummary` anywhere but the owner and test files. The matrix feeds the same consistent and inconsistent per-file fixtures through the Vitest JSON parser, the JUnit parsers, `mergeSummaries`, `parseReportField` and `findReport`, and asserts that each consistent one survives and each inconsistent one becomes `null`.
 
 ## Contracts
 
@@ -669,21 +726,21 @@ CT-3's entry point `pi/extension.ts` is written by T6, and T9 and T10 depend on 
 
 ### Phase 2: Facts, manifest, minting (depends on Phase 1)
 
-- **T4 — Per-file TestRun results** (claims FR-001..FR-004, AS-001..AS-004). Implement AD-2 across the structured-report parsers (legacy and strict), `mergeSummaries`, ledger read-back and `findReport`. This is one atomic commit, because these are hook-imported machine files.
+- **T4 — Per-file TestRun results** (claims FR-001..FR-004, AS-001..AS-004). Implement AD-2 across the structured-report parsers (legacy and strict), `mergeSummaries`, ledger read-back and `findReport`. `parseReportSummary` stays the sole constructor and runs `reconcileFileResults` (INV-8 owner). `evidence.ts`'s `parseReportField` and `report-discovery.ts` only call it. T4 writes the INV-8 matrix. This is one atomic commit, because these are hook-imported machine files.
 - **T5 — Manifest, classification, attribution** (claims FR-013..FR-017, AS-015..AS-019). Implement AD-3, AD-4 (the manifest half) and AD-12, plus `affectedRunnerCheck`. Move `TEST_FILE_SUFFIXES`, which removes the INV-2 violation in `config.ts`. Add the new pure modules to `DEFAULT_PURE_MODULES`.
 - **T6 — Shared minting rule and Pi recorder** (claims FR-031..FR-034, AS-036, AS-039, AS-041). Implement AD-8. First, probe Pi's `tool_result` event and grant flow and pin the shapes in comments. Refactor `extractEvidence` to `HarnessToolCall`, add the mv/cp destinations, extract `recordToolEvidence`, and switch `record-evidence.ts`, which removes the INV-4 violation. Then add the grant's `evidenceLedger`, the Pi recorder registration, and `piChildEvidence`. Edits to hook-imported files are one atomic commit.
 - **Files:** see File Structure, T4, T5 and T6.
 
 ### Phase 3: Pure judges (depends on Phase 2)
 
-- **T7 — I6 core** (claims FR-005..FR-013, AS-005..AS-014, AS-018; depends on T4 and T5). Implement `judgeRedThenGreen` (AD-5) and the proof variants and derivation (AD-6). Thread the I6-era marker through population, revalidation and `state-file-wire`, in one atomic commit. Add property tests over every permutation of red, implementation write and green, plus a collection-only red, untrusted-only runs, legacy facts and no test files: no false pass, and the expected gap each time (SC-001).
-- **T8 — Planner and affected core** (claims FR-027, FR-028, AS-032, AS-033; depends on T5). Implement `planStopChecks` and `changedFilesFromLedger` (AD-9), keeping the `planStopCheck` wrapper. Add `judgeAffectedRun`, `renderStopChecksBlock` and `renderStopChecksPlan` (AD-11). Add the planner, the plan view and `affected-stop-check.ts` to `DEFAULT_PURE_MODULES`.
+- **T7 — I6 core** (claims FR-005..FR-013, AS-005..AS-014, AS-018; depends on T4 and T5). Implement `judgeRedThenGreen` (AD-5) and the proof variants and derivation (AD-6). Add `redThenGreenEra` (INV-6 owner) and call it from population, revalidation and `state-file-wire`, in one atomic commit. Write the INV-6 matrix; its reconcile row is completed by T9. Add property tests over every permutation of red, implementation write and green, plus a collection-only red, untrusted-only runs, legacy facts and no test files: no false pass, and the expected gap each time (SC-001).
+- **T8 — Planner and affected core** (claims FR-027, FR-028, AS-032, AS-033; depends on T5). Implement `planStopChecks` (AD-9), keeping the `planStopCheck` wrapper. Implement `changed-files.ts` (`changedFilesAtStop`, the INV-7 owner) with its unit tests. Add `judgeAffectedRun`, `renderStopChecksBlock` and `renderStopChecksPlan` (AD-11). Add the planner, the plan view and `affected-stop-check.ts` to `DEFAULT_PURE_MODULES`.
 - **Files:** see File Structure, T7 and T8.
 
 ### Phase 4: Shells (depends on Phase 3)
 
-- **T9 — Settlement wiring** (claims FR-008, FR-011, FR-035 for I6, AS-005..AS-014, AS-018, AS-037, AS-038; depends on T5, T6 and T7). Add `LedgerObservation` to exact settlement on both harnesses, handle an unreadable ledger as infrastructure, add the reconcile carry-forward, and add the I6 brief section and retry remedy (AD-6, AD-7). Write the I6 settlement matrix test (Claude vs Pi from the same facts).
-- **T10 — Stop shells and helper** (claims FR-018..FR-026, FR-029, FR-035 for I7, AS-020..AS-031, AS-034, AS-040; depends on T6 and T8). Implement `runStopChecks` (AD-10). Switch `dispatch.ts`, passing changed files from the evidence snapshot epoch with an existence filter and `hookStartedAtMs` taken at dispatch start, and `pi/subagent-stop.ts`. Add the helper's `liveAttemptEvidence` port. Remove the `planStopCheck` wrapper. Write the INV-1 matrix and the INV-3 isolation test. All hook-imported edits go in one atomic commit.
+- **T9 — Settlement wiring** (claims FR-008, FR-011, FR-035 for I6, AS-005..AS-014, AS-018, AS-037, AS-038; depends on T5, T6 and T7). Add `LedgerObservation` to exact settlement on both harnesses, handle an unreadable ledger as infrastructure, add the reconcile carry-forward (`reconcile-implementation-proof.ts` calls `redThenGreenEra`, and T9 adds its row to the INV-6 matrix), and add the I6 brief section and retry remedy (AD-6, AD-7). Write the I6 settlement matrix test (Claude vs Pi from the same facts).
+- **T10 — Stop shells and helper** (claims FR-018..FR-026, FR-029, FR-035 for I7, AS-020..AS-031, AS-034, AS-040; depends on T6 and T8). Implement `runStopChecks` (AD-10). Switch `dispatch.ts` and `pi/subagent-stop.ts`. `dispatch.ts` passes changed files from `changedFilesAtStop` over the evidence snapshot epoch with an `exists` predicate, plus `hookStartedAtMs` taken at dispatch start. Add the helper's `liveAttemptEvidence` port, which feeds `changedFilesAtStop`. Remove the `planStopCheck` wrapper. Write the INV-1 matrix, the INV-7 matrix and the INV-3 isolation test. All hook-imported edits go in one atomic commit.
 - **Files:** see File Structure, T9 and T10.
 
 ### Phase 5: Docs and Loom's manifest (depends on Phase 4)
