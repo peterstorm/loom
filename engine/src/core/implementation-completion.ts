@@ -27,6 +27,7 @@ import {
   type TaskProof,
 } from "./proof-obligations";
 import { compareStrings } from "./ordering";
+import type { RedThenGreenFailureKind } from "./red-then-green-types";
 import {
   canonicalJson,
   parseReviewPath,
@@ -1324,7 +1325,13 @@ export function createEscalationRemediationReceipt(raw: unknown): Parsed<Escalat
   });
 }
 
+/** The receipt failure kind a proof failure mints. An I6 failure names its
+ *  unmet step, so each gap is a distinct kind (FR-009). */
 function proofFailureKind(failure: ProofFailure): string {
+  if (failure.kind === "red-then-green-unproven") {
+    const kind: RedThenGreenFailureKind = `proof:red-then-green-unproven:${failure.gap.kind}`;
+    return kind;
+  }
   return `proof:${failure.kind}`;
 }
 

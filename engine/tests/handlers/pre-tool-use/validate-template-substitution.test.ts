@@ -52,6 +52,42 @@ describe("validate-template-substitution — property tests", () => {
   });
 });
 
+describe("validate-template-substitution — identifier-glued braces are expression syntax", () => {
+  it("{var} glued to a preceding identifier character never blocks (ADT field notation, struct literals)", () => {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[A-Za-z0-9_-]{0,12}[A-Za-z0-9_]$/),
+        fc.stringMatching(/^[a-z][a-z0-9_]{0,15}$/),
+        (head, field) => {
+          expect(validateTemplate(`ProofFailure += ${head}{${field}}`)).toBe("allow");
+        },
+      ),
+    );
+  });
+
+  it("the plan's ADT notation red-then-green-unproven{gap} → allow", () => {
+    expect(
+      validateTemplate("ProofFailure += red-then-green-unproven{gap}; ProofEvidence += red-then-green{red,implementationWrite,green}"),
+    ).toBe("allow");
+  });
+
+  it("ADT union notation {none}|{some NonEmpty<Path>} → allow; a lone {none} still blocks", () => {
+    expect(validateTemplate("parsed to {none}|{some NonEmpty<RepositoryRelativePath>}")).toBe("allow");
+    expect(validateTemplate("a|{tag} or {tag}|b")).toBe("allow");
+    expect(validateTemplate("parsed to {none} here")).toBe("block");
+  });
+
+  it("a placeholder after a non-identifier character still blocks: loom-{task_id}, ({wave}), /{plan_file}", () => {
+    expect(validateTemplate("/tmp/loom-{task_id}-bun.xml")).toBe("block");
+    expect(validateTemplate("Wave ({wave})")).toBe("block");
+    expect(validateTemplate("Available at: /{plan_file}")).toBe("block");
+  });
+
+  it("a placeholder glued to a stripped shell expansion still blocks: x${done}{leftover}", () => {
+    expect(validateTemplate("x${done}{leftover}")).toBe("block");
+  });
+});
+
 describe("validate-template-substitution — active graph boundary", () => {
   it("keeps the core decision pure over a pre-gathered graph-existence fact", () => {
     expect(validateTemplateSubstitution("Use {task_id}", false)).toEqual({ kind: "allow" });

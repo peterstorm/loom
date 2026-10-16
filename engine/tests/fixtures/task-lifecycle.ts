@@ -2,9 +2,11 @@ import {
   derivePendingTaskProof,
   evaluateProofObligations,
   evaluateTaskProof,
+  type RedThenGreenEra,
   type SatisfiedTaskProof,
   type TaskProof,
 } from "../../src/core/proof-obligations";
+import type { RedThenGreenObservation } from "../../src/core/red-then-green-types";
 import { labelledValue } from "./parse-result";
 import {
   parseActiveWaveGateRegistration,
@@ -82,12 +84,30 @@ export function completedWaveGateFixture(input: Readonly<{
   }));
 }
 
+/** The I6 run a satisfied fixture shows: red run 0, then the first write to an
+ *  implementation file, then green run 1. */
+export function shownRedThenGreen(implementationWrite = "src/fixture.ts"): RedThenGreenObservation {
+  return {
+    kind: "shown",
+    red: { index: 0, command: "npx vitest run" },
+    implementationWrite,
+    green: { index: 1, command: "npx vitest run" },
+  };
+}
+
 /** A satisfied Proof for a Task that changed exactly its declared files, with
- *  trusted test evidence and new tests written. */
-export function satisfiedProof(files: readonly string[]): SatisfiedTaskProof {
+ *  trusted test evidence and new tests written. A Task in an I6-era graph
+ *  (`redThenGreenEra(manifest)`) also owes red-then-green, shown here. */
+export function satisfiedProof(files: readonly string[], era: RedThenGreenEra = "not-owed"): SatisfiedTaskProof {
   const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: files },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: files, newTestsWritten: true },
+    { newTestsRequired: true, declaredArtifacts: files, redThenGreen: era },
+    {
+      taskCompleted: true,
+      testResult: { verdict: "trusted-pass" },
+      filesModified: files,
+      newTestsWritten: true,
+      ...(era === "owed-if-new-tests" ? { redThenGreen: shownRedThenGreen(files[0]) } : {}),
+    },
   );
   if (evaluated.state !== "satisfied") throw new Error("satisfied proof fixture must be satisfied");
   return evaluated;
@@ -97,8 +117,9 @@ export function satisfiedProof(files: readonly string[]): SatisfiedTaskProof {
 export function pendingTaskProof(
   declaredArtifacts: readonly string[] = [],
   newTestsRequired = true,
+  era: RedThenGreenEra = "not-owed",
 ) {
-  return derivePendingTaskProof({ newTestsRequired, declaredArtifacts });
+  return derivePendingTaskProof({ newTestsRequired, declaredArtifacts, redThenGreen: era });
 }
 
 export type TaskFixtureInput = TaskCommonMetadata & Readonly<{

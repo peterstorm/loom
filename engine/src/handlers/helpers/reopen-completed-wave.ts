@@ -221,7 +221,7 @@ export function reopenCompletedWave(
     completionReceipt: completed.completionReceipt,
     reopenedTaskIds: Object.freeze([...proof.taskIds]),
   });
-  const tasks = graph.tasks.map((task) => proof.taskIds.includes(task.id) ? returnToRevalidation(task) : task);
+  const tasks = graph.tasks.map((task) => proof.taskIds.includes(task.id) ? returnToRevalidation(task, graph.verification_manifest) : task);
   const gate = {
     ...(graph.wave_gates[String(request.wave)] ?? newWaveGate()),
     impl_complete: false,

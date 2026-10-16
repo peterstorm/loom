@@ -1,15 +1,18 @@
 import { evaluateAsRecorded } from "./completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
-  defaultVerificationManifest,
+  legacyDefaultVerificationManifest,
+  type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import type { TaskGraph } from "../../src/types";
 
-/** Build one accepted default-manifest receipt for Wave Gate state fixtures. */
+/** Build one accepted receipt for Wave Gate state fixtures. The default is the
+ *  authority a graph with no `verification_manifest` reads: the legacy default
+ *  manifest, frozen before test-file classification existed. */
 export function acceptedWaveCompletionSuite(
   active: NonNullable<TaskGraph["active_wave_gate"]>,
+  manifest: FrozenVerificationManifest = legacyDefaultVerificationManifest(),
 ) {
-  const manifest = defaultVerificationManifest();
   const authorized = authorizeWaveCompletionSuite(manifest, active, "c".repeat(64));
   if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));
   const evaluated = evaluateAsRecorded(authorized.value, {

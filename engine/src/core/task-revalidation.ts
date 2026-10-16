@@ -5,7 +5,8 @@
  * implemented against.
  */
 
-import { derivePendingTaskProof } from "./proof-obligations";
+import { derivePendingTaskProof, redThenGreenEra } from "./proof-obligations";
+import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
 import type { Task } from "../types";
 
@@ -15,12 +16,16 @@ import type { Task } from "../types";
  * and test evidence remain active remediation/audit inputs wherever gate and
  * status projections read them; only a fresh implementation settlement clears
  * the revalidation marker. A legacy Task without Proof gets its pending Proof
- * derived from its policy and declared artifacts.
+ * derived from its policy, its declared artifacts and its TaskGraph's I6 era
+ * (`redThenGreenEra` of the graph's frozen `verificationManifest`, INV-6).
+ * `verificationManifest` is required so every caller states its graph's era;
+ * `undefined` means the graph has no manifest, which is the legacy era.
  */
-export function returnToRevalidation(task: Task): Task {
+export function returnToRevalidation(task: Task, verificationManifest: FrozenVerificationManifest | undefined): Task {
   const proof = task.proof ?? derivePendingTaskProof({
     verificationPolicy: taskVerificationPolicy(task),
     declaredArtifacts: task.file_list ?? [],
+    redThenGreen: redThenGreenEra(verificationManifest),
   });
   return {
     ...task,

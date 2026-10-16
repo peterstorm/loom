@@ -50,6 +50,8 @@ import {
   requiresRegression,
 } from "../../core/verification-policy";
 import { isProtectedVerificationPath } from "../../core/completion-suite";
+import { redThenGreenEra, type RedThenGreenEra } from "../../core/proof-obligations";
+import { parseFrozenVerificationManifest } from "../../core/verification-manifest";
 import { DECISION_RECORD_AGENT } from "../../core/model-profiles";
 export type { ValidationResult } from "./validation-result";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -131,6 +133,16 @@ function findingsErrorsOf(task: Record<string, unknown>, label: string): string[
 export type ValidationScope = "state-file" | "decompose-payload";
 
 /** Validate a full TaskGraph at the stored-state or authored-decompose boundary. */
+/** The graph's I6 era, which decides the obligations each stored Proof carries
+ *  (INV-6). A malformed manifest is already reported by `parseTaskGraph` above;
+ *  its Tasks are then checked as the legacy era, so the graph stays refused. */
+function taskGraphRedThenGreenEra(json: Record<string, unknown>): RedThenGreenEra {
+  const parsed = json.verification_manifest === undefined
+    ? undefined
+    : parseFrozenVerificationManifest(json.verification_manifest);
+  return redThenGreenEra(parsed?.ok === true ? parsed.value : undefined);
+}
+
 export function validateFull(
   json: Record<string, unknown>,
   scope: ValidationScope = "state-file",
@@ -177,6 +189,7 @@ export function validateFull(
   }
   errors.push(...taskDependencyErrors(validTaskRecords));
 
+  const era = taskGraphRedThenGreenEra(json);
   for (let i = 0; i < tasks.length; i++) {
     const task = taskRecords[i];
     if (task === null) {
@@ -243,7 +256,7 @@ export function validateFull(
       // Decompose payloads intentionally omit execution state; every persisted
       // state task must agree with StateManager's exact parser, including when a
       // required field is absent rather than merely malformed.
-      const stateError = taskUnionError(task, i);
+      const stateError = taskUnionError(task, i, era);
       if (stateError !== null) errors.push(stateError);
     }
 
