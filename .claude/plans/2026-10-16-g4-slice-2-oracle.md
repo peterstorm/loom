@@ -67,7 +67,18 @@ A collection error is distinguishable from a behavioral failure in both formats:
 - **Manifest source.** Schema 2 gains two optional keys:
   - `affectedRunner`, with the same form checks as `acceptanceRunner`, `{files}` as one whole argument, a `required-file` JUnit report beneath `.loom/completion-reports/`, `timeoutMs <= MAX_AFFECTED_RUNNER_TIMEOUT_MS = 120_000`, and a report path distinct from `acceptanceRunner`'s and every Wave check's;
   - `testFileSuffixes: NonEmpty<string>`.
-- **Frozen manifest.** Every freeze made from now on, engine default included, carries `testFiles: { source: "operator-manifest" | "engine-default"; suffixes: NonEmpty<string> }`. It enters the manifest digest. `affectedRunner` enters the digest only when it is declared.
+- **Frozen manifest.** Every freeze made after this feature carries `testFiles: { source: "operator-manifest" | "engine-default"; suffixes: NonEmpty<string> }`. It enters the manifest digest. `affectedRunner` enters the digest only when it is declared.
+- **Freeze cases.** Population always freezes a manifest. `populate-task-graph.ts` reads `.loom/verification-manifest.json`; when the read fails with ENOENT, it freezes `defaultVerificationManifest()`, and `task-graph-population.ts` writes the result as `verification_manifest`. So no post-feature TaskGraph lacks one. T5 makes every freeze path carry `testFiles`:
+  - a schema-2 operator manifest with `testFileSuffixes` freezes `{ source: "operator-manifest", suffixes }`;
+  - a schema-2 operator manifest without the key, and any schema-1 manifest, freeze `{ source: "engine-default", suffixes: DEFAULT_TEST_FILE_SUFFIXES }`;
+  - no manifest file at all freezes `defaultVerificationManifest()`, which now also carries `{ source: "engine-default", suffixes: DEFAULT_TEST_FILE_SUFFIXES }`.
+
+  Only TaskGraphs frozen before this feature lack `testFiles`: those carrying a pre-feature frozen manifest, and those carrying none.
+- **Legacy default stays.** `defaultVerificationManifest()` is also the read-time fallback for old graphs that carry no `verification_manifest` (`state-file-wire.ts` suite-receipt digest check, `wave-completion-suite-readiness.ts`). Their receipts were stamped with the old default's digest, so T5 splits the function:
+  - `defaultVerificationManifest()` is the population freeze and carries `testFiles`;
+  - `legacyDefaultVerificationManifest()` keeps today's bytes and digest exactly, and the two read-time fallbacks switch to it.
+
+  An old graph therefore keeps both its receipts and its `not-owed` era. `parseFrozenVerificationManifest` admits `testFiles` as an optional key and re-checks the digest with it included only when present.
 - **Obligation derivation.** `deriveProofObligations` takes `redThenGreen: RedThenGreenEra`, defined as `"owed-if-new-tests" | "not-owed"`. Only `redThenGreenEra(manifest: FrozenVerificationManifest | undefined): RedThenGreenEra` in `engine/src/core/proof-obligations.ts` computes it, from the presence of `testFiles` (INV-6). Population, the `state-file-wire` obligation-match check, `task-revalidation` and the reconcile helper all call `redThenGreenEra(graph.verification_manifest)`. None of them tests `testFiles` presence inline.
 
 An old TaskGraph has no `testFiles`, so its re-derived obligations stay exactly as they were (FR-005). Claimants already carry `newTests: waived(covered-by-acceptance-contract)`, so they are never obligated (FR-010).
@@ -165,6 +176,7 @@ I6 is judged per attempt epoch.
   - **Tool mapping.** `piToolCall(event)` maps Pi's lowercase tool names through the existing `TOOL_NAME_MAP`. The bash exit is `details.exitCode` when it is numeric, otherwise `isError ? 1 : 0` (FR-033). A probe step in T6 confirms Pi 0.83's `tool_result` shape and records it in a code comment.
   - **Ledger address.** `IssuedWriteGrant` gains `evidenceLedger: { sessionId: SessionId; agentType: AgentType }`, minted by the parent at spawn from its own session and the spawn item's agent. The child records into the parent's ledger under `epochOf(grant.agentId, agentType)`. One child process is one agent, so attribution is exact by construction. A child with no grant or a rejected grant records nothing and writes a stderr note (AS-039).
   - **Stamps.** The `tool_call` handler keeps writing call-start stamps under the child's own session, and the recorder reads them there.
+  - **The write grant is not a lifecycle (executable-models policy).** It is pre-existing, bounded mechanics, already owned by `pi/write-grant.ts` (issue, consume, revoke) and `pi/child-write-grant.ts`, whose `ActiveChildWriteGrant` ADT and `rejectedSessions` set cover activated, cleanup-pending and rejected. This feature adds no state or transition to it; it only adds the `evidenceLedger` field the grant carries. The recorder's only decision on that state is one pure total function: `piEvidenceTarget(grant: ActiveChildWriteGrant | undefined, rejected: boolean, consumed: ConsumedWriteGrant | null): EvidenceTarget | { kind: "no-record"; reason: "no-grant" | "grant-rejected" | "cleanup-pending" }`, in `pi/evidence-recorder.ts`. `engine/tests/pi/evidence-recorder.test.ts` pins it with one case per grant state (AS-039: no grant, rejected and cleanup-pending record nothing, with a note; an active grant targets the parent ledger under `epochOf(grant.agentId, agentType)`).
   - **Parent reads.** `piChildEvidence(parentSession, slotToken, agentType)` recomputes the granted agent id from the slot's grant token, as `issuePiWriteGrant` does, and returns the child's `LedgerObservation`. Settlement (T9) and the Pi report-only stop check (T10) consume it (FR-035).
 - **Pure modules.** `HarnessToolCall` adapters `claudeToolCall` and `piToolCall` live in a new pure module, `engine/src/core/harness-tool-call.ts`, added to `DEFAULT_PURE_MODULES`.
 
@@ -233,6 +245,24 @@ Counters: each check has its own per-agent counter file:
 - affected adds `*.affected-stop-check.json` with `AFFECTED_STOP_CHECK_MAX_BLOCKS = 3`.
 
 A check's counter increments only when that check contributes failures to a block. All counters clear when the stop proceeds (FR-023, AS-029).
+
+The block counter is not a lifecycle (executable-models policy). It is a bounded integer, 0 to 3, per agent and per check. Slice 1 already runs this mechanic for the acceptance check, and it has no domain states. Its whole transition rule is one pure, total function in `engine/src/core/affected-stop-check.ts` (T8):
+
+```
+stopCheckBlockDecision(
+  issued: { acceptance: BlockCount; affected: BlockCount },
+  verdicts: { acceptance: CheckVerdict; affected: CheckVerdict },
+  cap: 3,
+): { outcome: "block" | "proceed"; record: { acceptance: number | "clear"; affected: number | "clear" }; notes: readonly string[] }
+```
+
+The rules it applies:
+- an unreadable count fails open: the check cannot block, and a note is added;
+- a count at the cap fails open with a cap note;
+- a failing verdict under the cap blocks, and records `count + 1` for that check only;
+- `proceed` clears both counters.
+
+The shell only reads and writes the counter files that this function names. `engine/tests/core/affected-stop-check.test.ts` pins every transition: 0 to 1 to 2 to 3, then cap-reached fail-open, unreadable fail-open, an independent cap per check (AS-029), and clear on proceed. A property test asserts that no agent is blocked more than 3 times by either check (SC-005).
 
 Verdicts and messages come from the pure `judgeAffectedRun(projection)` (CT-2 types):
 - failing testcases are named with file and name, collection errors included;
@@ -336,7 +366,9 @@ engine/tests/machine/evidence-per-file-readback.test.ts          — legacy/malf
 ### Manifest, classification, attribution (T5)
 
 ```
-engine/src/core/verification-manifest.ts        — affectedRunner + testFileSuffixes parse; frozen testFiles + affectedRunner; digest; affectedRunnerCheck; MAX_AFFECTED_RUNNER_TIMEOUT_MS; report-path distinctness
+engine/src/core/verification-manifest.ts        — affectedRunner + testFileSuffixes parse; frozen testFiles on every freeze path (operator with/without key, schema 1, engine default) + affectedRunner; digest; legacyDefaultVerificationManifest (today's bytes); affectedRunnerCheck; MAX_AFFECTED_RUNNER_TIMEOUT_MS; report-path distinctness
+engine/src/state-file-wire.ts                   — T5 only: the absent-manifest suite-receipt fallback switches to legacyDefaultVerificationManifest (T7 later edits the obligation-match check; different Waves)
+engine/src/core/wave-completion-suite-readiness.ts — absent-manifest fallback switches to legacyDefaultVerificationManifest
 engine/src/core/test-file-classification.ts     — NEW: DEFAULT_TEST_FILE_SUFFIXES, isTestFileBySuffixes, classifyTaskFiles
 engine/src/core/report-file-attribution.ts      — NEW: attributeReportedFile (moved from gate.ts + absolute-path rule)
 engine/src/core/acceptance-contract/gate.ts     — imports attributeReportedFile (testcaseAcceptanceFile becomes a re-export alias, removed only if no caller remains)
@@ -375,7 +407,7 @@ engine/src/core/task-graph-population.ts        — passes the I6-era marker
 engine/src/core/task-revalidation.ts            — passes the I6-era marker
 engine/src/state-file-wire.ts                   — obligation-match check passes the marker
 engine/tests/core/red-then-green.property.test.ts      — permutation property tests (SC-001)
-engine/tests/core/red-then-green-era.matrix.test.ts    — INV-6 matrix: legacy and I6-era frozen manifests through population, state-file-wire, revalidation and reconcile give the same owed/not-owed answer
+engine/tests/core/red-then-green-era.matrix.test.ts    — INV-6 matrix. Rows: (a) operator schema 2 with testFileSuffixes, (b) operator schema 2 without the key, (c) operator schema 1, and (d) no manifest file (ENOENT → defaultVerificationManifest()), each frozen through population → owed-if-new-tests with the expected suffix source; (e) a pre-feature frozen manifest, and (f) a pre-feature graph with no verification_manifest → not-owed. Every row runs through population, state-file-wire, revalidation and reconcile, and gets the same answer.
 engine/tests/core/proof-obligations-red-then-green.test.ts
 ```
 
@@ -532,7 +564,7 @@ const renderStopChecksPlan: RenderStopChecksPlanFn;
 
 ### Settlement wiring
 
-**Responsibility:** Hand each harness's epoch facts to the I6 judge at completion.
+**Responsibility:** Hand each harness's epoch facts to the I6 judge at completion. `exact-implementation-settlement.ts` is the one place that classifies `file_list`, through `classifyTaskFiles` (INV-2), before calling `judgeRedThenGreen`.
 **Files:** `engine/src/handlers/helpers/exact-implementation-settlement.ts`, `engine/src/handlers/subagent-stop/update-task-status.ts`, `pi/subagent-settlement.ts`, `engine/src/handlers/helpers/reconcile-implementation-proof.ts`, `engine/src/core/implementation-brief.ts`
 **Depends on:** I6 judge, Shared minting rule
 
@@ -560,6 +592,8 @@ I7:  stop → changedFilesAtStop(epoch, root, exists) → ChangedFiles → planS
 view: helper stop-check-plan → liveAttemptEvidence → ChangedFiles → renderStopChecksPlan (same planStopChecks)
 ```
 
+These ordered flows are function composition inside one hook process, on one call stack, with no stage boundary, queue, LLM node or human review between steps. They are not a multi-stage pipeline, so this plan declines the fugue Pipeline bridge and declares no AuthoredDag. Loom does not use fugue either.
+
 The only transformations that touch the filesystem are report discovery, ledger reads and appends, the existence filter on changed files, runner execution, and lock and counter files. All of them are in shells. Every decision is a pure function of parsed values.
 
 ---
@@ -582,12 +616,16 @@ The only transformations that touch the filesystem are report discovery, ledger 
 **Rule file:** `.claude/linter/rules/inv-2-one-test-file-classifier.json`
 **Owner module:** `engine/src/core/test-file-classification.ts`
 **Sibling entry points:**
-- `engine/src/core/red-then-green.ts` — I6's split of `file_list` into test and implementation files
-- `engine/src/core/acceptance-contract/stop-check-plan.ts` — classification shown in the plan view
+- `engine/src/handlers/helpers/exact-implementation-settlement.ts` — the I6 split: calls `classifyTaskFiles(task.file_list, frozen testFiles)` and hands the ready `TestFileClassification` to `judgeRedThenGreen` (both harnesses settle through this shell)
+- `engine/src/core/verification-manifest.ts` — applies `DEFAULT_TEST_FILE_SUFFIXES` when freezing `testFiles` for a manifest without `testFileSuffixes`, a schema-1 manifest, or no manifest file
 - `engine/src/core/implementation-brief.ts` — the I6 brief section's test and implementation files
 - `engine/src/linter/programmatic/config.ts` — the programmatic linter's test-file skip
 **Matrix test:** `engine/tests/core/test-file-classification.test.ts`
-**Statement:** Whether a path is a test file is decided only by `test-file-classification.ts`, against the frozen suffixes or the engine default. The rule refuses any other declaration of `TEST_FILE_SUFFIXES` and any inline `endsWith('.test.' | '.spec.')` outside that module and test files. It covers every call site listed above. `core/review-panel.ts`'s lens-routing text heuristic is not file classification and is out of scope.
+**Statement:** Whether a path is a test file is decided only by `test-file-classification.ts`, against the frozen suffixes or the engine default.
+- The I6 split of `file_list` happens in exactly one place, the settlement shell. `red-then-green.ts` never classifies: it receives a ready `TestFileClassification` (AD-5).
+- The matrix runs one set of `file_list`s, under default and operator suffixes, through the settlement shell's classification, the brief section, the frozen default from `verification-manifest.ts` and the linter skip, and asserts that they agree.
+- The rule refuses any other declaration of `TEST_FILE_SUFFIXES` and any inline `endsWith('.test.' | '.spec.')`, except in the owner and test files. The siblings comply by importing from the owner: `verification-manifest.ts` imports `DEFAULT_TEST_FILE_SUFFIXES`, which the `\bTEST_FILE_SUFFIXES` pattern does not match.
+- `core/review-panel.ts`'s lens-routing text heuristic is not file classification and is out of scope.
 
 ### INV-3: Affected-check data never reaches proof, receipts or gate evidence
 
@@ -631,7 +669,7 @@ The only transformations that touch the filesystem are report discovery, ledger 
 - `engine/src/core/task-revalidation.ts` — re-derives a revalidated Task's pending proof
 - `engine/src/handlers/helpers/reconcile-implementation-proof.ts` — re-evaluates proof from stored evidence
 **Matrix test:** `engine/tests/core/red-then-green-era.matrix.test.ts`
-**Statement:** Whether a TaskGraph owes `red-then-green` (when a Task also requires new tests) is decided only by `redThenGreenEra(graph.verification_manifest)`. It returns `owed-if-new-tests` exactly when the frozen manifest carries `testFiles`, and `not-owed` otherwise. All four listed sites pass its answer to `deriveProofObligations`, so a pre-feature TaskGraph is never newly obligated (FR-005), and claimants stay unobligated through their `newTests` waiver (FR-010). The rule refuses an inline `testFiles ===/!== undefined|null` test outside `proof-obligations.ts` and `verification-manifest.ts` (which parses and freezes the field) and test files. The matrix feeds a legacy and an I6-era frozen manifest through every site and asserts the same derived obligations.
+**Statement:** Whether a TaskGraph owes `red-then-green` (when a Task also requires new tests) is decided only by `redThenGreenEra(graph.verification_manifest)`. It returns `owed-if-new-tests` exactly when the frozen manifest carries `testFiles`, and `not-owed` otherwise. All four listed sites pass its answer to `deriveProofObligations`, so a pre-feature TaskGraph is never newly obligated (FR-005), and claimants stay unobligated through their `newTests` waiver (FR-010). The rule refuses an inline `testFiles ===/!== undefined|null` test outside `proof-obligations.ts` and `verification-manifest.ts` (which parses and freezes the field) and test files. Population freezes `testFiles` on every post-feature path, including an operator manifest without `testFileSuffixes`, a schema-1 manifest and no manifest file (AD-4). So only pre-feature TaskGraphs read as `not-owed`. The matrix rows (a)–(f) cover all four post-feature freeze cases plus the two pre-feature shapes, through every site, and assert the same derived obligations.
 
 ### INV-7: One changed-files derivation at stop
 
@@ -727,14 +765,14 @@ CT-3's entry point `pi/extension.ts` is written by T6, and T9 and T10 depend on 
 ### Phase 2: Facts, manifest, minting (depends on Phase 1)
 
 - **T4 — Per-file TestRun results** (claims FR-001..FR-004, AS-001..AS-004). Implement AD-2 across the structured-report parsers (legacy and strict), `mergeSummaries`, ledger read-back and `findReport`. `parseReportSummary` stays the sole constructor and runs `reconcileFileResults` (INV-8 owner). `evidence.ts`'s `parseReportField` and `report-discovery.ts` only call it. T4 writes the INV-8 matrix. This is one atomic commit, because these are hook-imported machine files.
-- **T5 — Manifest, classification, attribution** (claims FR-013..FR-017, AS-015..AS-019). Implement AD-3, AD-4 (the manifest half) and AD-12, plus `affectedRunnerCheck`. Move `TEST_FILE_SUFFIXES`, which removes the INV-2 violation in `config.ts`. Add the new pure modules to `DEFAULT_PURE_MODULES`.
-- **T6 — Shared minting rule and Pi recorder** (claims FR-031..FR-034, AS-036, AS-039, AS-041). Implement AD-8. First, probe Pi's `tool_result` event and grant flow and pin the shapes in comments. Refactor `extractEvidence` to `HarnessToolCall`, add the mv/cp destinations, extract `recordToolEvidence`, and switch `record-evidence.ts`, which removes the INV-4 violation. Then add the grant's `evidenceLedger`, the Pi recorder registration, and `piChildEvidence`. Edits to hook-imported files are one atomic commit.
+- **T5 — Manifest, classification, attribution** (claims FR-013..FR-017, AS-015..AS-019). Implement AD-3, AD-4 (the manifest half) and AD-12, plus `affectedRunnerCheck`. T5 owns the freeze change: `testFiles` on all four freeze cases (operator with key, operator without key, schema 1, no file), plus the `legacyDefaultVerificationManifest` split and the switch of the two read-time fallbacks. T5 writes rows (a) to (d) of the INV-6 era matrix as freeze-output assertions, and a test that `legacyDefaultVerificationManifest().manifestDigest` equals today's default digest. T7 extends the same rows through the derivation sites. Move `TEST_FILE_SUFFIXES`, which removes the INV-2 violation in `config.ts`. Add the new pure modules to `DEFAULT_PURE_MODULES`.
+- **T6 — Shared minting rule and Pi recorder** (claims FR-031..FR-034, AS-036, AS-039, AS-041). Implement AD-8. First, probe Pi's `tool_result` event and grant flow and pin the shapes in comments. Refactor `extractEvidence` to `HarnessToolCall`, add the mv/cp destinations, extract `recordToolEvidence`, and switch `record-evidence.ts`, which removes the INV-4 violation. Then add the grant's `evidenceLedger`, the pure `piEvidenceTarget` grant-state decision with one test per grant state (AD-8), the Pi recorder registration, and `piChildEvidence`. Edits to hook-imported files are one atomic commit.
 - **Files:** see File Structure, T4, T5 and T6.
 
 ### Phase 3: Pure judges (depends on Phase 2)
 
 - **T7 — I6 core** (claims FR-005..FR-013, AS-005..AS-014, AS-018; depends on T4 and T5). Implement `judgeRedThenGreen` (AD-5) and the proof variants and derivation (AD-6). Add `redThenGreenEra` (INV-6 owner) and call it from population, revalidation and `state-file-wire`, in one atomic commit. Write the INV-6 matrix; its reconcile row is completed by T9. Add property tests over every permutation of red, implementation write and green, plus a collection-only red, untrusted-only runs, legacy facts and no test files: no false pass, and the expected gap each time (SC-001).
-- **T8 — Planner and affected core** (claims FR-027, FR-028, AS-032, AS-033; depends on T5). Implement `planStopChecks` (AD-9), keeping the `planStopCheck` wrapper. Implement `changed-files.ts` (`changedFilesAtStop`, the INV-7 owner) with its unit tests. Add `judgeAffectedRun`, `renderStopChecksBlock` and `renderStopChecksPlan` (AD-11). Add the planner, the plan view and `affected-stop-check.ts` to `DEFAULT_PURE_MODULES`.
+- **T8 — Planner and affected core** (claims FR-027, FR-028, AS-032, AS-033; depends on T5). Implement `planStopChecks` (AD-9), keeping the `planStopCheck` wrapper. Implement `changed-files.ts` (`changedFilesAtStop`, the INV-7 owner) with its unit tests. Add `judgeAffectedRun`, `stopCheckBlockDecision` (the counter transition rule, AD-10), `renderStopChecksBlock` and `renderStopChecksPlan` (AD-11). Add the planner, the plan view and `affected-stop-check.ts` to `DEFAULT_PURE_MODULES`.
 - **Files:** see File Structure, T7 and T8.
 
 ### Phase 4: Shells (depends on Phase 3)
