@@ -69,6 +69,15 @@ export type HookResult =
    * `postToolUseContextResult`.
    */
   | { kind: "post-tool-use-context"; context: string; systemMessage?: string }
+  /**
+   * A PreToolUse admission that also replaces the tool call's input. Claude
+   * Code hands the call `hookSpecificOutput.updatedInput` instead of what the
+   * model sent, without any permission decision (probed on 2.1.286). Hooks
+   * on one matcher run in parallel on the ORIGINAL input, so only one hook may
+   * rewrite a call, and its siblings never see the rewrite. Construct with
+   * `preToolUseRewriteResult`.
+   */
+  | { kind: "pre-tool-use-rewrite"; updatedInput: Readonly<Record<string, unknown>>; systemMessage?: string }
   | { kind: "block"; message: string }
   | { kind: "error"; message: string }
   /**
@@ -105,17 +114,43 @@ export const postToolUseContextResult = (context: string, systemMessage?: string
   ...(systemMessage === undefined ? {} : { systemMessage: nonEmptyMessage(systemMessage) }),
 });
 export const errorResult = (message: string): HookResult => ({ kind: "error", message: nonEmptyMessage(message) });
+/** A PreToolUse admission that replaces the call's input with `updatedInput`. */
+export const preToolUseRewriteResult = (
+  updatedInput: Readonly<Record<string, unknown>>,
+  systemMessage?: string,
+): Extract<HookResult, { kind: "pre-tool-use-rewrite" }> => ({
+  kind: "pre-tool-use-rewrite",
+  updatedInput,
+  ...(systemMessage === undefined ? {} : { systemMessage: nonEmptyMessage(systemMessage) }),
+});
+
+/** The hook results that let the tool call proceed (exit 0). */
+export type HookSuccess = Extract<HookResult, { kind: "allow" | "passthrough" | "post-tool-use-context" | "pre-tool-use-rewrite" }>;
+
+/** The event-specific part of a success's stdout, if its arm has one. */
+function hookSpecificOutputOf(result: HookSuccess): Readonly<Record<string, unknown>> | undefined {
+  switch (result.kind) {
+    case "allow":
+    case "passthrough":
+      return undefined;
+    case "post-tool-use-context":
+      return { hookEventName: "PostToolUse", additionalContext: result.context };
+    case "pre-tool-use-rewrite":
+      return { hookEventName: "PreToolUse", updatedInput: result.updatedInput };
+  }
+}
 
 /** The JSON a successful hook writes to stdout, or null when it has nothing to
  *  say. Successful hooks have stderr swallowed, so stdout JSON is the only
- *  channel that reaches the operator (`systemMessage`) or the model
- *  (`hookSpecificOutput.additionalContext`). */
-export function hookSuccessStdout(result: Extract<HookResult, { kind: "allow" | "passthrough" | "post-tool-use-context" }>): string | null {
-  const context = result.kind === "post-tool-use-context" ? result.context : undefined;
-  if (result.systemMessage === undefined && context === undefined) return null;
+ *  channel that reaches the operator (`systemMessage`), the model
+ *  (`hookSpecificOutput.additionalContext`), or the tool call itself
+ *  (`hookSpecificOutput.updatedInput`). */
+export function hookSuccessStdout(result: HookSuccess): string | null {
+  const hookSpecificOutput = hookSpecificOutputOf(result);
+  if (result.systemMessage === undefined && hookSpecificOutput === undefined) return null;
   return JSON.stringify({
     ...(result.systemMessage === undefined ? {} : { systemMessage: result.systemMessage }),
-    ...(context === undefined ? {} : { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: context } }),
+    ...(hookSpecificOutput === undefined ? {} : { hookSpecificOutput }),
   });
 }
 export const blockResult = (message: string): HookResult => ({ kind: "block", message: nonEmptyMessage(message) });

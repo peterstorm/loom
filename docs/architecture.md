@@ -59,7 +59,7 @@ bun engine/src/cli.ts <hook-type> <handler> [arguments]
 
 Claude Code lifecycle coverage:
 
-- **PreToolUse** — phase order, Wave/task order, prompt substitution, model/Skill policy, direct-edit policy, guarded machine tools, state-path Bash guard.
+- **PreToolUse** — phase order, Wave/task order, prompt substitution, model/Skill policy, direct-edit policy, guarded machine tools, state-path Bash guard. An implementation brief marker (`LOOM_IMPLEMENTATION_BRIEF: T5`) is expanded here: `validate-task-execution` renders the brief, runs every spawn veto and the reservation on it, and returns it as the call's `updatedInput`, so the parent sends only the marker. Its sibling gates expand the marker themselves, because hooks on one matcher see only the original input (`engine/src/handlers/pre-tool-use/implementation-brief-marker.ts`).
 - **PostToolUse** — immediate lint, evidence recording, and orchestration-spawn correlation.
 - **SubagentStart** — active-Agent tracking and guarded-machine epoch binding.
 - **SubagentStop** — phase advancement, implementation proof reconciliation, review/spec evidence capture, orchestration transcript capture, cleanup.

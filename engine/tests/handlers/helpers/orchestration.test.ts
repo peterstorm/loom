@@ -1537,7 +1537,7 @@ describe("orchestration CLI", () => {
         agent: "code-implementer-agent",
         dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
         pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
-        claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2" },
+        claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2", prompt: "LOOM_IMPLEMENTATION_BRIEF: T2" },
       }],
     });
 

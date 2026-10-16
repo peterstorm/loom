@@ -17,6 +17,7 @@ import {
   type DeclaredSkills,
 } from "../../core/agent-skills";
 import { isLoomNamespacedAgent } from "../../core/model-profiles";
+import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 
 export { promptReferencesSkill } from "../../core/agent-skills";
 export type { DeclaredSkills } from "../../core/agent-skills";
@@ -156,4 +157,6 @@ const handler: HookHandler = async (stdin) => {
   return { kind: "allow" };
 };
 
-export default handler;
+// A brief marker is judged as the brief it expands to: the brief, not the
+// marker, must reference the agent's skill.
+export default withBriefMarkerExpanded("validate-agent-skill", handler);

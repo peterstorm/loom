@@ -16,6 +16,7 @@ import { pathExistsFailClosed, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import { findFile } from "../../utils/find-file";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 
 /**
  * The real phase-artifact reads. Artifact absence only ever ADDS a block
@@ -76,7 +77,8 @@ const handler: HookHandler = async (stdin) => {
   }, realPhaseOrderDeps);
 };
 
-export default handler;
+// A brief marker is judged as the brief it expands to.
+export default withBriefMarkerExpanded("validate-phase-order", handler);
 
 // Re-export for tests that import from handler path
 export { detectPhase, checkArtifacts, isPanelAgent, canRunPanelAgent } from "../../core/validate-phase-order";

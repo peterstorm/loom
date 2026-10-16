@@ -14,14 +14,14 @@ describe("briefInvocation", () => {
   it.each([
     { withPrompt: false, prompt: undefined },
     { withPrompt: true, prompt: "rendered brief" },
-  ])("projects both harness invocations (withPrompt: $withPrompt)", ({ withPrompt, prompt }) => {
+  ])("projects both harness invocations with the marker, never the brief (withPrompt: $withPrompt)", ({ withPrompt, prompt }) => {
     const invocation = briefInvocation(brief, "opus", withPrompt);
     expect(invocation).toEqual({
       taskId: "T2",
       agent: "code-implementer-agent",
       dispatch: brief.dispatch,
       pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
-      claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2" },
+      claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2", prompt: "LOOM_IMPLEMENTATION_BRIEF: T2" },
       ...(prompt === undefined ? {} : { prompt }),
     });
     expect("prompt" in invocation).toBe(withPrompt);

@@ -1,13 +1,15 @@
 /**
  * Validate that subagent-spawn prompts have no unsubstituted template variables.
  *
- * Claude Code wrapper — delegates to core/.
+ * Claude Code wrapper — delegates to core/. A brief marker is judged as the
+ * brief it expands to.
  */
 
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { validateTemplateSubstitution } from "../../core/validate-template-substitution";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { pathExistsFailClosed, taskGraphPath } from "../../config";
+import { withBriefMarkerExpanded } from "./implementation-brief-marker";
 
 const handler: HookHandler = async (stdin) => {
   let input: PreToolUseInput;
@@ -28,4 +30,4 @@ const handler: HookHandler = async (stdin) => {
   return validateTemplateSubstitution(prompt, pathExistsFailClosed(taskGraphPath()));
 };
 
-export default handler;
+export default withBriefMarkerExpanded("validate-template-substitution", handler);

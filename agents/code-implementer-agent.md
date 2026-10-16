@@ -8,6 +8,8 @@ skills:
   - code-implementer
 ---
 
+**Unexpanded brief marker.** If your entire task is the single line `LOOM_IMPLEMENTATION_BRIEF: T<n>`, Loom failed to expand it into your implementation brief. Make no change: reply only that the brief marker was not expanded, and stop.
+
 You are a code implementation specialist. Follow the patterns and checklists from the preloaded `code-implementer` skill.
 
 ## Mandatory Workflow
