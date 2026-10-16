@@ -1,0 +1,15 @@
+{
+  "kind": "regex",
+  "name": "inv-4-one-evidence-minting-rule",
+  "description": "Ledger facts are minted by one rule for both harnesses: only the shared tool-evidence recorder (engine/src/machine/tool-evidence-recorder.ts) may call extractEvidence(...) or append to the evidence ledger (.appendEvidence(...)). Claude Code's record-evidence hook and the Pi child recorder normalize their tool call into a HarnessToolCall and hand it to recordToolEvidence; a second minting path would let the two harnesses mint different facts from the same call (G4 slice 2, FR-031, SC-007).",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "\\bextractEvidence\\(|\\.appendEvidence\\(",
+  "flags": "",
+  "excludePatterns": [
+    ".test.ts",
+    "engine/src/machine/extract-evidence.ts",
+    "engine/src/machine/tool-evidence-recorder.ts"
+  ],
+  "fixHint": "Build a HarnessToolCall with the harness adapter and call recordToolEvidence from engine/src/machine/tool-evidence-recorder.ts; never mint or append evidence directly.",
+  "enabled": true
+}
