@@ -35,6 +35,11 @@ export {
   type BashOutcome,
   type ClassifiedTestCommand,
 } from "./extract-evidence";
+export type {
+  PiEvidenceNoRecordReason,
+  PiEvidenceTargetDecision,
+  ToolEvidencePorts,
+} from "./harness-tool-call-types";
 export {
   parseEvidenceLine,
   type EvidenceLineParse,
@@ -111,6 +116,7 @@ export {
   type LoadedMachine,
 } from "./ledger";
 export { fsSessionRegistry } from "./session-registry";
+export { recordToolEvidence } from "./tool-evidence-recorder";
 export {
   bindSessionTaskGraphPointer,
   claimPersistedSessionTaskGraphPointerBinding,

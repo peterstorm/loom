@@ -32,6 +32,15 @@ const SPAWN_AUTHORITY_ALLOWLIST: Readonly<Record<string, string>> = Object.freez
     "runs the edited project's own TypeScript compiler (its tsc.js under the current runtime, no shell) for advisory type diagnostics",
 });
 
+/** Pure command parsers that may compare a shell WORD against the bare literal
+ *  `git`, and why. The exemption covers only that one form: a launch naming git
+ *  is still flagged, and an exempt file must hold no spawn authority at all. */
+const GIT_COMMAND_WORD_ALLOWLIST: Readonly<Record<string, string>> = Object.freeze({
+  "engine/src/machine/extract-evidence.ts":
+    "recognizes a literal `git mv` head in an agent's Bash command so its destination mints a FileWrite (FR-034); it spawns nothing",
+});
+const GIT_LITERAL_FORM = "the literal \"git\"";
+
 const CHILD_PROCESS_MODULES: ReadonlySet<string> = new Set(["child_process", "node:child_process"]);
 const BUN_SPAWN_MEMBERS: ReadonlySet<string> = new Set(["spawn", "spawnSync"]);
 /** Process-launching functions whose command operand is their first argument. */
@@ -141,7 +150,7 @@ function findings(path: string, source: string): readonly Finding[] {
     // The literal `git` anywhere in code — a constant later handed to a
     // launcher, an argv element — names the executable; comments are not nodes.
     if (ts.isStringLiteralLike(node) && node.text === "git" && !ts.isModuleDeclaration(node.parent)) {
-      record("git-executable", node, "the literal \"git\"");
+      record("git-executable", node, GIT_LITERAL_FORM);
     }
     ts.forEachChild(node, visit);
   };
@@ -152,11 +161,12 @@ function findings(path: string, source: string): readonly Finding[] {
 function spawnViolations(path: string, source: string): readonly string[] {
   const all = findings(path, source);
   const violations: string[] = [];
-  const git = all.filter(({ rule }) => rule === "git-executable");
+  const authority = all.filter(({ rule }) => rule === "spawn-authority");
+  const wordExempt = path in GIT_COMMAND_WORD_ALLOWLIST && authority.length === 0;
+  const git = all.filter(({ rule, form }) => rule === "git-executable" && !(wordExempt && form === GIT_LITERAL_FORM));
   if (path !== SEAM && git.length > 0) {
     violations.push(`${path}: names git as an executable outside ${SEAM} (${git.map(({ line, form }) => `line ${line}: ${form}`).join("; ")})`);
   }
-  const authority = all.filter(({ rule }) => rule === "spawn-authority");
   if (!(path in SPAWN_AUTHORITY_ALLOWLIST) && authority.length > 0) {
     violations.push(`${path}: holds process-spawning authority but is not on the justified allowlist (${authority.map(({ line, form }) => `line ${line}: ${form}`).join("; ")})`);
   }
@@ -226,6 +236,20 @@ describe("the engine has exactly one place that spawns git", () => {
     expect(spawnViolations("engine/src/orchestration/completion-check-runner.ts", source)).toEqual([
       expect.stringMatching(/^engine\/src\/orchestration\/completion-check-runner\.ts: names git as an executable outside engine\/src\/utils\/git-execution-policy\.ts \(line \d+: /),
     ]);
+  });
+
+  it("exempts only the bare `git` word in a listed pure parser, never a launch or a spawner", () => {
+    for (const [path] of Object.entries(GIT_COMMAND_WORD_ALLOWLIST)) {
+      const source = readFileSync(join(REPOSITORY_ROOT, path), "utf-8");
+      const own = findings(path, source);
+      expect(own.some(({ form }) => form === GIT_LITERAL_FORM), `${path} is word-allowlisted but no longer compares the literal — remove it`).toBe(true);
+      expect(own.filter(({ rule }) => rule === "spawn-authority"), `${path} must hold no spawn authority`).toEqual([]);
+    }
+    const listed = "engine/src/machine/extract-evidence.ts";
+    expect(spawnViolations(listed, 'const isGitMove = (w: string) => w === "git";')).toEqual([]);
+    expect(spawnViolations(listed, 'execFileSync("git", ["status"]);')).not.toEqual([]);
+    expect(spawnViolations(listed, 'import { spawnSync } from "node:child_process";\nconst head = "git";')).not.toEqual([]);
+    expect(spawnViolations(EXAMPLE, 'const isGitMove = (w: string) => w === "git";')).not.toEqual([]);
   });
 
   it.each([

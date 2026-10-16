@@ -118,7 +118,7 @@ describe("verification manifest exact parsing", () => {
       "id", "scope", "executable", "args", "cwd", "timeoutMs", "report",
     ]);
     expect(Object.keys(parsed.checks[0]!.report)).toEqual(["kind", "path"]);
-    expect(Object.keys(frozen)).toEqual(["schemaVersion", "kind", "source", "manifestDigest", "projectChecks"]);
+    expect(Object.keys(frozen)).toEqual(["schemaVersion", "kind", "source", "manifestDigest", "projectChecks", "testFiles"]);
     expect(Object.keys(frozen.source)).toEqual(["kind", "path", "digest"]);
     expect(Object.keys(frozen.projectChecks[0]!)).toEqual([
       "kind", "checkId", "scope", "executable", "args", "cwd", "timeoutMs", "reportPolicy",

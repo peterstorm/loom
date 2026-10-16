@@ -26,6 +26,7 @@ import {
   type SessionTaskGraphPointerBinding,
 } from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
+import type { PiEvidenceLedgerAddress } from "../engine/src/machine/harness-tool-call-types";
 import { consumePiWriteGrant } from "./write-grant";
 import { cleanupFailureSuffix, runPiCleanupActions } from "./cleanup-actions";
 import type { DurableSpawnClaims, RosterClaim } from "./spawn-claims";
@@ -33,6 +34,9 @@ import type { DurableSpawnClaims, RosterClaim } from "./spawn-claims";
 type ActiveChildWriteGrantScope = Readonly<{
   scopeDirs?: readonly string[];
   grantCwd?: string;
+  /** The parent ledger address the consumed grant carried (AD-8): where this
+   *  child's evidence recorder appends. Absent when the parent issued none. */
+  evidenceLedger?: PiEvidenceLedgerAddress;
 }>;
 
 /** Scoped write policy plus exact outstanding child cleanup authority. */
@@ -63,11 +67,18 @@ export function rejectedChildWriteGrantBlock(rejected: boolean): Readonly<{ bloc
     : null;
 }
 
-function piSystemAgentIdentity(systemPrompt: string): string {
+/** The Loom agent identity a child's rendered system prompt carries, or null
+ *  unless it carries exactly one. A session with one is a Loom subagent child. */
+export function piChildAgentIdentity(systemPrompt: string): string | null {
   PI_AGENT_ID_MARKER.lastIndex = 0;
   const matches = [...systemPrompt.matchAll(PI_AGENT_ID_MARKER)];
-  if (matches.length !== 1) throw new Error("child system prompt must contain exactly one Loom Pi agent identity");
-  return matches[0]![1]!;
+  return matches.length === 1 ? matches[0]![1]! : null;
+}
+
+function piSystemAgentIdentity(systemPrompt: string): string {
+  const identity = piChildAgentIdentity(systemPrompt);
+  if (identity === null) throw new Error("child system prompt must contain exactly one Loom Pi agent identity");
+  return identity;
 }
 
 /** The I/O one child activation performs, injectable so the rollback and
@@ -149,6 +160,7 @@ export async function activatePiChildWriteGrant(
       pointerBinding,
       scopeDirs: grant.scopeDirs,
       grantCwd: grant.cwd,
+      ...(grant.evidenceLedger === null ? {} : { evidenceLedger: grant.evidenceLedger }),
     });
     partialBinding = null;
     ports.writeStderr(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);

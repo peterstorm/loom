@@ -221,7 +221,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
         const mode = fstatSync(receipts).mode;
         try {
           fchmodSync(receipts, 0o500);
-          if (harness === "pi") expect(await native.capture(handle, requests.slice(0, 1), [[JSON.stringify(payload)]])).toMatchObject([undefined, { isError: true, content: [{ text: expect.stringContaining("durable receipt unavailable") }] }]);
+          if (harness === "pi") expect(await native.capture(handle, requests.slice(0, 1), [[JSON.stringify(payload)]])).toMatchObject([undefined, undefined, { isError: true, content: [{ text: expect.stringContaining("durable receipt unavailable") }] }]);
           else expect(await native.capture(handle, requests.slice(0, 1), [[JSON.stringify(payload)]])).toMatchObject([{ kind: "error", message: expect.stringContaining("durable receipt unavailable") }]);
         } finally { fchmodSync(receipts, mode); closeSync(receipts); }
         const path = join(handle.runDirectory, first.outputSlot.path);

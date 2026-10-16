@@ -180,6 +180,16 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/acceptance-contract/stop-check-planner.ts",
   "engine/src/core/acceptance-contract/stop-check-plan.ts",
   "engine/src/core/stop-check-plan-types.ts",
+  // G4 slice 2: the frozen CT-1 (I6) and CT-2 (I7) surfaces, the one test-file
+  // classifier (INV-2) and the one reported-file attribution (INV-5).
+  "engine/src/core/red-then-green-types.ts",
+  "engine/src/core/affected-stop-check-types.ts",
+  "engine/src/core/test-file-classification.ts",
+  "engine/src/core/report-file-attribution.ts",
+  // The harness tool-call adapters both harnesses normalize through (INV-4, T6).
+  "engine/src/core/harness-tool-call.ts",
+  // The frozen CT-3 surface the shared minting rule and both adapters import.
+  "engine/src/machine/harness-tool-call-types.ts",
   // Standalone read coverage (ADR-0022): the obligation, page verification and
   // admission decision, plus the deterministic diff the obligation is frozen
   // from. The Context Packet projection imports both.

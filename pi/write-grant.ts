@@ -13,10 +13,13 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { guardedDirs, subagentDir } from "../engine/src/config";
 import {
+  parseAgentType,
   parseGrantedAgentId,
+  parseSessionId,
   WRITE_GRANT_AGENT_NAMESPACE,
   type GrantedAgentId,
 } from "../engine/src/machine/evidence";
+import type { PiEvidenceLedgerAddress } from "../engine/src/machine/harness-tool-call-types";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 
 const GRANT_VERSION = 1 as const;
@@ -47,6 +50,11 @@ interface StoredWriteGrant {
    *  Absent on implementation-item grants, which stay whole-session like
    *  the original model. Backward compatible: old records lack the key. */
   readonly scopeDirs?: readonly string[];
+  /** The PARENT session ledger the child records its evidence into, and the
+   *  agent type its epoch is stamped with (AD-8, FR-032). Minted by the parent
+   *  at spawn and bound by the MAC. Absent on a record issued without one:
+   *  that grant authorizes writes but no evidence. */
+  readonly evidenceLedger?: Readonly<{ sessionId: string; agentType: string }>;
 }
 
 export interface IssuedWriteGrant {
@@ -69,6 +77,9 @@ export interface ConsumedWriteGrant {
    *  whatever cwd the enforcement site happens to report. */
   readonly cwd: string;
   readonly scopeDirs?: readonly string[];
+  /** Where this child records its ledger facts: the parent session and the
+   *  agent type of its epoch. Null when the parent issued no address. */
+  readonly evidenceLedger: PiEvidenceLedgerAddress | null;
 }
 
 const tokenDigest = (token: string): string => createHash("sha256").update(token).digest("hex");
@@ -85,6 +96,13 @@ function parseStoredGrant(raw: unknown): StoredWriteGrant | null {
   if (scopeDirs !== undefined &&
       (!Array.isArray(scopeDirs) ||
        scopeDirs.some((d) => typeof d !== "string" || d === ""))) {
+    return null;
+  }
+  const ledger = grant.evidenceLedger;
+  if (ledger !== undefined &&
+      (typeof ledger !== "object" || ledger === null || Array.isArray(ledger) ||
+       typeof (ledger as Record<string, unknown>).sessionId !== "string" ||
+       typeof (ledger as Record<string, unknown>).agentType !== "string")) {
     return null;
   }
   return grant.version === GRANT_VERSION &&
@@ -110,6 +128,7 @@ function bindingMac(token: string, grant: Omit<StoredWriteGrant, "bindingMac">):
       taskGraphPath: grant.taskGraphPath,
       expiresAt: grant.expiresAt,
       scopeDirs: grant.scopeDirs,
+      evidenceLedger: grant.evidenceLedger,
     }))
     .digest("hex");
 }
@@ -152,6 +171,41 @@ function scopeIsCwdOrAncestor(dir: string, cwd: string): boolean {
     resolve(dir) === resolvedCwd;
 }
 
+/**
+ * The canonical write scope of a scoped grant: each dir normalized against
+ * `cwd`, refused when it traverses upward, overlaps loom-guarded state or
+ * covers the spawn cwd, and deduplicated after normalization. Undefined (a
+ * whole-session capability) when no dirs are given.
+ */
+function acceptedScopeDirs(dirs: readonly string[] | undefined, cwd: string): readonly string[] | undefined {
+  if (dirs === undefined || dirs.length === 0) return undefined;
+  const seen = new Set<string>();
+  const accepted: string[] = [];
+  for (const dir of dirs) {
+    if (typeof dir !== "string" || dir === "") throw new Error("Pi write grant scope dirs must be non-empty strings");
+    // A `..` segment lets a prompt-derived scope resolve OUTSIDE its intended
+    // `.claude/specs|plans` confinement into a non-guarded sibling that the
+    // guarded/cwd overlap checks below would not catch. Legitimate artifact
+    // scopes never traverse upward, so reject any `..` before resolution.
+    if (dir.split(/[/\\]/).includes("..")) {
+      throw new Error(`Pi write grant scope dir ${dir} contains a '..' traversal segment; refusing scoped grant`);
+    }
+    const normalized = normalizeScopeDir(dir, cwd);
+    if (scopeDirTouchesGuarded(normalized)) {
+      throw new Error(`Pi write grant scope dir ${normalized} overlaps loom-guarded state; refusing scoped grant`);
+    }
+    if (scopeIsCwdOrAncestor(normalized, cwd)) {
+      throw new Error(`Pi write grant scope dir ${normalized} is the spawn cwd or an ancestor; refusing scoped grant`);
+    }
+    // Deduplicate after normalization so syntactically different inputs that
+    // resolve to the same capability scope produce one canonical entry.
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    accepted.push(normalized);
+  }
+  return Object.freeze(accepted);
+}
+
 export function issuePiWriteGrant(input: {
   readonly agent: string;
   readonly taskId: string;
@@ -163,38 +217,19 @@ export function issuePiWriteGrant(input: {
   /** Optional artifact write scope (relative paths resolve against `cwd`).
    *  Absent → whole-session capability (implementation items). */
   readonly scopeDirs?: readonly string[];
+  /** The parent session ledger the child records into (AD-8). Its agent type
+   *  must be the grant agent: one child process is one agent. */
+  readonly evidenceLedger?: PiEvidenceLedgerAddress;
 }): IssuedWriteGrant {
+  if (input.evidenceLedger !== undefined && input.evidenceLedger.agentType !== input.agent) {
+    throw new Error(
+      `Pi write grant evidence ledger agent type ${input.evidenceLedger.agentType} does not match grant agent ${input.agent}`,
+    );
+  }
   const token = randomBytes(32).toString("hex");
   const ttlMs = input.ttlMs ?? PI_WRITE_GRANT_START_WINDOW_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) throw new Error("Pi write grant TTL must be a positive integer");
-  let scopeDirs: readonly string[] | undefined;
-  if (input.scopeDirs !== undefined && input.scopeDirs.length > 0) {
-    const seen = new Set<string>();
-    const accepted: string[] = [];
-    for (const dir of input.scopeDirs) {
-      if (typeof dir !== "string" || dir === "") throw new Error("Pi write grant scope dirs must be non-empty strings");
-      // A `..` segment lets a prompt-derived scope resolve OUTSIDE its intended
-      // `.claude/specs|plans` confinement into a non-guarded sibling that the
-      // guarded/cwd overlap checks below would not catch. Legitimate artifact
-      // scopes never traverse upward, so reject any `..` before resolution.
-      if (dir.split(/[/\\]/).includes("..")) {
-        throw new Error(`Pi write grant scope dir ${dir} contains a '..' traversal segment; refusing scoped grant`);
-      }
-      const normalized = normalizeScopeDir(dir, input.cwd);
-      if (scopeDirTouchesGuarded(normalized)) {
-        throw new Error(`Pi write grant scope dir ${normalized} overlaps loom-guarded state; refusing scoped grant`);
-      }
-      if (scopeIsCwdOrAncestor(normalized, input.cwd)) {
-        throw new Error(`Pi write grant scope dir ${normalized} is the spawn cwd or an ancestor; refusing scoped grant`);
-      }
-      // Deduplicate after normalization so syntactically different inputs that
-      // resolve to the same capability scope produce one canonical entry.
-      if (seen.has(normalized)) continue;
-      seen.add(normalized);
-      accepted.push(normalized);
-    }
-    scopeDirs = Object.freeze(accepted);
-  }
+  const scopeDirs = acceptedScopeDirs(input.scopeDirs, input.cwd);
   const unsigned: Omit<StoredWriteGrant, "bindingMac"> = {
     version: GRANT_VERSION,
     tokenSha256: tokenDigest(token),
@@ -204,6 +239,9 @@ export function issuePiWriteGrant(input: {
     taskGraphPath: resolve(input.taskGraphPath),
     expiresAt: (input.now ?? Date.now()) + ttlMs,
     scopeDirs,
+    ...(input.evidenceLedger === undefined
+      ? {}
+      : { evidenceLedger: { sessionId: input.evidenceLedger.sessionId, agentType: input.evidenceLedger.agentType } }),
   };
   const grant: StoredWriteGrant = Object.freeze({
     ...unsigned,
@@ -270,7 +308,7 @@ export function consumePiWriteGrant(
   // this is the ONE producer the write gate accepts, so the id it hands back
   // must be proven to be in the reserved namespace and binding-safe, not merely
   // spelled that way.
-  const agentId = parseGrantedAgentId(`${WRITE_GRANT_AGENT_NAMESPACE}${token.slice(0, 16)}`);
+  const agentId = piGrantedAgentId(token);
   if (agentId === null) throw new Error("write grant minted an invalid capability identity");
   return Object.freeze({
     agent: grant.agent,
@@ -279,7 +317,31 @@ export function consumePiWriteGrant(
     agentId,
     cwd: grant.cwd,
     scopeDirs: grant.scopeDirs,
+    evidenceLedger: consumedEvidenceLedger(grant),
   });
+}
+
+/**
+ * The capability identity a grant token mints: `pi-grant-` plus the token's
+ * first 16 hex digits. The ONE derivation, shared by consumption (the id the
+ * child binds) and the parent's read-back of that child's epoch
+ * (`piChildEvidence`). Null for anything but a 64-hex token.
+ */
+export function piGrantedAgentId(token: string): GrantedAgentId | null {
+  return TOKEN.test(token) ? parseGrantedAgentId(`${WRITE_GRANT_AGENT_NAMESPACE}${token.slice(0, 16)}`) : null;
+}
+
+/** Parse the stored ledger address into branded ids, re-checking that it
+ *  names the grant agent. A MAC-verified record fails this only if its issuer
+ *  wrote an inconsistent address, so the grant is refused. */
+function consumedEvidenceLedger(grant: StoredWriteGrant): PiEvidenceLedgerAddress | null {
+  if (grant.evidenceLedger === undefined) return null;
+  const sessionId = parseSessionId(grant.evidenceLedger.sessionId);
+  const agentType = parseAgentType(grant.evidenceLedger.agentType);
+  if (sessionId === null || agentType === null || agentType !== grant.agent) {
+    throw new Error("write grant evidence ledger address is invalid");
+  }
+  return Object.freeze({ sessionId, agentType });
 }
 
 /** Errors that genuinely mean "this component does not exist yet" and so are

@@ -15,7 +15,10 @@
  * naive splitting allowed to mint trusted verdicts.
  */
 
-import { FILE_MODIFYING_TOOLS, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
+import { match } from "ts-pattern";
+import { editedFilePath, TEST_COMMAND_PATTERNS } from "../core/tool-vocabulary";
+import { claudeBashOutcome, claudeToolCall, isClaudeToolFailure } from "../core/harness-tool-call";
+import type { BashToolOutcome, HarnessToolCall } from "./harness-tool-call-types";
 import { normalizeShellSpan } from "../core/shell-normalize";
 import {
   classifyFdDupWord,
@@ -326,12 +329,98 @@ function collectTeeTargets(segment: string, out: string[]): void {
   }
 }
 
+/** The words after a literal `mv`, `cp` or `git mv` head, or null for any
+ *  other command. A path-qualified head (`/bin/mv`) is the same command. */
+function moveCopyArguments(words: readonly string[]): readonly string[] | null {
+  const isHead = (word: string | undefined, name: string): boolean =>
+    word !== undefined && (word === name || word.endsWith(`/${name}`));
+  if (isHead(words[0], "mv") || isHead(words[0], "cp")) return words.slice(1);
+  if (isHead(words[0], "git") && words[1] === "mv") return words.slice(2);
+  return null;
+}
+
+/** Options of `mv`/`cp` that take a separate value: that value is never a
+ *  path operand. `t` / `--target-directory` names the destination directory. */
+const VALUE_SHORT_OPTIONS: ReadonlySet<string> = new Set(["t", "S"]);
+const VALUE_LONG_OPTIONS: ReadonlySet<string> = new Set(["--target-directory", "--suffix"]);
+const TARGET_DIRECTORY_PREFIX = "--target-directory=";
+
+/** Where one source lands inside a destination directory. */
+function insideDirectory(directory: string, source: string): string {
+  const base = source.replace(/\/+$/, "").split("/").pop() ?? source;
+  return `${directory.replace(/\/+$/, "")}/${base}`;
+}
+
+/** The operands and `-t` target directory of a `mv`/`cp` argument list. */
+function moveCopyOperands(args: readonly string[]): Readonly<{ operands: readonly string[]; targetDirectory: string | null }> {
+  const operands: string[] = [];
+  let targetDirectory: string | null = null;
+  let optionsDone = false;
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i]!;
+    if (optionsDone || word === "-" || !word.startsWith("-")) {
+      operands.push(word);
+    } else if (word === "--") {
+      optionsDone = true;
+    } else if (word.startsWith(TARGET_DIRECTORY_PREFIX)) {
+      targetDirectory = word.slice(TARGET_DIRECTORY_PREFIX.length);
+    } else if (VALUE_LONG_OPTIONS.has(word)) {
+      const value = args[++i];
+      if (word === "--target-directory" && value !== undefined) targetDirectory = value;
+    } else if (!word.startsWith("--")) {
+      // A short-option group (`-rt DIR`, `-tDIR`): a value-taking letter
+      // consumes the rest of the group, or else the next word.
+      const letters = word.slice(1);
+      const at = [...letters].findIndex((letter) => VALUE_SHORT_OPTIONS.has(letter));
+      if (at !== -1) {
+        const rest = letters.slice(at + 1);
+        const value = rest !== "" ? rest : args[++i];
+        if (letters[at] === "t" && value !== undefined) targetDirectory = value;
+      }
+    }
+  }
+  return { operands, targetDirectory };
+}
+
 /**
- * Every file path a Bash command line's redirections (`>`, `>>`, `&>`,
- * `n>`, `n>>`) or `tee` invocations write — quote-aware and unquoted, per
- * segment, comments stripped. These mint FileWrite evidence so a report
- * artifact STAGED via Bash (`cat > /tmp/r.json <<EOF …`) is visible to the
- * agent-authored-artifact veto exactly like an Edit/Write would be.
+ * Collect the destinations of a literal `mv`, `git mv` or `cp` in one segment
+ * (FR-034): the paths the command creates, so a renamed or copied file
+ * appears under its NEW path. Options are skipped (`--` ends them), and an
+ * option's separate value is never read as a path.
+ * - `-t DIR` / `--target-directory[=]DIR`: every operand lands in DIR.
+ * - Several sources, or a destination spelled with a trailing `/`: the
+ *   destination is a directory, and each source lands inside it.
+ * - Otherwise the last operand is the destination path itself.
+ * Purely textual: `mv a existing-dir` names `existing-dir` itself, not
+ * `existing-dir/a`, which only over-mints. A source is not a write.
+ */
+function collectMoveCopyTargets(segment: string, out: string[]): void {
+  const args = moveCopyArguments(wordsBeforeRedirect(stripEnvPrefix(segment.trim())));
+  if (args === null) return;
+  const { operands, targetDirectory } = moveCopyOperands(args);
+  if (targetDirectory !== null) {
+    for (const source of operands) out.push(insideDirectory(targetDirectory, source));
+    return;
+  }
+  if (operands.length < 2) return;
+  const destination = operands[operands.length - 1]!;
+  const sources = operands.slice(0, -1);
+  if (sources.length > 1 || destination.endsWith("/")) {
+    for (const source of sources) out.push(insideDirectory(destination, source));
+  } else {
+    out.push(destination);
+  }
+}
+
+/**
+ * Every file path a Bash command line writes, as far as its text names it:
+ * redirections (`>`, `>>`, `&>`, `n>`, `n>>`), `tee` targets, and the
+ * destinations of a literal `mv`, `git mv` or `cp` — quote-aware and
+ * unquoted, per segment, comments stripped. These mint FileWrite evidence so
+ * a report artifact STAGED via Bash (`cat > /tmp/r.json <<EOF …`,
+ * `cp staged.json r.json`) is visible to the agent-authored-artifact veto
+ * exactly like an Edit/Write would be, and so a renamed file appears among
+ * the changed files under its new path (FR-034).
  * Unexpandable targets (`$VAR/…`) are kept as-is: they resolve to paths
  * that match nothing, which only fails closed. Targets are NOT resolved
  * here — consumers normalize with their cwd like every other FileWrite.
@@ -342,17 +431,76 @@ export function extractShellWriteTargets(command: string): string[] {
     const segment = stripComment(raw);
     collectRedirectTargets(segment, targets);
     collectTeeTargets(segment, targets);
+    collectMoveCopyTargets(segment, targets);
   }
   return [...new Set(targets)];
 }
 
 /**
- * Outcome of a Bash call as reported by the harness at execution time.
+ * Report discovery for one classified test segment, supplied by the shell.
+ * `currentCallWrites` are the write targets of THIS command line (raw,
+ * unresolved): the lookup must veto them too, because a one-call
+ * `printf '{…}' > r.json; npx vitest --outputFile=r.json` stages an artifact
+ * the persisted ledger cannot know about yet.
+ */
+export type FindReportForSegment = (
+  segment: string,
+  stdout: string,
+  currentCallWrites: readonly string[],
+) => TestReportSummary | null;
+
+/**
+ * Evidence for one normalized tool call — facts only; judgments happen at
+ * fold time. This is the ONE minting rule for both harnesses (INV-4): each
+ * harness adapter (`core/harness-tool-call.ts`) normalizes its own event into
+ * a `HarnessToolCall`, and the shared shell (`tool-evidence-recorder.ts`) is
+ * its only production caller. `Other` tools mint nothing (the vocabulary is
+ * closed on purpose).
  *
- * `interrupted` is carried rather than folded into `exit: null` because the
- * two mean different things downstream: an unknown exit still describes a run
- * that FINISHED, while an interrupted one does not, and only the second breaks
- * the completeness precondition `judgeTestRun` relies on.
+ * FileRead/FileWrite facts mean "the tool SUCCEEDED" — a `failed` file tool
+ * mints nothing, so a machine guard can never be satisfied by an attempt.
+ * The path is the input's `file_path` (Claude Code) or `path` (Pi). Bash
+ * always mints: its exit status IS the ground truth (a failing test run is a
+ * trusted failure, not a non-event), and an unknown exit yields `exit: null`,
+ * which downstream never trusts as success.
+ *
+ * The four-argument form `(toolName, toolInput, toolResponse, find)` is a
+ * compatibility adapter over Claude Code's raw hook shape, kept only for the
+ * pre-AD-8 unit suite: it normalizes with `claudeToolCall` and applies the
+ * same rule. Scheduled for deletion once that suite moves to `HarnessToolCall`.
+ */
+export function extractEvidence(call: HarnessToolCall, findReportForSegment: FindReportForSegment): Evidence[];
+export function extractEvidence(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolResponse: unknown,
+  findReportForSegment: FindReportForSegment,
+): Evidence[];
+export function extractEvidence(
+  callOrToolName: HarnessToolCall | string,
+  ...rest: [FindReportForSegment] | [Record<string, unknown>, unknown, FindReportForSegment]
+): Evidence[] {
+  if (typeof callOrToolName !== "string") return mintEvidence(callOrToolName, rest[0] as FindReportForSegment);
+  const [toolInput, toolResponse, find] = rest as [Record<string, unknown>, unknown, FindReportForSegment];
+  return mintEvidence(
+    claudeToolCall({ tool_name: callOrToolName, tool_input: toolInput, tool_response: toolResponse, cwd: "" }),
+    find,
+  );
+}
+
+function mintEvidence(call: HarnessToolCall, findReportForSegment: FindReportForSegment): Evidence[] {
+  if (call.tool === "Other") return [];
+  if (call.tool === "Bash") return bashEvidence(call.input, call.outcome, findReportForSegment);
+  if (call.outcome.kind === "failed") return [];
+  const path = editedFilePath(call.input);
+  if (path === null) return [];
+  return call.tool === "Read" ? [{ kind: "FileRead", path }] : [{ kind: "FileWrite", path, via: "tool" }];
+}
+
+/**
+ * Outcome of a Bash call in the pre-AD-8 shape. Compatibility only: a thin
+ * delegate over `claudeBashOutcome` for the pre-AD-8 unit suite, scheduled
+ * for deletion with the four-argument `extractEvidence` form.
  */
 export interface BashOutcome {
   readonly exit: number | null;
@@ -361,143 +509,81 @@ export interface BashOutcome {
   readonly interrupted: boolean;
 }
 
-/**
- * Defensively extract exit status + stdout from the harness's tool_response.
- * Field names vary across harness versions; unknown shapes yield exit: null,
- * which downstream treats as untrusted (never as success).
- */
+/** The finished-or-not reading of a Bash outcome that minting needs. */
+function bashRun(outcome: BashToolOutcome): BashOutcome {
+  return match(outcome)
+    .with({ kind: "exited" }, ({ exit, stdout }) => ({ exit, stdout, interrupted: false }))
+    .with({ kind: "exit-unknown" }, ({ stdout }) => ({ exit: null, stdout, interrupted: false }))
+    .with({ kind: "interrupted" }, () => ({ exit: null, stdout: "", interrupted: true }))
+    .exhaustive();
+}
+
+/** Compatibility delegate over `claudeBashOutcome` (see `BashOutcome`). */
 export function extractBashOutcome(toolResponse: unknown): BashOutcome {
-  if (typeof toolResponse === "string") return { exit: null, stdout: toolResponse, interrupted: false };
-  if (typeof toolResponse !== "object" || toolResponse === null) {
-    return { exit: null, stdout: "", interrupted: false };
-  }
-
-  const o = toolResponse as Record<string, unknown>;
-  if (o.interrupted === true) return { exit: null, stdout: "", interrupted: true };
-
-  const exitRaw = o.exit_code ?? o.exitCode ?? o.returnCode ?? o.code;
-  const exit = typeof exitRaw === "number" && Number.isInteger(exitRaw) ? exitRaw : null;
-
-  const stdoutRaw = o.stdout ?? o.output;
-  const stdout = typeof stdoutRaw === "string" ? stdoutRaw : "";
-
-  return { exit, stdout, interrupted: false };
+  return bashRun(claudeBashOutcome(toolResponse));
 }
 
-function filePathOf(toolInput: Record<string, unknown>): string | null {
-  const p = toolInput.file_path ?? toolInput.path;
-  return typeof p === "string" && p.trim() !== "" ? p : null;
-}
-
-/**
- * Did the harness report this tool call as FAILED? Field names vary across
- * harness versions (`is_error`, `success: false`, an `error` payload) —
- * recognize the known error shapes; unknown shapes count as success so the
- * recorder does not silently starve the ledger on a harness format change.
- */
+/** Compatibility delegate over `isClaudeToolFailure` (see `BashOutcome`). */
 export function isToolFailure(toolResponse: unknown): boolean {
-  if (typeof toolResponse !== "object" || toolResponse === null) return false;
-  const o = toolResponse as Record<string, unknown>;
-  if (o.is_error === true || o.isError === true) return true;
-  if (o.success === false) return true;
-  if (typeof o.error === "string" && o.error.trim() !== "") return true;
-  if (typeof o.error === "object" && o.error !== null) return true;
-  return false;
+  return isClaudeToolFailure(toolResponse);
 }
 
-/**
- * Evidence for one tool call — facts only; judgments happen at fold time.
- * Returns [] for tool calls that carry no ground-truth signal (the
- * vocabulary is closed on purpose).
- *
- * FileRead/FileWrite facts mean "the tool SUCCEEDED" — a failed Read/Edit
- * (error-shaped tool_response) mints nothing, so a machine guard can never
- * be satisfied by an attempt. Bash still mints TestRun on error responses:
- * the captured exit status IS the ground truth there (a failing test run is
- * a trusted failure, not a non-event), and a response with no usable exit
- * yields exit: null, which downstream never trusts as success.
- */
-export function extractEvidence(
-  toolName: string,
-  toolInput: Record<string, unknown>,
-  toolResponse: unknown,
-  findReportForSegment: (
-    segment: string,
-    stdout: string,
-    /** Write targets of THIS command line (raw, unresolved) — the report
-     *  lookup must veto them too: a one-call `printf '{…}' > r.json; npx
-     *  vitest --outputFile=r.json` stages an artifact the persisted ledger
-     *  cannot know about yet. */
-    currentCallWrites: readonly string[],
-  ) => TestReportSummary | null,
+function bashEvidence(
+  input: Readonly<Record<string, unknown>>,
+  bashOutcome: BashToolOutcome,
+  findReportForSegment: FindReportForSegment,
 ): Evidence[] {
-  if (toolName === "Read") {
-    if (isToolFailure(toolResponse)) return [];
-    const path = filePathOf(toolInput);
-    return path ? [{ kind: "FileRead", path }] : [];
+  const command = typeof input.command === "string" ? input.command : "";
+  const events: Evidence[] = [];
+  // Bash-authored writes (redirects, tee) mint FileWrite regardless of the
+  // tool_response shape: the shell opens/truncates a redirect target BEFORE
+  // the command runs, so even a failing call wrote the file — and
+  // over-minting only ever vetoes or demotes downstream, never vouches.
+  // Minted with via: "shell": the PreToolUse gate cannot enforce Bash, so
+  // a shell write must never advance a guard the gate is supposed to own
+  // (tokensFor skips them) — it still feeds the artifact veto and the
+  // modified-after-pass demotion. Ordered BEFORE any TestRun from the same
+  // call, so a test command's own `| tee log` / `> log` redirect does not
+  // read as "files modified AFTER the pass" and self-demote a trusted
+  // verdict.
+  const shellWrites = extractShellWriteTargets(command);
+  for (const path of shellWrites) {
+    events.push({ kind: "FileWrite", path, via: "shell" });
   }
-
-  if (FILE_MODIFYING_TOOLS.has(toolName)) {
-    if (isToolFailure(toolResponse)) return [];
-    const path = filePathOf(toolInput);
-    return path ? [{ kind: "FileWrite", path, via: "tool" }] : [];
+  const classified = classifyTestCommandDetailed(command);
+  if (classified !== null) {
+    const outcome = bashRun(bashOutcome);
+    const report = findReportForSegment(classified.segment, outcome.stdout, shellWrites);
+    // The line's exit is attributed to the test segment only when the
+    // composition proves ownership (attributeExit) — `false && npx vitest
+    // …; true` exits 0 without vitest running, and must not classify as a
+    // passing run.
+    //
+    // A BACKGROUNDED test segment (`mvn test &`) drops its report too, not
+    // just its exit. `judgeTestRun` treats an unknown exit beside a green
+    // report as trustworthy — deliberately, because some harnesses report no
+    // exit code at all — but that reasoning assumes the report describes a
+    // FINISHED run. The shell returns from `&` immediately, so the runner is
+    // still writing: surefire has per-class XML for the suites that happen to
+    // have completed, every mtime postdates the call, and the merged summary
+    // reads `total > 0, failed = 0`. That minted `trusted-pass` on a suite
+    // still running, and `applyUntrustedStopResolution` then refused to let
+    // any later evidence correct it. `findReport`'s guards bound STALENESS;
+    // nothing bounds completeness, so the only honest answer here is no
+    // evidence at all.
+    //
+    // An INTERRUPTED call (harness timeout/abort) breaks the same
+    // precondition by the same mechanism — the runner was killed mid-write,
+    // so the classes that finished first left a partial-but-green report —
+    // and it too arrives here as `exit: null`. Both unfinished cases drop the
+    // report; only a run that actually ended may pair one with an exit.
+    const unfinished = classified.isBackgrounded || outcome.interrupted;
+    events.push({
+      kind: "TestRun",
+      command,
+      exit: attributeExit(outcome.exit, classified),
+      report: unfinished ? null : report,
+    });
   }
-
-  if (toolName === "Bash") {
-    const command = typeof toolInput.command === "string" ? toolInput.command : "";
-    const events: Evidence[] = [];
-    // Bash-authored writes (redirects, tee) mint FileWrite regardless of the
-    // tool_response shape: the shell opens/truncates a redirect target BEFORE
-    // the command runs, so even a failing call wrote the file — and
-    // over-minting only ever vetoes or demotes downstream, never vouches.
-    // Minted with via: "shell": the PreToolUse gate cannot enforce Bash, so
-    // a shell write must never advance a guard the gate is supposed to own
-    // (tokensFor skips them) — it still feeds the artifact veto and the
-    // modified-after-pass demotion. Ordered BEFORE any TestRun from the same
-    // call, so a test command's own `| tee log` / `> log` redirect does not
-    // read as "files modified AFTER the pass" and self-demote a trusted
-    // verdict.
-    const shellWrites = extractShellWriteTargets(command);
-    for (const path of shellWrites) {
-      events.push({ kind: "FileWrite", path, via: "shell" });
-    }
-    const classified = classifyTestCommandDetailed(command);
-    if (classified !== null) {
-      const outcome = extractBashOutcome(toolResponse);
-      const report = findReportForSegment(classified.segment, outcome.stdout, shellWrites);
-      // The line's exit is attributed to the test segment only when the
-      // composition proves ownership (attributeExit) — `false && npx vitest
-      // …; true` exits 0 without vitest running, and must not classify as a
-      // passing run.
-      //
-      // A BACKGROUNDED test segment (`mvn test &`) drops its report too, not
-      // just its exit. `judgeTestRun` treats an unknown exit beside a green
-      // report as trustworthy — deliberately, because some harnesses report no
-      // exit code at all — but that reasoning assumes the report describes a
-      // FINISHED run. The shell returns from `&` immediately, so the runner is
-      // still writing: surefire has per-class XML for the suites that happen to
-      // have completed, every mtime postdates the call, and the merged summary
-      // reads `total > 0, failed = 0`. That minted `trusted-pass` on a suite
-      // still running, and `applyUntrustedStopResolution` then refused to let
-      // any later evidence correct it. `findReport`'s guards bound STALENESS;
-      // nothing bounds completeness, so the only honest answer here is no
-      // evidence at all.
-      //
-      // An INTERRUPTED call (harness timeout/abort) breaks the same
-      // precondition by the same mechanism — the runner was killed mid-write,
-      // so the classes that finished first left a partial-but-green report —
-      // and it too arrives here as `exit: null`. Both unfinished cases drop the
-      // report; only a run that actually ended may pair one with an exit.
-      const unfinished = classified.isBackgrounded || outcome.interrupted;
-      events.push({
-        kind: "TestRun",
-        command,
-        exit: attributeExit(outcome.exit, classified),
-        report: unfinished ? null : report,
-      });
-    }
-    return events;
-  }
-
-  return [];
+  return events;
 }

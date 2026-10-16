@@ -32,10 +32,12 @@ import {
   type ElementResult,
   type UnknownRecord,
 } from "./plain-record";
+import { DEFAULT_TEST_FILE_SUFFIXES, ENGINE_DEFAULT_TEST_FILES, type FrozenTestFiles } from "./test-file-classification";
 
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;
-/** Source schema 2 adds the optional `acceptanceRunner`; schema 1 stays valid and means none. */
+/** Source schema 2 adds the optional `acceptanceRunner`, `affectedRunner` and
+ *  `testFileSuffixes`; schema 1 stays valid and means none of them. */
 export const VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION = 2 as const;
 export const VERIFICATION_MANIFEST_KIND = "loom-verification-manifest" as const;
 
@@ -67,6 +69,16 @@ export const ACCEPTANCE_RUNNER_CHECK_ID = "project:acceptance-runner" as const;
 /** The Acceptance Stop Check runs inside a SubagentStop hook whose own timeout
  *  is 300 s (hooks.json); a run must finish well inside it. */
 export const MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS = 240_000;
+/** The check id the affected runner's expanded command carries through the completion runner. */
+export const AFFECTED_RUNNER_CHECK_ID = "project:affected-runner" as const;
+/**
+ * The affected runner's timeout cap. This equals CT-2's
+ * `MAX_AFFECTED_RUNNER_TIMEOUT_MS`. It is restated here because that types file
+ * imports `../types`, which imports this module, so importing it would close a
+ * cycle between top-level domains. `verification-manifest-affected.test.ts`
+ * asserts the two are equal.
+ */
+export const MAX_AFFECTED_RUNNER_TIMEOUT_MS = 120_000;
 
 /**
  * The operator-declared command that runs only some acceptance files: exactly
@@ -83,15 +95,34 @@ export type AcceptanceRunner = Readonly<{
   report: Extract<ReportPolicy, { kind: "required-file" }>;
 }>;
 
+/** The operator-declared affected-test runner (I7): the acceptance runner's
+ *  shape and form checks, capped at `MAX_AFFECTED_RUNNER_TIMEOUT_MS`. This is
+ *  the same type as CT-2's `AffectedRunner`. */
+export type AffectedRunner = AcceptanceRunner;
+
 type VerificationManifestBase = Readonly<{
   kind: typeof VERIFICATION_MANIFEST_KIND;
   checks: readonly VerificationManifestCheck[];
 }>;
 
-/** Schema 1 cannot declare a runner; schema 2 may, and declares one only when the operator does. */
+/** Schema 1 cannot declare a runner or test-file suffixes; schema 2 may, and
+ *  carries each key only when the operator declares it. */
 export type VerificationManifest =
-  | VerificationManifestBase & Readonly<{ schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION; acceptanceRunner?: never }>
-  | VerificationManifestBase & Readonly<{ schemaVersion: typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION; acceptanceRunner?: AcceptanceRunner }>;
+  | VerificationManifestBase & Readonly<{
+      schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION;
+      acceptanceRunner?: never;
+      affectedRunner?: never;
+      testFileSuffixes?: never;
+    }>
+  | VerificationManifestBase & Readonly<{
+      schemaVersion: typeof VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION;
+      acceptanceRunner?: AcceptanceRunner;
+      affectedRunner?: AffectedRunner;
+      testFileSuffixes?: NonEmpty<string>;
+    }>;
+
+/** The engine default's classification: the only one an engine-default source may carry. */
+type EngineDefaultTestFiles = FrozenTestFiles & Readonly<{ source: "engine-default" }>;
 
 type FrozenVerificationManifestBase = Readonly<{
   schemaVersion: typeof VERIFICATION_MANIFEST_SCHEMA_VERSION;
@@ -101,20 +132,29 @@ type FrozenVerificationManifestBase = Readonly<{
 
 /**
  * The engine-default form authorizes nothing: no project check and no runner.
- * An operator-file form's runner is absent on graphs frozen before the runner
- * existed, and whenever the operator declared none: either way the stop check
- * is off.
+ * An operator-file form's runners are absent on graphs frozen before they
+ * existed, and whenever the operator declared none: either way that stop
+ * check is off.
+ *
+ * `testFiles` is the frozen test-file classification (FR-014). Every freeze
+ * made since it existed carries it, the engine default included; only a
+ * TaskGraph frozen before it lacks it, and that absence is exactly the
+ * pre-I6 era.
  */
 export type FrozenVerificationManifest =
   | FrozenVerificationManifestBase & Readonly<{
       source: EngineDefaultSource;
       projectChecks: readonly [];
       acceptanceRunner?: never;
+      affectedRunner?: never;
+      testFiles?: EngineDefaultTestFiles;
     }>
   | FrozenVerificationManifestBase & Readonly<{
       source: OperatorFileSource;
       projectChecks: readonly ProjectWaveCompletionCheck[];
       acceptanceRunner?: AcceptanceRunner;
+      affectedRunner?: AffectedRunner;
+      testFiles?: FrozenTestFiles;
     }>;
 
 export type ProjectVerificationCoverage =
@@ -256,15 +296,39 @@ function parseCheck(raw: unknown, path: string): Parsed<VerificationManifestChec
 /** A stand-in file used only to validate the runner's command shape. */
 const RUNNER_SHAPE_FILE = "acceptance-runner-shape.test.ts";
 
+/**
+ * The two operator-declared runners share one shape and every form check
+ * (FR-015); they differ only in their manifest key, the check id their
+ * command carries, and the timeout cap their stop-hook slot allows.
+ */
+type RunnerRole = Readonly<{
+  key: "acceptanceRunner" | "affectedRunner";
+  checkId: typeof ACCEPTANCE_RUNNER_CHECK_ID | typeof AFFECTED_RUNNER_CHECK_ID;
+  maxTimeoutMs: number;
+}>;
+
+const ACCEPTANCE_RUNNER_ROLE: RunnerRole = freeze({
+  key: "acceptanceRunner",
+  checkId: ACCEPTANCE_RUNNER_CHECK_ID,
+  maxTimeoutMs: MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS,
+});
+
+const AFFECTED_RUNNER_ROLE: RunnerRole = freeze({
+  key: "affectedRunner",
+  checkId: AFFECTED_RUNNER_CHECK_ID,
+  maxTimeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
+});
+
 /** The runner's command with `files` in place of the placeholder, as authorized project-command authority. */
 function runnerCheck(
   runner: Readonly<{ executable: unknown; args: readonly string[]; cwd: unknown; timeoutMs: unknown; report: unknown }>,
   files: readonly string[],
   path: string,
+  role: RunnerRole,
 ): Parsed<ProjectWaveCompletionCheck> {
   const authorized = parseAuthorizedWaveCompletionCheck({
     kind: "project-command",
-    checkId: ACCEPTANCE_RUNNER_CHECK_ID,
+    checkId: role.checkId,
     scope: "wave",
     executable: runner.executable,
     args: runner.args.flatMap((arg) => arg === ACCEPTANCE_RUNNER_FILES_PLACEHOLDER ? files : [arg]),
@@ -276,7 +340,8 @@ function runnerCheck(
   return authorized.value.kind === "project-command" ? success(authorized.value) : failure([`${path} must be a project command`]);
 }
 
-function parseAcceptanceRunner(raw: unknown, path: string): Parsed<AcceptanceRunner> {
+/** Parse one runner under its role's form checks; `path` names its key in the document. */
+function parseRunner(raw: unknown, path: string, role: RunnerRole): Parsed<AcceptanceRunner> {
   const record = exactRecord(raw, ["executable", "args", "cwd", "timeoutMs", "report"], path);
   if (!record.ok) return record;
   const rawArgs = record.value.args;
@@ -292,15 +357,15 @@ function parseAcceptanceRunner(raw: unknown, path: string): Parsed<AcceptanceRun
     errors.push(`${path}.args may use "${ACCEPTANCE_RUNNER_FILES_PLACEHOLDER}" only as a whole argument`);
   }
   const { executable, cwd, timeoutMs, report } = record.value;
-  const shape = runnerCheck({ executable, args: rawArgs, cwd, timeoutMs, report }, [RUNNER_SHAPE_FILE], path);
+  const shape = runnerCheck({ executable, args: rawArgs, cwd, timeoutMs, report }, [RUNNER_SHAPE_FILE], path, role);
   if (!shape.ok) errors.push(...shape.error.errors);
   if (shape.ok) {
     const { reportPolicy } = shape.value;
     if (reportPolicy.kind !== "required-file" || !reportPolicy.path.startsWith(`${COMPLETION_REPORT_ROOT}/`)) {
       errors.push(`${path}.report must be a required-file beneath protected ${COMPLETION_REPORT_ROOT}/`);
     }
-    if (shape.value.timeoutMs > MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS) {
-      errors.push(`${path}.timeoutMs must be at most ${MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS}, inside the stop hook's own timeout`);
+    if (shape.value.timeoutMs > role.maxTimeoutMs) {
+      errors.push(`${path}.timeoutMs must be at most ${role.maxTimeoutMs}, inside the stop hook's own timeout`);
     }
   }
   if (errors.length > 0 || !shape.ok || shape.value.reportPolicy.kind !== "required-file") return failure(errors);
@@ -323,9 +388,25 @@ export function acceptanceRunnerCheck(
   runner: AcceptanceRunner,
   files: NonEmpty<string>,
 ): Parsed<ProjectWaveCompletionCheck> {
+  return roleRunnerCheck(runner, files, ACCEPTANCE_RUNNER_ROLE);
+}
+
+/**
+ * The affected runner's exact command over a Task's changed files, formed
+ * exactly as `acceptanceRunnerCheck` forms the acceptance runner's, under the
+ * affected runner's own check id.
+ */
+export function affectedRunnerCheck(
+  runner: AffectedRunner,
+  files: NonEmpty<string>,
+): Parsed<ProjectWaveCompletionCheck> {
+  return roleRunnerCheck(runner, files, AFFECTED_RUNNER_ROLE);
+}
+
+function roleRunnerCheck(runner: AcceptanceRunner, files: readonly string[], role: RunnerRole): Parsed<ProjectWaveCompletionCheck> {
   return total(() => {
-    const relative = filesFromRunnerCwd(runner.cwd, files);
-    return relative.ok ? runnerCheck(runner, relative.value, "acceptanceRunner") : relative;
+    const relative = filesFromRunnerCwd(runner.cwd, files, role);
+    return relative.ok ? runnerCheck(runner, relative.value, role.key, role) : relative;
   });
 }
 
@@ -334,25 +415,97 @@ export function acceptanceRunnerCheck(
  * outside that directory cannot be named to a runner that only collects
  * beneath it, so it is refused rather than passed through unmatched.
  */
-function filesFromRunnerCwd(cwd: RepositoryRelativePath, files: readonly string[]): Parsed<readonly string[]> {
+function filesFromRunnerCwd(cwd: RepositoryRelativePath, files: readonly string[], role: RunnerRole): Parsed<readonly string[]> {
   if (cwd === ".") return success(files);
   const prefix = `${cwd}/`;
   const outside = files.filter((file) => !file.startsWith(prefix));
   return outside.length > 0
-    ? failure([`acceptanceRunner.cwd ${cwd} does not contain ${outside.join(", ")}`])
+    ? failure([`${role.key}.cwd ${cwd} does not contain ${outside.join(", ")}`])
     : success(freezeArray(files.map((file) => file.slice(prefix.length))));
 }
 
 /**
- * A runner must not share a report path with a Wave check, or one run would
- * overwrite the other's evidence. Both the source and the frozen parse apply
- * it, so a frozen manifest carries the invariant in its own parse.
+ * A runner must not share a report path with a Wave check, nor the affected
+ * runner with the acceptance runner, or one run would overwrite the other's
+ * evidence. Both the source and the frozen parse apply it, so a frozen
+ * manifest carries the invariant in its own parse.
  */
 function runnerReportConflicts(runner: AcceptanceRunner, checkReports: readonly ReportPolicy[], path: string): readonly string[] {
   return checkReports.some((report) => report.kind === "required-file" && report.path === runner.report.path)
     ? [`${path}.report.path ${runner.report.path} is also a Wave check's report path`]
     : [];
 }
+
+function affectedAcceptanceConflict(affected: AffectedRunner, acceptance: AcceptanceRunner | null, path: string): readonly string[] {
+  return acceptance !== null && acceptance.report.path === affected.report.path
+    ? [`${path}.report.path ${affected.report.path} is also the acceptanceRunner's report path`]
+    : [];
+}
+
+/** Every report-path conflict among the runners and the Wave checks. */
+function reportConflicts(
+  acceptance: AcceptanceRunner | null,
+  affected: AffectedRunner | null,
+  checkReports: readonly ReportPolicy[],
+  path: string,
+): readonly string[] {
+  return [
+    ...(acceptance === null ? [] : runnerReportConflicts(acceptance, checkReports, `${path}.acceptanceRunner`)),
+    ...(affected === null ? [] : [
+      ...runnerReportConflicts(affected, checkReports, `${path}.affectedRunner`),
+      ...affectedAcceptanceConflict(affected, acceptance, `${path}.affectedRunner`),
+    ]),
+  ];
+}
+
+/**
+ * Operator test-file suffixes: a non-empty list of distinct, non-empty
+ * suffixes, none naming a directory. Declared order is kept, since it is
+ * what the operator froze and what the digest covers.
+ */
+function parseTestFileSuffixes(raw: unknown, path: string): Parsed<NonEmpty<string>> {
+  if (!Array.isArray(raw) || raw.length === 0 || !raw.every((suffix): suffix is string => typeof suffix === "string")) {
+    return failure([`${path} must be a non-empty array of strings`]);
+  }
+  const errors = raw.flatMap((suffix, index) => suffix === "" || /[\\/]/.test(suffix)
+    ? [`${path}[${index}] must be a non-empty suffix without a path separator`]
+    : []);
+  const repeated = [...new Set(raw.filter((suffix, index) => raw.indexOf(suffix) !== index))].sort(compareStrings);
+  if (repeated.length > 0) errors.push(`${path} repeats suffixes: ${repeated.join(", ")}`);
+  return errors.length === 0 ? success(freezeArray(raw) as NonEmpty<string>) : failure(errors);
+}
+
+const TEST_FILES_SOURCES: ReadonlySet<unknown> = new Set<FrozenTestFiles["source"]>(["operator-manifest", "engine-default"]);
+
+function parseFrozenTestFiles(raw: unknown, path: string): Parsed<FrozenTestFiles> {
+  const record = exactRecord(raw, ["source", "suffixes"], path);
+  if (!record.ok) return record;
+  const { source } = record.value;
+  const suffixes = parseTestFileSuffixes(record.value.suffixes, `${path}.suffixes`);
+  const errors = [
+    ...(TEST_FILES_SOURCES.has(source) ? [] : [`${path}.source must be operator-manifest or engine-default`]),
+    ...(suffixes.ok ? [] : suffixes.error.errors),
+  ];
+  return errors.length === 0 && suffixes.ok
+    ? success(freeze({ source: source as FrozenTestFiles["source"], suffixes: suffixes.value }))
+    : failure(errors);
+}
+
+const isEngineDefaultSuffixes = (suffixes: readonly string[]): boolean =>
+  suffixes.length === DEFAULT_TEST_FILE_SUFFIXES.length &&
+  suffixes.every((suffix, index) => suffix === DEFAULT_TEST_FILE_SUFFIXES[index]);
+
+const NOT_ENGINE_DEFAULT_TEST_FILES =
+  `frozenVerificationManifest.testFiles.suffixes must equal the engine default (${DEFAULT_TEST_FILE_SUFFIXES.join(", ")}) when source is engine-default`;
+
+/** The refusal of an `engine-default` classification whose suffixes are not exactly the engine default, in order. */
+const engineDefaultTestFilesErrors = (testFiles: FrozenTestFiles | null): readonly string[] =>
+  testFiles?.source === "engine-default" && !isEngineDefaultSuffixes(testFiles.suffixes) ? [NOT_ENGINE_DEFAULT_TEST_FILES] : [];
+
+/** The canonical classification: an `engine-default` label always means the
+ *  shared engine default, never the suffixes a stored form carried. */
+const canonicalTestFiles = (testFiles: FrozenTestFiles | null): FrozenTestFiles | null =>
+  testFiles?.source === "engine-default" ? ENGINE_DEFAULT_TEST_FILES : testFiles;
 
 function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationManifestCheck[]> {
   const collected = collectDenseArray(raw, path, (value, elementPath) => toElementResult(parseCheck(value, elementPath)));
@@ -369,8 +522,22 @@ function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationMa
   return errors.length === 0 ? success(freezeArray(checks)) : failure(errors);
 }
 
-/** Whether a raw document names an `acceptanceRunner` key, so the exact record admits it. */
-const declaresRunner = (raw: unknown): boolean => isPlainRecord(raw) && Object.hasOwn(raw, "acceptanceRunner");
+/** Which of these optional keys a raw document names, so the exact record admits them. */
+const declaredKeys = <const K extends string>(raw: unknown, keys: readonly K[]): readonly K[] =>
+  isPlainRecord(raw) ? keys.filter((key) => Object.hasOwn(raw, key)) : [];
+
+/** Parse an optional key: null when the document does not declare it. */
+const optionalKey = <T>(declared: readonly string[], key: string, parse: () => Parsed<T>): Parsed<T> | null =>
+  declared.includes(key) ? parse() : null;
+
+const errorsOf = (...results: readonly (Parsed<unknown> | null)[]): readonly string[] =>
+  results.flatMap((result) => result === null || result.ok ? [] : result.error.errors);
+
+/** The value of an optional key that parsed, or null when it was not declared. */
+const valueOrNull = <T>(result: Parsed<T> | null): T | null => result?.ok === true ? result.value : null;
+
+const SOURCE_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFileSuffixes"] as const;
+const FROZEN_OPTIONAL_KEYS = ["acceptanceRunner", "affectedRunner", "testFiles"] as const;
 
 function parseDocument(raw: unknown): Parsed<VerificationManifest> {
   // A non-record falls through to exactRecord, which names the shape error.
@@ -381,30 +548,35 @@ function parseDocument(raw: unknown): Parsed<VerificationManifest> {
       `verificationManifest.schemaVersion must equal ${VERIFICATION_MANIFEST_SCHEMA_VERSION} or ${VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION}`,
     ]);
   }
-  // Schema 1 never admits the key, so a schema-1 runner is refused as an unknown field.
-  const hasRunner = runnerSchema && declaresRunner(raw);
-  const record = exactRecord(
-    raw,
-    ["schemaVersion", "kind", "checks", ...(hasRunner ? ["acceptanceRunner"] : [])],
-    "verificationManifest",
-  );
+  // Schema 1 never admits the optional keys, so each is refused there as an unknown field.
+  const declared = runnerSchema ? declaredKeys(raw, SOURCE_OPTIONAL_KEYS) : [];
+  const record = exactRecord(raw, ["schemaVersion", "kind", "checks", ...declared], "verificationManifest");
   if (!record.ok) return record;
   const errors: string[] = [];
   if (record.value.kind !== VERIFICATION_MANIFEST_KIND) {
     errors.push(`verificationManifest.kind must equal ${VERIFICATION_MANIFEST_KIND}`);
   }
   const checks = parseChecks(record.value.checks, "verificationManifest.checks");
-  if (!checks.ok) errors.push(...checks.error.errors);
-  const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "verificationManifest.acceptanceRunner") : null;
-  if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
-  if (runner?.ok && checks.ok) errors.push(...runnerReportConflicts(runner.value, checks.value.map(({ report }) => report), "verificationManifest.acceptanceRunner"));
-  if (errors.length > 0 || !checks.ok || (runner !== null && !runner.ok)) return failure(errors);
+  const acceptance = optionalKey(declared, "acceptanceRunner", () =>
+    parseRunner(record.value.acceptanceRunner, "verificationManifest.acceptanceRunner", ACCEPTANCE_RUNNER_ROLE));
+  const affected = optionalKey(declared, "affectedRunner", () =>
+    parseRunner(record.value.affectedRunner, "verificationManifest.affectedRunner", AFFECTED_RUNNER_ROLE));
+  const suffixes = optionalKey(declared, "testFileSuffixes", () =>
+    parseTestFileSuffixes(record.value.testFileSuffixes, "verificationManifest.testFileSuffixes"));
+  errors.push(...errorsOf(checks, acceptance, affected, suffixes));
+  if (!checks.ok || errors.length > 0) return failure(errors);
+  const conflicts = reportConflicts(
+    valueOrNull(acceptance), valueOrNull(affected), checks.value.map(({ report }) => report), "verificationManifest",
+  );
+  if (conflicts.length > 0) return failure(conflicts);
   const manifest: VerificationManifest = runnerSchema
     ? freeze({
         schemaVersion: VERIFICATION_MANIFEST_RUNNER_SCHEMA_VERSION,
         kind: VERIFICATION_MANIFEST_KIND,
         checks: checks.value,
-        ...(runner === null ? {} : { acceptanceRunner: runner.value }),
+        ...(acceptance?.ok === true ? { acceptanceRunner: acceptance.value } : {}),
+        ...(affected?.ok === true ? { affectedRunner: affected.value } : {}),
+        ...(suffixes?.ok === true ? { testFileSuffixes: suffixes.value } : {}),
       })
     : freeze({ schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION, kind: VERIFICATION_MANIFEST_KIND, checks: checks.value });
   return success(manifest);
@@ -433,10 +605,17 @@ function runnerAuthorityJson(runner: AcceptanceRunner): JsonValue {
   };
 }
 
+/** The optional frozen fields; null is absent, so a pre-feature form keeps its digest. */
+type FrozenOptionalFields = Readonly<{
+  acceptanceRunner: AcceptanceRunner | null;
+  affectedRunner: AffectedRunner | null;
+  testFiles: FrozenTestFiles | null;
+}>;
+
 function manifestAuthorityJson(
   source: VerificationManifestSource,
   checks: readonly ProjectWaveCompletionCheck[],
-  runner: AcceptanceRunner | null,
+  { acceptanceRunner, affectedRunner, testFiles }: FrozenOptionalFields,
 ): JsonValue {
   const projectChecks: readonly JsonValue[] = checks.map((check): JsonValue => ({
     kind: check.kind,
@@ -455,49 +634,72 @@ function manifestAuthorityJson(
       ? { kind: source.kind }
       : { kind: source.kind, path: source.path, digest: source.digest },
     projectChecks,
-    ...(runner === null ? {} : { acceptanceRunner: runnerAuthorityJson(runner) }),
+    ...(acceptanceRunner === null ? {} : { acceptanceRunner: runnerAuthorityJson(acceptanceRunner) }),
+    ...(affectedRunner === null ? {} : { affectedRunner: runnerAuthorityJson(affectedRunner) }),
+    ...(testFiles === null ? {} : { testFiles: { source: testFiles.source, suffixes: testFiles.suffixes } }),
   };
 }
 
 const ENGINE_DEFAULT_SOURCE: EngineDefaultSource = freeze({ kind: "engine-default" as const });
 
-/** What a frozen manifest is sealed from: the engine default carries nothing to authorize. */
+/** What a frozen manifest is sealed from: the engine default authorizes nothing,
+ *  and carries at most the engine-default classification. */
 type FrozenAuthority =
-  | Readonly<{ kind: "engine-default" }>
-  | Readonly<{
+  | Readonly<{ kind: "engine-default"; testFiles: EngineDefaultTestFiles | null }>
+  | FrozenOptionalFields & Readonly<{
       kind: "operator-file";
       source: OperatorFileSource;
       checks: readonly ProjectWaveCompletionCheck[];
-      runner: AcceptanceRunner | null;
     }>;
 
 function frozenManifest(authority: FrozenAuthority): FrozenVerificationManifest {
   if (authority.kind === "engine-default") {
+    const { testFiles } = authority;
     return freeze({
       schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
       kind: "frozen-verification-manifest",
       source: ENGINE_DEFAULT_SOURCE,
-      manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], null)),
+      manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], {
+        acceptanceRunner: null, affectedRunner: null, testFiles,
+      })),
       projectChecks: Object.freeze([] as const),
+      ...(testFiles === null ? {} : { testFiles }),
     });
   }
-  const { source, runner } = authority;
+  const { source, acceptanceRunner, affectedRunner, testFiles } = authority;
   const projectChecks = freezeArray([...authority.checks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
   return freeze({
     schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
     kind: "frozen-verification-manifest",
     source,
-    manifestDigest: digestJson(manifestAuthorityJson(source, projectChecks, runner)),
+    manifestDigest: digestJson(manifestAuthorityJson(source, projectChecks, { acceptanceRunner, affectedRunner, testFiles })),
     projectChecks,
-    ...(runner === null ? {} : { acceptanceRunner: runner }),
+    ...(acceptanceRunner === null ? {} : { acceptanceRunner }),
+    ...(affectedRunner === null ? {} : { affectedRunner }),
+    ...(testFiles === null ? {} : { testFiles }),
   });
 }
 
-const ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default" });
+const ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", testFiles: ENGINE_DEFAULT_TEST_FILES });
+const LEGACY_ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", testFiles: null });
 
-/** Freeze the absent-source compatibility authority. It can never accept project commands. */
+/**
+ * The authority population freezes when `.loom/verification-manifest.json` is
+ * absent. It can never accept project commands, and it carries the engine
+ * default test-file classification (FR-014).
+ */
 export function defaultVerificationManifest(): FrozenVerificationManifest {
   return ENGINE_DEFAULT_MANIFEST;
+}
+
+/**
+ * The engine default exactly as frozen before the test-file classification
+ * existed: same bytes, same digest. Only read-time fallbacks for a TaskGraph
+ * that carries no `verification_manifest` use it, because that graph's
+ * receipts were stamped with this digest.
+ */
+export function legacyDefaultVerificationManifest(): FrozenVerificationManifest {
+  return LEGACY_ENGINE_DEFAULT_MANIFEST;
 }
 
 function rawByteDigest(bytes: Uint8Array): ArtifactDigest {
@@ -531,7 +733,11 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<FrozenVeri
       kind: "operator-file",
       source,
       checks: parsed.value.checks.map(projectCheck),
-      runner: parsed.value.acceptanceRunner ?? null,
+      acceptanceRunner: parsed.value.acceptanceRunner ?? null,
+      affectedRunner: parsed.value.affectedRunner ?? null,
+      testFiles: parsed.value.testFileSuffixes === undefined
+        ? ENGINE_DEFAULT_TEST_FILES
+        : freeze({ source: "operator-manifest" as const, suffixes: parsed.value.testFileSuffixes }),
     }));
   });
 }
@@ -588,46 +794,116 @@ function parseProjectChecks(raw: unknown): Parsed<readonly ProjectWaveCompletion
     : failure(errors);
 }
 
-/** Rehydrate only exact frozen authority whose canonical digest still matches. */
+/** Each frozen field parsed independently; an optional key is null when it was not declared. */
+type FrozenFields = Readonly<{
+  source: Parsed<VerificationManifestSource>;
+  checks: Parsed<readonly ProjectWaveCompletionCheck[]>;
+  declaredDigest: ReturnType<typeof parseArtifactDigest>;
+  acceptance: Parsed<AcceptanceRunner> | null;
+  affected: Parsed<AcceptanceRunner> | null;
+  testFiles: Parsed<FrozenTestFiles> | null;
+}>;
+
+function frozenTagErrors(record: UnknownRecord): string[] {
+  const errors: string[] = [];
+  if (record.schemaVersion !== VERIFICATION_MANIFEST_SCHEMA_VERSION) {
+    errors.push(`frozenVerificationManifest.schemaVersion must equal ${VERIFICATION_MANIFEST_SCHEMA_VERSION}`);
+  }
+  if (record.kind !== "frozen-verification-manifest") {
+    errors.push("frozenVerificationManifest.kind must equal frozen-verification-manifest");
+  }
+  return errors;
+}
+
+function parseFrozenFields(record: UnknownRecord, declared: readonly string[]): FrozenFields {
+  return freeze({
+    source: parseSource(record.source),
+    checks: parseProjectChecks(record.projectChecks),
+    declaredDigest: parseArtifactDigest(record.manifestDigest),
+    acceptance: optionalKey(declared, "acceptanceRunner", () =>
+      parseRunner(record.acceptanceRunner, "frozenVerificationManifest.acceptanceRunner", ACCEPTANCE_RUNNER_ROLE)),
+    affected: optionalKey(declared, "affectedRunner", () =>
+      parseRunner(record.affectedRunner, "frozenVerificationManifest.affectedRunner", AFFECTED_RUNNER_ROLE)),
+    testFiles: optionalKey(declared, "testFiles", () =>
+      parseFrozenTestFiles(record.testFiles, "frozenVerificationManifest.testFiles")),
+  });
+}
+
+/** Cross-field refusals, in their reporting order: report conflicts, engine-default authority, digest shape. */
+function frozenFieldErrors(fields: FrozenFields): string[] {
+  const { source, checks, declaredDigest, acceptance, affected, testFiles } = fields;
+  const errors = [...errorsOf(source, checks, acceptance, affected, testFiles)];
+  if (checks.ok) {
+    errors.push(...reportConflicts(
+      valueOrNull(acceptance), valueOrNull(affected), checks.value.map(({ reportPolicy }) => reportPolicy), "frozenVerificationManifest",
+    ));
+  }
+  const engineDefault = source.ok && source.value.kind === "engine-default";
+  if (engineDefault && acceptance !== null) {
+    errors.push("frozenVerificationManifest engine-default source cannot authorize an acceptance runner");
+  }
+  if (engineDefault && affected !== null) {
+    errors.push("frozenVerificationManifest engine-default source cannot authorize an affected runner");
+  }
+  if (engineDefault && valueOrNull(testFiles)?.source === "operator-manifest") {
+    errors.push("frozenVerificationManifest engine-default source cannot carry an operator-manifest testFiles");
+  }
+  if (!declaredDigest.ok) errors.push(`frozenVerificationManifest.manifestDigest: ${declaredDigest.error.message}`);
+  if (engineDefault && checks.ok && checks.value.length > 0) {
+    errors.push("frozenVerificationManifest engine-default source cannot authorize project checks");
+  }
+  return errors;
+}
+
+/** Rebuild the canonical authority from admitted fields, so its digest can be re-derived. */
+function canonicalFrozenManifest(
+  source: VerificationManifestSource,
+  checks: readonly ProjectWaveCompletionCheck[],
+  fields: FrozenFields,
+): FrozenVerificationManifest {
+  const frozenTestFiles = canonicalTestFiles(valueOrNull(fields.testFiles));
+  return source.kind === "engine-default"
+    ? frozenManifest({
+        kind: "engine-default",
+        // frozenFieldErrors refused an operator-manifest classification under this source.
+        testFiles: frozenTestFiles === null ? null : ENGINE_DEFAULT_TEST_FILES,
+      })
+    : frozenManifest({
+        kind: "operator-file",
+        source,
+        checks,
+        acceptanceRunner: valueOrNull(fields.acceptance),
+        affectedRunner: valueOrNull(fields.affected),
+        testFiles: frozenTestFiles,
+      });
+}
+
+/**
+ * Rehydrate only exact frozen authority whose canonical digest still matches
+ * and whose `engine-default` classification is exactly the engine default.
+ * Both refusals are reported together, the named classification one first.
+ */
 export function parseFrozenVerificationManifest(raw: unknown): Parsed<FrozenVerificationManifest> {
   return total(() => {
-    const hasRunner = declaresRunner(raw);
+    const declared = declaredKeys(raw, FROZEN_OPTIONAL_KEYS);
     const record = exactRecord(
       raw,
-      ["schemaVersion", "kind", "source", "manifestDigest", "projectChecks", ...(hasRunner ? ["acceptanceRunner"] : [])],
+      ["schemaVersion", "kind", "source", "manifestDigest", "projectChecks", ...declared],
       "frozenVerificationManifest",
     );
     if (!record.ok) return record;
-    const tagErrors: string[] = [];
-    if (record.value.schemaVersion !== VERIFICATION_MANIFEST_SCHEMA_VERSION) {
-      tagErrors.push(`frozenVerificationManifest.schemaVersion must equal ${VERIFICATION_MANIFEST_SCHEMA_VERSION}`);
-    }
-    if (record.value.kind !== "frozen-verification-manifest") {
-      tagErrors.push("frozenVerificationManifest.kind must equal frozen-verification-manifest");
-    }
-    const source = parseSource(record.value.source);
-    const checks = parseProjectChecks(record.value.projectChecks);
-    const declaredDigest = parseArtifactDigest(record.value.manifestDigest);
-    const runner = hasRunner ? parseAcceptanceRunner(record.value.acceptanceRunner, "frozenVerificationManifest.acceptanceRunner") : null;
-    const errors = [...tagErrors, ...[source, checks].flatMap((result) => result.ok ? [] : result.error.errors)];
-    if (runner !== null && !runner.ok) errors.push(...runner.error.errors);
-    if (runner?.ok && checks.ok) {
-      errors.push(...runnerReportConflicts(runner.value, checks.value.map(({ reportPolicy }) => reportPolicy), "frozenVerificationManifest.acceptanceRunner"));
-    }
-    if (source.ok && source.value.kind === "engine-default" && runner !== null) {
-      errors.push("frozenVerificationManifest engine-default source cannot authorize an acceptance runner");
-    }
-    if (!declaredDigest.ok) errors.push(`frozenVerificationManifest.manifestDigest: ${declaredDigest.error.message}`);
-    if (source.ok && source.value.kind === "engine-default" && checks.ok && checks.value.length > 0) {
-      errors.push("frozenVerificationManifest engine-default source cannot authorize project checks");
-    }
-    if (errors.length > 0 || !source.ok || !checks.ok || !declaredDigest.ok || (runner !== null && !runner.ok)) return failure(errors);
-    const canonical = source.value.kind === "engine-default"
-      ? frozenManifest({ kind: "engine-default" })
-      : frozenManifest({ kind: "operator-file", source: source.value, checks: checks.value, runner: runner === null ? null : runner.value });
-    return canonical.manifestDigest === declaredDigest.value
-      ? success(canonical)
-      : failure(["frozenVerificationManifest.manifestDigest does not match its canonical authority"]);
+    const fields = parseFrozenFields(record.value, declared);
+    const { source, checks, declaredDigest } = fields;
+    const errors = [...frozenTagErrors(record.value), ...frozenFieldErrors(fields)];
+    if (errors.length > 0 || !source.ok || !checks.ok || !declaredDigest.ok) return failure(errors);
+    const canonical = canonicalFrozenManifest(source.value, checks.value, fields);
+    const refusals = [
+      ...engineDefaultTestFilesErrors(valueOrNull(fields.testFiles)),
+      ...(canonical.manifestDigest === declaredDigest.value
+        ? []
+        : ["frozenVerificationManifest.manifestDigest does not match its canonical authority"]),
+    ];
+    return refusals.length === 0 ? success(canonical) : failure(refusals);
   });
 }
 
