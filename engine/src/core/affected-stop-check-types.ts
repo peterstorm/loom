@@ -1,5 +1,5 @@
 /**
- * Acceptance Contract CT-2's frozen types file: the surface of I7, the
+ * Acceptance Contract CT-2's types file: the surface of I7, the
  * affected-test stop check, and of its `helper stop-check-plan` view.
  *
  * At every implementation Task's stop (claimant or not), the operator-declared
@@ -12,16 +12,17 @@
  * completion evidence: no type below reaches proof, receipts or Wave Gate
  * evidence (FR-026).
  *
- * Declarations only: the types, sealed ADTs, function signatures and fixed
- * texts that the planner, the stop shell and the plan view share. No logic
- * lives here; its bytes freeze at the CT-2 Wave Gate.
+ * Types and fixed constants only: the types, sealed ADTs, function
+ * signatures, budget constants and fixed text tables that the planner, the
+ * stop shell and the plan view share. No function is implemented here. This
+ * file is the CT-2 contract surface, changed only through a CT-2 amendment.
  *
  * Layering note: `StopChecksPorts` is the stop shell's port, and the core
  * owns its shape. The core may not import the shell's canonical repository
  * root or the completion runner's result type, so the port is parametric over
  * both. The shell instantiates it as
  * `StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>`,
- * which is a structural superset of today's `StopCheckPorts`.
+ * which is a structural superset of `StopCheckPorts`.
  */
 
 import type { OwedStopCheck } from "./acceptance-contract";
@@ -60,8 +61,8 @@ export const AFFECTED_STOP_CHECK_MAX_BLOCKS = 3;
  *  `acceptanceRunner`'s and from every Wave check's. */
 export type AffectedRunner = AcceptanceRunner;
 
-/** The frozen test-file classification. Every freeze made after this feature
- *  carries it, and it enters the manifest digest. */
+/** The frozen test-file classification. The freezer always records it, and it
+ *  enters the manifest digest; a manifest frozen before the field existed lacks it. */
 export type FrozenTestFiles = Readonly<{
   source: "operator-manifest" | "engine-default";
   suffixes: NonEmpty<string>;
@@ -120,7 +121,7 @@ export type AffectedPlan =
   | Readonly<{ kind: "off"; reason: AffectedOffReason }>
   | Readonly<{ kind: "on"; files: NonEmpty<ChangedFilePath>; command: StopCheckCommand; reportPath: string }>;
 
-/** The acceptance check's plan, which is the `off | on` arm `planStopCheck` decides today, unchanged. */
+/** The acceptance check's plan, the `off | on` arm `planStopCheck` decides, unchanged. */
 export type AcceptancePlan =
   | Readonly<{ kind: "off"; reason: StopCheckOffReason }>
   | Readonly<{ kind: "on"; check: OwedStopCheck; command: StopCheckCommand; reportPath: string }>;
@@ -180,7 +181,7 @@ export type StopCheckRunnerLock =
  * The I/O both stop checks need, injectable for tests. `Root` is the shell's
  * canonical repository root, and `RunResult` is the completion runner's
  * result. Instantiated with those two types, the port is a structural superset
- * of today's `StopCheckPorts`. The unprefixed counter methods keep counting
+ * of `StopCheckPorts`. The unprefixed counter methods keep counting
  * acceptance-check blocks, and the `Affected` ones count the affected check's
  * own blocks.
  */

@@ -8,7 +8,7 @@
  * production State File parser. The I7-off reason of a manifest without an
  * `affectedRunner` is read through `helper stop-check-plan`'s handler.
  *
- * Each testcase builds the manifest it needs, so a key today's parser refuses
+ * Each testcase builds the manifest it needs, so a key the parser refuses
  * fails that testcase alone.
  */
 

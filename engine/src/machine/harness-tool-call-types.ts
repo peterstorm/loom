@@ -35,47 +35,91 @@ import type { Epoch, Evidence } from "./types";
  */
 export type HarnessTool = "Read" | "Write" | "Edit" | "MultiEdit" | "Bash" | "Other";
 
-/**
- * What the harness reported about one finished tool call, read only from that
- * call's own result.
- */
-export type ToolOutcome = Readonly<{
-  /**
-   * The harness reported the call as failed: an error-shaped Claude
-   * `tool_response`, or Pi's `isError`. A failed Read, Write, Edit or
-   * MultiEdit mints no FileRead or FileWrite.
-   */
-  failed: boolean;
-  /**
-   * The Bash exit status (FR-033). Claude Code: the exit code its
-   * `tool_response` carries. Pi: `details.exitCode` when it is a number,
-   * otherwise `isError ? 1 : 0`. `null` only when the harness exposes neither.
-   */
-  exit: number | null;
-  /** The call's captured standard output, read for a JSON reporter on stdout. */
-  stdout: string;
-  /** The harness killed the call (timeout or abort); the command never finished. */
-  interrupted: boolean;
-}>;
+/** The file tools: each one either succeeded or failed, and has no exit status. */
+export type FileTool = Exclude<HarnessTool, "Bash" | "Other">;
 
-/** One finished tool call, normalized from either harness. */
-export type HarnessToolCall = Readonly<{
-  tool: HarnessTool;
+/**
+ * What the harness reported about one finished Read, Write, Edit or MultiEdit
+ * call, read only from that call's own result.
+ * - `succeeded`: the call mints its FileRead or `via: "tool"` FileWrite.
+ * - `failed`: an error-shaped Claude `tool_response` (`is_error`, `isError`,
+ *   `success: false`, or an `error` payload), or Pi's `isError`. Mints
+ *   nothing, so an attempt never satisfies a machine guard.
+ */
+export type FileToolOutcome =
+  | Readonly<{ kind: "succeeded" }>
+  | Readonly<{ kind: "failed" }>;
+
+/**
+ * What the harness reported about one Bash call, read only from that call's
+ * own result. Bash has no `failed` arm: its exit status is the ground truth,
+ * and a failing test run is a trusted failure, not a non-event. Shell write
+ * targets mint in every arm, because the shell opens a redirect target before
+ * the command runs.
+ * - `exited`: the command finished with this integer exit status (FR-033).
+ *   Claude Code: the exit code its `tool_response` carries. Pi:
+ *   `details.exitCode` when it is a number, otherwise `isError ? 1 : 0`, so
+ *   Pi always lands here or in `interrupted`. A TestRun gets this `exit`
+ *   (through exit attribution) and may pair with a discovered report.
+ * - `exit-unknown`: the command finished, but the harness exposed no exit
+ *   status (an unrecognized Claude `tool_response` shape). A TestRun gets
+ *   `exit: null`, which never counts as success on its own. A report may
+ *   still pair with it, because the run finished.
+ * - `interrupted`: the harness killed the call (timeout or abort), so the
+ *   command never finished. A TestRun gets `exit: null` and `report: null`:
+ *   a killed runner leaves a partial report that can read green, so only a
+ *   finished run may vouch. No stdout is carried, because none is trusted.
+ *
+ * `stdout` is the call's captured standard output, which report discovery
+ * reads for a JSON reporter on stdout.
+ */
+export type BashToolOutcome =
+  | Readonly<{ kind: "exited"; exit: number; stdout: string }>
+  | Readonly<{ kind: "exit-unknown"; stdout: string }>
+  | Readonly<{ kind: "interrupted" }>;
+
+/** Every outcome a harness can report for a call that mints facts. */
+export type ToolOutcome = FileToolOutcome | BashToolOutcome;
+
+declare const TOOL_CALL_ID: unique symbol;
+
+/**
+ * A non-empty tool-call id supplied by the harness (Claude's `tool_use_id`,
+ * Pi's `toolCallId`). The harness adapters are its only producers, and they
+ * read an empty or non-string id as no id at all, so `""` never stands for
+ * "absent". It is assignable to `string`, so it passes straight to the
+ * registry's `appendEvidence` and `callStartFor`.
+ */
+export type ToolCallId = string & { readonly [TOOL_CALL_ID]: true };
+
+/** The fields every normalized tool call carries, whatever its tool. */
+type HarnessToolCallCommon = Readonly<{
   /**
    * The tool input exactly as the harness delivered it. The rule reads only
    * the file path (`file_path` on Claude Code, `path` on Pi) and `command`.
    */
   input: Readonly<Record<string, unknown>>;
-  outcome: ToolOutcome;
   /**
    * The harness tool-call id: the ledger idempotency key and the key of the
-   * call-start stamp. `null` when the harness supplied none, in which case
-   * artifact-backed reports cannot vouch (fail closed).
+   * call-start stamp. `null` when the harness supplied none. Then the facts
+   * append without an idempotency key, and artifact-backed reports cannot
+   * vouch (fail closed).
    */
-  callId: string | null;
+  callId: ToolCallId | null;
   /** The directory the call ran in. Relative FileWrite paths resolve against it at mint time. */
   cwd: string;
 }>;
+
+/**
+ * One finished tool call, normalized from either harness. `tool` is the
+ * discriminant, and it fixes which outcome the call can carry: a file tool
+ * never has an exit status, Bash never has a bare `failed`, and `Other`
+ * carries no outcome because it mints nothing.
+ */
+export type HarnessToolCall =
+  | (HarnessToolCallCommon & Readonly<{ tool: FileTool; outcome: FileToolOutcome }>)
+  | (HarnessToolCallCommon & Readonly<{ tool: "Bash"; outcome: BashToolOutcome }>)
+  | (HarnessToolCallCommon & Readonly<{ tool: "Other" }>);
 
 /** Where one tool call's facts are appended. */
 export type EvidenceTarget = Readonly<{

@@ -13,7 +13,7 @@
  * with recording runner ports, and compares what it launches with what the
  * plan shows.
  *
- * Each testcase builds the manifest it needs, so a key today's parser refuses
+ * Each testcase builds the manifest it needs, so a key the parser refuses
  * fails that testcase alone.
  */
 

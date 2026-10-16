@@ -100,8 +100,14 @@ export type RunRef = Readonly<{ index: number; command: string }>;
  * after the first write to a Task implementation file. `untrustedOnly` is true
  * when the step is unmet by qualifying runs while the epoch holds a
  * non-qualifying TestRun or the Task's test result has `pi-structured`
- * provenance: only trusted ledger runs qualify. `ledger-unavailable`: no
- * observation of the epoch ledger reached the judgment.
+ * provenance: only trusted ledger runs qualify.
+ *
+ * `ledger-unavailable` is minted by proof evaluation, never by the judge: no
+ * `LedgerObservation` reached it at all. That is the stored-evidence
+ * reconcile path, which reads no ledger and has no earlier satisfied I6
+ * result to carry forward. It is distinct from an `unreadable` observation,
+ * which settles as `implementation-observation-unavailable` before any
+ * judgment and never mints a gap.
  */
 export type RedThenGreenGap =
   | Readonly<{ kind: "no-test-files" }>

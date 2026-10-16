@@ -13,7 +13,7 @@
  * - a recording runner lock;
  * - one block counter per check.
  *
- * Each testcase builds the manifest it needs, so a manifest key today's parser
+ * Each testcase builds the manifest it needs, so a manifest key the parser
  * refuses fails the testcase itself, not the file.
  */
 
