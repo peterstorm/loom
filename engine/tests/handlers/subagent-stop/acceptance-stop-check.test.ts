@@ -140,8 +140,10 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   };
 }
 
-/** An acceptance counter that cannot be read, as a corrupt counter file reads. */
-const UNREADABLE_ACCEPTANCE_COUNTER = inMemoryBlockCounters({ presets: { acceptance: { kind: "unreadable", reason: "counter.json is not JSON" } } }).counters;
+/** A fresh acceptance counter that cannot be read, as a corrupt counter file
+ *  reads. Fresh per test: a stop that proceeds clears it, as it removes a file. */
+const unreadableAcceptanceCounter = () =>
+  inMemoryBlockCounters({ presets: { acceptance: { kind: "unreadable", reason: "counter.json is not JSON" } } }).counters;
 
 const junit = (outcome: "passed" | "failed"): Uint8Array => new TextEncoder().encode(
   `<?xml version="1.0"?><testsuites><testsuite name="${SURFACE.acceptance}" tests="1">` +
@@ -214,7 +216,7 @@ describe("runStopChecks: the acceptance arm", () => {
     const fake = ports(junit("passed"));
     fake.blocks.set("session.agent", 2);
     expect(await runStopChecks(input("T2"), fake.value)).toEqual({ kind: "passed" });
-    expect(fake.blocks.get("session.agent") ?? 0).toBe(0);
+    expect(fake.blocks.has("session.agent")).toBe(false);
   });
 
   it("skips a non-claimant, a graph with no runner, and a contract not yet frozen", async () => {
@@ -253,7 +255,7 @@ describe("runStopChecks: the acceptance arm", () => {
     };
     const outcome = await runStopChecks(input("T2"), { ...fake.value, runCheck: killedRun });
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(message) });
-    expect(fake.blocks.get("session.agent") ?? 0).toBe(0);
+    expect(fake.blocks.has("session.agent")).toBe(false);
     expect(fake.locks).toEqual({ acquired: 1, released: 1 });
   });
 
@@ -278,14 +280,14 @@ describe("runStopChecks: the acceptance arm", () => {
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(`acceptanceRunner.cwd engine does not contain ${SURFACE.acceptance}`) });
     expect(fake.runs).toEqual([]);
     expect(fake.locks).toEqual({ acquired: 0, released: 0 });
-    expect(fake.blocks.get("session.agent") ?? 0).toBe(0);
+    expect(fake.blocks.has("session.agent")).toBe(false);
   });
 
   it("notes a refused command before reading the block counter or resolving the repository root", async () => {
     const elsewhere = freezeVerificationManifest(manifestBytes({ ...RUNNER, cwd: "engine" }));
     if (!elsewhere.ok) throw new Error(elsewhere.error.errors.join("; "));
     const fake = ports(junit("failed"), {
-      blocks: UNREADABLE_ACCEPTANCE_COUNTER,
+      blocks: unreadableAcceptanceCounter(),
       repositoryRoot: () => ({ ok: false, reason: "the protected TaskGraph's repository root is unavailable" }),
     });
     const outcome = await runStopChecks(input("T2", { verification_manifest: elsewhere.value }), fake.value);
@@ -302,7 +304,7 @@ describe("runStopChecks: the acceptance arm", () => {
   });
 
   it("names an unreadable block counter instead of reporting the cap, and never blocks without it", async () => {
-    const fake = ports(junit("failed"), { blocks: UNREADABLE_ACCEPTANCE_COUNTER });
+    const fake = ports(junit("failed"), { blocks: unreadableAcceptanceCounter() });
     const outcome = await runStopChecks(input("T2"), fake.value);
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining("block counter is unreadable: counter.json is not JSON") });
     expect(outcome).not.toMatchObject({ message: expect.stringContaining("cap") });
@@ -324,7 +326,7 @@ describe("runStopChecks: the acceptance arm", () => {
     for (let attempt = 0; attempt <= ACCEPTANCE_STOP_CHECK_MAX_BLOCKS; attempt++) outcomes.push(await runStopChecks(input("T2"), fake.value));
     expect(outcomes.map(({ kind }) => kind)).toEqual([...Array(ACCEPTANCE_STOP_CHECK_MAX_BLOCKS).fill("block"), "note"]);
     expect(outcomes.at(-1)).toMatchObject({ message: expect.stringContaining("block cap") });
-    expect(fake.blocks.get("session.agent") ?? 0).toBe(0);
+    expect(fake.blocks.has("session.agent")).toBe(false);
   });
 });
 

@@ -293,8 +293,10 @@ describe("runStopChecks: the affected check blocks on failing affected tests", (
     const outcome = await runStopChecks(input(manifest({ affected: true }), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports);
 
     expect(outcome).toEqual({ kind: "passed" });
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
-    expect(fake.counters.acceptance.get("session.agent")).toBe(0);
+    // Only a clear drops the preset count, as removing the counter file does.
+    expect(fake.ports.blocks.issued("affected", "session.agent")).toEqual({ kind: "count", blocks: 0 });
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
+    expect(fake.counters.acceptance.has("session.agent")).toBe(false);
   });
 
   it("AS-023: zero affected tests pass with the zero-tests note", async () => {
@@ -382,7 +384,7 @@ describe("runStopChecks: failing open", () => {
     expect(outcomes.map(({ kind }) => kind)).toEqual([...Array(AFFECTED_STOP_CHECK_MAX_BLOCKS).fill("block"), "note"]);
     expect(textOf(outcomes.at(-1)!)).toContain(AFFECTED_NOTE_TEXT["cap-reached"]);
     expect(fake.launches).toHaveLength(AFFECTED_STOP_CHECK_MAX_BLOCKS);
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
   });
 
   it("AS-025: an unreadable affected counter fails open naming it, and the runner never launches", async () => {
@@ -410,12 +412,13 @@ describe("runStopChecks: failing open", () => {
   ])("AS-026: an affected runner that %s fails open with its named note, under one lock released once", async (_label, run, kind) => {
     const root = repositoryRoot();
     const fake = fakePorts(root, { affected: run });
+    fake.counters.affected.set("session.agent", 1);
 
     const outcome = await runStopChecks(input(manifest({ affected: true }), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports);
 
     expect(outcome.kind).toBe("note");
     expect(textOf(outcome)).toContain(AFFECTED_NOTE_TEXT[kind]);
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
     expect(fake.locks).toMatchObject({ acquired: 1, released: 1 });
   });
 
@@ -476,6 +479,7 @@ describe("runStopChecks: failing open", () => {
   it("names both the crash and a lock that would not release when a runner throws under the lock", async () => {
     const root = repositoryRoot();
     const fake = fakePorts(root, { lock: "release-fails", affected: { kind: "throws" } });
+    fake.counters.affected.set("session.agent", 1);
 
     const outcome = await runStopChecks(input(manifest({ affected: true }), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports);
 
@@ -484,7 +488,7 @@ describe("runStopChecks: failing open", () => {
       message: "stop checks for T3 crashed and did not decide: runner port defect\nstop checks for T3: the runner lock x.lock could not be released: EACCES",
     });
     expect(fake.locks).toMatchObject({ acquired: 1, released: 1, held: 0 });
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
   });
 
   it("turns a thrown fault, including an unloadable TaskGraph, into a crash note", async () => {

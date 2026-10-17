@@ -165,11 +165,12 @@ export type StopChecksOutcome =
   /** The stop proceeds, and the operator is told what each check noted. */
   | Readonly<{ kind: "note"; message: string }>;
 
-/** The two stop checks. Each keeps its own per-agent block counter and cap. */
-export type StopCheckName = "acceptance" | "affected";
+/** Every stop check, in the order a stop runs them. The one list of check
+ *  names: `StopCheckName` is derived from it, so the two cannot drift. */
+export const STOP_CHECK_NAMES = Object.freeze(["acceptance", "affected"] as const);
 
-/** Every stop check, in the order a stop runs them. */
-export const STOP_CHECK_NAMES: readonly StopCheckName[] = Object.freeze(["acceptance", "affected"] as const);
+/** The two stop checks. Each keeps its own per-agent block counter and cap. */
+export type StopCheckName = (typeof STOP_CHECK_NAMES)[number];
 
 /** Blocks already issued to one agent by one check, or why that count cannot be read. */
 export type StopCheckBlockCount =

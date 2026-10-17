@@ -111,7 +111,9 @@ keeps an independent block counter per check. Every decision it acts on is a pur
   (`StopCheckBlockCounters`: `issued`, `record` and `clear`, each taking a `StopCheckName`), and iterates
   `STOP_CHECK_NAMES` instead of naming each check's methods. It has three adapters: the counter files in
   production, `UNKEPT_BLOCK_COUNTERS` for Pi's report-only run, and the shared in-memory fake in
-  `engine/tests/fixtures/stop-check-block-counters.ts`, which every stop-check test uses.
+  `engine/tests/fixtures/stop-check-block-counters.ts`, which every stop-check test that counts blocks
+  uses. A cleared counter is absent in both the files and the fake. Tests that count nothing use
+  `UNKEPT_BLOCK_COUNTERS`.
 - **Verdicts and messages.** The verdicts come from the pure judges `judgeStopCheck` (acceptance) and
   `judgeAffectedRun` (affected, CT-2 types):
   - failing testcases are named with their file, collection errors included;
