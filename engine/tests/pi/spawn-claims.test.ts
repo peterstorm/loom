@@ -46,15 +46,16 @@ import {
 import { releaseHeldSpawnClaims, releaseOrphanedSpawnClaims } from "../../../pi/spawn-claim-shell";
 import { createPiParentSessions, legacyReservationItem, type PiSpawnReservation } from "../../../pi/spawn-reservation";
 import { HELD_GRANT, parentSessionsHolding, reviewerReservationNaming } from "../fixtures/held-spawn-batch";
-import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
+import { type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AgentId } from "../../src/machine/evidence";
 import type { SessionRunBinding } from "../../src/orchestration/session-run-bindings";
 import { value } from "../fixtures/parse-result";
+import { agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
-const sessionId = parseSessionId("spawn-claims-session")!;
+const sessionId = sessionIdOf("spawn-claims-session");
 const pointer = { directory: "/state", pointerName: "p", registryName: "r", target: "/graph.json" } as unknown as SessionTaskGraphPointerBinding;
 const witnessRun = { runId: "run.spawn-claims", runsRoot: "/runs", runDirectory: "/runs/run.spawn-claims" } as unknown as SessionRunBinding;
-const rosterId = (slot: number): AgentId => parseAgentId(`pi-spawn-claims-${slot}`)!;
+const rosterId = (slot: number): AgentId => agentIdOf(`pi-spawn-claims-${slot}`);
 const rosterItem = (slot: number) =>
   legacyReservationItem({ rosterId: rosterId(slot), emissionLaunch: null, kind: "implementation" }, "code-implementer-agent", `T${slot + 1}`);
 const debtContext = {
@@ -532,7 +533,7 @@ describe("releaseHeldSpawnClaims: one tool call's held claims on its session", (
   });
 
   it("revokes the grants of a reservation naming another session but leaves the reservation as debt", async () => {
-    const other = parseSessionId("spawn-claims-other")!;
+    const other = sessionIdOf("spawn-claims-other");
     const foreign = reservationNaming(other);
     const parentSessions = holding(foreign);
     const { ports, calls } = durablePorts();

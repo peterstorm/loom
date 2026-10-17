@@ -27,12 +27,10 @@ import {
   CALL_START_SUFFIX,
   epochOf,
   eventsForEpoch,
-  parseAgentId,
-  parseAgentType,
-  parseSessionId,
   type SessionId,
 } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
+import { agentIdOf, agentTypeOf, sessionIdOf } from "../../fixtures/machine-identities";
 
 const run = `record-evidence-${process.pid}-${Date.now()}`;
 // These sessions live in the shared SUBAGENT_DIR, so every session a test
@@ -41,7 +39,7 @@ const run = `record-evidence-${process.pid}-${Date.now()}`;
 const sessions = new Set<SessionId>();
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string): SessionId => {
-  const session = parseSessionId(`${run}-${name}`)!;
+  const session = sessionIdOf(`${run}-${name}`);
   sessions.add(session);
   return session;
 };
@@ -57,10 +55,7 @@ afterAll(() => {
 });
 
 async function bind(session: SessionId, type: string, id: string): Promise<void> {
-  const agentType = parseAgentType(type);
-  const agentId = parseAgentId(id);
-  if (!agentType || !agentId) throw new Error(`test fixture: invalid identity ${type}/${id}`);
-  await bindMachineAgent(session, agentType, agentId);
+  await bindMachineAgent(session, agentTypeOf(type), agentIdOf(id));
 }
 
 const post = (session: SessionId, tool: string, input: Record<string, unknown> = {}) =>
@@ -118,8 +113,8 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
       expect(readEvidence(s)).toEqual([]);
     } finally {
       stderrSpy.mockRestore();
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-2")!);
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-2"));
     }
   });
 
@@ -136,7 +131,7 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
       expect(readEvidence(s)).toEqual([]);
     } finally {
       stderrSpy.mockRestore();
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     }
   });
 
@@ -159,7 +154,7 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
       expect(readEvidence(s)).toEqual([]);
     } finally {
       stderrSpy.mockRestore();
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     }
   });
 
@@ -205,12 +200,12 @@ describe("parallel bound subagents (one session, Claude Code wave)", () => {
       expect(records).toHaveLength(ids.length);
       for (const [i, id] of ids.entries()) {
         // update-task-status reads eventsForEpoch(records, epochOf(agent_id, agent_type)).
-        const own = eventsForEpoch(records, epochOf(parseAgentId(id)!, parseAgentType("code-implementer-agent")!));
+        const own = eventsForEpoch(records, epochOf(agentIdOf(id), agentTypeOf("code-implementer-agent")));
         expect(own).toEqual([{ kind: "TestRun", command: `npm test -- part-${i}`, exit: 0, report: null }]);
       }
     } finally {
       for (const id of ids) {
-        await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId(id)!);
+        await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf(id));
       }
     }
   });
@@ -221,7 +216,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     const s = sid("forged-report");
     const dir = mkdtempSync(join(tmpdir(), "loom-forged-report-"));
     const reportPath = join(dir, "results.json");
-    const epoch = epochOf(parseAgentId("a-1")!, parseAgentType("code-implementer-agent")!);
+    const epoch = epochOf(agentIdOf("a-1"), agentTypeOf("code-implementer-agent"));
     await bind(s, "code-implementer-agent", "a-1");
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
     writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
@@ -255,7 +250,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     // report: null → judgeTestRun says untrusted, never trusted-pass.
     expect(testRun && testRun.kind === "TestRun" && testRun.report).toBeNull();
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -301,7 +296,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     const staged = events.find((e) => e.kind === "FileWrite");
     expect(staged && staged.kind === "FileWrite" && staged.via).toBe("shell");
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -351,7 +346,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
     // Mint-time resolution: the ledger carries the absolute path.
     expect(staged && staged.kind === "FileWrite" && staged.path).toBe(reportPath);
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -388,7 +383,7 @@ describe("agent-authored --outputFile artifacts cannot vouch (epoch FileWrite ve
       source: "vitest-json",
     });
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -428,7 +423,7 @@ describe("call-scoped report freshness (call-start ordering)", () => {
     // cannot mint a trusted pass for a call it predates.
     expect(testRun && testRun.kind === "TestRun" && testRun.report).toBeNull();
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -463,7 +458,7 @@ describe("call-scoped report freshness (call-start ordering)", () => {
     const testRun = events.findLast((e) => e.kind === "TestRun");
     expect(testRun && testRun.kind === "TestRun" && testRun.report).toBeNull();
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -487,13 +482,13 @@ describe("duplicated PostToolUse deliveries never double-count (round-10 Fix 6)"
 
     const records = readEvidence(s);
     expect(records).toHaveLength(2); // both lines land in the append-only ledger…
-    const epoch = epochOf(parseAgentId("a-1")!, parseAgentType("code-implementer-agent")!);
+    const epoch = epochOf(agentIdOf("a-1"), agentTypeOf("code-implementer-agent"));
     // …but the fold boundary sees the call ONCE.
     const { eventsForEpoch } = await import("../../../src/machine/evidence");
     expect(eventsForEpoch(records, epoch)).toEqual([
       { kind: "FileWrite", path: "/tmp/impl.ts", via: "tool" },
     ]);
 
-    await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
   });
 });

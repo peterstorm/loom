@@ -3,9 +3,10 @@ import fc from "fast-check";
 import { WHITELISTED_HELPERS, SUBAGENT_DIR, MACHINES_DIR } from "../../../src/config";
 import { guardStateFileDecision } from "../../../src/core/guard-state-file";
 import { runGuardStateFile, stampCallStart } from "../../../src/handlers/pre-tool-use/guard-state-file";
-import { parseSessionId, type SessionRegistry } from "../../../src/machine/evidence";
+import { type SessionRegistry } from "../../../src/machine/evidence";
 import { inMemorySessionRegistry } from "../../machine/fake-session-registry";
 import type { HookResult } from "../../../src/types";
+import { sessionIdOf } from "../../fixtures/machine-identities";
 
 /**
  * Test the REAL pure guard decision (guardStateFileDecision) — the handler
@@ -1372,7 +1373,7 @@ describe("guard-state-file handler — call-start stamping never changes the gua
     const reg = inMemorySessionRegistry();
     const result = await runGuardStateFile(stdin(), reg);
     expect(result.kind).toBe("allow");
-    const sessionId = parseSessionId("stamp-session")!;
+    const sessionId = sessionIdOf("stamp-session");
     const stamp = reg.callStartFor(sessionId, "toolu_stamp_01");
     expect(stamp).not.toBeNull();
     expect(Math.abs(Date.now() - stamp!)).toBeLessThan(60_000);
@@ -1410,7 +1411,7 @@ describe("guard-state-file handler — call-start stamping never changes the gua
     expect(result.kind).toBe("block");
     // The stamp still landed — a blocked call's PostToolUse never fires, but
     // the stamp is bounded and harmless.
-    expect(reg.callStartFor(parseSessionId("stamp-session")!, "toolu_stamp_01")).not.toBeNull();
+    expect(reg.callStartFor(sessionIdOf("stamp-session"), "toolu_stamp_01")).not.toBeNull();
   });
 
   it("no tool_use_id / unparseable session id → no stamp, guard outcome unchanged", async () => {

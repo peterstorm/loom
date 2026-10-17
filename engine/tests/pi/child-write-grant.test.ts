@@ -14,10 +14,11 @@ import {
 } from "../../../pi/child-write-grant";
 import { injectPiWriteGrant, issuePiWriteGrant } from "../../../pi/write-grant";
 import { remainingDurableClaims } from "../../../pi/spawn-claims";
-import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
+import { type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AgentId } from "../../src/machine/evidence";
+import { agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
-const agentId = parseAgentId("pi-grant-child-1")!;
+const agentId = agentIdOf("pi-grant-child-1");
 const pointer = { directory: "/state", pointerName: "p", registryName: "r", target: "/graph.json" } as unknown as SessionTaskGraphPointerBinding;
 const scope = { scopeDirs: [".claude/specs/x/"], grantCwd: "/repo" } as const;
 const active: ActiveChildWriteGrant = { ...scope, kind: "active", agentId, pointerBinding: pointer };
@@ -81,7 +82,7 @@ describe("retainedChildWriteGrant", () => {
 });
 
 describe("rejectedChildWriteGrantDebt", () => {
-  const sessionId = parseSessionId("child-session")!;
+  const sessionId = sessionIdOf("child-session");
 
   it("retains a partial roster entry as cleanup debt, keyed by its session, exactly when its removal failed", () => {
     fc.assert(fc.property(fc.boolean(), fc.array(fc.string(), { maxLength: 3 }), (partialMade, cleanupErrors) => {

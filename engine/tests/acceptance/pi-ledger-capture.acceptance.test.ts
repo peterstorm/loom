@@ -48,9 +48,6 @@ import {
   epochOf,
   eventsForEpoch,
   fsSessionRegistry,
-  parseAgentId,
-  parseAgentType,
-  parseSessionId,
   type Evidence,
   type SessionId,
 } from "../../src/machine";
@@ -72,6 +69,7 @@ import {
 } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { fixturePiAgentDirectory } from "../fixtures/fixture-pi-agent-directory";
+import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
 // ─── Environment ──────────────────────────────────────────────────────────
 
@@ -97,11 +95,6 @@ const ENV_KEYS = [
 const previousEnv = new Map(ENV_KEYS.map((key) => [key, process.env[key]] as const));
 
 const IMPLEMENTER = "code-implementer-agent";
-const IMPLEMENTER_TYPE = (() => {
-  const parsed = parseAgentType(IMPLEMENTER);
-  if (parsed === null) throw new Error("fixture agent type must parse");
-  return parsed;
-})();
 const TASK_PROMPT = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
 const TEST_FILE = "tests/feature.test.ts";
 const IMPLEMENTATION_FILE = "src/feature.ts";
@@ -153,11 +146,7 @@ afterAll(() => {
 
 const stderrText = (): string => stderr.join("");
 
-const sessionId = (): SessionId => {
-  const parsed = parseSessionId(randomUUID());
-  if (parsed === null) throw new Error("fixture session id must parse");
-  return parsed;
-};
+const sessionId = (): SessionId => sessionIdOf(randomUUID());
 
 // ─── Fixture repository and TaskGraph ─────────────────────────────────────
 
@@ -364,16 +353,12 @@ type ClaudeAgent = Readonly<{ session: SessionId; agentId: string; root: string 
 async function bindClaudeAgent(root: string): Promise<ClaudeAgent> {
   const session = sessionId();
   const agentId = `claude-impl-${randomUUID().slice(0, 8)}`;
-  const parsedId = parseAgentId(agentId);
-  if (parsedId === null) throw new Error("fixture Claude agent id must parse");
-  await bindMachineAgent(session, IMPLEMENTER_TYPE, parsedId);
+  await bindMachineAgent(session, IMPLEMENTER_TYPE, agentIdOf(agentId));
   return { session, agentId, root };
 }
 
 function claudeEpochFacts(agent: ClaudeAgent): readonly Evidence[] {
-  const parsedId = parseAgentId(agent.agentId);
-  if (parsedId === null) throw new Error("fixture Claude agent id must parse");
-  return eventsForEpoch(fsSessionRegistry.readEvidence(agent.session), epochOf(parsedId, IMPLEMENTER_TYPE));
+  return eventsForEpoch(fsSessionRegistry.readEvidence(agent.session), epochOf(agentIdOf(agent.agentId), IMPLEMENTER_TYPE));
 }
 
 function claudePayload(step: ToolStep): Readonly<{ tool_name: string; tool_input: Record<string, unknown>; tool_response: unknown }> {
@@ -503,9 +488,7 @@ async function spawnGrantedChild(root: string): Promise<PiChild> {
 
 /** The child's epoch in the PARENT session's ledger: `epochOf(grant agent id, agent type)`. */
 function piParentEpochFacts(granted: PiChild): readonly Evidence[] {
-  const agentId = parseAgentId(granted.grantAgentId);
-  if (agentId === null) throw new Error("fixture grant agent id must parse");
-  return eventsForEpoch(fsSessionRegistry.readEvidence(granted.parentSession), epochOf(agentId, IMPLEMENTER_TYPE));
+  return eventsForEpoch(fsSessionRegistry.readEvidence(granted.parentSession), epochOf(agentIdOf(granted.grantAgentId), IMPLEMENTER_TYPE));
 }
 
 function piEvents(step: ToolStep, callId: string): Readonly<{ call: Record<string, unknown>; result: Record<string, unknown> }> {
@@ -757,8 +740,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
         implementFeature(root),
       ]);
 
-      const agentId = parseAgentId(granted.grantAgentId);
-      if (agentId === null) throw new Error("fixture grant agent id must parse");
+      const agentId = agentIdOf(granted.grantAgentId);
       const parentRecords = fsSessionRegistry.readEvidence(granted.parentSession);
       expect(parentRecords.map(({ epoch }) => epoch)).toEqual([
         epochOf(agentId, IMPLEMENTER_TYPE),

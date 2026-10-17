@@ -19,7 +19,7 @@ import { createRunDirectory } from "../../src/orchestration/run-directory-handle
 import type { SessionRunBinding } from "../../src/orchestration/session-run-bindings";
 import { shutdownPiSession } from "../../../pi/session-shutdown";
 import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
-import { fsSessionRegistry, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
+import { fsSessionRegistry, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { AdmittedSpawnItem, SpawnAdmission } from "../../src/core/spawn-admission";
 import type { SpawnEmissionExpectation } from "../../src/core/issued-emission-capability";
 import {
@@ -40,6 +40,7 @@ import { createTrustedReviewWitnesses, type TrustedReviewWitnesses } from "../..
 import { recordingDurableReleases } from "../fixtures/recording-durable-releases";
 import { piSpawnRosterId } from "../../../pi/tool-input";
 import type { PiEmissionLaunchBridge } from "../../../pi/emission-launch-bridge";
+import { sessionIdOf } from "../fixtures/machine-identities";
 
 const ENV_KEYS = ["LOOM_SUBAGENT_DIR", "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"] as const;
 let root: string;
@@ -63,7 +64,7 @@ afterEach(() => {
 });
 
 const rawSessionId = "spawn-lifecycle-session";
-const sessionId = parseSessionId(rawSessionId)!;
+const sessionId = sessionIdOf(rawSessionId);
 const toolCallId = "call-lifecycle-1";
 
 type Admission = Extract<SpawnAdmission, { kind: "admit" }>;

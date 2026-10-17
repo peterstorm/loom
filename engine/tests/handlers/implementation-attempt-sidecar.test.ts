@@ -25,7 +25,8 @@ import {
   parseReservationId,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
-import { countActiveAgents, machineBindingPath, parseSessionId } from "../../src/machine";
+import { countActiveAgents, machineBindingPath } from "../../src/machine";
+import { sessionIdOf } from "../fixtures/machine-identities";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
@@ -39,7 +40,7 @@ const previousDir = process.env.LOOM_SUBAGENT_DIR;
 const previousState = process.env.LOOM_STATE_PATH;
 const previousProject = process.env.CLAUDE_PROJECT_DIR;
 const SESSION = "sidecar-session";
-const SESSION_ID = parseSessionId(SESSION)!;
+const SESSION_ID = sessionIdOf(SESSION);
 const AGENT = "agent-sidecar";
 
 function root(): string {

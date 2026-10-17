@@ -18,6 +18,13 @@ import type {
   ContractAcceptanceFile,
   FrozenPathDigest,
 } from "../../src/core/acceptance-contract";
+import { renderStopCheckPlan } from "../../src/core/acceptance-contract/stop-check-plan";
+import {
+  AFFECTED_OFF_REASON_TEXT,
+  AFFECTED_SECTION_HEADING,
+  AFFECTED_STOP_CHECK_OFF,
+  type AffectedOffReason,
+} from "../../src/core/affected-stop-check-types";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { STOP_CHECK_OFF, STOP_CHECK_OFF_REASON_TEXT, type StopCheckOffReason } from "../../src/core/stop-check-plan-types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
@@ -115,6 +122,17 @@ export function stopCheckGraph({ tasks, contracts, manifest }: StopCheckGraphInp
 /** The single line an `off` view renders for a reason without errors. */
 export const offLine = (taskId: string, wave: number, reason: StopCheckOffReason["kind"]): string =>
   `${taskId} (Wave ${wave}): ${STOP_CHECK_OFF} — ${STOP_CHECK_OFF_REASON_TEXT[reason]}`;
+
+/** The CT-1 acceptance lines the combined plan keeps unchanged for a known Task; an unknown one fails the test. */
+export function acceptancePlanLines(graph: TaskGraph, taskId: string): readonly string[] {
+  const rendering = renderStopCheckPlan(graph, taskId);
+  if (rendering.kind !== "rendered") throw new Error(`${taskId} is not in the fixture graph`);
+  return rendering.lines;
+}
+
+/** The two lines an `off` affected section renders for a reason that carries no detail lines. */
+export const affectedOffSection = (reason: AffectedOffReason["kind"]): readonly string[] =>
+  [AFFECTED_SECTION_HEADING, `  ${AFFECTED_STOP_CHECK_OFF} — ${AFFECTED_OFF_REASON_TEXT[reason]}`];
 
 const REPO_ROOT = resolve(__dirname, "../../..");
 
