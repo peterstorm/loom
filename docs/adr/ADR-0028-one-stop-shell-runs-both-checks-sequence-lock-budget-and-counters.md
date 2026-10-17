@@ -106,6 +106,12 @@ keeps an independent block counter per check. Every decision it acts on is a pur
   The shell reads and writes only the files that this function names. When the stop proceeds,
   `runStopChecks` clears both counters, and if a clear fails, that failure becomes a note rather than a
   throw.
+
+  The shell reaches the counters through one port keyed by check name, `ports.blocks`
+  (`StopCheckBlockCounters`: `issued`, `record` and `clear`, each taking a `StopCheckName`), and iterates
+  `STOP_CHECK_NAMES` instead of naming each check's methods. It has three adapters: the counter files in
+  production, `UNKEPT_BLOCK_COUNTERS` for Pi's report-only run, and the shared in-memory fake in
+  `engine/tests/fixtures/stop-check-block-counters.ts`, which every stop-check test uses.
 - **Verdicts and messages.** The verdicts come from the pure judges `judgeStopCheck` (acceptance) and
   `judgeAffectedRun` (affected, CT-2 types):
   - failing testcases are named with their file, collection errors included;

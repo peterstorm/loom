@@ -24,6 +24,7 @@ import {
   type FailingAffectedTestcase,
   type JudgeAffectedRunFn,
   type StopCheckBlockCount,
+  type StopCheckName,
 } from "./affected-stop-check-types";
 import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import type { NonEmpty } from "./orchestration-contract";
@@ -46,8 +47,6 @@ export const judgeAffectedRun: JudgeAffectedRunFn = (projection): AffectedRunVer
 };
 
 // --- The block-counter transition rule ---
-
-export type StopCheckName = "acceptance" | "affected";
 
 /** Whether a check has failures it would block the stop for. A passing,
  *  skipped, off or fail-open check is `not-failing`. */

@@ -16,7 +16,7 @@ import { stopCheckExpectation } from "../../src/core/acceptance-contract/stop-ch
 import { renderStopCheckPlan, stopCheckPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
 import { STOP_CHECK_ON, UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { acceptanceRunnerCheck, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
-import type { StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks } from "../../src/handlers/subagent-stop/stop-checks";
 import type { StopChecksOutcome } from "../../src/core/affected-stop-check-types";
 import { NO_CHANGED_FILES } from "../../src/core/changed-files";
@@ -274,12 +274,7 @@ async function liveStop(graph: TaskGraph, taskId: string): Promise<LiveStop> {
       return { ok: false, error: { kind: "containment-unsupported", message: "not launched by this test" } };
     },
     readReport: () => new Uint8Array(),
-    blocksIssued: () => ({ kind: "count", blocks: 0 }),
-    recordBlock: () => undefined,
-    clearBlocks: () => undefined,
-    affectedBlocksIssued: () => ({ kind: "count", blocks: 0 }),
-    recordAffectedBlock: () => undefined,
-    clearAffectedBlocks: () => undefined,
+    blocks: UNKEPT_BLOCK_COUNTERS,
     pathExists: () => true,
     now: () => Date.now(),
   };

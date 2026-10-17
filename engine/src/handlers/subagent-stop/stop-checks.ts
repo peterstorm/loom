@@ -34,6 +34,7 @@ import {
   AFFECTED_OUTSIDE_CWD_PREFIX,
   AFFECTED_STOP_CHECK_MAX_BLOCKS,
   SETTLEMENT_RESERVE_MS,
+  STOP_CHECK_NAMES,
   STOP_HOOK_BUDGET_MS,
   type AcceptancePlan,
   type AffectedPlan,
@@ -41,6 +42,7 @@ import {
   type ChangedFilePath,
   type ChangedFiles,
   type StopCheckBlockCount,
+  type StopCheckName,
   type StopChecksOutcome,
 } from "../../core/affected-stop-check-types";
 import {
@@ -49,7 +51,6 @@ import {
   renderStopChecksBlock,
   stopCheckBlockDecision,
   type StopCheckBlockCaps,
-  type StopCheckName,
   type StopChecksBlockParts,
 } from "../../core/affected-stop-check";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../core/changed-files";
@@ -279,9 +280,10 @@ function settle({ taskId, agentKey }: Stopper, results: Results, issued: Issued,
     const result = results[name];
     return write.kind === "set" && result.kind === "failing" ? result.part(CAPS[name] - write.blocks) : null;
   };
-  const { acceptance: acceptanceWrite, affected: affectedWrite } = decision.record;
-  if (acceptanceWrite.kind === "set") ports.recordBlock(agentKey, acceptanceWrite.blocks);
-  if (affectedWrite.kind === "set") ports.recordAffectedBlock(agentKey, affectedWrite.blocks);
+  for (const name of STOP_CHECK_NAMES) {
+    const write = decision.record[name];
+    if (write.kind === "set") ports.blocks.record(name, agentKey, write.blocks);
+  }
   const acceptance = part("acceptance");
   const affected = part("affected");
   // Each arm of the non-empty parts type names the failing check it carries.
@@ -311,8 +313,8 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
   });
   // Only a check that would run reads its counter.
   const issued: Issued = Object.freeze({
-    acceptance: isRunnable(planned.acceptance) ? ports.blocksIssued(input.agentKey) : NO_BLOCKS_ISSUED,
-    affected: isRunnable(planned.affected) ? ports.affectedBlocksIssued(input.agentKey) : NO_BLOCKS_ISSUED,
+    acceptance: isRunnable(planned.acceptance) ? ports.blocks.issued("acceptance", input.agentKey) : NO_BLOCKS_ISSUED,
+    affected: isRunnable(planned.affected) ? ports.blocks.issued("affected", input.agentKey) : NO_BLOCKS_ISSUED,
   });
   const acceptance = admitted(taskId, "acceptance", planned.acceptance, issued);
   const affected = admitted(taskId, "affected", planned.affected, issued);
@@ -399,9 +401,9 @@ export async function runStopChecks(input: StopChecksInput, ports: StopCheckShel
   }
   if (outcome.kind === "block") return outcome;
   const faults: string[] = [];
-  for (const clear of [ports.clearBlocks, ports.clearAffectedBlocks]) {
+  for (const name of STOP_CHECK_NAMES) {
     try {
-      clear(input.agentKey);
+      ports.blocks.clear(name, input.agentKey);
     } catch (error) {
       faults.push(describe(error));
     }

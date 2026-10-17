@@ -39,6 +39,7 @@ import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import { createStopCheckPlanHandler } from "../../src/handlers/helpers/stop-check-plan";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
+import { UNKEPT_BLOCK_COUNTERS } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { publishImplementationAttemptSidecar } from "../../src/implementation-attempt-sidecar";
 import {
@@ -346,12 +347,7 @@ function recordingPorts(at: Project): Readonly<{ ports: Ports; launches: Launch[
       } as CompletionCheckRunnerResult;
     },
     readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocksIssued: () => ({ kind: "count", blocks: 0 }),
-    recordBlock: () => undefined,
-    clearBlocks: () => undefined,
-    affectedBlocksIssued: () => ({ kind: "count", blocks: 0 }),
-    recordAffectedBlock: () => undefined,
-    clearAffectedBlocks: () => undefined,
+    blocks: UNKEPT_BLOCK_COUNTERS,
     pathExists: (root, path) => existsSync(join(root, path)),
     now: () => clock.ms,
   };

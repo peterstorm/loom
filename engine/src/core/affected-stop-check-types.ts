@@ -21,8 +21,7 @@
  * owns its shape. The core may not import the shell's canonical repository
  * root or the completion runner's result type, so the port is parametric over
  * both. The shell instantiates it as
- * `StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>`,
- * which is a structural superset of `StopCheckPorts`.
+ * `StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>`.
  */
 
 import type { OwedStopCheck } from "./acceptance-contract";
@@ -166,10 +165,28 @@ export type StopChecksOutcome =
   /** The stop proceeds, and the operator is told what each check noted. */
   | Readonly<{ kind: "note"; message: string }>;
 
+/** The two stop checks. Each keeps its own per-agent block counter and cap. */
+export type StopCheckName = "acceptance" | "affected";
+
+/** Every stop check, in the order a stop runs them. */
+export const STOP_CHECK_NAMES: readonly StopCheckName[] = Object.freeze(["acceptance", "affected"] as const);
+
 /** Blocks already issued to one agent by one check, or why that count cannot be read. */
 export type StopCheckBlockCount =
   | Readonly<{ kind: "count"; blocks: number }>
   | Readonly<{ kind: "unreadable"; reason: string }>;
+
+/**
+ * Each check's per-agent block counter, keyed by check, so the counters stay
+ * independent (AS-029) and a further check needs no new port member.
+ */
+export type StopCheckBlockCounters = Readonly<{
+  issued: (check: StopCheckName, agentKey: string) => StopCheckBlockCount;
+  /** Record that `check` has now blocked this agent `blocks` times. */
+  record: (check: StopCheckName, agentKey: string, blocks: number) => void;
+  /** Forget this agent's blocks for `check`: its stop is proceeding. */
+  clear: (check: StopCheckName, agentKey: string) => void;
+}>;
 
 /** The one per-repository runner lock both checks run under. `release`
  *  returns why the lock could not be released, or null. */
@@ -180,10 +197,7 @@ export type StopCheckRunnerLock =
 /**
  * The I/O both stop checks need, injectable for tests. `Root` is the shell's
  * canonical repository root, and `RunResult` is the completion runner's
- * result. Instantiated with those two types, the port is a structural superset
- * of `StopCheckPorts`. The unprefixed counter methods keep counting
- * acceptance-check blocks, and the `Affected` ones count the affected check's
- * own blocks.
+ * result. `blocks` holds both checks' counters behind one keyed port.
  */
 export type StopChecksPorts<Root extends string, RunResult> = Readonly<{
   repositoryRoot: (stateFilePath: string) => Readonly<{ ok: true; root: Root }> | Readonly<{ ok: false; reason: string }>;
@@ -192,14 +206,7 @@ export type StopChecksPorts<Root extends string, RunResult> = Readonly<{
   /** Runs either check's formed command. The two checks' report paths always differ. */
   runCheck: (check: StopCheckCommand, root: Root) => Promise<RunResult>;
   readReport: (path: string) => Uint8Array;
-  blocksIssued: (agentKey: string) => StopCheckBlockCount;
-  recordBlock: (agentKey: string, blocks: number) => void;
-  clearBlocks: (agentKey: string) => void;
-  affectedBlocksIssued: (agentKey: string) => StopCheckBlockCount;
-  /** Record that the affected check has now blocked this agent `blocks` times. */
-  recordAffectedBlock: (agentKey: string, blocks: number) => void;
-  /** Forget this agent's affected blocks: its stop is proceeding. */
-  clearAffectedBlocks: (agentKey: string) => void;
+  blocks: StopCheckBlockCounters;
   /** Whether a changed file exists at stop time. This is the existence
    *  predicate the shell hands `changedFilesAtStop`. */
   pathExists: (root: Root, path: ChangedFilePath) => boolean;
