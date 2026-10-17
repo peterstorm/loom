@@ -24,10 +24,11 @@ import {
   STOP_HOOK_BUDGET_MS,
   type ChangedFiles,
   type StopCheckBlockCount,
+  type StopCheckCommand,
+  type StopCheckName,
   type StopChecksOutcome,
 } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../src/core/changed-files";
-import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import {
   ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
@@ -45,34 +46,27 @@ import {
 import { createStopCheckPlanHandler, type LiveAttemptEvidenceFn } from "../../src/handlers/helpers/stop-check-plan";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import type { Evidence } from "../../src/machine";
-import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
 import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contract, frozenPaths, gitProject, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
+import {
+  ACCEPTANCE_REPORT,
+  ACCEPTANCE_RUNNER,
+  AFFECTED_REPORT,
+  AFFECTED_RUNNER,
+  affectedArgv,
+  argvOf,
+  checkNameOf,
+  observedRun,
+  parsedRun,
+} from "../fixtures/stop-check-runners";
 
 const SURFACE = surface("payload");
-const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const OWED = "AS-001: one valid call wins";
 const LEDGER_TEST = "ledger > balances after a debit";
-
-const ACCEPTANCE_RUNNER = {
-  executable: "vitest",
-  args: ["run", "--reporter=junit", `--outputFile=${ACCEPTANCE_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: 120_000,
-  report: { kind: "required-file", path: ACCEPTANCE_REPORT },
-};
-const AFFECTED_RUNNER = {
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-};
 
 function manifest(runners: Readonly<{ acceptance?: boolean; affected?: Readonly<Record<string, unknown>> | boolean }>): FrozenVerificationManifest {
   const affected = runners.affected === true ? AFFECTED_RUNNER : runners.affected || undefined;
@@ -148,8 +142,7 @@ function elapsedMs(run: Run, timeoutMs: number): number {
   }
 }
 
-type CheckName = "acceptance" | "affected";
-type Launch = Readonly<{ check: CheckName; argv: readonly string[]; lockHeld: boolean; atMs: number }>;
+type Launch = Readonly<{ check: StopCheckName; argv: readonly string[]; lockHeld: boolean; atMs: number }>;
 
 type FakeOptions = Readonly<{
   acceptance?: Run;
@@ -169,24 +162,16 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
     ...(options.blocks === undefined ? {} : { presets: options.blocks }),
     clearFails: options.clearFails === true ? ["acceptance"] : [],
   });
-  const runnerResult = (check: CheckName, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf: Uint8Array | null = bytes) => {
-    const path = check === "acceptance" ? ACCEPTANCE_REPORT : AFFECTED_REPORT;
-    if (bytes === null) reports.delete(join(root, path));
-    else reports.set(join(root, path), bytes);
-    return {
-      ok: true,
-      value: {
-        checkResult: {
-          checkId: "stop-check",
-          scope: "wave",
-          outcome: {
-            kind: "observed", exitCode: timedOut || signal !== null ? null : 1, timedOut, signal,
-            report: digestOf === null ? { kind: "missing", path } : { kind: "produced", path, digest: sha256Bytes(digestOf), byteLength: digestOf.byteLength },
-          },
-        },
-        diagnostics: { stdoutTail: `${check} runner stdout`, stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-      },
-    } as CompletionCheckRunnerResult;
+  const runnerResult = (command: StopCheckCommand, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf?: Uint8Array) => {
+    const check = checkNameOf(command);
+    const path = join(root, check === "acceptance" ? ACCEPTANCE_REPORT : AFFECTED_REPORT);
+    if (bytes === null) reports.delete(path);
+    else reports.set(path, bytes);
+    return observedRun(command, bytes, {
+      ending: { exitCode: timedOut || signal !== null ? null : 1, timedOut, signal },
+      stdoutTail: `${check} runner stdout`,
+      ...(digestOf === undefined ? {} : { digestOf }),
+    });
   };
   const ports: StopCheckShellPorts = {
     repositoryRoot: () => options.root === "unavailable" ? { ok: false, reason: "no Git repository here" } : { ok: true, root },
@@ -197,31 +182,25 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
       return { kind: "acquired", release: () => { locks.released++; locks.held--; return options.lock === "release-fails" ? "the runner lock x.lock could not be released: EACCES" : null; } };
     },
     runCheck: async (command) => {
-      const check: CheckName = command.reportPolicy.kind === "required-file" && command.reportPolicy.path === AFFECTED_REPORT ? "affected" : "acceptance";
-      launches.push({ check, argv: [command.executable, ...command.args], lockHeld: locks.held > 0, atMs: clock.ms });
+      const check = checkNameOf(command);
+      launches.push({ check, argv: argvOf(command), lockHeld: locks.held > 0, atMs: clock.ms });
       const run = options[check] ?? { kind: "report", cases: [] };
       clock.ms += elapsedMs(run, command.timeoutMs);
       switch (run.kind) {
         case "report":
-          return runnerResult(check, false, null, junit(run.cases));
+          return runnerResult(command, false, null, junit(run.cases));
         case "timed-out":
-          return runnerResult(check, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
+          return runnerResult(command, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
         case "killed":
-          return runnerResult(check, false, "SIGTERM", junit([failing("src/partial.test.ts", "partial")]));
+          return runnerResult(command, false, "SIGTERM", junit([failing("src/partial.test.ts", "partial")]));
         case "no-report":
-          return runnerResult(check, false, null, null);
+          return runnerResult(command, false, null, null);
         case "report-rewritten":
-          return runnerResult(check, false, null, junit([passing("src/ledger.test.ts", LEDGER_TEST)]), junit([failing("src/ledger.test.ts", LEDGER_TEST)]));
+          return runnerResult(command, false, null, junit([passing("src/ledger.test.ts", LEDGER_TEST)]), junit([failing("src/ledger.test.ts", LEDGER_TEST)]));
         case "not-junit":
-          return runnerResult(check, false, null, new TextEncoder().encode("not xml at all"));
+          return runnerResult(command, false, null, new TextEncoder().encode("not xml at all"));
         case "start-failed":
-          return {
-            ok: true,
-            value: {
-              checkResult: { checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: `spawn ${command.executable} ENOENT` } },
-              diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-            },
-          } as CompletionCheckRunnerResult;
+          return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: `spawn ${command.executable} ENOENT` } });
         case "did-not-complete":
           return { ok: false, error: { kind: "containment-unsupported", message: "no process groups on this host" } };
         case "throws":
@@ -263,7 +242,6 @@ function input(
 
 const observed = (files: ChangedFiles): ChangedFilesObservation => ({ kind: "observed", changed: files });
 const textOf = (outcome: StopChecksOutcome): string => outcome.kind === "block" || outcome.kind === "note" ? outcome.message : "";
-const affectedArgv = (...files: string[]): readonly string[] => [AFFECTED_RUNNER.executable, ...AFFECTED_RUNNER.args.slice(0, -1), ...files];
 
 // --- Blocking and passing ---
 

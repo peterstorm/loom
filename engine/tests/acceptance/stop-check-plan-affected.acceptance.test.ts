@@ -29,17 +29,14 @@ import {
   AFFECTED_STOP_CHECK_OFF,
   MAX_AFFECTED_RUNNER_TIMEOUT_MS,
   type AffectedOffReason,
-  type StopChecksPorts,
 } from "../../src/core/affected-stop-check-types";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { renderStopCheckPlan } from "../../src/core/acceptance-contract/stop-check-plan";
-import { sha256Bytes } from "../../src/core/digest";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import { createStopCheckPlanHandler } from "../../src/handlers/helpers/stop-check-plan";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
-import { UNKEPT_BLOCK_COUNTERS } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { publishImplementationAttemptSidecar } from "../../src/implementation-attempt-sidecar";
 import {
@@ -51,38 +48,18 @@ import {
   parseSessionId,
   type Evidence,
 } from "../../src/machine";
-import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
 import type { HookResult, Task, TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { statePathIn, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { frozenContract, stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
-
-type Ports = StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>;
+import { ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, argvOf, checkNameOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 
 const SESSION = "stop-check-plan-affected-session";
 const AGENT_TYPE = "code-implementer-agent";
-const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const PAYLOAD_TYPES = "src/payload-types.ts";
 const PAYLOAD_ACCEPTANCE = "tests/payload.acceptance.test.ts";
 const OWED = "AS-001: one valid call wins";
-
-const ACCEPTANCE_RUNNER = {
-  executable: "vitest",
-  args: ["run", "--reporter=junit", `--outputFile=${ACCEPTANCE_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: 120_000,
-  report: { kind: "required-file", path: ACCEPTANCE_REPORT },
-};
-const AFFECTED_RUNNER = {
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-};
-const affectedArgv = (...files: string[]): readonly string[] => [AFFECTED_RUNNER.executable, ...AFFECTED_RUNNER.args.slice(0, -1), ...files];
 
 /** A schema-2 manifest frozen by the production freezer; throws when it is refused. */
 function manifest(runners: Readonly<{ acceptance?: boolean; affected?: Readonly<Record<string, unknown>> | boolean }>): FrozenVerificationManifest {
@@ -319,39 +296,26 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
 
 type Launch = Readonly<{ check: "acceptance" | "affected"; argv: readonly string[]; cwd: string }>;
 
+const PASSING_REPORT = new TextEncoder().encode(
+  `<?xml version="1.0"?><testsuites tests="1"><testsuite name="suite" tests="1"><testcase classname="${PAYLOAD_ACCEPTANCE}" name="${OWED}"></testcase></testsuite></testsuites>`);
+
 /** Runner ports that record each launch and report every check passing. */
-function recordingPorts(at: Project): Readonly<{ ports: Ports; launches: Launch[] }> {
-  const launches: Launch[] = [];
-  const reports = new Map<string, Uint8Array>();
-  const clock = { ms: Date.now() };
-  const ports: Ports = {
-    repositoryRoot: () => ({ ok: true, root: at.canonicalRoot }),
-    acquireRunner: () => ({ kind: "acquired", release: () => null }),
-    runCheck: async (command) => {
-      const path = command.reportPolicy.kind === "required-file" ? command.reportPolicy.path : "";
-      launches.push({ check: path === AFFECTED_REPORT ? "affected" : "acceptance", argv: [command.executable, ...command.args], cwd: command.cwd });
-      const bytes = new TextEncoder().encode(
-        `<?xml version="1.0"?><testsuites tests="1"><testsuite name="suite" tests="1"><testcase classname="${PAYLOAD_ACCEPTANCE}" name="${OWED}"></testcase></testsuite></testsuites>`);
-      reports.set(join(at.root, path), bytes);
-      clock.ms += 1_000;
-      return {
-        ok: true,
-        value: {
-          checkResult: {
-            checkId: command.checkId,
-            scope: "wave",
-            outcome: { kind: "observed", exitCode: 0, timedOut: false, signal: null, report: { kind: "produced", path, digest: sha256Bytes(bytes), byteLength: bytes.byteLength } },
-          },
-          diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-        },
-      } as CompletionCheckRunnerResult;
-    },
-    readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocks: UNKEPT_BLOCK_COUNTERS,
+function recordingPorts(at: Project) {
+  const { ports, launches } = recordingStopCheckPorts({
+    root: at.canonicalRoot,
+    report: () => PASSING_REPORT,
     pathExists: (root, path) => existsSync(join(root, path)),
-    now: () => clock.ms,
+    startMs: Date.now(),
+    msPerRun: 1_000,
+  });
+  return {
+    ports,
+    launches: (): readonly Launch[] => launches.map((command) => ({
+      check: checkNameOf(command),
+      argv: argvOf(command),
+      cwd: command.cwd,
+    })),
   };
-  return { ports, launches };
 }
 
 /** The launches a rendered plan promises: the acceptance command, then the affected one, each only when on. */
@@ -392,7 +356,7 @@ describe("stop-check-plan and the live hook share one plan (CT-2)", () => {
       hook_event_name: "SubagentStop",
     }), [], async () => ({ kind: "passthrough" }), fake.ports);
 
-    expect(fake.launches).toEqual(plannedLaunches(lines));
+    expect(fake.launches()).toEqual(plannedLaunches(lines));
   });
 });
 

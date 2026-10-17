@@ -21,36 +21,19 @@ import { planStopChecks } from "../../src/core/acceptance-contract/stop-check-pl
 import { renderStopChecksPlan, stopChecksPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
 import { MAX_AFFECTED_RUNNER_TIMEOUT_MS, type ChangedFiles } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop } from "../../src/core/changed-files";
-import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
-import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import { UNKEPT_BLOCK_COUNTERS } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks } from "../../src/handlers/subagent-stop/stop-checks";
 import type { Evidence } from "../../src/machine";
-import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
 import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contract, frozenPaths, surface, task } from "../fixtures/contract-status-fixtures";
+import { ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, argvOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 
 const SURFACE = surface("payload");
-const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const OWED = "AS-001: one valid call wins";
 
-const ACCEPTANCE_RUNNER = {
-  executable: "vitest",
-  args: ["run", "--reporter=junit", `--outputFile=${ACCEPTANCE_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: 120_000,
-  report: { kind: "required-file", path: ACCEPTANCE_REPORT },
-};
-const AFFECTED_RUNNER = {
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-};
 const NODE_AFFECTED_RUNNER = {
   executable: "node",
   args: ["--test", "--test-reporter=junit", `--test-reporter-destination=${AFFECTED_REPORT}`, "{files}"],
@@ -105,35 +88,26 @@ function repositoryRoot(): CanonicalRepositoryRoot {
 
 type Command = Readonly<{ argv: readonly string[]; cwd: string; reportPath: string }>;
 
+const PASSING_REPORT = new TextEncoder().encode(`<testsuites><testsuite name="s" tests="1"><testcase classname="${SURFACE.acceptance}" name="${OWED}"/></testsuite></testsuites>`);
+
 /** Ports whose runner records each command and reports every check passing. */
-function recordingPorts(root: CanonicalRepositoryRoot, reportOnly: boolean): Readonly<{ ports: StopCheckShellPorts; launched: Command[] }> {
-  const launched: Command[] = [];
-  const reports = new Map<string, Uint8Array>();
-  const ports: StopCheckShellPorts = {
-    repositoryRoot: () => ({ ok: true, root }),
-    acquireRunner: () => ({ kind: "acquired", release: () => null }),
-    runCheck: async (command) => {
-      const reportPath = command.reportPolicy.kind === "required-file" ? command.reportPolicy.path : "";
-      launched.push({ argv: [command.executable, ...command.args], cwd: command.cwd, reportPath });
-      const bytes = new TextEncoder().encode(`<testsuites><testsuite name="s" tests="1"><testcase classname="${SURFACE.acceptance}" name="${OWED}"/></testsuite></testsuites>`);
-      reports.set(join(root, reportPath), bytes);
-      return {
-        ok: true,
-        value: {
-          checkResult: { checkId: command.checkId, scope: "wave", outcome: { kind: "observed", exitCode: 0, timedOut: false, signal: null, report: { kind: "produced", path: reportPath, digest: sha256Bytes(bytes), byteLength: bytes.byteLength } } },
-          diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-        },
-      } as CompletionCheckRunnerResult;
-    },
-    readReport: (path) => reports.get(path) ?? new Uint8Array(),
+function recordingPorts(root: CanonicalRepositoryRoot, reportOnly: boolean) {
+  const { ports, launches } = recordingStopCheckPorts({
+    root,
+    report: () => PASSING_REPORT,
     blocks: {
       ...UNKEPT_BLOCK_COUNTERS,
       record: () => { if (reportOnly) throw new Error("report-only ports record no block"); },
     },
-    pathExists: () => true,
-    now: () => 0,
+  });
+  return {
+    ports,
+    launched: (): readonly Command[] => launches.map((command) => ({
+      argv: argvOf(command),
+      cwd: command.cwd,
+      reportPath: command.reportPolicy.kind === "required-file" ? command.reportPolicy.path : "",
+    })),
   };
-  return { ports, launched };
 }
 
 /** The commands the owner's plan forms, in the order the shell must run them. */
@@ -141,7 +115,7 @@ function plannedCommands(g: TaskGraph, taskId: string, changed: ChangedFiles): r
   const plan = planStopChecks(g, taskId, changed);
   if (plan.kind === "unknown-task") return [];
   const on = [plan.acceptance, plan.affected].flatMap((arm) => arm.kind === "on" ? [arm] : []);
-  return on.map(({ command, reportPath }) => ({ argv: [command.executable, ...command.args], cwd: command.cwd, reportPath }));
+  return on.map(({ command, reportPath }) => ({ argv: argvOf(command), cwd: command.cwd, reportPath }));
 }
 
 /** The commands the view shows, in its order. */
@@ -197,8 +171,8 @@ describe("INV-1: the live stop shells and the plan view act on the one plan", ()
     const pi = recordingPorts(root, true);
     await reportImplementationStopChecks({ load: () => g, getPath: () => join(root, ".pi/active_task_graph.json") }, taskId, { kind: "read", events }, pi.ports);
 
-    expect(claude.launched).toEqual(planned);
-    expect(pi.launched).toEqual(planned);
+    expect(claude.launched()).toEqual(planned);
+    expect(pi.launched()).toEqual(planned);
     expect(viewedCommands(g, taskId, changed)).toEqual(planned);
     expect(renderedArgv(g, taskId, changed)).toEqual(planned.map(({ argv }) => argv));
   });

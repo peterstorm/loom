@@ -20,11 +20,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { piChildEvidence } from "../../../pi/evidence-recorder";
 import { reportImplementationStopChecks } from "../../../pi/subagent-stop";
 import { piGrantedAgentId } from "../../../pi/write-grant";
-import { MAX_AFFECTED_RUNNER_TIMEOUT_MS } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop } from "../../src/core/changed-files";
-import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
-import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { createStopCheckPlanHandler } from "../../src/handlers/helpers/stop-check-plan";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
@@ -39,25 +36,17 @@ import {
   parseSessionId,
   type Evidence,
 } from "../../src/machine";
-import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
 import { StateManager } from "../../src/state-manager";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "../fixtures/contract-status-fixtures";
+import { AFFECTED_ARGV_PREFIX, AFFECTED_RUNNER, argvOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 
 const SESSION = "changed-files-matrix-session";
 const PI_PARENT_SESSION = "changed-files-matrix-pi-parent";
 const AGENT_TYPE = "code-implementer-agent";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const PI_GRANT_TOKEN = "ab".repeat(32);
-const AFFECTED_RUNNER = {
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-};
-const ARGV_PREFIX: readonly string[] = [AFFECTED_RUNNER.executable, ...AFFECTED_RUNNER.args.slice(0, -1)];
+const EMPTY_REPORT = new TextEncoder().encode('<testsuites><testsuite name="s" tests="0"></testsuite></testsuites>');
 
 const TASKS = [
   task("T2", 1, ["src/payload.ts"]),
@@ -152,36 +141,21 @@ async function project(): Promise<Project> {
   return { root, canonicalRoot: canonicalRoot.value, statePath };
 }
 
-/** Production-shaped ports with the real existence predicate and a runner that records the affected argv. */
-function recordingPorts(at: Project): Readonly<{ ports: StopCheckShellPorts; affectedFiles: () => readonly string[] | null }> {
-  let argv: readonly string[] | null = null;
-  const reports = new Map<string, Uint8Array>();
-  const ports: StopCheckShellPorts = {
-    repositoryRoot: () => ({ ok: true, root: at.canonicalRoot }),
-    acquireRunner: () => ({ kind: "acquired", release: () => null }),
-    runCheck: async (command) => {
-      argv = [command.executable, ...command.args];
-      const bytes = new TextEncoder().encode('<testsuites><testsuite name="s" tests="0"></testsuite></testsuites>');
-      reports.set(join(at.root, AFFECTED_REPORT), bytes);
-      return {
-        ok: true,
-        value: {
-          checkResult: { checkId: command.checkId, scope: "wave", outcome: { kind: "observed", exitCode: 0, timedOut: false, signal: null, report: { kind: "produced", path: AFFECTED_REPORT, digest: sha256Bytes(bytes), byteLength: bytes.byteLength } } },
-          diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-        },
-      } as CompletionCheckRunnerResult;
-    },
-    readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocks: UNKEPT_BLOCK_COUNTERS,
+/** Production-shaped ports with the real existence predicate, and the files the last affected launch ran over. */
+function recordingPorts(at: Project) {
+  const { ports, launches } = recordingStopCheckPorts({
+    root: at.canonicalRoot,
+    report: () => EMPTY_REPORT,
     pathExists: (root, path) => existsSync(join(root, path)),
-    now: () => 0,
-  };
+  });
   return {
     ports,
-    affectedFiles: () => {
-      if (argv === null) return null;
-      expect(argv.slice(0, ARGV_PREFIX.length)).toEqual(ARGV_PREFIX);
-      return argv.slice(ARGV_PREFIX.length);
+    affectedFiles: (): readonly string[] | null => {
+      const last = launches.at(-1);
+      if (last === undefined) return null;
+      const argv = argvOf(last);
+      expect(argv.slice(0, AFFECTED_ARGV_PREFIX.length)).toEqual(AFFECTED_ARGV_PREFIX);
+      return argv.slice(AFFECTED_ARGV_PREFIX.length);
     },
   };
 }
