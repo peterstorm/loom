@@ -35,6 +35,7 @@ import type { HookResult } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "../fixtures/contract-status-fixtures";
+import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 
 const SESSION = "stop-checks-isolation-session";
 const AGENT = "agent-ledger";
@@ -160,12 +161,7 @@ function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
       }
     },
     readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocksIssued: () => ({ kind: "count", blocks: 0 }),
-    recordBlock: () => undefined,
-    clearBlocks: () => undefined,
-    affectedBlocksIssued: () => outcome.affectedBlocks ?? { kind: "count", blocks: 0 },
-    recordAffectedBlock: () => undefined,
-    clearAffectedBlocks: () => undefined,
+    blocks: inMemoryBlockCounters(outcome.affectedBlocks === undefined ? {} : { presets: { affected: outcome.affectedBlocks } }).counters,
     pathExists: () => true,
     // The hook started `hookAgeMs` ago; the clock does not move during the stop.
     now: (() => { let first = true; return () => { const reading = first ? now - (outcome.hookAgeMs ?? 0) : now; first = false; return reading; }; })(),

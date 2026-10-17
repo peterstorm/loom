@@ -31,6 +31,7 @@ import {
   STOP_HOOK_BUDGET_MS,
   type AffectedStopCheckNoteKind,
   type StopCheckBlockCount,
+  type StopCheckName,
   type StopChecksPorts,
 } from "../../src/core/affected-stop-check-types";
 import { sha256Bytes } from "../../src/core/digest";
@@ -52,6 +53,7 @@ import type { CompletionCheckRunnerResult } from "../../src/orchestration/comple
 import type { HookHandler, HookResult } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 import { contract, frozenPaths, stateFileJson, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 
 type Ports = StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>;
@@ -229,11 +231,9 @@ type Run =
   | Readonly<{ kind: "start-failed" }>
   | Readonly<{ kind: "did-not-complete" }>;
 
-type CheckName = "acceptance" | "affected";
+type Launch = Readonly<{ check: StopCheckName; argv: readonly string[]; cwd: string; timeoutMs: number; lockHeld: boolean }>;
 
-type Launch = Readonly<{ check: CheckName; argv: readonly string[]; cwd: string; timeoutMs: number; lockHeld: boolean }>;
-
-const checkOf = (reportPath: string): CheckName => {
+const checkOf = (reportPath: string): StopCheckName => {
   if (reportPath === ACCEPTANCE_REPORT) return "acceptance";
   if (reportPath === AFFECTED_REPORT) return "affected";
   throw new Error(`fixture runner launched an unknown report path ${reportPath}`);
@@ -264,12 +264,11 @@ function fakePorts(at: Project, options: FakeOptions = {}) {
   const lock = options.lock ?? { holder: null };
   const locks = { acquired: 0, released: 0, held: 0 };
   const flight = options.flight ?? { count: 0 };
-  const counters = {
-    acceptance: new Map<string, number>(),
-    affected: new Map<string, number>(),
-  };
-  const preset = (map: Map<string, number>, blocks: number | undefined) => (key: string): StopCheckBlockCount =>
-    ({ kind: "count", blocks: map.get(key) ?? blocks ?? 0 });
+  const presetCount = (blocks: number | undefined): StopCheckBlockCount | undefined =>
+    blocks === undefined ? undefined : { kind: "count", blocks };
+  const blocks = inMemoryBlockCounters({
+    presets: { acceptance: presetCount(options.blocks?.acceptance), affected: presetCount(options.blocks?.affected) },
+  });
   const runsSoFar = { acceptance: 0, affected: 0 };
 
   const runCheck: Ports["runCheck"] = async (command) => {
@@ -352,16 +351,11 @@ function fakePorts(at: Project, options: FakeOptions = {}) {
       if (bytes === undefined) throw new Error(`ENOENT: ${path}`);
       return bytes;
     },
-    blocksIssued: preset(counters.acceptance, options.blocks?.acceptance),
-    recordBlock: (key, blocks) => { counters.acceptance.set(key, blocks); },
-    clearBlocks: (key) => { counters.acceptance.set(key, 0); },
-    affectedBlocksIssued: preset(counters.affected, options.blocks?.affected),
-    recordAffectedBlock: (key, blocks) => { counters.affected.set(key, blocks); },
-    clearAffectedBlocks: (key) => { counters.affected.set(key, 0); },
+    blocks: blocks.counters,
     pathExists: (root, path) => existsSync(join(root, path)),
     now: () => clock.ms,
   };
-  return { ports, launches, reads, locks, counters, clock, startedAtMs };
+  return { ports, launches, reads, locks, counters: blocks.counts, clock, startedAtMs };
 }
 
 /** Cleanup that records each call: a blocked stop must release nothing. */

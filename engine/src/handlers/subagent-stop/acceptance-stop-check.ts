@@ -18,6 +18,8 @@ import { randomUUID } from "node:crypto";
 import {
   STOP_HOOK_BUDGET_MS,
   type StopCheckBlockCount,
+  type StopCheckBlockCounters,
+  type StopCheckName,
   type StopCheckRunnerLock,
   type StopChecksPorts,
 } from "../../core/affected-stop-check-types";
@@ -48,15 +50,13 @@ const errnoCode = (error: unknown): unknown =>
 /** A counter no block was ever written to: the count every check starts from. */
 export const NO_BLOCKS_ISSUED: StopCheckBlockCount = Object.freeze({ kind: "count", blocks: 0 });
 
-/** Which check a counter file counts blocks for. Each has its own file, so their caps are independent. */
-type CounterCheck = "acceptance" | "affected";
-
-/** A block count lives beside the other per-agent runtime files, never in the TaskGraph. */
-function counterPath(check: CounterCheck, agentKey: string): string {
+/** A block count lives beside the other per-agent runtime files, never in the
+ *  TaskGraph. Each check has its own file, so their caps are independent. */
+function counterPath(check: StopCheckName, agentKey: string): string {
   return join(subagentDir(), `${agentKey.replace(/[^A-Za-z0-9._-]/g, "_")}.${check}-stop-check.json`);
 }
 
-function readBlocks(check: CounterCheck, agentKey: string): StopCheckBlockCount {
+function readBlocks(check: StopCheckName, agentKey: string): StopCheckBlockCount {
   const path = counterPath(check, agentKey);
   let text: string;
   try {
@@ -78,13 +78,27 @@ function readBlocks(check: CounterCheck, agentKey: string): StopCheckBlockCount 
     : { kind: "unreadable", reason: `${path} carries no non-negative integer "blocks"` };
 }
 
-function writeBlocks(check: CounterCheck, agentKey: string, blocks: number): void {
+function writeBlocks(check: StopCheckName, agentKey: string, blocks: number): void {
   const path = counterPath(check, agentKey);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, JSON.stringify({ blocks }), { mode: 0o600 });
 }
 
-const clearCounter = (check: CounterCheck, agentKey: string): void => rmSync(counterPath(check, agentKey), { force: true });
+const clearCounter = (check: StopCheckName, agentKey: string): void => rmSync(counterPath(check, agentKey), { force: true });
+
+/** The counters as files beside the agent's other runtime files. */
+const FILE_BLOCK_COUNTERS: StopCheckBlockCounters = Object.freeze({
+  issued: readBlocks,
+  record: writeBlocks,
+  clear: clearCounter,
+});
+
+/** Counters that are never kept: every check reads no block issued. */
+export const UNKEPT_BLOCK_COUNTERS: StopCheckBlockCounters = Object.freeze({
+  issued: () => NO_BLOCKS_ISSUED,
+  record: () => undefined,
+  clear: () => undefined,
+});
 
 /**
  * One lock per repository, so stops in unrelated repositories never wait on
@@ -201,12 +215,7 @@ export const PRODUCTION_STOP_CHECK_PORTS: StopCheckShellPorts = Object.freeze({
   acquireRunner: acquireRunnerLock,
   runCheck: (check, root) => runCompletionCheck(check, root),
   readReport: (path: string) => Uint8Array.from(readRunBytesNoFollow(path)),
-  blocksIssued: (agentKey: string) => readBlocks("acceptance", agentKey),
-  recordBlock: (agentKey: string, blocks: number) => writeBlocks("acceptance", agentKey, blocks),
-  clearBlocks: (agentKey: string) => clearCounter("acceptance", agentKey),
-  affectedBlocksIssued: (agentKey: string) => readBlocks("affected", agentKey),
-  recordAffectedBlock: (agentKey: string, blocks: number) => writeBlocks("affected", agentKey, blocks),
-  clearAffectedBlocks: (agentKey: string) => clearCounter("affected", agentKey),
+  blocks: FILE_BLOCK_COUNTERS,
   pathExists: (root, path) => existsSync(join(root, path)),
   now: () => Date.now(),
 });
@@ -218,10 +227,5 @@ export const PRODUCTION_STOP_CHECK_PORTS: StopCheckShellPorts = Object.freeze({
  */
 export const REPORT_ONLY_STOP_CHECK_PORTS: StopCheckShellPorts = Object.freeze({
   ...PRODUCTION_STOP_CHECK_PORTS,
-  blocksIssued: () => NO_BLOCKS_ISSUED,
-  recordBlock: () => undefined,
-  clearBlocks: () => undefined,
-  affectedBlocksIssued: () => NO_BLOCKS_ISSUED,
-  recordAffectedBlock: () => undefined,
-  clearAffectedBlocks: () => undefined,
+  blocks: UNKEPT_BLOCK_COUNTERS,
 });

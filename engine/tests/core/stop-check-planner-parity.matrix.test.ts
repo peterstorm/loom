@@ -23,7 +23,7 @@ import { MAX_AFFECTED_RUNNER_TIMEOUT_MS, type ChangedFiles } from "../../src/cor
 import { changedFilesAtStop } from "../../src/core/changed-files";
 import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
-import type { StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks } from "../../src/handlers/subagent-stop/stop-checks";
 import type { Evidence } from "../../src/machine";
 import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
@@ -109,7 +109,6 @@ type Command = Readonly<{ argv: readonly string[]; cwd: string; reportPath: stri
 function recordingPorts(root: CanonicalRepositoryRoot, reportOnly: boolean): Readonly<{ ports: StopCheckShellPorts; launched: Command[] }> {
   const launched: Command[] = [];
   const reports = new Map<string, Uint8Array>();
-  const zero = () => ({ kind: "count" as const, blocks: 0 });
   const ports: StopCheckShellPorts = {
     repositoryRoot: () => ({ ok: true, root }),
     acquireRunner: () => ({ kind: "acquired", release: () => null }),
@@ -127,12 +126,10 @@ function recordingPorts(root: CanonicalRepositoryRoot, reportOnly: boolean): Rea
       } as CompletionCheckRunnerResult;
     },
     readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocksIssued: zero,
-    recordBlock: () => { if (reportOnly) throw new Error("report-only ports record no block"); },
-    clearBlocks: () => undefined,
-    affectedBlocksIssued: zero,
-    recordAffectedBlock: () => { if (reportOnly) throw new Error("report-only ports record no block"); },
-    clearAffectedBlocks: () => undefined,
+    blocks: {
+      ...UNKEPT_BLOCK_COUNTERS,
+      record: () => { if (reportOnly) throw new Error("report-only ports record no block"); },
+    },
     pathExists: () => true,
     now: () => 0,
   };

@@ -20,8 +20,10 @@ import {
   AFFECTED_BLOCK_HEADING,
   AFFECTED_NOTE_TEXT,
   AFFECTED_STOP_CHECK_MAX_BLOCKS,
+  STOP_CHECK_NAMES,
   type FailingAffectedTestcase,
   type StopCheckBlockCount,
+  type StopCheckName,
 } from "../../src/core/affected-stop-check-types";
 import {
   judgeAffectedRun,
@@ -30,7 +32,6 @@ import {
   stopCheckBlockDecision,
   type CheckVerdict,
   type StopCheckBlockCaps,
-  type StopCheckName,
 } from "../../src/core/affected-stop-check";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { parseJunitTestcases, type JunitTestcasesResult } from "../../src/core/structured-test-report";
@@ -176,7 +177,7 @@ describe("stopCheckBlockDecision", () => {
         if (decision.outcome === "proceed") break; // the agent's stop proceeds: it ends.
         blocks += 1;
         expect([acceptance, affected]).toContain("failing");
-        for (const name of ["acceptance", "affected"] as const) {
+        for (const name of STOP_CHECK_NAMES) {
           const write = decision.record[name];
           if (write.kind === "set") {
             expect(write.blocks).toBe(counters[name] + 1);
@@ -202,7 +203,7 @@ describe("stopCheckBlockDecision", () => {
         break;
       }
       blocks += 1;
-      for (const name of ["acceptance", "affected"] as const) {
+      for (const name of STOP_CHECK_NAMES) {
         const write = decision.record[name];
         if (write.kind === "set") counters[name] = write.blocks;
       }

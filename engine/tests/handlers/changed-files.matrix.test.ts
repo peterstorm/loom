@@ -24,7 +24,7 @@ import { MAX_AFFECTED_RUNNER_TIMEOUT_MS } from "../../src/core/affected-stop-che
 import { changedFilesAtStop } from "../../src/core/changed-files";
 import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
-import type { StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { createStopCheckPlanHandler } from "../../src/handlers/helpers/stop-check-plan";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
@@ -156,7 +156,6 @@ async function project(): Promise<Project> {
 function recordingPorts(at: Project): Readonly<{ ports: StopCheckShellPorts; affectedFiles: () => readonly string[] | null }> {
   let argv: readonly string[] | null = null;
   const reports = new Map<string, Uint8Array>();
-  const zero = () => ({ kind: "count" as const, blocks: 0 });
   const ports: StopCheckShellPorts = {
     repositoryRoot: () => ({ ok: true, root: at.canonicalRoot }),
     acquireRunner: () => ({ kind: "acquired", release: () => null }),
@@ -173,12 +172,7 @@ function recordingPorts(at: Project): Readonly<{ ports: StopCheckShellPorts; aff
       } as CompletionCheckRunnerResult;
     },
     readReport: (path) => reports.get(path) ?? new Uint8Array(),
-    blocksIssued: zero,
-    recordBlock: () => undefined,
-    clearBlocks: () => undefined,
-    affectedBlocksIssued: zero,
-    recordAffectedBlock: () => undefined,
-    clearAffectedBlocks: () => undefined,
+    blocks: UNKEPT_BLOCK_COUNTERS,
     pathExists: (root, path) => existsSync(join(root, path)),
     now: () => 0,
   };

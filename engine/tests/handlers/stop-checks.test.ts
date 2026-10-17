@@ -51,6 +51,7 @@ import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contract, frozenPaths, gitProject, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
+import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
 
 const SURFACE = surface("payload");
 const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -164,12 +165,10 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
   const launches: Launch[] = [];
   const reports = new Map<string, Uint8Array>();
   const locks = { acquired: 0, released: 0, held: 0 };
-  const counters = { acceptance: new Map<string, number>(), affected: new Map<string, number>() };
-  const issued = (check: CheckName) => (key: string): StopCheckBlockCount => {
-    const preset = options.blocks?.[check];
-    if (preset?.kind === "unreadable") return preset;
-    return { kind: "count", blocks: counters[check].get(key) ?? preset?.blocks ?? 0 };
-  };
+  const { counters: blocks, counts: counters } = inMemoryBlockCounters({
+    ...(options.blocks === undefined ? {} : { presets: options.blocks }),
+    clearFails: options.clearFails === true ? ["acceptance"] : [],
+  });
   const runnerResult = (check: CheckName, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf: Uint8Array | null = bytes) => {
     const path = check === "acceptance" ? ACCEPTANCE_REPORT : AFFECTED_REPORT;
     if (bytes === null) reports.delete(join(root, path));
@@ -234,15 +233,7 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
       if (bytes === undefined) throw new Error(`ENOENT: ${path}`);
       return bytes;
     },
-    blocksIssued: issued("acceptance"),
-    recordBlock: (key, blocks) => { counters.acceptance.set(key, blocks); },
-    clearBlocks: (key) => {
-      if (options.clearFails === true) throw new Error("EROFS: counter directory is read-only");
-      counters.acceptance.set(key, 0);
-    },
-    affectedBlocksIssued: issued("affected"),
-    recordAffectedBlock: (key, blocks) => { counters.affected.set(key, blocks); },
-    clearAffectedBlocks: (key) => { counters.affected.set(key, 0); },
+    blocks,
     pathExists: () => true,
     now: () => clock.ms,
   };
@@ -302,8 +293,10 @@ describe("runStopChecks: the affected check blocks on failing affected tests", (
     const outcome = await runStopChecks(input(manifest({ affected: true }), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports);
 
     expect(outcome).toEqual({ kind: "passed" });
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
-    expect(fake.counters.acceptance.get("session.agent")).toBe(0);
+    // Only a clear drops the preset count, as removing the counter file does.
+    expect(fake.ports.blocks.issued("affected", "session.agent")).toEqual({ kind: "count", blocks: 0 });
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
+    expect(fake.counters.acceptance.has("session.agent")).toBe(false);
   });
 
   it("AS-023: zero affected tests pass with the zero-tests note", async () => {
@@ -391,7 +384,7 @@ describe("runStopChecks: failing open", () => {
     expect(outcomes.map(({ kind }) => kind)).toEqual([...Array(AFFECTED_STOP_CHECK_MAX_BLOCKS).fill("block"), "note"]);
     expect(textOf(outcomes.at(-1)!)).toContain(AFFECTED_NOTE_TEXT["cap-reached"]);
     expect(fake.launches).toHaveLength(AFFECTED_STOP_CHECK_MAX_BLOCKS);
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
   });
 
   it("AS-025: an unreadable affected counter fails open naming it, and the runner never launches", async () => {
@@ -419,12 +412,13 @@ describe("runStopChecks: failing open", () => {
   ])("AS-026: an affected runner that %s fails open with its named note, under one lock released once", async (_label, run, kind) => {
     const root = repositoryRoot();
     const fake = fakePorts(root, { affected: run });
+    fake.counters.affected.set("session.agent", 1);
 
     const outcome = await runStopChecks(input(manifest({ affected: true }), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports);
 
     expect(outcome.kind).toBe("note");
     expect(textOf(outcome)).toContain(AFFECTED_NOTE_TEXT[kind]);
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
     expect(fake.locks).toMatchObject({ acquired: 1, released: 1 });
   });
 
@@ -485,6 +479,7 @@ describe("runStopChecks: failing open", () => {
   it("names both the crash and a lock that would not release when a runner throws under the lock", async () => {
     const root = repositoryRoot();
     const fake = fakePorts(root, { lock: "release-fails", affected: { kind: "throws" } });
+    fake.counters.affected.set("session.agent", 1);
 
     const outcome = await runStopChecks(input(manifest({ affected: true }), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports);
 
@@ -493,7 +488,7 @@ describe("runStopChecks: failing open", () => {
       message: "stop checks for T3 crashed and did not decide: runner port defect\nstop checks for T3: the runner lock x.lock could not be released: EACCES",
     });
     expect(fake.locks).toMatchObject({ acquired: 1, released: 1, held: 0 });
-    expect(fake.counters.affected.get("session.agent")).toBe(0);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
   });
 
   it("turns a thrown fault, including an unloadable TaskGraph, into a crash note", async () => {
@@ -707,22 +702,22 @@ describe("production stop-check ports", () => {
   it("AS-029: keeps the affected counter in its own file, independent of the acceptance counter", () => {
     const dir = subagentDir();
     const ports = PRODUCTION_STOP_CHECK_PORTS;
-    ports.recordBlock("s.a", 2);
-    ports.recordAffectedBlock("s.a", 1);
-    expect(ports.blocksIssued("s.a")).toEqual({ kind: "count", blocks: 2 });
-    expect(ports.affectedBlocksIssued("s.a")).toEqual({ kind: "count", blocks: 1 });
+    ports.blocks.record("acceptance", "s.a", 2);
+    ports.blocks.record("affected", "s.a", 1);
+    expect(ports.blocks.issued("acceptance", "s.a")).toEqual({ kind: "count", blocks: 2 });
+    expect(ports.blocks.issued("affected", "s.a")).toEqual({ kind: "count", blocks: 1 });
     expect(existsSync(join(dir, "s.a.affected-stop-check.json"))).toBe(true);
-    ports.clearAffectedBlocks("s.a");
+    ports.blocks.clear("affected", "s.a");
     expect(existsSync(join(dir, "s.a.affected-stop-check.json"))).toBe(false);
-    expect(ports.blocksIssued("s.a")).toEqual({ kind: "count", blocks: 2 });
-    ports.clearBlocks("s.a");
-    expect(ports.affectedBlocksIssued("s.a")).toEqual({ kind: "count", blocks: 0 });
+    expect(ports.blocks.issued("acceptance", "s.a")).toEqual({ kind: "count", blocks: 2 });
+    ports.blocks.clear("acceptance", "s.a");
+    expect(ports.blocks.issued("affected", "s.a")).toEqual({ kind: "count", blocks: 0 });
   });
 
   it("reads a corrupt affected counter as unreadable, naming the file", () => {
     const dir = subagentDir();
     writeFileSync(join(dir, "s.a.affected-stop-check.json"), "{not json");
-    expect(PRODUCTION_STOP_CHECK_PORTS.affectedBlocksIssued("s.a")).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("is not JSON") });
+    expect(PRODUCTION_STOP_CHECK_PORTS.blocks.issued("affected", "s.a")).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("is not JSON") });
   });
 
   it("answers whether a changed file exists beneath the repository root", () => {
@@ -737,8 +732,8 @@ describe("production stop-check ports", () => {
 
   it("keeps no affected counter in the Pi report-only form", () => {
     const dir = subagentDir();
-    REPORT_ONLY_STOP_CHECK_PORTS.recordAffectedBlock("pi.T2", 1);
-    expect(REPORT_ONLY_STOP_CHECK_PORTS.affectedBlocksIssued("pi.T2")).toEqual({ kind: "count", blocks: 0 });
+    REPORT_ONLY_STOP_CHECK_PORTS.blocks.record("affected", "pi.T2", 1);
+    expect(REPORT_ONLY_STOP_CHECK_PORTS.blocks.issued("affected", "pi.T2")).toEqual({ kind: "count", blocks: 0 });
     expect(existsSync(join(dir, "pi.T2.affected-stop-check.json"))).toBe(false);
   });
 });

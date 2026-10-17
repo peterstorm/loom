@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runDispatch } from "../../../src/handlers/subagent-stop/dispatch";
-import type { StopCheckShellPorts } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
+import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
 import { publishImplementationAttemptSidecar } from "../../../src/implementation-attempt-sidecar";
 import {
   createImplementationAttemptAuthority,
@@ -96,12 +96,7 @@ const inertPorts = (): StopCheckShellPorts => ({
   acquireRunner: () => ({ kind: "acquired", release: () => null }),
   runCheck: async () => { throw new Error("unused"); },
   readReport: () => new Uint8Array(),
-  blocksIssued: () => ({ kind: "count", blocks: 0 }),
-  recordBlock: () => undefined,
-  clearBlocks: () => undefined,
-  affectedBlocksIssued: () => ({ kind: "count", blocks: 0 }),
-  recordAffectedBlock: () => undefined,
-  clearAffectedBlocks: () => undefined,
+  blocks: UNKEPT_BLOCK_COUNTERS,
   pathExists: () => true,
   now: () => Date.now(),
 });
