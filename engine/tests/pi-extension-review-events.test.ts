@@ -1281,7 +1281,8 @@ describe("Pi extension review tool_result integration", () => {
     // A runtime-resolved ESM import avoids Vitest-only module APIs and keeps
     // this real extension boundary executable under both Vitest and Bun.
     const pi = await extension();
-    expect(pi.handlers.get("tool_result")).toHaveLength(2);
+    // The evidence recorder (registered first), then review capture, then post-edit lint.
+    expect(pi.handlers.get("tool_result")).toHaveLength(3);
 
     const context = {
       sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" },

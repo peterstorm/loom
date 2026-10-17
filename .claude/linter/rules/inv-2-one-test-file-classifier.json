@@ -1,0 +1,14 @@
+{
+  "kind": "regex",
+  "name": "inv-2-one-test-file-classifier",
+  "description": "Whether a path is a test file is decided in one place: engine/src/core/test-file-classification.ts owns the engine default suffix list (DEFAULT_TEST_FILE_SUFFIXES) and the suffix match. I6's file_list split in the settlement helper, the implementation brief and the programmatic linter's test-file skip all import it, so the default list cannot drift between them (G4 slice 2, FR-013, FR-014). This rule refuses a re-declared suffix list (any binding named TEST_FILE_SUFFIXES; the owner's export is DEFAULT_TEST_FILE_SUFFIXES) and an ad-hoc endsWith('.test.'/'.spec.') check anywhere else.",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "\\bTEST_FILE_SUFFIXES\\s*[:=]|\\.endsWith\\(\\s*[\"'`][^\"'`]*\\.(test|spec)\\.",
+  "flags": "",
+  "excludePatterns": [
+    ".test.ts",
+    "engine/src/core/test-file-classification.ts"
+  ],
+  "fixHint": "Import isTestFile / classifyTaskFiles (and DEFAULT_TEST_FILE_SUFFIXES) from engine/src/core/test-file-classification.ts instead of re-declaring a suffix list or matching suffixes inline.",
+  "enabled": true
+}

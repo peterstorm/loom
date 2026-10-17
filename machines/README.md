@@ -24,7 +24,13 @@ model, see [`docs/deterministic-core.md`](../docs/deterministic-core.md).
   only). Judgments (`passed`/`trusted`) are derived from the facts at read
   time, never stored. Transcript text never becomes **ledger** evidence; when
   no trusted ledger verdict exists, completion may use a separately labeled,
-  explicitly untrusted transcript fallback.
+  explicitly untrusted transcript fallback. A `TestRun` report also carries
+  the per-file results its structured report lists (I6 and I7 read them).
+  Minting is one rule for both harnesses: Claude's hook and a Pi child's
+  `tool_result` recorder (`pi/evidence-recorder.ts`, writing into the
+  parent's ledger under its grant's epoch) normalize to a `HarnessToolCall`
+  and call `machine/tool-evidence-recorder.ts`, the only caller of
+  `extractEvidence` and of the ledger append (INV-4).
 - **PreToolUse** (`enforce-phase-tools`) folds the agent's own epoch into
   the current phase and denies enforced tools the phase doesn't list —
   deny-by-default within the machine's declared `enforcedTools`
@@ -106,8 +112,12 @@ additionally walks the import closure so the reducer can never re-acquire
   (the reducer), `parse-machine.ts`, `extract-evidence.ts`, `mermaid.ts`,
   `test-report.ts` (report parsing + the trust judgment), `evidence.ts`
   (identity brands, binding/ledger line parsing, epoch attribution, the
-  `SessionRegistry` port).
+  `SessionRegistry` port), `harness-tool-call-types.ts` (the normalized
+  `HarnessToolCall` both harness adapters produce; the adapters themselves
+  are pure in `engine/src/core/harness-tool-call.ts`).
 - **Imperative shell**: `ledger.ts` (binding/roster/ledger files + locks),
+  `tool-evidence-recorder.ts` (the one minting shell: report discovery with
+  the freshness stamp and artifact veto, cwd resolution, ledger append),
   `report-discovery.ts` (finding report artifacts on disk),
   `session-registry.ts` (the fs adapter of the `SessionRegistry` port; an
   in-memory fake lives with the tests for property-testing attribution
@@ -118,10 +128,15 @@ Known residual limits, on purpose and documented:
   only under the sole-active rule, so in a contended session it runs
   ungated. Claude Code stamps `agent_id` on every subagent call, so parallel
   Waves stay gated.
-- Pi has no recorder, and its `tool_call` guard cannot name the calling
-  agent, so Pi children run without the live phase gate. Each Pi child is a
-  separate process, so nothing is credited to the wrong agent; the gate is
-  simply absent.
+- Pi children RECORD ledger facts (a child holding a valid
+  parent-issued write grant appends to the parent's ledger under its grant
+  epoch; a child without one records nothing and says so on stderr), but Pi
+  children still run without the live phase gate: the `tool_call` guard
+  cannot name the calling agent. Each Pi child is a separate process, so
+  nothing is credited to the wrong agent; the gate is simply absent. Pi
+  0.83 and 0.84 report no bash exit code, so a Pi `TestRun`'s exit is
+  `details.exitCode` when an integer is present, otherwise `isError` read
+  as 1 or 0; an abort or timeout is interrupted.
 - Report freshness is *call-scoped*: the PreToolUse Bash hook stamps the
   start of every Bash call (`<session>.callstart.json`, keyed by the
   harness `tool_use_id`), and a disk artifact (explicit `--outputFile`
@@ -141,16 +156,22 @@ Known residual limits, on purpose and documented:
   redirect/`tee` targets, which mint `FileWrite` too, INCLUDING targets of
   the very command line being judged, so a one-call
   `printf '{…}' > r.json; npx vitest --outputFile=r.json` stage is
-  vetoed). A report staged via a Bash write with no static target in the
-  command text — `cp`/`mv`, `dd of=`, or a file authored by an interpreter
-  (`python -c 'open(...).write(...)'`) — still mints no `FileWrite`, but
-  the staging now has to happen DURING the judged call itself (an earlier
-  stage fails the ordering check), as does a "test" script that itself
-  echoes runner-shaped JSON.
+  vetoed). The destinations of a literal `mv`, `git mv` or `cp` mint
+  `FileWrite` too (so `cp staged.json r.json` is vetoed, and a renamed file
+  appears under its new path among the I7 changed files). A Bash write
+  whose target the command text does not name statically — `dd of=`, a
+  `$VAR` destination, or a file authored by an interpreter
+  (`python -c 'open(...).write(...)'`), a generator or a script — still
+  mints no `FileWrite`. Such a staging has to happen DURING the judged
+  call itself (an earlier stage fails the ordering check), as does a "test"
+  script that itself echoes runner-shaped JSON. These silent writes are
+  also the soundness hole of I6 red-then-green: its proof covers logged
+  facts only (see `docs/deterministic-implementation.md`, I6).
 - Bash-minted `FileWrite` events carry `via: "shell"` and never advance a
-  guard (the gate cannot enforce Bash) — they exist for the artifact veto
-  and the modified-after-pass demotion. Tool writes (`via: "tool"`, or
-  absent on pre-`via` records) are the only guard-advancing writes.
+  guard (the gate cannot enforce Bash) — they exist for the artifact veto,
+  the modified-after-pass demotion, I6's first-implementation-write step
+  and I7's changed files. Tool writes (`via: "tool"`, or absent on
+  pre-`via` records) are the only guard-advancing writes.
 - Exit-status attribution is composition-aware and fails closed: the
   line's exit is credited to the classified test segment only when
   ownership is provable (a sole command; or the LAST command after `&&`,

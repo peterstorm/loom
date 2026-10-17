@@ -333,12 +333,15 @@ export function isBindingFresh(args: {
 // `o.report` would let unknown extra fields ride inside a branded
 // TestReportSummary and back out on re-serialization; the brand must mean
 // "exactly what parseReportSummary built". Impossible counts (fractional/
-// negative total, failed > total) yield null and never vouch.
+// negative total, failed > total) yield null and never vouch. Per-file
+// results are handed to the same constructor raw (INV-8): it reads an absent
+// `files` as unrecorded (a pre-feature line) and refuses malformed or
+// unreconciled ones, nulling the report while the TestRun fact stays readable.
 function parseReportField(v: unknown): TestReportSummary | null {
   if (typeof v !== "object" || v === null) return null;
   const o = v as Record<string, unknown>;
   if (o.source !== "vitest-json" && o.source !== "junit-xml") return null;
-  return parseReportSummary(o.total, o.failed, o.source);
+  return parseReportSummary(o.total, o.failed, o.source, { files: o.files });
 }
 
 function parseEvent(raw: unknown): Evidence | null {

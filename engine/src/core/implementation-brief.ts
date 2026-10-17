@@ -27,6 +27,13 @@ import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { invariantRoles } from "./plan-paths";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
+import { redThenGreenDuty } from "./implementation-application";
+import { deriveImplementationRetryDisposition } from "./implementation-retry";
+import { isRedThenGreenFailureKind } from "./red-then-green";
+import type { RedThenGreenFailureKind, TestFileClassification } from "./red-then-green-types";
+import { quoteShellArgument } from "./shell-quoting";
+import { classifyTaskFiles } from "./test-file-classification";
+import type { FrozenVerificationManifest } from "./verification-manifest";
 import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 
@@ -111,6 +118,10 @@ export type ImplementationBriefInput = Readonly<{
   invariants: readonly PlanInvariant[];
   /** The TaskGraph's Acceptance Contracts, with their freeze; empty when none. */
   contracts: readonly AcceptanceContract[];
+  /** The TaskGraph's frozen verification manifest (`graph.verification_manifest`),
+   *  absent only on a TaskGraph frozen before it existed. Its frozen test-file
+   *  classification splits an I6-owing Task's file list for the I6 section. */
+  verificationManifest: FrozenVerificationManifest | undefined;
 }>;
 
 export type ImplementationBrief = Readonly<{
@@ -128,7 +139,9 @@ export type ImplementationBriefError =
   | Readonly<{ kind: "requirement-text-unavailable"; message: string }>
   | Readonly<{ kind: "predecessor-output-unavailable"; message: string }>
   | Readonly<{ kind: "residual-placeholders"; message: string }>
-  | Readonly<{ kind: "task-id-binding"; message: string }>;
+  | Readonly<{ kind: "task-id-binding"; message: string }>
+  | Readonly<{ kind: "test-file-classification-unavailable"; message: string }>
+  | Readonly<{ kind: "red-then-green-proof-unfrozen"; message: string }>;
 
 const refused = (kind: ImplementationBriefError["kind"], message: string): DomainResult<never, ImplementationBriefError> =>
   canonicalRecord({ ok: false as const, error: canonicalRecord({ kind, message }) });
@@ -300,6 +313,121 @@ function acceptanceContractSection(task: Task, contracts: readonly AcceptanceCon
   return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
 }
 
+/** The I6 failure kinds the retry this dispatch admits inherits, in receipt order. */
+function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationDispatch): readonly RedThenGreenFailureKind[] {
+  if (dispatch.kind !== "retry-implementation") return [];
+  const disposition = deriveImplementationRetryDisposition(task);
+  return disposition.kind === "retry" ? disposition.context.failureKinds.filter(isRedThenGreenFailureKind) : [];
+}
+
+/**
+ * The one Bash call that returns `files` (repository-relative paths) to
+ * `source`: restore what `source` has, delete what it lacks. A file the Task
+ * created does not exist at the baseline, and `git restore` refuses the whole
+ * call if one pathspec matches nothing, so each file is decided on its own.
+ *
+ * "Absent at `source`" is only ever concluded after the command has proved
+ * where it stands: it runs in a subshell from the repository root (the paths
+ * are root-relative whatever the agent's cwd), and it verifies that `source`
+ * names a commit (`^0`) before touching any file. A wrong or unknown
+ * `source`, or a cwd outside any repository, therefore stops the call before
+ * the loop, so `git cat-file` cannot misreport every file as absent and
+ * nothing is deleted. A failed restore stops the loop too. Paths are
+ * shell-quoted.
+ */
+export function baselineRestoreCommand(source: string, files: readonly string[]): string {
+  return `(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${source}^0 && ` +
+    `for f in ${files.map(quoteShellArgument).join(" ")}; do ` +
+    `if git cat-file -e ${source}:"$f"; then git restore --source ${source} -- "$f" || exit 1; else rm -f -- "$f"; fi; done)`;
+}
+
+/**
+ * The repair a retry owes after an I6 failure (AD-7). I6 is judged per
+ * attempt epoch and the order lies in the past, so a retry that keeps its
+ * predecessor's implementation can never show red: it restores the Task's
+ * implementation files to the attempt baseline (`baselineRestoreCommand`, a
+ * Bash call, which mints no FileWrite), observes red, and only then
+ * implements. A Task populated without a start commit restores from HEAD: the
+ * command stays runnable, and the brief says which uncommitted work that
+ * discards.
+ */
+function redThenGreenRemedy(
+  task: Task,
+  classification: TestFileClassification,
+  failures: readonly RedThenGreenFailureKind[],
+): readonly string[] {
+  if (failures.length === 0) return [];
+  const source = task.start_sha ?? "HEAD";
+  const baseline = task.start_sha === undefined
+    ? "No start commit was recorded for this Task, so `HEAD` stands in: the restore discards your files' uncommitted changes since the last commit. "
+    : "";
+  return [
+    "",
+    `**I6 repair for this retry.** The previous attempt failed I6 (${failures.map((kind) => `\`${kind}\``).join(", ")}). ` +
+      "This attempt is judged on its own ledger epoch, so it must show the order afresh:",
+    classification.implementationFiles.length === 0
+      ? "1. Your file list declares no implementation file to restore; skip to step 2."
+      : `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, classification.implementationFiles)}\`. ` +
+        `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
+        baseline +
+        "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them.",
+    "2. Run your tests and observe red: at least one testcase in one of your test files fails.",
+    "3. Then implement, and run your tests green.",
+  ];
+}
+
+/** Why a brief cannot state I6: the duty's own named disagreement. */
+type RedThenGreenSectionRefusal = Readonly<{
+  kind: Extract<ImplementationBriefError["kind"], "test-file-classification-unavailable" | "red-then-green-proof-unfrozen">;
+  message: string;
+}>;
+
+/**
+ * The I6 section for a Task whose `redThenGreenDuty` is `owed` (AD-7): its
+ * test and implementation files under the frozen classification the duty
+ * carries (INV-2), the required order, what counts as a run, and — on a retry
+ * after an I6 failure — the repair. Null for a Task that owes no I6; each
+ * named disagreement refuses the brief instead of omitting the section.
+ */
+function redThenGreenSection(
+  task: Task,
+  dispatch: WaveImplementationDispatch,
+  manifest: FrozenVerificationManifest | undefined,
+): DomainResult<string | null, RedThenGreenSectionRefusal> {
+  const duty = redThenGreenDuty(task, manifest);
+  switch (duty.kind) {
+    case "not-owed":
+      return { ok: true, value: null };
+    case "classification-unfrozen":
+      return { ok: false, error: { kind: "test-file-classification-unavailable", message: `${duty.reason}, so the brief cannot name its test files` } };
+    case "proof-unfrozen":
+      return { ok: false, error: { kind: "red-then-green-proof-unfrozen", message: duty.reason } };
+    case "owed":
+      break;
+  }
+  const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles);
+  return {
+    ok: true,
+    value: [
+      "**I6 red-then-green — BINDING for this Task.** Settlement proves this Task test-first from your attempt's evidence ledger, and only from it, in this order:",
+      "1. **Red.** A trusted test run in which at least one testcase in one of your test files fails. A collection or import error with no failing testcase is not red.",
+      "2. **First implementation write.** Your first write to any implementation file below, by a file tool or a shell command (a baseline restore of your own files via `git restore` mints no FileWrite and is exempt). Fixtures, helpers and type files count; writing a test file never does.",
+      "3. **Green.** A later trusted run that exits 0 in which every one of your test files runs at least one testcase and none fails or fails to collect.",
+      "",
+      "Test files:",
+      bulleted(classification.testFiles, "None — your file list matches no test file, so I6 fails with `no-test-files`; report it instead of finishing."),
+      "",
+      "Implementation files:",
+      bulleted(classification.implementationFiles, "None."),
+      "",
+      "Only ledger runs with an exit code and a parsed structured report count, under every evaluation policy: a run without its report, a chained, piped or redirected run, and transcript test evidence never satisfy a step. " +
+        "Run each step's tests as one bare report-writing command, in the forms the final verification table at the top of this brief lists. " +
+        "I6 is judged per attempt: an earlier attempt's red never counts for this one.",
+      ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch)),
+    ].join("\n"),
+  };
+}
+
 /**
  * Render one Task's implementation brief, or refuse with the exact reason the
  * brief could not be admissible.
@@ -353,6 +481,9 @@ export function renderImplementationBrief(
     return refused("predecessor-output-unavailable", `${task.id}: ${predecessorOutputErrorMessage(predecessors.error)}`);
   }
 
+  const redThenGreen = redThenGreenSection(task, dispatch, input.verificationManifest);
+  if (!redThenGreen.ok) return refused(redThenGreen.error.kind, redThenGreen.error.message);
+
   const policy = taskVerificationPolicy(task);
   const values: Readonly<Record<BriefVariable, string>> = {
     rules_content: rulesContent,
@@ -365,6 +496,7 @@ export function renderImplementationBrief(
     verification_policy: [
       `- regression: ${requirementRendering(policy.regression)}`,
       `- new_tests: ${requirementRendering(policy.newTests)}`,
+      ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
     ].join("\n"),
     implementation_retry_context: dispatch.promptAppendix ?? NO_RETRY_CONTEXT,
     task_description: task.description,

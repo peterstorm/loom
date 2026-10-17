@@ -28,12 +28,18 @@ import {
 } from "./implementation-completion";
 import { compareStrings } from "./ordering";
 import {
+  deriveProofObligations,
   evaluateTaskProof,
   PI_STRUCTURED_EVIDENCE_POLICY,
+  redThenGreenEra,
   type ProofEvaluationPolicy,
+  type ProofObligation,
 } from "./proof-obligations";
+import type { RedThenGreenObservation } from "./red-then-green-types";
 import { invalidateTaskReview } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
+import type { FrozenTestFiles } from "./test-file-classification";
+import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
 import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 
@@ -413,7 +419,68 @@ export type IncomingImplementationEvidence = Readonly<{
   /** One parsed ADT when the transport carried one; absent reads as the
    *  canonical not-written observation (type-design-analyzer-1). */
   newTests?: NewTestEvidence;
+  /** The I6 judgment over the attempt epoch, present exactly when the Task
+   *  owes `red-then-green` and the settlement shell judged its ledger. */
+  redThenGreen?: RedThenGreenObservation;
 }>;
+
+/**
+ * Whether a Task owes I6 (`red-then-green`), answered once for settlement,
+ * reconcile and the brief.
+ *
+ * The frozen Proof is authoritative: population derived its obligations from
+ * `redThenGreenEra` of the TaskGraph's frozen manifest, and the State File
+ * load refuses a Task whose stored obligations disagree with that era
+ * (INV-6), so a loaded Task's obligations already carry its era. The era is
+ * consulted only for a Task carrying no frozen Proof at all. Every way the two
+ * could still disagree is its own named arm, never a silent "not owed":
+ * - `owed` carries the frozen test-file classification the judge and the
+ *   brief split the Task's `file_list` with (INV-2);
+ * - `classification-unfrozen`: the Proof owes I6 but the manifest froze no
+ *   classification to judge it by — an infrastructure fault, never a retry;
+ * - `proof-unfrozen`: no frozen Proof, yet the era obligates this Task —
+ *   nothing to settle against, so it is refused.
+ */
+export type RedThenGreenDuty =
+  | Readonly<{ kind: "not-owed" }>
+  | Readonly<{ kind: "owed"; testFiles: FrozenTestFiles }>
+  | Readonly<{ kind: "classification-unfrozen"; reason: string }>
+  | Readonly<{ kind: "proof-unfrozen"; reason: string }>;
+
+const NOT_OWED: RedThenGreenDuty = freeze({ kind: "not-owed" });
+
+const owesRedThenGreen = (obligations: readonly ProofObligation[]): boolean =>
+  obligations.some(({ kind }) => kind === "red-then-green");
+
+export function redThenGreenDuty(
+  task: Task,
+  manifest: FrozenVerificationManifest | undefined,
+): RedThenGreenDuty {
+  if (task.proof === undefined) {
+    const eraObligations = deriveProofObligations({
+      verificationPolicy: taskVerificationPolicy(task),
+      declaredArtifacts: task.file_list ?? [],
+      redThenGreen: redThenGreenEra(manifest),
+    });
+    return owesRedThenGreen(eraObligations)
+      ? freeze({
+          kind: "proof-unfrozen",
+          reason: `${task.id} carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green for a Task that requires new tests`,
+        })
+      : NOT_OWED;
+  }
+  if (!owesRedThenGreen(task.proof.obligations)) return NOT_OWED;
+  // Not an era test: the frozen Proof has already decided the duty. This only
+  // reads the classification value the judge needs, and names its absence as
+  // the `classification-unfrozen` disagreement (INV-6's sanctioned consumer).
+  const frozen = manifest?.testFiles;
+  return frozen === undefined
+    ? freeze({
+        kind: "classification-unfrozen",
+        reason: `${task.id} owes red-then-green but its TaskGraph freezes no test-file classification`,
+      })
+    : freeze({ kind: "owed", testFiles: frozen });
+}
 
 export type NormalizedImplementationEvidence = Readonly<{
   testResult?: TaskTestResult;
@@ -700,6 +767,7 @@ export function settleObservedImplementation(
         : bytes.cumulativeProofArtifactChanges,
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
+      ...(incoming.redThenGreen === undefined ? {} : { redThenGreen: incoming.redThenGreen }),
     },
     proofEvaluationPolicy,
   });

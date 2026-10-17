@@ -11,7 +11,7 @@ import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../core/agen
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
-import { parseReportedAgentId, parseSessionId, readActiveAgentRoles, readEvidence } from "../../machine";
+import { parseAgentType, parseReportedAgentId, parseSessionId, readActiveAgentRoles, readEvidence } from "../../machine";
 import { ensureRosteredImplementationBinding, suppliedTranscript } from "../implementation-binding";
 import { PENDING_BINDING_ESCALATION } from "../../core/implementation-binding";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
@@ -30,11 +30,10 @@ import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status
 import storeReviewerFindings from "./store-reviewer-findings";
 import { runStoreSpecCheckFindings } from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
-import {
-  PRODUCTION_STOP_CHECK_PORTS,
-  runAcceptanceStopCheck,
-  type StopCheckPorts,
-} from "./acceptance-stop-check";
+import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "./acceptance-stop-check";
+import { epochChangedFiles, runStopChecks } from "./stop-checks";
+import { claudeEpochLedger } from "./update-task-status";
+
 import {
   snapshotImplementationAttemptSidecar,
   type ImplementationAuthorityObservation,
@@ -104,8 +103,10 @@ export const runDispatch = async (
   stdin: string,
   args: string[],
   cleanup: HookHandler = cleanupSubagentFlag,
-  stopCheckPorts: StopCheckPorts = PRODUCTION_STOP_CHECK_PORTS,
+  stopCheckPorts: StopCheckShellPorts = PRODUCTION_STOP_CHECK_PORTS,
 ): Promise<HookResult> => {
+  // The hook budget (FR-025) is measured from the hook clock's first reading.
+  const hookStartedAtMs = stopCheckPorts.now();
   const parsedInput = parseSubagentStopStdin(stdin);
   if (!parsedInput.ok) {
     // No trustworthy session or Agent identity exists, so cleanup cannot be
@@ -338,16 +339,28 @@ export const runDispatch = async (
   if (resolution.kind === "unresolved") return unresolvedTaskGraph(resolution.cause);
   const { manager } = resolution;
 
-  // The Acceptance Stop Check runs before settlement and before cleanup: a
-  // blocked stop keeps this same agent working, so nothing may settle the Task
-  // or release the agent's runtime bindings. The check is total and fails open.
+  // The stop checks (acceptance, then affected tests) run before settlement
+  // and before cleanup: a blocked stop keeps this same agent working, so
+  // nothing may settle the Task or release the agent's runtime bindings. They
+  // are total and fail open. The changed files come from this agent's own
+  // epoch in the pre-unbind snapshot, the same epoch settlement judges.
   let stopCheckNote: string | undefined;
   if (category === "impl" && sidecarObservation.kind === "authority-observed") {
-    const outcome = await runAcceptanceStopCheck({
+    const { sidecar } = sidecarObservation;
+    const epoch = claudeEpochLedger(
+      evidenceSnapshot.kind === "snapshot"
+        ? { kind: "read", records: evidenceSnapshot.events }
+        : { kind: "unreadable", reason: `the evidence snapshot for session ${sidecar.sessionId} failed` },
+      sidecar.agentId,
+      parseAgentType(stripNamespace(resolvedAgentType)),
+    );
+    const outcome = await runStopChecks({
       loadGraph: () => manager.load(),
       stateFilePath: manager.getPath(),
-      taskId: sidecarObservation.sidecar.authority.taskId,
-      agentKey: `${sidecarObservation.sidecar.sessionId}.${sidecarObservation.sidecar.agentId}`,
+      taskId: sidecar.authority.taskId,
+      agentKey: `${sidecar.sessionId}.${sidecar.agentId}`,
+      changedFiles: epochChangedFiles(epoch, stopCheckPorts.pathExists),
+      hookStartedAtMs,
     }, stopCheckPorts);
     if (outcome.kind === "block") return { kind: "block", message: outcome.message };
     if (outcome.kind === "note") stopCheckNote = outcome.message;

@@ -85,6 +85,7 @@ export function renderTaskImplementationBrief(
       roster: graph.tasks,
       invariants: invariants.value,
       contracts: graph.acceptance_contracts ?? [],
+      verificationManifest: graph.verification_manifest,
     });
     return rendered.ok ? rendered : { ok: false, error: rendered.error.message };
   } catch (error) {

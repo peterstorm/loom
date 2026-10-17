@@ -2,7 +2,8 @@ import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import stopCheckPlan, { createStopCheckPlanHandler } from "../../../src/handlers/helpers/stop-check-plan";
-import { renderStopCheckPlan } from "../../../src/core/acceptance-contract/stop-check-plan";
+import { renderStopChecksPlan } from "../../../src/core/acceptance-contract/stop-check-plan";
+import { NO_CHANGED_FILES } from "../../../src/core/changed-files";
 import { UNKNOWN_TASK_PREFIX, type RenderStopCheckPlanFn } from "../../../src/core/stop-check-plan-types";
 import { WHITELISTED_HELPERS } from "../../../src/config";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
@@ -224,7 +225,8 @@ describe("stop-check-plan through the real CLI", () => {
     const statePath = writeStateFile(project(), onGraphJson());
     const manager = StateManager.fromPath(statePath);
     if (manager === null) throw new Error("fixture State File was not written");
-    const expected = renderStopCheckPlan(manager.load(), "T2");
+    // No live attempt: the helper renders both checks over no changed files (FR-028).
+    const expected = renderStopChecksPlan(manager.load(), "T2", NO_CHANGED_FILES);
     if (expected.kind !== "rendered") throw new Error("fixture Task T2 is unknown to the renderer");
 
     const result = runStopCheckPlanCli(statePath, "T2");

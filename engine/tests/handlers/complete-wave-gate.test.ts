@@ -53,12 +53,13 @@ import {
 import {
   derivePendingTaskProof,
   evaluateTaskProof,
+  redThenGreenEra,
 } from "../../src/core/proof-obligations";
 import {
   createImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
 } from "../../src/core/implementation-completion";
-import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
+import { satisfiedProof as eraSatisfiedProof, taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
@@ -2772,13 +2773,20 @@ describe("final-Wave compatibility completion replay", () => {
   }
 
   it("refuses modern suite authority without mutating state and directs registered resume or start", async () => {
+    // A post-feature manifest makes the graph I6-era, so its Task's satisfied
+    // proof carries red-then-green too, or the strict load check refuses it (INV-6).
+    const modern = (graph: TaskGraph): TaskGraph => {
+      const manifest = defaultVerificationManifest();
+      const proof = eraSatisfiedProof([], redThenGreenEra(manifest));
+      return { ...graph, verification_manifest: manifest, tasks: graph.tasks.map((task) => ({ ...task, proof }) as Task) };
+    };
     const modernCases = [
       {
-        graph: { ...legacyFinalGraph(), verification_manifest: defaultVerificationManifest() },
+        graph: modern(legacyFinalGraph()),
         diagnostic: "start a fresh registered `/wave-gate` run",
       },
       {
-        graph: { ...registeredGraph(), verification_manifest: defaultVerificationManifest() },
+        graph: modern(registeredGraph()),
         diagnostic: "helper orchestration resume",
       },
     ];

@@ -26,7 +26,7 @@ import {
 import { compareStrings } from "./ordering";
 import {
   authorizeWaveCompletionSuite,
-  defaultVerificationManifest,
+  legacyDefaultVerificationManifest,
   deriveProjectVerificationCoverage,
 } from "./verification-manifest";
 import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
@@ -47,7 +47,7 @@ function exactCompletionSuiteError(
   ) {
     return "accepted suite does not match the active Wave Gate run/Wave/revision/authority";
   }
-  const manifest = graph.verification_manifest ?? defaultVerificationManifest();
+  const manifest = graph.verification_manifest ?? legacyDefaultVerificationManifest();
   if (parsed.value.manifestDigest !== manifest.manifestDigest) {
     return "accepted suite manifest digest does not match protected verification_manifest";
   }
@@ -327,6 +327,6 @@ export function deriveWaveCompletionSuiteReadiness(
   if (outcome.kind === "legacy-unavailable") return outcome;
   const authority = source.terminal && source.receipt !== undefined
     ? source.receipt
-    : graph.verification_manifest ?? defaultVerificationManifest();
+    : graph.verification_manifest ?? legacyDefaultVerificationManifest();
   return canonicalRecord({ ...outcome, projectVerificationCoverage: deriveProjectVerificationCoverage(authority) });
 }

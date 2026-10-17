@@ -83,6 +83,8 @@ function facts(
     proofEvaluationPolicy: transport === "Claude"
       ? TRUSTED_LEDGER_ONLY_POLICY
       : PI_STRUCTURED_EVIDENCE_POLICY,
+    // These fixtures' Tasks owe no red-then-green, so the epoch is never judged.
+    ledger: { kind: "read", events: [] },
   };
 }
 

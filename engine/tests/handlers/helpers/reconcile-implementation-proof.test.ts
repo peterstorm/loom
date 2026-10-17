@@ -400,6 +400,8 @@ describe("reconcileTaskFromStoredEvidence", () => {
       failedTask(),
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
+      false,
+      undefined,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -439,6 +441,8 @@ describe("reconcileTaskFromStoredEvidence", () => {
       withProof,
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
+      false,
+      undefined,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -460,6 +464,8 @@ describe("reconcileTaskFromStoredEvidence", () => {
       },
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
+      false,
+      undefined,
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
       {
@@ -472,6 +478,8 @@ describe("reconcileTaskFromStoredEvidence", () => {
       },
       ["src/a.ts"],
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
+      false,
+      undefined,
     );
 
     expect(regressionWaived.status).toBe("pending");
@@ -509,6 +517,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       ["src/a.ts"],
       parseNewTestEvidence(false, "verification waived"),
       true,
+      undefined,
     );
     expect(migrated).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
     expect(migrated.legacy_missing_proof).toBeUndefined();
@@ -519,6 +528,8 @@ describe("reconcileTaskFromStoredEvidence", () => {
       failedTask(false),
       ["src/a.ts"],
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
+      false,
+      undefined,
     );
 
     expect(reconciled.status).toBe("pending");

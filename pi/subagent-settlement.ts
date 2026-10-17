@@ -7,7 +7,9 @@
  * — the exact callback `TaskGraphStore.updateAndReturn` runs under the state
  * lock, so the shell's protocol for every role is the same three steps:
  * observe outside the lock, run one reducer here under it, emit the outcome.
- * Nothing in this module touches the store, the filesystem, Git or stderr.
+ * Nothing in this module touches the store, the filesystem, Git or stderr;
+ * the one ledger read (`piImplementationLedger`) goes through the registry
+ * port its caller injects.
  */
 
 import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-output";
@@ -40,6 +42,9 @@ import {
   type ImplementationSettlementApplicationResult,
 } from "../engine/src/core/implementation-application";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
+import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
+import { parseAgentType, type SessionId, type SessionRegistry } from "../engine/src/machine";
+import { piChildEvidence } from "./evidence-recorder";
 import {
   inferSoleExecutingTask,
   unprovenAttributionReason,
@@ -488,6 +493,33 @@ export function implementationTestResult(test: ImplementationTestObservation) {
         label: "transcript-regex (fallback)",
         provenance: "unverified" as const,
       };
+}
+
+/**
+ * The Pi implementation child's attempt epoch, as exact settlement judges it
+ * (I6, FR-035): the parent session's ledger read back under the epoch of the
+ * child's parent-issued write grant (`piChildEvidence`). Every missing input
+ * is a named `unreadable` observation, never an empty epoch, so settlement
+ * records infrastructure rather than a red-then-green gap the child never
+ * had a chance to close. The one read goes through the injected registry.
+ */
+export function piImplementationLedger(
+  parentSession: SessionId | null,
+  grantToken: string | null,
+  agentType: string,
+  registry: Pick<SessionRegistry, "readEvidence">,
+): LedgerObservation {
+  if (parentSession === null) {
+    return Object.freeze({ kind: "unreadable", reason: "the batch names no parent session, so no child ledger epoch was read" });
+  }
+  if (grantToken === null) {
+    return Object.freeze({ kind: "unreadable", reason: "the reserved slot holds no write grant, so the child recorded no ledger epoch" });
+  }
+  const parsedAgentType = parseAgentType(agentType);
+  if (parsedAgentType === null) {
+    return Object.freeze({ kind: "unreadable", reason: `agent type ${JSON.stringify(agentType)} names no ledger epoch` });
+  }
+  return piChildEvidence(parentSession, grantToken, parsedAgentType, registry);
 }
 
 export function applicationState(state: TaskGraph, application: ImplementationSettlementApplicationResult): TaskGraph {

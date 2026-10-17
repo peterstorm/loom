@@ -153,7 +153,7 @@ export function reviseAcceptanceContract(
   });
   const candidate: TaskGraph = {
     ...graph,
-    tasks: graph.tasks.map((task) => revalidatedIds.includes(task.id) ? returnToRevalidation(task) : task),
+    tasks: graph.tasks.map((task) => revalidatedIds.includes(task.id) ? returnToRevalidation(task, graph.verification_manifest) : task),
     acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
   };
   // The current Wave's suite receipt and reviews judged the old bytes.

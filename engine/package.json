@@ -9,6 +9,7 @@
     "test": "npm run test:unit && env -u PI_CODING_AGENT npm run test:smoke",
     "test:unit": "env -u PI_CODING_AGENT vitest run --reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml",
     "test:acceptance": "env -u PI_CODING_AGENT vitest run --reporter=junit --outputFile=../.loom/completion-reports/acceptance.junit.xml",
+    "test:affected": "env -u PI_CODING_AGENT vitest related --run --reporter=junit --outputFile=../.loom/completion-reports/affected.junit.xml",
     "test:watch": "env -u PI_CODING_AGENT vitest",
     "test:smoke": "bash ../scripts/smoke-panel-mode.sh && bash ../scripts/smoke-review-panel.sh && bash ../scripts/smoke-standalone-review.sh && bun ../scripts/smoke-orchestration-facades.ts && bash ../scripts/smoke-pi-resources.sh && bash ../artifacts/tests/test-validate-task-graph.sh",
     "calibrate:models": "LOOM_RUN_MODEL_CALIBRATION=1 bun ../scripts/run-model-calibration.ts",

@@ -41,6 +41,7 @@ import {
   anyActiveSubagent,
   bindSessionTaskGraphPointer,
   fsSessionRegistry,
+  parseAgentType,
 } from "../engine/src/machine";
 import type { SessionRunBinding } from "../engine/src/orchestration/session-run-bindings";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
@@ -397,11 +398,19 @@ async function reserveFromLedger(
         throw new Error(`Pi write-grant slot ${slot + 1} lost its admitted spawn association`);
       }
       const item = state.admission.item;
+      // The child records its ledger facts into THIS parent session's ledger,
+      // under the epoch of its grant identity and this item's agent type
+      // (AD-8, FR-032); the address travels inside the MAC-bound grant.
+      const agentType = parseAgentType(item.agent);
+      if (agentType === null) {
+        throw new Error(`Pi write-grant slot ${slot + 1} agent ${JSON.stringify(item.agent)} cannot address an evidence epoch`);
+      }
       const grant = issuePiWriteGrant({
         agent: item.agent,
         taskId: requirement.taskId,
         cwd: piSpawnCwd(event.input, slot, cwd),
         taskGraphPath: orchestrationGraphPath,
+        evidenceLedger: { sessionId: safeSessionId, agentType },
         ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
       });
       // Claim the issued token for its slot before prompt injection can

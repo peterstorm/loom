@@ -22,6 +22,7 @@ import type { AcceptedReviewAuthority } from "../src/types";
 import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
+  legacyDefaultVerificationManifest,
   freezeVerificationManifest,
   type FrozenVerificationManifest,
 } from "../src/core/verification-manifest";
@@ -948,8 +949,8 @@ describe("parseTaskGraph protected completion authority", () => {
     expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
   });
 
-  it("uses default manifest authority when the legacy-compatible field is absent", () => {
-    const receipt = acceptedReceipt();
+  it("uses the legacy default manifest authority when the legacy-compatible field is absent", () => {
+    const receipt = acceptedReceipt(legacyDefaultVerificationManifest());
     expect(parseTaskGraph(graph({
       current_wave: 1,
       active_wave_gate: activeWaveGate(),

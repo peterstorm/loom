@@ -147,14 +147,25 @@ describe("no-cross-boundary-imports", () => {
       expect(result).toBeNull();
     });
 
-    it("denies linter importing from core", () => {
+    it("refuses linter importing from core, except the one test-file classification owner", () => {
       const result = checkBoundaryViolation(
         "engine/src/linter/loader.ts",
         "engine/src/core/validate-phase-order",
         DEFAULT_BOUNDARIES
       );
       expect(result).not.toBeNull();
-      expect(result).toContain("must not import");
+      expect(result).toContain("may only import from");
+      // INV-2: the linter shares the I6/I7 test-file classification instead of a copy.
+      expect(checkBoundaryViolation(
+        "engine/src/linter/programmatic/config.ts",
+        "engine/src/core/test-file-classification",
+        DEFAULT_BOUNDARIES
+      )).toBeNull();
+      expect(checkBoundaryViolation(
+        "engine/src/linter/programmatic/config.ts",
+        "engine/src/core/test-file-classification-extra",
+        DEFAULT_BOUNDARIES
+      )).not.toBeNull();
     });
 
     it("denies linter importing from handlers", () => {

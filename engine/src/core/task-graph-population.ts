@@ -3,7 +3,7 @@ import { acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-cont
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
-import { derivePendingTaskProof } from "./proof-obligations";
+import { derivePendingTaskProof, redThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
 import {
   ACCEPTANCE_RED_WINDOW,
   serializeVerificationPolicy,
@@ -214,6 +214,7 @@ function sanitizeTask(
   specIndex: SpecIndexAvailability,
   proofBoundary: PopulationProofBoundary,
   inRedWindow: boolean,
+  redThenGreen: RedThenGreenEra,
 ): Task {
   const verificationPolicy = windowPolicy(taskVerificationPolicy(task), inRedWindow);
   const proofBaseline = proofBoundary.kind === "captured" ? proofBoundary.baselines.get(task.id) : undefined;
@@ -239,6 +240,7 @@ function sanitizeTask(
     proof: derivePendingTaskProof({
       verificationPolicy,
       declaredArtifacts: task.file_list,
+      redThenGreen,
     }),
     review_status: "pending",
     review_generation: 0,
@@ -303,6 +305,7 @@ export function populateTaskGraph(
   const contracts = acceptanceContractsFromPlan(command.contracts, command.tasks);
   if (!contracts.ok) return reject("invalid-contracts", contracts.error.join("; "));
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
+  const redThenGreen = redThenGreenEra(command.verificationManifest);
 
   const waves = taskWaves(command.tasks);
   const waveGates = Object.freeze(Object.fromEntries(
@@ -333,8 +336,13 @@ export function populateTaskGraph(
     spec_file: lockedSpecFile,
     spec_index_observation: specIndexObservationOf(command.specIndex),
     proof_boundary_observation: proofBoundaryObservationOf(command.proofBoundary),
-    tasks: Object.freeze(command.tasks.map((task) =>
-      sanitizeTask(task, command.specIndex, command.proofBoundary, redWindow.has(task.id)))),
+    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(
+      task,
+      command.specIndex,
+      command.proofBoundary,
+      redWindow.has(task.id),
+      redThenGreen,
+    ))),
     ...(contracts.value.length === 0 ? {} : { acceptance_contracts: contracts.value }),
     current_wave: 1,
     executing_tasks: Object.freeze([]),

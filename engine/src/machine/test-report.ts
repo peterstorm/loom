@@ -8,6 +8,8 @@ export {
   parseReportSummary,
   parseStructuredTestReportBytes,
   parseVitestJson,
+  readJunitReport,
+  type JunitReportRead,
   type StructuredReportError,
   type StructuredReportErrorReason,
   type StructuredReportParseResult,
@@ -37,7 +39,15 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
  * - exit 0 or unknown + report, ≥1 test, 0 failures → trusted-pass
  * - exit 0 or unknown + report with 0 tests         → trusted-fail (nothing ran)
  * - exit 0 or unknown + report with failures        → trusted-fail
+ * - exit 0 or unknown + report recording a file
+ *   that failed to collect or import                → trusted-fail
  * - exit 0 or unknown + no report                   → untrusted (fall back downstream)
+ *
+ * A collection error is a failure even when the counts show none: Vitest JSON
+ * counts no testcase for a file that failed to import, so its counts alone
+ * would read a run whose only failure is a broken file as a pass. The report's
+ * recorded per-file results (INV-8: reconciled with those counts) carry it; an
+ * unrecorded or counts-only summary is judged on its counts alone.
  *
  * An unknown exit does NOT sink a run that produced a report. A structured
  * JUnit/vitest-JSON report is STRONGER evidence about what happened than a
@@ -64,7 +74,10 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
 export function judgeTestRun(exit: number | null, report: TestReportSummary | null): TestVerdict {
   if (exit !== null && exit !== 0) return { verdict: "trusted-fail" };
   if (report === null) return { verdict: "untrusted" };
-  return report.total > 0 && report.failed === 0
+  return report.total > 0 && report.failed === 0 && !recordsCollectionError(report)
     ? { verdict: "trusted-pass" }
     : { verdict: "trusted-fail" };
 }
+
+const recordsCollectionError = ({ files }: TestReportSummary): boolean =>
+  files?.kind === "recorded" && files.results.some((result) => result.collectionError);

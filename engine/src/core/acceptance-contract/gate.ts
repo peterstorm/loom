@@ -6,37 +6,21 @@
  */
 
 import type { ArtifactDigest, NonEmpty } from "../orchestration-contract";
-import { normalizePlanPath } from "../plan-path-match";
-import type { JunitTestcasesResult, ReportTestcaseOutcome } from "../structured-test-report";
+import { attributeReportedFile } from "../report-file-attribution";
+import { isCollectionErrorTestcase, type JunitTestcasesResult, type ReportTestcaseOutcome } from "../structured-test-report";
 import { freeze, nonEmpty } from "./kernel";
 import type { AcceptanceContract, AcceptanceTestcase, ContractAcceptanceFile, ContractTaskView } from "./model";
 import { contractWave, dueWaves } from "./tasks";
 
 /**
- * The declared acceptance file a JUnit testcase belongs to, or null. Vitest
- * reports the test file relative to its root, so the declared repository path
- * may be longer; Surefire reports the class name, which maps to the declared
- * `.java`/`.kt` path. Matching is by whole path segments, never by suffix text.
- * An exact path wins; otherwise a segment-suffix match attributes the testcase
- * only when exactly one declared file matches — an ambiguous testcase is left
- * unattributed, which fails closed rather than crediting the wrong contract.
+ * The declared acceptance file a JUnit testcase belongs to, or null: the
+ * testcase's `classname` attributed through the one reported-file rule
+ * (INV-5, `report-file-attribution.ts`). JUnit classnames are
+ * runner-cwd-relative or JVM classes, so no repository root is passed; an
+ * absolute classname would be left unattributed (fail closed).
  */
-export function testcaseAcceptanceFile(files: readonly string[], classname: string): string | null {
-  const reported = normalizePlanPath(classname);
-  const exact = files.find((file) => normalizePlanPath(file) === reported);
-  if (exact !== undefined) return exact;
-  const jvmClass = !reported.includes("/") && /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(reported)
-    ? reported.split("$")[0]!.replace(/\./g, "/")
-    : null;
-  const matches = files.filter((file) => {
-    const declared = normalizePlanPath(file);
-    if (declared.endsWith(`/${reported}`)) return true;
-    if (jvmClass === null) return false;
-    const withoutExtension = declared.replace(/\.[^./]+$/, "");
-    return withoutExtension === jvmClass || withoutExtension.endsWith(`/${jvmClass}`);
-  });
-  return matches.length === 1 ? matches[0]! : null;
-}
+export const testcaseAcceptanceFile = (files: readonly string[], classname: string): string | null =>
+  attributeReportedFile(files, classname, null);
 
 const ANCHOR_MENTION = /\b((?:FR|AS)-\d+):/g;
 
@@ -184,7 +168,7 @@ export function observeAcceptanceFacts(
       name: testcase.name,
       outcome: testcase.outcome,
       failureType: testcase.failureType,
-      collectionError: testcase.name === testcase.classname,
+      collectionError: isCollectionErrorTestcase(testcase),
     }));
   }
   return freeze({ kind: "projected", checkId, reportDigest, testcases: Object.freeze(testcases), otherFailures });

@@ -1,4 +1,6 @@
 import { canonicalStructuralEquals } from "./orchestration-contract";
+import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
+import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
   parseVerificationPolicy,
   requiresNewTests,
@@ -47,9 +49,32 @@ export type ProofObligation =
   | Readonly<{ kind: "task-completed" }>
   | Readonly<{ kind: "regression-test-pass" }>
   | Readonly<{ kind: "new-tests" }>
+  | Readonly<{ kind: "red-then-green" }>
   | Readonly<{ kind: "attempt-scope-attested" }>
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
+
+/**
+ * Whether a TaskGraph owes I6 (`red-then-green`) for its Tasks that require
+ * new tests. `owed-if-new-tests` marks a TaskGraph populated after I6 existed;
+ * `not-owed` marks one populated before, which is never newly obligated
+ * (FR-005). Only `redThenGreenEra` mints it (INV-6).
+ */
+export type RedThenGreenEra = "owed-if-new-tests" | "not-owed";
+
+/**
+ * The one I6-era test (INV-6): a TaskGraph owes I6 exactly when its frozen
+ * verification manifest carries the frozen test-file classification. Every
+ * post-feature freeze carries `testFiles` (AD-4), so only a TaskGraph frozen
+ * before this feature, or one carrying no manifest at all, reads `not-owed`.
+ * Population, the State File obligation-match check and revalidation ask
+ * here directly; settlement and the stored-evidence reconcile reach it through
+ * `redThenGreenDuty`, which defers to a Task's frozen Proof and asks here only
+ * when none is frozen, so they cannot disagree.
+ */
+export function redThenGreenEra(manifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
+  return manifest?.testFiles === undefined ? "not-owed" : "owed-if-new-tests";
+}
 
 /** Which byte comparison each declared artifact owes.
  *
@@ -60,13 +85,18 @@ export type ProofObligation =
  */
 export type DeclaredArtifactExpectation = "changed" | "attested";
 
-/** Small decomposition-owned input from which obligations are deterministically derived. */
+/**
+ * Small decomposition-owned input from which obligations are deterministically
+ * derived. `redThenGreen` is the TaskGraph's I6 era, from `redThenGreenEra`;
+ * absent reads as `not-owed`, exactly what every caller derived before I6.
+ */
 export type ProofObligationInput =
   | Readonly<{
       verificationPolicy: VerificationPolicy;
       newTestsRequired?: never;
       declaredArtifacts: readonly string[];
       declaredArtifactExpectation?: DeclaredArtifactExpectation;
+      redThenGreen?: RedThenGreenEra;
     }>
   | Readonly<{
       verificationPolicy?: never;
@@ -74,6 +104,7 @@ export type ProofObligationInput =
       newTestsRequired: boolean;
       declaredArtifacts: readonly string[];
       declaredArtifactExpectation?: DeclaredArtifactExpectation;
+      redThenGreen?: RedThenGreenEra;
     }>;
 
 /**
@@ -107,6 +138,13 @@ export interface ObservedProofEvidence {
   readonly filesModified: readonly string[];
   readonly newTestsWritten?: boolean;
   readonly newTestEvidence?: string;
+  /**
+   * The I6 judgment over the attempt epoch's ledger. Absent when no ledger
+   * observation reached proof (the stored-evidence reconcile with nothing to
+   * carry forward): a `red-then-green` obligation then fails as
+   * `ledger-unavailable`.
+   */
+  readonly redThenGreen?: RedThenGreenObservation;
 }
 
 /**
@@ -134,6 +172,7 @@ export type ProofFailure =
   | Readonly<{ kind: "untrusted-regression-tests-failed"; label: string }>
   | Readonly<{ kind: "untrusted-regression-pass"; label: string }>
   | Readonly<{ kind: "new-tests-not-observed" }>
+  | Readonly<{ kind: "red-then-green-unproven"; gap: RedThenGreenGap }>
   | Readonly<{ kind: "attempt-scope-drifted" }>
   | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-drifted"; artifact: string }>;
@@ -181,6 +220,7 @@ export type ProofEvidence =
       label: string;
     }>
   | Readonly<{ kind: "new-tests"; detail: string | null }>
+  | Readonly<{ kind: "red-then-green"; red: RunRef; implementationWrite: string; green: RunRef }>
   | Readonly<{ kind: "attempt-scope-attested" }>
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
@@ -255,6 +295,9 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
       : []),
     ...(requiresNewTests(policy)
       ? [Object.freeze({ kind: "new-tests" as const })]
+      : []),
+    ...(requiresNewTests(policy) && input.redThenGreen === "owed-if-new-tests"
+      ? [Object.freeze({ kind: "red-then-green" as const })]
       : []),
     ...(expectation === "attested"
       ? [Object.freeze({ kind: "attempt-scope-attested" as const })]
@@ -331,6 +374,32 @@ const evaluateRegression = (
   });
 };
 
+const LEDGER_UNAVAILABLE: RedThenGreenObservation = Object.freeze({
+  kind: "unproven",
+  gap: Object.freeze({ kind: "ledger-unavailable" }),
+});
+
+const evaluateRedThenGreen = (
+  obligation: Extract<ProofObligation, { kind: "red-then-green" }>,
+  observation: RedThenGreenObservation = LEDGER_UNAVAILABLE,
+): EvaluatedProofResult =>
+  observation.kind === "shown"
+    ? Object.freeze({
+        state: "satisfied",
+        obligation,
+        evidence: Object.freeze({
+          kind: "red-then-green",
+          red: observation.red,
+          implementationWrite: observation.implementationWrite,
+          green: observation.green,
+        }),
+      })
+    : Object.freeze({
+        state: "failed",
+        obligation,
+        failure: Object.freeze({ kind: "red-then-green-unproven", gap: observation.gap }),
+      });
+
 const evaluateOne = (
   obligation: ProofObligation,
   observed: ObservedProofEvidence,
@@ -366,6 +435,8 @@ const evaluateOne = (
             obligation,
             failure: Object.freeze({ kind: "new-tests-not-observed" }),
           });
+    case "red-then-green":
+      return evaluateRedThenGreen(obligation, observed.redThenGreen);
     case "attempt-scope-attested":
       return observed.filesModified.length === 0
         ? Object.freeze({
@@ -508,7 +579,7 @@ const parseNonEmptyString = (raw: unknown, path: string): ProofParseResult<strin
 export function parseProofObligation(raw: unknown, path = "obligation"): ProofParseResult<ProofObligation> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
   if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests" ||
-      raw.kind === "attempt-scope-attested") {
+      raw.kind === "red-then-green" || raw.kind === "attempt-scope-attested") {
     const kind = raw.kind;
     return parseExactRecordArm<ProofObligation>(raw, path, ["kind"], () =>
       ok(Object.freeze({ kind })));
@@ -520,65 +591,83 @@ export function parseProofObligation(raw: unknown, path = "obligation"): ProofPa
       return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
     });
   }
-  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, attempt-scope-attested, declared-artifact-changed, or declared-artifact-attested`]);
+  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, red-then-green, attempt-scope-attested, declared-artifact-changed, or declared-artifact-attested`]);
 }
+
+type VerificationPolicySelection = Readonly<{
+  explicit: ReturnType<typeof parseVerificationPolicy> | undefined;
+  errors: readonly string[];
+}>;
+
+/** Exactly one of the explicit policy and the legacy `newTestsRequired` flag must be present. */
+function selectVerificationPolicy(raw: Record<string, unknown>): VerificationPolicySelection {
+  const hasLegacy = raw.newTestsRequired !== undefined;
+  const explicit = raw.verificationPolicy === undefined
+    ? undefined
+    : parseVerificationPolicy(raw.verificationPolicy, "verificationPolicy");
+  const errors = [
+    ...(hasLegacy && typeof raw.newTestsRequired !== "boolean" ? ["newTestsRequired must be a boolean when present"] : []),
+    ...(explicit !== undefined && !explicit.ok ? explicit.errors : []),
+    ...(!hasLegacy && explicit === undefined ? ["verificationPolicy or newTestsRequired must be present"] : []),
+    ...(explicit !== undefined && hasLegacy ? ["verificationPolicy and newTestsRequired are mutually exclusive"] : []),
+  ];
+  return { explicit, errors };
+}
+
+/** Shape errors of the declared-artifact and era fields, before their elements are read. */
+function proofInputShapeErrors(raw: Record<string, unknown>): readonly string[] {
+  return [
+    ...(Array.isArray(raw.declaredArtifacts) ? [] : ["declaredArtifacts must be an array"]),
+    ...(raw.declaredArtifactExpectation !== undefined &&
+        raw.declaredArtifactExpectation !== "changed" && raw.declaredArtifactExpectation !== "attested"
+      ? ["declaredArtifactExpectation must be changed or attested"]
+      : []),
+    ...(raw.redThenGreen !== undefined && raw.redThenGreen !== "owed-if-new-tests" && raw.redThenGreen !== "not-owed"
+      ? ["redThenGreen must be owed-if-new-tests or not-owed"]
+      : []),
+  ];
+}
+
+type DeclaredArtifactList = Readonly<{ artifacts: readonly string[]; errors: readonly string[] }>;
+
+/** Element errors in index order, then the uniqueness error; a non-array yields neither. */
+function parseDeclaredArtifactList(raw: unknown): DeclaredArtifactList {
+  if (!Array.isArray(raw)) return { artifacts: [], errors: [] };
+  const parsed = raw.map((value, index) => parseNonEmptyString(value, `declaredArtifacts[${index}]`));
+  const artifacts = parsed.flatMap((entry) => entry.ok ? [entry.value] : []);
+  const errors = [
+    ...parsed.flatMap((entry) => entry.ok ? [] : entry.errors),
+    ...(new Set(artifacts).size !== artifacts.length ? ["declaredArtifacts must be unique"] : []),
+  ];
+  return { artifacts, errors };
+}
+
+/** Optional fields already proven by `proofInputShapeErrors`; absent fields stay absent. */
+const optionalProofInputFields = (raw: Record<string, unknown>) => ({
+  ...(raw.declaredArtifactExpectation === undefined
+    ? {}
+    : { declaredArtifactExpectation: raw.declaredArtifactExpectation as DeclaredArtifactExpectation }),
+  ...(raw.redThenGreen === undefined ? {} : { redThenGreen: raw.redThenGreen as RedThenGreenEra }),
+});
 
 export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofObligationInput> {
   if (!isRecord(raw)) return fail(["proof obligation input must be an object"]);
   const exact = parseExactRecordArm(
     raw,
     "proof obligation input",
-    ["verificationPolicy", "newTestsRequired", "declaredArtifacts", "declaredArtifactExpectation"],
+    ["verificationPolicy", "newTestsRequired", "declaredArtifacts", "declaredArtifactExpectation", "redThenGreen"],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
-  const errors: string[] = [];
-  const hasLegacy = raw.newTestsRequired !== undefined;
-  if (hasLegacy && typeof raw.newTestsRequired !== "boolean") {
-    errors.push("newTestsRequired must be a boolean when present");
-  }
-  const explicit = raw.verificationPolicy === undefined
-    ? undefined
-    : parseVerificationPolicy(raw.verificationPolicy, "verificationPolicy");
-  if (explicit !== undefined && !explicit.ok) errors.push(...explicit.errors);
-  if (!hasLegacy && explicit === undefined) {
-    errors.push("verificationPolicy or newTestsRequired must be present");
-  }
-  if (explicit !== undefined && hasLegacy) {
-    errors.push("verificationPolicy and newTestsRequired are mutually exclusive");
-  }
-  if (!Array.isArray(raw.declaredArtifacts)) errors.push("declaredArtifacts must be an array");
-  if (raw.declaredArtifactExpectation !== undefined &&
-      raw.declaredArtifactExpectation !== "changed" && raw.declaredArtifactExpectation !== "attested") {
-    errors.push("declaredArtifactExpectation must be changed or attested");
-  }
-
-  const artifacts: string[] = [];
-  if (Array.isArray(raw.declaredArtifacts)) {
-    raw.declaredArtifacts.forEach((value, index) => {
-      const parsed = parseNonEmptyString(value, `declaredArtifacts[${index}]`);
-      if (parsed.ok) artifacts.push(parsed.value);
-      else errors.push(...parsed.errors);
-    });
-    if (new Set(artifacts).size !== artifacts.length) errors.push("declaredArtifacts must be unique");
-  }
+  const { explicit, errors: policyErrors } = selectVerificationPolicy(raw);
+  const artifactList = parseDeclaredArtifactList(raw.declaredArtifacts);
+  const errors = [...policyErrors, ...proofInputShapeErrors(raw), ...artifactList.errors];
   if (errors.length > 0) return fail(errors);
-  const declaredArtifacts = Object.freeze([...artifacts]);
+  const declaredArtifacts = Object.freeze([...artifactList.artifacts]);
+  const optional = optionalProofInputFields(raw);
   return explicit?.ok
-    ? ok(Object.freeze({
-        verificationPolicy: explicit.value,
-        declaredArtifacts,
-        ...(raw.declaredArtifactExpectation === undefined
-          ? {}
-          : { declaredArtifactExpectation: raw.declaredArtifactExpectation as "changed" | "attested" }),
-      }))
-    : ok(Object.freeze({
-        newTestsRequired: raw.newTestsRequired === true,
-        declaredArtifacts,
-        ...(raw.declaredArtifactExpectation === undefined
-          ? {}
-          : { declaredArtifactExpectation: raw.declaredArtifactExpectation as "changed" | "attested" }),
-      }));
+    ? ok(Object.freeze({ verificationPolicy: explicit.value, declaredArtifacts, ...optional }))
+    : ok(Object.freeze({ newTestsRequired: raw.newTestsRequired === true, declaredArtifacts, ...optional }));
 }
 
 function parseUntrustedTestProvenance(
@@ -624,12 +713,87 @@ export function parseTaskTestResult(raw: unknown, path = "testResult"): ProofPar
   return fail([`${path}.verdict must be trusted-pass, trusted-fail, or untrusted`]);
 }
 
+function parseRunRef(raw: unknown, path: string): ProofParseResult<RunRef> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  return parseExactRecordArm(raw, path, ["index", "command"], () => {
+    const errors = [
+      ...(typeof raw.index === "number" && Number.isSafeInteger(raw.index) && raw.index >= 0
+        ? []
+        : [`${path}.index must be a non-negative safe integer`]),
+      ...(typeof raw.command === "string" && raw.command.trim().length > 0
+        ? []
+        : [`${path}.command must be a non-empty string`]),
+    ];
+    return errors.length > 0
+      ? fail(errors)
+      : ok(Object.freeze({ index: raw.index as number, command: raw.command as string }));
+  });
+}
+
+type RedThenGreenFacts = Readonly<{ red: RunRef; implementationWrite: string; green: RunRef }>;
+
+/** The three ordered I6 facts: a red run, an implementation write, then a later green run. */
+function parseRedThenGreenFacts(raw: Record<string, unknown>, path: string): ProofParseResult<RedThenGreenFacts> {
+  const red = parseRunRef(raw.red, `${path}.red`);
+  const implementationWrite = parseNonEmptyString(raw.implementationWrite, `${path}.implementationWrite`);
+  const green = parseRunRef(raw.green, `${path}.green`);
+  if (!red.ok || !implementationWrite.ok || !green.ok) {
+    return fail([red, implementationWrite, green].flatMap((parsed) => parsed.ok ? [] : parsed.errors));
+  }
+  return red.value.index < green.value.index
+    ? ok(Object.freeze({ red: red.value, implementationWrite: implementationWrite.value, green: green.value }))
+    : fail([`${path}.red must precede ${path}.green`]);
+}
+
+function parseRedThenGreenGap(raw: unknown, path = "gap"): ProofParseResult<RedThenGreenGap> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  switch (raw.kind) {
+    case "no-test-files":
+    case "implementation-write-missing":
+    case "red-after-first-implementation-write":
+    case "ledger-unavailable": {
+      const kind = raw.kind;
+      return parseExactRecordArm<RedThenGreenGap>(raw, path, ["kind"], () => ok(Object.freeze({ kind })));
+    }
+    case "red-missing":
+    case "green-missing": {
+      const kind = raw.kind;
+      return parseExactRecordArm<RedThenGreenGap>(raw, path, ["kind", "untrustedOnly"], () =>
+        typeof raw.untrustedOnly === "boolean"
+          ? ok(Object.freeze({ kind, untrustedOnly: raw.untrustedOnly }))
+          : fail([`${path}.untrustedOnly must be a boolean`]));
+    }
+    default:
+      return fail([`${path}.kind is not a recognized red-then-green gap`]);
+  }
+}
+
+function parseRedThenGreenObservation(
+  raw: unknown,
+  path = "redThenGreen",
+): ProofParseResult<RedThenGreenObservation> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  if (raw.kind === "shown") {
+    return parseExactRecordArm<RedThenGreenObservation>(raw, path, ["kind", "red", "implementationWrite", "green"], () => {
+      const facts = parseRedThenGreenFacts(raw, path);
+      return facts.ok ? ok(Object.freeze({ kind: "shown", ...facts.value })) : facts;
+    });
+  }
+  if (raw.kind === "unproven") {
+    return parseExactRecordArm<RedThenGreenObservation>(raw, path, ["kind", "gap"], () => {
+      const gap = parseRedThenGreenGap(raw.gap, `${path}.gap`);
+      return gap.ok ? ok(Object.freeze({ kind: "unproven", gap: gap.value })) : gap;
+    });
+  }
+  return fail([`${path}.kind must be shown or unproven`]);
+}
+
 export function parseObservedProofEvidence(raw: unknown): ProofParseResult<ObservedProofEvidence> {
   if (!isRecord(raw)) return fail(["observed proof evidence must be an object"]);
   const exact = parseExactRecordArm(
     raw,
     "observed proof evidence",
-    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence"],
+    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen"],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
@@ -640,6 +804,8 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     if (parsed.ok) testResult = parsed.value;
     else errors.push(...parsed.errors);
   }
+  const redThenGreen = raw.redThenGreen === undefined ? undefined : parseRedThenGreenObservation(raw.redThenGreen);
+  if (redThenGreen !== undefined && !redThenGreen.ok) errors.push(...redThenGreen.errors);
 
   if (typeof raw.taskCompleted !== "boolean") errors.push("taskCompleted must be a boolean");
   const files: string[] = [];
@@ -666,6 +832,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     filesModified: Object.freeze([...new Set(files)]),
     ...(typeof raw.newTestsWritten === "boolean" ? { newTestsWritten: raw.newTestsWritten } : {}),
     ...(typeof raw.newTestEvidence === "string" ? { newTestEvidence: raw.newTestEvidence } : {}),
+    ...(redThenGreen?.ok ? { redThenGreen: redThenGreen.value } : {}),
   }));
 }
 
@@ -709,9 +876,40 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
         return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
       });
     }
+    case "red-then-green-unproven":
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "gap"], () => {
+        const gap = parseRedThenGreenGap(raw.gap, `${path}.gap`);
+        return gap.ok ? ok(Object.freeze({ kind: "red-then-green-unproven", gap: gap.value })) : gap;
+      });
     default:
       return fail([`${path}.kind is not a recognized proof failure`]);
   }
+}
+
+/** The `regression-test-pass` arm: trusted ledger evidence, or a labelled Pi-structured untrusted pass. */
+function parseRegressionPassEvidence(raw: Record<string, unknown>, path: string): ProofParseResult<ProofEvidence> {
+  const allowed = raw.provenance === "pi-structured"
+    ? ["kind", "provenance", "verdict", "label"]
+    : ["kind", "provenance", "verdict"];
+  return parseExactRecordArm<ProofEvidence>(raw, path, allowed, () => {
+    if (raw.provenance === "evidence-ledger" && raw.verdict === "trusted-pass") {
+      return ok(Object.freeze({
+        kind: "regression-test-pass", provenance: "evidence-ledger", verdict: "trusted-pass",
+      }));
+    }
+    if (raw.provenance === "pi-structured" && raw.verdict === "untrusted-pass") {
+      const label = parseNonEmptyString(raw.label, `${path}.label`);
+      return label.ok
+        ? ok(Object.freeze({
+            kind: "regression-test-pass",
+            provenance: "pi-structured",
+            verdict: "untrusted-pass",
+            label: label.value,
+          }))
+        : label;
+    }
+    return fail([`${path} has an invalid regression evidence provenance/verdict combination`]);
+  });
 }
 
 export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseResult<ProofEvidence> {
@@ -720,30 +918,7 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
     const kind = raw.kind;
     return parseExactRecordArm<ProofEvidence>(raw, path, ["kind"], () => ok(Object.freeze({ kind })));
   }
-  if (raw.kind === "regression-test-pass") {
-    const allowed = raw.provenance === "pi-structured"
-      ? ["kind", "provenance", "verdict", "label"]
-      : ["kind", "provenance", "verdict"];
-    return parseExactRecordArm<ProofEvidence>(raw, path, allowed, () => {
-      if (raw.provenance === "evidence-ledger" && raw.verdict === "trusted-pass") {
-        return ok(Object.freeze({
-          kind: "regression-test-pass", provenance: "evidence-ledger", verdict: "trusted-pass",
-        }));
-      }
-      if (raw.provenance === "pi-structured" && raw.verdict === "untrusted-pass") {
-        const label = parseNonEmptyString(raw.label, `${path}.label`);
-        return label.ok
-          ? ok(Object.freeze({
-              kind: "regression-test-pass",
-              provenance: "pi-structured",
-              verdict: "untrusted-pass",
-              label: label.value,
-            }))
-          : label;
-      }
-      return fail([`${path} has an invalid regression evidence provenance/verdict combination`]);
-    });
-  }
+  if (raw.kind === "regression-test-pass") return parseRegressionPassEvidence(raw, path);
   if (raw.kind === "new-tests") {
     return parseExactRecordArm(raw, path, ["kind", "detail"], () => {
       if (raw.detail !== null && typeof raw.detail !== "string") {
@@ -757,6 +932,12 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
     return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
       const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
       return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
+    });
+  }
+  if (raw.kind === "red-then-green") {
+    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "red", "implementationWrite", "green"], () => {
+      const facts = parseRedThenGreenFacts(raw, path);
+      return facts.ok ? ok(Object.freeze({ kind: "red-then-green", ...facts.value })) : facts;
     });
   }
   return fail([`${path}.kind is not recognized proof evidence`]);
@@ -776,6 +957,8 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
         ].includes(result.failure.kind);
       case "new-tests":
         return result.failure.kind === "new-tests-not-observed";
+      case "red-then-green":
+        return result.failure.kind === "red-then-green-unproven";
       case "attempt-scope-attested":
         return result.failure.kind === "attempt-scope-drifted";
       case "declared-artifact-changed":

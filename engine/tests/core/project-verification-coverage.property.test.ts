@@ -83,7 +83,7 @@ describe("Project Verification Coverage projection", () => {
     expect(deriveProjectVerificationCoverage(empty)).toEqual({ kind: "not-configured", reason: "empty-operator-manifest" });
     for (const authority of [absent, empty]) {
       expect(authority.projectChecks).toEqual([]);
-      expect(Object.keys(authority).sort()).toEqual(["kind", "manifestDigest", "projectChecks", "schemaVersion", "source"]);
+      expect(Object.keys(authority).sort()).toEqual(["kind", "manifestDigest", "projectChecks", "schemaVersion", "source", "testFiles"]);
       expect(renderProjectVerificationCoverage(deriveProjectVerificationCoverage(authority))).toContain("reserved checks only");
     }
   });

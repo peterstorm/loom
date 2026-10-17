@@ -49,9 +49,21 @@ export interface BoundaryRule {
 export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
   {
     module: "engine/src/linter/",
-    allow: ["./", "engine/src/linter/", "node:", "ts-pattern"],
+    allow: [
+      "./",
+      "engine/src/linter/",
+      "node:",
+      // The one test-file classification (INV-2): the linter's isTestFile and
+      // the I6/I7 core must split files by the same rule, so the linter imports
+      // the pure owner instead of keeping a copy. Every other core module stays
+      // refused by omission from this fail-closed allowlist.
+      "engine/src/core/test-file-classification",
+      "ts-pattern",
+    ],
     deny: [
-      "engine/src/core/",
+      // `engine/src/core/` is NOT denied here, deliberately: deny is evaluated
+      // before allow, so a blanket core deny would override the single shared
+      // core module above. See the parsers boundary for the same pattern.
       "engine/src/handlers/",
       "engine/src/parsers/",
       "engine/src/state-manager",
@@ -81,6 +93,9 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // filesystem. Listed individually rather than opening `machine/`, which
       // would also admit the ledger and report-discovery shells.
       "engine/src/machine/extract-evidence",
+      // The frozen CT-3 declarations the harness tool-call adapters produce:
+      // types only, importing nothing but the pure machine evidence/types pair.
+      "engine/src/machine/harness-tool-call-types",
       // Narrow pure helpers: extract-task-id uses core/task-id for canonical
       // Task identity; the other two have no imports. These explicit entries
       // admit no shell/I/O dependency. The rest of utils stays denied rather

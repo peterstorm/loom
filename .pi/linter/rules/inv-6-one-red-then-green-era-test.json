@@ -1,0 +1,15 @@
+{
+  "kind": "regex",
+  "name": "inv-6-one-red-then-green-era-test",
+  "description": "Whether a TaskGraph is I6-era (red-then-green owed when new tests are required) is decided only by redThenGreenEra(frozenManifest) in engine/src/core/proof-obligations.ts. Population, the state-file-wire obligation-match check and task revalidation call it directly, and settlement and the stored-evidence reconcile reach it through redThenGreenDuty (implementation-application.ts), so they cannot disagree about which graphs owe I6 (G4 slice 2, FR-005, FR-010). This rule refuses an inline presence test on the frozen manifest's testFiles field anywhere else; verification-manifest.ts is excluded because it parses and freezes that field.",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "testFiles\\s*[!=]==?\\s*(undefined|null)",
+  "flags": "",
+  "excludePatterns": [
+    ".test.ts",
+    "engine/src/core/proof-obligations.ts",
+    "engine/src/core/verification-manifest.ts"
+  ],
+  "fixHint": "Call redThenGreenEra(graph.verification_manifest) from engine/src/core/proof-obligations.ts instead of testing testFiles presence inline.",
+  "enabled": true
+}

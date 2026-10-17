@@ -42,6 +42,11 @@ import {
   type PiReviewAttemptAuthority,
 } from "../../../pi/reserved-slot";
 import { slot } from "../fixtures/pi-reserved-slot";
+import type { LedgerObservation } from "../../src/core/red-then-green-types";
+
+/** A read child epoch with no events: these results exercise settlement paths
+ *  that owe no red-then-green, so the epoch's content is never judged. */
+const EMPTY_LEDGER: LedgerObservation = { kind: "read", events: [] };
 
 /**
  * The concerns the Pi `tool_result` handler used to hold inline, exercised
@@ -69,12 +74,15 @@ const applyFailedPiResult = (
 });
 
 type ImplementationPiArgs = Parameters<typeof applyImplementationPiResultWithAuthority>[0];
+/** The applier with the inputs no test here varies defaulted: the State File
+ *  path beside the repository root, and an empty child epoch. */
 const applyImplementationPiResult = (
-  args: Omit<ImplementationPiArgs, "authoritativeStatePath"> &
-    Partial<Pick<ImplementationPiArgs, "authoritativeStatePath">>,
+  args: Omit<ImplementationPiArgs, "authoritativeStatePath" | "ledger"> &
+    Partial<Pick<ImplementationPiArgs, "authoritativeStatePath" | "ledger">>,
 ) => applyImplementationPiResultWithAuthority({
   ...args,
   authoritativeStatePath: args.authoritativeStatePath ?? join(args.repository.root(), ".loom-test-state.json"),
+  ledger: args.ledger ?? EMPTY_LEDGER,
 });
 
 type SpecCheckPiArgs = Parameters<typeof applySpecCheckPiResultWithBoundary>[0];

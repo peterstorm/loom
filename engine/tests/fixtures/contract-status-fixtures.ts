@@ -38,6 +38,10 @@ export const task = (id: string, wave: number, files: readonly string[], anchors
     file_list: [...files],
     spec_anchors: [...anchors],
     spec_contributions: [],
+    // New tests waived: these Tasks exercise contract status and stop checks, not
+    // I6, so their obligations are the same in either red-then-green era and a
+    // test may attach any manifest without breaking the strict INV-6 load check.
+    new_tests_required: false,
   });
 
 export type ContractOptions = Readonly<{

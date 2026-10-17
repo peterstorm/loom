@@ -64,6 +64,8 @@ import {
   deriveProofObligations,
   parseTaskProof,
   parseTaskTestResult,
+  redThenGreenEra,
+  type RedThenGreenEra,
 } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import {
@@ -107,7 +109,7 @@ import {
 import { parseTaskId, type TaskId } from "./core/task-id";
 import {
   authorizeWaveCompletionSuite,
-  defaultVerificationManifest,
+  legacyDefaultVerificationManifest,
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
@@ -943,8 +945,13 @@ export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]):
  * each helper runs in the sequence its checks originally ran in, and the
  * first non-null error still wins — so the diagnostic a drifted graph
  * produces is unchanged.
+ *
+ * `era` is the TaskGraph's I6 era (`redThenGreenEra(graph.verification_manifest)`,
+ * INV-6), which decides whether a Task's stored obligations must include
+ * `red-then-green`. It is required: the obligation check matches exactly that
+ * era's derivation, so no caller can prove a Task against "either era".
  */
-export function taskUnionError(v: unknown, index: number): string | null {
+export function taskUnionError(v: unknown, index: number, era: RedThenGreenEra): string | null {
   if (!isRecord(v)) {
     return `tasks[${index}] must be an object`;
   }
@@ -959,7 +966,7 @@ export function taskUnionError(v: unknown, index: number): string | null {
     ?? taskAttemptAuthorityError(t, index, id)
     ?? taskRepositoryCarryError(t, index, id)
     ?? taskPacketError(t, index, id)
-    ?? taskStatusError(t, index, id)
+    ?? taskStatusError(t, index, id, era)
     ?? taskEvidenceError(t, index, id)
     ?? taskFindingsError(t, index, id);
 }
@@ -1392,6 +1399,7 @@ function taskStatusError(
   t: Record<string, unknown>,
   index: number,
   id: string,
+  era: RedThenGreenEra,
 ): string | null {
   const label = `tasks[${index}] ("${id}")`;
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
@@ -1453,6 +1461,7 @@ function taskStatusError(
     verificationPolicy: verification.value.policy,
     declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
     declaredArtifactExpectation: expectation,
+    redThenGreen: era,
   });
   const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
     proof.value.obligations.every((actual, obligationIndex) => {
@@ -1838,6 +1847,7 @@ function migrateParsedTask(
   task: Record<string, unknown>,
   index: number,
   executing: ReadonlySet<string>,
+  era: RedThenGreenEra,
 ): ParseResult<Record<string, unknown>> {
   const identity = parseTaskId(task.id, `tasks[${index}].id`);
   if (!identity.ok) return parseErr(identity.error.errors.join("; "));
@@ -1854,6 +1864,7 @@ function migrateParsedTask(
         verificationPolicy: verification.value.policy,
         declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
         declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
+        redThenGreen: era,
       }),
     };
   } else if (task.proof === undefined && (task.status === "implemented" || task.status === "completed")) {
@@ -1956,15 +1967,16 @@ function migrateParsedTask(
 function parseTaskGraphTasks(
   obj: Record<string, unknown>,
   executingTasks: readonly TaskId[],
+  era: RedThenGreenEra,
 ): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
   const executing = new Set<string>(executingTasks);
   const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
-    const err = taskUnionError(tasks[i], i);
+    const err = taskUnionError(tasks[i], i, era);
     if (err !== null) return parseErr(err);
-    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing);
+    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing, era);
     if (!migrated.ok) return migrated;
     parsedTasks.push(migrated.value);
   }
@@ -2083,7 +2095,9 @@ function parseActiveWaveCompletionSuiteField(
   if (mismatches.length > 0) {
     return parseErr(`active_wave_completion_suite must match active_wave_gate: ${mismatches.join(", ")}`);
   }
-  const manifest = verificationManifest ?? defaultVerificationManifest();
+  // A graph without a frozen manifest predates population freezing one; its
+  // receipts were stamped with the pre-I6 engine default's digest.
+  const manifest = verificationManifest ?? legacyDefaultVerificationManifest();
   if (receipt.manifestDigest !== manifest.manifestDigest) {
     return parseErr("active_wave_completion_suite.manifestDigest must match verification_manifest authority");
   }
@@ -2091,7 +2105,10 @@ function parseActiveWaveCompletionSuiteField(
   return rosterConflict === null ? parseOk(receipt) : parseErr(rosterConflict);
 }
 
-function parseTaskGraphAuthorityFields(obj: Record<string, unknown>): ParseResult<ParsedTaskGraphAuthorityFields> {
+function parseTaskGraphAuthorityFields(
+  obj: Record<string, unknown>,
+  verificationManifest: FrozenVerificationManifest | undefined,
+): ParseResult<ParsedTaskGraphAuthorityFields> {
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
   const { activeWaveGate, waveGateHistory } = registrations.value;
@@ -2109,19 +2126,17 @@ function parseTaskGraphAuthorityFields(obj: Record<string, unknown>): ParseResul
       (documents.spec.path !== (obj.spec_file ?? null) || documents.plan.path !== (obj.plan_file ?? null))) {
     return parseErr("wave_review_epoch.specCheckDocuments paths must match spec_file/plan_file authority");
   }
-  const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
-  if (!verificationManifest.ok) return parseErr(verificationManifest.error);
   const activeWaveCompletionSuite = parseActiveWaveCompletionSuiteField(
     obj.active_wave_completion_suite,
     activeWaveGate,
-    verificationManifest.value,
+    verificationManifest,
   );
   if (!activeWaveCompletionSuite.ok) return parseErr(activeWaveCompletionSuite.error);
   return parseOk({
     activeWaveGate,
     waveGateHistory,
     waveReviewEpoch: waveReviewEpoch.value,
-    verificationManifest: verificationManifest.value,
+    verificationManifest,
     activeWaveCompletionSuite: activeWaveCompletionSuite.value,
   });
 }
@@ -2369,6 +2384,44 @@ function parseTaskGraphDocumentFields(
   });
 }
 
+type ParsedTaskGraphGating = Readonly<{
+  waveGates: Readonly<Record<string, unknown>>;
+  specCheck: SpecCheck | undefined;
+}>;
+
+/**
+ * Parse the wave gates and spec-check, migrate an UNKNOWN spec-check's block,
+ * then prove every remaining `blocked: true` gate has a cause.
+ */
+function parseTaskGraphGating(
+  obj: Record<string, unknown>,
+  tasks: readonly unknown[],
+): ParseResult<ParsedTaskGraphGating> {
+  const waveGates = parseTaskGraphWaveGates(obj);
+  if (!waveGates.ok) return parseErr(waveGates.error);
+  const specCheck = parseSpecCheckField(obj.spec_check);
+  if (!specCheck.ok) return parseErr(specCheck.error);
+  const rawSpecCheck = isRecord(obj.spec_check) ? obj.spec_check : null;
+  // UNKNOWN was a captured-count state. Its migration deliberately discards
+  // those unusable counts, so reconcile the old spec-check-only block from the
+  // migrated evidence before enforcing the no-causeless-block invariant.
+  const migratedWaveGates = rawSpecCheck?.verdict === "UNKNOWN" && specCheck.value !== undefined
+    ? reconcileWaveBlock(
+        waveGates.value as Readonly<Record<string, WaveGate>>,
+        tasks as Task[],
+        specCheck.value,
+        specCheck.value.wave,
+      )
+    : waveGates.value;
+  const blockedCauseError = blockedGateCauseError(
+    migratedWaveGates,
+    tasks as Record<string, unknown>[],
+    specCheck.value,
+  );
+  if (blockedCauseError !== null) return parseErr(blockedCauseError);
+  return parseOk({ waveGates: migratedWaveGates, specCheck: specCheck.value });
+}
+
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
@@ -2388,31 +2441,15 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!documents.ok) return parseErr(documents.error);
   const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
   if (!executingTasks.ok) return parseErr(executingTasks.error);
-  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? []);
+  // The frozen manifest is parsed before the Tasks: it decides their I6 era,
+  // and so which obligations their stored Proof must carry (INV-6).
+  const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
+  if (!verificationManifest.ok) return parseErr(verificationManifest.error);
+  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? [], redThenGreenEra(verificationManifest.value));
   if (!tasks.ok) return parseErr(tasks.error);
-  const waveGates = parseTaskGraphWaveGates(obj);
-  if (!waveGates.ok) return parseErr(waveGates.error);
-  const specCheck = parseSpecCheckField(obj.spec_check);
-  if (!specCheck.ok) return parseErr(specCheck.error);
-  const rawSpecCheck = isRecord(obj.spec_check) ? obj.spec_check : null;
-  // UNKNOWN was a captured-count state. Its migration deliberately discards
-  // those unusable counts, so reconcile the old spec-check-only block from the
-  // migrated evidence before enforcing the no-causeless-block invariant.
-  const migratedWaveGates = rawSpecCheck?.verdict === "UNKNOWN" && specCheck.value !== undefined
-    ? reconcileWaveBlock(
-        waveGates.value as Readonly<Record<string, WaveGate>>,
-        tasks.value as Task[],
-        specCheck.value,
-        specCheck.value.wave,
-      )
-    : waveGates.value;
-  const blockedCauseError = blockedGateCauseError(
-    migratedWaveGates,
-    tasks.value as Record<string, unknown>[],
-    specCheck.value,
-  );
-  if (blockedCauseError !== null) return parseErr(blockedCauseError);
-  const authority = parseTaskGraphAuthorityFields(obj);
+  const gating = parseTaskGraphGating(obj, tasks.value);
+  if (!gating.ok) return parseErr(gating.error);
+  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value);
   if (!authority.ok) return parseErr(authority.error);
   const history = parseTaskGraphHistoryFields(
     obj,
@@ -2431,8 +2468,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     ...documents.value,
     tasks: tasks.value,
     executingTasks: executingTasks.value,
-    waveGates: migratedWaveGates,
-    specCheck: specCheck.value,
+    waveGates: gating.value.waveGates,
+    specCheck: gating.value.specCheck,
     acceptanceContracts: acceptanceContracts.value,
     authority: authority.value,
     history: history.value,

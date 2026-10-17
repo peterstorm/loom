@@ -11,9 +11,10 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { satisfiedProof } from "../../../fixtures/task-lifecycle";
 import { afterEach, describe, expect, it } from "vitest";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../../fixtures/pi-session";
-import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
+import { redThenGreenEra } from "../../../../src/core/proof-obligations";
 import { defaultVerificationManifest, freezeVerificationManifest, type FrozenVerificationManifest } from "../../../../src/core/verification-manifest";
 import { parseNewTestEvidence, type TaskGraph } from "../../../../src/types";
 
@@ -31,20 +32,6 @@ function write(root: string, path: string, contents: string): void {
   mkdirSync(dirname(absolute), { recursive: true });
   writeFileSync(absolute, contents);
 }
-
-const proof = (() => {
-  const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: ["source.ts"] },
-    {
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: ["source.ts"],
-      newTestsWritten: true,
-    },
-  );
-  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
-  return evaluated;
-})();
 
 function operatorManifest(roster: "empty" | "sentinel" = "sentinel") {
   const parsed = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
@@ -100,6 +87,7 @@ if (outcome === "nonzero") process.exit(7);
   git(root, "add", "-A");
   git(root, "commit", "-qm", "fixture");
 
+  const manifest = options.modern ? options.manifest ?? operatorManifest() : undefined;
   const graph: TaskGraph = {
     current_phase: "execute",
     current_wave: 1,
@@ -113,7 +101,8 @@ if (outcome === "nonzero") process.exit(7);
       agent: "code-implementer-agent",
       wave: 1,
       status: "implemented",
-      proof,
+      // The Task owes I6 exactly when the graph's manifest is post-feature (INV-6).
+      proof: satisfiedProof(["source.ts"], redThenGreenEra(manifest)),
       depends_on: [],
       file_list: ["source.ts"],
       files_modified: ["source.ts"],
@@ -126,7 +115,7 @@ if (outcome === "nonzero") process.exit(7);
     }],
     ...(options.executing ? { executing_tasks: ["T1"] } : {}),
     wave_gates: {},
-    ...(options.modern ? { verification_manifest: options.manifest ?? operatorManifest() } : {}),
+    ...(manifest === undefined ? {} : { verification_manifest: manifest }),
   };
   const statePath = join(root, ".claude/state/active_task_graph.json");
   write(root, ".claude/state/active_task_graph.json", JSON.stringify(graph, null, 2));

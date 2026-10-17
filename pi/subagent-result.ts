@@ -23,6 +23,7 @@ import {
   settleUnavailableImplementation,
 } from "../engine/src/core/implementation-application";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN } from "../engine/src/types";
+import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import { observePhaseTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   constrainReviewResolutionToScope,
@@ -413,6 +414,8 @@ type ImplementationPiResultArgs = Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
+  /** The child's attempt epoch read back from the parent ledger (I6, FR-035). */
+  ledger: LedgerObservation;
 }>;
 
 /** The implementation arguments with the reserved slot under its local name. */
@@ -729,6 +732,7 @@ function settleLockedPiResult(
     testResult: implementationTestResult(transcript.test),
     testEvidence: transcript.test.evidence.evidence,
     proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
+    ledger: args.ledger,
   }, piExactSettlementPorts(args));
 }
 

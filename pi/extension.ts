@@ -90,6 +90,7 @@ import {
   rejectedChildWriteGrantBlock,
 } from "./child-write-grant";
 import { shutdownPiSession } from "./session-shutdown";
+import { createPiEvidenceRecorder } from "./evidence-recorder";
 import {
   registerPiEmissionReadiness,
   type PiEmissionReadinessHost,
@@ -213,6 +214,18 @@ export default function (
   // The per-factory session aggregates every handler below shares.
   const parentSessions = createPiParentSessions();
   const childWriteGrants = createPiChildWriteGrants();
+  const evidenceRecorder = createPiEvidenceRecorder(childWriteGrants);
+
+  // ─── Evidence Recorder (tool_result, AD-8) ────────────────────────────
+  // A granted child records its own tool calls into the PARENT session's
+  // ledger through the minting shell it shares with Claude Code's PostToolUse
+  // recorder. Registered BEFORE every other tool_result handler: Pi chains
+  // handler rewrites of `content`/`isError`, and the facts must come from the
+  // tool's own result (FR-033). It never rewrites the result.
+  pi.on("tool_result", async (event, ctx) => {
+    evidenceRecorder.recordToolResult(event, ctx);
+    return undefined;
+  });
   const reviewWitnesses = createTrustedReviewWitnesses();
   publishLoomReviewAuthorityBridge(globalThis, { verify: reviewWitnesses.verify });
   const emissionLaunchBridge = registerPiEmissionLaunchBridge(
@@ -340,14 +353,15 @@ export default function (
         } else if (graphIsActive) {
           result = guardStateFileDecision(command);
         }
-        // Call-start stamp (PRODUCER only — pi has no PostToolUse evidence
-        // recorder yet, so nothing on the pi side consumes these stamps;
-        // they exist so the engine's recorder can order artifacts if it
-        // reads the same session): decided FIRST, stamped AFTER, in its own
-        // catch — a thrown stamp write must never change the guard's
-        // polarity (and must not trip the fail-closed outer catch). The
-        // tool-call id is read defensively; absent → no stamp, and the
-        // engine recorder fails closed on artifact-backed reports.
+        // Call-start stamp, under THIS (child) session: the evidence
+        // recorder's report discovery reads it there to prove an artifact
+        // postdates the call (`EvidenceTarget.stamps`).
+        //
+        // The guard is decided FIRST and the stamp written AFTER, in its own
+        // catch: a thrown stamp write must never change the guard's polarity
+        // (and must not trip the fail-closed outer catch). The tool-call id is
+        // read defensively; absent → no stamp, and the engine recorder fails
+        // closed on artifact-backed reports.
         try {
           const toolUseId = (event as { toolCallId?: unknown }).toolCallId;
           if (safeSessionId !== null && typeof toolUseId === "string" && toolUseId !== "") {
@@ -433,9 +447,16 @@ export default function (
             });
           },
         });
-        if (prepared.kind === "crashed") return guardCrashBlock(prepared.guard, prepared.cause);
-        if (prepared.kind === "block") return { block: true, reason: prepared.reason };
-        if (prepared.kind === "pass-through") return;
+        switch (prepared.kind) {
+          case "crashed": return guardCrashBlock(prepared.guard, prepared.cause);
+          case "block": return { block: true, reason: prepared.reason };
+          case "pass-through": return;
+          case "admit": break;
+          default: {
+            const unreachable: never = prepared;
+            return unreachable;
+          }
+        }
         // Admitted: reserve the batch's lifecycle before Pi may dispatch it.
         const refusal = await reservePiSpawnLifecycle({
           event,
@@ -491,7 +512,10 @@ export default function (
   // roster entries therefore cannot authorize child Edit/Write calls. Consume
   // the one-time capability injected into THIS child's task and bind its own
   // session before the first model turn.
-  pi.on("before_agent_start", async (event, ctx) => activatePiChildWriteGrant(event, ctx, childWriteGrants));
+  pi.on("before_agent_start", async (event, ctx) => {
+    evidenceRecorder.observeAgentStart(event, ctx);
+    return activatePiChildWriteGrant(event, ctx, childWriteGrants);
+  });
 
   // ─── Emission Readiness (launcher barrier, AD-4/FR-008) ───────────────
   registerLoomEmissionReadiness(pi);

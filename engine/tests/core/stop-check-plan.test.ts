@@ -16,11 +16,10 @@ import { stopCheckExpectation } from "../../src/core/acceptance-contract/stop-ch
 import { renderStopCheckPlan, stopCheckPlanView } from "../../src/core/acceptance-contract/stop-check-plan";
 import { STOP_CHECK_ON, UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { acceptanceRunnerCheck, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
-import {
-  runAcceptanceStopCheck,
-  type StopCheckOutcome,
-  type StopCheckPorts,
-} from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import type { StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import { runStopChecks } from "../../src/handlers/subagent-stop/stop-checks";
+import type { StopChecksOutcome } from "../../src/core/affected-stop-check-types";
+import { NO_CHANGED_FILES } from "../../src/core/changed-files";
 import type { Task, TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -257,17 +256,17 @@ const LIVE_ROOT = (() => {
   return parsed.value;
 })();
 
-type LiveStop = Readonly<{ outcome: StopCheckOutcome; launched: readonly Readonly<{ argv: readonly string[]; cwd: string }>[] }>;
+type LiveStop = Readonly<{ outcome: StopChecksOutcome; launched: readonly Readonly<{ argv: readonly string[]; cwd: string }>[] }>;
 
 /**
- * The live Acceptance Stop Check run once at `taskId`'s stop, with per-stop
- * state that never stops it: no block issued yet, a resolved repository root
- * and a free runner lock. It records each command it would launch; the launch
+ * The live stop checks run once at `taskId`'s stop, with per-stop state that
+ * never stops them: no block issued yet, a resolved repository root, a free
+ * runner lock and no changed files (so the affected check never launches). It records each command it would launch; the launch
  * fails, so nothing is judged and nothing is blocked.
  */
 async function liveStop(graph: TaskGraph, taskId: string): Promise<LiveStop> {
   const launched: { argv: readonly string[]; cwd: string }[] = [];
-  const ports: StopCheckPorts = {
+  const ports: StopCheckShellPorts = {
     repositoryRoot: () => ({ ok: true, root: LIVE_ROOT }),
     acquireRunner: () => ({ kind: "acquired", release: () => null }),
     runCheck: async (check) => {
@@ -278,8 +277,20 @@ async function liveStop(graph: TaskGraph, taskId: string): Promise<LiveStop> {
     blocksIssued: () => ({ kind: "count", blocks: 0 }),
     recordBlock: () => undefined,
     clearBlocks: () => undefined,
+    affectedBlocksIssued: () => ({ kind: "count", blocks: 0 }),
+    recordAffectedBlock: () => undefined,
+    clearAffectedBlocks: () => undefined,
+    pathExists: () => true,
+    now: () => Date.now(),
   };
-  const outcome = await runAcceptanceStopCheck({ loadGraph: () => graph, stateFilePath: "/repo/.claude/state/active_task_graph.json", taskId, agentKey: "s.a" }, ports);
+  const outcome = await runStopChecks({
+    loadGraph: () => graph,
+    stateFilePath: "/repo/.claude/state/active_task_graph.json",
+    taskId,
+    agentKey: "s.a",
+    changedFiles: () => ({ kind: "observed", changed: NO_CHANGED_FILES }),
+    hookStartedAtMs: Date.now(),
+  }, ports);
   return { outcome, launched };
 }
 

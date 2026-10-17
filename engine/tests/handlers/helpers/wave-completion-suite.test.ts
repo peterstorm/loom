@@ -15,7 +15,7 @@ import {
 } from "../../../src/core/completion-suite";
 import { evaluateAsRecorded } from "../../fixtures/completion-suite-evaluation";
 import { parseArtifactDigest } from "../../../src/core/orchestration-contract";
-import { derivePendingTaskProof, evaluateTaskProof } from "../../../src/core/proof-obligations";
+import { derivePendingTaskProof, redThenGreenEra } from "../../../src/core/proof-obligations";
 import type { AcceptanceContract, AcceptanceTestcase } from "../../../src/core/acceptance-contract";
 import { runCompletionCheck as productionRunCompletionCheck } from "../../../src/orchestration/completion-check-runner";
 import {
@@ -76,14 +76,10 @@ function manifest(mode: string, report = true) {
   return parsed.value;
 }
 
-const proof = (() => {
-  const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: [] },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
-  );
-  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
-  return evaluated;
-})();
+/** Every graph here freezes a post-feature manifest, so its Tasks owe I6 (INV-6). */
+const ERA = redThenGreenEra(manifest("pass"));
+
+const proof = satisfiedProof([], ERA);
 
 function completionScript(): string {
   return `
@@ -196,7 +192,7 @@ function contractTasks(stage: ContractStage): Task[] {
     agent: "code-implementer-agent",
     wave: 1,
     status: contractWave ? "implemented" : "completed",
-    proof: satisfiedProof([ACCEPTANCE_FILE]),
+    proof: satisfiedProof([ACCEPTANCE_FILE], ERA),
     depends_on: [],
     file_list: [ACCEPTANCE_FILE],
     review_status: contractWave ? "pending" : "passed",
@@ -208,8 +204,8 @@ function contractTasks(stage: ContractStage): Task[] {
     agent: "code-implementer-agent",
     wave: 2,
     ...(contractWave
-      ? { status: "pending" as const, proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/payload.ts"] }) }
-      : { status: "implemented" as const, proof: satisfiedProof(["src/payload.ts"]) }),
+      ? { status: "pending" as const, proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/payload.ts"], redThenGreen: ERA }) }
+      : { status: "implemented" as const, proof: satisfiedProof(["src/payload.ts"], ERA) }),
     depends_on: ["T1"],
     spec_anchors: ["AS-001"],
     file_list: ["src/payload.ts"],
@@ -222,7 +218,7 @@ function contractTasks(stage: ContractStage): Task[] {
     agent: "code-implementer-agent",
     wave: 3,
     status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/second.ts"] }),
+    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/second.ts"], redThenGreen: ERA }),
     depends_on: ["T1"],
     spec_anchors: ["AS-002"],
     file_list: ["src/second.ts"],

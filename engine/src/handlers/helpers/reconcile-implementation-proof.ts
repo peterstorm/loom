@@ -12,7 +12,10 @@ import { StateManager } from "../../state-manager";
 import {
   evaluateTaskProof,
   PI_STRUCTURED_EVIDENCE_POLICY,
+  type RedThenGreenEra,
 } from "../../core/proof-obligations";
+import type { RedThenGreenObservation } from "../../core/red-then-green-types";
+import type { FrozenVerificationManifest } from "../../core/verification-manifest";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { artifactCovers } from "../../core/path-coverage";
 import { invalidateTaskReview } from "../../core/review-output";
@@ -29,6 +32,7 @@ import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/rep
 import { runGit } from "../../utils/git-execution-policy";
 import {
   isWaveComplete,
+  redThenGreenDuty,
   type NewTestEvidence,
 } from "../../core/implementation-application";
 import {
@@ -216,24 +220,73 @@ function taskCompletionWasObserved(task: Task): boolean {
   );
 }
 
+/**
+ * The I6 judgment reconcile can stand on. It reads no ledger, so it never
+ * re-judges red-then-green: a result an earlier settlement satisfied carries
+ * forward as the facts it named, and anything else stays absent, which proof
+ * evaluates as `ledger-unavailable`.
+ */
+function carriedRedThenGreen(task: Task): RedThenGreenObservation | undefined {
+  const proof = task.proof;
+  if (proof === undefined || proof.state === "pending") return undefined;
+  for (const result of proof.results) {
+    if (result.state === "satisfied" && result.evidence.kind === "red-then-green") {
+      const { red, implementationWrite, green } = result.evidence;
+      return Object.freeze({ kind: "shown", red, implementationWrite, green });
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The I6 era reconcile re-derives obligations under, from the one
+ * `redThenGreenDuty` answer: a Task's frozen Proof decides (INV-6), so a
+ * frozen red-then-green obligation is kept even when the manifest froze no
+ * classification (reconcile reads no ledger and needs none). A Task with no
+ * frozen Proof that its era obligates is refused by name: reconcile would
+ * otherwise fail it as `ledger-unavailable`, which no retry can repair. The
+ * throw aborts the locked update, so the handler reports it without changing
+ * state, as it does every other reconcile refusal.
+ */
+function reconcileEra(task: Task, verificationManifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
+  const duty = redThenGreenDuty(task, verificationManifest);
+  switch (duty.kind) {
+    case "not-owed":
+      return "not-owed";
+    case "owed":
+    case "classification-unfrozen":
+      return "owed-if-new-tests";
+    case "proof-unfrozen":
+      throw new Error(`cannot reconcile: ${duty.reason}`);
+  }
+}
+
 /** Re-evaluate a failed aggregate from already-persisted evidence. This does
  * not invent completion or test provenance: it keeps the prior completion
- * observation, stored test result, structured writes, and current byte delta. */
+ * observation, stored test result, structured writes, prior satisfied I6
+ * facts, and current byte delta. `verificationManifest` is the TaskGraph's
+ * frozen manifest (`undefined` only for a TaskGraph frozen before manifests
+ * existed); whether I6 is owed is the Task's `redThenGreenDuty` under it (see
+ * `reconcileEra`). Both trailing parameters are required, so every caller
+ * states its graph's era rather than defaulting into the legacy one. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
-  allowLegacyPositiveMigration = false,
+  allowLegacyPositiveMigration: boolean,
+  verificationManifest: FrozenVerificationManifest | undefined,
 ): Task {
   if (task.status === "completed") return task;
   // The ADT arrives parsed; no legacy-pair re-coercion here.
   const newTestsWritten = collectedNewTests.written;
   const newTestEvidence = collectedNewTests.evidence;
+  const redThenGreen = carriedRedThenGreen(task);
   const proof = evaluateTaskProof(
     {
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
       declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
+      redThenGreen: reconcileEra(task, verificationManifest),
     },
     {
       taskCompleted: taskCompletionWasObserved(task) ||
@@ -242,6 +295,7 @@ export function reconcileTaskFromStoredEvidence(
       filesModified: proofArtifactsChanged,
       newTestsWritten,
       newTestEvidence,
+      ...(redThenGreen === undefined ? {} : { redThenGreen }),
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
@@ -431,6 +485,7 @@ const handler: HookHandler = async (_stdin, args) => {
           proofArtifactsChanged,
           collectedNewTests.value,
           recoveredBaselineSha !== null && recoveredPaths.length > 0,
+          state.verification_manifest,
         );
       });
       const resolved: TaskGraph = {

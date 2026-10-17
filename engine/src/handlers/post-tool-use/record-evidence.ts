@@ -20,19 +20,17 @@
  * so a broken recorder surfaces downstream instead of silently passing.
  */
 
-import { resolve } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
+import { claudeToolCall } from "../../core/harness-tool-call";
 import {
   attributeEvidence,
-  eventsForEpoch,
   type EvidenceAttribution,
-  extractEvidence,
-  findReport,
   fsSessionRegistry,
   parseCallerIdentity,
   parseSessionId,
+  recordToolEvidence,
   type SessionId,
   type SessionRegistry,
 } from "../../machine";
@@ -110,55 +108,25 @@ export const runRecordEvidence = async (
     }
     const { binding } = attribution;
 
-    const toolInput = input.tool_input ?? {};
-    const cwd = input.cwd ?? process.cwd();
-
-    const extracted = extractEvidence(
-      toolName,
-      toolInput,
-      input.tool_response,
-      (segment, stdout, currentCallWrites) => {
-        // Cheap hardening against agent-authored report artifacts: an explicit
-        // --outputFile path the agent wrote earlier this epoch must not vouch
-        // as a report — findReport rejects it loudly. The veto set covers
-        // Edit/Write/MultiEdit FileWrites, Bash-authored writes (redirect/
-        // tee targets minted by extractShellWriteTargets) from PRIOR calls,
-        // AND this very call's own write targets (currentCallWrites) — a
-        // one-call `printf '{…}' > r.json; npx vitest --outputFile=r.json`
-        // stages an artifact the persisted ledger cannot know about yet.
-        // Known residual: writes with no static target in the command text —
-        // cp/mv/dd of=, or a file authored by an interpreter
-        // (`python -c 'open(...)'`) — mint nothing and can still stage an
-        // artifact (documented in machines/README.md "known residuals").
-        // Computed lazily here: this closure only runs for classified test
-        // commands. The read-time resolve is a no-op for records minted
-        // absolute (see below) and covers old relative-path records.
-        const epochWrites = new Set([
-          ...eventsForEpoch(registry.readEvidence(sessionId), binding.epoch).flatMap((e) =>
-            e.kind === "FileWrite" ? [resolve(cwd, e.path)] : [],
-          ),
-          ...currentCallWrites.map((p) => resolve(cwd, p)),
-        ]);
-        // Call-scoped freshness: the PreToolUse stamp for THIS call orders
-        // artifacts against the call start. No tool_use_id / no stamp →
-        // null, and findReport fails closed on the artifact-backed sources.
-        const callStartMs =
-          input.tool_use_id !== undefined && input.tool_use_id !== ""
-            ? registry.callStartFor(sessionId, input.tool_use_id)
-            : null;
-        return findReport(segment, cwd, stdout, { nowMs: Date.now(), callStartMs }, (absPath) =>
-          epochWrites.has(absPath),
-        );
-      },
+    // Normalize the hook payload and hand it to the ONE minting shell shared
+    // with the Pi recorder (INV-4): report discovery with the
+    // agent-authored-artifact veto and the call-start stamp, mint-time path
+    // resolution and the append all live there. On Claude Code the stamp was
+    // written under the hook session itself (PreToolUse guard-state-file).
+    // Known residual: writes with no static target in the command text — a
+    // file authored by an interpreter (`python -c 'open(...)'`), `dd of=` —
+    // mint nothing and can still stage an artifact.
+    recordToolEvidence(
+      { kind: "record", ledger: sessionId, epoch: binding.epoch, stamps: sessionId },
+      claudeToolCall({
+        tool_name: toolName,
+        tool_input: input.tool_input,
+        tool_response: input.tool_response,
+        tool_use_id: input.tool_use_id,
+        cwd: input.cwd ?? process.cwd(),
+      }),
+      { registry, nowMs: Date.now },
     );
-    // Resolve FileWrite paths at MINT time, against THIS call's cwd: a later
-    // reader's cwd may differ (the agent cd'd), and resolving a relative
-    // redirect target against the wrong base would let a staged artifact
-    // slip past the veto.
-    const events = extracted.map((e) =>
-      e.kind === "FileWrite" ? { ...e, path: resolve(cwd, e.path) } : e,
-    );
-    registry.appendEvidence(sessionId, binding.epoch, events, input.tool_use_id);
 
     return passthroughResult();
   } catch (e) {

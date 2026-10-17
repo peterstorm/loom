@@ -585,6 +585,9 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
       { kind: "task-completed" },
       { kind: "regression-test-pass" },
       { kind: "new-tests" },
+      // Population freezes a post-feature manifest, so this non-claimant Task
+      // with new tests required owes red-then-green (FR-005, INV-6).
+      { kind: "red-then-green" },
       { kind: "declared-artifact-changed", artifact: "src/other.ts" },
     ]);
     expect(t9.spec_anchors).toEqual([]);

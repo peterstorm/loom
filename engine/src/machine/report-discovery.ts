@@ -5,12 +5,17 @@
  * Bun JUnit output files, JSON on stdout, conventional JUnit dirs) and hands
  * their contents to the pure parsers. All node:fs usage of the report pipeline
  * lives HERE, keeping test-report.ts (and its reducer consumers) pure.
+ *
+ * INV-8 sibling: every summary returned here was minted by those parsers or by
+ * `mergeSummaries`, all of which funnel through `parseReportSummary`, so each
+ * one carries per-file results already reconciled with its counts. This shell
+ * never builds or edits a summary; it only decides which artifacts may vouch.
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { TestReportSummary } from "./types";
-import { mergeSummaries, parseJunitXml, parseVitestJson } from "./test-report";
+import { mergeSummaries, parseJunitXml, parseVitestJson, readJunitReport } from "./test-report";
 
 /** Extract an explicit report path from the command itself (vitest/jest --outputFile). */
 export function outputFileFromCommand(command: string): string | null {
@@ -248,30 +253,79 @@ function isFresh(path: string, nowMs: number, callStartMs: number): boolean {
   }
 }
 
-function readJunitDir(dir: string, nowMs: number, callStartMs: number): TestReportSummary[] {
+/**
+ * What one conventional report dir says about a run (INV-8: a run's reports
+ * vouch together or not at all):
+ * - `reports`: every fresh report there parsed and reconciled (possibly none);
+ * - `none`: the dir does not exist, or a report vanished between the listing
+ *   and its read. Reports read before the vanished one are dropped with it, so
+ *   this dir contributes nothing rather than a partial list;
+ * - `void`: a report there cannot vouch, or the dir or a report could not be
+ *   read, so the whole capture is untrusted.
+ */
+type DirReports =
+  | Readonly<{ kind: "reports"; summaries: readonly TestReportSummary[] }>
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "void" }>;
+
+const NO_DIR_REPORTS: DirReports = Object.freeze({ kind: "none" });
+const VOID_DIR_REPORTS: DirReports = Object.freeze({ kind: "void" });
+
+/**
+ * The fresh JUnit reports of one conventional dir. Dropping a malformed or
+ * unreconciled report (INV-8) and merging the rest would mint a summary that
+ * silently omits that report's files and failures, a half-trusted capture the
+ * per-file contract forbids, so such a report voids the dir. A sibling `*.xml`
+ * that is not a test report at all (Maven failsafe's `failsafe-summary.xml`,
+ * whose root is `<failsafe-summary>`) describes no testcases and is skipped.
+ */
+function readJunitDir(dir: string, nowMs: number, callStartMs: number): DirReports {
   try {
-    return readdirSync(dir)
+    const summaries: TestReportSummary[] = [];
+    const fresh = readdirSync(dir)
       .filter((f) => f.endsWith(".xml"))
       .map((f) => join(dir, f))
-      .filter((p) => isFresh(p, nowMs, callStartMs))
-      .map((p) => {
-        const parsed = parseJunitXml(readFileSync(p, "utf-8"));
-        if (parsed === null) {
-          // A malformed report is indistinguishable from no report unless it
-          // is named — the trust verdict stays untrusted either way, but the
-          // operator gets the lead this file's doctrine promises.
-          process.stderr.write(`findReport: malformed JUnit report '${p}' (ignored for trust)\n`);
+      .filter((p) => isFresh(p, nowMs, callStartMs));
+    for (const path of fresh) {
+      const read = readJunitReport(readFileSync(path, "utf-8"));
+      switch (read.kind) {
+        case "parsed":
+          summaries.push(read.summary);
+          break;
+        case "not-junit":
+          // Named, so a skipped sibling is visible rather than silently absent.
+          process.stderr.write(`findReport: skipping '${path}' — not a JUnit report (no testsuite/testcase element)\n`);
+          break;
+        case "refused":
+          // Named, so the operator can tell a refused report from no report.
+          process.stderr.write(
+            `findReport: malformed JUnit report '${path}', or its per-file results disagree with its counts — the run's reports cannot vouch\n`,
+          );
+          return VOID_DIR_REPORTS;
+        default: {
+          // A new read kind must decide here whether the dir can still vouch.
+          const unhandled: never = read;
+          throw new Error(`readJunitDir: unhandled JUnit read ${JSON.stringify(unhandled)}`);
         }
-        return parsed;
-      })
-      .filter((s): s is TestReportSummary => s !== null);
+      }
+    }
+    return Object.freeze({ kind: "reports", summaries: Object.freeze(summaries) });
   } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return [];
-    // Unreadable report dir → no reports (fail closed), logged so a
+    // ENOENT covers both a dir that does not exist and a report deleted
+    // between readdirSync and readFileSync: neither leaves a report to vouch.
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return NO_DIR_REPORTS;
+    // Unreadable report dir or report → untrusted (fail closed), logged so a
     // permissions/race problem is distinguishable from an empty dir.
     process.stderr.write(`findReport: cannot read JUnit dir '${dir}': ${errMessage(e)}\n`);
-    return [];
+    return VOID_DIR_REPORTS;
   }
+}
+
+/** One run's summary over the report dirs it scanned: `null` when any dir is
+ *  void, or when no dir holds any report. Pure. */
+function mergeRunReports(dirs: readonly DirReports[]): TestReportSummary | null {
+  if (dirs.some((dir) => dir.kind === "void")) return null;
+  return mergeSummaries(dirs.flatMap((dir) => (dir.kind === "reports" ? dir.summaries : [])));
 }
 
 /** Walk one level of subdirectories for multi-module builds (bounded, no recursion). */
@@ -300,7 +354,11 @@ const JVM_RUNNER_PREFIXES = ["mvn", "mvnw", "./mvnw", "gradle", "./gradlew"];
  *    explicit paths are rejected when `vetoExplicitPath` says the agent wrote
  *    them earlier this epoch (an agent-authored artifact must not mint a pass)
  * 3. JSON on stdout when the segment asked for a JSON reporter
- * 4. Fresh JUnit XML in conventional dirs — JVM runners only
+ * 4. Fresh JUnit XML in conventional dirs — the JVM build dirs for JVM
+ *    runners, Loom's completion-report dir for JS runners — merged into one
+ *    summary only when every fresh report there parses and reconciles; one
+ *    that does not makes the whole capture `null`, while a sibling XML that
+ *    is not a JUnit report at all (failsafe-summary.xml) is skipped
  *
  * `times` is a named-args object on purpose: `nowMs` and `callStartMs` are
  * two same-typed epoch-ms values whose positional swap would silently
@@ -403,16 +461,11 @@ export function findReport(
     noStamp("JUnit report dirs");
     return null;
   }
-  if (!isJvmRunner) {
-    return mergeSummaries(
-      readJunitDir(resolve(cwd, ...LOOM_COMPLETION_REPORT_DIR), nowMs, callStartMs),
-    );
-  }
-  const junit = [
-    ...JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(resolve(cwd, d), nowMs, callStartMs)),
-    ...moduleDirs(cwd).flatMap((m) =>
-      JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(join(m, d), nowMs, callStartMs)),
-    ),
-  ];
-  return mergeSummaries(junit);
+  const reportDirs = isJvmRunner
+    ? [
+      ...JUNIT_REPORT_DIRS.map((d) => resolve(cwd, d)),
+      ...moduleDirs(cwd).flatMap((m) => JUNIT_REPORT_DIRS.map((d) => join(m, d))),
+    ]
+    : [resolve(cwd, ...LOOM_COMPLETION_REPORT_DIR)];
+  return mergeRunReports(reportDirs.map((dir) => readJunitDir(dir, nowMs, callStartMs)));
 }
