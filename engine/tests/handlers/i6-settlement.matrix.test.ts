@@ -153,6 +153,10 @@ function records(events: readonly RawEvent[], epoch: string, foreign: readonly R
   ];
 }
 
+const TRANSPORTS = ["Claude", "Pi"] as const;
+/** Which `harnessLedgers` observation each transport settles from. */
+const LEDGER_KEY = { Claude: "claude", Pi: "pi" } as const satisfies Record<(typeof TRANSPORTS)[number], string>;
+
 /** Each harness's epoch observation of the same facts. */
 function harnessLedgers(events: readonly RawEvent[]): Readonly<{ claude: LedgerObservation; pi: LedgerObservation }> {
   const foreign = [write(LEDGER_IMPL), red(), green()];
@@ -537,28 +541,25 @@ describe("Claude Code settlement reads the agent's own epoch (claudeEpochLedger)
 });
 
 describe("an unreadable ledger is an infrastructure failure, never a semantic retry", () => {
-  for (const transport of ["Claude", "Pi"] as const) {
-    it(`settles an owed Task as infrastructure-blocked on ${transport} when its ledger is unreadable`, () => {
-      const settled = settle(i6Graph(), "T1", { kind: "unreadable", reason: "ledger line 4 is corrupt" }, { transport });
-      expect(settled.infrastructureReason).toContain("ledger line 4 is corrupt");
-      expect(transitionOf(settled)).toBe("infrastructure-blocked");
-      if (settled.application.kind !== "applied") return;
-      expectInfrastructureBlocked(taskOf(settled.application.state, "T1"));
-    });
-  }
+  it.each(TRANSPORTS)("settles an owed Task as infrastructure-blocked on %s when its ledger is unreadable", (transport) => {
+    const settled = settle(i6Graph(), "T1", { kind: "unreadable", reason: "ledger line 4 is corrupt" }, { transport });
+    expect(settled.infrastructureReason).toContain("ledger line 4 is corrupt");
+    expect(transitionOf(settled)).toBe("infrastructure-blocked");
+    if (settled.application.kind !== "applied") return;
+    expectInfrastructureBlocked(taskOf(settled.application.state, "T1"));
+  });
 
-  for (const transport of ["Claude", "Pi"] as const) {
-    it(`settles an owed Task as infrastructure-blocked on ${transport} when its TaskGraph froze no test-file classification`, () => {
-      const populated = i6Graph();
-      expect(taskOf(populated, "T1").proof?.obligations.map(({ kind }) => kind)).toContain("red-then-green");
-      const unclassified: TaskGraph = { ...populated, verification_manifest: preFeatureManifest() };
-      const settled = settle(unclassified, "T1", harnessLedgers([write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()])[transport === "Claude" ? "claude" : "pi"], { transport });
-      expect(settled.infrastructureReason).toMatch(/T1 owes red-then-green but its TaskGraph freezes no test-file classification/);
-      expect(transitionOf(settled)).toBe("infrastructure-blocked");
-      if (settled.application.kind !== "applied") throw new Error("infrastructure settlement must apply");
-      expectInfrastructureBlocked(taskOf(settled.application.state, "T1"));
-    });
-  }
+  it.each(TRANSPORTS)("settles an owed Task as infrastructure-blocked on %s when its TaskGraph froze no test-file classification", (transport) => {
+    const populated = i6Graph();
+    expect(taskOf(populated, "T1").proof?.obligations.map(({ kind }) => kind)).toContain("red-then-green");
+    const unclassified: TaskGraph = { ...populated, verification_manifest: preFeatureManifest() };
+    const ledger = harnessLedgers([write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()])[LEDGER_KEY[transport]];
+    const settled = settle(unclassified, "T1", ledger, { transport });
+    expect(settled.infrastructureReason).toMatch(/T1 owes red-then-green but its TaskGraph freezes no test-file classification/);
+    expect(transitionOf(settled)).toBe("infrastructure-blocked");
+    if (settled.application.kind !== "applied") throw new Error("infrastructure settlement must apply");
+    expectInfrastructureBlocked(taskOf(settled.application.state, "T1"));
+  });
 
   it("FR-005: a pre-feature TaskGraph settles without consulting the ledger at all", () => {
     const graph = populate([authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL])], preFeatureManifest());
@@ -619,27 +620,25 @@ describe("redThenGreenDuty: the frozen Proof decides, and every disagreement is 
     expect(redThenGreenDuty(withoutProof(taskOf(claimant, "T1")), claimant.verification_manifest)).toEqual({ kind: "not-owed" });
   });
 
-  for (const transport of ["Claude", "Pi"] as const) {
-    it(`refuses on ${transport} to settle a proof-less Task an I6-era TaskGraph obligates, under any ledger`, () => {
-      const graph = i6Graph();
-      const proofless = withTask(graph, withoutProof(taskOf(graph, "T1")));
-      for (const ledger of [
-        harnessLedgers([write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()]).claude,
-        { kind: "unreadable", reason: "ledger file is corrupt" } as const,
-      ]) {
-        const settled = settle(proofless, "T1", ledger, { transport });
-        expect(settled).not.toHaveProperty("infrastructureReason");
-        expect(settled.application).toMatchObject({
-          kind: "error",
-          error: { kind: "invalid-task", errors: [expect.stringMatching(/T1 carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green/)] },
-        });
-        // A refusal changes nothing: the reservation stands and no receipt is written.
-        const task = taskOf(settled.application.state, "T1");
-        expect(task.active_implementation_attempt).toBeDefined();
-        expect(task.implementation_attempt_history).toBeUndefined();
-      }
-    });
-  }
+  it.each(TRANSPORTS)("refuses on %s to settle a proof-less Task an I6-era TaskGraph obligates, under any ledger", (transport) => {
+    const graph = i6Graph();
+    const proofless = withTask(graph, withoutProof(taskOf(graph, "T1")));
+    for (const ledger of [
+      harnessLedgers([write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()])[LEDGER_KEY[transport]],
+      { kind: "unreadable", reason: "ledger file is corrupt" } as const,
+    ]) {
+      const settled = settle(proofless, "T1", ledger, { transport });
+      expect(settled).not.toHaveProperty("infrastructureReason");
+      expect(settled.application).toMatchObject({
+        kind: "error",
+        error: { kind: "invalid-task", errors: [expect.stringMatching(/T1 carries no frozen Proof, but its TaskGraph's I6 era owes red-then-green/)] },
+      });
+      // A refusal changes nothing: the reservation stands and no receipt is written.
+      const task = taskOf(settled.application.state, "T1");
+      expect(task.active_implementation_attempt).toBeDefined();
+      expect(task.implementation_attempt_history).toBeUndefined();
+    }
+  });
 });
 
 // --- Stored-evidence reconcile (INV-6 sibling) ---
@@ -822,30 +821,73 @@ describe("the implementation brief states I6 up front and names the repair on re
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
   });
 
-  it("the retry's restore command returns changed files to the baseline, deletes created ones, and mints no FileWrite", () => {
-    const repository = canonicalTempDir("loom-i6-restore-");
-    try {
+  describe("the retry's restore command, run by real bash against a real repository", () => {
+    const FILES = ["src/ledger.ts", "src/ledger types.ts"] as const;
+
+    /** A repository whose baseline commit holds `src/ledger.ts`, after an
+     *  attempt that changed it and created `src/ledger types.ts` (a space in
+     *  its name). Returns the baseline commit. */
+    function attemptedRepository(repository: string): string {
       const git = (...args: string[]): string => execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
       git("init", "-q");
       git("config", "user.name", "Loom Test");
       git("config", "user.email", "loom@example.test");
-      writeFileSync(join(repository, "ledger.ts"), "baseline\n");
-      git("add", "ledger.ts");
+      mkdirSync(join(repository, "src"));
+      writeFileSync(join(repository, FILES[0]), "baseline\n");
+      git("add", FILES[0]);
       git("commit", "-qm", "baseline");
-      const baseline = git("rev-parse", "HEAD");
-      // The previous attempt changed a baseline file and created one, its name with a space.
-      writeFileSync(join(repository, "ledger.ts"), "attempt\n");
-      writeFileSync(join(repository, "ledger types.ts"), "created\n");
-
-      const command = baselineRestoreCommand(baseline, ["ledger.ts", "ledger types.ts"]);
-      execFileSync("bash", ["-c", command], { cwd: repository, stdio: "ignore" });
-
-      expect(readFileSync(join(repository, "ledger.ts"), "utf8")).toBe("baseline\n");
-      expect(() => readFileSync(join(repository, "ledger types.ts"))).toThrow(/ENOENT/);
-      expect(extractShellWriteTargets(command)).toEqual([]);
-    } finally {
-      rmSync(repository, { recursive: true, force: true });
+      writeFileSync(join(repository, FILES[0]), "attempt\n");
+      writeFileSync(join(repository, FILES[1]), "created\n");
+      return git("rev-parse", "HEAD");
     }
+
+    const bash = (command: string, cwd: string): number => {
+      try {
+        execFileSync("bash", ["-c", command], { cwd, stdio: "ignore" });
+        return 0;
+      } catch (error) {
+        return (error as { status?: number }).status ?? -1;
+      }
+    };
+
+    function inRepository(body: (repository: string) => void): void {
+      const repository = canonicalTempDir("loom-i6-restore-");
+      try {
+        body(repository);
+      } finally {
+        rmSync(repository, { recursive: true, force: true });
+      }
+    }
+
+    it("returns changed files to the baseline, deletes created ones, and mints no FileWrite", () => inRepository((repository) => {
+      const command = baselineRestoreCommand(attemptedRepository(repository), FILES);
+      expect(bash(command, repository)).toBe(0);
+      expect(readFileSync(join(repository, FILES[0]), "utf8")).toBe("baseline\n");
+      expect(() => readFileSync(join(repository, FILES[1]))).toThrow(/ENOENT/);
+      expect(extractShellWriteTargets(command)).toEqual([]);
+    }));
+
+    it("restores the root-relative paths when the agent's cwd is a subdirectory", () => inRepository((repository) => {
+      const command = baselineRestoreCommand(attemptedRepository(repository), FILES);
+      expect(bash(command, join(repository, "src"))).toBe(0);
+      expect(readFileSync(join(repository, FILES[0]), "utf8")).toBe("baseline\n");
+      expect(() => readFileSync(join(repository, FILES[1]))).toThrow(/ENOENT/);
+    }));
+
+    it("fails and deletes nothing when the source is not a commit, so no file is misread as created", () => inRepository((repository) => {
+      attemptedRepository(repository);
+      for (const source of ["e".repeat(40), "HEAD~5"]) {
+        expect(bash(baselineRestoreCommand(source, FILES), repository)).not.toBe(0);
+        expect(readFileSync(join(repository, FILES[0]), "utf8")).toBe("attempt\n");
+        expect(readFileSync(join(repository, FILES[1]), "utf8")).toBe("created\n");
+      }
+    }));
+
+    it("fails and deletes nothing outside any repository", () => inRepository((directory) => {
+      writeFileSync(join(directory, "ledger.ts"), "attempt\n");
+      expect(bash(baselineRestoreCommand("HEAD", ["ledger.ts"]), directory)).not.toBe(0);
+      expect(readFileSync(join(directory, "ledger.ts"), "utf8")).toBe("attempt\n");
+    }));
   });
 
   it("a retry of a Task with no recorded start commit restores from HEAD and says what that discards", () => {

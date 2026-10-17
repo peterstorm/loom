@@ -265,14 +265,16 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
  * not invent completion or test provenance: it keeps the prior completion
  * observation, stored test result, structured writes, prior satisfied I6
  * facts, and current byte delta. `verificationManifest` is the TaskGraph's
- * frozen manifest; whether I6 is owed is the Task's `redThenGreenDuty` under
- * it (see `reconcileEra`). */
+ * frozen manifest (`undefined` only for a TaskGraph frozen before manifests
+ * existed); whether I6 is owed is the Task's `redThenGreenDuty` under it (see
+ * `reconcileEra`). Both trailing parameters are required, so every caller
+ * states its graph's era rather than defaulting into the legacy one. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
-  allowLegacyPositiveMigration = false,
-  verificationManifest?: FrozenVerificationManifest,
+  allowLegacyPositiveMigration: boolean,
+  verificationManifest: FrozenVerificationManifest | undefined,
 ): Task {
   if (task.status === "completed") return task;
   // The ADT arrives parsed; no legacy-pair re-coercion here.

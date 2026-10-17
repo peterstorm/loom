@@ -138,6 +138,15 @@ type Run =
   | Readonly<{ kind: "not-junit" }>
   | Readonly<{ kind: "throws" }>;
 
+/** How far one fake run advances the clock: a report its own `tookMs`, a timeout the whole timeout, anything else one second. */
+function elapsedMs(run: Run, timeoutMs: number): number {
+  switch (run.kind) {
+    case "report": return run.tookMs ?? 1_000;
+    case "timed-out": return timeoutMs;
+    default: return 1_000;
+  }
+}
+
 type CheckName = "acceptance" | "affected";
 type Launch = Readonly<{ check: CheckName; argv: readonly string[]; lockHeld: boolean; atMs: number }>;
 
@@ -161,7 +170,7 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
     if (preset?.kind === "unreadable") return preset;
     return { kind: "count", blocks: counters[check].get(key) ?? preset?.blocks ?? 0 };
   };
-  const observed = (check: CheckName, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf: Uint8Array | null = bytes) => {
+  const runnerResult = (check: CheckName, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf: Uint8Array | null = bytes) => {
     const path = check === "acceptance" ? ACCEPTANCE_REPORT : AFFECTED_REPORT;
     if (bytes === null) reports.delete(join(root, path));
     else reports.set(join(root, path), bytes);
@@ -192,20 +201,20 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
       const check: CheckName = command.reportPolicy.kind === "required-file" && command.reportPolicy.path === AFFECTED_REPORT ? "affected" : "acceptance";
       launches.push({ check, argv: [command.executable, ...command.args], lockHeld: locks.held > 0, atMs: clock.ms });
       const run = options[check] ?? { kind: "report", cases: [] };
-      clock.ms += run.kind === "report" ? (run.tookMs ?? 1_000) : run.kind === "timed-out" ? command.timeoutMs : 1_000;
+      clock.ms += elapsedMs(run, command.timeoutMs);
       switch (run.kind) {
         case "report":
-          return observed(check, false, null, junit(run.cases));
+          return runnerResult(check, false, null, junit(run.cases));
         case "timed-out":
-          return observed(check, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
+          return runnerResult(check, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
         case "killed":
-          return observed(check, false, "SIGTERM", junit([failing("src/partial.test.ts", "partial")]));
+          return runnerResult(check, false, "SIGTERM", junit([failing("src/partial.test.ts", "partial")]));
         case "no-report":
-          return observed(check, false, null, null);
+          return runnerResult(check, false, null, null);
         case "report-rewritten":
-          return observed(check, false, null, junit([passing("src/ledger.test.ts", LEDGER_TEST)]), junit([failing("src/ledger.test.ts", LEDGER_TEST)]));
+          return runnerResult(check, false, null, junit([passing("src/ledger.test.ts", LEDGER_TEST)]), junit([failing("src/ledger.test.ts", LEDGER_TEST)]));
         case "not-junit":
-          return observed(check, false, null, new TextEncoder().encode("not xml at all"));
+          return runnerResult(check, false, null, new TextEncoder().encode("not xml at all"));
         case "start-failed":
           return {
             ok: true,
@@ -633,7 +642,8 @@ describe("helper stop-check-plan: the liveAttemptEvidence port", () => {
   /** A State File for `graph(...)` in a fresh Git project, with `LOOM_STATE_PATH` pointed at it. */
   function stateFile(frozen: FrozenVerificationManifest): string {
     const root = gitProject("loom-stop-checks-helper-", roots);
-    const { json } = stopCheckGraph({ tasks: graph(frozen).tasks, contracts: graph(frozen).acceptance_contracts ?? [], manifest: frozen });
+    const built = graph(frozen);
+    const { json } = stopCheckGraph({ tasks: built.tasks, contracts: built.acceptance_contracts ?? [], manifest: frozen });
     const path = writeStateFile(root, json);
     process.env.LOOM_STATE_PATH = path;
     return path;

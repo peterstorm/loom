@@ -302,6 +302,11 @@ function readJunitDir(dir: string, nowMs: number, callStartMs: number): DirRepor
             `findReport: malformed JUnit report '${path}', or its per-file results disagree with its counts — the run's reports cannot vouch\n`,
           );
           return VOID_DIR_REPORTS;
+        default: {
+          // A new read kind must decide here whether the dir can still vouch.
+          const unhandled: never = read;
+          throw new Error(`readJunitDir: unhandled JUnit read ${JSON.stringify(unhandled)}`);
+        }
       }
     }
     return Object.freeze({ kind: "reports", summaries: Object.freeze(summaries) });

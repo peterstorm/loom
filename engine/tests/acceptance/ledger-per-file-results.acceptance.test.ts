@@ -6,9 +6,8 @@
  * runners write: a Vitest JUnit report in Loom's completion-report directory,
  * a Vitest JSON report named by `--outputFile`, and Surefire JUnit reports in
  * `target/surefire-reports`. Read-back is driven through `parseEvidenceLine`,
- * the ledger's one line parser. Per-file results are read off the summary
- * structurally, so these tests compile before the summary type carries them
- * and fail on the missing behavior, never on a load error.
+ * the ledger's one line parser. Per-file results are read off the summary's
+ * own `files` field; a summary that carries none reads as `undefined`.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -156,20 +155,18 @@ ${body}
 
 // --- Reading per-file results off a summary ---
 
-/** The per-file results a summary carries, read structurally (absent before this contract). */
-const filesOf = (summary: TestReportSummary | null): unknown =>
-  summary !== null && "files" in summary ? summary.files : undefined;
+/** The per-file results a summary carries; `undefined` for no summary or a counts-only one. */
+const filesOf = (summary: TestReportSummary | null): TestReportFiles | undefined => summary?.files;
 
-const isRecorded = (files: unknown): files is Extract<TestReportFiles, { kind: "recorded" }> =>
-  typeof files === "object" && files !== null && "kind" in files && files.kind === "recorded" &&
-  "results" in files && Array.isArray(files.results);
+const isRecorded = (files: TestReportFiles | undefined): files is Extract<TestReportFiles, { kind: "recorded" }> =>
+  files?.kind === "recorded";
 
 const byFile = (left: TestFileResult, right: TestFileResult): number =>
   left.file < right.file ? -1 : left.file > right.file ? 1 : 0;
 
 /** A summary's per-file results with the results in file order, so assertions
  *  decide which files were recorded and how, not the order they were listed. */
-function perFile(summary: TestReportSummary | null): unknown {
+function perFile(summary: TestReportSummary | null): TestReportFiles | undefined {
   const files = filesOf(summary);
   return isRecorded(files) ? { kind: "recorded", results: [...files.results].sort(byFile) } : files;
 }

@@ -13,12 +13,11 @@ import type { NonEmpty } from "./orchestration-contract";
 import type { TestFileClassification } from "./red-then-green-types";
 
 /**
- * The frozen test-file classification. This is the same shape as CT-2's
- * `FrozenTestFiles` (`affected-stop-check-types.ts`), declared here because
- * that types file imports `../types`, which imports the verification manifest
- * that freezes this value. Importing it would close a cycle between top-level
- * domains. `tests/core/test-file-classification.test.ts` asserts the two are
- * mutually assignable.
+ * The frozen test-file classification. Declared here, by its owner: CT-2's
+ * types file (`affected-stop-check-types.ts`) re-exports this declaration.
+ * The import runs only that way round, because the types file imports
+ * `../types`, which imports the verification manifest that freezes this
+ * value, so declaring it there would close a cycle between top-level domains.
  */
 export type FrozenTestFiles = Readonly<{
   source: "operator-manifest" | "engine-default";

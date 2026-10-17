@@ -170,9 +170,8 @@ Known residual limits, on purpose and documented:
 - Bash-minted `FileWrite` events carry `via: "shell"` and never advance a
   guard (the gate cannot enforce Bash) — they exist for the artifact veto,
   the modified-after-pass demotion, I6's first-implementation-write step
-  and I7's changed files. The phase gate cannot deny a shell write, so a
-  shell write is only ever logged. Tool writes (`via: "tool"`, or absent on pre-`via` records) are
-  the only guard-advancing writes.
+  and I7's changed files. Tool writes (`via: "tool"`, or absent on
+  pre-`via` records) are the only guard-advancing writes.
 - Exit-status attribution is composition-aware and fails closed: the
   line's exit is credited to the classified test segment only when
   ownership is provable (a sole command; or the LAST command after `&&`,

@@ -321,24 +321,36 @@ function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationD
 }
 
 /**
+ * The one Bash call that returns `files` (repository-relative paths) to
+ * `source`: restore what `source` has, delete what it lacks. A file the Task
+ * created does not exist at the baseline, and `git restore` refuses the whole
+ * call if one pathspec matches nothing, so each file is decided on its own.
+ *
+ * "Absent at `source`" is only ever concluded after the command has proved
+ * where it stands: it runs in a subshell from the repository root (the paths
+ * are root-relative whatever the agent's cwd), and it verifies that `source`
+ * names a commit (`^0`) before touching any file. A wrong or unknown
+ * `source`, or a cwd outside any repository, therefore stops the call before
+ * the loop, so `git cat-file` cannot misreport every file as absent and
+ * nothing is deleted. A failed restore stops the loop too. Paths are
+ * shell-quoted.
+ */
+export function baselineRestoreCommand(source: string, files: readonly string[]): string {
+  return `(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${source}^0 && ` +
+    `for f in ${files.map(quoteShellArgument).join(" ")}; do ` +
+    `if git cat-file -e ${source}:"$f"; then git restore --source ${source} -- "$f" || exit 1; else rm -f -- "$f"; fi; done)`;
+}
+
+/**
  * The repair a retry owes after an I6 failure (AD-7). I6 is judged per
  * attempt epoch and the order lies in the past, so a retry that keeps its
  * predecessor's implementation can never show red: it restores the Task's
- * implementation files to the attempt baseline (a Bash call, which mints no
- * FileWrite), observes red, and only then implements. A file the Task created
- * does not exist at the baseline, and `git restore` refuses the whole call if
- * one pathspec matches nothing, so the command restores each file the baseline
- * has and deletes each one it lacks. Paths are shell-quoted. A Task populated
- * without a start commit restores from HEAD: the command stays runnable, and
- * the brief says which uncommitted work that discards.
+ * implementation files to the attempt baseline (`baselineRestoreCommand`, a
+ * Bash call, which mints no FileWrite), observes red, and only then
+ * implements. A Task populated without a start commit restores from HEAD: the
+ * command stays runnable, and the brief says which uncommitted work that
+ * discards.
  */
-/** The one Bash call that returns `files` to `source`: restore what `source`
- *  has, delete what it lacks. */
-export function baselineRestoreCommand(source: string, files: readonly string[]): string {
-  return `for f in ${files.map(quoteShellArgument).join(" ")}; do ` +
-    `if git cat-file -e ${source}:"$f"; then git restore --source ${source} -- "$f"; else rm -f -- "$f"; fi; done`;
-}
-
 function redThenGreenRemedy(
   task: Task,
   classification: TestFileClassification,
@@ -356,7 +368,7 @@ function redThenGreenRemedy(
     classification.implementationFiles.length === 0
       ? "1. Your file list declares no implementation file to restore; skip to step 2."
       : `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, classification.implementationFiles)}\`. ` +
-        `It restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
+        `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
         baseline +
         "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them.",
     "2. Run your tests and observe red: at least one testcase in one of your test files fails.",

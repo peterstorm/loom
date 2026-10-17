@@ -610,7 +610,7 @@ A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and
 - `red-missing` or `green-missing` with `untrustedOnly: true`: tests ran, but no run was qualifying. Usual causes are a chained, piped or redirected command, a missing report option, or Pi-structured evidence with no ledger run.
 - `red-after-first-implementation-write`: the code came before the failing test.
 
-The retry brief tells the agent to restore its implementation files with `git restore --source <start_sha> -- <files>`, observe red, and then implement. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
+The retry brief tells the agent to return its implementation files to the attempt baseline with one Bash call, observe red, and then implement. The call runs from the repository root and first checks that the baseline is a commit. The baseline is the Task's `start_sha`, or `HEAD` when none was recorded; the brief then says that the uncommitted changes are discarded. The call restores each file the baseline has (`git restore`) and deletes each file the Task created (`rm -f`). If the baseline is not a commit, it fails before changing anything. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
 
 ### Reviewer evidence is missing
 

@@ -48,6 +48,7 @@ import {
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
+  legacyDefaultVerificationManifest,
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
@@ -369,6 +370,11 @@ const i6Graph = (fileList: readonly string[] = NON_CLAIMANT_FILES): TaskGraph =>
 const at = (index: number, command: string): RunRef => ({ index, command });
 
 describe("I6 obligation (CT-1)", () => {
+  it("FR-005: the pasted pre-feature freeze is the engine's own legacy default, digest included", () => {
+    // The literal stays an independent oracle; this pins it to the production path.
+    expect(preFeatureManifest()).toEqual(legacyDefaultVerificationManifest());
+  });
+
   it("FR-005: only non-claimant Tasks requiring new tests owe I6 after this feature, and an earlier TaskGraph is never newly obligated", () => {
     const tasks = [
       authoredTask("T1", [LEDGER_TEST, LEDGER_IMPL]),

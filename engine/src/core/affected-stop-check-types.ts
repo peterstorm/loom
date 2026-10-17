@@ -31,6 +31,7 @@ import type { NonEmpty } from "./orchestration-contract";
 import type { ReviewPath } from "./review-packet";
 import type { StopCheckOffReason, StopCheckPlanRendering, StopCheckPlanView, StopCheckRunnerCommand } from "./stop-check-plan-types";
 import type { JunitTestcasesResult } from "./structured-test-report";
+import type { FrozenTestFiles } from "./test-file-classification";
 import type { AcceptanceRunner } from "./verification-manifest";
 import type { Evidence } from "../machine/types";
 import type { TaskGraph } from "../types";
@@ -62,11 +63,9 @@ export const AFFECTED_STOP_CHECK_MAX_BLOCKS = 3;
 export type AffectedRunner = AcceptanceRunner;
 
 /** The frozen test-file classification. The freezer always records it, and it
- *  enters the manifest digest; a manifest frozen before the field existed lacks it. */
-export type FrozenTestFiles = Readonly<{
-  source: "operator-manifest" | "engine-default";
-  suffixes: NonEmpty<string>;
-}>;
+ *  enters the manifest digest; a manifest frozen before the field existed lacks
+ *  it. Its owner is the one test-file classifier (INV-2); CT-2 names it here. */
+export type { FrozenTestFiles };
 
 /** What a frozen verification manifest adds for I6 and I7. `affectedRunner`
  *  is present, and enters the digest, only when the operator declared it. */
@@ -228,6 +227,10 @@ export type AffectedStopCheckNoteKind =
   | "repository-unavailable"
   | "crashed";
 
+/** The one sentence for a refused runner command: the `command-refused` note
+ *  and the `command-refused` plan-view off reason both read it. */
+const COMMAND_REFUSED_TEXT = "the affected runner command could not be formed for the changed files";
+
 /** The fixed text each affected-check note carries. */
 export const AFFECTED_NOTE_TEXT: Readonly<Record<AffectedStopCheckNoteKind, string>> = {
   "no-changed-files": "the affected stop check is skipped: this attempt has no changed files",
@@ -240,7 +243,7 @@ export const AFFECTED_NOTE_TEXT: Readonly<Record<AffectedStopCheckNoteKind, stri
   "budget-exhausted": "the stop hook budget was exhausted before the affected runner could run in full",
   "cap-reached": `the affected stop check reached its ${AFFECTED_STOP_CHECK_MAX_BLOCKS}-block cap`,
   "counter-unreadable": "the affected stop check's block counter is unreadable",
-  "command-refused": "the affected runner command could not be formed for the changed files",
+  "command-refused": COMMAND_REFUSED_TEXT,
   "lock-held": "another stop holds the stop-check runner lock",
   "repository-unavailable": "the repository root is unavailable to the affected stop check",
   "crashed": "the affected stop check crashed and did not decide",
@@ -312,7 +315,7 @@ export const AFFECTED_STOP_CHECK_OFF = "affected stop check off";
 export const AFFECTED_OFF_REASON_TEXT: Readonly<Record<AffectedOffReason["kind"], string>> = {
   "no-runner": "no affected runner is frozen in this TaskGraph",
   "no-changed-files": "this Task's attempt has no changed files beneath the affected runner cwd",
-  "command-refused": "the affected runner command could not be formed for the changed files",
+  "command-refused": COMMAND_REFUSED_TEXT,
 };
 
 /** The prefix of each `outsideCwd` detail line: `${AFFECTED_OUTSIDE_CWD_PREFIX}: ${file}`. */

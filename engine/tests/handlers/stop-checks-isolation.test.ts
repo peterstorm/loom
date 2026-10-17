@@ -128,7 +128,7 @@ const junit = (outcome: "passed" | "failed" | "none"): Uint8Array => new TextEnc
 
 function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
   const reports = new Map<string, Uint8Array>();
-  const observed = (timedOut: boolean, signal: string | null, bytes: Uint8Array | null): CompletionCheckRunnerResult => {
+  const runnerResult = (timedOut: boolean, signal: string | null, bytes: Uint8Array | null): CompletionCheckRunnerResult => {
     if (bytes !== null) reports.set(join(at.root, AFFECTED_REPORT), bytes);
     return {
       ok: true,
@@ -147,12 +147,12 @@ function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
     acquireRunner: () => outcome.lockHeld === true ? { kind: "held", reason: "another stop holds the lock" } : { kind: "acquired", release: () => null },
     runCheck: async (command) => {
       switch (outcome.run) {
-        case "passes": return observed(false, null, junit("passed"));
-        case "fails": return observed(false, null, junit("failed"));
-        case "zero-tests": return observed(false, null, junit("none"));
-        case "timed-out": return observed(true, "SIGKILL", junit("failed"));
-        case "killed": return observed(false, "SIGTERM", junit("failed"));
-        case "no-report": return observed(false, null, null);
+        case "passes": return runnerResult(false, null, junit("passed"));
+        case "fails": return runnerResult(false, null, junit("failed"));
+        case "zero-tests": return runnerResult(false, null, junit("none"));
+        case "timed-out": return runnerResult(true, "SIGKILL", junit("failed"));
+        case "killed": return runnerResult(false, "SIGTERM", junit("failed"));
+        case "no-report": return runnerResult(false, null, null);
         case "start-failed":
           return { ok: true, value: { checkResult: { checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: "spawn ENOENT" } }, diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false } } } as CompletionCheckRunnerResult;
         case "did-not-complete":

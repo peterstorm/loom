@@ -355,11 +355,13 @@ export default function (
         }
         // Call-start stamp, under THIS (child) session: the evidence
         // recorder's report discovery reads it there to prove an artifact
-        // postdates the call (`EvidenceTarget.stamps`). Decided FIRST, stamped AFTER, in its own
-        // catch — a thrown stamp write must never change the guard's
-        // polarity (and must not trip the fail-closed outer catch). The
-        // tool-call id is read defensively; absent → no stamp, and the
-        // engine recorder fails closed on artifact-backed reports.
+        // postdates the call (`EvidenceTarget.stamps`).
+        //
+        // The guard is decided FIRST and the stamp written AFTER, in its own
+        // catch: a thrown stamp write must never change the guard's polarity
+        // (and must not trip the fail-closed outer catch). The tool-call id is
+        // read defensively; absent → no stamp, and the engine recorder fails
+        // closed on artifact-backed reports.
         try {
           const toolUseId = (event as { toolCallId?: unknown }).toolCallId;
           if (safeSessionId !== null && typeof toolUseId === "string" && toolUseId !== "") {

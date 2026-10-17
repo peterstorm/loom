@@ -342,6 +342,36 @@ describe("the write grant carries the parent's ledger address", () => {
       .toThrow(/integrity/);
   });
 
+  it("a stored address that is not a {sessionId, agentType} record is refused as malformed before any MAC check", () => {
+    for (const evidenceLedger of [["pi-parent-session"], "pi-parent-session", { sessionId: "pi-parent-session" }, { sessionId: 7, agentType: "code-implementer-agent" }]) {
+      const issued = issue(address);
+      const directory = join(root, "subagents", "pi-write-grants");
+      const [file] = readdirSync(directory);
+      const path = join(directory, file!);
+      const stored = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+      writeFileSync(path, JSON.stringify({ ...stored, evidenceLedger }));
+      expect(() => consumePiWriteGrant(injectPiWriteGrant("Task ID: T1", issued), cwd, "code-implementer-agent"), JSON.stringify(evidenceLedger))
+        .toThrow("write grant is malformed");
+    }
+  });
+
+  it("a MAC-valid address whose ids do not parse is refused at consumption, never recorded into a wrong epoch", () => {
+    // The issuer is the only writer a MAC admits; these forge an inconsistent
+    // issuer by handing issue() ids the parsers would refuse.
+    const unparseableSession = { sessionId: "../escape" as SessionId, agentType: IMPLEMENTER };
+    const badSession = issue(unparseableSession);
+    expect(() => consumePiWriteGrant(injectPiWriteGrant("Task ID: T1", badSession), cwd, "code-implementer-agent"))
+      .toThrow("write grant evidence ledger address is invalid");
+
+    const spacedAgent = "code implementer";
+    const badAgentType = issuePiWriteGrant({
+      agent: spacedAgent, taskId: "T1", cwd, taskGraphPath: graph,
+      evidenceLedger: { sessionId: parent, agentType: spacedAgent as typeof IMPLEMENTER },
+    });
+    expect(() => consumePiWriteGrant(injectPiWriteGrant("Task ID: T1", badAgentType), cwd, spacedAgent))
+      .toThrow("write grant evidence ledger address is invalid");
+  });
+
   it("an address naming another agent type than the grant's agent is refused at issue", () => {
     const architect = parseAgentType("architecture-agent")!;
     expect(() => issue({ sessionId: parent, agentType: architect })).toThrow(/agent type/);

@@ -67,7 +67,7 @@ export function piEvidenceTarget(
 }
 
 const NO_RECORD_EXPLANATION: Readonly<Record<PiEvidenceNoRecordReason, string>> = Object.freeze({
-  "no-grant": "this child activated no parent-issued write grant",
+  "no-grant": "this child holds no parent-issued write grant that names an evidence ledger",
   "grant-rejected": "this child's write grant was rejected at activation",
   "cleanup-pending": "this child's binding survives only as cleanup debt",
 });
