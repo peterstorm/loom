@@ -23,15 +23,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  AFFECTED_OFF_REASON_TEXT,
   AFFECTED_OUTSIDE_CWD_PREFIX,
   AFFECTED_SECTION_HEADING,
-  AFFECTED_STOP_CHECK_OFF,
   MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  type AffectedOffReason,
 } from "../../src/core/affected-stop-check-types";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-import { renderStopCheckPlan } from "../../src/core/acceptance-contract/stop-check-plan";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
@@ -52,7 +48,7 @@ import type { HookResult, Task, TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { statePathIn, task, writeStateFile } from "../fixtures/contract-status-fixtures";
-import { frozenContract, stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
+import { acceptancePlanLines, affectedOffSection, frozenContract, stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
 import { ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, argvOf, checkNameOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 
 const SESSION = "stop-check-plan-affected-session";
@@ -178,16 +174,6 @@ async function plan(taskId: string): Promise<PlanRun> {
   return { result, lines: text === "" ? [] : text.replace(/\n$/, "").split("\n") };
 }
 
-/** The CT-1 acceptance lines for the Task, which the combined plan must keep unchanged. */
-function acceptanceLines(graph: TaskGraph, taskId: string): readonly string[] {
-  const rendering = renderStopCheckPlan(graph, taskId);
-  if (rendering.kind !== "rendered") throw new Error(`${taskId} is not in the fixture graph`);
-  return rendering.lines;
-}
-
-const offSection = (reason: AffectedOffReason["kind"]): readonly string[] =>
-  [AFFECTED_SECTION_HEADING, `  ${AFFECTED_STOP_CHECK_OFF} — ${AFFECTED_OFF_REASON_TEXT[reason]}`];
-
 // --- The affected plan ---
 
 describe("stop-check-plan renders the affected plan (CT-2)", () => {
@@ -207,7 +193,7 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
 
     expect(result).toEqual({ kind: "passthrough" });
     expect(lines).toEqual([
-      ...acceptanceLines(at.graph, "T2"),
+      ...acceptancePlanLines(at.graph, "T2"),
       AFFECTED_SECTION_HEADING,
       "  changed files:",
       "    src/payload.ts",
@@ -227,7 +213,7 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
     const { lines } = await plan("T3");
 
     expect(lines).toEqual([
-      ...acceptanceLines(at.graph, "T3"),
+      ...acceptancePlanLines(at.graph, "T3"),
       AFFECTED_SECTION_HEADING,
       "  changed files:",
       "    src/ledger.ts",
@@ -242,14 +228,14 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
       { agentId: "agent-payload", taskId: "T2", writes: [{ path: "src/payload.ts", onDisk: true }] },
     ]);
 
-    expect((await plan("T2")).lines).toEqual([...acceptanceLines(at.graph, "T2"), ...offSection("no-runner")]);
+    expect((await plan("T2")).lines).toEqual([...acceptancePlanLines(at.graph, "T2"), ...affectedOffSection("no-runner")]);
   });
 
   it("AS-033: FR-028: with no live attempt, or an attempt that changed nothing, the plan says there are no changed files", async () => {
     const at = await project(manifest({ acceptance: true, affected: true }), [{ agentId: "agent-payload", taskId: "T2", writes: [] }]);
 
-    expect((await plan("T2")).lines).toEqual([...acceptanceLines(at.graph, "T2"), ...offSection("no-changed-files")]);
-    expect((await plan("T3")).lines).toEqual([...acceptanceLines(at.graph, "T3"), ...offSection("no-changed-files")]);
+    expect((await plan("T2")).lines).toEqual([...acceptancePlanLines(at.graph, "T2"), ...affectedOffSection("no-changed-files")]);
+    expect((await plan("T3")).lines).toEqual([...acceptancePlanLines(at.graph, "T3"), ...affectedOffSection("no-changed-files")]);
   });
 
   it("AS-033: FR-028: an attempt whose only changed files were deleted, or lie outside the runner cwd, has no changed files, and each file outside the cwd is named", async () => {
@@ -260,8 +246,8 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
     }]);
 
     expect((await plan("T3")).lines).toEqual([
-      ...acceptanceLines(at.graph, "T3"),
-      ...offSection("no-changed-files"),
+      ...acceptancePlanLines(at.graph, "T3"),
+      ...affectedOffSection("no-changed-files"),
       `    ${AFFECTED_OUTSIDE_CWD_PREFIX}: src/ledger.ts`,
     ]);
   });
@@ -283,7 +269,7 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
 
     const { lines } = await plan("T3");
 
-    const head = [...acceptanceLines(at.graph, "T3"), ...offSection("command-refused")];
+    const head = [...acceptancePlanLines(at.graph, "T3"), ...affectedOffSection("command-refused")];
     expect(lines.slice(0, head.length)).toEqual(head);
     const errors = lines.slice(head.length);
     expect(errors.length).toBeGreaterThan(0);

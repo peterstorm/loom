@@ -17,29 +17,20 @@ import fc from "fast-check";
 import {
   attributeEvidence,
   epochOf,
-  parseAgentId,
-  parseAgentType,
   parseCallerIdentity,
   resolveSoleActiveBinding,
-  type AgentId,
   type CallerIdentity,
   type MachineBinding,
   type MachineBindingAuthority,
 } from "../../src/machine/evidence";
+import { agentIdOf, agentTypeOf } from "../fixtures/machine-identities";
 
 const ID_POOL = ["a339f6fd51d78b179", "a-2", "a-3", "a-4", "a-5"] as const;
 const TYPE_POOL = ["code-implementer-agent", "ts-test-agent"] as const;
 
-const agentId = (raw: string): AgentId => {
-  const parsed = parseAgentId(raw);
-  if (parsed === null) throw new Error(`fixture id ${raw} must parse`);
-  return parsed;
-};
-
 const binding = (id: string, type: string): MachineBinding => {
-  const agentType = parseAgentType(type);
-  if (agentType === null) throw new Error(`fixture type ${type} must parse`);
-  return { agentId: agentId(id), agentType, epoch: epochOf(agentId(id), agentType) };
+  const agentType = agentTypeOf(type);
+  return { agentId: agentIdOf(id), agentType, epoch: epochOf(agentIdOf(id), agentType) };
 };
 
 const parsed = (bindings: readonly MachineBinding[]): MachineBindingAuthority => ({ kind: "parsed", bindings });
@@ -49,7 +40,7 @@ const bindingArb: fc.Arbitrary<MachineBinding> = fc
   .map(([id, type]) => binding(id, type));
 
 const bindingsArb = fc.uniqueArray(bindingArb, { maxLength: 5, selector: (b) => b.epoch });
-const rosterArb = fc.uniqueArray(fc.constantFrom(...ID_POOL).map(agentId), { maxLength: 5 });
+const rosterArb = fc.uniqueArray(fc.constantFrom(...ID_POOL).map(agentIdOf), { maxLength: 5 });
 const reportedArb: fc.Arbitrary<CallerIdentity> = fc
   .constantFrom(...ID_POOL)
   .map((id) => parseCallerIdentity(id));

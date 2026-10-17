@@ -16,12 +16,10 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import {
-  AFFECTED_OFF_REASON_TEXT,
   AFFECTED_OUTSIDE_CWD_PREFIX,
   AFFECTED_SECTION_HEADING,
   AFFECTED_STOP_CHECK_OFF,
   MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  type AffectedOffReason,
   type ChangedFilePath,
   type ChangedFiles,
 } from "../../src/core/affected-stop-check-types";
@@ -44,7 +42,7 @@ import {
 } from "../../src/core/verification-manifest";
 import type { Task, TaskGraph } from "../../src/types";
 import { task } from "../fixtures/contract-status-fixtures";
-import { frozenContract } from "../fixtures/stop-check-plan-fixtures";
+import { acceptancePlanLines, affectedOffSection, frozenContract } from "../fixtures/stop-check-plan-fixtures";
 import { ACCEPTANCE_REPORT, ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { graphFixture } from "../fixtures/task-lifecycle";
 
@@ -94,15 +92,6 @@ const changed = (...files: string[]): ChangedFiles =>
 const NONE: ChangedFiles = changed();
 
 const nonEmptyOf = <T,>(values: readonly T[]): NonEmpty<T> => values as unknown as NonEmpty<T>;
-
-const offSection = (reason: AffectedOffReason["kind"]): readonly string[] =>
-  [AFFECTED_SECTION_HEADING, `  ${AFFECTED_STOP_CHECK_OFF} — ${AFFECTED_OFF_REASON_TEXT[reason]}`];
-
-function acceptanceLines(graph: TaskGraph, taskId: string): readonly string[] {
-  const rendering = renderStopCheckPlan(graph, taskId);
-  if (rendering.kind !== "rendered") throw new Error(`${taskId} is not in the fixture graph`);
-  return rendering.lines;
-}
 
 function renderedLines(graph: TaskGraph, taskId: string, files: ChangedFiles): readonly string[] {
   const rendering = renderStopChecksPlan(graph, taskId, files);
@@ -225,7 +214,7 @@ describe("renderStopChecksPlan", () => {
     const graph = graphOf(bothRunners());
 
     expect(renderedLines(graph, "T2", changed("src/payload.ts", "src/payload.test.ts"))).toEqual([
-      ...acceptanceLines(graph, "T2"),
+      ...acceptancePlanLines(graph, "T2"),
       AFFECTED_SECTION_HEADING,
       "  changed files:",
       "    src/payload.ts",
@@ -239,7 +228,7 @@ describe("renderStopChecksPlan", () => {
   it("AS-032: FR-028: shows the files beneath the cwd by repository path and the argv relative to the cwd", () => {
     const graph = graphOf(bothRunners({ ...AFFECTED_RUNNER, cwd: "engine" }));
 
-    expect(renderedLines(graph, "T3", changed("src/ledger.ts", "engine/src/a.ts")).slice(acceptanceLines(graph, "T3").length)).toEqual([
+    expect(renderedLines(graph, "T3", changed("src/ledger.ts", "engine/src/a.ts")).slice(acceptancePlanLines(graph, "T3").length)).toEqual([
       AFFECTED_SECTION_HEADING,
       "  changed files:",
       "    engine/src/a.ts",
@@ -252,21 +241,21 @@ describe("renderStopChecksPlan", () => {
   it("AS-017: FR-017: AS-033: with no affected runner frozen, the affected section is off for no-runner alone", () => {
     for (const manifest of [frozen({ schemaVersion: 1 }), frozen({ schemaVersion: 2, acceptanceRunner: ACCEPTANCE_RUNNER })]) {
       const graph = graphOf(manifest);
-      expect(renderedLines(graph, "T3", changed("src/ledger.ts"))).toEqual([...acceptanceLines(graph, "T3"), ...offSection("no-runner")]);
+      expect(renderedLines(graph, "T3", changed("src/ledger.ts"))).toEqual([...acceptancePlanLines(graph, "T3"), ...affectedOffSection("no-runner")]);
     }
   });
 
   it("AS-033: FR-028: with no changed files the affected section is off for that one reason", () => {
     const graph = graphOf(bothRunners());
-    expect(renderedLines(graph, "T2", NONE)).toEqual([...acceptanceLines(graph, "T2"), ...offSection("no-changed-files")]);
+    expect(renderedLines(graph, "T2", NONE)).toEqual([...acceptancePlanLines(graph, "T2"), ...affectedOffSection("no-changed-files")]);
   });
 
   it("AS-033: FR-028: names each changed file outside the runner cwd under the no-changed-files reason", () => {
     const graph = graphOf(bothRunners({ ...AFFECTED_RUNNER, cwd: "engine" }));
 
     expect(renderedLines(graph, "T3", changed("src/ledger.ts", "pi/x.ts"))).toEqual([
-      ...acceptanceLines(graph, "T3"),
-      ...offSection("no-changed-files"),
+      ...acceptancePlanLines(graph, "T3"),
+      ...affectedOffSection("no-changed-files"),
       `    ${AFFECTED_OUTSIDE_CWD_PREFIX}: src/ledger.ts`,
       `    ${AFFECTED_OUTSIDE_CWD_PREFIX}: pi/x.ts`,
     ]);
@@ -278,8 +267,8 @@ describe("renderStopChecksPlan", () => {
     if (refused.ok) throw new Error("node refuses an inline-evaluation option");
 
     expect(renderedLines(graph, "T3", changed("src/ledger.test.js", "-e"))).toEqual([
-      ...acceptanceLines(graph, "T3"),
-      ...offSection("command-refused"),
+      ...acceptancePlanLines(graph, "T3"),
+      ...affectedOffSection("command-refused"),
       ...refused.error.errors.map((error) => `    ${error}`),
     ]);
   });
@@ -316,7 +305,7 @@ describe("renderStopChecksPlan", () => {
     fc.assert(fc.property(manifest, fc.array(file, { maxLength: 5 }), fc.constantFrom("T1", "T2", "T3"), (m, files, taskId) => {
       const graph = graphOf(m);
       const lines = renderedLines(graph, taskId, changed(...files));
-      const head = acceptanceLines(graph, taskId);
+      const head = acceptancePlanLines(graph, taskId);
       expect(lines.slice(0, head.length)).toEqual(head);
       expect(lines.filter((line) => line === AFFECTED_SECTION_HEADING)).toHaveLength(1);
       expect(lines[head.length]).toBe(AFFECTED_SECTION_HEADING);

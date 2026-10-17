@@ -42,16 +42,14 @@ import { consumePiWriteGrant, injectPiWriteGrant, issuePiWriteGrant, piGrantedAg
 import { piToolCall } from "../../src/core/harness-tool-call";
 import {
   epochOf,
-  parseAgentId,
   parseAgentType,
-  parseSessionId,
-  type AgentId,
   type SessionId,
   type SessionRegistry,
   type SessionTaskGraphPointerBinding,
 } from "../../src/machine";
 import type { PiEvidenceLedgerAddress } from "../../src/machine/harness-tool-call-types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "../machine/fake-session-registry";
 import { inertEmissionLaunchBridge } from "../fixtures/held-spawn-batch";
 import { recordingDurableReleases } from "../fixtures/recording-durable-releases";
@@ -61,26 +59,10 @@ import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness
 import type { AdmittedSpawnItem, SpawnAdmission } from "../../src/core/spawn-admission";
 import { PI_EXTENSION_RUNTIME_REVISION_ENV, PI_EXTENSION_RUNTIME_ROOT_ENV } from "../../src/runtime-compatibility";
 
-const session = (raw: string): SessionId => {
-  const parsed = parseSessionId(raw);
-  if (parsed === null) throw new Error(`fixture session ${raw} must parse`);
-  return parsed;
-};
-const agentId = (raw: string): AgentId => {
-  const parsed = parseAgentId(raw);
-  if (parsed === null) throw new Error(`fixture agent id ${raw} must parse`);
-  return parsed;
-};
-const IMPLEMENTER = (() => {
-  const parsed = parseAgentType("code-implementer-agent");
-  if (parsed === null) throw new Error("fixture agent type must parse");
-  return parsed;
-})();
-
-const parent = session("pi-parent-session");
-const child = session("pi-child-session");
-const grantAgent = agentId("pi-grant-0123456789abcdef");
-const address: PiEvidenceLedgerAddress = { sessionId: parent, agentType: IMPLEMENTER };
+const parent = sessionIdOf("pi-parent-session");
+const child = sessionIdOf("pi-child-session");
+const grantAgent = agentIdOf("pi-grant-0123456789abcdef");
+const address: PiEvidenceLedgerAddress = { sessionId: parent, agentType: IMPLEMENTER_TYPE };
 const pointer = { directory: "/state", pointerName: "p", registryName: "r", target: "/graph.json" } as unknown as SessionTaskGraphPointerBinding;
 const activeGrant: ActiveChildWriteGrant = { kind: "active", agentId: grantAgent, pointerBinding: pointer, evidenceLedger: address };
 
@@ -117,7 +99,7 @@ describe("piEvidenceTarget — the recorder's one total decision over the child'
     expect(piEvidenceTarget(activeGrant, false, child)).toEqual({
       kind: "record",
       ledger: parent,
-      epoch: epochOf(grantAgent, IMPLEMENTER),
+      epoch: epochOf(grantAgent, IMPLEMENTER_TYPE),
       stamps: child,
     });
   });
@@ -162,10 +144,10 @@ describe("createPiEvidenceRecorder — the Pi child's tool_result recorder", () 
     recorder.recordToolResult(bashEvent("printf x > out.txt && bun test", true), ctx(child));
 
     expect(registry.readEvidence(parent).map(({ epoch, event, callId }) => ({ epoch, event, callId }))).toEqual([
-      { epoch: epochOf(grantAgent, IMPLEMENTER), event: { kind: "FileRead", path: "/repo/README.md" }, callId: "call-read" },
-      { epoch: epochOf(grantAgent, IMPLEMENTER), event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "call-write" },
-      { epoch: epochOf(grantAgent, IMPLEMENTER), event: { kind: "FileWrite", path: "/repo/out.txt", via: "shell" }, callId: "call-bash" },
-      { epoch: epochOf(grantAgent, IMPLEMENTER), event: { kind: "TestRun", command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
+      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "FileRead", path: "/repo/README.md" }, callId: "call-read" },
+      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "call-write" },
+      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "FileWrite", path: "/repo/out.txt", via: "shell" }, callId: "call-bash" },
+      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "TestRun", command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
     ]);
     expect(registry.readEvidence(child)).toEqual([]);
   });
@@ -358,7 +340,7 @@ describe("the write grant carries the parent's ledger address", () => {
   it("a MAC-valid address whose ids do not parse is refused at consumption, never recorded into a wrong epoch", () => {
     // The issuer is the only writer a MAC admits; these forge an inconsistent
     // issuer by handing issue() ids the parsers would refuse.
-    const unparseableSession = { sessionId: "../escape" as SessionId, agentType: IMPLEMENTER };
+    const unparseableSession = { sessionId: "../escape" as SessionId, agentType: IMPLEMENTER_TYPE };
     const badSession = issue(unparseableSession);
     expect(() => consumePiWriteGrant(injectPiWriteGrant("Task ID: T1", badSession), cwd, "code-implementer-agent"))
       .toThrow("write grant evidence ledger address is invalid");
@@ -366,7 +348,7 @@ describe("the write grant carries the parent's ledger address", () => {
     const spacedAgent = "code implementer";
     const badAgentType = issuePiWriteGrant({
       agent: spacedAgent, taskId: "T1", cwd, taskGraphPath: graph,
-      evidenceLedger: { sessionId: parent, agentType: spacedAgent as typeof IMPLEMENTER },
+      evidenceLedger: { sessionId: parent, agentType: spacedAgent as typeof IMPLEMENTER_TYPE },
     });
     expect(() => consumePiWriteGrant(injectPiWriteGrant("Task ID: T1", badAgentType), cwd, spacedAgent))
       .toThrow("write grant evidence ledger address is invalid");
@@ -404,7 +386,7 @@ describe("the write grant carries the parent's ledger address", () => {
     expect(piEvidenceTarget(granted, false, child)).toEqual({
       kind: "record",
       ledger: parent,
-      epoch: epochOf(piGrantedAgentId(issued.token)!, IMPLEMENTER),
+      epoch: epochOf(piGrantedAgentId(issued.token)!, IMPLEMENTER_TYPE),
       stamps: child,
     });
   });
@@ -415,7 +397,7 @@ describe("the write grant carries the parent's ledger address", () => {
 describe("spawn reservation mints the grant's evidence ledger address", () => {
   const SPAWN_KEYS = ["LOOM_SUBAGENT_DIR", "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"] as const;
   const parentRaw = "pi-spawning-parent";
-  const parentSession = session(parentRaw);
+  const parentSession = sessionIdOf(parentRaw);
   const toolCallId = "call-spawn-evidence";
   let root: string;
   let previous: ReadonlyArray<readonly [string, string | undefined]>;
@@ -618,15 +600,15 @@ describe("the Pi extension registers the evidence recorder", () => {
 
 describe("piChildEvidence — the parent reads one child's epoch", () => {
   const token = "c".repeat(64);
-  const childAgent = agentId(`pi-grant-${"c".repeat(16)}`);
+  const childAgent = agentIdOf(`pi-grant-${"c".repeat(16)}`);
 
   it("returns exactly the facts of the child's epoch in the parent ledger", () => {
     const registry = inMemorySessionRegistry();
-    registry.appendEvidence(parent, epochOf(childAgent, IMPLEMENTER), [{ kind: "FileRead", path: "/a" }], "c1");
-    registry.appendEvidence(parent, epochOf(agentId("pi-grant-ffffffffffffffff"), IMPLEMENTER), [{ kind: "FileRead", path: "/sibling" }]);
-    registry.appendEvidence(parent, epochOf(childAgent, IMPLEMENTER), [{ kind: "FileWrite", path: "/b", via: "tool" }], "c2");
+    registry.appendEvidence(parent, epochOf(childAgent, IMPLEMENTER_TYPE), [{ kind: "FileRead", path: "/a" }], "c1");
+    registry.appendEvidence(parent, epochOf(agentIdOf("pi-grant-ffffffffffffffff"), IMPLEMENTER_TYPE), [{ kind: "FileRead", path: "/sibling" }]);
+    registry.appendEvidence(parent, epochOf(childAgent, IMPLEMENTER_TYPE), [{ kind: "FileWrite", path: "/b", via: "tool" }], "c2");
 
-    expect(piChildEvidence(parent, token, IMPLEMENTER, registry)).toEqual({
+    expect(piChildEvidence(parent, token, IMPLEMENTER_TYPE, registry)).toEqual({
       kind: "read",
       events: [{ kind: "FileRead", path: "/a" }, { kind: "FileWrite", path: "/b", via: "tool" }],
     });
@@ -634,13 +616,13 @@ describe("piChildEvidence — the parent reads one child's epoch", () => {
 
   it("an unreadable ledger is an unreadable observation, never an empty epoch", () => {
     const registry = { readEvidence: () => { throw new Error("evidence ledger is corrupt"); } };
-    const observation = piChildEvidence(parent, token, IMPLEMENTER, registry);
+    const observation = piChildEvidence(parent, token, IMPLEMENTER_TYPE, registry);
     expect(observation.kind).toBe("unreadable");
     expect(observation.kind === "unreadable" && observation.reason).toContain("corrupt");
   });
 
   it("a malformed slot token names no grant identity and is unreadable", () => {
-    const observation = piChildEvidence(parent, "not-a-token", IMPLEMENTER, inMemorySessionRegistry());
+    const observation = piChildEvidence(parent, "not-a-token", IMPLEMENTER_TYPE, inMemorySessionRegistry());
     expect(observation.kind).toBe("unreadable");
   });
 });
