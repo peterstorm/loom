@@ -135,3 +135,26 @@ decides, and `redThenGreenEra` is consulted only for a Task with no frozen Proof
 - An `engine-default` classification is locked to the current `DEFAULT_TEST_FILE_SUFFIXES`. Changing that
   default later requires a new source tag, or a parser that accepts the old suffix list, so that graphs
   frozen earlier still parse.
+
+## Amendment (2026-10-17): the era carries its classification, and freezers require it by type
+
+The follow-up named under *Negative* is taken, without changing the State File shape or any digest:
+
+- **One reader.** `frozenRedThenGreenEra(manifest)` in `proof-obligations.ts` returns
+  `FrozenRedThenGreenEra = { kind: "not-owed" } | { kind: "owed-if-new-tests"; testFiles: FrozenTestFiles }`.
+  Outside `verification-manifest.ts`, which parses, freezes and digests the field, it is the only production
+  code that reads a frozen manifest's `testFiles`. `RedThenGreenEra` is now its `kind`, and
+  `redThenGreenEra` returns that kind. `redThenGreenDuty` used to read `manifest.testFiles` a second time to
+  get the classification. It now takes the classification from the era, so the era and the classification
+  it supplies are one value.
+- **Post-feature freezers are typed.** `defaultVerificationManifest()` and `freezeVerificationManifest()`
+  return `I6EraVerificationManifest`, a `FrozenVerificationManifest` whose `testFiles` is required. A new
+  post-feature freeze path that drops the classification no longer compiles.
+  `legacyDefaultVerificationManifest()` deliberately returns the wider type, and `FrozenVerificationManifest`
+  keeps `testFiles` optional, because pre-feature graphs must still parse. Population keeps accepting the
+  wider type, so tests can still simulate a graph frozen before the feature.
+- **The INV-6 lint rule** refuses these inline forms of the test outside the two owners: an equality on
+  either side, a negation, an `in` test, optional chaining, `??`, destructuring the field and bracket access.
+  It is a backstop, not a proof. The field stays a public optional member of `FrozenVerificationManifest`.
+  Making it opaque outside the owners would change that type for the parser, the State File wire and every
+  test fixture.

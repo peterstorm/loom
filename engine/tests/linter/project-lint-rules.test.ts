@@ -75,8 +75,18 @@ const OWNERSHIP_RULES: readonly OwnershipRow[] = [
   },
   {
     rule: "inv-6-one-red-then-green-era-test",
-    refused: "if (manifest.testFiles === undefined) return \"not-owed\";\nconst owed = m.testFiles !== null;",
-    allowed: "const era = redThenGreenEra(graph.verification_manifest);",
+    refused: [
+      "if (manifest.testFiles === undefined) return \"not-owed\";",
+      "const owed = m.testFiles !== null;",
+      "if (undefined === manifest.testFiles) return;",
+      "if (!manifest.testFiles) return;",
+      "const declared = \"testFiles\" in manifest;",
+      "const frozen = manifest?.testFiles;",
+      "const files = manifest.testFiles ?? ENGINE_DEFAULT_TEST_FILES;",
+      "const { testFiles } = graph.verification_manifest ?? {};",
+      "const raw = manifest[\"testFiles\"];",
+    ].join("\n"),
+    allowed: "const era = frozenRedThenGreenEra(graph.verification_manifest);\nconst split = classifyTaskFiles(fileList, duty.testFiles);",
     owners: ["engine/src/core/proof-obligations.ts", "engine/src/core/verification-manifest.ts"],
   },
   {

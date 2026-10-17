@@ -1,7 +1,8 @@
 /**
- * INV-6 matrix: whether a TaskGraph owes `red-then-green` is decided only by
- * `redThenGreenEra(graph.verification_manifest)`, from the presence of the
- * frozen `testFiles`.
+ * INV-6 matrix: whether a TaskGraph owes `red-then-green`, and under which
+ * classification, is decided only by
+ * `frozenRedThenGreenEra(graph.verification_manifest)`, from the frozen
+ * `testFiles`; `redThenGreenEra` is its era alone.
  *
  * Rows (a)–(d) are the four post-feature freeze cases (AD-4). Each is frozen
  * through population (`populateTaskGraph`, with the manifest the
@@ -25,15 +26,19 @@ import {
   populateTaskGraph,
   type AuthoredTask,
 } from "../../src/core/task-graph-population";
-import type { FrozenStopCheckManifestFields, FrozenTestFiles } from "../../src/core/affected-stop-check-types";
+import type { FrozenTestFiles } from "../../src/core/affected-stop-check-types";
 import { ENGINE_DEFAULT_TEST_FILES } from "../../src/core/test-file-classification";
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
+  legacyDefaultVerificationManifest,
   type FrozenVerificationManifest,
+  type I6EraVerificationManifest,
 } from "../../src/core/verification-manifest";
+import { frozenRedThenGreenEra, redThenGreenEra } from "../../src/core/proof-obligations";
 import type { TaskGraph } from "../../src/types";
 import { protectedGraphFixture } from "../fixtures/task-lifecycle";
+import type { Equal } from "../fixtures/type-equality";
 
 const parsedSpec = parseSpec(`# Feature: Era
 
@@ -123,9 +128,6 @@ function fromSource(document: Readonly<Record<string, unknown>>): FrozenVerifica
   return frozen.value;
 }
 
-const testFilesOf = (graph: TaskGraph): FrozenTestFiles | undefined =>
-  (graph.verification_manifest as (FrozenVerificationManifest & FrozenStopCheckManifestFields) | undefined)?.testFiles;
-
 type EraRow = Readonly<{ row: string; manifest: () => FrozenVerificationManifest; testFiles: FrozenTestFiles }>;
 
 const POST_FEATURE_ROWS: readonly EraRow[] = [
@@ -151,12 +153,43 @@ const POST_FEATURE_ROWS: readonly EraRow[] = [
   },
 ];
 
+// Every post-feature freezer's result requires `testFiles` by type (ADR-0025):
+// a freeze path that dropped it fails to compile here, not silently at
+// settlement. The typecheck is the real check; the runtime test below only
+// keeps these bindings live.
+const defaultFreezeIsI6Era: Equal<ReturnType<typeof defaultVerificationManifest>, I6EraVerificationManifest> = true;
+const operatorFreezeIsI6Era: Equal<
+  Extract<ReturnType<typeof freezeVerificationManifest>, { ok: true }>["value"],
+  I6EraVerificationManifest
+> = true;
+
 describe("INV-6: every post-feature freeze path carries testFiles", () => {
+  it("types both freezers' results as I6-era manifests, whose testFiles is required", () => {
+    expect([defaultFreezeIsI6Era, operatorFreezeIsI6Era]).toEqual([true, true]);
+  });
+
   it.each(POST_FEATURE_ROWS)("FR-014: $row freezes testFiles through population with the expected suffix source", ({ manifest, testFiles }) => {
     const frozen = manifest();
     const graph = populated(frozen);
 
     expect(graph.verification_manifest).toEqual(frozen);
-    expect(testFilesOf(graph)).toEqual(testFiles);
+    expect(graph.verification_manifest?.testFiles).toEqual(testFiles);
+  });
+
+  it.each(POST_FEATURE_ROWS)("FR-014: $row reads as the I6 era carrying exactly the classification it froze", ({ manifest, testFiles }) => {
+    const graph = populated(manifest());
+
+    expect(frozenRedThenGreenEra(graph.verification_manifest)).toEqual({ kind: "owed-if-new-tests", testFiles });
+    expect(redThenGreenEra(graph.verification_manifest)).toBe("owed-if-new-tests");
+  });
+});
+
+describe("INV-6: a TaskGraph frozen before the classification is the pre-I6 era", () => {
+  it.each([
+    ["the pre-feature engine-default freeze", legacyDefaultVerificationManifest()],
+    ["no frozen manifest at all", undefined],
+  ] as const)("FR-005: %s reads not-owed and carries no classification", (_label, manifest) => {
+    expect(frozenRedThenGreenEra(manifest)).toEqual({ kind: "not-owed" });
+    expect(redThenGreenEra(manifest)).toBe("not-owed");
   });
 });

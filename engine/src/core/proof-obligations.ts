@@ -1,5 +1,6 @@
 import { canonicalStructuralEquals } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
+import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
   parseVerificationPolicy,
@@ -55,25 +56,45 @@ export type ProofObligation =
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
 
 /**
- * Whether a TaskGraph owes I6 (`red-then-green`) for its Tasks that require
- * new tests. `owed-if-new-tests` marks a TaskGraph populated after I6 existed;
- * `not-owed` marks one populated before, which is never newly obligated
- * (FR-005). Only `redThenGreenEra` mints it (INV-6).
+ * A TaskGraph's I6 era, with what the era brings. `owed-if-new-tests` marks a
+ * TaskGraph populated after I6 existed and carries the test-file
+ * classification its manifest froze, the one the judge and the brief split a
+ * Task's `file_list` by (INV-2); `not-owed` marks one populated before, which
+ * is never newly obligated (FR-005). The era and its classification are one
+ * value, so no reader can see an I6-era graph without a classification. Only
+ * `frozenRedThenGreenEra` mints it (INV-6).
  */
-export type RedThenGreenEra = "owed-if-new-tests" | "not-owed";
+export type FrozenRedThenGreenEra =
+  | Readonly<{ kind: "not-owed" }>
+  | Readonly<{ kind: "owed-if-new-tests"; testFiles: FrozenTestFiles }>;
+
+/** The era alone, as obligation derivation and the State File checks take it. */
+export type RedThenGreenEra = FrozenRedThenGreenEra["kind"];
+
+const PRE_I6_ERA: FrozenRedThenGreenEra = Object.freeze({ kind: "not-owed" });
 
 /**
- * The one I6-era test (INV-6): a TaskGraph owes I6 exactly when its frozen
- * verification manifest carries the frozen test-file classification. Every
- * post-feature freeze carries `testFiles` (AD-4), so only a TaskGraph frozen
- * before this feature, or one carrying no manifest at all, reads `not-owed`.
- * Population, the State File obligation-match check and revalidation ask
- * here directly; settlement and the stored-evidence reconcile reach it through
- * `redThenGreenDuty`, which defers to a Task's frozen Proof and asks here only
- * when none is frozen, so they cannot disagree.
+ * The one I6-era test (INV-6), and the one reader of a frozen manifest's
+ * `testFiles` outside `verification-manifest.ts`, which parses, freezes and
+ * digests it: a TaskGraph owes I6 exactly when its frozen verification
+ * manifest carries the frozen test-file classification (ADR-0025). Every
+ * post-feature freeze carries it (the post-feature freezers' return type
+ * requires it), so only a TaskGraph frozen before this feature, or one
+ * carrying no manifest at all, reads `not-owed`. The INV-6 lint rule is the
+ * backstop against a second reader. Population, the State File obligation-match check
+ * and revalidation ask through `redThenGreenEra`; settlement, the
+ * stored-evidence reconcile and the brief ask through `redThenGreenDuty`,
+ * which defers to a Task's frozen Proof and takes the classification from
+ * here, so none of them can disagree.
  */
+export function frozenRedThenGreenEra(manifest: FrozenVerificationManifest | undefined): FrozenRedThenGreenEra {
+  const testFiles = manifest?.testFiles;
+  return testFiles === undefined ? PRE_I6_ERA : Object.freeze({ kind: "owed-if-new-tests", testFiles });
+}
+
+/** `frozenRedThenGreenEra`'s era alone. */
 export function redThenGreenEra(manifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
-  return manifest?.testFiles === undefined ? "not-owed" : "owed-if-new-tests";
+  return frozenRedThenGreenEra(manifest).kind;
 }
 
 /** Which byte comparison each declared artifact owes.
