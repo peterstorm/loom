@@ -22,6 +22,7 @@ import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { observeFrozenDigests } from "../../orchestration/frozen-path-observation";
 import {
   FULL_TIER_LINT_CHECK_ID_TEXT,
+  boundedFailureMessage,
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
@@ -31,7 +32,6 @@ import {
   type AuthorizedWaveCompletionSuite,
   type CompletionCheckId,
   type CompletionCheckResult,
-  type NonEmptyString,
   type WaveCompletionSuiteResult,
 } from "../../core/completion-suite";
 import {
@@ -46,6 +46,7 @@ import {
 import type { RunDirHandle } from "../../orchestration/run-directory-handle";
 import type { StateManager } from "../../state-manager";
 import type {
+  HookResult,
   TaskGraph,
   WaveCompletionResultObservation,
   WaveWorkspaceObservation,
@@ -305,18 +306,26 @@ function observedLintResult(
     if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
   }
+  return lintCheckResult(checkId, lint);
+}
+
+const NO_LINT_RESULT = "full-tier lint returned no terminal result";
+
+/**
+ * The full-tier lint's verdict as the reserved check's result: allow is exit
+ * 0, a rule block is exit 1, and anything else (a lint engine error, a result
+ * with no verdict) is a spawn failure whose message is bounded to what a
+ * completion result may store, so the suite result still parses and the gate
+ * reports the lint failure rather than a parser refusal. Pure.
+ */
+export function lintCheckResult(checkId: CompletionCheckId, lint: HookResult): CompletionCheckResult {
   if (lint.kind === "allow") return observedLintCheckResult(checkId, 0);
-  const message = "message" in lint ? lint.message : "full-tier lint returned no terminal result";
-  const lintEngineFailure = message.startsWith("🚫 WAVE-GATE LINT ENGINE ERROR:") ||
-    message.includes("LINT ENGINE ERROR");
-  if (lint.kind === "block" && !lintEngineFailure) return observedLintCheckResult(checkId, 1);
+  const message = "message" in lint ? lint.message : NO_LINT_RESULT;
+  if (lint.kind === "block" && !message.includes("LINT ENGINE ERROR")) return observedLintCheckResult(checkId, 1);
   return freeze({
     checkId,
     scope: "wave",
-    outcome: freeze({
-      kind: "spawn-failed",
-      message: message as NonEmptyString,
-    }),
+    outcome: freeze({ kind: "spawn-failed", message: boundedFailureMessage(message, NO_LINT_RESULT) }),
   });
 }
 

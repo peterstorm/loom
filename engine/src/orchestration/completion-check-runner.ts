@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { lstatSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import {
+  boundedFailureMessage,
   parseAuthorizedWaveCompletionCheck,
   parseCompletionSignal,
   type AuthorizedWaveCompletionCheck,
@@ -9,7 +10,7 @@ import {
   type CompletionProcessOutcome,
   type CompletionReportOutcome,
   type CompletionSignal,
-  type NonEmptyString,
+  type FailureMessage,
 } from "../core/completion-suite";
 import type {
   AuthorizedRemediationCheck,
@@ -131,24 +132,16 @@ const DEFAULT_HARD_KILL_WAIT_MS = 1_000;
 const DEFAULT_DIAGNOSTIC_TAIL_BYTES = 64 * 1_024;
 const MAX_TERMINATION_BOUND_MS = 60_000;
 const MAX_DIAGNOSTIC_TAIL_BYTES = 1_024 * 1_024;
-const MAX_MESSAGE_LENGTH = 4_096;
 
 const completionSucceeded = (value: CompletionCheckExecution): CompletionCheckRunnerResult =>
   Object.freeze({ ok: true, value: Object.freeze(value) });
 const failed = (error: CompletionCheckRunnerFailure): Readonly<{ ok: false; error: CompletionCheckRunnerFailure }> =>
   Object.freeze({ ok: false, error: Object.freeze(error) });
 
-/** The one validating constructor for bounded failure messages: the trim
- *  check plus the non-empty fallback literal prove non-emptiness, and the
- *  4096 slice bound must stay at or under completion-suite's
- *  MAX_SPAWN_FAILURE_MESSAGE_LENGTH (4096) because the at-rest wire parser
- *  refuses longer messages. The brand is minted here — where the proof
- *  lives — never re-asserted by callers (parse-don't-validate,
- *  type-design-analyzer-1). */
-function messageOf(cause: unknown): NonEmptyString {
-  const message = cause instanceof Error ? cause.message : String(cause);
-  const bounded = message.slice(0, MAX_MESSAGE_LENGTH);
-  return (bounded.trim().length > 0 ? bounded : "completion check infrastructure failure") as NonEmptyString;
+/** A thrown cause as a storable failure message, through completion-suite's
+ *  one constructor, so it is bounded exactly as the at-rest parser requires. */
+function messageOf(cause: unknown): FailureMessage {
+  return boundedFailureMessage(cause instanceof Error ? cause.message : String(cause), "completion check infrastructure failure");
 }
 
 function boundedInteger(raw: number | undefined, fallback: number, maximum: number): number | null {
