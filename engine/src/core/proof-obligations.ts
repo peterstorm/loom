@@ -68,7 +68,9 @@ export type RedThenGreenEra = "owed-if-new-tests" | "not-owed";
  * post-feature freeze carries `testFiles` (AD-4), so only a TaskGraph frozen
  * before this feature, or one carrying no manifest at all, reads `not-owed`.
  * Population, the State File obligation-match check and revalidation ask
- * here; the stored-evidence reconcile joins them (T9), so they cannot disagree.
+ * here directly; settlement and the stored-evidence reconcile reach it through
+ * `redThenGreenDuty`, which defers to a Task's frozen Proof and asks here only
+ * when none is frozen, so they cannot disagree.
  */
 export function redThenGreenEra(manifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
   return manifest?.testFiles === undefined ? "not-owed" : "owed-if-new-tests";

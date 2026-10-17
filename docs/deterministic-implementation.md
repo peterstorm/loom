@@ -151,7 +151,7 @@ A defect caught by the wave gate costs a remediation cycle; the same defect caug
 
 **Soundness limit.** The proof covers logged facts only. It is exactly as strong as the guarantee that every write and every test run produced a ledger event, and that guarantee has holes:
 
-- **Writes with no ledger event are silent holes.** No `FileWrite` is minted for a file authored by an interpreter (`python -c 'open(…).write(…)'`), a code generator, a build step, or any tool the recorder does not see. An agent can write implementation code that way before its red run, and I6 cannot tell. Writes are minted only by Read, Write, Edit and MultiEdit tool calls, Bash redirections, `tee` targets, and literal `mv`, `git mv` and `cp` destinations.
+- **Writes with no ledger event are silent holes.** No `FileWrite` is minted for a file authored by an interpreter (`python -c 'open(…).write(…)'`), a code generator, a build step, or any tool the recorder does not see. An agent can write implementation code that way before its red run, and I6 cannot tell. Writes are minted only by Write, Edit and MultiEdit tool calls, Bash redirections, `tee` targets, and literal `mv`, `git mv` and `cp` destinations.
 - **Shell writes are logged but cannot be vetoed.** A Bash write mints a `FileWrite` with `via: "shell"`, so it counts as an implementation write and its order is judged. But the phase gate cannot deny a Bash call before it runs, so nothing prevents the write. I6 can only refuse the outcome at settlement.
 - **The ledger is not tamper-proof.** The guard-state-file hook denies Bash writes to the ledger while orchestration authority is active. The ledger has no HMAC, and full integrity stays out of scope.
 

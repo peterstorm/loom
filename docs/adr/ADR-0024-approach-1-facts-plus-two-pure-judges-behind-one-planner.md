@@ -58,7 +58,7 @@ I7 (stop time):
 - `planStopChecks(graph, taskId, changed: ChangedFiles)` in `engine/src/core/acceptance-contract/stop-check-planner.ts` is the single total pure plan (INV-1). It returns the unchanged acceptance arm next to an `AffectedPlan` that is either `on` with files, command and report path, or `off` with exactly one reason: `no-runner`, `no-changed-files` or `command-refused`.
 - `ChangedFiles` is derived only by `changedFilesAtStop` in `engine/src/core/changed-files.ts` (INV-7). Each shell supplies only the epoch events and an `exists` predicate: `dispatch.ts`, `pi/subagent-stop.ts`, and `helper stop-check-plan` through `liveAttemptEvidence`.
 - `runStopChecks` in `engine/src/handlers/subagent-stop/stop-checks.ts` plans once, takes the existing runner lock once, and runs acceptance and then affected. It launches the affected runner only when the remaining budget (300 s minus a 30 s settlement reserve) covers its `timeoutMs`. It renders one combined block message.
-- Per-check block counters follow the pure `stopCheckBlockDecision` in `engine/src/core/affected-stop-check.ts`, with a cap of 3 per check. Verdicts come from the pure `judgeAffectedRun`.
+- Per-check block counters follow the pure `stopCheckBlockDecision` in `engine/src/core/affected-stop-check.ts`, with a separate counter per check. The affected cap is typed to `AFFECTED_STOP_CHECK_MAX_BLOCKS = 3`; the acceptance cap is the caller-supplied `ACCEPTANCE_STOP_CHECK_MAX_BLOCKS` (also 3 today). Verdicts come from the pure `judgeAffectedRun`.
 - The outcome type carries only `skip | passed | block | note`. Affected-check data never reaches proof, receipts or gate evidence (INV-3, FR-026).
 
 ## Consequences

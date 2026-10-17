@@ -77,9 +77,11 @@ Detail:
 - **Derivation.** `deriveProofObligations` emits `red-then-green` only when the verification policy
   requires new tests and the TaskGraph's era is `owed-if-new-tests`. Only `redThenGreenEra(manifest)`
   mints the era (INV-6). It returns `owed-if-new-tests` exactly when the frozen verification manifest
-  carries `testFiles`. Population (`task-graph-population.ts`), revalidation (`task-revalidation.ts`),
-  the State File obligation-match check (`state-file-wire.ts`) and reconcile all call it, so a TaskGraph
-  frozen before this feature is never newly obligated (FR-005).
+  carries `testFiles`. Population (`task-graph-population.ts`), revalidation (`task-revalidation.ts`)
+  and the State File obligation-match check (`state-file-wire.ts`) call it directly; settlement and
+  reconcile reach the same era through `redThenGreenDuty` (`implementation-application.ts`), which defers
+  to a Task's frozen Proof and calls `redThenGreenEra` only when none is frozen. A TaskGraph frozen before
+  this feature is therefore never newly obligated (FR-005).
 - **Evaluation.** `evaluateRedThenGreen` maps a `shown` observation to a satisfied result whose evidence
   is the three steps, and an `unproven` observation to `red-then-green-unproven` with its gap. When the
   observation is absent, the default is `{ kind: "unproven", gap: { kind: "ledger-unavailable" } }`, so
@@ -101,7 +103,7 @@ Detail:
   carry, it leaves the observation absent, and evaluation reads that as `ledger-unavailable`.
 - **Timing.** The judgment runs once, at completion settlement, over the attempt epoch (FR-011). Each
   attempt is judged on its own epoch, never across attempts.
-- **Wire.** The State File parser accepts the new obligation, the failure with each named gap, and the
+- **Wire.** The State File parser (`parseTaskProof` and `parseRedThenGreenGap` in `core/proof-obligations.ts`) accepts the new obligation, the failure with each named gap, and the
   evidence variant. It rejects an unrecognized gap kind.
 
 ## Consequences

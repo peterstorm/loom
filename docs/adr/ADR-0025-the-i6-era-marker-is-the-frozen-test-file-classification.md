@@ -91,11 +91,13 @@ export function redThenGreenEra(manifest: FrozenVerificationManifest | undefined
 ```
 
 `deriveProofObligations` takes `redThenGreen: RedThenGreenEra` as an input. It never checks `testFiles`
-itself. These callers all compute the era with `redThenGreenEra(graph.verification_manifest)`, or with the
-equivalent frozen manifest they hold, and none of them checks `testFiles` presence inline:
-`task-graph-population.ts`, `state-file-wire.ts` (obligation-match check), `task-revalidation.ts`,
-`handlers/helpers/reconcile-implementation-proof.ts`, `handlers/helpers/validate-task-graph.ts` and
-`implementation-application.ts`.
+itself. Population (`task-graph-population.ts`), the State File obligation-match check
+(`state-file-wire.ts`), revalidation (`task-revalidation.ts`) and `handlers/helpers/validate-task-graph.ts`
+compute the era with `redThenGreenEra(graph.verification_manifest)`, or with the equivalent frozen manifest
+they hold. Settlement and the stored-evidence reconcile (`handlers/helpers/reconcile-implementation-proof.ts`)
+go through `redThenGreenDuty(task, manifest)` in `implementation-application.ts`: a Task's frozen Proof
+decides, and `redThenGreenEra` is consulted only for a Task with no frozen Proof. None of them checks
+`testFiles` presence inline.
 
 **Resulting invariants.**
 - An old TaskGraph has no `testFiles`, so its re-derived obligations stay exactly as they were (FR-005).
@@ -122,6 +124,8 @@ equivalent frozen manifest they hold, and none of them checks `testFiles` presen
   or dropped it from the engine default, would quietly turn I6 off for those graphs. The rule that every
   freeze path carries `testFiles` must hold forever and is enforced only by tests and review, not by the type
   system: `testFiles` stays optional in `FrozenVerificationManifest` so that pre-feature graphs still parse.
+  A possible follow-up is an explicit era sum type on the frozen manifest (pre-feature vs post-feature), which
+  would make `redThenGreenEra` a total match and let post-feature freeze paths require `testFiles` by type.
 - The engine now has two engine-default manifests (`defaultVerificationManifest` and
   `legacyDefaultVerificationManifest`). Using the wrong one at a read-time fallback would break old receipts
   or obligation matching. Each fallback must be chosen on purpose.
