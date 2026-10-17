@@ -594,6 +594,24 @@ The implementation Agent must run recognizable tests. For trusted Claude evidenc
 
 Do not use `mark-tests-passed` to fabricate evidence. It is an evidence/status operation, not an escape hatch.
 
+### Task fails I6 (red-then-green)
+
+A Task owes I6 when it requires new tests, is not an Acceptance Contract claimant, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. Such a Task settles `implemented` only when its attempt epoch's ledger shows three things in order:
+1. a qualifying red on one of its test files;
+2. then its first write to an implementation file;
+3. then a qualifying green covering every one of its test files.
+
+A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results. The obligation, the gaps and the soundness limit are defined in [Deterministic implementation, I6](deterministic-implementation.md#during-the-loop--put-the-oracle-inside-the-agents-iteration).
+
+A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and in the retry receipt. Each gap points to a likely cause:
+
+- `no-test-files`: the `file_list` matches no frozen test suffix. Re-scope the Task, or declare `testFileSuffixes` in the manifest before the next population.
+- `implementation-write-missing`: the ledger holds no write to a non-test `file_list` entry. Either the agent wrote only through an unlogged path, such as an interpreter or a generator, or it wrote nothing.
+- `red-missing` or `green-missing` with `untrustedOnly: true`: tests ran, but no run was qualifying. Usual causes are a chained, piped or redirected command, a missing report option, or Pi-structured evidence with no ledger run.
+- `red-after-first-implementation-write`: the code came before the failing test.
+
+The retry brief tells the agent to restore its implementation files with `git restore --source <start_sha> -- <files>`, observe red, and then implement. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
+
 ### Reviewer evidence is missing
 
 Registered programs derive the exact missing slots and issue retry requests. Resume the program; do not re-run the whole roster or manually write a transcript.
@@ -721,6 +739,63 @@ When an implementation agent that claims a frozen Acceptance Contract's Requirem
 - **Not completion evidence.** Nothing is recorded as a test result or proof; the Wave Gate's completion suite stays the only authority.
 - **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is printed as a `loom(pi):` line and never blocks.
 
+### Affected-Test Stop Check
+
+Whenever any implementation agent stops, claimant or not, the engine runs the tests affected by the files that agent changed (I7). It runs them through the operator-declared `affectedRunner`, after the Acceptance Stop Check. If an affected test fails, the stop is blocked and the same agent keeps working, with each failing test and its file in front of it.
+
+- **Opt in** with two optional keys in a schema-2 `.loom/verification-manifest.json`. Both are frozen at population and covered by the manifest digest:
+
+  ```json
+  {
+    "schemaVersion": 2,
+    "kind": "loom-verification-manifest",
+    "checks": [ … ],
+    "affectedRunner": {
+      "executable": "npx",
+      "args": ["vitest", "related", "--run", "--reporter=junit", "--outputFile=.loom/completion-reports/affected.junit.xml", "{files}"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "report": { "kind": "required-file", "path": ".loom/completion-reports/affected.junit.xml" }
+    },
+    "testFileSuffixes": [".test.ts", ".spec.ts"]
+  }
+  ```
+
+  - `affectedRunner` gets the same form checks as `acceptanceRunner`: the allowlist, no shell, `{files}` as one whole argument, and a `required-file` JUnit report beneath `.loom/completion-reports/`. Two further rules apply. `timeoutMs` is at most 120000. The report path must differ from the `acceptanceRunner`'s and from every Wave check's.
+  - `testFileSuffixes` is a non-empty list of distinct suffixes, none containing a path separator. Without it, the freeze records the engine default (`.test.ts`, `.spec.ts`, `.test.tsx`, `.spec.tsx`) as `testFiles: { source: "engine-default", … }`. The same classification decides I6's test and implementation files.
+
+  A manifest change reaches only TaskGraphs populated after it. The digest of a TaskGraph frozen earlier never changes.
+- **Changed files.** The changed files are the attempt epoch's ledger `FileWrite` paths, deduplicated in first-write order. Paths outside the repository are dropped, and so are paths absent at stop time, such as a deleted file. A renamed file appears under its new path, because a literal `mv`, `git mv` or `cp` mints a write for its destination. Only files beneath the runner's `cwd` are passed. Each is one argument, written relative to the `cwd`. A file written with no ledger event, for example by an interpreter or a generator, is not a changed file.
+- **Silent when off.** With no `affectedRunner` frozen, the check does nothing and says nothing.
+- **Fails open.** In each of these cases the stop proceeds, and a `systemMessage` names the cause:
+  - no changed files, or none beneath the runner `cwd` (the note lists the files outside it);
+  - the command cannot be formed for the changed files;
+  - the runner cannot start or does not complete;
+  - the runner times out or is killed;
+  - the runner leaves no readable report;
+  - another stop holds the runner lock;
+  - the repository root is unavailable;
+  - the block counter is unreadable;
+  - the agent has reached its 3-block cap;
+  - the check crashes.
+
+  A report with zero testcases passes, and the stop notes it.
+- **Budget.** Both checks run inside the SubagentStop hook's 300 s timeout, minus a 30 s reserve for settlement. The affected runner launches only if the remaining time holds its whole `timeoutMs`. Otherwise the stop notes that the budget was exhausted. The timeout is never clipped.
+- **One lock, one message.** The acceptance check and the affected check run in sequence under one acquisition of the per-repository runner lock described above. Each report is read back digest-checked while the lock is held. When both checks fail, the agent gets one block message with an `## Acceptance stop check` section and an `## Affected-test stop check` section. Under the affected heading, each failure reads `- '<name>' (<file>) — failed | collection-error`.
+- **Separate caps.** Each check has its own per-agent counter (`*.acceptance-stop-check.json` and `*.affected-stop-check.json`), each capped at 3 blocks. A check's counter increases only when that check contributes failures to a block. Both counters clear when the stop proceeds.
+- **Not completion evidence.** No affected-run fact reaches settlement, proof, receipts or Wave Gate evidence. A test proves this by settling the same Task under every affected outcome and finding byte-identical proof and receipts.
+- **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and prints a `loom(pi):` line. It never blocks.
+
+### Pi evidence ledger recorder
+
+A Pi implementation child records its own tool calls into the parent session's evidence ledger, under the epoch of its parent-issued write grant. It uses the same minting rule as Claude Code's PostToolUse recorder (`machine/tool-evidence-recorder.ts`), so I6 settlement and the I7 stop check on Pi read the same kind of facts as on Claude Code.
+
+- **Ledger address.** The parent puts the ledger address (its session and the spawn item's agent type) into the grant at spawn. The grant MAC binds it.
+- **No valid grant, no record.** A child with no grant, a rejected grant, or a binding that survives only as cleanup debt records nothing. It prints one stderr note per reason. Plain Pi sessions and the parent stay quiet.
+- **Exit codes.** Pi 0.83 and 0.84 expose no bash exit code. The recorder reads an error result as exit 1 and a clean one as exit 0. A result ending in Pi's abort or timeout status line counts as interrupted.
+- **Plan view.** `helper stop-check-plan` cannot resolve a Pi child's epoch from a separate process, so for a Pi run it shows no changed files.
+- **No live gate.** The live phase gate is still absent on Pi; only recording was added.
+
 ### Population refuses the spec or a Requirement id
 
 `populate-task-graph` proves the authored trace against the Spec Index before writing anything. It refuses, naming the cause:
@@ -845,9 +920,9 @@ It takes no arguments. For each Acceptance Contract, in TaskGraph order, it prin
 
 A TaskGraph without contracts prints the single line `no Acceptance Contracts`. The helper is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 with `No task graph at <path>` when no TaskGraph exists, and with the load boundary's error when the graph is unreadable or corrupt — a corrupt graph is never reported as missing.
 
-### What will the Acceptance Stop Check run at a Task's stop?
+### What will the stop checks run at a Task's stop?
 
-Before dispatching a claimant, or when a stop check keeps an Agent working and you want to see why, print the Stop-Check Plan for that Task:
+Before dispatching a Task, or when a stop check keeps an Agent working and you want to see why, print the Stop-Check Plan for that Task. It covers both the Acceptance Stop Check and the Affected-Test Stop Check:
 
 ```bash
 bun "$LOOM_DIR/engine/src/cli.ts" helper stop-check-plan --task T2
@@ -862,7 +937,25 @@ It takes exactly one argument, `--task <id>`. When the check is on, it prints:
 
 When the check is off, it prints one line, `T2 (Wave 2): acceptance stop check off — <reason>`. The reason is one of: no acceptance runner is frozen in the TaskGraph, the Task owes no frozen acceptance testcase due by its Wave (a contract still awaiting RED owes nothing), or the runner command could not be formed for the owed files. In the last case the runner's refusal follows on indented lines.
 
-The plan is `planStopCheck`, the same pure function the live check decides from. So whenever the plan reads `off`, the check skips, or for a refused command it notes the refusal and runs nothing. When the plan reads `on`, the check would launch exactly the printed argv from the printed cwd. A property test runs the live check over generated TaskGraphs to pin this. At the stop itself the live check also consults per-stop state the plan does not read, in this order: the Agent's block counter (after 3 blocks it stops blocking), the repository root, and the runner lock (a sibling claimant may hold it). When one of those stops the check, the hook emits a note, the stop proceeds, and the plan still reads `on`. The helper never runs the runner. It is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 on any of these:
+An `affected tests:` section follows the acceptance lines. When the affected check is on, the section prints:
+
+```text
+affected tests:
+  changed files:
+    <file>              one line per file the runner gets, in first-write order
+  cwd: <affected runner cwd>
+  argv: [...]           {files} expanded, each file relative to the cwd
+  report: <report path>
+```
+
+When the affected check is off, the section prints `  affected stop check off — <reason>`. The reason is exactly one of these, in this precedence:
+1. no affected runner is frozen in this TaskGraph;
+2. this Task's attempt has no changed files beneath the affected runner cwd. Each changed file outside the cwd follows on its own line, as `outside the affected runner cwd: <file>`;
+3. the affected runner command could not be formed for the changed files. The refusal follows on indented lines.
+
+The helper reads the changed files from the Task's live attempt, read-only, through the same `changedFilesAtStop` derivation the hook uses. On Claude Code, the live attempt is the one implementation sidecar naming the Task, read from the session ledger. With no live attempt, which includes every Pi run, there are no changed files. A live attempt whose ledger epoch cannot be read exits 1 with the cause, so it never reads as "no changed files".
+
+The plan is `planStopChecks`, the one pure function both live checks decide from, on Claude Code and on Pi. So whenever a check's plan reads `off`, that check skips, or for a refused command it notes the refusal and runs nothing. When it reads `on`, the check would launch exactly the printed argv from the printed cwd. A parity matrix test runs the hook, the Pi stop and the helper over the same fixtures to pin this. At the stop itself the live checks also consult per-stop state the plan does not read: each check's block counter (after 3 blocks that check stops blocking), the repository root, the runner lock (another stop may hold it), and, for the affected check, the remaining hook budget. When one of those stops the check, the hook emits a note, the stop proceeds, and the plan still reads `on`. The helper never runs the runner. It is read-only: it never writes the State File and never takes its lock, so it is safe while a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph. It exits 1 on any of these:
 
 - `--task` is missing or has no value, or an argument is left unconsumed;
 - no TaskGraph exists (`No task graph at <path>`);

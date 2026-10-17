@@ -60,9 +60,9 @@ bun engine/src/cli.ts <hook-type> <handler> [arguments]
 Claude Code lifecycle coverage:
 
 - **PreToolUse** — phase order, Wave/task order, prompt substitution, model/Skill policy, direct-edit policy, guarded machine tools, state-path Bash guard. An implementation brief marker (`LOOM_IMPLEMENTATION_BRIEF: T5`) is expanded here: `validate-task-execution` renders the brief, runs every spawn veto and the reservation on it, and returns it as the call's `updatedInput`, so the parent sends only the marker. Its sibling gates expand the marker themselves, because hooks on one matcher see only the original input (`engine/src/handlers/pre-tool-use/implementation-brief-marker.ts`).
-- **PostToolUse** — immediate lint, evidence recording, and orchestration-spawn correlation.
+- **PostToolUse** — immediate lint, evidence recording, and orchestration-spawn correlation. Evidence recording (`handlers/post-tool-use/record-evidence.ts`) attributes the call to an agent epoch, normalizes the hook payload with `claudeToolCall`, and hands it to the shared minting shell (see [Evidence ledger: one minting rule](#evidence-ledger-one-minting-rule)).
 - **SubagentStart** — active-Agent tracking and guarded-machine epoch binding.
-- **SubagentStop** — phase advancement, implementation proof reconciliation, review/spec evidence capture, orchestration transcript capture, cleanup.
+- **SubagentStop** — the stop checks (the Acceptance Stop Check, then the Affected-Test Stop Check, run by `handlers/subagent-stop/stop-checks.ts` from the one planner `planStopChecks`), then phase advancement, implementation proof reconciliation (including the I6 red-then-green judgment over the agent's epoch), review/spec evidence capture, orchestration transcript capture, cleanup.
 - **SessionStart** — stale binding cleanup and post-`/clear` context restoration.
 
 ### Pi
@@ -76,7 +76,8 @@ Claude Code lifecycle coverage:
 - rendering resources through `pi/resources.ts`, and resolving the Pi user agent directory the spawn definition port reads through the one pure rule the routing loader and the PreToolUse model guard share (`engine/src/core/pi-agent-directory.ts`);
 - adapting Pi messages through `pi/transcript-adapter.ts`;
 - settling finished subagent results: `pi/subagent-result-batch.ts` parses the harness batch, `pi/reserved-slot.ts` parses each slot's role claims into one role authority at the spawn producer (the reservation stores only that parsed slot), `pi/subagent-settlement.ts` holds the pure locked reducers, and `pi/subagent-result.ts` is the shell that observes evidence and runs them under the TaskGraph lock;
-- minting and consuming scoped write grants through `pi/write-grant.ts`;
+- minting and consuming scoped write grants through `pi/write-grant.ts`. Each grant also carries the parent's evidence ledger address (`evidenceLedger`: parent session and agent type);
+- recording a child's tool calls into the parent's evidence ledger (`pi/evidence-recorder.ts`). The recorder registers before every other `tool_result` handler, normalizes the event with `piToolCall`, and calls the shared minting shell under the epoch of the child's grant. The pure `piEvidenceTarget` decides from the grant state alone whether the child may record. The parent reads a child's epoch back with `piChildEvidence` for I6 settlement and the report-only stop checks;
 - correlating native Pi batch-item identities to engine-issued request identities, and the one issued-review-request authentication spawn admission and capture share (`pi/review-run-authority.ts`); witnessing captured standalone review transcripts in the per-factory Trusted Review Witness Aggregate (`pi/trusted-review-witness.ts`);
 - capturing exact final result bytes into reserved Run Directory slots (`pi/review-capture.ts`);
 - staging emission-enabled launches with the installed subagent launcher (`pi/emission-launch-bridge.ts`), whose readiness verifier runs the one launcher step sequence (`pi/emission-readiness-sequence.ts`) and is decided by the launcher's pure readiness and route gate (`pi/emission-readiness-gate.ts`), over the readiness protocol (command, entry type, report shape) both sides import from `pi/emission-readiness-protocol.ts`;
@@ -246,6 +247,30 @@ A result is accepted only against that authority. The harness-native correlator 
 
 Context Packets split fixed and variable byte sections, hash the complete content, and are published before the spawn action. This avoids repeatedly asking a parent model to reconstruct scope and protocol prose.
 
+### Evidence ledger: one minting rule
+
+The evidence ledger (`<session>.evidence.jsonl`) holds facts only: `FileRead`, `FileWrite` and `TestRun`, each stamped with an agent epoch. Judgments such as trusted, passed or red-then-green are computed from those facts when they are read. Both harnesses mint facts through one rule (INV-4):
+
+```text
+Claude PostToolUse payload ─ claudeToolCall ─┐
+                                             ├─ HarnessToolCall ─ recordToolEvidence ─ extractEvidence (pure) ─ ledger append
+Pi child tool_result event ─ piToolCall ─────┘
+```
+
+- **Pure parts.** `core/harness-tool-call.ts` holds the two pure adapters. They reduce each harness's event to one `HarnessToolCall`: the tool, its input, its outcome (failed, exit, stdout, interrupted), the call id and the cwd. `machine/extract-evidence.ts` turns that call into facts. Its rules cover command classification, exit-ownership rules, and shell write targets: redirects, `tee`, and the destinations of a literal `mv`, `git mv` or `cp`.
+- **The shell.** `machine/tool-evidence-recorder.ts` is the only production caller of `extractEvidence` and of the ledger append. It does three things:
+  - it runs report discovery, which applies the call-start freshness stamp and the agent-authored-artifact veto;
+  - it resolves `FileWrite` paths against the call's cwd;
+  - it appends to the target ledger under the target epoch.
+- **Per-file results.** A `TestRun` report summary carries the per-file results its structured report lists. `parseReportSummary` is the only constructor of a summary (INV-8), and it reconciles those results with the counts. When a ledger record's per-file data is malformed, the whole report reads as untrusted.
+- **Targets.** Claude Code records into its own session ledger under the epoch that attribution resolves. A Pi child records into the parent session's ledger under `epochOf(grant agent id, agent type)`, the address its parent-issued grant carries. One child process is one agent, so attribution on Pi is exact by construction.
+
+A matrix test feeds the same tool-call fixtures through both adapters and asserts identical records. Consumers read the ledger only through epoch folds:
+- the SubagentStop test-result resolver;
+- I6 settlement (`judgeRedThenGreen`);
+- the stop checks' changed files (`changedFilesAtStop`, INV-7);
+- `helper stop-check-plan`.
+
 ## Review authority model
 
 A review Finding is identified by Agent plus emission ordinal, never by model-supplied id. A Task implementation write increments its Review Generation. A Review Packet binds that generation to exact base/head revisions, exact path scope, diffs, postimage bytes, plan context, and proof obligations. Artifacts are files: a scoped directory is reviewed through its Git-visible leaves at either revision (deleted leaves included, ignored files excluded, symlinks by target), and every scoped path must cover at least one artifact.
@@ -329,7 +354,7 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - remediation excludes state/review evidence and installs only an audited temporary index;
 - legacy formats are isolated in a read-only archive rather than expanded in canonical parsers.
 
-Known limits are documented where they live: shell-text guarding cannot infer every multi-hop cwd construction; Claude’s evidence attribution stands down during ambiguous parallel activity; Pi RPC children support standard dialogs but not custom TUI components.
+Known limits are documented where they live: shell-text guarding cannot infer every multi-hop cwd construction; ledger-derived proof (I6) covers logged facts only, so a write that emits no ledger event, such as one by an interpreter, a generator or an unseen tool, is a silent hole, and shell writes are logged but cannot be vetoed ([Deterministic implementation, I6](deterministic-implementation.md#during-the-loop--put-the-oracle-inside-the-agents-iteration)); Claude’s evidence attribution stands down during ambiguous parallel activity; Pi RPC children support standard dialogs but not custom TUI components.
 
 ## Dependency direction
 

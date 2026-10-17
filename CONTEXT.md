@@ -321,8 +321,25 @@ The immutable, self-digested audit record for one exact Implementation Attempt t
 _Avoid_: Rollback receipt, cleanup log, retry counter
 
 **Proof Obligation**:
-An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
+An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, the **Red-Then-Green Obligation** where its TaskGraph's era owes it, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
 _Avoid_: Checklist item, self-report, completion claim
+
+**Red-Then-Green Obligation** (I6):
+The **Proof Obligation** that a Task show test-first work within one attempt epoch's ledger facts. The steps, in order:
+1. a qualifying red on one of its test files: a failing testcase, not merely a collection error;
+2. then the first write to one of its implementation files, by a file tool or a shell write;
+3. then a qualifying green that covers every one of its test files.
+
+A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results.
+- **Who owes it.** A Task that requires new tests, is not a claimant, and sits in a TaskGraph whose frozen manifest carries `testFiles`. Only `redThenGreenEra` decides that last condition (INV-6), so a TaskGraph populated before I6 existed is never newly obligated.
+- **Judgment.** The pure `judgeRedThenGreen` judges it at settlement and fails closed. The failure is named `proof:red-then-green-unproven:<gap>`, and an unreadable ledger is infrastructure.
+- **Soundness limit.** The proof covers logged facts only. A write that emits no ledger event, such as one by an interpreter, a generator or an unseen tool, is a silent hole. Shell writes are logged but cannot be vetoed.
+
+_Avoid_: TDD check, test-first gate, red/green (alone)
+
+**Test-File Classification**:
+The frozen split of paths into test files and implementation files, made by suffix only. The suffixes are the manifest's `testFileSuffixes`, or the engine default `.test.ts`, `.spec.ts`, `.test.tsx`, `.spec.tsx`. Population freezes the classification as `testFiles: { source: "operator-manifest" | "engine-default"; suffixes }`. Its presence is the I6-era marker. Only `core/test-file-classification.ts` decides whether a path is a test file (INV-2). Every `file_list` entry that is not a test file is an implementation file, including fixtures, helpers and types files.
+_Avoid_: Test glob, test pattern (alone), spec file
 
 **Spec Index**:
 A pure deterministic projection of one canonical specification into Functional Requirement (`FR-NNN`), Acceptance Scenario (`AS-NNN`), Out-of-Scope (`OOS-NNN`), and glossary entries with canonical content hashes. It is derived join input, not a second source of truth; malformed or duplicate identifiers fail parsing. Each FR/AS/OOS entry's complete Markdown list-item body — physical bullet, directly adjacent lazy paragraph continuations, and blank-separated paragraphs indented beneath the marker — is one canonical content value and one hash input; an unindented block after a blank ends the entry, so wrapping a mandatory clause cannot remove it from drift authority and unrelated prose cannot enter it. Owned nested prose, headings, thematic breaks, and fence-shaped text remain content; colon-full FR/AS/OOS identifiers inside that owned body refuse the specification instead of becoming hidden or absorbed declarations. Genuine top-level examples remain excluded. This is a bounded Spec grammar, not complete CommonMark conformance. Each family is a distinct type and each parser-minted entry's content hash is derived at construction, so the three collections cannot be substituted for one another and engine-produced entries keep content/hash construction in one place. The phantom constructor-origin brand is not forgery-proof: structural spreading can preserve its static type while replacing content, so runtime consumers trust parser provenance rather than the brand as a security boundary. The colon and the contiguous family token are the deliberate prose-disambiguation boundaries: an ID-shaped line without a colon ("FR-002 and FR-003 are related") or with a spaced family token ("F R-002:") is prose, not a malformed identifier, and stays legal; every Markdown marker-run form (`> >`, `- -`, `* *`, `1. 2.`) before a colon-full ID fails closed.
@@ -444,6 +461,43 @@ _Avoid_: Entry point (alone — collides with **Sibling Entry Point**)
 At a claimant implementation agent's SubagentStop, the engine runs the frozen acceptance files that decide its claims through the operator-declared `acceptanceRunner` (verification manifest schema 2). If a testcase it owes, one due by its Wave, is not passing, the engine blocks the stop so the same agent keeps working: Claude Code exit 2, at most 3 blocks per agent. It fails open on anything it cannot observe, is report-only on Pi, and is never completion evidence: the Wave Gate's completion suite stays the authority.
 _Avoid_: Stop gate, pre-gate (it gates nothing the Wave Gate owns)
 
+**Affected-Test Stop Check** (I7):
+At every implementation agent's SubagentStop, claimant or not, the engine runs the **Affected Runner** over the attempt's **Changed Files** after the **Acceptance Stop Check**. A failing affected test blocks the stop, and the block message names each failing test and its file. The agent can be blocked at most 3 times, on a counter kept apart from the acceptance check's.
+- **Shared with the acceptance check.** Both checks run in sequence under one acquisition of the per-repository runner lock and inside one 300 s hook budget, with a 30 s reserve kept for settlement. When both fail, they produce one combined block message.
+- **Budget.** The affected runner launches only when the remaining budget holds its whole timeout; the timeout is never clipped.
+- **Trust model.** It fails open, with a named note, on every fault: a timeout, a kill, a missing report, budget exhaustion, a held lock, an unreadable counter, the cap, or a crash. It is report-only on Pi. It never reaches proof, receipts or Wave Gate evidence (INV-3).
+
+_Avoid_: Affected gate, regression check, test cadence
+
+**Affected Runner**:
+The optional `affectedRunner` key of a schema-2 verification manifest. It is frozen at population and included in the manifest digest only when it is declared. It takes the same form checks as `acceptanceRunner`, with three differences:
+- `{files}` expands to the **Changed Files** beneath its `cwd`, each relative to that `cwd`;
+- `timeoutMs` is at most 120000;
+- its `required-file` JUnit report path must differ from the `acceptanceRunner`'s and from every Wave check's.
+
+Loom's own manifest entry is operator-owned.
+_Avoid_: Related-tests command, affected script
+
+**Changed Files**:
+A Task attempt's files as of its stop: the epoch's ledger `FileWrite` paths, deduplicated in first-write order, inside the repository, and still existing at stop time. A rename shows up under its new path, because a literal `mv`, `git mv` or `cp` mints a write for its destination. They come only from the pure `changedFilesAtStop` (INV-7), which receives the epoch events and an injected existence predicate. Its three callers are the Claude stop dispatcher, the Pi report-only stop and `helper stop-check-plan`. The result is the parsed value `none | some(NonEmpty)`, which the planner consumes and never derives. Files written with no ledger event are not among them.
+_Avoid_: Diff, modified files, touched files
+
+**Evidence Minting Rule**:
+The one rule that turns a tool call into ledger facts on both harnesses (INV-4).
+- **Normalization.** Each harness reduces its event to a `HarnessToolCall`: Claude Code's PostToolUse payload through `claudeToolCall`, a Pi child's `tool_result` event through `piToolCall`.
+- **Minting.** The pure `extractEvidence` turns the call into facts. `machine/tool-evidence-recorder.ts` is the only caller of `extractEvidence` and of the ledger append. It runs report discovery, which applies the freshness stamp and the agent-authored-artifact veto.
+
+The **Pi Ledger Recorder** is this rule's Pi entry point.
+_Avoid_: Recorder (alone), evidence hook
+
+**Pi Ledger Recorder**:
+The Pi child's `tool_result` handler (`pi/evidence-recorder.ts`). A child holding a valid parent-issued write grant records its tool calls into the parent session's evidence ledger, under `epochOf(grant agent id, agent type)`. The grant's MAC-bound `evidenceLedger` address names that ledger.
+- **No valid grant.** A child with no grant, a rejected grant, or a cleanup-pending binding records nothing and writes a stderr note. The pure `piEvidenceTarget` decides this.
+- **Parent side.** The parent reads one child's epoch back with `piChildEvidence`, for I6 settlement and the report-only stop checks.
+- **What it does not add.** No live phase gate on Pi.
+
+_Avoid_: Pi transcript converter, Pi evidence bridge
+
 **Acceptance Freeze**:
 What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift. Because the stamp lands when the contract Wave's gate completes, after its advisory decision, status names the advisories on frozen paths at that pause (`acceptance-freeze-pending`): they can still be fixed by re-dispatching the contract Task, but only by a **Contract Revision** after approval.
 _Avoid_: Snapshot, lock, baseline
@@ -461,7 +515,11 @@ The read-only view of every **Acceptance Contract** in a TaskGraph (`helper cont
 _Avoid_: Contract report, freeze dump, contract list
 
 **Stop-Check Plan**:
-The read-only view of what the **Acceptance Stop Check** would do at one Task's stop (`helper stop-check-plan --task <id>`): the owed testcases grouped by **Acceptance Contract**, the acceptance files, and the runner's cwd, its argv after `{files}` expansion and its report path. When the check would do nothing, the view gives exactly one reason instead: no runner frozen, nothing owed by the Task's Wave, or the runner command refused for the owed files. The view projects `planStopCheck`, the same pure plan the live check decides from, so the two cannot disagree on anything the TaskGraph decides; the live check adds only per-stop state (the block counter and cap, the repository root, the runner lock). It never runs the runner. The plan and view are pure functions of the parsed TaskGraph and a Task id: the plan lives in `core/acceptance-contract/stop-check-planner.ts`, and the view and renderer live in `core/acceptance-contract/stop-check-plan.ts`. The `acceptance-contract` barrel does not re-export the planner, because doing so would close an import cycle through `verification-manifest`. An unknown id is refused naming it, so a typo never reads as "nothing owed". The helper never writes the State File or takes its lock.
+The read-only view of what both stop checks would do at one Task's stop (`helper stop-check-plan --task <id>`).
+- **Acceptance part.** It shows the owed testcases grouped by **Acceptance Contract**, the acceptance files, and the runner's cwd, its argv after `{files}` expansion and its report path. When that check would do nothing, it gives exactly one reason instead: no runner frozen, nothing owed by the Task's Wave, or the runner command refused for the owed files.
+- **`affected tests:` section.** It shows the **Changed Files** the **Affected Runner** gets, with its cwd, argv and report path. When that check would do nothing, it gives exactly one reason instead: no affected runner, no changed files beneath its cwd (listing the files outside it), or the command refused.
+
+The changed files come from the Task's live Claude attempt, read only. With no live attempt, which includes every Pi run, there are none. The view projects `planStopChecks`, the same pure plan both live checks decide from, so they cannot disagree on anything the TaskGraph and the changed files decide. The live checks add only per-stop state: each check's block counter and cap, the repository root, the runner lock, and the hook budget. The view never runs a runner. The plan and view are pure functions of the parsed TaskGraph, a Task id and the changed files: the plan lives in `core/acceptance-contract/stop-check-planner.ts`, and the view and renderer live in `core/acceptance-contract/stop-check-plan.ts`. The `acceptance-contract` barrel does not re-export the planner, because doing so would close an import cycle through `verification-manifest`. An unknown id is refused naming it, so a typo never reads as "nothing owed". The helper never writes the State File or takes its lock.
 _Avoid_: Dry run, stop-check preview, acceptance dry run
 
 **Git-Visible Leaf**:
@@ -493,6 +551,9 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority and one **Implementation Settlement Receipt**
 - Unversioned Slice-3 **Implementation Settlement Receipts** use a read-only compatibility projection until the next registration records protocol-2 cutover authority; from that strict suffix, ordered receipts form one fail-closed lineage: current-attempt infrastructure preserves state, current-attempt implementation reopens attempt 1, attempt-1 semantic failure derives exactly one byte-exact **Implementation Retry Context**, and attempt-2 semantic failure escalates terminally; skipped-terminal, reordered, or post-escalation receipts authorize nothing
 - A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
+- A **Red-Then-Green Obligation** is judged from one attempt epoch's ledger facts, which the **Evidence Minting Rule** minted on either harness. The Task's test files come from the frozen **Test-File Classification**, and an earlier attempt's red never counts
+- The **Acceptance Stop Check** and the **Affected-Test Stop Check** are both planned by `planStopChecks` and run by one stop shell under one runner lock and one hook budget. Neither is completion evidence, so neither can satisfy or fail a **Proof Obligation**
+- The **Changed Files** feed only the **Affected-Test Stop Check** and the **Stop-Check Plan**. The **Red-Then-Green Obligation** reads the epoch's FileWrites directly against the **Test-File Classification**
 - Repository observation never grants Task attribution: current Task paths stay local, locked current-Wave sibling-owned paths stay inert, and every changed unowned path is unresolved semantic failure/invalidation
 - Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 freezes retry context, authorizes semantic attempt 2 dispatch, and publishes terminal escalation for operator handling
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
