@@ -751,9 +751,9 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
     "kind": "loom-verification-manifest",
     "checks": [ … ],
     "affectedRunner": {
-      "executable": "npx",
-      "args": ["vitest", "related", "--run", "--reporter=junit", "--outputFile=.loom/completion-reports/affected.junit.xml", "{files}"],
-      "cwd": ".",
+      "executable": "npm",
+      "args": ["run", "test:affected", "--", "{files}"],
+      "cwd": "engine",
       "timeoutMs": 120000,
       "report": { "kind": "required-file", "path": ".loom/completion-reports/affected.junit.xml" }
     },
@@ -761,6 +761,7 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
   }
   ```
 
+  - Loom's own manifest uses this form. `npx` is not on the allowlist, and `npm` must name a script (`run`, `test`, `check` or `build`), so `vitest related` goes through the engine's `test:affected` script. `{files}` reaches the runner relative to its `cwd`.
   - `affectedRunner` gets the same form checks as `acceptanceRunner`: the allowlist, no shell, `{files}` as one whole argument, and a `required-file` JUnit report beneath `.loom/completion-reports/`. Two further rules apply. `timeoutMs` is at most 120000. The report path must differ from the `acceptanceRunner`'s and from every Wave check's.
   - `testFileSuffixes` is a non-empty list of distinct suffixes, none containing a path separator. Without it, the freeze records the engine default (`.test.ts`, `.spec.ts`, `.test.tsx`, `.spec.tsx`) as `testFiles: { source: "engine-default", … }`. The same classification decides I6's test and implementation files.
 

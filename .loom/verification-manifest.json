@@ -32,5 +32,20 @@
       "kind": "required-file",
       "path": ".loom/completion-reports/acceptance.junit.xml"
     }
+  },
+  "affectedRunner": {
+    "executable": "npm",
+    "args": [
+      "run",
+      "test:affected",
+      "--",
+      "{files}"
+    ],
+    "cwd": "engine",
+    "timeoutMs": 120000,
+    "report": {
+      "kind": "required-file",
+      "path": ".loom/completion-reports/affected.junit.xml"
+    }
   }
 }
