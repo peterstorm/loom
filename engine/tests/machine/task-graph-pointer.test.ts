@@ -4,9 +4,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   bindSessionTaskGraphPointer,
-  parseAgentId,
   parseCanonicalTaskGraphPointer,
-  parseSessionId,
   parseSessionTaskGraphPointerLeaseRegistry,
   persistSessionTaskGraphPointerBinding,
   releasePersistedSessionTaskGraphPointerBinding,
@@ -14,6 +12,7 @@ import {
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
   TASK_GRAPH_POINTER_LEASES_SUFFIX,
 } from "../../src/machine";
+import { agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
 const roots: string[] = [];
 
@@ -26,8 +25,7 @@ function fixture() {
   writeFileSync(graphA, "{}\n");
   writeFileSync(graphB, "{}\n");
   writeFileSync(graphC, "{}\n");
-  const sessionId = parseSessionId("019fca39-f989-7510-8e62-50dadbcad499");
-  if (sessionId === null) throw new Error("session fixture must parse");
+  const sessionId = sessionIdOf("019fca39-f989-7510-8e62-50dadbcad499");
   return {
     root,
     graphA,
@@ -125,8 +123,7 @@ describe("shared session TaskGraph pointer lease registry", () => {
 
   it("persists Claude cleanup authority, releases the exact final lease, and permits a new target", async () => {
     const { root, graphA, graphB, graphC, sessionId, pointer, registry: registryPath } = fixture();
-    const agentId = parseAgentId("claude-agent-1");
-    if (agentId === null) throw new Error("agent fixture must parse");
+    const agentId = agentIdOf("claude-agent-1");
     writeFileSync(pointer, graphA);
     const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
     const sidecar = join(
@@ -150,8 +147,7 @@ describe("shared session TaskGraph pointer lease registry", () => {
 
   it("fails closed on a malformed persisted cleanup sidecar without releasing its lease", async () => {
     const { root, graphA, sessionId, pointer, registry: registryPath } = fixture();
-    const agentId = parseAgentId("claude-agent-malformed");
-    if (agentId === null) throw new Error("agent fixture must parse");
+    const agentId = agentIdOf("claude-agent-malformed");
     const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
     persistSessionTaskGraphPointerBinding(sessionId, agentId, binding);
     const sidecar = join(
@@ -168,8 +164,7 @@ describe("shared session TaskGraph pointer lease registry", () => {
 
   it("retains persisted cleanup authority when its lease registry is missing", async () => {
     const { root, graphA, sessionId, pointer, registry: registryPath } = fixture();
-    const agentId = parseAgentId("claude-agent-missing-registry");
-    if (agentId === null) throw new Error("agent fixture must parse");
+    const agentId = agentIdOf("claude-agent-missing-registry");
     const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
     persistSessionTaskGraphPointerBinding(sessionId, agentId, binding);
     const sidecar = join(
@@ -186,8 +181,7 @@ describe("shared session TaskGraph pointer lease registry", () => {
 
   it("retains persisted cleanup authority when pointer ownership is lost", async () => {
     const { root, graphA, graphB, sessionId, pointer } = fixture();
-    const agentId = parseAgentId("claude-agent-2");
-    if (agentId === null) throw new Error("agent fixture must parse");
+    const agentId = agentIdOf("claude-agent-2");
     const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
     persistSessionTaskGraphPointerBinding(sessionId, agentId, binding);
     writeFileSync(pointer, graphB);

@@ -49,7 +49,7 @@ import {
 } from "../../src/machine";
 import type { PiEvidenceLedgerAddress } from "../../src/machine/harness-tool-call-types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
+import { IMPLEMENTER_TYPE, agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "../machine/fake-session-registry";
 import { inertEmissionLaunchBridge } from "../fixtures/held-spawn-batch";
 import { recordingDurableReleases } from "../fixtures/recording-durable-releases";
@@ -355,7 +355,7 @@ describe("the write grant carries the parent's ledger address", () => {
   });
 
   it("an address naming another agent type than the grant's agent is refused at issue", () => {
-    const architect = parseAgentType("architecture-agent")!;
+    const architect = agentTypeOf("architecture-agent");
     expect(() => issue({ sessionId: parent, agentType: architect })).toThrow(/agent type/);
   });
 
@@ -466,7 +466,7 @@ describe("spawn reservation mints the grant's evidence ledger address", () => {
     expect(input.task).toContain("LOOM_PI_WRITE_GRANT:");
 
     const consumed = consumePiWriteGrant(input.task, root, "specify-agent");
-    const specifyAgent = parseAgentType("specify-agent")!;
+    const specifyAgent = agentTypeOf("specify-agent");
     expect(consumed?.evidenceLedger).toEqual({ sessionId: parentSession, agentType: specifyAgent });
     // The address the child consumed is the parent ledger under the grant's epoch.
     const granted: ActiveChildWriteGrant = {

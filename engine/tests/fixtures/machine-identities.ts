@@ -1,7 +1,9 @@
 /**
  * Ledger identities for tests, through the production parsers. A fixture
  * identity that does not parse fails the test that named it, never a silent
- * null. Every evidence and ledger suite builds its ids here.
+ * null or a bare non-null assertion. A suite that needs a fixture session,
+ * agent or agent type builds it here; a suite that tests the parsers
+ * themselves calls them directly.
  */
 
 import {

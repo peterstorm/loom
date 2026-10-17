@@ -31,15 +31,13 @@ import {
   epochOf,
   fsSessionRegistry,
   markAgentActive,
-  parseAgentId,
-  parseAgentType,
-  parseSessionId,
   type Evidence,
 } from "../../src/machine";
 import { StateManager } from "../../src/state-manager";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "../fixtures/contract-status-fixtures";
+import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
 import { AFFECTED_ARGV_PREFIX, AFFECTED_RUNNER, argvOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 
 const SESSION = "changed-files-matrix-session";
@@ -116,13 +114,13 @@ async function project(): Promise<Project> {
 
   const registered = await registerTaskExecutionBatch(["T3", "T2"].map((taskId) => ({ kind: "implementation" as const, prompt: `Task ID: ${taskId}`, description: taskId })));
   if (registered.kind !== "registered") throw new Error(`fixture registration refused: ${JSON.stringify(registered)}`);
-  const session = parsed(parseSessionId(SESSION), "session");
-  const type = parsed(parseAgentType(AGENT_TYPE), "agent type");
+  const session = sessionIdOf(SESSION);
+  const type = agentTypeOf(AGENT_TYPE);
   for (const [agentId, taskId, writes] of [["agent-ledger", "T3", EPOCH], ["agent-payload", "T2", SIBLING_EPOCH]] as const) {
     const authority = registered.authorities.find((candidate) => candidate.taskId === taskId);
     if (authority === undefined) throw new Error(`fixture registration reserved no attempt for ${taskId}`);
     publishImplementationAttemptSidecar({ sessionId: SESSION, agentId, taskGraphPath: statePath, authority });
-    const id = parsed(parseAgentId(agentId), "agent id");
+    const id = agentIdOf(agentId);
     await markAgentActive(session, id, type);
     appendEvidence(session, epochOf(id, type), events(root, writes));
     writeFileSync(transcriptPath(agentId), [
@@ -182,9 +180,9 @@ describe("INV-7: every stop shell hands the affected runner the owner's changed 
     }), [], async () => ({ kind: "passthrough" }), claude.ports);
 
     // The Pi report-only stop, through the child's epoch in the parent ledger.
-    const parentSession = parsed(parseSessionId(PI_PARENT_SESSION), "Pi parent session");
-    const type = parsed(parseAgentType(AGENT_TYPE), "agent type");
-    const grantAgent = parsed(parseAgentId(parsed(piGrantedAgentId(PI_GRANT_TOKEN), "grant agent id")), "grant agent id");
+    const parentSession = sessionIdOf(PI_PARENT_SESSION);
+    const type = agentTypeOf(AGENT_TYPE);
+    const grantAgent = agentIdOf(parsed(piGrantedAgentId(PI_GRANT_TOKEN), "grant agent id"));
     appendEvidence(parentSession, epochOf(grantAgent, type), events(at.root, EPOCH));
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const pi = recordingPorts(at);
