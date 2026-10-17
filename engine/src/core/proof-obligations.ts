@@ -74,12 +74,14 @@ export type RedThenGreenEra = FrozenRedThenGreenEra["kind"];
 const PRE_I6_ERA: FrozenRedThenGreenEra = Object.freeze({ kind: "not-owed" });
 
 /**
- * The one I6-era test (INV-6), and the only reader of a frozen manifest's
- * `testFiles`: a TaskGraph owes I6 exactly when its frozen verification
+ * The one I6-era test (INV-6), and the one reader of a frozen manifest's
+ * `testFiles` outside `verification-manifest.ts`, which parses, freezes and
+ * digests it: a TaskGraph owes I6 exactly when its frozen verification
  * manifest carries the frozen test-file classification (ADR-0025). Every
- * post-feature freeze carries it (the freezers' return type requires it), so
- * only a TaskGraph frozen before this feature, or one carrying no manifest at
- * all, reads `not-owed`. Population, the State File obligation-match check
+ * post-feature freeze carries it (the post-feature freezers' return type
+ * requires it), so only a TaskGraph frozen before this feature, or one
+ * carrying no manifest at all, reads `not-owed`. The INV-6 lint rule is the
+ * backstop against a second reader. Population, the State File obligation-match check
  * and revalidation ask through `redThenGreenEra`; settlement, the
  * stored-evidence reconcile and the brief ask through `redThenGreenDuty`,
  * which defers to a Task's frozen Proof and takes the classification from

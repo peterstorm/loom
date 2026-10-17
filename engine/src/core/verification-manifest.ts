@@ -159,11 +159,13 @@ export type FrozenVerificationManifest =
 
 /**
  * A manifest frozen since the test-file classification existed: its
- * `testFiles` is required (ADR-0025). Every freezer returns one, so a freeze
- * path that dropped the classification, and with it quietly turned I6 off for
- * every graph it froze, no longer typechecks. Only a manifest read back from
- * a TaskGraph frozen before the classification existed is the wider
- * `FrozenVerificationManifest`.
+ * `testFiles` is required (ADR-0025). Every post-feature freezer
+ * (`defaultVerificationManifest`, `freezeVerificationManifest`) returns one,
+ * so a freeze path that dropped the classification, and with it quietly
+ * turned I6 off for every graph it froze, no longer typechecks. The wider
+ * `FrozenVerificationManifest` is what a TaskGraph frozen before the
+ * classification existed reads back as, and what
+ * `legacyDefaultVerificationManifest` deliberately returns.
  */
 export type I6EraVerificationManifest = FrozenVerificationManifest & Readonly<{ testFiles: FrozenTestFiles }>;
 

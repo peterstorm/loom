@@ -83,6 +83,8 @@ const OWNERSHIP_RULES: readonly OwnershipRow[] = [
       "const declared = \"testFiles\" in manifest;",
       "const frozen = manifest?.testFiles;",
       "const files = manifest.testFiles ?? ENGINE_DEFAULT_TEST_FILES;",
+      "const { testFiles } = graph.verification_manifest ?? {};",
+      "const raw = manifest[\"testFiles\"];",
     ].join("\n"),
     allowed: "const era = frozenRedThenGreenEra(graph.verification_manifest);\nconst split = classifyTaskFiles(fileList, duty.testFiles);",
     owners: ["engine/src/core/proof-obligations.ts", "engine/src/core/verification-manifest.ts"],

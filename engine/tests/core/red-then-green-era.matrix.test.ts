@@ -128,8 +128,6 @@ function fromSource(document: Readonly<Record<string, unknown>>): FrozenVerifica
   return frozen.value;
 }
 
-const testFilesOf = (graph: TaskGraph): FrozenTestFiles | undefined => graph.verification_manifest?.testFiles;
-
 type EraRow = Readonly<{ row: string; manifest: () => FrozenVerificationManifest; testFiles: FrozenTestFiles }>;
 
 const POST_FEATURE_ROWS: readonly EraRow[] = [
@@ -155,8 +153,10 @@ const POST_FEATURE_ROWS: readonly EraRow[] = [
   },
 ];
 
-// Every freezer's result requires `testFiles` by type (ADR-0025): a freeze
-// path that dropped it fails to compile here, not silently at settlement.
+// Every post-feature freezer's result requires `testFiles` by type (ADR-0025):
+// a freeze path that dropped it fails to compile here, not silently at
+// settlement. The typecheck is the real check; the runtime test below only
+// keeps these bindings live.
 const defaultFreezeIsI6Era: Equal<ReturnType<typeof defaultVerificationManifest>, I6EraVerificationManifest> = true;
 const operatorFreezeIsI6Era: Equal<
   Extract<ReturnType<typeof freezeVerificationManifest>, { ok: true }>["value"],
@@ -173,7 +173,7 @@ describe("INV-6: every post-feature freeze path carries testFiles", () => {
     const graph = populated(frozen);
 
     expect(graph.verification_manifest).toEqual(frozen);
-    expect(testFilesOf(graph)).toEqual(testFiles);
+    expect(graph.verification_manifest?.testFiles).toEqual(testFiles);
   });
 
   it.each(POST_FEATURE_ROWS)("FR-014: $row reads as the I6 era carrying exactly the classification it froze", ({ manifest, testFiles }) => {
