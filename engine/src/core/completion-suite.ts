@@ -83,16 +83,16 @@ export type CompletionSignal = (typeof COMPLETION_SIGNALS)[number];
 export type RepositoryRelativePath = ReviewPath | ".";
 /** A storable failure message: not blank, and at most `MAX_FAILURE_MESSAGE_LENGTH`
  *  characters. Minted only by `parseFailureMessage` and `boundedFailureMessage`. */
-export type NonEmptyString = string & { readonly __nonEmptyString: true };
+export type FailureMessage = string & { readonly __failureMessage: true };
 
 /** The one brand: every caller below has already proved the text non-blank and bounded. */
-const asFailureMessage = (text: string): NonEmptyString => text as NonEmptyString;
+const asFailureMessage = (text: string): FailureMessage => text as FailureMessage;
 
 const isStorableFailureMessage = (raw: unknown): raw is string =>
   typeof raw === "string" && raw.trim().length > 0 && raw.length <= MAX_FAILURE_MESSAGE_LENGTH;
 
 /** A failure message as stored, or null when it is blank, too long, or not a string. */
-export function parseFailureMessage(raw: unknown): NonEmptyString | null {
+export function parseFailureMessage(raw: unknown): FailureMessage | null {
   return isStorableFailureMessage(raw) ? asFailureMessage(raw) : null;
 }
 
@@ -103,7 +103,7 @@ const UNSPECIFIED_FAILURE_MESSAGE = asFailureMessage("completion check failed wi
  * `MAX_FAILURE_MESSAGE_LENGTH` characters, or `fallback` when that is blank.
  * Total: a blank fallback yields a fixed message, never an unstorable one.
  */
-export function boundedFailureMessage(text: string, fallback: string): NonEmptyString {
+export function boundedFailureMessage(text: string, fallback: string): FailureMessage {
   return parseFailureMessage(text.slice(0, MAX_FAILURE_MESSAGE_LENGTH)) ??
     parseFailureMessage(fallback.slice(0, MAX_FAILURE_MESSAGE_LENGTH)) ??
     UNSPECIFIED_FAILURE_MESSAGE;
@@ -121,7 +121,7 @@ export type CompletionReportOutcome =
       byteLength: number;
     }>
   | Readonly<{ kind: "missing"; path: ReviewPath }>
-  | Readonly<{ kind: "unreadable"; path: ReviewPath; message: NonEmptyString }>;
+  | Readonly<{ kind: "unreadable"; path: ReviewPath; message: FailureMessage }>;
 export type CompletionScope = "task" | "wave";
 
 /** The reserved check is engine authority; project checks come from frozen manifest authority. */
@@ -145,7 +145,7 @@ export type AuthorizedWaveCompletionCheck =
 
 /** Spawn failure cannot be confused with facts observed from a spawned process. */
 export type CompletionProcessOutcome =
-  | Readonly<{ kind: "spawn-failed"; message: NonEmptyString }>
+  | Readonly<{ kind: "spawn-failed"; message: FailureMessage }>
   | Readonly<{
       kind: "observed";
       exitCode: number | null;
@@ -219,13 +219,13 @@ export type CompletionAuthorityField =
   | "workspaceDigest";
 
 export type CompletionInfrastructureFailure =
-  | Readonly<{ kind: "spawn-failed"; checkId: CompletionCheckId; message: NonEmptyString }>
+  | Readonly<{ kind: "spawn-failed"; checkId: CompletionCheckId; message: FailureMessage }>
   | Readonly<{ kind: "incomplete-process-observation"; checkId: CompletionCheckId }>
   | Readonly<{
       kind: "report-unreadable";
       checkId: CompletionCheckId;
       path: ReviewPath;
-      message: NonEmptyString;
+      message: FailureMessage;
     }>;
 
 export type CompletionSemanticFailure =

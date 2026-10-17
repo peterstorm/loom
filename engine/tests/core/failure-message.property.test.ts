@@ -1,6 +1,6 @@
 /**
  * The one constructor of a storable completion failure message
- * (`NonEmptyString`): `parseFailureMessage` admits exactly what the at-rest
+ * (`FailureMessage`): `parseFailureMessage` admits exactly what the at-rest
  * parser stores, and `boundedFailureMessage` fits any text into it, so a
  * message a check minted can always be parsed back.
  */
@@ -11,8 +11,11 @@ import {
   MAX_FAILURE_MESSAGE_LENGTH,
   boundedFailureMessage,
   parseCompletionProcessOutcome,
+  parseCompletionReportOutcome,
   parseFailureMessage,
 } from "../../src/core/completion-suite";
+
+const REPORT = ".loom/completion-reports/verify.junit.xml";
 
 describe("parseFailureMessage", () => {
   it.each<[string, unknown]>([
@@ -29,6 +32,25 @@ describe("parseFailureMessage", () => {
     expect(parseFailureMessage("spawn vitest ENOENT")).toBe("spawn vitest ENOENT");
     const longest = "x".repeat(MAX_FAILURE_MESSAGE_LENGTH);
     expect(parseFailureMessage(longest)).toBe(longest);
+  });
+});
+
+describe("the at-rest parser's two message arms use the one constructor", () => {
+  it.each<[string, string, boolean]>([
+    ["a valid message", "EACCES: permission denied", true],
+    ["a blank message", "   ", false],
+    ["an over-length message", "x".repeat(MAX_FAILURE_MESSAGE_LENGTH + 1), false],
+  ])("an unreadable report with %s is admitted exactly when the message is storable", (_label, message, admitted) => {
+    const parsed = parseCompletionReportOutcome({ kind: "unreadable", path: REPORT, message });
+    expect(parsed.ok).toBe(admitted);
+    if (parsed.ok) expect(parsed.value).toEqual({ kind: "unreadable", path: REPORT, message });
+    else expect(parsed.error.errors.join("; ")).toContain(`at most ${MAX_FAILURE_MESSAGE_LENGTH} characters`);
+  });
+
+  it("a spawn failure with a blank or over-length message is refused", () => {
+    for (const message of ["", "x".repeat(MAX_FAILURE_MESSAGE_LENGTH + 1)]) {
+      expect(parseCompletionProcessOutcome({ kind: "spawn-failed", message }).ok).toBe(false);
+    }
   });
 });
 

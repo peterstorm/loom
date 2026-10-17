@@ -10,7 +10,7 @@ import {
   type CompletionProcessOutcome,
   type CompletionReportOutcome,
   type CompletionSignal,
-  type NonEmptyString,
+  type FailureMessage,
 } from "../core/completion-suite";
 import type {
   AuthorizedRemediationCheck,
@@ -140,7 +140,7 @@ const failed = (error: CompletionCheckRunnerFailure): Readonly<{ ok: false; erro
 
 /** A thrown cause as a storable failure message, through completion-suite's
  *  one constructor, so it is bounded exactly as the at-rest parser requires. */
-function messageOf(cause: unknown): NonEmptyString {
+function messageOf(cause: unknown): FailureMessage {
   return boundedFailureMessage(cause instanceof Error ? cause.message : String(cause), "completion check infrastructure failure");
 }
 

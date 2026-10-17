@@ -321,9 +321,7 @@ const NO_LINT_RESULT = "full-tier lint returned no terminal result";
 export function lintCheckResult(checkId: CompletionCheckId, lint: HookResult): CompletionCheckResult {
   if (lint.kind === "allow") return observedLintCheckResult(checkId, 0);
   const message = "message" in lint ? lint.message : NO_LINT_RESULT;
-  const lintEngineFailure = message.startsWith("🚫 WAVE-GATE LINT ENGINE ERROR:") ||
-    message.includes("LINT ENGINE ERROR");
-  if (lint.kind === "block" && !lintEngineFailure) return observedLintCheckResult(checkId, 1);
+  if (lint.kind === "block" && !message.includes("LINT ENGINE ERROR")) return observedLintCheckResult(checkId, 1);
   return freeze({
     checkId,
     scope: "wave",
