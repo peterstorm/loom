@@ -31,6 +31,7 @@ import { redThenGreenDuty } from "./implementation-application";
 import { deriveImplementationRetryDisposition } from "./implementation-retry";
 import { isRedThenGreenFailureKind } from "./red-then-green";
 import type { RedThenGreenFailureKind, TestFileClassification } from "./red-then-green-types";
+import { quoteShellArgument } from "./shell-quoting";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import type { PlanInvariant, Task, WaveImplementationDispatch } from "../types";
@@ -324,10 +325,20 @@ function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationD
  * attempt epoch and the order lies in the past, so a retry that keeps its
  * predecessor's implementation can never show red: it restores the Task's
  * implementation files to the attempt baseline (a Bash call, which mints no
- * FileWrite), observes red, and only then implements. A Task populated
+ * FileWrite), observes red, and only then implements. A file the Task created
+ * does not exist at the baseline, and `git restore` refuses the whole call if
+ * one pathspec matches nothing, so the command restores each file the baseline
+ * has and deletes each one it lacks. Paths are shell-quoted. A Task populated
  * without a start commit restores from HEAD: the command stays runnable, and
  * the brief says which uncommitted work that discards.
  */
+/** The one Bash call that returns `files` to `source`: restore what `source`
+ *  has, delete what it lacks. */
+export function baselineRestoreCommand(source: string, files: readonly string[]): string {
+  return `for f in ${files.map(quoteShellArgument).join(" ")}; do ` +
+    `if git cat-file -e ${source}:"$f"; then git restore --source ${source} -- "$f"; else rm -f -- "$f"; fi; done`;
+}
+
 function redThenGreenRemedy(
   task: Task,
   classification: TestFileClassification,
@@ -338,16 +349,16 @@ function redThenGreenRemedy(
   const baseline = task.start_sha === undefined
     ? "No start commit was recorded for this Task, so `HEAD` stands in: the restore discards your files' uncommitted changes since the last commit. "
     : "";
-  const files = classification.implementationFiles.join(" ");
   return [
     "",
     `**I6 repair for this retry.** The previous attempt failed I6 (${failures.map((kind) => `\`${kind}\``).join(", ")}). ` +
       "This attempt is judged on its own ledger epoch, so it must show the order afresh:",
     classification.implementationFiles.length === 0
       ? "1. Your file list declares no implementation file to restore; skip to step 2."
-      : `1. Restore your implementation files to the attempt baseline with one Bash call: \`git restore --source ${source} -- ${files}\`. ` +
+      : `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, classification.implementationFiles)}\`. ` +
+        `It restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
         baseline +
-        "A Bash restore mints no FileWrite, so it is not your first implementation write. Restore only these files: they are yours, and no sibling's work lives in them.",
+        "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them.",
     "2. Run your tests and observe red: at least one testcase in one of your test files fails.",
     "3. Then implement, and run your tests green.",
   ];

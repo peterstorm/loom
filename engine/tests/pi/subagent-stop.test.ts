@@ -18,8 +18,8 @@ import {
   settleEmptyBatch,
 } from "../fixtures/held-spawn-batch";
 import { fsSessionRegistry, parseAgentId, parseSessionId } from "../../src/machine";
-import type { PiSubagentStopPorts } from "../../../pi/subagent-stop";
-import type { PiSpawnReservation } from "../../../pi/spawn-reservation";
+import { issuedGrantTokens, type PiSubagentStopPorts } from "../../../pi/subagent-stop";
+import { createPiParentSessions, type PiSpawnReservation } from "../../../pi/spawn-reservation";
 import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness";
 import { piDurableClaimReleasePorts } from "../../../pi/spawn-claim-shell";
 
@@ -93,5 +93,30 @@ describe("dispatchPiSubagentStop — the reservation is owned before it is settl
     expect(parentSessions.get(owner)?.spawnReservations.get(toolCallId)).toBe(divergent);
     // Revoking a grant is owed whatever the reservation says.
     expect(parentSessions.get(owner)?.issuedWriteGrants.has(toolCallId)).toBe(false);
+  });
+});
+
+describe("issuedGrantTokens — each result slot's ledger address, read before the grants are released", () => {
+  it("maps every slot the owner's call issued a grant for to that grant's token, by slot, not by array position", () => {
+    const parentSessions = createPiParentSessions();
+    parentSessions.runtimeFor(owner).issuedWriteGrants.set(toolCallId, Object.freeze([
+      Object.freeze({ slot: 0, token: "a".repeat(64) }),
+      Object.freeze({ slot: 2, token: "c".repeat(64) }),
+    ]));
+    parentSessions.runtimeFor(owner).issuedWriteGrants.set("another-call", Object.freeze([Object.freeze({ slot: 1, token: "b".repeat(64) })]));
+
+    const tokens = issuedGrantTokens({ sessionId: owner, toolCallId }, parentSessions);
+
+    expect([...tokens]).toEqual([[0, "a".repeat(64)], [2, "c".repeat(64)]]);
+    // A slot that holds no grant reads no token, so its ledger read is named unreadable, never empty.
+    expect(tokens.get(1)).toBeUndefined();
+  });
+
+  it("is empty for a batch with no owner, an owner holding no session, or a call that issued no grant", () => {
+    const parentSessions = createPiParentSessions();
+    expect(issuedGrantTokens(null, parentSessions).size).toBe(0);
+    expect(issuedGrantTokens({ sessionId: owner, toolCallId }, parentSessions).size).toBe(0);
+    parentSessions.runtimeFor(otherSession).issuedWriteGrants.set(toolCallId, Object.freeze([Object.freeze({ slot: 0, token: "a".repeat(64) })]));
+    expect(issuedGrantTokens({ sessionId: owner, toolCallId }, parentSessions).size).toBe(0);
   });
 });

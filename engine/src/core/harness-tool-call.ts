@@ -9,9 +9,11 @@
  * Each reads its harness's own result shape and nothing else, so the facts
  * the shared shell (`machine/tool-evidence-recorder.ts`) mints from one call
  * are the same on both harnesses. Both are total and never throw. An unknown
- * Bash shape degrades to `exit-unknown`, the outcome that trusts least; an
- * unknown file-tool shape counts as success, so a harness format change
- * cannot starve the ledger of writes (`isClaudeToolFailure`).
+ * Claude Code Bash shape degrades to `exit-unknown`, the outcome that trusts
+ * least. Pi reports no exit code, so a Pi bash result is read from `isError`
+ * as exit 1 or 0, and an unrecognised one reads as exit 0 (`piBashOutcome`).
+ * An unknown file-tool shape counts as success on both, so a harness format
+ * change cannot starve the ledger of writes (`isClaudeToolFailure`).
  *
  * Pi 0.83 `tool_result` shape, probed in
  * `@earendil-works/pi-coding-agent@0.83.0` (dist/core/extensions/types.d.ts,
@@ -51,6 +53,12 @@ function parseToolCallId(raw: unknown): ToolCallId | null {
 const recordOrEmpty = (raw: unknown): Readonly<Record<string, unknown>> => (isRecord(raw) ? raw : {});
 
 const isIntegerExit = (raw: unknown): raw is number => typeof raw === "number" && Number.isInteger(raw);
+
+/** A harness tool name's vocabulary entry, read from the table's own keys
+ *  only: an untrusted name such as `constructor` is `Other`, never a
+ *  prototype member. */
+const toolOf = (table: Readonly<Record<string, HarnessToolCall["tool"]>>, name: string): HarnessToolCall["tool"] =>
+  Object.hasOwn(table, name) ? table[name] ?? "Other" : "Other";
 
 /** Build the call for its tool, so each tool carries only its own outcome kind. */
 function normalized(
@@ -127,7 +135,7 @@ export function claudeBashOutcome(toolResponse: unknown): BashToolOutcome {
 /** Normalize Claude Code's PostToolUse payload. */
 export function claudeToolCall(payload: ClaudeToolPayload): HarnessToolCall {
   return normalized(
-    CLAUDE_TOOLS[payload.tool_name] ?? "Other",
+    toolOf(CLAUDE_TOOLS, payload.tool_name),
     { input: recordOrEmpty(payload.tool_input), callId: parseToolCallId(payload.tool_use_id), cwd: payload.cwd },
     () => (isClaudeToolFailure(payload.tool_response) ? { kind: "failed" } : { kind: "succeeded" }),
     () => claudeBashOutcome(payload.tool_response),
@@ -190,7 +198,7 @@ function piBashOutcome(event: PiToolResultEvent): BashToolOutcome {
  *  shell passes the session's. */
 export function piToolCall(event: PiToolResultEvent, cwd: string): HarnessToolCall {
   return normalized(
-    PI_TOOLS[event.toolName] ?? "Other",
+    toolOf(PI_TOOLS, event.toolName),
     { input: recordOrEmpty(event.input), callId: parseToolCallId(event.toolCallId), cwd },
     () => (event.isError === true ? { kind: "failed" } : { kind: "succeeded" }),
     () => piBashOutcome(event),

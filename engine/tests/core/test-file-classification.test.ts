@@ -37,20 +37,21 @@ import type { Equal } from "../fixtures/type-equality";
 
 const OPERATOR_SUFFIXES = [".spec.ts", ".it.ts", "Test.java"] as const;
 
-/** The frozen classification of a manifest built from these source keys. */
-function frozenTestFiles(document: Readonly<Record<string, unknown>> | "no-manifest-file"): FrozenTestFiles {
-  const manifest: FrozenVerificationManifest = document === "no-manifest-file"
-    ? defaultVerificationManifest()
-    : (() => {
-        const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-          kind: "loom-verification-manifest", checks: [], ...document,
-        })));
-        if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
-        return frozen.value;
-      })();
+/** The classification a frozen manifest carries; every freeze path carries one. */
+function testFilesOf(manifest: FrozenVerificationManifest): FrozenTestFiles {
   const testFiles = (manifest as FrozenVerificationManifest & FrozenStopCheckManifestFields).testFiles;
   if (testFiles === undefined) throw new Error("every freeze path carries testFiles");
   return testFiles;
+}
+
+/** The frozen classification of a manifest built from these source keys. */
+function frozenTestFiles(document: Readonly<Record<string, unknown>> | "no-manifest-file"): FrozenTestFiles {
+  if (document === "no-manifest-file") return testFilesOf(defaultVerificationManifest());
+  const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
+    kind: "loom-verification-manifest", checks: [], ...document,
+  })));
+  if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
+  return testFilesOf(frozen.value);
 }
 
 const FILE_LIST: readonly string[] = [

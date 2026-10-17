@@ -70,11 +70,11 @@ children record into the parent's ledger at an address the parent mints into the
 - **Normalized call (CT-3).** `engine/src/machine/harness-tool-call-types.ts` declares `HarnessToolCall`
   as a union over `tool: "Read" | "Write" | "Edit" | "MultiEdit" | "Bash" | "Other"`, with `input`, a
   nullable `callId`, `cwd`, and a per-tool outcome. File tools carry `succeeded | failed`. Bash carries
-  `exited { exit, stdout } | interrupted`. `Other` carries none. Each tool therefore holds only its own
+  `exited { exit, stdout } | exit-unknown { stdout } | interrupted`. `Other` carries none. Each tool therefore holds only its own
   outcome kind, and an illegal pairing cannot be represented.
 - **Pure adapters.** `engine/src/core/harness-tool-call.ts` is on `DEFAULT_PURE_MODULES` and holds
-  `claudeToolCall(payload)` and `piToolCall(event, cwd)`. Both are total and never throw: an unknown Bash
-  shape degrades to `exit-unknown`, the outcome that trusts least, while an unknown file-tool shape counts as
+  `claudeToolCall(payload)` and `piToolCall(event, cwd)`. Both are total and never throw: an unknown Claude
+  Code Bash shape degrades to `exit-unknown`, the outcome that trusts least (a Pi bash result is always read as an exit, below), while an unknown file-tool shape counts as
   success so a harness format change cannot starve the ledger of writes. Pi's file tools use `input.path`, while Claude uses
   `input.file_path`. The Pi bash exit is `details.exitCode` when it is an integer (FR-033). Otherwise it is
   `isError` read as 1 or 0, and an error ending in Pi's abort or timeout status line becomes `interrupted`.

@@ -466,6 +466,61 @@ describe("findReport", () => {
   });
 });
 
+describe("findReport — a run's JUnit reports vouch together or not at all (INV-8)", () => {
+  let cwd: string;
+  let callStart: number;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "loom-report-dir-"));
+    callStart = Date.now() - 1000;
+  });
+
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  const stderrOf = (run: () => unknown): Readonly<{ result: unknown; text: string }> => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = run();
+      return { result, text: stderrSpy.mock.calls.map((c) => String(c[0])).join("") };
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  };
+
+  it("a malformed report beside a valid one voids the run, never a merge of the valid rest", () => {
+    const dir = join(cwd, "target/surefire-reports");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
+    writeFileSync(join(dir, "TEST-b.xml"), '<testsuite tests="1" failures="2" errors="0"/>');
+    const { result, text } = stderrOf(() => findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart }));
+    expect(result).toBeNull();
+    expect(text).toContain("malformed JUnit report");
+  });
+
+  it("a sibling XML that is not a JUnit report (failsafe-summary.xml) is skipped, and the valid reports still merge", () => {
+    const dir = join(cwd, "target/failsafe-reports");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="1" errors="0"/>');
+    writeFileSync(join(dir, "TEST-b.xml"), '<testsuite tests="2" failures="0" errors="0"/>');
+    writeFileSync(join(dir, "failsafe-summary.xml"),
+      '<?xml version="1.0"?><failsafe-summary result="255" timeout="false"><completed>6</completed><errors>0</errors><failures>1</failures><skipped>0</skipped></failsafe-summary>');
+    const { result, text } = stderrOf(() => findReport("mvn verify", cwd, "", { nowMs: Date.now(), callStartMs: callStart }));
+    expect(result).toEqual({ total: 6, failed: 1, source: "junit-xml" });
+    expect(text).toContain("not a JUnit report");
+  });
+
+  it("a refused report in one module's dir voids the reports of every other module", () => {
+    mkdirSync(join(cwd, "core/target/surefire-reports"), { recursive: true });
+    mkdirSync(join(cwd, "api/target/surefire-reports"), { recursive: true });
+    writeFileSync(join(cwd, "core/target/surefire-reports/TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
+    writeFileSync(join(cwd, "api/target/surefire-reports/TEST-b.xml"), "<testsuite>");
+    const { result } = stderrOf(() => findReport("mvn test", cwd, "", { nowMs: Date.now(), callStartMs: callStart }));
+    expect(result).toBeNull();
+  });
+});
+
 describe("findReport — call-start ordering (a window bounds, the stamp orders)", () => {
   let cwd: string;
 

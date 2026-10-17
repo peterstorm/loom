@@ -470,6 +470,9 @@ export function redThenGreenDuty(
       : NOT_OWED;
   }
   if (!owesRedThenGreen(task.proof.obligations)) return NOT_OWED;
+  // Not an era test: the frozen Proof has already decided the duty. This only
+  // reads the classification value the judge needs, and names its absence as
+  // the `classification-unfrozen` disagreement (INV-6's sanctioned consumer).
   const frozen = manifest?.testFiles;
   return frozen === undefined
     ? freeze({

@@ -28,21 +28,20 @@ import {
 import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import type { NonEmpty } from "./orchestration-contract";
 import { attributeReportedFile } from "./report-file-attribution";
-import type { ReportTestcase } from "./structured-test-report";
+import { isCollectionErrorTestcase } from "./structured-test-report";
 
 // --- Judging an affected run ---
-
-/** A file that failed to load: the runner reports one failing testcase named
- *  after the file itself, the same rule the acceptance gate reads. */
-const isCollectionError = (testcase: ReportTestcase): boolean => testcase.name === testcase.classname;
 
 export const judgeAffectedRun: JudgeAffectedRunFn = (projection): AffectedRunVerdict => {
   if (!projection.ok) return freeze({ kind: "unobservable", reason: `the affected runner's report could not be read: ${projection.error.message}` });
   if (projection.value.length === 0) return freeze({ kind: "passed", observed: "zero-tests" });
-  const failing = nonEmpty(projection.value.flatMap((testcase): FailingAffectedTestcase[] =>
-    testcase.outcome !== "failed"
-      ? []
-      : [freeze({ file: testcase.classname, name: testcase.name, outcome: isCollectionError(testcase) ? "collection-error" : "failed" })]));
+  const failing = nonEmpty(projection.value
+    .filter(({ outcome }) => outcome === "failed")
+    .map((testcase): FailingAffectedTestcase => freeze({
+      file: testcase.classname,
+      name: testcase.name,
+      outcome: isCollectionErrorTestcase(testcase) ? "collection-error" : "failed",
+    })));
   return failing === null ? freeze({ kind: "passed", observed: "some-tests" }) : freeze({ kind: "failing", testcases: failing });
 };
 

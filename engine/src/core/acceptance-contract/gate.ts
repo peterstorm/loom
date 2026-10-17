@@ -7,7 +7,7 @@
 
 import type { ArtifactDigest, NonEmpty } from "../orchestration-contract";
 import { attributeReportedFile } from "../report-file-attribution";
-import type { JunitTestcasesResult, ReportTestcaseOutcome } from "../structured-test-report";
+import { isCollectionErrorTestcase, type JunitTestcasesResult, type ReportTestcaseOutcome } from "../structured-test-report";
 import { freeze, nonEmpty } from "./kernel";
 import type { AcceptanceContract, AcceptanceTestcase, ContractAcceptanceFile, ContractTaskView } from "./model";
 import { contractWave, dueWaves } from "./tasks";
@@ -168,7 +168,7 @@ export function observeAcceptanceFacts(
       name: testcase.name,
       outcome: testcase.outcome,
       failureType: testcase.failureType,
-      collectionError: testcase.name === testcase.classname,
+      collectionError: isCollectionErrorTestcase(testcase),
     }));
   }
   return freeze({ kind: "projected", checkId, reportDigest, testcases: Object.freeze(testcases), otherFailures });

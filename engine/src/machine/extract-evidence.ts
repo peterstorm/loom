@@ -424,6 +424,13 @@ function collectMoveCopyTargets(segment: string, out: string[]): void {
  * Unexpandable targets (`$VAR/…`) are kept as-is: they resolve to paths
  * that match nothing, which only fails closed. Targets are NOT resolved
  * here — consumers normalize with their cwd like every other FileWrite.
+ *
+ * Under-minting is the other direction, and it is not closed: only these
+ * literal forms are read. A file created by any other command (`ln`,
+ * `install`, `rsync`, `tar -x`, `sed -i`, `dd of=`, an interpreter) or by a
+ * wrapped head (`sudo cp`, `env cp`, `command mv`) mints nothing. That is the
+ * logged-facts-only limit of the veto, I6 and I7 that `machines/README.md`
+ * documents: such a write is invisible to all three.
  */
 export function extractShellWriteTargets(command: string): string[] {
   const targets: string[] = [];

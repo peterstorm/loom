@@ -11,9 +11,10 @@
  * `testFiles` with its expected suffix source, so no post-feature TaskGraph
  * reads as pre-feature.
  *
- * T7 extends each row through the derivation sites (population, the
- * state-file-wire obligation-match check, revalidation) and adds the two
- * pre-feature rows (e) and (f); T9 adds the reconcile site.
+ * The derivation sites (population, the state-file-wire obligation-match
+ * check, revalidation) and the pre-feature rows (e) and (f) are pinned in
+ * `proof-obligations-red-then-green.test.ts`; the reconcile site in
+ * `i6-settlement.matrix.test.ts`.
  */
 
 import { describe, expect, it } from "vitest";

@@ -59,7 +59,7 @@ import { parseJunitTestcases } from "../../core/structured-test-report";
 import type { TaskGraph } from "../../types";
 import type { CompletionCheckRunnerResult } from "../../orchestration/completion-check-runner";
 import type { CanonicalRepositoryRoot } from "../../utils/workspace-digest";
-import { ACCEPTANCE_STOP_CHECK_MAX_BLOCKS, type StopCheckShellPorts } from "./acceptance-stop-check";
+import { ACCEPTANCE_STOP_CHECK_MAX_BLOCKS, NO_BLOCKS_ISSUED, type StopCheckShellPorts } from "./acceptance-stop-check";
 
 /** The longest runner output tail a blocked agent is shown, per check. */
 const OUTPUT_TAIL_CHARS = 4_000;
@@ -238,7 +238,6 @@ async function runAffected(
 type Results = Readonly<Record<StopCheckName, CheckResult>>;
 type Issued = Readonly<Record<StopCheckName, StopCheckBlockCount>>;
 
-const NONE_ISSUED: StopCheckBlockCount = Object.freeze({ kind: "count", blocks: 0 });
 const NOT_FAILING = Object.freeze({ acceptance: "not-failing", affected: "not-failing" } as const);
 
 const isRunnable = <Plan>(arm: Arm<Plan>): arm is Readonly<{ kind: "runnable"; plan: Plan }> => arm.kind === "runnable";
@@ -312,8 +311,8 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
   });
   // Only a check that would run reads its counter.
   const issued: Issued = Object.freeze({
-    acceptance: isRunnable(planned.acceptance) ? ports.blocksIssued(input.agentKey) : NONE_ISSUED,
-    affected: isRunnable(planned.affected) ? ports.affectedBlocksIssued(input.agentKey) : NONE_ISSUED,
+    acceptance: isRunnable(planned.acceptance) ? ports.blocksIssued(input.agentKey) : NO_BLOCKS_ISSUED,
+    affected: isRunnable(planned.affected) ? ports.affectedBlocksIssued(input.agentKey) : NO_BLOCKS_ISSUED,
   });
   const acceptance = admitted(taskId, "acceptance", planned.acceptance, issued);
   const affected = admitted(taskId, "affected", planned.affected, issued);

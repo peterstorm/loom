@@ -30,6 +30,7 @@ import {
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import {
+  baselineRestoreCommand,
   renderImplementationBrief,
   RULE_DOCUMENTS,
   type ImplementationBriefInput,
@@ -338,6 +339,12 @@ const i6Result = (settled: ExactImplementationSettlement, taskId: string): Proof
 const transitionOf = (settled: ExactImplementationSettlement): string | undefined =>
   settled.application.kind === "applied" ? settled.application.transition.kind : undefined;
 
+/** An infrastructure settlement: no semantic retry counted, and the receipt says it consumed no attempt. */
+function expectInfrastructureBlocked(task: Task): void {
+  expect(task.retry_count).toBeUndefined();
+  expect(task.implementation_attempt_history?.at(-1)).toMatchObject({ consumesSemanticAttempt: false });
+}
+
 /** Settle the same facts through both harness boundaries and require one answer. */
 function settleOnBothHarnesses(graph: TaskGraph, events: readonly RawEvent[]) {
   const { claude, pi } = harnessLedgers(events);
@@ -536,9 +543,7 @@ describe("an unreadable ledger is an infrastructure failure, never a semantic re
       expect(settled.infrastructureReason).toContain("ledger line 4 is corrupt");
       expect(transitionOf(settled)).toBe("infrastructure-blocked");
       if (settled.application.kind !== "applied") return;
-      const task = taskOf(settled.application.state, "T1");
-      expect(task.retry_count).toBeUndefined();
-      expect(task.implementation_attempt_history?.at(-1)).toMatchObject({ consumesSemanticAttempt: false });
+      expectInfrastructureBlocked(taskOf(settled.application.state, "T1"));
     });
   }
 
@@ -551,9 +556,7 @@ describe("an unreadable ledger is an infrastructure failure, never a semantic re
       expect(settled.infrastructureReason).toMatch(/T1 owes red-then-green but its TaskGraph freezes no test-file classification/);
       expect(transitionOf(settled)).toBe("infrastructure-blocked");
       if (settled.application.kind !== "applied") throw new Error("infrastructure settlement must apply");
-      const task = taskOf(settled.application.state, "T1");
-      expect(task.retry_count).toBeUndefined();
-      expect(task.implementation_attempt_history?.at(-1)).toMatchObject({ consumesSemanticAttempt: false });
+      expectInfrastructureBlocked(taskOf(settled.application.state, "T1"));
     });
   }
 
@@ -730,6 +733,9 @@ function renderedPrompt(input: ImplementationBriefInput): string {
   return rendered.value.prompt;
 }
 
+/** The brief's I6 section, or "" when the brief carries none. */
+const i6Section = (prompt: string): string => prompt.split("**I6 red-then-green")[1] ?? "";
+
 /** A retry-owed Task whose previous attempt settled with `events`. */
 function retryAfter(graph: TaskGraph, events: readonly RawEvent[], newTestsWritten = true): Readonly<{ graph: TaskGraph; task: Task }> {
   const settled = settle(graph, "T1", harnessLedgers(events).claude, { newTestsWritten });
@@ -745,7 +751,7 @@ describe("the implementation brief states I6 up front and names the repair on re
     const graph = i6Graph([LEDGER_TEST, LEDGER_FIXTURES, LEDGER_IMPL]);
     const task = taskOf(graph, "T1");
     const prompt = renderedPrompt(briefInput(graph, task));
-    const section = prompt.split("**I6 red-then-green")[1] ?? "";
+    const section = i6Section(prompt);
     expect(section).not.toBe("");
     expect(section).toContain(`Test files:\n- ${LEDGER_TEST}`);
     expect(section).toContain(`Implementation files:\n- ${LEDGER_FIXTURES}\n- ${LEDGER_IMPL}`);
@@ -759,7 +765,7 @@ describe("the implementation brief states I6 up front and names the repair on re
     const spec = "tests/ledger.spec.ts";
     const notATest = "tests/ledger.test.ts";
     const graph = populate([authoredTask("T1", ["src/ledger.ts", spec, notATest])], operatorPatternManifest([".spec.ts"]));
-    const section = renderedPrompt(briefInput(graph, taskOf(graph, "T1"))).split("**I6 red-then-green")[1] ?? "";
+    const section = i6Section(renderedPrompt(briefInput(graph, taskOf(graph, "T1"))));
     expect(section).toContain(`Test files:\n- ${spec}`);
     expect(section).toContain(`Implementation files:\n- src/ledger.ts\n- ${notATest}`);
   });
@@ -774,7 +780,7 @@ describe("the implementation brief states I6 up front and names the repair on re
 
   it("AS-013: an owing Task with no test file is told so before it starts", () => {
     const graph = i6Graph([LEDGER_IMPL, LEDGER_TYPES]);
-    const section = renderedPrompt(briefInput(graph, taskOf(graph, "T1"))).split("**I6 red-then-green")[1] ?? "";
+    const section = i6Section(renderedPrompt(briefInput(graph, taskOf(graph, "T1"))));
     expect(section).toContain("Test files:\nNone — your file list matches no test file");
     expect(section).toMatch(/no-test-files/);
   });
@@ -797,7 +803,7 @@ describe("the implementation brief states I6 up front and names the repair on re
 
   it("step 2 exempts the baseline git restore from the first implementation write, as the minting rule does", () => {
     const graph = i6Graph();
-    const section = renderedPrompt(briefInput(graph, taskOf(graph, "T1"))).split("**I6 red-then-green")[1] ?? "";
+    const section = i6Section(renderedPrompt(briefInput(graph, taskOf(graph, "T1"))));
     const step2 = section.split("\n").find((line) => line.startsWith("2. **First implementation write.**")) ?? "";
     expect(step2).toMatch(/by a file tool or a shell command/);
     expect(step2).toMatch(/`git restore`[^.]*mints no FileWrite and is exempt/);
@@ -810,10 +816,36 @@ describe("the implementation brief states I6 up front and names the repair on re
       [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
     const prompt = renderedPrompt(briefInput(graph, task));
     expect(prompt).toContain("proof:red-then-green-unproven:red-after-first-implementation-write");
-    expect(prompt).toContain(`git restore --source ${"d".repeat(40)} -- ${LEDGER_TYPES} ${LEDGER_IMPL}`);
+    expect(prompt).toContain(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL]));
     expect(prompt).toMatch(/mints no FileWrite/);
     expect(prompt).toMatch(/observe red[\s\S]*then implement/i);
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
+  });
+
+  it("the retry's restore command returns changed files to the baseline, deletes created ones, and mints no FileWrite", () => {
+    const repository = canonicalTempDir("loom-i6-restore-");
+    try {
+      const git = (...args: string[]): string => execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+      git("init", "-q");
+      git("config", "user.name", "Loom Test");
+      git("config", "user.email", "loom@example.test");
+      writeFileSync(join(repository, "ledger.ts"), "baseline\n");
+      git("add", "ledger.ts");
+      git("commit", "-qm", "baseline");
+      const baseline = git("rev-parse", "HEAD");
+      // The previous attempt changed a baseline file and created one, its name with a space.
+      writeFileSync(join(repository, "ledger.ts"), "attempt\n");
+      writeFileSync(join(repository, "ledger types.ts"), "created\n");
+
+      const command = baselineRestoreCommand(baseline, ["ledger.ts", "ledger types.ts"]);
+      execFileSync("bash", ["-c", command], { cwd: repository, stdio: "ignore" });
+
+      expect(readFileSync(join(repository, "ledger.ts"), "utf8")).toBe("baseline\n");
+      expect(() => readFileSync(join(repository, "ledger types.ts"))).toThrow(/ENOENT/);
+      expect(extractShellWriteTargets(command)).toEqual([]);
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
   });
 
   it("a retry of a Task with no recorded start commit restores from HEAD and says what that discards", () => {
@@ -821,7 +853,7 @@ describe("the implementation brief states I6 up front and names the repair on re
       [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
     const { start_sha: _start, ...unrecorded } = task;
     const prompt = renderedPrompt(briefInput(graph, unrecorded as Task));
-    expect(prompt).toContain(`git restore --source HEAD -- ${LEDGER_IMPL}`);
+    expect(prompt).toContain(baselineRestoreCommand("HEAD", [LEDGER_IMPL]));
     expect(prompt).toMatch(/No start commit was recorded for this Task, so `HEAD` stands in/);
     expect(prompt).not.toContain("<the Task's start commit>");
   });
@@ -928,10 +960,7 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
     const { stop, persistedTask } = await armedOwingTask("snapshot-failed");
     await stop({ kind: "snapshot-failed" });
     const task = persistedTask();
-    expect(task.implementation_attempt_history?.at(-1)).toMatchObject({
-      transition: "infrastructure-blocked",
-      consumesSemanticAttempt: false,
-    });
-    expect(task.retry_count).toBeUndefined();
+    expect(task.implementation_attempt_history?.at(-1)).toMatchObject({ transition: "infrastructure-blocked" });
+    expectInfrastructureBlocked(task);
   }, 30_000);
 });

@@ -958,7 +958,7 @@ async function settleBatchResults(
 /** Each spawn slot's write-grant token the owner's session issued for this
  *  batch, read before settlement releases the grants. No owner, or no grants
  *  recorded for the call, is no tokens. Pure over the session map. */
-function issuedGrantTokens(owner: SpawnClaimHolder | null, parentSessions: PiParentSessions): ReadonlyMap<number, string> {
+export function issuedGrantTokens(owner: SpawnClaimHolder | null, parentSessions: PiParentSessions): ReadonlyMap<number, string> {
   if (owner === null) return new Map();
   const grants = parentSessions.get(owner.sessionId)?.issuedWriteGrants.get(owner.toolCallId) ?? [];
   return new Map(grants.map(({ slot, token }) => [slot, token] as const));
@@ -975,18 +975,25 @@ const processingErrorResponse = (processingErrors: readonly string[]): PiSubagen
         isError: true,
       };
 
-/** Shape guard for `details.results`: the stderr/processing-error diagnostic
- *  when a pi version drifts the field away from an array, or `null` when it
- *  is a recognised array. Pure. */
-const resultsShapeDiagnostic = (details: Record<string, unknown> | null): string | null => {
-  if (details === null || !Object.hasOwn(details, "results")) {
-    return "subagent tool_result is missing details.results — successful evidence was not applied";
+/** A batch's `details.results`, read once: the raw results array, or the
+ *  stderr/processing-error diagnostic when a pi version drifts the field away
+ *  from an array. Pure. */
+type PiResultsField =
+  | Readonly<{ kind: "results"; raw: readonly unknown[] }>
+  | Readonly<{ kind: "unusable"; diagnostic: string }>;
+
+function piResultsField(rawDetails: unknown): PiResultsField {
+  if (!isRecord(rawDetails) || !Object.hasOwn(rawDetails, "results")) {
+    return { kind: "unusable", diagnostic: "subagent tool_result is missing details.results — successful evidence was not applied" };
   }
-  if (!Array.isArray(details.results)) {
-    return `subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied`;
-  }
-  return null;
-};
+  const results: unknown = rawDetails.results;
+  return Array.isArray(results)
+    ? { kind: "results", raw: results }
+    : {
+        kind: "unusable",
+        diagnostic: `subagent tool_result has unrecognized details.results shape (${typeof results}) — successful evidence was not applied`,
+      };
+}
 
 /** Settle one completed spawn batch. Resolves the processing-error response
  *  Pi shows the parent, or `undefined` when every result was processed. */
@@ -1021,12 +1028,8 @@ export async function dispatchPiSubagentStop(
   if (resolved.resolutionFailure !== null) return processingErrorResponse(processingErrors);
   const { reservation } = batch;
 
-  const rawDetails: unknown = event.details;
-  const details = isRecord(rawDetails)
-    ? rawDetails as Record<string, unknown>
-    : null;
-  const hasResults = details !== null && Object.hasOwn(details, "results");
-  const rawResults = hasResults && Array.isArray(details.results) ? details.results : [];
+  const resultsField = piResultsField(event.details);
+  const rawResults = resultsField.kind === "results" ? resultsField.raw : [];
   // Exact per-entry parsing precedes finalization. A matching-agent/exit-0
   // shell is not a successful implementation envelope until transcript shape
   // and exact returned Task identity have both parsed.
@@ -1052,10 +1055,9 @@ export async function dispatchPiSubagentStop(
 
   // Shape guard: a pi version drifting details.results away from an array
   // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
-  const shapeDiagnostic = resultsShapeDiagnostic(details);
-  if (shapeDiagnostic !== null) {
-    processingErrors.push(shapeDiagnostic);
-    process.stderr.write(`loom(pi): ${shapeDiagnostic}\n`);
+  if (resultsField.kind === "unusable") {
+    processingErrors.push(resultsField.diagnostic);
+    process.stderr.write(`loom(pi): ${resultsField.diagnostic}\n`);
   } else {
     const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
     processingErrors.push(...await settleBatchResults(batch, reviewWitnesses, event, sessionId, rawResults, entries));

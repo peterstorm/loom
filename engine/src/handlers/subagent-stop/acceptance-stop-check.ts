@@ -45,6 +45,9 @@ const describe = (cause: unknown): string => cause instanceof Error ? cause.mess
 const errnoCode = (error: unknown): unknown =>
   typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
 
+/** A counter no block was ever written to: the count every check starts from. */
+export const NO_BLOCKS_ISSUED: StopCheckBlockCount = Object.freeze({ kind: "count", blocks: 0 });
+
 /** Which check a counter file counts blocks for. Each has its own file, so their caps are independent. */
 type CounterCheck = "acceptance" | "affected";
 
@@ -60,7 +63,7 @@ function readBlocks(check: CounterCheck, agentKey: string): StopCheckBlockCount 
     text = readFileSync(path, "utf8");
   } catch (error) {
     return errnoCode(error) === "ENOENT"
-      ? { kind: "count", blocks: 0 }
+      ? NO_BLOCKS_ISSUED
       : { kind: "unreadable", reason: `${path}: ${describe(error)}` };
   }
   let parsed: unknown;
@@ -208,8 +211,6 @@ export const PRODUCTION_STOP_CHECK_PORTS: StopCheckShellPorts = Object.freeze({
   now: () => Date.now(),
 });
 
-const NO_BLOCKS_ISSUED = (): StopCheckBlockCount => ({ kind: "count", blocks: 0 });
-
 /**
  * Pi settles a batch only after its subagents have ended, so it cannot resume
  * one: there both checks run report-only. No counter is kept, because nothing
@@ -217,10 +218,10 @@ const NO_BLOCKS_ISSUED = (): StopCheckBlockCount => ({ kind: "count", blocks: 0 
  */
 export const REPORT_ONLY_STOP_CHECK_PORTS: StopCheckShellPorts = Object.freeze({
   ...PRODUCTION_STOP_CHECK_PORTS,
-  blocksIssued: NO_BLOCKS_ISSUED,
+  blocksIssued: () => NO_BLOCKS_ISSUED,
   recordBlock: () => undefined,
   clearBlocks: () => undefined,
-  affectedBlocksIssued: NO_BLOCKS_ISSUED,
+  affectedBlocksIssued: () => NO_BLOCKS_ISSUED,
   recordAffectedBlock: () => undefined,
   clearAffectedBlocks: () => undefined,
 });

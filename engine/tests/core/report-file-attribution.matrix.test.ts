@@ -46,7 +46,6 @@ const ROWS: readonly Row[] = [
   { label: "a JVM nested class", reported: "com.acme.BillingTest$Nested", expected: "svc/src/test/kotlin/com/acme/BillingTest.kt" },
   { label: "an undeclared JVM class", reported: "com.acme.OtherTest", expected: null },
   { label: "an absolute path inside the repository", reported: `${ROOT}/pi/tests/core/ledger.test.ts`, expected: "pi/tests/core/ledger.test.ts", needsRoot: true },
-  { label: "an absolute path inside the repository, root with a trailing slash", reported: `${ROOT}/engine/tests/core/ledger.test.ts`, expected: "engine/tests/core/ledger.test.ts", needsRoot: true },
   { label: "an absolute path outside the repository", reported: "/elsewhere/engine/tests/core/ledger.test.ts", expected: null },
   { label: "an absolute path in a sibling directory sharing the root's prefix", reported: `${ROOT}-copy/engine/tests/core/ledger.test.ts`, expected: null },
   { label: "the repository root itself", reported: ROOT, expected: null },

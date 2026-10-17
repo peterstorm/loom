@@ -36,8 +36,11 @@ export {
   type ClassifiedTestCommand,
 } from "./extract-evidence";
 export type {
+  EvidenceTarget,
+  HarnessToolCall,
   PiEvidenceNoRecordReason,
   PiEvidenceTargetDecision,
+  RecordToolEvidenceFn,
   ToolEvidencePorts,
 } from "./harness-tool-call-types";
 export {

@@ -22,6 +22,7 @@ import {
   AFFECTED_SECTION_HEADING,
   AFFECTED_STOP_CHECK_OFF,
   type AcceptancePlan,
+  type AffectedOffReason,
   type AffectedPlan,
   type AffectedStopCheckView,
   type RenderStopChecksPlanFn,
@@ -109,6 +110,16 @@ const acceptanceLines = (view: KnownAcceptanceView): readonly [string, ...string
     ])
     .exhaustive();
 
+/** The detail lines under an off affected check: what lies outside the runner
+ *  cwd, or why the builder refused the command. */
+const affectedOffDetail = (reason: AffectedOffReason): readonly string[] =>
+  match(reason)
+    .returnType<readonly string[]>()
+    .with({ kind: "no-runner" }, () => [])
+    .with({ kind: "no-changed-files" }, ({ outsideCwd }) => (outsideCwd ?? []).map((file) => `    ${AFFECTED_OUTSIDE_CWD_PREFIX}: ${file}`))
+    .with({ kind: "command-refused" }, ({ errors }) => errors.map((error) => `    ${error}`))
+    .exhaustive();
+
 /** The affected section, in the grammar `RenderStopChecksPlanFn` documents. */
 const affectedLines = (view: AffectedStopCheckView): readonly string[] => [
   AFFECTED_SECTION_HEADING,
@@ -116,12 +127,7 @@ const affectedLines = (view: AffectedStopCheckView): readonly string[] => [
     .returnType<readonly string[]>()
     .with({ kind: "off" }, ({ reason }) => [
       `  ${AFFECTED_STOP_CHECK_OFF} — ${AFFECTED_OFF_REASON_TEXT[reason.kind]}`,
-      ...match(reason)
-        .returnType<readonly string[]>()
-        .with({ kind: "no-runner" }, () => [])
-        .with({ kind: "no-changed-files" }, ({ outsideCwd }) => (outsideCwd ?? []).map((file) => `    ${AFFECTED_OUTSIDE_CWD_PREFIX}: ${file}`))
-        .with({ kind: "command-refused" }, ({ errors }) => errors.map((error) => `    ${error}`))
-        .exhaustive(),
+      ...affectedOffDetail(reason),
     ])
     .with({ kind: "on" }, ({ files, command }) => [
       "  changed files:",

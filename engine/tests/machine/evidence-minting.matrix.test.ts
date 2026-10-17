@@ -297,6 +297,15 @@ describe("INV-4: one evidence minting rule for both harnesses", () => {
     }
   });
 
+  it("both harness adapters read an inherited object key as an unrelated tool, never a prototype member", () => {
+    for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      const claude = claudeToolCall({ tool_name: name, tool_input: {}, tool_response: {}, tool_use_id: "call-x", cwd: repo });
+      const pi = piToolCall({ toolName: name, toolCallId: "call-x", input: {}, content: [], isError: false }, repo);
+      expect(claude, name).toEqual({ tool: "Other", input: {}, callId: "call-x", cwd: repo });
+      expect(pi, name).toEqual(claude);
+    }
+  });
+
   it("only the owner modules mint or append ledger facts (source scan of engine/src and pi)", () => {
     const allowed = new Set([
       "engine/src/machine/extract-evidence.ts",

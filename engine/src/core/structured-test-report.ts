@@ -571,6 +571,12 @@ export type ReportTestcase = Readonly<{
 
 export type JunitTestcasesResult = DomainResult<readonly ReportTestcase[], StructuredReportError>;
 
+/** The one collection-error rule every JUnit reader shares: a file that failed
+ *  to load is reported as a single testcase named after its own classname.
+ *  A reader that counts failures pairs it with a failed outcome. */
+export const isCollectionErrorTestcase = (testcase: Pick<ReportTestcase, "name" | "classname">): boolean =>
+  testcase.name === testcase.classname;
+
 function testcaseElements(element: ReportElement): readonly ReportElement[] {
   return element.name === "testcase" ? [element] : reportChildren(element).flatMap(testcaseElements);
 }
@@ -614,7 +620,7 @@ function junitFileResults(root: ReportElement): TestReportFiles | undefined {
       executed: (prior?.executed ?? 0) + 1,
       failed: (prior?.failed ?? 0) + (failed ? 1 : 0),
       skipped: (prior?.skipped ?? 0) + (testcase.outcome === "skipped" ? 1 : 0),
-      collectionError: (prior?.collectionError ?? false) || (failed && testcase.name === testcase.classname),
+      collectionError: (prior?.collectionError ?? false) || (failed && isCollectionErrorTestcase(testcase)),
     });
   }
   return { kind: "recorded", results: [...byFile.values()] };

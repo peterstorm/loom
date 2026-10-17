@@ -289,13 +289,12 @@ describe("stop-check-plan renders the affected plan (CT-2)", () => {
   });
 
   it("AS-033: FR-028: when the runner command cannot be formed for the changed files, the plan says so and shows the refusal", async () => {
-    const report = AFFECTED_REPORT;
     const nodeRunner = {
       executable: "node",
-      args: ["--test", "--test-reporter=junit", `--test-reporter-destination=${report}`, "{files}"],
+      args: ["--test", "--test-reporter=junit", `--test-reporter-destination=${AFFECTED_REPORT}`, "{files}"],
       cwd: ".",
       timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-      report: { kind: "required-file", path: report },
+      report: { kind: "required-file", path: AFFECTED_REPORT },
     };
     // A changed file named like an inline-evaluation option makes `node --test` refuse the argv.
     const at = await project(manifest({ affected: nodeRunner }), [{

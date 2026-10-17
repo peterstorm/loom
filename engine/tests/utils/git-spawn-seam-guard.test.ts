@@ -239,7 +239,7 @@ describe("the engine has exactly one place that spawns git", () => {
   });
 
   it("exempts only the bare `git` word in a listed pure parser, never a launch or a spawner", () => {
-    for (const [path] of Object.entries(GIT_COMMAND_WORD_ALLOWLIST)) {
+    for (const path of Object.keys(GIT_COMMAND_WORD_ALLOWLIST)) {
       const source = readFileSync(join(REPOSITORY_ROOT, path), "utf-8");
       const own = findings(path, source);
       expect(own.some(({ form }) => form === GIT_LITERAL_FORM), `${path} is word-allowlisted but no longer compares the literal — remove it`).toBe(true);

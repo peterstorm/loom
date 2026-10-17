@@ -128,7 +128,7 @@ Known residual limits, on purpose and documented:
   only under the sole-active rule, so in a contended session it runs
   ungated. Claude Code stamps `agent_id` on every subagent call, so parallel
   Waves stay gated.
-- Pi children now RECORD ledger facts (a child holding a valid
+- Pi children RECORD ledger facts (a child holding a valid
   parent-issued write grant appends to the parent's ledger under its grant
   epoch; a child without one records nothing and says so on stderr), but Pi
   children still run without the live phase gate: the `tool_call` guard
@@ -156,7 +156,7 @@ Known residual limits, on purpose and documented:
   redirect/`tee` targets, which mint `FileWrite` too, INCLUDING targets of
   the very command line being judged, so a one-call
   `printf '{…}' > r.json; npx vitest --outputFile=r.json` stage is
-  vetoed). The destinations of a literal `mv`, `git mv` or `cp` now mint
+  vetoed). The destinations of a literal `mv`, `git mv` or `cp` mint
   `FileWrite` too (so `cp staged.json r.json` is vetoed, and a renamed file
   appears under its new path among the I7 changed files). A Bash write
   whose target the command text does not name statically — `dd of=`, a
@@ -170,8 +170,8 @@ Known residual limits, on purpose and documented:
 - Bash-minted `FileWrite` events carry `via: "shell"` and never advance a
   guard (the gate cannot enforce Bash) — they exist for the artifact veto,
   the modified-after-pass demotion, I6's first-implementation-write step
-  and I7's changed files. A shell write is therefore logged but can never be
-  vetoed. Tool writes (`via: "tool"`, or absent on pre-`via` records) are
+  and I7's changed files. The phase gate cannot deny a shell write, so a
+  shell write is only ever logged. Tool writes (`via: "tool"`, or absent on pre-`via` records) are
   the only guard-advancing writes.
 - Exit-status attribution is composition-aware and fails closed: the
   line's exit is credited to the classified test segment only when
