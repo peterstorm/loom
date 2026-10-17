@@ -32,12 +32,12 @@ import {
   parseSessionId,
   type AgentId,
   type SessionId,
+  type SessionTaskGraphPointerBinding,
 } from "../../src/machine";
 import type { EvidenceRecord } from "../../src/machine/types";
 import { claudeToolCall, piToolCall } from "../../src/core/harness-tool-call";
 import { createPiEvidenceRecorder } from "../../../pi/evidence-recorder";
 import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
-import type { SessionTaskGraphPointerBinding } from "../../src/machine";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { inMemorySessionRegistry } from "./fake-session-registry";
 

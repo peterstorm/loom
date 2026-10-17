@@ -18,13 +18,13 @@
  */
 
 import type { ChangedFilePath, ChangedFiles, ChangedFilesAtStopFn } from "./affected-stop-check-types";
-import { nonEmpty } from "./acceptance-contract/kernel";
+import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import { parseRepositoryPath } from "./repository-path";
 import { parseReviewPath } from "./review-packet";
 
 /** No changed files: the derivation over an epoch with none, and the plan
  *  input wherever only the acceptance arm is asked about. */
-export const NO_CHANGED_FILES: ChangedFiles = Object.freeze({ kind: "none" });
+export const NO_CHANGED_FILES: ChangedFiles = freeze({ kind: "none" });
 
 /**
  * A FileWrite path as a canonical repository-relative path, or null when it
@@ -45,5 +45,5 @@ export const changedFilesAtStop: ChangedFilesAtStopFn = (events, repositoryRoot,
     return path === null ? [] : [path];
   });
   const files = nonEmpty([...new Set(written)].filter((path) => exists(path)));
-  return files === null ? NO_CHANGED_FILES : Object.freeze({ kind: "some", files });
+  return files === null ? NO_CHANGED_FILES : freeze({ kind: "some", files });
 };

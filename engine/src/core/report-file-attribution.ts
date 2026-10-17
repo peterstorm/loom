@@ -16,11 +16,13 @@ const JVM_CLASS = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
 const ABSOLUTE = /^(?:\/|[A-Za-z]:\/)/;
 
 /**
- * An absolute identity as a repository-relative path, or null when it is
- * absolute but not strictly inside `repositoryRoot` (or no root is known). A
- * relative identity is returned unchanged.
+ * An absolute path as a repository-relative one, or null when it is absolute
+ * but not strictly inside `repositoryRoot` (or no root is known). A relative
+ * path is returned unchanged. `reported` must already be normalized
+ * (`normalizePlanPath`). This is the one absolute-to-relative rule: the I6
+ * judge maps a written FileWrite path through it too.
  */
-function repositoryRelative(reported: string, repositoryRoot: string | null): string | null {
+export function repositoryRelative(reported: string, repositoryRoot: string | null): string | null {
   if (!ABSOLUTE.test(reported)) return reported;
   if (repositoryRoot === null) return null;
   const root = normalizePlanPath(repositoryRoot).replace(/\/+$/, "");

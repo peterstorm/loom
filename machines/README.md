@@ -133,9 +133,10 @@ Known residual limits, on purpose and documented:
   epoch; a child without one records nothing and says so on stderr), but Pi
   children still run without the live phase gate: the `tool_call` guard
   cannot name the calling agent. Each Pi child is a separate process, so
-  nothing is credited to the wrong agent; the gate is simply absent. Pi's
-  bash tool exposes no exit code (0.83, 0.84), so a Pi `TestRun`'s exit is
-  `isError` read as 1 or 0, and an abort or timeout is interrupted.
+  nothing is credited to the wrong agent; the gate is simply absent. Pi
+  0.83 and 0.84 report no bash exit code, so a Pi `TestRun`'s exit is
+  `details.exitCode` when an integer is present, otherwise `isError` read
+  as 1 or 0; an abort or timeout is interrupted.
 - Report freshness is *call-scoped*: the PreToolUse Bash hook stamps the
   start of every Bash call (`<session>.callstart.json`, keyed by the
   harness `tool_use_id`), and a disk artifact (explicit `--outputFile`

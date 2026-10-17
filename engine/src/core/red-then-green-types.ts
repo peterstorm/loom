@@ -26,15 +26,19 @@ import type { Evidence } from "../machine/types";
  *
  * `executed` and `failed` count this file's testcases under the report
  * format's own counting rule, so the results of one report reconcile with its
- * summary counts. `collectionError` is true when the file failed to collect or
- * import: Vitest JUnit's synthetic testcase whose `name` equals its
- * `classname`, or a failed Vitest JSON entry with no `assertionResults`. A
- * file whose only failure is a collection error is never a behavioral red.
+ * summary counts. That rule counts every declared testcase, so `skipped`
+ * names how many of `executed` never ran (skipped, pending, todo, disabled);
+ * `failed + skipped <= executed`, and `executed - skipped` is how many actually
+ * ran. `collectionError` is true when the file failed to collect or import:
+ * Vitest JUnit's synthetic testcase whose `name` equals its `classname`, or a
+ * failed Vitest JSON entry with no `assertionResults`. A file whose only
+ * failure is a collection error is never a behavioral red.
  */
 export type TestFileResult = Readonly<{
   file: string;
   executed: number;
   failed: number;
+  skipped: number;
   collectionError: boolean;
 }>;
 
@@ -122,7 +126,8 @@ export type RedThenGreenGap =
  * first qualifying behavioral red on a Task test file, the first FileWrite
  * (tool or shell) to a Task implementation file after it, and the first
  * qualifying green after that write, which exits 0 and attributes every Task
- * test file with `executed >= 1`, `failed === 0` and no collection error.
+ * test file with at least one testcase that ran (`executed - skipped >= 1`),
+ * `failed === 0` and no collection error.
  */
 export type RedThenGreenObservation =
   | Readonly<{ kind: "shown"; red: RunRef; implementationWrite: string; green: RunRef }>

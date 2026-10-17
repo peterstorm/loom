@@ -178,7 +178,7 @@ const recorded = (results: readonly TestFileResult[]): TestReportFiles =>
   ({ kind: "recorded", results: [...results].sort(byFile) });
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
-  ({ file, executed, failed, collectionError });
+  ({ file, executed, failed, skipped: 0, collectionError });
 
 // --- Ledger lines ---
 
@@ -276,7 +276,7 @@ describe("TestRun per-file results at capture (CT-1)", () => {
       expect(isRecorded(files)).toBe(true);
       if (!isRecorded(files)) continue;
       expect(files.results.find(({ file }) => file === broken)).toMatchObject({ collectionError: true });
-      expect(files.results.find(({ file }) => file === red)).toMatchObject({ failed: 1, collectionError: false });
+      expect(files.results.find(({ file }) => file === red)).toMatchObject({ failed: 1, skipped: 0, collectionError: false });
     }
   });
 
@@ -382,7 +382,7 @@ describe("TestRun per-file results at ledger read-back (CT-1)", () => {
       { kind: "recorded", results: [...CONSISTENT_RESULTS.slice(0, 2), result("tests/red.test.ts", -2, 1)] },
       { kind: "recorded", results: [...CONSISTENT_RESULTS.slice(0, 2), result("tests/red.test.ts", 1.5, 1)] },
       { kind: "recorded", results: [...CONSISTENT_RESULTS.slice(0, 2), result("tests/red.test.ts", 0, 1)] },
-      { kind: "recorded", results: [...CONSISTENT_RESULTS.slice(0, 2), { file: "tests/red.test.ts", executed: 2, failed: 1, collectionError: "no" }] },
+      { kind: "recorded", results: [...CONSISTENT_RESULTS.slice(0, 2), { file: "tests/red.test.ts", executed: 2, failed: 1, skipped: 0, collectionError: "no" }] },
       { kind: "recorded", results: [result("tests/broken.test.ts", 1, 1, true), result("tests/red.test.ts", 2, 0), result("tests/red.test.ts", 2, 1)] },
     ];
     for (const files of malformed) {

@@ -132,10 +132,10 @@ function findingsErrorsOf(task: Record<string, unknown>, label: string): string[
  */
 export type ValidationScope = "state-file" | "decompose-payload";
 
-/** Validate a full TaskGraph at the stored-state or authored-decompose boundary. */
 /** The graph's I6 era, which decides the obligations each stored Proof carries
- *  (INV-6). A malformed manifest is already reported by `parseTaskGraph` above;
- *  its Tasks are then checked as the legacy era, so the graph stays refused. */
+ *  (INV-6). A malformed manifest is already reported by `parseTaskGraph` in
+ *  `validateFull`; its Tasks are then checked as the legacy era, so the graph
+ *  stays refused. */
 function taskGraphRedThenGreenEra(json: Record<string, unknown>): RedThenGreenEra {
   const parsed = json.verification_manifest === undefined
     ? undefined
@@ -143,6 +143,7 @@ function taskGraphRedThenGreenEra(json: Record<string, unknown>): RedThenGreenEr
   return redThenGreenEra(parsed?.ok === true ? parsed.value : undefined);
 }
 
+/** Validate a full TaskGraph at the stored-state or authored-decompose boundary. */
 export function validateFull(
   json: Record<string, unknown>,
   scope: ValidationScope = "state-file",

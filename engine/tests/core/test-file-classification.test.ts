@@ -12,8 +12,9 @@
  *   - `linter/programmatic/config.ts`, whose `isTestFile` skip is the engine
  *     default.
  * The settlement shell (`exact-implementation-settlement.ts`) and the I6 brief
- * section (`implementation-brief.ts`) gain their rows when they start
- * classifying (T9).
+ * section (`implementation-brief.ts`) call the owner's `classifyTaskFiles`
+ * over the frozen `testFiles` directly; `i6-settlement.matrix.test.ts` and
+ * `implementation-brief.test.ts` pin what each does with the partition.
  */
 
 import fc from "fast-check";
@@ -23,6 +24,7 @@ import {
   ENGINE_DEFAULT_TEST_FILES,
   classifyTaskFiles,
   isTestFileBySuffixes,
+  type FrozenTestFiles as OwnerFrozenTestFiles,
 } from "../../src/core/test-file-classification";
 import type { FrozenStopCheckManifestFields, FrozenTestFiles } from "../../src/core/affected-stop-check-types";
 import {
@@ -31,6 +33,7 @@ import {
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { isTestFile } from "../../src/linter/programmatic/config";
+import type { Equal } from "../fixtures/type-equality";
 
 const OPERATOR_SUFFIXES = [".spec.ts", ".it.ts", "Test.java"] as const;
 
@@ -65,9 +68,8 @@ const FILE_LIST: readonly string[] = [
   "engine/tests/core/ledger.test.ts.snap",
 ];
 
-// The owner's FrozenTestFiles and CT-2's are one shape; each must accept the other.
-type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-const sameFrozenTestFiles: MutuallyAssignable<FrozenTestFiles, import("../../src/core/test-file-classification").FrozenTestFiles> = true;
+// The owner's FrozenTestFiles and CT-2's are one type.
+const sameFrozenTestFiles: Equal<FrozenTestFiles, OwnerFrozenTestFiles> = true;
 
 describe("INV-2: the owner module", () => {
   it("declares the same FrozenTestFiles shape as the CT-2 contract", () => {

@@ -955,6 +955,15 @@ async function settleBatchResults(
   return processingErrors;
 }
 
+/** Each spawn slot's write-grant token the owner's session issued for this
+ *  batch, read before settlement releases the grants. No owner, or no grants
+ *  recorded for the call, is no tokens. Pure over the session map. */
+function issuedGrantTokens(owner: SpawnClaimHolder | null, parentSessions: PiParentSessions): ReadonlyMap<number, string> {
+  if (owner === null) return new Map();
+  const grants = parentSessions.get(owner.sessionId)?.issuedWriteGrants.get(owner.toolCallId) ?? [];
+  return new Map(grants.map(({ slot, token }) => [slot, token] as const));
+}
+
 const processingErrorResponse = (processingErrors: readonly string[]): PiSubagentStopResponse | undefined =>
   processingErrors.length === 0
     ? undefined
@@ -1002,8 +1011,7 @@ export async function dispatchPiSubagentStop(
     reservation: resolved.reservation,
     parentSessions,
     durableClaimReleases,
-    grantTokens: new Map((owner === null ? [] : parentSessions.get(owner.sessionId)?.issuedWriteGrants.get(owner.toolCallId) ?? [])
-      .map(({ slot, token }) => [slot, token] as const)),
+    grantTokens: issuedGrantTokens(owner, parentSessions),
   });
   const processingErrors: string[] = [
     ...(resolved.resolutionFailure === null ? [] : [resolved.resolutionFailure]),

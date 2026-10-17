@@ -145,15 +145,22 @@ function acceptanceArm(taskId: string, plan: AcceptancePlan, rootFault: string |
   return rootFault === null ? Object.freeze({ kind: "runnable", plan }) : acceptanceNote(taskId, rootFault);
 }
 
-function affectedArm(taskId: string, plan: AffectedPlan, observation: ChangedFilesObservation | Readonly<{ kind: "no-root"; reason: string }>): Arm<OnAffected> {
-  if (plan.kind === "off" && plan.reason.kind === "no-runner") return IDLE;
+type AffectedObservation = ChangedFilesObservation | Readonly<{ kind: "no-root"; reason: string }>;
+
+/** Why the affected check cannot decide whatever its plan says: no root, or no readable epoch. */
+function affectedFault(taskId: string, observation: AffectedObservation): CheckResult | null {
   if (observation.kind === "no-root") return affectedNote(taskId, "repository-unavailable", observation.reason);
   if (observation.kind === "unavailable") return affectedNote(taskId, "crashed", observation.reason);
-  if (plan.kind === "on") return Object.freeze({ kind: "runnable", plan });
-  return match(plan.reason)
+  return null;
+}
+
+function affectedArm(taskId: string, plan: AffectedPlan, observation: AffectedObservation): Arm<OnAffected> {
+  if (plan.kind === "on") return affectedFault(taskId, observation) ?? Object.freeze({ kind: "runnable", plan });
+  const { reason } = plan;
+  // A missing runner is idle before the changed files matter.
+  if (reason.kind === "no-runner") return IDLE;
+  return affectedFault(taskId, observation) ?? match(reason)
     .returnType<CheckResult>()
-    // Unreachable: a missing runner is idle above, before the changed files matter.
-    .with({ kind: "no-runner" }, () => IDLE)
     .with({ kind: "no-changed-files" }, ({ outsideCwd }) => affectedNote(taskId, "no-changed-files", outsideCwd === null
       ? null
       : outsideCwd.map((file) => `${AFFECTED_OUTSIDE_CWD_PREFIX}: ${file}`).join("; ")))

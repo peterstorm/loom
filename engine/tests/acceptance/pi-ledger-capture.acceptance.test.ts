@@ -740,7 +740,7 @@ describe("CT-3: Pi ledger capture through the shared minting rule", () => {
             failed: 1,
             files: {
               kind: "recorded",
-              results: [{ file: join(root, TEST_FILE), executed: 1, failed: 1, collectionError: false }],
+              results: [{ file: join(root, TEST_FILE), executed: 1, failed: 1, skipped: 0, collectionError: false }],
             },
           }),
         },

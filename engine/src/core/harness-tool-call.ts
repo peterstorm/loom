@@ -8,8 +8,10 @@
  *
  * Each reads its harness's own result shape and nothing else, so the facts
  * the shared shell (`machine/tool-evidence-recorder.ts`) mints from one call
- * are the same on both harnesses. Both are total: an unknown shape degrades
- * to the outcome that trusts least, never to a throw.
+ * are the same on both harnesses. Both are total and never throw. An unknown
+ * Bash shape degrades to `exit-unknown`, the outcome that trusts least; an
+ * unknown file-tool shape counts as success, so a harness format change
+ * cannot starve the ledger of writes (`isClaudeToolFailure`).
  *
  * Pi 0.83 `tool_result` shape, probed in
  * `@earendil-works/pi-coding-agent@0.83.0` (dist/core/extensions/types.d.ts,

@@ -21,9 +21,10 @@ import {
   type TestReportSummary,
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
+import type { Equal } from "../fixtures/type-equality";
 
-const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
-  ({ file, executed, failed, collectionError });
+const result = (file: string, executed: number, failed: number, collectionError = false, skipped = 0): TestFileResult =>
+  ({ file, executed, failed, skipped, collectionError });
 
 const recorded = (results: readonly TestFileResult[]): TestReportFiles => ({ kind: "recorded", results });
 
@@ -40,7 +41,6 @@ const bytes = (content: string): Uint8Array => new TextEncoder().encode(content)
 // --- The owner restates CT-1's per-file types (an import would close a module
 // cycle); these compile-time pins fail typecheck if the two ever drift apart. ---
 
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 type OwnerFiles = NonNullable<TestReportSummary["files"]>;
 type OwnerFileResult = Extract<OwnerFiles, { kind: "recorded" }>["results"][number];
 const filesTypesAgree: Equal<OwnerFiles, TestReportFiles> = true;
@@ -57,7 +57,8 @@ describe("owner per-file types", () => {
 /** A behavioral (non-collection-error) per-file result under either format. */
 const behavioralResult = (file: string) =>
   fc.integer({ min: 0, max: 20 }).chain((executed) =>
-    fc.integer({ min: 0, max: executed }).map((failed) => result(file, executed, failed)));
+    fc.integer({ min: 0, max: executed }).chain((failed) =>
+      fc.integer({ min: 0, max: executed - failed }).map((skipped) => result(file, executed, failed, false, skipped))));
 
 /** Distinct-file per-file results, valid under both formats' rules. */
 const resultsArb = fc.uniqueArray(fc.stringMatching(/^[a-z]{1,6}\/[a-z]{1,6}\.test\.ts$/u), { maxLength: 6 })
@@ -104,6 +105,9 @@ describe("reconcileFileResults (INV-8 reconcile laws)", () => {
       { kind: "recorded", results: [], extra: true },
       { kind: "unrecorded", results: [] },
       { kind: "recorded", results: [{ file: "a.test.ts", executed: 1, failed: 0 }] },
+      // The four-field shape that predates `skipped` is refused, never defaulted.
+      { kind: "recorded", results: [{ file: "a.test.ts", executed: 1, failed: 0, collectionError: false }] },
+      { kind: "recorded", results: [result("a.test.ts", 1, 0, false, 2)] },
       { kind: "recorded", results: [{ ...result("a.test.ts", 1, 0), note: "x" }] },
       { kind: "recorded", results: [result(" ", 1, 0)] },
       { kind: "recorded", results: [result("a.test.ts", 1, 2)] },
@@ -156,7 +160,7 @@ describe("parseReportSummary with per-file results (sole constructor)", () => {
     const summary = mint([result("tests/a.test.ts", 2, 1)]);
     expect(JSON.parse(JSON.stringify(summary))).toEqual({
       total: 2, failed: 1, source: "junit-xml",
-      files: { kind: "recorded", results: [{ file: "tests/a.test.ts", executed: 2, failed: 1, collectionError: false }] },
+      files: { kind: "recorded", results: [{ file: "tests/a.test.ts", executed: 2, failed: 1, skipped: 0, collectionError: false }] },
     });
     expect(Object.isFrozen(summary)).toBe(true);
     expect(Object.isFrozen(summary?.files)).toBe(true);
@@ -167,8 +171,8 @@ describe("parseReportSummary with per-file results (sole constructor)", () => {
   });
 
   it("FR-003: the minted per-file results are a re-minted copy, never the caller's objects", () => {
-    const input: { file: string; executed: number; failed: number; collectionError: boolean }[] =
-      [{ file: "tests/a.test.ts", executed: 1, failed: 0, collectionError: false }];
+    const input: { file: string; executed: number; failed: number; skipped: number; collectionError: boolean }[] =
+      [{ file: "tests/a.test.ts", executed: 1, failed: 0, skipped: 0, collectionError: false }];
     const summary = mint(input);
     input[0]!.failed = 1;
     expect(summary?.files).toEqual(recorded([result("tests/a.test.ts", 1, 0)]));
@@ -202,6 +206,18 @@ describe("Vitest JSON per-file projection", () => {
       result("/repo/tests/broken.test.ts", 0, 0, true),
       result("/repo/tests/b.test.ts", 3, 1),
     ]));
+  });
+
+  it("FR-006: an assertion that neither passed nor failed is a declared testcase that never ran", () => {
+    const summary = parseVitestJson(report(
+      [{
+        name: "/repo/tests/a.test.ts",
+        status: "passed",
+        assertionResults: [assertion("passed"), assertion("skipped"), assertion("pending"), assertion("todo")],
+      }],
+      { total: 4, passed: 1, failed: 0 },
+    ));
+    expect(summary?.files).toEqual(recorded([result("/repo/tests/a.test.ts", 4, 0, false, 3)]));
   });
 
   it("FR-004: a report without testResults keeps its summary with per-file results unrecorded", () => {
@@ -240,7 +256,7 @@ describe("JUnit per-file projection", () => {
     expect(summary).toMatchObject({ total: 4, failed: 2, source: "junit-xml" });
     expect(summary?.files).toEqual(recorded([
       result("tests/broken.test.ts", 1, 1, true),
-      result("tests/red.test.ts", 3, 1),
+      result("tests/red.test.ts", 3, 1, false, 1),
     ]));
   });
 

@@ -37,9 +37,9 @@ import { stopCheckExpectation } from "./stop-check";
 
 /** The off-reason precedence is the order the steps run in: no runner, then
  *  nothing owed, then the command refused. */
-function acceptancePlan(graph: TaskGraph, task: Task, manifest: FrozenVerificationManifest | undefined): AcceptancePlan {
+function acceptancePlan(graph: TaskGraph, task: Task): AcceptancePlan {
   const off = (reason: StopCheckOffReason): AcceptancePlan => freeze({ kind: "off", reason: freeze(reason) });
-  const runner = manifest?.acceptanceRunner;
+  const runner = graph.verification_manifest?.acceptanceRunner;
   if (runner === undefined) return off({ kind: "no-runner" });
   const check = stopCheckExpectation(graph.acceptance_contracts ?? [], graph.tasks, task);
   if (check.kind === "none") return off({ kind: "nothing-owed" });
@@ -69,11 +69,10 @@ function affectedPlan(manifest: FrozenVerificationManifest | undefined, changed:
 export const planStopChecks: PlanStopChecksFn = (graph, taskId, changed): StopChecksPlan => {
   const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return freeze({ kind: "unknown-task" });
-  const manifest = graph.verification_manifest;
   return freeze({
     kind: "known",
     wave: task.wave,
-    acceptance: acceptancePlan(graph, task, manifest),
-    affected: affectedPlan(manifest, changed),
+    acceptance: acceptancePlan(graph, task),
+    affected: affectedPlan(graph.verification_manifest, changed),
   });
 };

@@ -10,9 +10,10 @@
  */
 
 import { normalizePlanPath } from "./plan-path-match";
-import { attributeReportedFile } from "./report-file-attribution";
+import { attributeReportedFile, repositoryRelative } from "./report-file-attribution";
 import type {
   JudgeRedThenGreenFn,
+  RedThenGreenFailureKind,
   RedThenGreenGap,
   RedThenGreenObservation,
   RunRef,
@@ -20,6 +21,17 @@ import type {
   TestFileResult,
 } from "./red-then-green-types";
 import type { Evidence } from "../machine/types";
+
+/** The one spelling of the receipt failure-kind prefix every I6 gap mints. */
+const RED_THEN_GREEN_FAILURE_PREFIX = "proof:red-then-green-unproven:";
+
+/** The settlement receipt failure kind one I6 gap mints: each gap is its own kind (FR-009). */
+export const redThenGreenFailureKind = (gap: RedThenGreenGap): RedThenGreenFailureKind =>
+  `${RED_THEN_GREEN_FAILURE_PREFIX}${gap.kind}`;
+
+/** Whether a receipt failure kind is one an I6 gap minted. */
+export const isRedThenGreenFailureKind = (kind: string): kind is RedThenGreenFailureKind =>
+  kind.startsWith(RED_THEN_GREEN_FAILURE_PREFIX);
 
 type TestRunFact = Extract<Evidence, { kind: "TestRun" }>;
 
@@ -40,16 +52,6 @@ type EpochReading = Readonly<{
   firstImplementationWrite: Readonly<{ index: number; path: string }> | null;
   holdsUntrustedRun: boolean;
 }>;
-
-const ABSOLUTE = /^(?:\/|[A-Za-z]:\/)/;
-
-/** A written path as repository-relative, or null when it is absolute outside the root. */
-function repositoryPath(written: string, repositoryRoot: string): string | null {
-  const path = normalizePlanPath(written);
-  if (!ABSOLUTE.test(path)) return path;
-  const prefix = `${normalizePlanPath(repositoryRoot).replace(/\/+$/, "")}/`;
-  return path.startsWith(prefix) && path.length > prefix.length ? path.slice(prefix.length) : null;
-}
 
 function attributedResults(
   run: TestRunFact,
@@ -80,7 +82,7 @@ function readEpoch(
   // Local accumulation over one ordered pass; nothing escapes but the frozen reading.
   for (const [index, event] of events.entries()) {
     if (event.kind === "FileWrite" && firstImplementationWrite === null) {
-      const relative = repositoryPath(event.path, repositoryRoot);
+      const relative = repositoryRelative(normalizePlanPath(event.path), repositoryRoot);
       const declared = relative === null ? undefined : implementationFiles.get(relative);
       if (declared !== undefined) firstImplementationWrite = Object.freeze({ index, path: declared });
     }
@@ -99,11 +101,16 @@ function readEpoch(
 const isRed = (run: QualifyingRun): boolean =>
   [...run.results.values()].some((results) => results.some(({ failed, collectionError }) => failed > 0 && !collectionError));
 
-/** A full green: exit 0, and every Task test file executed, passed and collected (FR-006). */
+/**
+ * A full green: exit 0, and every Task test file executed, passed and
+ * collected (FR-006). "Executed" means ran: a file whose testcases were all
+ * skipped (or pending, todo, disabled) declares tests but runs none, so it
+ * cannot stand in for the green the red demanded.
+ */
 const isGreen = (run: QualifyingRun, testFiles: readonly string[]): boolean =>
   run.exit === 0 && testFiles.every((file) => {
     const results = run.results.get(file) ?? [];
-    return results.reduce((sum, { executed }) => sum + executed, 0) >= 1 &&
+    return results.reduce((sum, { executed, skipped }) => sum + executed - skipped, 0) >= 1 &&
       results.every(({ failed, collectionError }) => failed === 0 && !collectionError);
   });
 

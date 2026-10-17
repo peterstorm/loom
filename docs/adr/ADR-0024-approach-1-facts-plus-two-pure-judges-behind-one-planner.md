@@ -19,7 +19,7 @@ The design question was how to add per-file facts, one completion-time judgment 
      - It reuses existing pieces: `testcaseAcceptanceFile` (generalized into `attributeReportedFile`), the `acceptanceRunnerCheck` command builder, the runner lock, and exact settlement.
      - Lock, budget, counters and message composition stay in one shell, not in dispatch.
    - Cons:
-     - The planner's signature widens. It takes `ChangedFiles` as an explicit input, and an additive wrapper (`planStopCheck`) had to stay alive for one Wave so the live hook kept compiling.
+     - The planner's signature widens. It takes `ChangedFiles` as an explicit input, and an additive wrapper (`planStopCheck`) had to stay alive for one Wave so the live hook kept compiling. It has since been removed: `planStopChecks` is the only planner.
      - I6 must be re-judged on every read. Paths with no ledger, such as `reconcileTaskFromStoredEvidence`, need an explicit carry-forward rule.
      - The report summary shape grows. Every producer, Claude and Pi alike, must reconcile per-file counts against the summary.
 
@@ -45,7 +45,7 @@ The design question was how to add per-file facts, one completion-time judgment 
 **TestRun facts gain per-file results. I6 is a pure judgment over the ordered epoch facts, read at completion time. I7 is planned by the existing single planner, extended for it, and one stop shell runs both checks.**
 
 Facts:
-- `TestReportSummary` gains `files: TestReportFiles`. Its two arms are `unrecorded` and `recorded` with `TestFileResult[]`, and each result is `{file, executed, failed, collectionError}` keyed by the report's own identity. One smart constructor, `reconcileFileResults`, gates this shape in the parsers, in `mergeSummaries` and in the ledger read-back (INV-8; `engine/src/core/structured-test-report.ts`, `engine/src/machine/test-report.ts`, `engine/src/machine/evidence.ts`). A malformed or unreconciled `files` voids the whole report, so the run is untrusted.
+- `TestReportSummary` gains `files: TestReportFiles`. Its two arms are `unrecorded` and `recorded` with `TestFileResult[]`, and each result is `{file, executed, failed, skipped, collectionError}` keyed by the report's own identity. `executed` counts declared testcases, so `skipped` says how many of them never ran. One smart constructor, `reconcileFileResults`, gates this shape in the parsers, in `mergeSummaries` and in the ledger read-back (INV-8; `engine/src/core/structured-test-report.ts`, `engine/src/machine/test-report.ts`, `engine/src/machine/evidence.ts`). A malformed or unreconciled `files` voids the whole report, so the run is untrusted.
 - Both harnesses mint facts through one rule. `extractEvidence` takes a normalized `HarnessToolCall` (`engine/src/core/harness-tool-call.ts`). `recordToolEvidence` in `engine/src/machine/tool-evidence-recorder.ts` is its only caller and the only ledger appender (INV-4). The Claude adapter is `handlers/post-tool-use/record-evidence.ts`, and the Pi adapter is `pi/evidence-recorder.ts`, which records into the parent's ledger under the child's epoch.
 - A reported file is mapped to a declared `file_list` entry by one neutral pure module, `engine/src/core/report-file-attribution.ts` (`attributeReportedFile`, INV-5). Test and implementation files are split by one classifier, `engine/src/core/test-file-classification.ts` (INV-2).
 
@@ -76,4 +76,4 @@ I7 (stop time):
 - The planner and the report summary are now wider, shared contracts. Any later stop check must also be added to `planStopChecks` and `runStopChecks`, which concentrates change in those two modules.
 - I6 depends on the ordering of past ledger facts, so a retry that does not first restore the implementation files can never observe red. This is mitigated by the brief's up-front I6 section and its retry remedy, not by the judge.
 - Per-file reconciliation is strict. A report whose per-file counts do not reconcile voids the whole report and makes the run untrusted, even when the whole-run counts alone would have been usable.
-- Rollout needed care while the engine runs live from the checkout. The additive `planStopCheck` wrapper had to stay until the shell switched, and every edit to a hook-imported file had to land as one commit.
+- Rollout needed care while the engine runs live from the checkout. The additive `planStopCheck` wrapper had to stay until the shell switched (it is now removed), and every edit to a hook-imported file had to land as one commit.

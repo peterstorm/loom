@@ -19,7 +19,9 @@
  * corrupt one surfaces the parser's error rather than reading as missing; an
  * unknown Task id names the id, so a typo never reads as "nothing owed"; a
  * live attempt whose ledger epoch cannot be read surfaces why, rather than
- * reading as "no changed files".
+ * reading as "no changed files". When no readable sidecar names the Task but
+ * some sidecar could not be read, the plan still renders, followed by a note
+ * that the Task's attempt may be among the unreadable ones.
  */
 
 import { readdirSync, realpathSync } from "node:fs";
@@ -54,6 +56,10 @@ const toStdout = (text: string): void => {
 /** A Task's live attempt, as the plan view finds it read-only. */
 export type LiveAttemptEvidence =
   | Readonly<{ kind: "no-live-attempt" }>
+  /** No readable sidecar names the Task, but some sidecar could not be read,
+   *  so the Task's live attempt may be among them: the plan renders with no
+   *  changed files and says why that may be wrong. */
+  | Readonly<{ kind: "uninspectable"; reason: string }>
   | Readonly<{ kind: "live"; ledger: LedgerObservation }>;
 
 /** The read-only port: the live attempt of `taskId` against the TaskGraph at `statePath`. */
@@ -77,30 +83,40 @@ function sidecarIdentity(leaf: string): Readonly<{ sessionId: string; agentId: s
   return Object.freeze({ sessionId: stem.slice(0, dot), agentId: Buffer.from(hex, "hex").toString("utf8") });
 }
 
+type LiveClaudeAttempt = Readonly<{ sidecar: ClaudeImplementationAttemptSidecar; agentType: AgentType | null }>;
+
 /**
  * The Claude implementation sidecars whose authority names `taskId` on this
- * TaskGraph, with the role their agent is rostered under. A sidecar whose
- * agent is no longer on its session roster belongs to an attempt that has
- * ended.
+ * TaskGraph, with the role their agent is rostered under, and why each
+ * sidecar that could not be read failed. A sidecar whose agent is no longer
+ * on its session roster belongs to an attempt that has ended; one removed
+ * between the listing and the read is an ended attempt too, not a failure.
  */
-function liveClaudeAttempts(taskId: string, canonicalStatePath: string): readonly Readonly<{ sidecar: ClaudeImplementationAttemptSidecar; agentType: AgentType | null }>[] {
+function liveClaudeAttempts(taskId: string, canonicalStatePath: string):
+  Readonly<{ attempts: readonly LiveClaudeAttempt[]; unreadable: readonly string[] }> {
   let leaves: readonly string[];
   try {
     leaves = readdirSync(subagentDir());
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { attempts: [], unreadable: [] };
     throw error;
   }
-  return leaves.flatMap((leaf) => {
+  const attempts: LiveClaudeAttempt[] = [];
+  const unreadable: string[] = [];
+  for (const leaf of leaves) {
     const identity = sidecarIdentity(leaf);
-    if (identity === null) return [];
+    if (identity === null) continue;
     const observed = snapshotImplementationAttemptSidecar(identity.sessionId, identity.agentId);
-    if (observed.kind !== "authority-observed") return [];
+    if (observed.kind !== "authority-observed") {
+      if (observed.failure.kind !== "missing-sidecar") unreadable.push(observed.failure.message);
+      continue;
+    }
     const { sidecar } = observed;
-    if (sidecar.authority.taskId !== taskId || sidecar.canonicalTaskGraphPath !== canonicalStatePath) return [];
+    if (sidecar.authority.taskId !== taskId || sidecar.canonicalTaskGraphPath !== canonicalStatePath) continue;
     const rostered = readActiveAgentRoles(sidecar.sessionId).find(({ agentId }) => agentId === sidecar.agentId);
-    return rostered === undefined ? [] : [Object.freeze({ sidecar, agentType: rostered.agentType })];
-  });
+    if (rostered !== undefined) attempts.push(Object.freeze({ sidecar, agentType: rostered.agentType }));
+  }
+  return { attempts, unreadable };
 }
 
 /**
@@ -114,8 +130,15 @@ function liveClaudeAttempts(taskId: string, canonicalStatePath: string): readonl
  * reads as no live attempt.
  */
 export const claudeLiveAttemptEvidence: LiveAttemptEvidenceFn = (taskId, statePath) => {
-  const attempts = liveClaudeAttempts(taskId, realpathSync.native(statePath));
-  if (attempts.length === 0) return NO_LIVE_ATTEMPT;
+  const { attempts, unreadable } = liveClaudeAttempts(taskId, realpathSync.native(statePath));
+  if (attempts.length === 0) {
+    return unreadable.length === 0
+      ? NO_LIVE_ATTEMPT
+      : Object.freeze({
+          kind: "uninspectable",
+          reason: `${unreadable.length} implementation attempt sidecar(s) could not be read (${unreadable[0]}), so a live attempt of ${taskId} may be missed`,
+        });
+  }
   if (attempts.length > 1) {
     return Object.freeze({ kind: "live", ledger: Object.freeze({ kind: "unreadable", reason: `${attempts.length} live implementation attempts name ${taskId}` }) });
   }
@@ -131,15 +154,19 @@ export const claudeLiveAttemptEvidence: LiveAttemptEvidenceFn = (taskId, statePa
   }
 };
 
-/** The changed files the plan renders: none without a live attempt, else the epoch's, or why they cannot be read. */
+/** The changed files the plan renders, with the note an uninspectable attempt
+ *  owes: none without a live attempt, else the epoch's, or why they cannot be read. */
 function planChangedFiles(live: LiveAttemptEvidence, statePath: string, ports: StopCheckPlanPorts):
-  Readonly<{ ok: true; changed: ChangedFiles }> | Readonly<{ ok: false; message: string }> {
-  if (live.kind === "no-live-attempt") return { ok: true, changed: NO_CHANGED_FILES };
+  Readonly<{ ok: true; changed: ChangedFiles; note: string | null }> | Readonly<{ ok: false; message: string }> {
+  if (live.kind === "no-live-attempt") return { ok: true, changed: NO_CHANGED_FILES, note: null };
+  if (live.kind === "uninspectable") {
+    return { ok: true, changed: NO_CHANGED_FILES, note: `note: ${live.reason}; the affected plan above may name too few changed files` };
+  }
   const root = ports.repositoryRoot(statePath);
   if (!root.ok) return { ok: false, message: `stop-check-plan: ${root.reason}` };
   const observed = epochChangedFiles(live.ledger, ports.pathExists)(root.root);
   return observed.kind === "observed"
-    ? { ok: true, changed: observed.changed }
+    ? { ok: true, changed: observed.changed, note: null }
     : { ok: false, message: `stop-check-plan: ${observed.reason}` };
 }
 
@@ -180,14 +207,14 @@ export function createStopCheckPlanHandler(
     // An unknown id has no live attempt, so the renderer refuses it naming the id.
     const changed = planChangedFiles(liveAttemptEvidence(parsed.taskId, manager.getPath()), manager.getPath(), ports);
     if (!changed.ok) return { kind: "error", message: changed.message };
-    return renderedResult(write, render(graph, parsed.taskId, changed.changed));
+    return renderedResult(write, render(graph, parsed.taskId, changed.changed), changed.note);
   };
 }
 
-function renderedResult(write: (text: string) => void, rendering: ReturnType<RenderStopChecksPlanFn>) {
+function renderedResult(write: (text: string) => void, rendering: ReturnType<RenderStopChecksPlanFn>, note: string | null) {
   return match(rendering)
     .with({ kind: "rendered" }, ({ lines }) => {
-      write(`${lines.join("\n")}\n`);
+      write(`${[...lines, ...(note === null ? [] : [note])].join("\n")}\n`);
       return { kind: "passthrough" } as const;
     })
     .with({ kind: "unknown-task" }, ({ message }) => ({ kind: "error", message }) as const)

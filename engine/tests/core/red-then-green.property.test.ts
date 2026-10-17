@@ -48,9 +48,11 @@ const NO_TEST_FILES: TestFileClassification = Object.freeze({
 
 // --- Fact rendering ---
 
-const passing = (file: string, executed = 2): TestFileResult => ({ file, executed, failed: 0, collectionError: false });
-const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, collectionError: false });
-const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, collectionError: true });
+const passing = (file: string, executed = 2): TestFileResult => ({ file, executed, failed: 0, skipped: 0, collectionError: false });
+const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, skipped: 0, collectionError: false });
+const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
+/** A file that declares testcases but runs none: every one skipped. */
+const allSkipped = (file: string): TestFileResult => ({ file, executed: 2, failed: 0, skipped: 2, collectionError: false });
 
 function summary(results: readonly TestFileResult[] | "unrecorded") {
   const listed = results === "unrecorded" ? [passing(REPORTED_A)] : results;
@@ -77,6 +79,7 @@ const STEPS = [
   "green",            // qualifying: exit 0, every Task test file passes
   "partial-green",    // qualifying: exit 0, one Task test file unreported
   "empty-green",      // qualifying: exit 0, a Task test file executed nothing
+  "skipped-green",    // qualifying: exit 0, a Task test file's testcases were all skipped
   "failing-exit-green", // qualifying report, every file passes, exit 1
   "untrusted-red",    // non-qualifying: no exit code
   "untrusted-green",  // non-qualifying: no exit code
@@ -103,6 +106,7 @@ function render(step: Step, index: number): Evidence {
     case "green": return testRun(command, 0, [passing(REPORTED_A), passing(REPORTED_B)]);
     case "partial-green": return testRun(command, 0, [passing(REPORTED_A)]);
     case "empty-green": return testRun(command, 0, [passing(REPORTED_A, 0), passing(REPORTED_B)]);
+    case "skipped-green": return testRun(command, 0, [allSkipped(REPORTED_A), passing(REPORTED_B)]);
     case "failing-exit-green": return testRun(command, 1, [passing(REPORTED_A), passing(REPORTED_B)]);
     case "untrusted-red": return testRun(command, null, [failing(REPORTED_A), passing(REPORTED_B)]);
     case "untrusted-green": return testRun(command, null, [passing(REPORTED_A), passing(REPORTED_B)]);
@@ -297,11 +301,21 @@ describe("judgeRedThenGreen: worked cases", () => {
     const events: readonly Evidence[] = [
       testRun("red", 1, [failing(REPORTED_A), passing(REPORTED_B)]),
       { kind: "FileWrite", path: IMPL, via: "tool" },
-      testRun("not green", 0, [passing(REPORTED_A), { file: REPORTED_B, executed: 1, failed: 1, collectionError: true }]),
+      testRun("not green", 0, [passing(REPORTED_A), { file: REPORTED_B, executed: 1, failed: 1, skipped: 0, collectionError: true }]),
     ];
     // exit 0 with a failing synthetic testcase is contradictory but representable; it must not green.
     expect(judge(events, CLASSIFIED, ROOT, false))
       .toEqual({ kind: "unproven", gap: { kind: "green-missing", untrustedOnly: false } });
+  });
+
+  it("FR-006: a green whose Task test file skipped every testcase is not green", () => {
+    // Red, implement, then skip the failing test: the file declares testcases
+    // and fails none, yet runs none, so the order is not shown.
+    expect(judge(renderAll(["red", "write-impl", "skipped-green"]), CLASSIFIED, ROOT, false))
+      .toEqual({ kind: "unproven", gap: { kind: "green-missing", untrustedOnly: false } });
+    const partlySkipped: TestFileResult = { file: REPORTED_A, executed: 2, failed: 0, skipped: 1, collectionError: false };
+    expect(judge([...renderAll(["red", "write-impl"]), testRun("green", 0, [partlySkipped, passing(REPORTED_B)])], CLASSIFIED, ROOT, false))
+      .toMatchObject({ kind: "shown" });
   });
 
   it("AS-010: a fixture write before the red is the first implementation write", () => {

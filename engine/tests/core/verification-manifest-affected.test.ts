@@ -12,24 +12,11 @@ import {
   type AffectedRunner as ContractAffectedRunner,
   type FrozenStopCheckManifestFields,
 } from "../../src/core/affected-stop-check-types";
-import {
-  MAX_AFFECTED_RUNNER_TIMEOUT_MS as MANIFEST_AFFECTED_TIMEOUT_CAP,
-  type AffectedRunner as ManifestAffectedRunner,
-} from "../../src/core/verification-manifest";
-
-type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-const sameAffectedRunner: MutuallyAssignable<ContractAffectedRunner, ManifestAffectedRunner> = true;
-
-describe("the manifest restates CT-2's affected-runner surface exactly", () => {
-  it("FR-015: the timeout cap and the runner type equal CT-2's", () => {
-    expect(MANIFEST_AFFECTED_TIMEOUT_CAP).toBe(MAX_AFFECTED_RUNNER_TIMEOUT_MS);
-    expect(sameAffectedRunner).toBe(true);
-  });
-});
 import { DEFAULT_TEST_FILE_SUFFIXES, ENGINE_DEFAULT_TEST_FILES } from "../../src/core/test-file-classification";
 import {
   ACCEPTANCE_RUNNER_CHECK_ID,
   AFFECTED_RUNNER_CHECK_ID,
+  MAX_AFFECTED_RUNNER_TIMEOUT_MS as MANIFEST_AFFECTED_TIMEOUT_CAP,
   acceptanceRunnerCheck,
   affectedRunnerCheck,
   authorizeWaveCompletionSuite,
@@ -39,6 +26,7 @@ import {
   parseFrozenVerificationManifest,
   parseVerificationManifest,
   type AcceptanceRunner,
+  type AffectedRunner as ManifestAffectedRunner,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
@@ -46,6 +34,16 @@ import type { AcceptedWaveCompletionReceipt } from "../../src/core/completion-su
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import type { ActiveWaveGateRegistration, TaskGraph } from "../../src/types";
 import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
+import type { Equal } from "../fixtures/type-equality";
+
+const sameAffectedRunner: Equal<ContractAffectedRunner, ManifestAffectedRunner> = true;
+
+describe("the manifest restates CT-2's affected-runner surface exactly", () => {
+  it("FR-015: the timeout cap and the runner type equal CT-2's", () => {
+    expect(MANIFEST_AFFECTED_TIMEOUT_CAP).toBe(MAX_AFFECTED_RUNNER_TIMEOUT_MS);
+    expect(sameAffectedRunner).toBe(true);
+  });
+});
 
 /** The engine default's digest before this feature: every read-time fallback
  *  for a TaskGraph that carries no `verification_manifest` checks receipts
@@ -303,15 +301,22 @@ describe("affectedRunner and testFileSuffixes in the source manifest", () => {
 describe("the frozen affected runner and classification are digest-checked", () => {
   const manifest = frozen({ schemaVersion: 2, acceptanceRunner: ACCEPTANCE_RUNNER, affectedRunner: AFFECTED_RUNNER, testFileSuffixes: [".it.ts"] });
 
-  it.each<[string, (form: Record<string, unknown>) => Record<string, unknown>]>([
-    ["the affected runner's report path", (form) => ({ ...form, affectedRunner: { ...AFFECTED_RUNNER, report: { kind: "required-file", path: ".loom/completion-reports/other.xml" } } })],
-    ["the affected runner added to a manifest frozen without one", (form) => form],
-    ["the suffix order", (form) => ({ ...form, testFiles: { source: "operator-manifest", suffixes: [".it.ts", ".test.ts"] } })],
-  ])("AS-019: FR-016: a change to %s after population is refused", (label, tamper) => {
-    const base = label.startsWith("the affected runner added")
-      ? { ...stored(frozen({ schemaVersion: 2, testFileSuffixes: [".it.ts"] })), affectedRunner: AFFECTED_RUNNER }
-      : tamper(stored(manifest));
-    expect(parseFrozenVerificationManifest(base)).toEqual({ ok: false, error: expect.objectContaining({ errors: [DIGEST_MISMATCH] }) });
+  it.each<[string, () => Record<string, unknown>]>([
+    ["the affected runner's report path", () => ({
+      ...stored(manifest),
+      affectedRunner: { ...AFFECTED_RUNNER, report: { kind: "required-file", path: ".loom/completion-reports/other.xml" } },
+    })],
+    ["the affected runner added to a manifest frozen without one", () => ({
+      ...stored(frozen({ schemaVersion: 2, testFileSuffixes: [".it.ts"] })),
+      affectedRunner: AFFECTED_RUNNER,
+    })],
+    ["the suffix order", () => ({
+      ...stored(manifest),
+      testFiles: { source: "operator-manifest", suffixes: [".it.ts", ".test.ts"] },
+    })],
+  ])("AS-019: FR-016: a change to %s after population is refused", (_label, tampered) => {
+    expect(parseFrozenVerificationManifest(tampered()))
+      .toEqual({ ok: false, error: expect.objectContaining({ errors: [DIGEST_MISMATCH] }) });
   });
 
   it("AS-019: FR-016: a frozen affected runner sharing the acceptance runner's report path is refused before the digest", () => {

@@ -15,6 +15,7 @@ type TestFileResult = Readonly<{
   file: string;
   executed: number;
   failed: number;
+  skipped: number;
   collectionError: boolean;
 }>;
 
@@ -60,22 +61,26 @@ const hasExactKeys = (raw: Record<string, unknown>, keys: readonly string[]): bo
   return actual.length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(raw, key));
 };
 
-const FILE_RESULT_KEYS = ["file", "executed", "failed", "collectionError"] as const;
+const FILE_RESULT_KEYS = ["file", "executed", "failed", "skipped", "collectionError"] as const;
 
-/** One per-file result, re-minted from exactly its four fields. A collection
- *  error must look like one under the format's own rule: Vitest JUnit reports
- *  it as one synthetic failing testcase, Vitest JSON as an entry with no
- *  assertions, so the two cannot be confused with a behavioral failure. */
+/** One per-file result, re-minted from exactly its five fields. A failing and
+ *  a skipped testcase are disjoint, so `failed + skipped <= executed`. A
+ *  collection error must look like one under the format's own rule: Vitest
+ *  JUnit reports it as one synthetic failing testcase, Vitest JSON as an entry
+ *  with no assertions, so the two cannot be confused with a behavioral failure. */
 function parseFileResult(source: ReportSource, raw: unknown): TestFileResult | string {
   if (!isPlainRecord(raw) || !hasExactKeys(raw, FILE_RESULT_KEYS)) {
-    return "a per-file result must carry exactly file, executed, failed and collectionError";
+    return "a per-file result must carry exactly file, executed, failed, skipped and collectionError";
   }
   const { file, collectionError } = raw;
   if (typeof file !== "string" || file.trim() === "") return "a per-file result names no file";
   const executed = safeCount(raw.executed);
   const failed = safeCount(raw.failed);
-  if (executed === null || failed === null) return `per-file counts for ${file} are not non-negative safe integers`;
-  if (failed > executed) return `${file} fails more testcases than it executed`;
+  const skipped = safeCount(raw.skipped);
+  if (executed === null || failed === null || skipped === null) {
+    return `per-file counts for ${file} are not non-negative safe integers`;
+  }
+  if (failed + skipped > executed) return `${file} fails or skips more testcases than it executed`;
   if (typeof collectionError !== "boolean") return `collectionError for ${file} is not a boolean`;
   if (collectionError && source === "junit-xml" && failed === 0) {
     return `${file} reports a JUnit collection error without its failing synthetic testcase`;
@@ -83,7 +88,7 @@ function parseFileResult(source: ReportSource, raw: unknown): TestFileResult | s
   if (collectionError && source === "vitest-json" && executed !== 0) {
     return `${file} reports a Vitest JSON collection error yet executed testcases`;
   }
-  return Object.freeze({ file, executed, failed, collectionError });
+  return Object.freeze({ file, executed, failed, skipped, collectionError });
 }
 
 /**
@@ -172,8 +177,9 @@ export function parseReportSummary(
 /**
  * Per-file results of a Vitest/Jest JSON report: one file per `testResults`
  * entry, named exactly as the report names it. `executed` counts the entry's
- * assertions under the same rule as `numTotalTests` (every declared test), and
- * a failed entry with no assertions is a collection error. `undefined` when
+ * assertions under the same rule as `numTotalTests` (every declared test),
+ * `skipped` the ones that neither passed nor failed (skipped, pending, todo,
+ * disabled), and a failed entry with no assertions is a collection error. `undefined` when
  * the report carries no `testResults` (a summary-only report); `null` when it
  * carries malformed ones, which makes the whole report untrusted.
  */
@@ -188,10 +194,13 @@ function vitestFileResults(report: Record<string, unknown>): TestReportFiles | n
     const statuses = (assertions as readonly unknown[])
       .map((assertion) => isPlainRecord(assertion) && typeof assertion.status === "string" ? assertion.status : null);
     if (statuses.includes(null)) return null;
+    const failed = statuses.filter((status) => status === "failed").length;
+    const passed = statuses.filter((status) => status === "passed").length;
     results.push({
       file: entry.name,
       executed: statuses.length,
-      failed: statuses.filter((status) => status === "failed").length,
+      failed,
+      skipped: statuses.length - passed - failed,
       collectionError: entry.status === "failed" && statuses.length === 0,
     });
   }
@@ -585,8 +594,10 @@ function projectTestcase(element: ReportElement): ReportTestcase | null {
 /**
  * Per-file results of a JUnit report: its testcases grouped by `classname`, in
  * first-appearance order, the classname kept exactly as written. `executed`
- * counts every testcase (the legacy declared-count rule the summary uses) and
- * `failed` the failing ones; a failing testcase whose `name` equals its
+ * counts every testcase (the legacy declared-count rule the summary uses),
+ * `failed` the failing ones and `skipped` the skipped ones (a skipped case
+ * that also carries a failure, Node's failing TODO, is skipped, as
+ * `projectTestcase` reads it); a failing testcase whose `name` equals its
  * `classname` is Vitest's synthetic collection-error case. `undefined` (the
  * summary stays, per-file results unrecorded) when the report has no
  * testcases, as in a summary-only report, or a testcase that names no file.
@@ -602,6 +613,7 @@ function junitFileResults(root: ReportElement): TestReportFiles | undefined {
       file: testcase.classname,
       executed: (prior?.executed ?? 0) + 1,
       failed: (prior?.failed ?? 0) + (failed ? 1 : 0),
+      skipped: (prior?.skipped ?? 0) + (testcase.outcome === "skipped" ? 1 : 0),
       collectionError: (prior?.collectionError ?? false) || (failed && testcase.name === testcase.classname),
     });
   }
@@ -657,6 +669,7 @@ function mergeFileResults(parts: readonly (TestReportFiles | undefined)[]): Test
         file: entry.file,
         executed: prior.executed + entry.executed,
         failed: prior.failed + entry.failed,
+        skipped: prior.skipped + entry.skipped,
         collectionError: prior.collectionError || entry.collectionError,
       });
     }

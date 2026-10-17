@@ -118,9 +118,9 @@ const GREEN_RUN = "npm --prefix engine run test:unit";
 
 type RawEvent = Readonly<Record<string, unknown>>;
 
-const passing = (file: string): TestFileResult => ({ file, executed: 2, failed: 0, collectionError: false });
-const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, collectionError: false });
-const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, collectionError: true });
+const passing = (file: string): TestFileResult => ({ file, executed: 2, failed: 0, skipped: 0, collectionError: false });
+const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, skipped: 0, collectionError: false });
+const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
 const write = (path: string, via: "tool" | "shell" = "tool"): RawEvent => ({ kind: "FileWrite", path, via });
 
 function run(results: readonly TestFileResult[], options: Readonly<{ command?: string; exit?: number | null }> = {}): RawEvent {
@@ -324,13 +324,16 @@ function settle(
   }, ports(attempt, taskOf(state, taskId).file_list ?? [], options.newTestsWritten ?? true));
 }
 
-/** The persisted I6 result of a settled Task, or undefined when proof owes none. */
-function i6Result(settled: ExactImplementationSettlement, taskId: string): ProofObligationResult | undefined {
-  if (settled.application.kind !== "applied") return undefined;
-  const proof = taskOf(settled.application.state, taskId).proof;
+/** A Task's persisted I6 result, or undefined when its proof owes none or is not yet evaluated. */
+function i6ResultOfTask(task: Task): ProofObligationResult | undefined {
+  const proof = task.proof;
   if (proof === undefined || proof.state === "pending") return undefined;
   return proof.results.find((result) => result.obligation.kind === "red-then-green");
 }
+
+/** The persisted I6 result of a settled Task, or undefined when proof owes none. */
+const i6Result = (settled: ExactImplementationSettlement, taskId: string): ProofObligationResult | undefined =>
+  settled.application.kind === "applied" ? i6ResultOfTask(taskOf(settled.application.state, taskId)) : undefined;
 
 const transitionOf = (settled: ExactImplementationSettlement): string | undefined =>
   settled.application.kind === "applied" ? settled.application.transition.kind : undefined;
@@ -813,6 +816,16 @@ describe("the implementation brief states I6 up front and names the repair on re
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
   });
 
+  it("a retry of a Task with no recorded start commit restores from HEAD and says what that discards", () => {
+    const { graph, task } = retryAfter(i6Graph([LEDGER_TEST, LEDGER_IMPL]),
+      [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
+    const { start_sha: _start, ...unrecorded } = task;
+    const prompt = renderedPrompt(briefInput(graph, unrecorded as Task));
+    expect(prompt).toContain(`git restore --source HEAD -- ${LEDGER_IMPL}`);
+    expect(prompt).toMatch(/No start commit was recorded for this Task, so `HEAD` stands in/);
+    expect(prompt).not.toContain("<the Task's start commit>");
+  });
+
   it("a retry whose previous attempt failed for another reason carries no I6 remedy", () => {
     const { graph, task } = retryAfter(i6Graph(), [write(LEDGER_TEST), red(), write(LEDGER_IMPL), green()], false);
     const prompt = renderedPrompt(briefInput(graph, task));
@@ -905,11 +918,7 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
     const { stop, persistedTask } = await armedOwingTask("own-epoch");
     const events = [write(TEST_FILE), reportedRun([failing(TEST_FILE)]), write(IMPL_FILE), reportedRun([passing(TEST_FILE)])];
     await stop({ kind: "snapshot", events: records(events, CLAUDE_EPOCH, [write(IMPL_FILE)]) });
-    const proof = persistedTask().proof;
-    const i6 = proof === undefined || proof.state === "pending"
-      ? undefined
-      : proof.results.find((result) => result.obligation.kind === "red-then-green");
-    expect(i6).toMatchObject({
+    expect(i6ResultOfTask(persistedTask())).toMatchObject({
       state: "satisfied",
       evidence: { kind: "red-then-green", red: { index: 1 }, implementationWrite: IMPL_FILE, green: { index: 3 } },
     });

@@ -74,7 +74,7 @@ const AFFECTED_RUNNER = {
 };
 
 function manifest(runners: Readonly<{ acceptance?: boolean; affected?: Readonly<Record<string, unknown>> | boolean }>): FrozenVerificationManifest {
-  const affected = runners.affected === true ? AFFECTED_RUNNER : runners.affected === false || runners.affected === undefined ? undefined : runners.affected;
+  const affected = runners.affected === true ? AFFECTED_RUNNER : runners.affected || undefined;
   const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 2,
     kind: "loom-verification-manifest",

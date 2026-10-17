@@ -121,7 +121,8 @@ export type AffectedPlan =
   | Readonly<{ kind: "off"; reason: AffectedOffReason }>
   | Readonly<{ kind: "on"; files: NonEmpty<ChangedFilePath>; command: StopCheckCommand; reportPath: string }>;
 
-/** The acceptance check's plan, the `off | on` arm `planStopCheck` decides, unchanged. */
+/** The acceptance check's plan: the `off | on` decision slice 1's
+ *  `planStopCheck` made, unchanged, now produced by `planStopChecks`. */
 export type AcceptancePlan =
   | Readonly<{ kind: "off"; reason: StopCheckOffReason }>
   | Readonly<{ kind: "on"; check: OwedStopCheck; command: StopCheckCommand; reportPath: string }>;
@@ -251,7 +252,7 @@ export const ACCEPTANCE_BLOCK_HEADING = "## Acceptance stop check";
 
 /** The heading of the affected check's part of a block message. It is present
  *  exactly when that check contributes failures. Each failing affected test
- *  under it reads `- '<name>' (<file>) — <outcome>`. */
+ *  under it reads `- '<name>' (<file>) — failed` or `— failed to collect`. */
 export const AFFECTED_BLOCK_HEADING = "## Affected-test stop check";
 
 // --- Plan view ---

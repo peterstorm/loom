@@ -13,8 +13,8 @@
  *
  * Settlement is driven through `settleExactImplementation`, the one shell both
  * harnesses settle through. The epoch ledger reaches it as a `LedgerObservation`
- * of events read back through the production ledger line parser, passed in a
- * test-local facts value whose type adds `ledger` to today's transport facts.
+ * of events read back through the production ledger line parser, carried in
+ * the production transport facts.
  * The byte and new-test ports report every declared file changed and new tests
  * written, so the only obligation a fixture can leave unmet is I6.
  */
@@ -55,6 +55,7 @@ import {
   settleExactImplementation,
   type ExactImplementationSettlement,
   type ExactImplementationSettlementPorts,
+  type ExactImplementationTransportFacts,
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
@@ -93,11 +94,11 @@ const PRE_FEATURE_DEFAULT_MANIFEST = {
 type RawEvent = Readonly<Record<string, unknown>>;
 
 const passing = (file: string, executed = 2): TestFileResult =>
-  ({ file, executed, failed: 0, collectionError: false });
+  ({ file, executed, failed: 0, skipped: 0, collectionError: false });
 const failing = (file: string, failed = 1, executed = 2): TestFileResult =>
-  ({ file, executed, failed, collectionError: false });
+  ({ file, executed, failed, skipped: 0, collectionError: false });
 const collectionError = (file: string): TestFileResult =>
-  ({ file, executed: 1, failed: 1, collectionError: true });
+  ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
 
 const write = (path: string, via: "tool" | "shell" = "tool"): RawEvent => ({ kind: "FileWrite", path, via });
 const read = (path: string): RawEvent => ({ kind: "FileRead", path });
@@ -254,9 +255,6 @@ function reserved(graph: TaskGraph, taskId: string): Readonly<{ graph: TaskGraph
   };
 }
 
-/** Today's transport facts plus the epoch ledger the shell observed. */
-type SettlementFacts = Parameters<typeof settleExactImplementation>[1] & { ledger: LedgerObservation };
-
 const snapshots = (paths: readonly string[], changed: boolean) =>
   [...paths].sort().map((artifact) => ({
     artifact,
@@ -300,7 +298,7 @@ function settle(
 ): ExactImplementationSettlement {
   const { graph: state, attempt } = reserved(graph, taskId);
   const transport = options.transport ?? "Claude";
-  const facts: SettlementFacts = {
+  const facts: ExactImplementationTransportFacts = {
     transport,
     authority: attempt,
     observedAt: "2026-10-16T00:05:00.000Z" as never,

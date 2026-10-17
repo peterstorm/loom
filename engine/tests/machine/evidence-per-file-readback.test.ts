@@ -14,7 +14,7 @@ import { parseEvidenceLine } from "../../src/machine/evidence";
 import type { Evidence } from "../../src/machine/types";
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
-  ({ file, executed, failed, collectionError });
+  ({ file, executed, failed, skipped: 0, collectionError });
 
 const RESULTS: readonly TestFileResult[] = [
   result("tests/broken.test.ts", 1, 1, true),

@@ -3,19 +3,25 @@
  * an absolute path, or a JVM class) maps to a declared repository path only
  * through `attributeReportedFile`.
  *
- * Every row runs through the owner and through each sibling entry point that
- * exists in this slice: the Wave Gate's acceptance attribution in
- * `acceptance-contract/gate.ts` (`observeAcceptanceFacts`, and the
- * `testcaseAcceptanceFile` alias it keeps for its barrel callers). The I6
- * judge (`red-then-green.ts`) and the I7 failure renderer
- * (`affected-stop-check.ts`) gain their columns when they land (T7, T8).
+ * Every row runs through the owner and through each sibling entry point:
+ * - the Wave Gate's acceptance attribution in `acceptance-contract/gate.ts`
+ *   (`observeAcceptanceFacts`, and the `testcaseAcceptanceFile` alias it keeps
+ *   for its barrel callers);
+ * - the I6 judge (`judgeRedThenGreen`), whose red step sees a failing file
+ *   only when the owner attributes it to a Task test file;
+ * - the I7 failure renderer (`renderAffectedBlock`), which shows the owner's
+ *   declared path, or the reported identity when the owner finds none.
  */
 
 import { describe, expect, it } from "vitest";
 import { attributeReportedFile } from "../../src/core/report-file-attribution";
 import { observeAcceptanceFacts, testcaseAcceptanceFile } from "../../src/core/acceptance-contract/gate";
 import type { AcceptanceExpectation } from "../../src/core/acceptance-contract";
+import { renderAffectedBlock } from "../../src/core/affected-stop-check";
 import { parseArtifactDigest, type ArtifactDigest } from "../../src/core/orchestration-contract";
+import { judgeRedThenGreen } from "../../src/core/red-then-green";
+import { parseReportSummary } from "../../src/core/structured-test-report";
+import type { Evidence } from "../../src/machine/types";
 
 const ROOT = "/home/dev/repo";
 
@@ -68,6 +74,43 @@ function gateAttribution(reported: string): string | null {
   return facts.testcases[0]?.file ?? null;
 }
 
+const IMPLEMENTATION = "engine/src/core/ledger.ts";
+
+/** A trusted failing run whose report names one file, by its reported identity. */
+function failingRun(reported: string): Evidence {
+  const report = parseReportSummary(1, 1, "junit-xml", {
+    files: { kind: "recorded", results: [{ file: reported, executed: 1, failed: 1, skipped: 0, collectionError: false }] },
+  });
+  if (report === null) throw new Error("fixture report must reconcile");
+  return { kind: "TestRun", command: "npm test", exit: 1, report };
+}
+
+/** The I6 judge's red step over one failing report: it is shown only when the
+ *  reported file attributes to a Task test file, so with no green after the
+ *  write the gap is `green-missing`; otherwise it is `red-missing`. */
+function judgeRedStep(reported: string): string {
+  const observation = judgeRedThenGreen(
+    [failingRun(reported), { kind: "FileWrite", path: IMPLEMENTATION, via: "tool" }],
+    { testFiles: DECLARED, implementationFiles: [IMPLEMENTATION] },
+    ROOT,
+    false,
+  );
+  return observation.kind === "unproven" ? observation.gap.kind : observation.kind;
+}
+
+/** The file the I7 block message shows for one failing reported testcase. */
+function renderedFile(reported: string, repositoryRoot: string | null): string {
+  const block = renderAffectedBlock(
+    [{ file: reported, name: "AS-001: decides", outcome: "failed" }],
+    { declared: DECLARED, repositoryRoot },
+    "",
+    1,
+  );
+  const line = block.split("\n").find((text) => text.startsWith("- 'AS-001: decides' ("));
+  if (line === undefined) throw new Error("the block names the failing testcase");
+  return line.slice("- 'AS-001: decides' (".length, line.lastIndexOf(") — failed"));
+}
+
 describe("INV-5: one reported-file to declared-file attribution", () => {
   it.each(ROWS)("owner: $label", ({ reported, expected }) => {
     expect(attributeReportedFile(DECLARED, reported, ROOT)).toBe(expected);
@@ -84,5 +127,15 @@ describe("INV-5: one reported-file to declared-file attribution", () => {
     expect(testcaseAcceptanceFile(DECLARED, reported)).toBe(owner);
     expect(gateAttribution(reported)).toBe(owner);
     if (needsRoot === true) expect(owner).toBeNull();
+  });
+
+  it.each(ROWS)("red-then-green.ts sees a red only in a file the owner attributes: $label", ({ reported, expected }) => {
+    expect(attributeReportedFile(DECLARED, reported, ROOT)).toBe(expected);
+    expect(judgeRedStep(reported)).toBe(expected === null ? "red-missing" : "green-missing");
+  });
+
+  it.each(ROWS)("affected-stop-check.ts shows the owner's declared path, else the reported file: $label", ({ reported }) => {
+    expect(renderedFile(reported, ROOT)).toBe(attributeReportedFile(DECLARED, reported, ROOT) ?? reported);
+    expect(renderedFile(reported, null)).toBe(attributeReportedFile(DECLARED, reported, null) ?? reported);
   });
 });

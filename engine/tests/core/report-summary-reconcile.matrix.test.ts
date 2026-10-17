@@ -42,7 +42,7 @@ type Fixture = Readonly<{
 }>;
 
 const result = (file: string, executed: number, failed: number, collectionError = false): TestFileResult =>
-  ({ file, executed, failed, collectionError });
+  ({ file, executed, failed, skipped: 0, collectionError });
 
 const JUNIT_RESULTS = [
   result("tests/broken.test.ts", 1, 1, true),

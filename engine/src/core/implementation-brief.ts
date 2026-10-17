@@ -29,6 +29,7 @@ import { invariantRoles } from "./plan-paths";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
 import { deriveImplementationRetryDisposition } from "./implementation-retry";
+import { isRedThenGreenFailureKind } from "./red-then-green";
 import type { RedThenGreenFailureKind, TestFileClassification } from "./red-then-green-types";
 import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
@@ -311,11 +312,6 @@ function acceptanceContractSection(task: Task, contracts: readonly AcceptanceCon
   return blocks.length === 0 ? NO_ACCEPTANCE_CONTRACT : blocks.join("\n\n");
 }
 
-/** The receipt failure-kind prefix every I6 gap mints. */
-const RED_THEN_GREEN_FAILURE_PREFIX = "proof:red-then-green-unproven:";
-const isRedThenGreenFailureKind = (kind: string): kind is RedThenGreenFailureKind =>
-  kind.startsWith(RED_THEN_GREEN_FAILURE_PREFIX);
-
 /** The I6 failure kinds the retry this dispatch admits inherits, in receipt order. */
 function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationDispatch): readonly RedThenGreenFailureKind[] {
   if (dispatch.kind !== "retry-implementation") return [];
@@ -328,7 +324,9 @@ function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationD
  * attempt epoch and the order lies in the past, so a retry that keeps its
  * predecessor's implementation can never show red: it restores the Task's
  * implementation files to the attempt baseline (a Bash call, which mints no
- * FileWrite), observes red, and only then implements.
+ * FileWrite), observes red, and only then implements. A Task populated
+ * without a start commit restores from HEAD: the command stays runnable, and
+ * the brief says which uncommitted work that discards.
  */
 function redThenGreenRemedy(
   task: Task,
@@ -336,7 +334,10 @@ function redThenGreenRemedy(
   failures: readonly RedThenGreenFailureKind[],
 ): readonly string[] {
   if (failures.length === 0) return [];
-  const source = task.start_sha ?? "<the Task's start commit>";
+  const source = task.start_sha ?? "HEAD";
+  const baseline = task.start_sha === undefined
+    ? "No start commit was recorded for this Task, so `HEAD` stands in: the restore discards your files' uncommitted changes since the last commit. "
+    : "";
   const files = classification.implementationFiles.join(" ");
   return [
     "",
@@ -345,6 +346,7 @@ function redThenGreenRemedy(
     classification.implementationFiles.length === 0
       ? "1. Your file list declares no implementation file to restore; skip to step 2."
       : `1. Restore your implementation files to the attempt baseline with one Bash call: \`git restore --source ${source} -- ${files}\`. ` +
+        baseline +
         "A Bash restore mints no FileWrite, so it is not your first implementation write. Restore only these files: they are yours, and no sibling's work lives in them.",
     "2. Run your tests and observe red: at least one testcase in one of your test files fails.",
     "3. Then implement, and run your tests green.",
