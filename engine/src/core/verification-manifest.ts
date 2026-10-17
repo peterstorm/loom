@@ -157,6 +157,16 @@ export type FrozenVerificationManifest =
       testFiles?: FrozenTestFiles;
     }>;
 
+/**
+ * A manifest frozen since the test-file classification existed: its
+ * `testFiles` is required (ADR-0025). Every freezer returns one, so a freeze
+ * path that dropped the classification, and with it quietly turned I6 off for
+ * every graph it froze, no longer typechecks. Only a manifest read back from
+ * a TaskGraph frozen before the classification existed is the wider
+ * `FrozenVerificationManifest`.
+ */
+export type I6EraVerificationManifest = FrozenVerificationManifest & Readonly<{ testFiles: FrozenTestFiles }>;
+
 export type ProjectVerificationCoverage =
   | Readonly<{
       kind: "not-configured";
@@ -652,20 +662,24 @@ type FrozenAuthority =
       checks: readonly ProjectWaveCompletionCheck[];
     }>;
 
-function frozenManifest(authority: FrozenAuthority): FrozenVerificationManifest {
-  if (authority.kind === "engine-default") {
-    const { testFiles } = authority;
-    return freeze({
-      schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
-      kind: "frozen-verification-manifest",
-      source: ENGINE_DEFAULT_SOURCE,
-      manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], {
-        acceptanceRunner: null, affectedRunner: null, testFiles,
-      })),
-      projectChecks: Object.freeze([] as const),
-      ...(testFiles === null ? {} : { testFiles }),
-    });
-  }
+type EngineDefaultFrozenManifest = Extract<FrozenVerificationManifest, Readonly<{ source: EngineDefaultSource }>>;
+type OperatorFileFrozenManifest = Extract<FrozenVerificationManifest, Readonly<{ source: OperatorFileSource }>>;
+type OperatorFileAuthority = Extract<FrozenAuthority, { kind: "operator-file" }>;
+
+function engineDefaultManifest(testFiles: EngineDefaultTestFiles | null): EngineDefaultFrozenManifest {
+  return freeze({
+    schemaVersion: VERIFICATION_MANIFEST_SCHEMA_VERSION,
+    kind: "frozen-verification-manifest",
+    source: ENGINE_DEFAULT_SOURCE,
+    manifestDigest: digestJson(manifestAuthorityJson(ENGINE_DEFAULT_SOURCE, [], {
+      acceptanceRunner: null, affectedRunner: null, testFiles,
+    })),
+    projectChecks: Object.freeze([] as const),
+    ...(testFiles === null ? {} : { testFiles }),
+  });
+}
+
+function operatorFileManifest(authority: OperatorFileAuthority): OperatorFileFrozenManifest {
   const { source, acceptanceRunner, affectedRunner, testFiles } = authority;
   const projectChecks = freezeArray([...authority.checks].sort((left, right) => compareStrings(left.checkId, right.checkId)));
   return freeze({
@@ -680,7 +694,23 @@ function frozenManifest(authority: FrozenAuthority): FrozenVerificationManifest 
   });
 }
 
-const ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", testFiles: ENGINE_DEFAULT_TEST_FILES });
+function frozenManifest(authority: FrozenAuthority): FrozenVerificationManifest {
+  return authority.kind === "engine-default" ? engineDefaultManifest(authority.testFiles) : operatorFileManifest(authority);
+}
+
+/** The authority a freezer seals: the classification is always present. */
+type I6EraAuthority =
+  | Readonly<{ kind: "engine-default"; testFiles: EngineDefaultTestFiles }>
+  | OperatorFileAuthority & Readonly<{ testFiles: FrozenTestFiles }>;
+
+/** Seal an authority that carries its classification, keeping it on the result's type. */
+function i6EraManifest(authority: I6EraAuthority): I6EraVerificationManifest {
+  return authority.kind === "engine-default"
+    ? freeze({ ...engineDefaultManifest(authority.testFiles), testFiles: authority.testFiles })
+    : freeze({ ...operatorFileManifest(authority), testFiles: authority.testFiles });
+}
+
+const ENGINE_DEFAULT_MANIFEST = i6EraManifest({ kind: "engine-default", testFiles: ENGINE_DEFAULT_TEST_FILES });
 const LEGACY_ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", testFiles: null });
 
 /**
@@ -688,7 +718,7 @@ const LEGACY_ENGINE_DEFAULT_MANIFEST = frozenManifest({ kind: "engine-default", 
  * absent. It can never accept project commands, and it carries the engine
  * default test-file classification (FR-014).
  */
-export function defaultVerificationManifest(): FrozenVerificationManifest {
+export function defaultVerificationManifest(): I6EraVerificationManifest {
   return ENGINE_DEFAULT_MANIFEST;
 }
 
@@ -709,7 +739,7 @@ function rawByteDigest(bytes: Uint8Array): ArtifactDigest {
 }
 
 /** Decode, parse, and freeze exact operator-file bytes into protected authority. */
-export function freezeVerificationManifest(rawBytes: unknown): Parsed<FrozenVerificationManifest> {
+export function freezeVerificationManifest(rawBytes: unknown): Parsed<I6EraVerificationManifest> {
   return total(() => {
     if (!(rawBytes instanceof Uint8Array)) {
       return failure(["verification manifest source must be a Uint8Array"]);
@@ -729,7 +759,7 @@ export function freezeVerificationManifest(rawBytes: unknown): Parsed<FrozenVeri
       path: VERIFICATION_MANIFEST_SOURCE_PATH,
       digest: rawByteDigest(bytes),
     });
-    return success(frozenManifest({
+    return success(i6EraManifest({
       kind: "operator-file",
       source,
       checks: parsed.value.checks.map(projectCheck),

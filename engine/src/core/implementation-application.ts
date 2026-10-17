@@ -30,8 +30,8 @@ import { compareStrings } from "./ordering";
 import {
   deriveProofObligations,
   evaluateTaskProof,
+  frozenRedThenGreenEra,
   PI_STRUCTURED_EVIDENCE_POLICY,
-  redThenGreenEra,
   type ProofEvaluationPolicy,
   type ProofObligation,
 } from "./proof-obligations";
@@ -429,10 +429,11 @@ export type IncomingImplementationEvidence = Readonly<{
  * reconcile and the brief.
  *
  * The frozen Proof is authoritative: population derived its obligations from
- * `redThenGreenEra` of the TaskGraph's frozen manifest, and the State File
- * load refuses a Task whose stored obligations disagree with that era
- * (INV-6), so a loaded Task's obligations already carry its era. The era is
- * consulted only for a Task carrying no frozen Proof at all. Every way the two
+ * the era of the TaskGraph's frozen manifest, and the State File load refuses
+ * a Task whose stored obligations disagree with that era (INV-6), so a loaded
+ * Task's obligations already carry its era. The era (`frozenRedThenGreenEra`)
+ * decides only for a Task carrying no frozen Proof, and otherwise supplies
+ * the classification an owed Proof is judged by. Every way the two
  * could still disagree is its own named arm, never a silent "not owed":
  * - `owed` carries the frozen test-file classification the judge and the
  *   brief split the Task's `file_list` with (INV-2);
@@ -456,11 +457,12 @@ export function redThenGreenDuty(
   task: Task,
   manifest: FrozenVerificationManifest | undefined,
 ): RedThenGreenDuty {
+  const era = frozenRedThenGreenEra(manifest);
   if (task.proof === undefined) {
     const eraObligations = deriveProofObligations({
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
-      redThenGreen: redThenGreenEra(manifest),
+      redThenGreen: era.kind,
     });
     return owesRedThenGreen(eraObligations)
       ? freeze({
@@ -470,16 +472,14 @@ export function redThenGreenDuty(
       : NOT_OWED;
   }
   if (!owesRedThenGreen(task.proof.obligations)) return NOT_OWED;
-  // Not an era test: the frozen Proof has already decided the duty. This only
-  // reads the classification value the judge needs, and names its absence as
-  // the `classification-unfrozen` disagreement (INV-6's sanctioned consumer).
-  const frozen = manifest?.testFiles;
-  return frozen === undefined
-    ? freeze({
+  // The frozen Proof has decided the duty; the era supplies the classification
+  // it is judged by, and a pre-I6 era is the `classification-unfrozen` disagreement.
+  return era.kind === "owed-if-new-tests"
+    ? freeze({ kind: "owed", testFiles: era.testFiles })
+    : freeze({
         kind: "classification-unfrozen",
         reason: `${task.id} owes red-then-green but its TaskGraph freezes no test-file classification`,
-      })
-    : freeze({ kind: "owed", testFiles: frozen });
+      });
 }
 
 export type NormalizedImplementationEvidence = Readonly<{

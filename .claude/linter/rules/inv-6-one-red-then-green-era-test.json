@@ -1,15 +1,15 @@
 {
   "kind": "regex",
   "name": "inv-6-one-red-then-green-era-test",
-  "description": "Whether a TaskGraph is I6-era (red-then-green owed when new tests are required) is decided only by redThenGreenEra(frozenManifest) in engine/src/core/proof-obligations.ts. Population, the state-file-wire obligation-match check and task revalidation call it directly, and settlement and the stored-evidence reconcile reach it through redThenGreenDuty (implementation-application.ts), so they cannot disagree about which graphs owe I6 (G4 slice 2, FR-005, FR-010). This rule refuses an inline presence test on the frozen manifest's testFiles field anywhere else; verification-manifest.ts is excluded because it parses and freezes that field.",
+  "description": "Whether a TaskGraph is I6-era (red-then-green owed when new tests are required), and which test-file classification it owes it under, is decided only by frozenRedThenGreenEra(frozenManifest) in engine/src/core/proof-obligations.ts, the one reader of the frozen manifest's testFiles. Population, the state-file-wire obligation-match check and task revalidation ask through redThenGreenEra, and settlement, the stored-evidence reconcile and the brief through redThenGreenDuty (implementation-application.ts), so they cannot disagree about which graphs owe I6 (G4 slice 2, FR-005, FR-010, ADR-0025). This rule refuses an inline presence test or read of the testFiles field anywhere else: an equality on either side, a negation, an `in` test, optional chaining and `??`. verification-manifest.ts is excluded because it parses and freezes that field.",
   "extensions": [".ts", ".tsx"],
-  "pattern": "testFiles\\s*[!=]==?\\s*(undefined|null)",
+  "pattern": "\\btestFiles\\s*[!=]==?|[!=]==?\\s*[A-Za-z0-9_$.?]*\\btestFiles\\b|!\\s*[A-Za-z0-9_$.?]+\\.testFiles\\b|[\"']testFiles[\"']\\s+in\\b|\\?\\.testFiles\\b|\\.testFiles\\s*\\?\\?",
   "flags": "",
   "excludePatterns": [
     ".test.ts",
     "engine/src/core/proof-obligations.ts",
     "engine/src/core/verification-manifest.ts"
   ],
-  "fixHint": "Call redThenGreenEra(graph.verification_manifest) from engine/src/core/proof-obligations.ts instead of testing testFiles presence inline.",
+  "fixHint": "Call frozenRedThenGreenEra(graph.verification_manifest) (or redThenGreenEra for the era alone) from engine/src/core/proof-obligations.ts instead of reading or testing testFiles inline.",
   "enabled": true
 }
