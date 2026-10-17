@@ -1,8 +1,10 @@
 /**
- * The Acceptance Stop Check's shell, driven through its ports: a claimant
- * with a failing owed testcase is blocked, a passing one is not, and every
- * path the check cannot decide fails open. Plus the production counter and
- * runner lock, the Pi report-only form, and the manifest's runner grammar.
+ * The acceptance arm of the one stop shell (`runStopChecks`), driven through
+ * its ports: a claimant with a failing owed testcase is blocked, a passing one
+ * is not, and every path the check cannot decide fails open. These graphs
+ * freeze no affected runner and the attempt changed no files, so the affected
+ * arm stays off. Plus the production counters and runner lock, the Pi
+ * report-only form, and the manifest's runner grammar.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,11 +22,11 @@ import {
   PRODUCTION_STOP_CHECK_PORTS,
   REPORT_ONLY_STOP_CHECK_PORTS,
   reapStaleRunnerLock,
-  runAcceptanceStopCheck,
-  stopCheckReportLine,
-  type BlockCount,
-  type StopCheckPorts,
+  type StopCheckShellPorts,
 } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
+import { runStopChecks, stopChecksReportLine } from "../../../src/handlers/subagent-stop/stop-checks";
+import type { StopCheckBlockCount } from "../../../src/core/affected-stop-check-types";
+import { NO_CHANGED_FILES } from "../../../src/core/changed-files";
 import type { CompletionCheckRunnerResult } from "../../../src/orchestration/completion-check-runner";
 import type { TaskGraph } from "../../../src/types";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
@@ -151,11 +153,11 @@ const root = (() => {
 })();
 
 /** In-memory ports; `reportBytes: null` makes the runner produce no report. */
-function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckPorts> = {}) {
+function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckShellPorts> = {}) {
   const blocks = new Map<string, number>();
   const runs: string[][] = [];
   const locks = { acquired: 0, released: 0 };
-  const run: StopCheckPorts["runCheck"] = async (check) => {
+  const run: StopCheckShellPorts["runCheck"] = async (check) => {
     runs.push([...check.args]);
     const report = reportBytes === null
       ? { kind: "missing" as const, path: REPORT }
@@ -168,7 +170,7 @@ function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckPorts
       },
     } as CompletionCheckRunnerResult;
   };
-  const value: StopCheckPorts = {
+  const value: StopCheckShellPorts = {
     repositoryRoot: () => ({ ok: true, root }),
     acquireRunner: () => {
       locks.acquired++;
@@ -176,21 +178,33 @@ function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckPorts
     },
     runCheck: run,
     readReport: () => reportBytes ?? new Uint8Array(),
-    blocksIssued: (key): BlockCount => ({ kind: "count", blocks: blocks.get(key) ?? 0 }),
+    blocksIssued: (key): StopCheckBlockCount => ({ kind: "count", blocks: blocks.get(key) ?? 0 }),
     recordBlock: (key, count) => { blocks.set(key, count); },
     clearBlocks: (key) => { blocks.delete(key); },
+    affectedBlocksIssued: () => ({ kind: "count", blocks: 0 }),
+    recordAffectedBlock: () => undefined,
+    clearAffectedBlocks: () => undefined,
+    pathExists: () => true,
+    now: () => Date.now(),
     ...overrides,
   };
   return { value, runs, blocks, locks };
 }
 
 const input = (taskId: string, overrides: Partial<TaskGraph> = {}) =>
-  ({ loadGraph: () => graph(overrides), stateFilePath: "/repo/.claude/state/active_task_graph.json", taskId, agentKey: "session.agent" });
+  ({
+    loadGraph: () => graph(overrides),
+    stateFilePath: "/repo/.claude/state/active_task_graph.json",
+    taskId,
+    agentKey: "session.agent",
+    changedFiles: () => ({ kind: "observed" as const, changed: NO_CHANGED_FILES }),
+    hookStartedAtMs: Date.now(),
+  });
 
-describe("runAcceptanceStopCheck", () => {
+describe("runStopChecks: the acceptance arm", () => {
   it("blocks a claimant whose owed testcase still fails, running only its acceptance file under the runner lock", async () => {
     const fake = ports(junit("failed"));
-    const outcome = await runAcceptanceStopCheck(input("T2"), fake.value);
+    const outcome = await runStopChecks(input("T2"), fake.value);
     expect(outcome).toMatchObject({ kind: "block", message: expect.stringContaining(`'${ROSTER[0].name}'`) });
     expect(fake.runs).toEqual([["run", "--reporter=junit", `--outputFile=${REPORT}`, SURFACE.acceptance]]);
     expect(fake.blocks.get("session.agent")).toBe(1);
@@ -200,29 +214,29 @@ describe("runAcceptanceStopCheck", () => {
   it("lets a claimant whose owed testcases pass stop, and forgets its blocks", async () => {
     const fake = ports(junit("passed"));
     fake.blocks.set("session.agent", 2);
-    expect(await runAcceptanceStopCheck(input("T2"), fake.value)).toEqual({ kind: "passed" });
+    expect(await runStopChecks(input("T2"), fake.value)).toEqual({ kind: "passed" });
     expect(fake.blocks.has("session.agent")).toBe(false);
   });
 
   it("skips a non-claimant, a graph with no runner, and a contract not yet frozen", async () => {
     const fake = ports(junit("failed"));
-    expect(await runAcceptanceStopCheck(input("T1"), fake.value)).toEqual({ kind: "skip" });
+    expect(await runStopChecks(input("T1"), fake.value)).toEqual({ kind: "skip" });
     const { acceptanceRunner: _runner, ...noRunner } = frozenManifest();
-    expect(await runAcceptanceStopCheck(input("T2", { verification_manifest: noRunner as FrozenVerificationManifest }), fake.value))
+    expect(await runStopChecks(input("T2", { verification_manifest: noRunner as FrozenVerificationManifest }), fake.value))
       .toEqual({ kind: "skip" });
     const awaiting = contract({ id: "CT-1", surface: SURFACE, anchors: ["AS-001"], freeze: { state: "awaiting-red" } });
-    expect(await runAcceptanceStopCheck(input("T2", { acceptance_contracts: [awaiting] }), fake.value)).toEqual({ kind: "skip" });
+    expect(await runStopChecks(input("T2", { acceptance_contracts: [awaiting] }), fake.value)).toEqual({ kind: "skip" });
     expect(fake.runs).toEqual([]);
   });
 
   it("fails open when the report is missing, changed after the run, or the runner did not complete", async () => {
-    expect(await runAcceptanceStopCheck(input("T2"), ports(null).value)).toMatchObject({ kind: "note", message: expect.stringContaining("no report") });
+    expect(await runStopChecks(input("T2"), ports(null).value)).toMatchObject({ kind: "note", message: expect.stringContaining("no report") });
     const changed = ports(junit("failed"), { readReport: () => junit("passed") });
-    expect(await runAcceptanceStopCheck(input("T2"), changed.value)).toMatchObject({ kind: "note", message: expect.stringContaining("changed") });
+    expect(await runStopChecks(input("T2"), changed.value)).toMatchObject({ kind: "note", message: expect.stringContaining("changed") });
     const cancelled = ports(junit("failed"), {
       runCheck: async () => ({ ok: false, error: { kind: "containment-unsupported", message: "no process groups" } }),
     });
-    expect(await runAcceptanceStopCheck(input("T2"), cancelled.value)).toMatchObject({ kind: "note", message: expect.stringContaining("no process groups") });
+    expect(await runStopChecks(input("T2"), cancelled.value)).toMatchObject({ kind: "note", message: expect.stringContaining("no process groups") });
     expect(cancelled.locks).toEqual({ acquired: 1, released: 1 });
   });
 
@@ -232,13 +246,13 @@ describe("runAcceptanceStopCheck", () => {
   ])("does not judge the partial report of a runner that %s", async (_label, killed, message) => {
     const fake = ports(junit("failed"));
     const run = fake.value.runCheck;
-    const killedRun: StopCheckPorts["runCheck"] = async (check, at) => {
+    const killedRun: StopCheckShellPorts["runCheck"] = async (check, at) => {
       const result = await run(check, at);
       if (!result.ok || result.value.checkResult.outcome.kind !== "observed") throw new Error("fixture");
       const outcome = { ...result.value.checkResult.outcome, ...killed };
       return { ok: true, value: { ...result.value, checkResult: { ...result.value.checkResult, outcome } } } as CompletionCheckRunnerResult;
     };
-    const outcome = await runAcceptanceStopCheck(input("T2"), { ...fake.value, runCheck: killedRun });
+    const outcome = await runStopChecks(input("T2"), { ...fake.value, runCheck: killedRun });
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(message) });
     expect(fake.blocks.has("session.agent")).toBe(false);
     expect(fake.locks).toEqual({ acquired: 1, released: 1 });
@@ -248,20 +262,20 @@ describe("runAcceptanceStopCheck", () => {
     const stuck = (reportBytes: Uint8Array) => ports(reportBytes, {
       acquireRunner: () => ({ kind: "acquired", release: () => "the runner lock x.lock could not be released: EACCES" }),
     });
-    expect(await runAcceptanceStopCheck(input("T2"), stuck(junit("passed")).value)).toEqual({
+    expect(await runStopChecks(input("T2"), stuck(junit("passed")).value)).toEqual({
       kind: "note",
-      message: "acceptance stop check: T2's owed acceptance testcases pass, but the runner lock x.lock could not be released: EACCES",
+      message: "stop checks for T2: the runner lock x.lock could not be released: EACCES",
     });
-    const noted = await runAcceptanceStopCheck(input("T2"), { ...stuck(junit("passed")).value, readReport: () => junit("failed") });
-    expect(noted).toMatchObject({ kind: "note", message: expect.stringMatching(/changed after the runner produced it.*; the runner lock x\.lock could not be released/) });
-    expect(await runAcceptanceStopCheck(input("T2"), stuck(junit("failed")).value)).toMatchObject({ kind: "block" });
+    const noted = await runStopChecks(input("T2"), { ...stuck(junit("passed")).value, readReport: () => junit("failed") });
+    expect(noted).toMatchObject({ kind: "note", message: expect.stringMatching(/changed after the runner produced it[\s\S]*the runner lock x\.lock could not be released/) });
+    expect(await runStopChecks(input("T2"), stuck(junit("failed")).value)).toMatchObject({ kind: "block" });
   });
 
   it("lets the stop proceed with a note, running nothing, when an owed file is outside the runner's cwd", async () => {
     const elsewhere = freezeVerificationManifest(manifestBytes({ ...RUNNER, cwd: "engine" }));
     if (!elsewhere.ok) throw new Error(elsewhere.error.errors.join("; "));
     const fake = ports(junit("failed"));
-    const outcome = await runAcceptanceStopCheck(input("T2", { verification_manifest: elsewhere.value }), fake.value);
+    const outcome = await runStopChecks(input("T2", { verification_manifest: elsewhere.value }), fake.value);
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(`acceptanceRunner.cwd engine does not contain ${SURFACE.acceptance}`) });
     expect(fake.runs).toEqual([]);
     expect(fake.locks).toEqual({ acquired: 0, released: 0 });
@@ -275,7 +289,7 @@ describe("runAcceptanceStopCheck", () => {
       blocksIssued: () => ({ kind: "unreadable", reason: "counter.json is not JSON" }),
       repositoryRoot: () => ({ ok: false, reason: "the protected TaskGraph's repository root is unavailable" }),
     });
-    const outcome = await runAcceptanceStopCheck(input("T2", { verification_manifest: elsewhere.value }), fake.value);
+    const outcome = await runStopChecks(input("T2", { verification_manifest: elsewhere.value }), fake.value);
     expect(outcome).toEqual({
       kind: "note",
       message: `acceptance stop check for T2 did not decide (the runner command is invalid for these files: acceptanceRunner.cwd engine does not contain ${SURFACE.acceptance}); the stop proceeds and the Wave Gate judges`,
@@ -284,13 +298,13 @@ describe("runAcceptanceStopCheck", () => {
 
   it("does not run while another claimant holds the runner", async () => {
     const fake = ports(junit("failed"), { acquireRunner: () => ({ kind: "held", reason: "another claimant's stop check (pid 7) is running the acceptance runner" }) });
-    expect(await runAcceptanceStopCheck(input("T2"), fake.value)).toMatchObject({ kind: "note", message: expect.stringContaining("pid 7") });
+    expect(await runStopChecks(input("T2"), fake.value)).toMatchObject({ kind: "note", message: expect.stringContaining("pid 7") });
     expect(fake.runs).toEqual([]);
   });
 
   it("names an unreadable block counter instead of reporting the cap, and never blocks without it", async () => {
     const fake = ports(junit("failed"), { blocksIssued: () => ({ kind: "unreadable", reason: "counter.json is not JSON" }) });
-    const outcome = await runAcceptanceStopCheck(input("T2"), fake.value);
+    const outcome = await runStopChecks(input("T2"), fake.value);
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining("block counter is unreadable: counter.json is not JSON") });
     expect(outcome).not.toMatchObject({ message: expect.stringContaining("cap") });
     expect(fake.runs).toEqual([]);
@@ -298,17 +312,17 @@ describe("runAcceptanceStopCheck", () => {
 
   it("turns a thrown fault, including an unloadable graph, into a note", async () => {
     const unloadable = { ...input("T2"), loadGraph: () => { throw new Error("state file is corrupt"); } };
-    expect(await runAcceptanceStopCheck(unloadable, ports(junit("failed")).value))
+    expect(await runStopChecks(unloadable, ports(junit("failed")).value))
       .toMatchObject({ kind: "note", message: expect.stringContaining("crashed and did not decide: state file is corrupt") });
     const throwing = ports(junit("failed"), { runCheck: async () => { throw new Error("spawn exploded"); } });
-    expect(await runAcceptanceStopCheck(input("T2"), throwing.value)).toMatchObject({ kind: "note", message: expect.stringContaining("spawn exploded") });
+    expect(await runStopChecks(input("T2"), throwing.value)).toMatchObject({ kind: "note", message: expect.stringContaining("spawn exploded") });
     expect(throwing.locks).toEqual({ acquired: 1, released: 1 });
   });
 
   it(`stops blocking after ${ACCEPTANCE_STOP_CHECK_MAX_BLOCKS} blocks for the same agent`, async () => {
     const fake = ports(junit("failed"));
     const outcomes = [];
-    for (let attempt = 0; attempt <= ACCEPTANCE_STOP_CHECK_MAX_BLOCKS; attempt++) outcomes.push(await runAcceptanceStopCheck(input("T2"), fake.value));
+    for (let attempt = 0; attempt <= ACCEPTANCE_STOP_CHECK_MAX_BLOCKS; attempt++) outcomes.push(await runStopChecks(input("T2"), fake.value));
     expect(outcomes.map(({ kind }) => kind)).toEqual([...Array(ACCEPTANCE_STOP_CHECK_MAX_BLOCKS).fill("block"), "note"]);
     expect(outcomes.at(-1)).toMatchObject({ message: expect.stringContaining("block cap") });
     expect(fake.blocks.has("session.agent")).toBe(false);
@@ -421,12 +435,12 @@ describe("production stop-check ports", () => {
   });
 });
 
-describe("stopCheckReportLine", () => {
+describe("stopChecksReportLine", () => {
   it("prints nothing for a skip and one operator line for every other outcome", () => {
-    expect(stopCheckReportLine("T2", { kind: "skip" })).toBeNull();
-    expect(stopCheckReportLine("T2", { kind: "passed" })).toBe("acceptance stop check: T2's owed acceptance testcases pass");
-    expect(stopCheckReportLine("T2", { kind: "note", message: "did not decide" })).toBe("did not decide");
-    expect(stopCheckReportLine("T2", { kind: "block", message: "still failing" }))
-      .toBe("acceptance stop check (report-only on Pi; the agent has already ended): T2 still failing");
+    expect(stopChecksReportLine("T2", { kind: "skip" })).toBeNull();
+    expect(stopChecksReportLine("T2", { kind: "passed" })).toBe("stop checks: every acceptance and affected-test check that ran for T2 passes");
+    expect(stopChecksReportLine("T2", { kind: "note", message: "did not decide" })).toBe("did not decide");
+    expect(stopChecksReportLine("T2", { kind: "block", message: "still failing" }))
+      .toBe("stop checks (report-only on Pi; the agent has already ended): T2\nstill failing");
   });
 });

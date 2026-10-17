@@ -1,15 +1,17 @@
 /**
- * Pi runs the Acceptance Stop Check report-only, at the call site that
- * settles an implementation result: a failing owed testcase is one operator
+ * Pi runs the stop checks report-only, at the call site that settles an
+ * implementation result: a failing owed acceptance testcase is one operator
  * line, never a block and never a processing error, and a result without a
- * Task runs nothing.
+ * Task runs nothing. The child's epoch here records no writes, so the affected
+ * check is off and only the acceptance check runs.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reportAcceptanceStopCheck } from "../../../pi/subagent-stop";
+import { reportImplementationStopChecks } from "../../../pi/subagent-stop";
 import {
   REPORT_ONLY_STOP_CHECK_PORTS,
-  type StopCheckPorts,
+  type StopCheckShellPorts,
 } from "../../src/handlers/subagent-stop/acceptance-stop-check";
+import type { LedgerObservation } from "../../src/core/red-then-green-types";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
 import { sha256Bytes } from "../../src/core/digest";
 import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
@@ -50,7 +52,7 @@ const root = (() => {
 })();
 
 /** The report-only ports, with a runner that reports the owed testcase failing. */
-function failingPorts(): StopCheckPorts & { runs: number } {
+function failingPorts(): StopCheckShellPorts & { runs: number } {
   const value = {
     ...REPORT_ONLY_STOP_CHECK_PORTS,
     runs: 0,
@@ -68,20 +70,23 @@ function failingPorts(): StopCheckPorts & { runs: number } {
         },
       } as CompletionCheckRunnerResult;
     },
-  } satisfies StopCheckPorts & { runs: number };
+  } satisfies StopCheckShellPorts & { runs: number };
   return value;
 }
+
+/** The child's epoch: read, with no writes, so no file changed. */
+const NO_WRITES: LedgerObservation = { kind: "read", events: [] };
 
 const manager = (load: () => TaskGraph) => ({ load, getPath: () => "/repo/.pi/state/active_task_graph.json" });
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("Pi reportAcceptanceStopCheck", () => {
+describe("Pi reportImplementationStopChecks", () => {
   it("prints a failing owed testcase as one report-only line and resolves, never blocking", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const ports = failingPorts();
-    const line = await reportAcceptanceStopCheck(manager(graph), "T2", ports);
-    expect(line).toMatch(/^loom\(pi\): acceptance stop check \(report-only on Pi; the agent has already ended\): T2 /);
+    const line = await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, ports);
+    expect(line).toMatch(/^loom\(pi\): stop checks \(report-only on Pi; the agent has already ended\): T2\n/);
     expect(line).toContain(NAME);
     expect(stderr).toHaveBeenCalledWith(`${line}\n`);
     expect(ports.runs).toBe(1);
@@ -89,13 +94,13 @@ describe("Pi reportAcceptanceStopCheck", () => {
 
   it("runs nothing for a result with no Task", async () => {
     const ports = failingPorts();
-    expect(await reportAcceptanceStopCheck(manager(graph), null, ports)).toBeNull();
+    expect(await reportImplementationStopChecks(manager(graph), null, NO_WRITES, ports)).toBeNull();
     expect(ports.runs).toBe(0);
   });
 
   it("turns an unloadable graph into a note instead of a thrown processing error", async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const line = await reportAcceptanceStopCheck(manager(() => { throw new Error("state file is corrupt"); }), "T2", failingPorts());
+    const line = await reportImplementationStopChecks(manager(() => { throw new Error("state file is corrupt"); }), "T2", NO_WRITES, failingPorts());
     expect(line).toContain("crashed and did not decide: state file is corrupt");
   });
 
@@ -103,7 +108,7 @@ describe("Pi reportAcceptanceStopCheck", () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const ports = failingPorts();
     for (let stop = 0; stop < 5; stop++) {
-      expect(await reportAcceptanceStopCheck(manager(graph), "T2", ports)).toContain("report-only on Pi");
+      expect(await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, ports)).toContain("report-only on Pi");
     }
   });
 });

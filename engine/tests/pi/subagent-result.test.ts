@@ -42,6 +42,11 @@ import {
   type PiReviewAttemptAuthority,
 } from "../../../pi/reserved-slot";
 import { slot } from "../fixtures/pi-reserved-slot";
+import type { LedgerObservation } from "../../src/core/red-then-green-types";
+
+/** A read child epoch with no events: these results exercise settlement paths
+ *  that owe no red-then-green, so the epoch's content is never judged. */
+const EMPTY_LEDGER: LedgerObservation = { kind: "read", events: [] };
 
 /**
  * The concerns the Pi `tool_result` handler used to hold inline, exercised
@@ -1513,6 +1518,7 @@ describe("applyImplementationPiResult", () => {
       result: result({ agent: "code-implementer-agent", task: "implementation result" }),
       reservedSlot: undefined,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(store.current().executing_tasks).toEqual(["T1", "T2"]);
@@ -1534,6 +1540,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(store.current().tasks[0]).toMatchObject({
@@ -1558,6 +1565,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: undefined,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(store.current().tasks[0]).toMatchObject({
@@ -1612,6 +1620,7 @@ describe("applyImplementationPiResult", () => {
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
       reservedSlot: modern.reservedSlot,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.processingErrors).toEqual([]);
@@ -1673,6 +1682,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(store.current().tasks[0]).toMatchObject({
@@ -1699,6 +1709,7 @@ describe("applyImplementationPiResult", () => {
       result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     const task = store.current().tasks[0]!;
@@ -1733,6 +1744,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: undefined,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.processingErrors).toEqual([expect.stringContaining("credited on that guess")]);
@@ -1755,6 +1767,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: undefined,
       parentPrompt: "**Task ID:** T1\n...\n**Task ID:** T2",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.processingErrors).toEqual([expect.stringContaining("parent's spawn prompt")]);
@@ -1783,6 +1796,7 @@ describe("applyImplementationPiResult", () => {
       result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(outcome.log.join("\n")).toContain("cannot compare malformed-transcript attempt baseline for T1");
@@ -1823,6 +1837,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.processingErrors).toEqual([
@@ -1888,6 +1903,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(store.current().tasks[0]).toMatchObject({
@@ -1929,6 +1945,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.processingErrors).toHaveLength(1);
@@ -1997,6 +2014,7 @@ describe("applyImplementationPiResult", () => {
         }),
         reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
         parentPrompt: "",
+        ledger: EMPTY_LEDGER,
       });
 
       expect(loads).toBeGreaterThan(0);
@@ -2026,6 +2044,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     const logged = outcome.log.join("\n");
@@ -2073,6 +2092,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     const task = store.current().tasks[0]!;
@@ -2110,6 +2130,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: modern.reservedSlot,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     const task = store.current().tasks[0]!;
@@ -2165,6 +2186,7 @@ describe("applyImplementationPiResult", () => {
         result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
         reservedSlot: modern.reservedSlot,
         parentPrompt: "",
+        ledger: EMPTY_LEDGER,
       });
 
       expect(applied.processingErrors).toEqual([]);
@@ -2202,6 +2224,7 @@ describe("applyImplementationPiResult", () => {
       }),
       reservedSlot: modern.reservedSlot,
       parentPrompt: "Task ID: T1",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.processingErrors).toEqual([expect.stringContaining("Task identity mismatch")]);
@@ -2229,6 +2252,7 @@ describe("applyImplementationPiResult", () => {
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: structuredBashPass() }),
       reservedSlot: first.reservedSlot,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(applied.log.join("\n")).toContain("result ignored (stale)");
@@ -2264,6 +2288,7 @@ describe("applyImplementationPiResult", () => {
       result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
       reservedSlot: modern.reservedSlot,
       parentPrompt: "",
+      ledger: EMPTY_LEDGER,
     });
 
     expect(store.current().tasks[0]).toMatchObject({ status: "implemented", review_status: "passed" });
@@ -2309,6 +2334,7 @@ describe("applyImplementationPiResult", () => {
         result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
         reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
         parentPrompt: "",
+        ledger: EMPTY_LEDGER,
       });
       expect(applied.processingErrors).toEqual([]);
       expect(store.current().tasks[0]?.new_test_observation).toMatchObject({
@@ -2365,6 +2391,7 @@ describe("applyImplementationPiResult", () => {
         }),
         reservedSlot: modern.reservedSlot,
         parentPrompt: "",
+        ledger: EMPTY_LEDGER,
       });
 
       const task = store.current().tasks[0]!;

@@ -29,22 +29,11 @@ import type {
   PlanStopChecksFn,
   StopChecksPlan,
 } from "../affected-stop-check-types";
-import { NO_CHANGED_FILES } from "../changed-files";
 import type { StopCheckOffReason } from "../stop-check-plan-types";
 import { acceptanceRunnerCheck, affectedRunnerCheck, type FrozenVerificationManifest } from "../verification-manifest";
 import type { Task, TaskGraph } from "../../types";
 import { freeze, nonEmpty } from "./kernel";
-import { stopCheckExpectation, type OwedStopCheck } from "./stop-check";
-
-/** The completion check `acceptanceRunnerCheck` forms for the owed files. */
-export type AcceptanceRunnerCommand = Extract<ReturnType<typeof acceptanceRunnerCheck>, { ok: true }>["value"];
-
-/** The acceptance check's plan in its pre-affected shape, which the live
- *  acceptance shell consumes until it switches to `planStopChecks` (T10). */
-export type StopCheckPlan =
-  | Readonly<{ kind: "unknown-task" }>
-  | Readonly<{ kind: "off"; wave: number; reason: StopCheckOffReason }>
-  | Readonly<{ kind: "on"; wave: number; check: OwedStopCheck; command: AcceptanceRunnerCommand; reportPath: string }>;
+import { stopCheckExpectation } from "./stop-check";
 
 /** The off-reason precedence is the order the steps run in: no runner, then
  *  nothing owed, then the command refused. */
@@ -88,10 +77,3 @@ export const planStopChecks: PlanStopChecksFn = (graph, taskId, changed): StopCh
     affected: affectedPlan(manifest, changed),
   });
 };
-
-/** The acceptance arm of `planStopChecks`, with its Wave. Kept until the live
- *  acceptance shell consumes `planStopChecks` directly (T10 removes it). */
-export function planStopCheck(graph: TaskGraph, taskId: string): StopCheckPlan {
-  const plan = planStopChecks(graph, taskId, NO_CHANGED_FILES);
-  return plan.kind === "unknown-task" ? plan : freeze({ ...plan.acceptance, wave: plan.wave });
-}

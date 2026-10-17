@@ -1,9 +1,11 @@
 import type { Task, TaskGraph, TaskTestResult } from "../../types";
 import {
+  redThenGreenDuty,
   settleObservedImplementation,
   settleUnavailableImplementation,
   type ImplementationSettlementApplicationResult,
   type NewTestEvidence,
+  type RedThenGreenDuty,
   type TaskLocalByteObservation,
 } from "../../core/implementation-application";
 import type {
@@ -11,6 +13,9 @@ import type {
   IsoInstant,
 } from "../../core/implementation-completion";
 import type { ProofEvaluationPolicy } from "../../core/proof-obligations";
+import { judgeRedThenGreen } from "../../core/red-then-green";
+import type { LedgerObservation, RedThenGreenObservation } from "../../core/red-then-green-types";
+import { classifyTaskFiles } from "../../core/test-file-classification";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import {
@@ -32,6 +37,14 @@ export type ExactImplementationTransportFacts = Readonly<{
   testResult: TaskTestResult;
   testEvidence: string;
   proofEvaluationPolicy: ProofEvaluationPolicy;
+  /**
+   * The attempt epoch's ledger as this transport read it: Claude Code's
+   * session ledger folded into the agent's epoch, or the parent ledger read
+   * back under a Pi child's grant epoch. Consulted only for a Task whose
+   * `redThenGreenDuty` is `owed`; for such a Task an `unreadable`
+   * observation settles as infrastructure and never as a semantic retry.
+   */
+  ledger: LedgerObservation;
 }>;
 
 export type ExactSettlementRepositoryPort = Readonly<{
@@ -115,6 +128,58 @@ function unavailable(
   });
 }
 
+/** I6 for one settlement: nothing owed, the judge's verdict, or why the
+ *  ledger could not be judged (an infrastructure reason). */
+type RedThenGreenJudgment =
+  | Readonly<{ kind: "not-owed" }>
+  | Readonly<{ kind: "judged"; observation: RedThenGreenObservation }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/**
+ * The one place both harnesses split a Task's `file_list` for I6 (INV-2):
+ * `classifyTaskFiles` against the frozen classification the `owed` duty
+ * carries, handed ready to the pure judge. Only an `owed` Task consults the
+ * ledger; the epoch it judges is the one this attempt's transport observed
+ * (I6 is judged per attempt epoch). A `proof-unfrozen` duty never reaches
+ * here: settlement refuses it before observing anything.
+ */
+function judgeAttemptRedThenGreen(
+  task: Task,
+  duty: Exclude<RedThenGreenDuty, { kind: "proof-unfrozen" }>,
+  facts: ExactImplementationTransportFacts,
+  repositoryRoot: string,
+): RedThenGreenJudgment {
+  switch (duty.kind) {
+    case "not-owed":
+      return { kind: "not-owed" };
+    case "classification-unfrozen":
+      return { kind: "unavailable", reason: duty.reason };
+    case "owed": {
+      const { ledger } = facts;
+      if (ledger.kind === "unreadable") {
+        return { kind: "unavailable", reason: `${facts.transport} evidence ledger unreadable for ${task.id}: ${ledger.reason}` };
+      }
+      const piStructured = facts.testResult.verdict === "untrusted" && facts.testResult.provenance === "pi-structured";
+      return {
+        kind: "judged",
+        observation: judgeRedThenGreen(ledger.events, classifyTaskFiles(task.file_list ?? [], duty.testFiles), repositoryRoot, piStructured),
+      };
+    }
+  }
+}
+
+/** A settlement the Oracle cannot run at all: state unchanged, no receipt,
+ *  the reservation left standing for the operator. */
+function refused(state: TaskGraph, reason: string): ExactImplementationSettlement {
+  return Object.freeze({
+    application: Object.freeze({
+      kind: "error",
+      state,
+      error: Object.freeze({ kind: "invalid-task", errors: Object.freeze<[string]>([reason]) }),
+    }),
+  });
+}
+
 /** Shared exact Claude/Pi shell. Transport adapters parse identity/transcripts
  * and render outcomes; this operation alone observes bytes/new tests and calls
  * the Oracle, without relabeling either transport's test provenance. */
@@ -132,6 +197,11 @@ export function settleExactImplementation(
   if (task?.active_implementation_attempt?.authorityDigest !== facts.authority.authorityDigest) {
     return unavailable(state, facts, `late ${facts.transport} result delivery`);
   }
+  // One answer to "does this Task owe I6" (the frozen Proof, INV-6). A Task
+  // with no frozen Proof that its era obligates is refused by name here,
+  // never settled as if it owed nothing.
+  const duty = redThenGreenDuty(task, state.verification_manifest);
+  if (duty.kind === "proof-unfrozen") return refused(state, duty.reason);
 
   let siblingOwnedPaths: readonly string[];
   try {
@@ -190,6 +260,8 @@ export function settleExactImplementation(
       bytes,
     );
   }
+  const redThenGreen = judgeAttemptRedThenGreen(task, duty, facts, ports.repository.root);
+  if (redThenGreen.kind === "unavailable") return unavailable(state, facts, redThenGreen.reason, bytes);
 
   return Object.freeze({
     application: settleObservedImplementation(
@@ -201,6 +273,7 @@ export function settleExactImplementation(
         testResult: facts.testResult,
         testEvidence: facts.testEvidence,
         newTests: newTests.value,
+        ...(redThenGreen.kind === "judged" ? { redThenGreen: redThenGreen.observation } : {}),
       },
       facts.proofEvaluationPolicy,
       bytes,

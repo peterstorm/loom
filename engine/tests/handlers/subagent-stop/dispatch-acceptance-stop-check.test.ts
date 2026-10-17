@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runDispatch } from "../../../src/handlers/subagent-stop/dispatch";
-import type { StopCheckPorts } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
+import type { StopCheckShellPorts } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
 import { publishImplementationAttemptSidecar } from "../../../src/implementation-attempt-sidecar";
 import {
   createImplementationAttemptAuthority,
@@ -91,7 +91,7 @@ function sidecar(statePath: string): void {
 const stop = JSON.stringify({ session_id: SESSION, agent_id: AGENT, agent_type: "code-implementer-agent", hook_event_name: "SubagentStop" });
 
 /** Ports that never decide: the repository root is unavailable, so the check notes and the stop proceeds. */
-const inertPorts = (): StopCheckPorts => ({
+const inertPorts = (): StopCheckShellPorts => ({
   repositoryRoot: () => ({ ok: false, reason: "repository root unavailable in this fixture" }),
   acquireRunner: () => ({ kind: "acquired", release: () => null }),
   runCheck: async () => { throw new Error("unused"); },
@@ -99,6 +99,11 @@ const inertPorts = (): StopCheckPorts => ({
   blocksIssued: () => ({ kind: "count", blocks: 0 }),
   recordBlock: () => undefined,
   clearBlocks: () => undefined,
+  affectedBlocksIssued: () => ({ kind: "count", blocks: 0 }),
+  recordAffectedBlock: () => undefined,
+  clearAffectedBlocks: () => undefined,
+  pathExists: () => true,
+  now: () => Date.now(),
 });
 
 describe("dispatch runs the Acceptance Stop Check before settlement", () => {
@@ -110,7 +115,7 @@ describe("dispatch runs the Acceptance Stop Check before settlement", () => {
     const cleanupCalls: string[] = [];
     const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
     // The real check with a runner that reports the owed testcase failing.
-    const ports: StopCheckPorts = {
+    const ports: StopCheckShellPorts = {
       ...inertPorts(),
       repositoryRoot: () => {
         const parsed = parseCanonicalRepositoryRoot(root);
@@ -168,7 +173,7 @@ describe("dispatch runs the Acceptance Stop Check before settlement", () => {
     sidecar(statePath);
     const cleanupCalls: string[] = [];
     const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
-    const ports: StopCheckPorts = {
+    const ports: StopCheckShellPorts = {
       ...inertPorts(),
       repositoryRoot: () => { throw new Error("git exploded"); },
     };

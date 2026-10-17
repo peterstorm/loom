@@ -32,7 +32,7 @@ import {
   stopCheckPlanView,
   stopChecksPlanView,
 } from "../../src/core/acceptance-contract/stop-check-plan";
-import { planStopCheck, planStopChecks } from "../../src/core/acceptance-contract/stop-check-planner";
+import { planStopChecks } from "../../src/core/acceptance-contract/stop-check-planner";
 import { changedFilesAtStop } from "../../src/core/changed-files";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
@@ -147,16 +147,6 @@ describe("planStopChecks", () => {
       expect(plan.acceptance).toEqual({ kind: "on", check, command: command.value, reportPath: ACCEPTANCE_REPORT });
       const t3 = planStopChecks(graph, "T3", files);
       expect(t3.kind === "known" && t3.acceptance).toEqual({ kind: "off", reason: { kind: "nothing-owed" } });
-    }
-  });
-
-  it("keeps planStopCheck as the acceptance arm with its Wave", () => {
-    for (const manifest of [undefined, frozen({ schemaVersion: 1 }), bothRunners()]) {
-      const graph = graphOf(manifest);
-      for (const taskId of ["T1", "T2", "T3", "T9"]) {
-        const plan = planStopChecks(graph, taskId, NONE);
-        expect(planStopCheck(graph, taskId)).toEqual(plan.kind === "unknown-task" ? plan : { ...plan.acceptance, wave: plan.wave });
-      }
     }
   });
 

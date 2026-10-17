@@ -39,7 +39,8 @@ import {
   parseSessionId,
   readEvidence,
 } from "../../machine";
-import type { EvidenceRecord, LoadedMachine } from "../../machine";
+import type { AgentId, AgentType, EvidenceRecord, LoadedMachine } from "../../machine";
+import type { LedgerObservation } from "../../core/red-then-green-types";
 import { TRUSTED_LEDGER_ONLY_POLICY } from "../../core/proof-obligations";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { taskVerificationPolicy } from "../../core/verification-policy";
@@ -104,6 +105,34 @@ export function isMachineBound(loaded: LoadedMachine): boolean {
 export type EvidenceSnapshot =
   | { readonly kind: "snapshot"; readonly events: readonly EvidenceRecord[] }
   | { readonly kind: "snapshot-failed" };
+
+/** The session ledger as this handler read it: its records, or why the read
+ *  yielded none it can trust (a failed snapshot, a failed or impossible read). */
+export type ClaudeLedgerRead =
+  | Readonly<{ kind: "read"; records: readonly EvidenceRecord[] }>
+  | Readonly<{ kind: "unreadable"; reason: string }>;
+
+/**
+ * The agent's own attempt epoch, as exact settlement judges it (I6): the
+ * epoch's events in ledger order, duplicate deliveries dropped by the same
+ * fold `resolveTestEvidence` and the machine read. A ledger that was never
+ * read, or an agent identity that names no epoch, is `unreadable` — never an
+ * empty epoch, which would read as "the agent ran nothing".
+ */
+export function claudeEpochLedger(
+  read: ClaudeLedgerRead,
+  agentId: AgentId | null,
+  agentType: AgentType | null,
+): LedgerObservation {
+  if (read.kind === "unreadable") return Object.freeze({ kind: "unreadable", reason: read.reason });
+  if (agentId === null || agentType === null) {
+    return Object.freeze({
+      kind: "unreadable",
+      reason: `the stop names no parseable ${agentId === null ? "agent id" : "agent type"}, so no ledger epoch is its own`,
+    });
+  }
+  return Object.freeze({ kind: "read", events: Object.freeze(eventsForEpoch(read.records, epochOf(agentId, agentType))) });
+}
 
 type LegacyUnreadableTranscriptSettlement =
   | Readonly<{ kind: "quarantined"; taskId: string }>
@@ -468,23 +497,28 @@ export const runUpdateTaskStatus = async (
       `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict labeled snapshot-read-failed\n`,
     );
   }
-  let records: readonly EvidenceRecord[] = [];
-  if (evidenceSnapshot === undefined && standaloneSessionId !== null) {
+  let ledgerRead: ClaudeLedgerRead;
+  if (evidenceSnapshot?.kind === "snapshot") {
+    ledgerRead = { kind: "read", records: evidenceSnapshot.events };
+  } else if (evidenceSnapshot?.kind === "snapshot-failed") {
+    ledgerRead = { kind: "unreadable", reason: `the dispatcher's evidence snapshot for ${input.session_id} failed` };
+  } else if (standaloneSessionId === null) {
+    ledgerRead = { kind: "unreadable", reason: "the stop names no valid session id, so no evidence ledger was read" };
+  } else {
     try {
-      records = readEvidence(standaloneSessionId);
+      ledgerRead = { kind: "read", records: readEvidence(standaloneSessionId) };
     } catch (error) {
       snapshotFailed = true;
+      const cause = error instanceof Error ? error.message : String(error);
       process.stderr.write(
-        `update-task-status: evidence ledger read failed for ${standaloneSessionId}: ` +
-        `${error instanceof Error ? error.message : String(error)}; verdict labeled snapshot-read-failed\n`,
+        `update-task-status: evidence ledger read failed for ${standaloneSessionId}: ${cause}; verdict labeled snapshot-read-failed\n`,
       );
+      ledgerRead = { kind: "unreadable", reason: `evidence ledger read failed for ${standaloneSessionId}: ${cause}` };
     }
-  } else if (evidenceSnapshot?.kind === "snapshot") {
-    records = evidenceSnapshot.events;
   }
-  const epochEvents = epochAgentId && epochAgentType
-    ? eventsForEpoch(records, epochOf(epochAgentId, epochAgentType))
-    : [];
+  // The one epoch both the test verdict and exact settlement (I6) read.
+  const epochLedger = claudeEpochLedger(ledgerRead, epochAgentId, epochAgentType);
+  const epochEvents = epochLedger.kind === "read" ? epochLedger.events : [];
   let testEvidence = resolveTestEvidence(epochEvents, bashTestOutput, machineBound, snapshotFailed);
   // Machine-bound agents don't self-report completion: fold this epoch's
   // evidence through the machine and consult its terminal requirements —
@@ -538,6 +572,7 @@ export const runUpdateTaskStatus = async (
         testResult: testEvidence.result,
         testEvidence: testEvidence.evidence,
         proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+        ledger: epochLedger,
       }, settlementPorts);
       modernOutcome.settlement = settled.application;
       return settled.application.kind === "error" ? locked : settled.application.state;

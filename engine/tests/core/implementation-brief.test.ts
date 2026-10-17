@@ -106,6 +106,8 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   template: TEMPLATE,
   task: value,
   dispatch: dispatchFor(value),
+  // These Tasks owe no red-then-green, so no frozen classification is needed.
+  verificationManifest: undefined,
   planFile: "/repo/.claude/plans/plan.md",
   spec: SPEC,
   rules: RULES,

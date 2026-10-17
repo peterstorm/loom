@@ -49,10 +49,10 @@ import type { SessionRunBinding } from "../engine/src/orchestration/session-run-
 import { parseIsoInstant } from "../engine/src/core/implementation-completion";
 import {
   REPORT_ONLY_STOP_CHECK_PORTS,
-  runAcceptanceStopCheck,
-  stopCheckReportLine,
-  type StopCheckPorts,
+  type StopCheckShellPorts,
 } from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
+import { epochChangedFiles, runStopChecks, stopChecksReportLine } from "../engine/src/handlers/subagent-stop/stop-checks";
+import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import {
   applyFailedPiResult,
   applyImplementationPiResult,
@@ -76,6 +76,7 @@ import {
   specCheckAuthorityOf,
 } from "./reserved-slot";
 import {
+  piImplementationLedger,
   retireCompletedOrMissingImplementation,
   type PiResultOutcome,
 } from "./subagent-settlement";
@@ -166,24 +167,29 @@ const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefin
     item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []);
 
 /**
- * The Acceptance Stop Check, report-only: Pi settles after the subagent has
- * ended, so a failing owed testcase is an operator note here, never a block.
- * The check is total, so it never raises a processing error. Returns the
- * operator line it printed, or null when it printed nothing.
+ * Both stop checks, report-only: Pi settles after the subagent has ended, so
+ * a failing owed acceptance testcase or affected test is an operator note
+ * here, never a block. The affected check runs over the changed files of the
+ * child's own epoch in the parent ledger (`ledger`, FR-035), the same epoch
+ * settlement judges. The checks are total, so they never raise a processing
+ * error. Returns the operator line printed, or null when nothing was printed.
  */
-export async function reportAcceptanceStopCheck(
+export async function reportImplementationStopChecks(
   manager: Readonly<{ load: () => TaskGraph; getPath: () => string }>,
   taskId: string | null,
-  ports: StopCheckPorts = REPORT_ONLY_STOP_CHECK_PORTS,
+  ledger: LedgerObservation,
+  ports: StopCheckShellPorts = REPORT_ONLY_STOP_CHECK_PORTS,
 ): Promise<string | null> {
   if (taskId === null) return null;
-  const outcome = await runAcceptanceStopCheck({
+  const outcome = await runStopChecks({
     loadGraph: () => manager.load(),
     stateFilePath: manager.getPath(),
     taskId,
     agentKey: `pi.${taskId}`,
+    changedFiles: epochChangedFiles(ledger, ports.pathExists),
+    hookStartedAtMs: ports.now(),
   }, ports);
-  const line = stopCheckReportLine(taskId, outcome);
+  const line = stopChecksReportLine(taskId, outcome);
   if (line === null) return null;
   const printed = `loom(pi): ${line}`;
   process.stderr.write(`${printed}\n`);
@@ -223,6 +229,9 @@ type PiStopBatch = Readonly<{
   reservation: OwnedPiSpawnReservation | undefined;
   parentSessions: PiParentSessions;
   durableClaimReleases: PiSubagentStopPorts["durableClaimReleases"];
+  /** Each spawn item's write-grant token, captured before settlement releases
+   *  the grants: the parent reads each child's ledger epoch through it. */
+  grantTokens: ReadonlyMap<number, string>;
 }>;
 
 /** How one batch's reservation resolved against its owner. */
@@ -843,8 +852,10 @@ async function processPiResult(
         // TaskGraph Project Boundary observed above.
         phaseArtifactBaseDir: projectBoundary.root,
       }));
-    case "implementation":
-      await reportAcceptanceStopCheck(mgr, reservedItem?.taskId ?? null);
+    case "implementation": {
+      // One read of the child's epoch, shared by the report-only stop checks (I7) and settlement (I6).
+      const ledger = piImplementationLedger(batch.resultSessionId, batch.grantTokens.get(resultIndex) ?? null, agentType, fsSessionRegistry);
+      await reportImplementationStopChecks(mgr, reservedItem?.taskId ?? null, ledger);
       return emit(await applyImplementationPiResult({
         store,
         repository,
@@ -853,7 +864,9 @@ async function processPiResult(
         result,
         reservedSlot: reservedItem,
         parentPrompt,
+        ledger,
       }));
+    }
     case "review":
       return emit(await applyReviewPiResult({
         store,
@@ -953,6 +966,19 @@ const processingErrorResponse = (processingErrors: readonly string[]): PiSubagen
         isError: true,
       };
 
+/** Shape guard for `details.results`: the stderr/processing-error diagnostic
+ *  when a pi version drifts the field away from an array, or `null` when it
+ *  is a recognised array. Pure. */
+const resultsShapeDiagnostic = (details: Record<string, unknown> | null): string | null => {
+  if (details === null || !Object.hasOwn(details, "results")) {
+    return "subagent tool_result is missing details.results — successful evidence was not applied";
+  }
+  if (!Array.isArray(details.results)) {
+    return `subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied`;
+  }
+  return null;
+};
+
 /** Settle one completed spawn batch. Resolves the processing-error response
  *  Pi shows the parent, or `undefined` when every result was processed. */
 export async function dispatchPiSubagentStop(
@@ -976,6 +1002,8 @@ export async function dispatchPiSubagentStop(
     reservation: resolved.reservation,
     parentSessions,
     durableClaimReleases,
+    grantTokens: new Map((owner === null ? [] : parentSessions.get(owner.sessionId)?.issuedWriteGrants.get(owner.toolCallId) ?? [])
+      .map(({ slot, token }) => [slot, token] as const)),
   });
   const processingErrors: string[] = [
     ...(resolved.resolutionFailure === null ? [] : [resolved.resolutionFailure]),
@@ -1016,11 +1044,7 @@ export async function dispatchPiSubagentStop(
 
   // Shape guard: a pi version drifting details.results away from an array
   // must be a LOUD no-op, not a silent one (or a throw mid-dispatch).
-  const shapeDiagnostic = !hasResults
-    ? "subagent tool_result is missing details.results — successful evidence was not applied"
-    : !Array.isArray(details.results)
-      ? `subagent tool_result has unrecognized details.results shape (${typeof details.results}) — successful evidence was not applied`
-      : null;
+  const shapeDiagnostic = resultsShapeDiagnostic(details);
   if (shapeDiagnostic !== null) {
     processingErrors.push(shapeDiagnostic);
     process.stderr.write(`loom(pi): ${shapeDiagnostic}\n`);
