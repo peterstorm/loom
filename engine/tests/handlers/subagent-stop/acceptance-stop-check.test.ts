@@ -26,13 +26,13 @@ import {
 } from "../../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runStopChecks, stopChecksReportLine } from "../../../src/handlers/subagent-stop/stop-checks";
 import { NO_CHANGED_FILES } from "../../../src/core/changed-files";
-import type { CompletionCheckRunnerResult } from "../../../src/orchestration/completion-check-runner";
 import type { TaskGraph } from "../../../src/types";
 import type { AcceptanceContract } from "../../../src/core/acceptance-contract";
 import { parseCanonicalRepositoryRoot } from "../../../src/utils/workspace-digest";
 import { contract, frozenPaths, surface, task } from "../../fixtures/contract-status-fixtures";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { inMemoryBlockCounters } from "../../fixtures/stop-check-block-counters";
+import { parsedRun } from "../../fixtures/stop-check-runners";
 
 const SURFACE = surface("payload");
 const REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -166,15 +166,9 @@ function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckShell
   const run: StopCheckShellPorts["runCheck"] = async (check) => {
     runs.push([...check.args]);
     const report = reportBytes === null
-      ? { kind: "missing" as const, path: REPORT }
-      : { kind: "produced" as const, path: REPORT, digest: sha256Bytes(reportBytes), byteLength: reportBytes.byteLength };
-    return {
-      ok: true,
-      value: {
-        checkResult: { checkId: check.checkId, scope: "wave", outcome: { kind: "observed", exitCode: 1, timedOut: false, signal: null, report } },
-        diagnostics: { stdoutTail: "runner stdout", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-      },
-    } as CompletionCheckRunnerResult;
+      ? { kind: "missing", path: REPORT }
+      : { kind: "produced", path: REPORT, digest: sha256Bytes(reportBytes), byteLength: reportBytes.byteLength };
+    return parsedRun({ checkId: check.checkId, scope: "wave", outcome: { kind: "observed", exitCode: 1, timedOut: false, signal: null, report } }, "runner stdout");
   };
   const value: StopCheckShellPorts = {
     repositoryRoot: () => ({ ok: true, root }),
@@ -251,7 +245,7 @@ describe("runStopChecks: the acceptance arm", () => {
       const result = await run(check, at);
       if (!result.ok || result.value.checkResult.outcome.kind !== "observed") throw new Error("fixture");
       const outcome = { ...result.value.checkResult.outcome, ...killed };
-      return { ok: true, value: { ...result.value, checkResult: { ...result.value.checkResult, outcome } } } as CompletionCheckRunnerResult;
+      return parsedRun({ ...result.value.checkResult, outcome }, result.value.diagnostics.stdoutTail);
     };
     const outcome = await runStopChecks(input("T2"), { ...fake.value, runCheck: killedRun });
     expect(outcome).toMatchObject({ kind: "note", message: expect.stringContaining(message) });

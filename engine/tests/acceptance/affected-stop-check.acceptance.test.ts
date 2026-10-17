@@ -54,6 +54,7 @@ import type { HookHandler, HookResult } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
+import { ACCEPTANCE_REPORT, ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, parsedRun } from "../fixtures/stop-check-runners";
 import { contract, frozenPaths, stateFileJson, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 
 type Ports = StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>;
@@ -61,25 +62,7 @@ type Ports = StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResul
 const SESSION = "affected-stop-check-session";
 const AGENT_TYPE = "code-implementer-agent";
 const SURFACE = surface("payload");
-const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const OWED = "AS-001: one valid call wins";
-
-const ACCEPTANCE_RUNNER = {
-  executable: "vitest",
-  args: ["run", "--reporter=junit", `--outputFile=${ACCEPTANCE_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: 120_000,
-  report: { kind: "required-file", path: ACCEPTANCE_REPORT },
-};
-const AFFECTED_RUNNER = {
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-};
-const affectedArgv = (...files: string[]): readonly string[] => [AFFECTED_RUNNER.executable, ...AFFECTED_RUNNER.args.slice(0, -1), ...files];
 
 /** A schema-2 manifest frozen by the production freezer; throws when it is refused. */
 function manifest(runners: Readonly<{ acceptance?: boolean; affected?: boolean }>): FrozenVerificationManifest {
@@ -283,22 +266,16 @@ function fakePorts(at: Project, options: FakeOptions = {}) {
       const observed = (timedOut: boolean, signal: string | null, bytes: Uint8Array | null) => {
         if (bytes !== null) reports.set(join(at.root, reportPath), bytes);
         else reports.delete(join(at.root, reportPath));
-        return {
-          ok: true,
-          value: {
-            checkResult: {
-              checkId: command.checkId,
-              scope: "wave",
-              outcome: {
-                kind: "observed", exitCode: timedOut || signal !== null ? null : 1, timedOut, signal,
-                report: bytes === null
-                  ? { kind: "missing", path: reportPath }
-                  : { kind: "produced", path: reportPath, digest: sha256Bytes(bytes), byteLength: bytes.byteLength },
-              },
-            },
-            diagnostics: { stdoutTail: `${check} runner stdout`, stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
+        return parsedRun({
+          checkId: command.checkId,
+          scope: "wave",
+          outcome: {
+            kind: "observed", exitCode: timedOut || signal !== null ? null : 1, timedOut, signal,
+            report: bytes === null
+              ? { kind: "missing", path: reportPath }
+              : { kind: "produced", path: reportPath, digest: sha256Bytes(bytes), byteLength: bytes.byteLength },
           },
-        } as CompletionCheckRunnerResult;
+        }, `${check} runner stdout`);
       };
       switch (run.kind) {
         case "report":
@@ -311,13 +288,7 @@ function fakePorts(at: Project, options: FakeOptions = {}) {
         case "no-report":
           return observed(false, null, null);
         case "start-failed":
-          return {
-            ok: true,
-            value: {
-              checkResult: { checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: `spawn ${command.executable} ENOENT` } },
-              diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-            },
-          } as CompletionCheckRunnerResult;
+          return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: `spawn ${command.executable} ENOENT` } });
         case "did-not-complete":
           return { ok: false, error: { kind: "containment-unsupported", message: "no process groups on this host" } };
       }

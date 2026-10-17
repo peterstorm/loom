@@ -32,26 +32,9 @@ import {
 import { createStopCheckPlanHandler } from "../../src/handlers/helpers/stop-check-plan";
 import { gitProject, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
+import { ACCEPTANCE_REPORT, ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
-const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const VERIFY_REPORT = ".loom/completion-reports/verify.junit.xml";
-
-const ACCEPTANCE_RUNNER = Object.freeze({
-  executable: "vitest",
-  args: ["run", "--reporter=junit", `--outputFile=${ACCEPTANCE_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: 120_000,
-  report: { kind: "required-file", path: ACCEPTANCE_REPORT },
-});
-
-const AFFECTED_RUNNER = Object.freeze({
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-});
 
 const WAVE_CHECK = Object.freeze({
   id: "project:verify",

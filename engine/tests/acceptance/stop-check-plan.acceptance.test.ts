@@ -20,7 +20,6 @@ import { acceptanceRunnerCheck } from "../../src/core/verification-manifest";
 import type { Task } from "../../src/types";
 import { gitProject, statePathIn, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import {
-  ACCEPTANCE_REPORT,
   awaitingRedContract,
   frozenContract,
   frozenRunnerManifest,
@@ -28,6 +27,7 @@ import {
   runStopCheckPlanCli,
   stopCheckGraph,
 } from "../fixtures/stop-check-plan-fixtures";
+import { ACCEPTANCE_REPORT } from "../fixtures/stop-check-runners";
 
 const LEDGER_TYPES = "engine/src/core/ledger-types.ts";
 const LEDGER = "engine/tests/acceptance/ledger.acceptance.test.ts";

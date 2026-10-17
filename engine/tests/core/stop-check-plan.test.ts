@@ -25,13 +25,13 @@ import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { task } from "../fixtures/contract-status-fixtures";
 import {
-  ACCEPTANCE_REPORT,
   ENGINE_RUNNER,
   awaitingRedContract,
   frozenContract,
   frozenRunnerManifest,
   offLine,
 } from "../fixtures/stop-check-plan-fixtures";
+import { ACCEPTANCE_REPORT } from "../fixtures/stop-check-runners";
 import { graphFixture } from "../fixtures/task-lifecycle";
 
 const TYPES = "engine/src/core/ledger-types.ts";

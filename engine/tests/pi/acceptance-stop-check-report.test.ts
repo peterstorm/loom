@@ -13,12 +13,11 @@ import {
 } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import type { LedgerObservation } from "../../src/core/red-then-green-types";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
-import { sha256Bytes } from "../../src/core/digest";
-import type { CompletionCheckRunnerResult } from "../../src/orchestration/completion-check-runner";
 import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contract, frozenPaths, surface, task } from "../fixtures/contract-status-fixtures";
+import { observedRun } from "../fixtures/stop-check-runners";
 
 const SURFACE = surface("payload");
 const REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -61,14 +60,7 @@ function failingPorts(): StopCheckShellPorts & { runs: number } {
     readReport: () => failingReport,
     runCheck: async (check) => {
       value.runs++;
-      return {
-        ok: true,
-        value: {
-          checkResult: { checkId: check.checkId, scope: "wave", outcome: { kind: "observed", exitCode: 1, timedOut: false, signal: null,
-            report: { kind: "produced", path: REPORT, digest: sha256Bytes(failingReport), byteLength: failingReport.byteLength } } },
-          diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-        },
-      } as CompletionCheckRunnerResult;
+      return observedRun(check, failingReport, { exitCode: 1, timedOut: false, signal: null });
     },
   } satisfies StopCheckShellPorts & { runs: number };
   return value;

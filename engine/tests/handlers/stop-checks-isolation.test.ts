@@ -18,7 +18,6 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   AFFECTED_NOTE_TEXT,
-  MAX_AFFECTED_RUNNER_TIMEOUT_MS,
   STOP_HOOK_BUDGET_MS,
   type AffectedStopCheckNoteKind,
   type StopCheckBlockCount,
@@ -36,20 +35,13 @@ import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../.
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
+import { AFFECTED_REPORT, AFFECTED_RUNNER, parsedRun } from "../fixtures/stop-check-runners";
 
 const SESSION = "stop-checks-isolation-session";
 const AGENT = "agent-ledger";
 const AGENT_TYPE = "code-implementer-agent";
-const AFFECTED_REPORT = ".loom/completion-reports/affected.junit.xml";
 const FIXED_NOW = new Date("2026-10-16T12:00:00.000Z");
 const GIT_DATE = "2026-10-16T12:00:00Z";
-const AFFECTED_RUNNER = {
-  executable: "vitest",
-  args: ["related", "--run", "--reporter=junit", `--outputFile=${AFFECTED_REPORT}`, "{files}"],
-  cwd: ".",
-  timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  report: { kind: "required-file", path: AFFECTED_REPORT },
-};
 
 const base = canonicalTempDir("loom-stop-checks-isolation-");
 const saved = { dir: process.env.LOOM_SUBAGENT_DIR, state: process.env.LOOM_STATE_PATH, project: process.env.CLAUDE_PROJECT_DIR };
@@ -131,16 +123,10 @@ function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
   const reports = new Map<string, Uint8Array>();
   const runnerResult = (timedOut: boolean, signal: string | null, bytes: Uint8Array | null): CompletionCheckRunnerResult => {
     if (bytes !== null) reports.set(join(at.root, AFFECTED_REPORT), bytes);
-    return {
-      ok: true,
-      value: {
-        checkResult: {
-          checkId: "affected", scope: "wave",
-          outcome: { kind: "observed", exitCode: 1, timedOut, signal, report: bytes === null ? { kind: "missing", path: AFFECTED_REPORT } : { kind: "produced", path: AFFECTED_REPORT, digest: sha256Bytes(bytes), byteLength: bytes.byteLength } },
-        },
-        diagnostics: { stdoutTail: "affected runner stdout naming ledger > balances", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
-      },
-    } as CompletionCheckRunnerResult;
+    return parsedRun({
+      checkId: "affected", scope: "wave",
+      outcome: { kind: "observed", exitCode: 1, timedOut, signal, report: bytes === null ? { kind: "missing", path: AFFECTED_REPORT } : { kind: "produced", path: AFFECTED_REPORT, digest: sha256Bytes(bytes), byteLength: bytes.byteLength } },
+    }, "affected runner stdout naming ledger > balances");
   };
   const now = FIXED_NOW.getTime();
   return {
@@ -155,7 +141,7 @@ function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
         case "killed": return runnerResult(false, "SIGTERM", junit("failed"));
         case "no-report": return runnerResult(false, null, null);
         case "start-failed":
-          return { ok: true, value: { checkResult: { checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: "spawn ENOENT" } }, diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false } } } as CompletionCheckRunnerResult;
+          return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: "spawn ENOENT" } });
         case "did-not-complete":
           return { ok: false, error: { kind: "containment-unsupported", message: "no process groups" } };
       }

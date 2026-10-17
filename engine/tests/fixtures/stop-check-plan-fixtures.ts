@@ -24,10 +24,8 @@ import { freezeVerificationManifest, type FrozenVerificationManifest } from "../
 import type { Task, TaskGraph } from "../../src/types";
 import { digest } from "./acceptance-fixtures";
 import { contract } from "./contract-status-fixtures";
+import { ACCEPTANCE_REPORT } from "./stop-check-runners";
 import { graphFixture, protectedGraphFixture } from "./task-lifecycle";
-
-/** The report path the fixture runner writes, beneath the protected report root. */
-export const ACCEPTANCE_REPORT = ".loom/completion-reports/acceptance.junit.xml";
 
 /** The runner the operator froze for this repository: `npm run test:acceptance -- {files}` from `engine`. */
 export const ENGINE_RUNNER = Object.freeze({
