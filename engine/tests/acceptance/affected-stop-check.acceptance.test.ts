@@ -34,7 +34,6 @@ import {
   type StopCheckName,
   type StopChecksPorts,
 } from "../../src/core/affected-stop-check-types";
-import { sha256Bytes } from "../../src/core/digest";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
@@ -54,7 +53,17 @@ import type { HookHandler, HookResult } from "../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
-import { ACCEPTANCE_REPORT, ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, parsedRun } from "../fixtures/stop-check-runners";
+import {
+  ACCEPTANCE_REPORT,
+  ACCEPTANCE_RUNNER,
+  AFFECTED_REPORT,
+  AFFECTED_RUNNER,
+  affectedArgv,
+  argvOf,
+  checkNameOf,
+  observedRun,
+  parsedRun,
+} from "../fixtures/stop-check-runners";
 import { contract, frozenPaths, stateFileJson, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 
 type Ports = StopChecksPorts<CanonicalRepositoryRoot, CompletionCheckRunnerResult>;
@@ -216,12 +225,6 @@ type Run =
 
 type Launch = Readonly<{ check: StopCheckName; argv: readonly string[]; cwd: string; timeoutMs: number; lockHeld: boolean }>;
 
-const checkOf = (reportPath: string): StopCheckName => {
-  if (reportPath === ACCEPTANCE_REPORT) return "acceptance";
-  if (reportPath === AFFECTED_REPORT) return "affected";
-  throw new Error(`fixture runner launched an unknown report path ${reportPath}`);
-};
-
 type FakeOptions = Readonly<{
   acceptance?: Run | readonly Run[];
   affected?: Run | readonly Run[];
@@ -255,8 +258,8 @@ function fakePorts(at: Project, options: FakeOptions = {}) {
   const runsSoFar = { acceptance: 0, affected: 0 };
 
   const runCheck: Ports["runCheck"] = async (command) => {
-    const check = checkOf(command.reportPolicy.kind === "required-file" ? command.reportPolicy.path : "");
-    launches.push({ check, argv: [command.executable, ...command.args], cwd: command.cwd, timeoutMs: command.timeoutMs, lockHeld: locks.held > 0 });
+    const check = checkNameOf(command);
+    launches.push({ check, argv: argvOf(command), cwd: command.cwd, timeoutMs: command.timeoutMs, lockHeld: locks.held > 0 });
     const run = runAt(options[check], runsSoFar[check]++) ?? { kind: "report", cases: [] };
     flight.count++;
     try {
@@ -266,16 +269,10 @@ function fakePorts(at: Project, options: FakeOptions = {}) {
       const observed = (timedOut: boolean, signal: string | null, bytes: Uint8Array | null) => {
         if (bytes !== null) reports.set(join(at.root, reportPath), bytes);
         else reports.delete(join(at.root, reportPath));
-        return parsedRun({
-          checkId: command.checkId,
-          scope: "wave",
-          outcome: {
-            kind: "observed", exitCode: timedOut || signal !== null ? null : 1, timedOut, signal,
-            report: bytes === null
-              ? { kind: "missing", path: reportPath }
-              : { kind: "produced", path: reportPath, digest: sha256Bytes(bytes), byteLength: bytes.byteLength },
-          },
-        }, `${check} runner stdout`);
+        return observedRun(command, bytes, {
+          ending: { exitCode: timedOut || signal !== null ? null : 1, timedOut, signal },
+          stdoutTail: `${check} runner stdout`,
+        });
       };
       switch (run.kind) {
         case "report":

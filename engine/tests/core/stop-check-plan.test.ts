@@ -31,7 +31,7 @@ import {
   frozenRunnerManifest,
   offLine,
 } from "../fixtures/stop-check-plan-fixtures";
-import { ACCEPTANCE_REPORT } from "../fixtures/stop-check-runners";
+import { ACCEPTANCE_REPORT, argvOf } from "../fixtures/stop-check-runners";
 import { graphFixture } from "../fixtures/task-lifecycle";
 
 const TYPES = "engine/src/core/ledger-types.ts";
@@ -270,7 +270,7 @@ async function liveStop(graph: TaskGraph, taskId: string): Promise<LiveStop> {
     repositoryRoot: () => ({ ok: true, root: LIVE_ROOT }),
     acquireRunner: () => ({ kind: "acquired", release: () => null }),
     runCheck: async (check) => {
-      launched.push({ argv: [check.executable, ...check.args], cwd: check.cwd });
+      launched.push({ argv: argvOf(check), cwd: check.cwd });
       return { ok: false, error: { kind: "containment-unsupported", message: "not launched by this test" } };
     },
     readReport: () => new Uint8Array(),

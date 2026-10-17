@@ -60,7 +60,7 @@ function failingPorts(): StopCheckShellPorts & { runs: number } {
     readReport: () => failingReport,
     runCheck: async (check) => {
       value.runs++;
-      return observedRun(check, failingReport, { exitCode: 1, timedOut: false, signal: null });
+      return observedRun(check, failingReport, { ending: { exitCode: 1, timedOut: false, signal: null } });
     },
   } satisfies StopCheckShellPorts & { runs: number };
   return value;

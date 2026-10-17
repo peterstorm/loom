@@ -9,7 +9,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { sha256Bytes } from "../../../src/core/digest";
 import {
   acceptanceRunnerCheck,
   defaultVerificationManifest,
@@ -32,7 +31,7 @@ import { parseCanonicalRepositoryRoot } from "../../../src/utils/workspace-diges
 import { contract, frozenPaths, surface, task } from "../../fixtures/contract-status-fixtures";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { inMemoryBlockCounters } from "../../fixtures/stop-check-block-counters";
-import { parsedRun } from "../../fixtures/stop-check-runners";
+import { observedRun, parsedRun } from "../../fixtures/stop-check-runners";
 
 const SURFACE = surface("payload");
 const REPORT = ".loom/completion-reports/acceptance.junit.xml";
@@ -165,10 +164,7 @@ function ports(reportBytes: Uint8Array | null, overrides: Partial<StopCheckShell
   const locks = { acquired: 0, released: 0 };
   const run: StopCheckShellPorts["runCheck"] = async (check) => {
     runs.push([...check.args]);
-    const report = reportBytes === null
-      ? { kind: "missing", path: REPORT }
-      : { kind: "produced", path: REPORT, digest: sha256Bytes(reportBytes), byteLength: reportBytes.byteLength };
-    return parsedRun({ checkId: check.checkId, scope: "wave", outcome: { kind: "observed", exitCode: 1, timedOut: false, signal: null, report } }, "runner stdout");
+    return observedRun(check, reportBytes, { ending: { exitCode: 1, timedOut: false, signal: null }, stdoutTail: "runner stdout" });
   };
   const value: StopCheckShellPorts = {
     repositoryRoot: () => ({ ok: true, root }),

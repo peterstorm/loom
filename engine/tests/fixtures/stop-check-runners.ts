@@ -1,8 +1,10 @@
 /**
  * The stop-check runner fixtures every stop-check suite shares:
- * - the two `vitest` runners an operator would freeze (`acceptanceRunner`,
- *   `affectedRunner`) and their report paths beneath the protected report root;
- * - `affectedArgv`, the argv the affected runner launches over its files;
+ * - `ACCEPTANCE_RUNNER` and `AFFECTED_RUNNER`, the two `vitest` runners an
+ *   operator would freeze under the manifest keys `acceptanceRunner` and
+ *   `affectedRunner`, and their report paths beneath the protected report root;
+ * - `affectedArgv`, `argvOf` and `checkNameOf`: the argv a command launches,
+ *   and which check it is, told apart by report path;
  * - `parsedRun` and `observedRun`, completion runner results admitted by the
  *   production parser, so a fake can never hand the shell a result production
  *   would refuse, and no fake needs a cast;
@@ -14,7 +16,13 @@
  */
 
 import { join } from "node:path";
-import { MAX_AFFECTED_RUNNER_TIMEOUT_MS, type ChangedFilePath, type StopCheckBlockCounters, type StopCheckCommand } from "../../src/core/affected-stop-check-types";
+import {
+  MAX_AFFECTED_RUNNER_TIMEOUT_MS,
+  type ChangedFilePath,
+  type StopCheckBlockCounters,
+  type StopCheckCommand,
+  type StopCheckName,
+} from "../../src/core/affected-stop-check-types";
 import { parseCompletionCheckResult } from "../../src/core/completion-suite";
 import { sha256Bytes } from "../../src/core/digest";
 import { UNKEPT_BLOCK_COUNTERS, type StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
@@ -51,6 +59,14 @@ export const affectedArgv = (...files: string[]): readonly string[] => [...AFFEC
 /** The argv a formed command launches. */
 export const argvOf = (command: StopCheckCommand): readonly string[] => [command.executable, ...command.args];
 
+/** Which check a formed command runs, told apart by its report path. A command for neither report fails the test. */
+export function checkNameOf(command: StopCheckCommand): StopCheckName {
+  const path = command.reportPolicy.kind === "required-file" ? command.reportPolicy.path : null;
+  if (path === ACCEPTANCE_REPORT) return "acceptance";
+  if (path === AFFECTED_REPORT) return "affected";
+  throw new Error(`fixture runner launched a command for an unknown report path ${String(path)}`);
+}
+
 /**
  * A completed runner result whose check result is spelled as plain JSON (any
  * outcome a fake needs: a timeout, a signal, a missing report, a failed
@@ -68,17 +84,27 @@ export function parsedRun(checkResult: unknown, stdoutTail = ""): CompletionChec
 /** How an observed run ended. A clean exit is the default. */
 export type RunEnding = Readonly<{ exitCode: number | null; timedOut: boolean; signal: string | null }>;
 
-const CLEAN_EXIT: RunEnding = Object.freeze({ exitCode: 0, timedOut: false, signal: null });
+export const CLEAN_EXIT: RunEnding = Object.freeze({ exitCode: 0, timedOut: false, signal: null });
 
-/** `command` having run to `ending`, leaving `bytes` as its report, or no report when null. */
-export function observedRun(command: StopCheckCommand, bytes: Uint8Array | null, ending: RunEnding = CLEAN_EXIT): CompletionCheckRunnerResult {
+export type ObservedRunOptions = Readonly<{
+  /** Defaults to a clean exit. */
+  ending?: RunEnding;
+  stdoutTail?: string;
+  /** The bytes the runner reported a digest of, when they differ from the
+   *  bytes left on disk: a report rewritten after the runner produced it. */
+  digestOf?: Uint8Array;
+}>;
+
+/** `command` having run, leaving `bytes` as its report, or no report when null. */
+export function observedRun(command: StopCheckCommand, bytes: Uint8Array | null, options: ObservedRunOptions = {}): CompletionCheckRunnerResult {
   const policy = command.reportPolicy;
+  const digested = options.digestOf ?? bytes;
   const report = policy.kind === "not-required"
     ? { kind: "not-required" }
-    : bytes === null
+    : digested === null
       ? { kind: "missing", path: policy.path }
-      : { kind: "produced", path: policy.path, digest: sha256Bytes(bytes), byteLength: bytes.byteLength };
-  return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "observed", ...ending, report } });
+      : { kind: "produced", path: policy.path, digest: sha256Bytes(digested), byteLength: digested.byteLength };
+  return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "observed", ...(options.ending ?? CLEAN_EXIT), report } }, options.stdoutTail);
 }
 
 export type RecordingStopCheckPortsOptions = Readonly<{

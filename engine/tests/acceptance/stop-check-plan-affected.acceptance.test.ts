@@ -53,7 +53,7 @@ import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../.
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { statePathIn, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { frozenContract, stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
-import { ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, argvOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
+import { ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, argvOf, checkNameOf, recordingStopCheckPorts } from "../fixtures/stop-check-runners";
 
 const SESSION = "stop-check-plan-affected-session";
 const AGENT_TYPE = "code-implementer-agent";
@@ -311,7 +311,7 @@ function recordingPorts(at: Project) {
   return {
     ports,
     launches: (): readonly Launch[] => launches.map((command) => ({
-      check: command.reportPolicy.kind === "required-file" && command.reportPolicy.path === AFFECTED_REPORT ? "affected" : "acceptance",
+      check: checkNameOf(command),
       argv: argvOf(command),
       cwd: command.cwd,
     })),

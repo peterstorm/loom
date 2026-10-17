@@ -24,11 +24,11 @@ import {
   STOP_HOOK_BUDGET_MS,
   type ChangedFiles,
   type StopCheckBlockCount,
+  type StopCheckCommand,
   type StopCheckName,
   type StopChecksOutcome,
 } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop, NO_CHANGED_FILES } from "../../src/core/changed-files";
-import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
 import {
   ACCEPTANCE_STOP_CHECK_MAX_BLOCKS,
@@ -52,7 +52,17 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contract, frozenPaths, gitProject, surface, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { stopCheckGraph } from "../fixtures/stop-check-plan-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
-import { ACCEPTANCE_REPORT, ACCEPTANCE_RUNNER, AFFECTED_REPORT, AFFECTED_RUNNER, affectedArgv, parsedRun } from "../fixtures/stop-check-runners";
+import {
+  ACCEPTANCE_REPORT,
+  ACCEPTANCE_RUNNER,
+  AFFECTED_REPORT,
+  AFFECTED_RUNNER,
+  affectedArgv,
+  argvOf,
+  checkNameOf,
+  observedRun,
+  parsedRun,
+} from "../fixtures/stop-check-runners";
 
 const SURFACE = surface("payload");
 const OWED = "AS-001: one valid call wins";
@@ -152,18 +162,16 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
     ...(options.blocks === undefined ? {} : { presets: options.blocks }),
     clearFails: options.clearFails === true ? ["acceptance"] : [],
   });
-  const runnerResult = (check: StopCheckName, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf: Uint8Array | null = bytes) => {
-    const path = check === "acceptance" ? ACCEPTANCE_REPORT : AFFECTED_REPORT;
-    if (bytes === null) reports.delete(join(root, path));
-    else reports.set(join(root, path), bytes);
-    return parsedRun({
-      checkId: "stop-check",
-      scope: "wave",
-      outcome: {
-        kind: "observed", exitCode: timedOut || signal !== null ? null : 1, timedOut, signal,
-        report: digestOf === null ? { kind: "missing", path } : { kind: "produced", path, digest: sha256Bytes(digestOf), byteLength: digestOf.byteLength },
-      },
-    }, `${check} runner stdout`);
+  const runnerResult = (command: StopCheckCommand, timedOut: boolean, signal: string | null, bytes: Uint8Array | null, digestOf?: Uint8Array) => {
+    const check = checkNameOf(command);
+    const path = join(root, check === "acceptance" ? ACCEPTANCE_REPORT : AFFECTED_REPORT);
+    if (bytes === null) reports.delete(path);
+    else reports.set(path, bytes);
+    return observedRun(command, bytes, {
+      ending: { exitCode: timedOut || signal !== null ? null : 1, timedOut, signal },
+      stdoutTail: `${check} runner stdout`,
+      ...(digestOf === undefined ? {} : { digestOf }),
+    });
   };
   const ports: StopCheckShellPorts = {
     repositoryRoot: () => options.root === "unavailable" ? { ok: false, reason: "no Git repository here" } : { ok: true, root },
@@ -174,23 +182,23 @@ function fakePorts(root: ReturnType<typeof repositoryRoot>, options: FakeOptions
       return { kind: "acquired", release: () => { locks.released++; locks.held--; return options.lock === "release-fails" ? "the runner lock x.lock could not be released: EACCES" : null; } };
     },
     runCheck: async (command) => {
-      const check: StopCheckName = command.reportPolicy.kind === "required-file" && command.reportPolicy.path === AFFECTED_REPORT ? "affected" : "acceptance";
-      launches.push({ check, argv: [command.executable, ...command.args], lockHeld: locks.held > 0, atMs: clock.ms });
+      const check = checkNameOf(command);
+      launches.push({ check, argv: argvOf(command), lockHeld: locks.held > 0, atMs: clock.ms });
       const run = options[check] ?? { kind: "report", cases: [] };
       clock.ms += elapsedMs(run, command.timeoutMs);
       switch (run.kind) {
         case "report":
-          return runnerResult(check, false, null, junit(run.cases));
+          return runnerResult(command, false, null, junit(run.cases));
         case "timed-out":
-          return runnerResult(check, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
+          return runnerResult(command, true, "SIGKILL", junit([failing("src/partial.test.ts", "partial")]));
         case "killed":
-          return runnerResult(check, false, "SIGTERM", junit([failing("src/partial.test.ts", "partial")]));
+          return runnerResult(command, false, "SIGTERM", junit([failing("src/partial.test.ts", "partial")]));
         case "no-report":
-          return runnerResult(check, false, null, null);
+          return runnerResult(command, false, null, null);
         case "report-rewritten":
-          return runnerResult(check, false, null, junit([passing("src/ledger.test.ts", LEDGER_TEST)]), junit([failing("src/ledger.test.ts", LEDGER_TEST)]));
+          return runnerResult(command, false, null, junit([passing("src/ledger.test.ts", LEDGER_TEST)]), junit([failing("src/ledger.test.ts", LEDGER_TEST)]));
         case "not-junit":
-          return runnerResult(check, false, null, new TextEncoder().encode("not xml at all"));
+          return runnerResult(command, false, null, new TextEncoder().encode("not xml at all"));
         case "start-failed":
           return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: `spawn ${command.executable} ENOENT` } });
         case "did-not-complete":

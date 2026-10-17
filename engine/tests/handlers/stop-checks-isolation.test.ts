@@ -21,8 +21,8 @@ import {
   STOP_HOOK_BUDGET_MS,
   type AffectedStopCheckNoteKind,
   type StopCheckBlockCount,
+  type StopCheckCommand,
 } from "../../src/core/affected-stop-check-types";
-import { sha256Bytes } from "../../src/core/digest";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
 import type { StopCheckShellPorts } from "../../src/handlers/subagent-stop/acceptance-stop-check";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
@@ -35,7 +35,7 @@ import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../.
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { stateFileJson, task, writeStateFile } from "../fixtures/contract-status-fixtures";
 import { inMemoryBlockCounters } from "../fixtures/stop-check-block-counters";
-import { AFFECTED_REPORT, AFFECTED_RUNNER, parsedRun } from "../fixtures/stop-check-runners";
+import { AFFECTED_REPORT, AFFECTED_RUNNER, observedRun, parsedRun } from "../fixtures/stop-check-runners";
 
 const SESSION = "stop-checks-isolation-session";
 const AGENT = "agent-ledger";
@@ -121,12 +121,12 @@ const junit = (outcome: "passed" | "failed" | "none"): Uint8Array => new TextEnc
 
 function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
   const reports = new Map<string, Uint8Array>();
-  const runnerResult = (timedOut: boolean, signal: string | null, bytes: Uint8Array | null): CompletionCheckRunnerResult => {
+  const runnerResult = (command: StopCheckCommand, timedOut: boolean, signal: string | null, bytes: Uint8Array | null): CompletionCheckRunnerResult => {
     if (bytes !== null) reports.set(join(at.root, AFFECTED_REPORT), bytes);
-    return parsedRun({
-      checkId: "affected", scope: "wave",
-      outcome: { kind: "observed", exitCode: 1, timedOut, signal, report: bytes === null ? { kind: "missing", path: AFFECTED_REPORT } : { kind: "produced", path: AFFECTED_REPORT, digest: sha256Bytes(bytes), byteLength: bytes.byteLength } },
-    }, "affected runner stdout naming ledger > balances");
+    return observedRun(command, bytes, {
+      ending: { exitCode: 1, timedOut, signal },
+      stdoutTail: "affected runner stdout naming ledger > balances",
+    });
   };
   const now = FIXED_NOW.getTime();
   return {
@@ -134,12 +134,12 @@ function ports(at: Project, outcome: Outcome): StopCheckShellPorts {
     acquireRunner: () => outcome.lockHeld === true ? { kind: "held", reason: "another stop holds the lock" } : { kind: "acquired", release: () => null },
     runCheck: async (command) => {
       switch (outcome.run) {
-        case "passes": return runnerResult(false, null, junit("passed"));
-        case "fails": return runnerResult(false, null, junit("failed"));
-        case "zero-tests": return runnerResult(false, null, junit("none"));
-        case "timed-out": return runnerResult(true, "SIGKILL", junit("failed"));
-        case "killed": return runnerResult(false, "SIGTERM", junit("failed"));
-        case "no-report": return runnerResult(false, null, null);
+        case "passes": return runnerResult(command, false, null, junit("passed"));
+        case "fails": return runnerResult(command, false, null, junit("failed"));
+        case "zero-tests": return runnerResult(command, false, null, junit("none"));
+        case "timed-out": return runnerResult(command, true, "SIGKILL", junit("failed"));
+        case "killed": return runnerResult(command, false, "SIGTERM", junit("failed"));
+        case "no-report": return runnerResult(command, false, null, null);
         case "start-failed":
           return parsedRun({ checkId: command.checkId, scope: "wave", outcome: { kind: "spawn-failed", message: "spawn ENOENT" } });
         case "did-not-complete":
