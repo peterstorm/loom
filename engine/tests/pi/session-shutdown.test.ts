@@ -20,7 +20,7 @@ import {
   reviewerReservationNaming,
   settleEmptyBatch,
 } from "../fixtures/held-spawn-batch";
-import { fsSessionRegistry, parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
+import { fsSessionRegistry, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import { shutdownPiSession, type PiSessionShutdownPorts } from "../../../pi/session-shutdown";
 import { piDurableClaimReleasePorts } from "../../../pi/spawn-claim-shell";
 import {
@@ -33,6 +33,7 @@ import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
 import { issuePiWriteGrant } from "../../../pi/write-grant";
 import type { PiEmissionLaunchBridge } from "../../../pi/emission-launch-bridge";
 import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness";
+import { agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
 let root: string;
 let priorSubagentDir: string | undefined;
@@ -76,8 +77,7 @@ describe("shutdownPiSession", () => {
     const graph = join(cwd, ".claude", "state", "active_task_graph.json");
     mkdirSync(join(cwd, ".claude", "state"), { recursive: true });
     writeFileSync(graph, "{}\n");
-    const sessionId = parseSessionId("parent-session");
-    if (sessionId === null) throw new Error("fixture session id must parse");
+    const sessionId = sessionIdOf("parent-session");
 
     const parentSessions = createPiParentSessions();
     const issue = (slot: number, taskId: string) => Object.freeze({
@@ -122,10 +122,10 @@ describe("shutdownPiSession", () => {
 });
 
 describe("shutdownPiSession releases through the settlement path", () => {
-  const owner = parseSessionId("shutdown-owner")!;
-  const otherSession = parseSessionId("shutdown-other")!;
+  const owner = sessionIdOf("shutdown-owner");
+  const otherSession = sessionIdOf("shutdown-other");
   const toolCallId = "call-shutdown-1";
-  const rosterIds = [0, 1].map((slot) => parseAgentId(`pi-shutdown-roster-${slot}`)!);
+  const rosterIds = [0, 1].map((slot) => agentIdOf(`pi-shutdown-roster-${slot}`));
   /** A lease never written to disk: its release resolves without I/O. */
   const LEASE = Object.freeze({
     directory: "/off-disk",
@@ -229,7 +229,7 @@ describe("shutdownPiSession releases through the settlement path", () => {
   });
 
   describe("the session's child write-grant binding, released as a durable ledger", () => {
-    const childId = parseAgentId("pi-shutdown-child")!;
+    const childId = agentIdOf("pi-shutdown-child");
     const boundChild = async () => {
       await fsSessionRegistry.markActive(owner, childId);
       const childWriteGrants = createPiChildWriteGrants();

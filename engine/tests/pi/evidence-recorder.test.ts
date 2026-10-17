@@ -143,11 +143,12 @@ describe("createPiEvidenceRecorder — the Pi child's tool_result recorder", () 
     }, ctx(child));
     recorder.recordToolResult(bashEvent("printf x > out.txt && bun test", true), ctx(child));
 
+    const epoch = epochOf(grantAgent, IMPLEMENTER_TYPE);
     expect(registry.readEvidence(parent).map(({ epoch, event, callId }) => ({ epoch, event, callId }))).toEqual([
-      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "FileRead", path: "/repo/README.md" }, callId: "call-read" },
-      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "call-write" },
-      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "FileWrite", path: "/repo/out.txt", via: "shell" }, callId: "call-bash" },
-      { epoch: epochOf(grantAgent, IMPLEMENTER_TYPE), event: { kind: "TestRun", command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
+      { epoch, event: { kind: "FileRead", path: "/repo/README.md" }, callId: "call-read" },
+      { epoch, event: { kind: "FileWrite", path: "/repo/src/a.ts", via: "tool" }, callId: "call-write" },
+      { epoch, event: { kind: "FileWrite", path: "/repo/out.txt", via: "shell" }, callId: "call-bash" },
+      { epoch, event: { kind: "TestRun", command: "printf x > out.txt && bun test", exit: null, report: null }, callId: "call-bash" },
     ]);
     expect(registry.readEvidence(child)).toEqual([]);
   });

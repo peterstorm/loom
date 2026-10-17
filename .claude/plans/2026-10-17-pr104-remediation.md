@@ -1,7 +1,8 @@
 # PR #104 remediation — test fixtures part 2 review
 
 - **Branch:** `refactor/test-fixtures-part-2` (retargeted to `main` after #102 merged)
-- **Scope:** the PR's 8 changed test files (frozen diff, `kind: all`)
+- **Scope:** the review's frozen diff was the PR's original 8 changed test files (`kind: all`); this
+  remediation also touched the four support suites listed below and added this plan
 - **Review run:** `.claude/reviews/review-and-fix-runs/review-fix-20261017T144436Z-18f3daee-r2`
   (the first run, `review-fix-20261017T144408Z-18f3daee`, was abandoned: its scope was derived against a stale
   local `main` predating the #102 merge)
@@ -30,5 +31,6 @@ and this plan.
 ## Validation
 
 - `npx tsc --noEmit -p engine`; no new unused imports
-- the five touched suites
+- the five touched suites: `evidence-recorder`, `changed-files.matrix`, `phase-gate-target`,
+  `task-graph-pointer`, `implementation-attempt-sidecar`
 - `npm run verify` (root)

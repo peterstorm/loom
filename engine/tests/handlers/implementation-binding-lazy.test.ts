@@ -41,7 +41,6 @@ import { snapshotImplementationAttemptSidecar } from "../../src/implementation-a
 import { projectSlug } from "../../src/utils/agent-transcript-path";
 import {
   parseReportedAgentId,
-  parseSessionId,
   readActiveAgentRoles,
   type AgentId,
   type SessionId,
@@ -60,6 +59,7 @@ import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
+import { sessionIdOf } from "../fixtures/machine-identities";
 
 const ENGINE_ROOT = join(__dirname, "..", "..");
 const { root: ROOT, statePath: STATE_PATH } = fixture;
@@ -166,7 +166,7 @@ function writeGraph(
 const readGraph = (): TaskGraph => JSON.parse(readFileSync(STATE_PATH, "utf8")) as TaskGraph;
 
 const ids = (agent: string): Readonly<{ sessionId: SessionId; agentId: AgentId }> => ({
-  sessionId: parseSessionId(session)!,
+  sessionId: sessionIdOf(session),
   agentId: parseReportedAgentId(agent)!,
 });
 

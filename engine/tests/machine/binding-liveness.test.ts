@@ -27,20 +27,18 @@ import {
 import {
   formatBindingLine,
   isBindingFresh,
-  parseAgentId,
-  parseAgentType,
   parseBindingLine,
-  parseSessionId,
   epochOf,
   type MachineBinding,
   type SessionId,
 } from "../../src/machine/evidence";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../src/config";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
+import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
 
 const run = `liveness-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
-const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
+const sid = (name: string) => sessionIdOf(`${run}-${name}`);
 const sessions = ["stale", "fresh", "extend", "mixed", "mixed-reap", "gate-stale", "bind-reaps", "unbind-malformed"].map(sid);
 
 afterAll(() => {
@@ -54,9 +52,8 @@ afterAll(() => {
 });
 
 function binding(id: string, type: string): MachineBinding {
-  const agentId = parseAgentId(id);
-  const agentType = parseAgentType(type);
-  if (!agentId || !agentType) throw new Error(`test fixture: invalid identity ${id}/${type}`);
+  const agentId = agentIdOf(id);
+  const agentType = agentTypeOf(type);
   return { agentId, agentType, epoch: epochOf(agentId, agentType) };
 }
 
@@ -159,7 +156,7 @@ describe("stale bindings are absent and reaped", () => {
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await unbindMachineAgent(s, parseAgentType(impl)!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf(impl), agentIdOf("a-1"));
       // The valid binding is gone, but the malformed line is NOT laundered
       // away and the file is NOT unlinked…
       expect(existsSync(path)).toBe(true);
@@ -220,7 +217,7 @@ describe("stale bindings are absent and reaped", () => {
 
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await bindMachineAgent(s, parseAgentType(impl)!, parseAgentId("a-live")!);
+      await bindMachineAgent(s, agentTypeOf(impl), agentIdOf("a-live"));
       writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-live\n"); // sole-active needs the bound agent rostered
       expect(readBindings(s)).toEqual([binding("a-live", impl)]);
       // NOT contended: the dead binding no longer voids attribution.
@@ -234,7 +231,7 @@ describe("stale bindings are absent and reaped", () => {
 describe("fresh bindings and activity refresh", () => {
   it("a freshly-bound machine is honored", async () => {
     const s = sid("fresh");
-    await bindMachineAgent(s, parseAgentType(impl)!, parseAgentId("a-1")!);
+    await bindMachineAgent(s, agentTypeOf(impl), agentIdOf("a-1"));
     writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n"); // sole-active needs the bound agent rostered
     expect(readBindings(s)).toEqual([binding("a-1", impl)]);
     expect(soleActiveBinding(s)?.epoch).toBe(`a-1:${impl}`);

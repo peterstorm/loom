@@ -20,20 +20,18 @@ import {
   machineBindingPath,
   unbindMachineAgent,
 } from "../../../src/machine/ledger";
-import { parseAgentId, parseAgentType, parseSessionId, type SessionId } from "../../../src/machine/evidence";
+import { parseSessionId, type SessionId } from "../../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../../src/config";
+import { agentIdOf, agentTypeOf, sessionIdOf } from "../../fixtures/machine-identities";
 
 /** bindMachineAgent takes branded identity — parse like production does. */
 async function bind(session: SessionId, type: string, id: string): Promise<void> {
-  const agentType = parseAgentType(type);
-  const agentId = parseAgentId(id);
-  if (!agentType || !agentId) throw new Error(`test fixture: invalid identity ${type}/${id}`);
-  await bindMachineAgent(session, agentType, agentId);
+  await bindMachineAgent(session, agentTypeOf(type), agentIdOf(id));
 }
 
 const run = `gate-fail-closed-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
-const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
+const sid = (name: string) => sessionIdOf(`${run}-${name}`);
 const sessions = ["missing-fields", "missing-fields-armed", "corrupt-binding", "mixed-corrupt-binding", "unreadable-binding", "ambiguous-caller", "absent", "invalid-machine", "vanished-machine", "crash"].map(sid);
 
 afterAll(() => {
@@ -63,7 +61,7 @@ describe("gate fails closed on unattributable input (Fix 1)", () => {
       const noTool = await enforce(JSON.stringify({ session_id: s, tool_input: {} }), []);
       expect(noTool.kind).toBe("block");
     } finally {
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     }
   });
 
@@ -88,7 +86,7 @@ describe("gate fails closed on unattributable input (Fix 1)", () => {
         }
       }
     } finally {
-      await unbindMachineAgent(armed, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(armed, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     }
   });
 });
@@ -191,7 +189,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
       }
     } finally {
       delete process.env.LOOM_MACHINES_DIR;
-      await unbindMachineAgent(s, parseAgentType("corrupt-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf("corrupt-agent"), agentIdOf("a-1"));
       rmSync(machines, { recursive: true, force: true });
     }
   });
@@ -215,7 +213,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
       }
     } finally {
       delete process.env.LOOM_MACHINES_DIR;
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
       rmSync(machines, { recursive: true, force: true });
     }
   });
@@ -234,7 +232,7 @@ describe("gate fails closed on broken machinery (Fix 4)", () => {
       }
     } finally {
       rmSync(`${SUBAGENT_DIR}/${s}.active`, { recursive: true, force: true });
-      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+      await unbindMachineAgent(s, agentTypeOf("code-implementer-agent"), agentIdOf("a-1"));
     }
   });
 });
