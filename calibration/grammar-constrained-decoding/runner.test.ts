@@ -42,10 +42,18 @@ function unreachablePreregistration(): Readonly<{ dir: string; prereg: string; w
   return { dir, prereg: preregPath, window: join(dir, "window") };
 }
 
+/**
+ * The inherited environment without colour forcing: under `FORCE_COLOR`, Bun
+ * paints its uncaught-error output, and the ANSI codes split `error:` from the
+ * message the stderr assertions below read as plain text.
+ */
+const uncoloredEnv = (): NodeJS.ProcessEnv =>
+  Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== "FORCE_COLOR"));
+
 const run = (args: readonly string[], env: NodeJS.ProcessEnv = {}) => spawnSync("bun", ["scripts/run-model-calibration.ts", ...args], {
   cwd: REPO_ROOT,
   encoding: "utf-8",
-  env: { ...process.env, ...env },
+  env: { ...uncoloredEnv(), NO_COLOR: "1", ...env },
   timeout: 60_000,
 });
 
