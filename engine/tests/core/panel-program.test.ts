@@ -42,14 +42,9 @@ import {
   completePersistentRefutationPanel,
   panelRequestIdentity,
   parseArchitecturePanelCheckpoint,
-  parsePanelPersistenceReceipt,
   parsePersistentArchitecturePanelEvent,
-  parsePersistentArchitecturePanelHistory,
   parsePersistentRefutationPanelEvent,
-  parsePersistentRefutationPanelHistory,
   parseRefutationPanelCheckpoint,
-  planArchitecturePanelPersistence,
-  planRefutationPanelPersistence,
   reducePersistentArchitecturePanel,
   refutationPanelCheckpoint,
   replayPersistentArchitecturePanel,
@@ -65,11 +60,7 @@ import {
   submitRefutationVerdict,
   type ArchitecturePanelState,
   type PersistentArchitecturePanelEvent,
-  type PersistentArchitecturePanelHistory,
-  type PersistentArchitectureStep,
   type PersistentRefutationPanelEvent,
-  type PersistentRefutationPanelHistory,
-  type PersistentRefutationStep,
 } from "../../src/core/persistent-panel";
 import { parseWaveFindingId, projectFindingForPanel, type BriefFinding } from "../../src/core/review-panel";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
@@ -1037,95 +1028,26 @@ describe("persistent architecture panel", () => {
     }
   });
 
-  it("produces durable journal/checkpoint effects and accepts only exact receipts", () => {
+  it("resumes from the journalled event prefix when a crash lands between event append and checkpoint", () => {
     const fixture = architectureFixture("persistence-contract");
     const step = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
-    const history = value(parsePersistentArchitecturePanelHistory(fixture.authority, [], publicationResolver));
-    const effects = value(planArchitecturePanelPersistence(step, history, publicationResolver));
-    expect(effects.map(({ kind }) => kind)).toEqual([
-      "append-architecture-panel-event",
-      "replace-architecture-panel-checkpoint",
-    ]);
-
-    // FR-021: a crash after the immutable append but before checkpoint replace
-    // resumes from that append and plans only the next deterministic sequence.
-    const append = effects[0];
-    if (append.kind !== "append-architecture-panel-event") throw new Error("expected append effect first");
-    const interruptedHistory = value(parsePersistentArchitecturePanelHistory(
-      fixture.authority,
-      [JSON.parse(JSON.stringify(append.event))],
-      publicationResolver,
-    ));
-    const resumed = value(replayPersistentArchitecturePanel(
-      fixture.authority,
-      interruptedHistory.events,
-      publicationResolver,
-    ));
+    // FR-021: the event reached the journal and the process died before the
+    // checkpoint was written. Resume replays the journalled prefix alone.
+    const journal: readonly PersistentArchitecturePanelEvent[] = [JSON.parse(JSON.stringify(step.recordedEvent))];
+    const resumed = value(replayPersistentArchitecturePanel(fixture.authority, journal, publicationResolver));
     expect(resumed.state).toEqual(step.state);
+    // The next submission continues from it, and its checkpoint reloads to the same state.
     const afterResume = value(submitCandidate(resumed.state, fixture, 1));
-    const resumedEffects = value(planArchitecturePanelPersistence(
-      afterResume,
-      interruptedHistory,
-      publicationResolver,
-    ));
-    expect(resumedEffects.map(({ sequence }) => sequence)).toEqual([2, 2]);
-    const replacement = resumedEffects[1];
-    if (replacement.kind !== "replace-architecture-panel-checkpoint") throw new Error("expected checkpoint replacement second");
+    const checkpoint = value(architecturePanelCheckpoint(afterResume.state, [...journal, afterResume.recordedEvent!], publicationResolver));
     expect(JSON.parse(JSON.stringify(value(parseArchitecturePanelCheckpoint(
-      JSON.parse(JSON.stringify(replacement.checkpoint)),
+      JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
     )).state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
-
-    for (const effect of effects) {
-      expect(value(parsePanelPersistenceReceipt({
-        schemaVersion: 1,
-        kind: "panel-persistence-recorded",
-        panel: "architecture",
-        runId: effect.runId,
-        sequence: effect.sequence,
-        dedupKey: effect.dedupKey,
-      }, effect))).toMatchObject({ dedupKey: effect.dedupKey });
-      expect(parsePanelPersistenceReceipt({
-        schemaVersion: 1,
-        kind: "panel-persistence-recorded",
-        panel: "architecture",
-        runId: effect.runId,
-        sequence: effect.sequence,
-        dedupKey: `${effect.dedupKey}:forged`,
-      }, effect)).toMatchObject({ ok: false, error: { kind: "persistence-receipt-mismatch" } });
-    }
   });
 
-  it("emits no persistence effects from structural steps/histories or a prefix that does not replay to the step state", () => {
+  it("refuses a checkpoint whose event prefix does not replay to the state", () => {
     const fixture = architectureFixture("persistence-forgery");
-    const initial = startPersistentArchitecturePanel(fixture.authority);
-    const first = value(submitCandidate(initial.state, fixture, 0));
-    const second = value(submitCandidate(first.state, fixture, 1));
-    const emptyHistory = value(parsePersistentArchitecturePanelHistory(fixture.authority, [], publicationResolver));
-
-    const structuralStep = Object.freeze({ ...first }) as PersistentArchitectureStep;
-    expect(planArchitecturePanelPersistence(structuralStep, emptyHistory, publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-event" },
-    });
-
-    const structuralHistory = Object.freeze({
-      panel: "architecture",
-      authority: fixture.authority,
-      events: [],
-    }) as unknown as PersistentArchitecturePanelHistory;
-    expect(planArchitecturePanelPersistence(first, structuralHistory, publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-history" },
-    });
-
-    expect(planArchitecturePanelPersistence(second, emptyHistory, publicationResolver)).toMatchObject({
-      ok: false,
-      error: {
-        kind: "malformed-checkpoint",
-        message: expect.stringContaining("does not replay exactly"),
-      },
-    });
+    const first = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
     expect(architecturePanelCheckpoint(first.state, [], publicationResolver)).toMatchObject({
       ok: false,
       error: { kind: "malformed-checkpoint", message: expect.stringContaining("does not replay") },
@@ -1398,66 +1320,14 @@ describe("persistent refutation panel", () => {
     )).toMatchObject({ ok: false, error: { kind: "stale-request" } });
   });
 
-  it("produces symmetric refutation persistence effects, exact receipts, and rejects structural forgeries", () => {
+  it("refuses a refutation checkpoint whose event prefix does not replay to the state", () => {
     const fixture = refutationFixture("persistence-contract");
-    const initial = startPersistentRefutationPanel(fixture.authority);
     const first = value(submitRefutationVerdict(
-      initial.state,
+      startPersistentRefutationPanel(fixture.authority).state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[0]!),
       verdictJson(fixture.authority, 0, votes[0]!),
     ));
-    const second = value(submitRefutationVerdict(
-      first.state,
-      publicationResolver,
-      panelRequestIdentity(fixture.requests[1]!),
-      verdictJson(fixture.authority, 1, votes[1]!),
-    ));
-    const emptyHistory = value(parsePersistentRefutationPanelHistory(fixture.authority, [], publicationResolver));
-    const effects = value(planRefutationPanelPersistence(first, emptyHistory, publicationResolver));
-    expect(effects.map(({ kind }) => kind)).toEqual([
-      "append-refutation-panel-event",
-      "replace-refutation-panel-checkpoint",
-    ]);
-
-    for (const effect of effects) {
-      const receipt = {
-        schemaVersion: 1,
-        kind: "panel-persistence-recorded",
-        panel: "refutation",
-        runId: effect.runId,
-        sequence: effect.sequence,
-        dedupKey: effect.dedupKey,
-      } as const;
-      expect(value(parsePanelPersistenceReceipt(receipt, effect))).toEqual(receipt);
-      expect(parsePanelPersistenceReceipt({ ...receipt, dedupKey: `${effect.dedupKey}:forged` }, effect)).toMatchObject({
-        ok: false,
-        error: { kind: "persistence-receipt-mismatch" },
-      });
-      expect(parsePanelPersistenceReceipt({ ...receipt, surplus: true }, effect)).toMatchObject({
-        ok: false,
-        error: { kind: "persistence-receipt-mismatch" },
-      });
-    }
-
-    const structuralStep = Object.freeze({ ...first }) as PersistentRefutationStep;
-    expect(planRefutationPanelPersistence(structuralStep, emptyHistory, publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-event" },
-    });
-    const structuralHistory = Object.freeze({
-      panel: "refutation",
-      authority: fixture.authority,
-      events: [],
-    }) as unknown as PersistentRefutationPanelHistory;
-    expect(planRefutationPanelPersistence(first, structuralHistory, publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-history" },
-    });
-    expect(planRefutationPanelPersistence(second, emptyHistory, publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-checkpoint", message: expect.stringContaining("does not replay exactly") },
-    });
     expect(refutationPanelCheckpoint(first.state, [], publicationResolver)).toMatchObject({
       ok: false,
       error: { kind: "malformed-checkpoint", message: expect.stringContaining("does not replay") },
@@ -1474,21 +1344,18 @@ function mixedRefutationFixture(suffix: string, confidence = 50): RefutationFixt
 }
 
 describe("current and historical Findings through the full persistent panel", () => {
-  it("publishes journal/checkpoint effects and reloads every prefix through full-basis done", () => {
+  it("checkpoints and reloads every prefix through full-basis done", () => {
     const fixture = mixedRefutationFixture("current-prefixes");
     let step = startPersistentRefutationPanel(fixture.authority);
     const events: PersistentRefutationPanelEvent[] = [];
     for (const index of [2, 0, 1, 3]) {
-      const history = value(parsePersistentRefutationPanelHistory(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver));
       step = index === 3 ? value(completePersistentRefutationPanel(step.state, publicationResolver))
         : value(submitRefutationVerdict(step.state, publicationResolver, panelRequestIdentity(fixture.requests[index]!), verdictJson(fixture.authority, index, votes[index]!)));
-      const effects = value(planRefutationPanelPersistence(step, history, publicationResolver));
       events.push(step.recordedEvent!);
-      expect(effects.map(({ sequence }) => sequence)).toEqual([events.length, events.length]);
-      const replacement = effects[1];
-      if (replacement.kind !== "replace-refutation-panel-checkpoint") throw new Error("checkpoint expected");
-      expect(replacement.checkpoint.schemaVersion).toBe(2);
-      const snapshot = JSON.stringify(replacement.checkpoint);
+      const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
+      expect(checkpoint.schemaVersion).toBe(2);
+      expect(checkpoint.events).toHaveLength(events.length);
+      const snapshot = JSON.stringify(checkpoint);
       const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(snapshot), publicationResolver));
       expect(JSON.stringify(reloaded.state)).toBe(JSON.stringify(step.state));
       expect(JSON.stringify(value(replayPersistentRefutationPanel(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver)).state))
@@ -1496,10 +1363,6 @@ describe("current and historical Findings through the full persistent panel", ()
       expect(reloaded.state.authority.findings).toEqual(fixture.authority.findings);
       expect(Object.isFrozen(reloaded.state.authority.findings[0]?.basis?.evidence)).toBe(true);
       expect(reloaded.state.authority.findings[1]).not.toHaveProperty("protocolVersion");
-      for (const effect of effects) {
-        expect(parsePanelPersistenceReceipt({ schemaVersion: 1, kind: "panel-persistence-recorded", panel: "refutation",
-          runId: effect.runId, sequence: effect.sequence, dedupKey: effect.dedupKey }, effect).ok).toBe(true);
-      }
     }
     if (step.state.stage !== "done") throw new Error("done expected");
     expect(step.state.decision.threshold).toBe(2);
@@ -1552,15 +1415,6 @@ describe("current and historical Findings through the full persistent panel", ()
     if (target.protocolVersion === 2) { delete target.protocolVersion; delete target.basis; }
     expect(replayPersistentRefutationPanel(fixture.authority, raw, publicationResolver).ok).toBe(false);
     expect(step.state.stage).toBe("done");
-  });
-
-  it("refuses an independently minted history for a changed current basis at persistence planning", () => {
-    const original = mixedRefutationFixture("current-parent-join", 50);
-    const changed = mixedRefutationFixture("current-parent-join", 51);
-    const history = value(parsePersistentRefutationPanelHistory(original.authority, [], publicationResolver));
-    const step = value(submitRefutationVerdict(startPersistentRefutationPanel(changed.authority).state,
-      publicationResolver, panelRequestIdentity(changed.requests[0]!), verdictJson(changed.authority, 0, votes[0]!)));
-    expect(planRefutationPanelPersistence(step, history, publicationResolver)).toMatchObject({ ok: false, error: { kind: "malformed-history" } });
   });
 
   it("confidence changes never change majority votes, counts, surviving severity or uncertainty", () => {

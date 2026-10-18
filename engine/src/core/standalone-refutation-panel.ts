@@ -12,7 +12,7 @@ import {
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
 import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
-import { projectFindingForPanel, type BriefFinding } from "./review-panel";
+import { defaultRefutationThreshold, projectFindingForPanel, type BriefFinding } from "./review-panel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
 import { findingOf } from "./standalone-finding-origin";
 import type {
@@ -175,10 +175,9 @@ export function freezeStandalonePanelAuthority(
   if (lenses.length === 0 || new Set(lenses).size !== lenses.length) {
     errors.push("panel authority lenses must be a non-empty distinct ordered roster");
   }
-  const floor = Math.floor(lenses.length / 2) + 1;
-  if (!Number.isInteger(input.threshold) || (input.threshold as number) < floor ||
-      (input.threshold as number) > lenses.length) {
-    errors.push(`panel authority threshold must be an integer from strict-majority floor ${floor} through ${lenses.length}`);
+  const majority = defaultRefutationThreshold(lenses.length);
+  if (input.threshold !== majority) {
+    errors.push(`panel authority threshold must be the strict majority ${majority} of its ${lenses.length} lenses`);
   }
   const [firstFinding, ...otherFindings] = expectedFindings;
   const [firstLens, ...otherLenses] = lenses;
@@ -251,9 +250,8 @@ export function parseStandalonePanelOutcomes(
   if (lenses.length !== expectedLenses.length || lenses.some((lens, index) => lens !== expectedLenses[index])) {
     errors.push("outcomes.lenses must exactly match the validated manifest lenses in order");
   }
-  const threshold = Number.isInteger(raw.threshold) ? raw.threshold as number : 0;
-  const majority = Math.floor(lenses.length / 2) + 1;
-  if (threshold < majority || threshold > lenses.length) errors.push("outcomes.threshold must be at least a strict majority and no greater than the lens count");
+  const threshold = defaultRefutationThreshold(lenses.length);
+  if (raw.threshold !== threshold) errors.push(`outcomes.threshold must be the strict majority ${threshold} of its ${lenses.length} lenses`);
   if (!Array.isArray(raw.outcomes)) return fail([...errors, "outcomes.outcomes must be an array"]);
   const expected = new Map(criticals.map((finding) => [`${STANDALONE_REVIEW_SUBJECT}:${finding.id}`, finding]));
   const canonicalPanelFindings = canonicalStandalonePanelFindings(criticals);

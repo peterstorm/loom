@@ -99,6 +99,11 @@ from the genuine one it displaced.
 
 ### Fugue used directly; no AuthoredDag sidecar
 
+*(Amended 2026-10-18 by ADR-0029.)* No production path ever ran through the Fugue runtime or the operation
+DAGs. Programs persist through the Run Directory journal and checkpoint instead, so the runtime, the DAGs and
+the `@fuguejs/framework` dependency were removed. The no-sidecar reasoning below still stands; the runtime
+choice does not.
+
 Fugue 0.4.0 is used through its **main public export only** — `Machine`,
 `JobLike`, `runStateMachine`, `replayEvents`, `toJson`/`fromJson`,
 `defineDag`, `runDag`, `createTransformNode`, `createHumanReviewNode`,

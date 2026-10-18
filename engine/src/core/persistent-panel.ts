@@ -11,9 +11,8 @@
  *     duplicate-result, retry-to-attempt-2 and terminal-blocked for every
  *     roster stage;
  *   - the program kernel (`core/persistent-panel-program`: the
- *     `PanelProgramDefinition`, the reducer guard, replay, histories,
- *     checkpoints and the persistence plan with its dedup key) owns
- *     replay-equals-state; this module supplies only `ARCHITECTURE_PROGRAM`
+ *     `PanelProgramDefinition`, the reducer guard, replay and checkpoints)
+ *     owns replay-equals-state; this module supplies only `ARCHITECTURE_PROGRAM`
  *     and `REFUTATION_PROGRAM`;
  *   - one module-private membership domain (`proofs`, from the kernel's
  *     `createPanelProofs`) owns which values came from start, reduction,
@@ -21,15 +20,15 @@
  *
  * Each panel contributes only its stage topology (which roster each stage
  * waits on and which stage follows) and its result parsing. Every state,
- * event, recorded step and history is minted in this module's private proof
- * domain, so a value that did not come from start, reduction, replay or
- * checkpoint parsing cannot be resumed, reduced or persisted. The issued
+ * event and recorded step is minted in this module's private proof domain, so
+ * a value that did not come from start, reduction, replay or checkpoint
+ * parsing cannot be resumed, reduced or checkpointed. The issued
  * roster authority comes from `panel-authority`; the verdict-source selection
  * both verdict submissions run before their authoritative parse comes from
  * `panel-verdict-source`.
  *
- * Durable bytes are unchanged by the shared kernel: every state, event,
- * checkpoint and effect is built with the key order its persisted form has
+ * Durable bytes are unchanged by the shared kernel: every state, event and
+ * checkpoint is built with the key order its persisted form has
  * always had, because checkpoint parsing compares the recorded state with the
  * replayed one as JSON text.
  *
@@ -58,15 +57,12 @@ import {
   jsonEqual,
   panelProgramCheckpoint,
   parsePanelProgramCheckpoint,
-  parsePanelProgramHistory,
-  planPanelProgramPersistence,
   reduceParsedPanelEvent,
   reducePanelProgram,
   replayPanelProgram,
   resumePanelProgram,
   type PanelCheckpoint,
   type PanelKind,
-  type PanelPersistenceEffect,
   type PanelProgramDefinition,
   type PanelStep,
 } from "./persistent-panel-program";
@@ -261,27 +257,11 @@ export type PersistentRefutationPanelEvent =
 export type PersistentArchitectureStep = PanelStep<ArchitecturePanelState, ArchitecturePanelAction, PersistentArchitecturePanelEvent>;
 export type PersistentRefutationStep = PanelStep<RefutationPanelState, RefutationPanelAction, PersistentRefutationPanelEvent>;
 
-declare const PERSISTENT_ARCHITECTURE_HISTORY: unique symbol;
-declare const PERSISTENT_REFUTATION_HISTORY: unique symbol;
-
-export type PersistentArchitecturePanelHistory = Readonly<{
-  panel: "architecture";
-  authority: ArchitecturePanelAuthority;
-  events: readonly PersistentArchitecturePanelEvent[];
-  readonly [PERSISTENT_ARCHITECTURE_HISTORY]: "PersistentArchitecturePanelHistory";
-}>;
-export type PersistentRefutationPanelHistory = Readonly<{
-  panel: "refutation";
-  authority: RefutationPanelAuthority;
-  events: readonly PersistentRefutationPanelEvent[];
-  readonly [PERSISTENT_REFUTATION_HISTORY]: "PersistentRefutationPanelHistory";
-}>;
-
 // ---------------------------------------------------------------------------
 // Membership proofs: the ONE authority over which values this module minted
 // ---------------------------------------------------------------------------
 
-/** Every minted state, event, recorded step and history of both panels, in one
+/** Every minted state, event and recorded step of both panels, in one
  *  module-private domain: no other module can mint into it. */
 const proofs = createPanelProofs();
 const { prove, proven } = proofs;
@@ -1387,7 +1367,7 @@ function completeRosterMatches(roster: ExactRoster, complete: CompleteRoster<Acc
   });
 }
 
-export function aggregateArchitecturePanel(authority: ArchitecturePanelAuthority, complete: CompleteRoster<AcceptedAgentResult<JudgeVerdict>>): PersistentPanelResult<readonly CandidateRanking[]> {
+function aggregateArchitecturePanel(authority: ArchitecturePanelAuthority, complete: CompleteRoster<AcceptedAgentResult<JudgeVerdict>>): PersistentPanelResult<readonly CandidateRanking[]> {
   try {
     if (completeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.judgeRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("architecture", "incomplete-roster", "complete judge roster is unproved, stale, or belongs to another panel"));
     const aggregated = aggregateVerdicts(complete.ordered.map(({ value }) => value), authority.judgeCriteria, authority.candidateIds);
@@ -1400,7 +1380,7 @@ export function aggregateArchitecturePanel(authority: ArchitecturePanelAuthority
   }
 }
 
-export function tallyRefutationPanel(authority: RefutationPanelAuthority, complete: CompleteRoster<AcceptedAgentResult<VerdictEnvelope<RefutationVerdict>>>, requestedThreshold = defaultRefutationThreshold(authority.lenses.length)): PersistentPanelResult<RefutationDecision> {
+function tallyRefutationPanel(authority: RefutationPanelAuthority, complete: CompleteRoster<AcceptedAgentResult<VerdictEnvelope<RefutationVerdict>>>, requestedThreshold = defaultRefutationThreshold(authority.lenses.length)): PersistentPanelResult<RefutationDecision> {
   try {
     if (completeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.verifierRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("refutation", "incomplete-roster", "complete verifier roster is unproved, stale, or belongs to another panel"));
     const strictMajority = defaultRefutationThreshold(authority.lenses.length);
@@ -1433,7 +1413,7 @@ export function completePersistentRefutationPanel(state: RefutationPanelState, r
 }
 
 // ---------------------------------------------------------------------------
-// Replay, histories, checkpoints and persistence plans (per panel)
+// Replay and checkpoints (per panel)
 // ---------------------------------------------------------------------------
 
 export function replayPersistentArchitecturePanel(authority: ArchitecturePanelAuthority, rawEvents: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentArchitectureStep> {
@@ -1442,24 +1422,6 @@ export function replayPersistentArchitecturePanel(authority: ArchitecturePanelAu
 
 export function replayPersistentRefutationPanel(authority: RefutationPanelAuthority, rawEvents: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
   return replayPanelProgram(REFUTATION_PROGRAM, authority, rawEvents, resolver);
-}
-
-/** Parse and replay an immutable architecture event prefix into persistence authority. */
-export function parsePersistentArchitecturePanelHistory(
-  authority: ArchitecturePanelAuthority,
-  rawEvents: unknown,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<PersistentArchitecturePanelHistory> {
-  return parsePanelProgramHistory(ARCHITECTURE_PROGRAM, authority, rawEvents, resolver) as PersistentPanelResult<PersistentArchitecturePanelHistory>;
-}
-
-/** Parse and replay an immutable refutation event prefix into persistence authority. */
-export function parsePersistentRefutationPanelHistory(
-  authority: RefutationPanelAuthority,
-  rawEvents: unknown,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<PersistentRefutationPanelHistory> {
-  return parsePanelProgramHistory(REFUTATION_PROGRAM, authority, rawEvents, resolver) as PersistentPanelResult<PersistentRefutationPanelHistory>;
 }
 
 export type ArchitecturePanelCheckpoint = PanelCheckpoint<"architecture", ArchitecturePanelAuthorityInput, PersistentArchitecturePanelEvent>;
@@ -1485,32 +1447,4 @@ export function parseArchitecturePanelCheckpoint(raw: unknown, resolver: Publica
 }
 export function parseRefutationPanelCheckpoint(raw: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
   return parsePanelProgramCheckpoint(REFUTATION_PROGRAM, raw, resolver);
-}
-
-export type ArchitecturePanelPersistenceEffect = PanelPersistenceEffect<"architecture", ArchitecturePanelAuthorityInput, PersistentArchitecturePanelEvent>;
-export type RefutationPanelPersistenceEffect = PanelPersistenceEffect<"refutation", RefutationPanelAuthorityInput, PersistentRefutationPanelEvent>;
-export type PanelPersistenceReceipt = Readonly<{ schemaVersion: 1; kind: "panel-persistence-recorded"; panel: PanelKind; runId: OrchestrationRunId; sequence: number; dedupKey: string }>;
-
-export function planArchitecturePanelPersistence(
-  step: PersistentArchitectureStep,
-  history: PersistentArchitecturePanelHistory,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<readonly [ArchitecturePanelPersistenceEffect, ArchitecturePanelPersistenceEffect]> {
-  return planPanelProgramPersistence(ARCHITECTURE_PROGRAM, step, history, resolver);
-}
-export function planRefutationPanelPersistence(
-  step: PersistentRefutationStep,
-  history: PersistentRefutationPanelHistory,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<readonly [RefutationPanelPersistenceEffect, RefutationPanelPersistenceEffect]> {
-  return planPanelProgramPersistence(REFUTATION_PROGRAM, step, history, resolver);
-}
-
-export function parsePanelPersistenceReceipt(raw: unknown, expected: ArchitecturePanelPersistenceEffect | RefutationPanelPersistenceEffect): PersistentPanelResult<PanelPersistenceReceipt> {
-  const panel = expected.kind.includes("architecture") ? "architecture" : "refutation";
-  const receipt = safeRecord(raw, ["schemaVersion", "kind", "panel", "runId", "sequence", "dedupKey"]);
-  if (receipt === null || receipt.schemaVersion !== 1 || receipt.kind !== "panel-persistence-recorded" || receipt.panel !== panel || receipt.runId !== expected.runId || receipt.sequence !== expected.sequence || receipt.dedupKey !== expected.dedupKey) {
-    return persistentFailure(panelError(panel, "persistence-receipt-mismatch", "panel persistence receipt does not match the exact journal/checkpoint effect"));
-  }
-  return persistentSuccess(Object.freeze({ schemaVersion: 1, kind: "panel-persistence-recorded", panel, runId: expected.runId, sequence: expected.sequence, dedupKey: expected.dedupKey }));
 }

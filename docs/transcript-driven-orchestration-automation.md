@@ -87,7 +87,7 @@ The parent receives only `spawn-batch`, `await-user`, `blocked`, or `done` at tr
 
 ### Persistent typed programs
 
-Closed reducers now model Wave Gate, standalone review, refutation/architecture panels, and remediation. Events are persisted through `orchestration/fugue-program-runtime.ts`; checkpoints are projections, not primary history. A semantic failure gets one retry, and attempt-2 rejection is a typed terminal state.
+Closed reducers now model Wave Gate, standalone review, refutation/architecture panels, and remediation. Events are persisted in the Run Directory journal (`orchestration/program-journal.ts`, ADR-0029); checkpoints are projections, not primary history. A semantic failure gets one retry, and attempt-2 rejection is a typed terminal state.
 
 ### Engine-issued request authority
 
@@ -123,7 +123,7 @@ The final design grafted:
 - parser-produced complete-roster proof and typed reducers from type-driven FP;
 - anchored fixed-layout authority and narrow capabilities from risk/security-first.
 
-The result uses Fugue 0.4.0 directly through its public state-machine and DAG APIs. It deliberately does not create one plan-level `AuthoredDag` for Loom’s internal orchestration: several distinct operation DAGs and persistent domain reducers cannot be honestly represented by that one-sidecar shape.
+The plan also called for running these programs on Fugue 0.4.0's state-machine and DAG APIs. No production path ever did, so ADR-0029 removed that runtime and the operation DAGs. The programs persist through the Run Directory journal. The plan's refusal to author one plan-level `AuthoredDag` sidecar still holds: distinct persistent domain reducers cannot honestly share that one-sidecar shape.
 
 See [ADR-0004](adr/ADR-0004-engine-owned-orchestration-automation.md) for the complete decision and consequences.
 

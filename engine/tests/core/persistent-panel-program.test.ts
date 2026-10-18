@@ -1,14 +1,13 @@
 /**
  * The persistent panel program kernel at its own interface, driven by a
  * trivial third program — a tally counter — with neither real panel in
- * sight: the reducer guard, replay-equals-state, histories, checkpoints, the
- * persistence plan and its dedup key, and proof-domain isolation. The two
+ * sight: the reducer guard, replay-equals-state, checkpoints, and proof-domain
+ * isolation. The two
  * real panels' instantiations are pinned by persistent-panel-kernel.property
  * and the persistent panel suites.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { sha256Hex } from "../../src/core/digest";
 import { safeRecord } from "../../src/core/exact-data";
 import { panelError, persistentFailure, persistentSuccess } from "../../src/core/panel-authority";
 import { parseOrchestrationRunId, type OrchestrationRunId } from "../../src/core/orchestration-contract";
@@ -17,8 +16,6 @@ import {
   jsonEqual,
   panelProgramCheckpoint,
   parsePanelProgramCheckpoint,
-  parsePanelProgramHistory,
-  planPanelProgramPersistence,
   reduceParsedPanelEvent,
   reducePanelProgram,
   replayPanelProgram,
@@ -79,16 +76,22 @@ const TALLY: PanelProgramDefinition<"refutation", TallyAuthority, TallyAuthority
 };
 
 const AUTHORITY: TallyAuthority = Object.freeze({ runId: value(parseOrchestrationRunId("run.tally")) });
-const OTHER_AUTHORITY: TallyAuthority = Object.freeze({ runId: value(parseOrchestrationRunId("run.other-tally")) });
 const INCREMENT = Object.freeze({ schemaVersion: 1, type: "increment" });
 const FINISH = Object.freeze({ schemaVersion: 1, type: "finish" });
 const increments = (count: number) => Array.from({ length: count }, () => INCREMENT);
-/** Record `count` increments one submission at a time, as a shell would. */
-const recordIncrements = (count: number): TallyStep => {
+/** Submit `raw` one event at a time, as a shell would, keeping each parsed event it journals. */
+const record = (raw: readonly TallyEvent[]): Readonly<{ step: TallyStep; events: readonly TallyEvent[] }> => {
   let step = TALLY.start(AUTHORITY);
-  for (let index = 0; index < count; index += 1) step = value(reduceParsedPanelEvent(TALLY, step.state, INCREMENT, resolver));
-  return step;
+  const events: TallyEvent[] = [];
+  for (const event of raw) {
+    step = value(reduceParsedPanelEvent(TALLY, step.state, event, resolver));
+    if (step.recordedEvent === undefined) throw new Error("a submission must record its event");
+    events.push(step.recordedEvent);
+  }
+  return Object.freeze({ step, events: Object.freeze(events) });
 };
+/** Record `count` increments one submission at a time, as a shell would. */
+const recordIncrements = (count: number): TallyStep => record(increments(count)).step;
 
 describe("persistent panel program kernel: the reducer guard", () => {
   it("transitions a proved state on a strictly parsed event", () => {
@@ -126,14 +129,14 @@ describe("persistent panel program kernel: the reducer guard", () => {
   });
 });
 
-describe("persistent panel program kernel: replay, checkpoints and persistence", () => {
+describe("persistent panel program kernel: replay and checkpoints", () => {
   it("replays any recorded prefix to exactly the state its submissions produced, checkpoint included", () => {
     fc.assert(fc.property(fc.integer({ min: 0, max: 12 }), fc.boolean(), (count, finish) => {
       const recorded = finish ? value(reduceParsedPanelEvent(TALLY, recordIncrements(count).state, FINISH, resolver)) : recordIncrements(count);
       const events = [...increments(count), ...(finish ? [FINISH] : [])];
       const replayed = value(replayPanelProgram(TALLY, AUTHORITY, events, resolver));
       expect(jsonEqual(replayed.state, recorded.state)).toBe(true);
-      const checkpoint = value(panelProgramCheckpoint(TALLY, recorded.state, value(parsePanelProgramHistory(TALLY, AUTHORITY, events, resolver)).events, resolver));
+      const checkpoint = value(panelProgramCheckpoint(TALLY, recorded.state, record(events).events, resolver));
       expect(checkpoint).toMatchObject({ schemaVersion: 2, kind: "refutation-panel-checkpoint", authority: { runId: "run.tally" } });
       const restored = value(parsePanelProgramCheckpoint(TALLY, JSON.parse(JSON.stringify(checkpoint)), resolver));
       expect(jsonEqual(restored.state, recorded.state)).toBe(true);
@@ -150,14 +153,14 @@ describe("persistent panel program kernel: replay, checkpoints and persistence",
   });
 
   it("refuses a checkpoint whose prefix does not replay to the supplied state", () => {
-    expect(refusal(panelProgramCheckpoint(TALLY, recordIncrements(2).state, value(parsePanelProgramHistory(TALLY, AUTHORITY, increments(1), resolver)).events, resolver)))
+    expect(refusal(panelProgramCheckpoint(TALLY, recordIncrements(2).state, record(increments(1)).events, resolver)))
       .toMatchObject({ kind: "malformed-checkpoint", message: "refutation checkpoint event prefix does not replay to the supplied state" });
   });
 
   /** The durable JSON of a two-increment checkpoint, as a shell reads it back. */
   const durableCheckpoint = (): Record<string, unknown> => {
-    const history = value(parsePanelProgramHistory(TALLY, AUTHORITY, increments(2), resolver));
-    return JSON.parse(JSON.stringify(value(panelProgramCheckpoint(TALLY, recordIncrements(2).state, history.events, resolver)))) as Record<string, unknown>;
+    const { step, events } = record(increments(2));
+    return JSON.parse(JSON.stringify(value(panelProgramCheckpoint(TALLY, step.state, events, resolver)))) as Record<string, unknown>;
   };
   const NOT_EXACT = { kind: "malformed-checkpoint", message: "refutation checkpoint must be an exact schemaVersion 2 record" } as const;
   const DISAGREES = { kind: "malformed-checkpoint", message: "refutation checkpoint state disagrees with its immutable event prefix" } as const;
@@ -192,28 +195,6 @@ describe("persistent panel program kernel: replay, checkpoints and persistence",
     // The projection decides agreement, never membership: the twin still refuses real disagreement.
     const disagreeing = { ...echoed, state: { ...echoed.state, count: 7 } };
     expect(refusal(parsePanelProgramCheckpoint(twin, disagreeing, resolver))).toMatchObject(DISAGREES);
-  });
-
-  it("plans the journal append and checkpoint replacement of one recorded step, keyed by sequence and content", () => {
-    const history = value(parsePanelProgramHistory(TALLY, AUTHORITY, increments(2), resolver));
-    const step = value(reduceParsedPanelEvent(TALLY, value(replayPanelProgram(TALLY, AUTHORITY, increments(2), resolver)).state, INCREMENT, resolver));
-    const [append, replace] = value(planPanelProgramPersistence(TALLY, step, history, resolver));
-    expect(append).toEqual({ schemaVersion: 1, kind: "append-refutation-panel-event", runId: "run.tally", sequence: 3,
-      dedupKey: `run.tally:3:${sha256Hex(JSON.stringify(step.recordedEvent))}`, event: step.recordedEvent });
-    expect(replace).toMatchObject({ kind: "replace-refutation-panel-checkpoint", sequence: 3, checkpoint: { state: { count: 3 } } });
-    expect(replace.dedupKey).toBe(`run.tally:3:${sha256Hex(JSON.stringify(replace.kind === "replace-refutation-panel-checkpoint" ? replace.checkpoint : null))}`);
-  });
-
-  it("plans nothing for a step that was not recorded, or over a history it does not extend", () => {
-    const history = value(parsePanelProgramHistory(TALLY, AUTHORITY, increments(1), resolver));
-    const recorded = value(reduceParsedPanelEvent(TALLY, value(replayPanelProgram(TALLY, AUTHORITY, increments(1), resolver)).state, INCREMENT, resolver));
-    expect(refusal(planPanelProgramPersistence(TALLY, TALLY.start(AUTHORITY), history, resolver))).toMatchObject({ kind: "malformed-event" });
-    expect(refusal(planPanelProgramPersistence(TALLY, recorded, { ...history }, resolver))).toMatchObject({ kind: "malformed-history" });
-    const foreign = value(parsePanelProgramHistory(TALLY, OTHER_AUTHORITY, increments(1), resolver));
-    expect(refusal(planPanelProgramPersistence(TALLY, recorded, foreign, resolver))).toMatchObject({ kind: "malformed-history" });
-    const stale = value(parsePanelProgramHistory(TALLY, AUTHORITY, increments(2), resolver));
-    expect(refusal(planPanelProgramPersistence(TALLY, recorded, stale, resolver))).toMatchObject({ kind: "malformed-checkpoint",
-      message: "refutation event prefix does not replay exactly to the proposed checkpoint state" });
   });
 });
 

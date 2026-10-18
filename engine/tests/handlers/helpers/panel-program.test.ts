@@ -4,10 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   LEGACY_PANEL_PROGRAM_SCHEMA_VERSION,
-  prepareArchitecturePanelPersistenceOperations,
-  prepareRefutationPanelPersistenceOperations,
   translateLegacyPanelJournal,
-  translateLegacyPanelJournalBytes,
   type LegacyArchitecturePanelJournal,
 } from "../../../src/handlers/helpers/panel-program";
 
@@ -34,33 +31,6 @@ const refutationInput = {
 };
 
 describe("legacy panel journal compatibility", () => {
-  it("retains the exact legacy source bytes while exposing an in-memory compatibility view", () => {
-    const source = ` {\n  \"input\": ${JSON.stringify(architectureInput)},\n  \"events\": []\n}\n`;
-    const translated = translateLegacyPanelJournalBytes("architecture", source);
-    expect(translated.ok).toBe(true);
-    if (!translated.ok) throw new Error(translated.error);
-    expect(translated.value.source).toBe(source);
-    expect(new TextEncoder().encode(translated.value.source)).toEqual(new TextEncoder().encode(source));
-    expect(translated.value.journal).toMatchObject({ panel: "architecture", events: [] });
-  });
-
-  it("exposes separate new-session helper persistence operations without a workflow DSL", () => {
-    expect(prepareArchitecturePanelPersistenceOperations({
-      state: {} as never,
-      action: null,
-    }, {} as never, (() => ({ ok: false })) as never)).toEqual({
-      ok: false,
-      error: "Architecture step has no durable event to persist",
-    });
-    expect(prepareRefutationPanelPersistenceOperations({
-      state: {} as never,
-      action: null,
-    }, {} as never, (() => ({ ok: false })) as never)).toEqual({
-      ok: false,
-      error: "Refutation step has no durable event to persist",
-    });
-  });
-
   it("format-detects historical and explicitly-versioned journals without rewriting either", () => {
     const historical = {
       input: architectureInput,

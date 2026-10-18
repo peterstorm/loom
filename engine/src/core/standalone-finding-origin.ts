@@ -9,6 +9,7 @@ import type { Finding } from "./findings";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { canonicalRecord, failure, success, type DomainResult } from "./orchestration-contract/identity";
 import { isRecord } from "./panel-kernel";
+import { defaultRefutationThreshold } from "./review-panel";
 import { parseBoundedReviewerJson } from "./reviewer-protocol";
 import {
   STANDALONE_LINEAGE_LIMITS, findingOriginSchema, standaloneLineageInventorySchema,
@@ -53,7 +54,7 @@ function historyProblem(row: StandaloneLineageRow): boolean {
       return findingOf(row).severity !== "critical" || new Set(value.lenses).size !== value.lenses.length ||
         new Set(votes).size !== votes.length || votes.length !== value.lenses.length ||
         votes.some(lens => !value.lenses.includes(lens)) ||
-        value.threshold < Math.floor(value.lenses.length / 2) + 1 || value.threshold > value.lenses.length ||
+        value.threshold !== defaultRefutationThreshold(value.lenses.length) ||
         value.survives !== (value.refutations.length < value.threshold);
     })
     .with({ kind: "resolution" }, { kind: "successor-resolution" }, value => new Set(value.assessments.map(entry => entry.role)).size !== value.assessments.length ||

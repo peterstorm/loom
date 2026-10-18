@@ -247,7 +247,7 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
     ],
   },
   {
-    // The orchestration shell drives the pure core through Fugue and owns the
+    // The orchestration shell drives the pure core and owns the
     // filesystem/protected-state/Git effects. Arrows point inward: it may
     // import the core, but the core's own allowlist already refuses to import
     // it back, so the functional core can never acquire a runtime dependency.
@@ -271,7 +271,6 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // path into the shell.
       "engine/src/machine/evidence",
       "node:",
-      "@fuguejs/framework",
       "zod",
       "ts-pattern",
     ],

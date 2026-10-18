@@ -264,8 +264,7 @@ engine/src/
 │   ├── no-follow-fs.ts             descriptor/no-follow filesystem operations
 │   ├── context-packets.ts          immutable spawn context
 │   ├── effect-runner.ts            effect intent/receipt reconciliation
-│   ├── fugue-program-runtime.ts     event journal + checkpoint runtime
-│   ├── dags/                        static operation DAGs
+│   ├── program-journal.ts           event journal record + storage port
 │   └── git-remediation.ts           verified-index installation
 ├── handlers/                       harness and helper boundaries
 ├── machine/                        guarded per-Agent phase machines/evidence

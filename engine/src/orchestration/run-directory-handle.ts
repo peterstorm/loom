@@ -11,7 +11,6 @@
  *   authority.json                     immutable run/roster/root authority
  *   abandoned.json                     immutable operator retirement marker
  *   program.json                       immutable registered program input
- *   progress.json                      mutable operator-facing progress view
  *   checkpoint.json                    atomic projection, not primary history
  *   events/<sequence>-<dedup>.json     immutable domain events
  *   requests/<request-id>.json         immutable request authority
@@ -85,7 +84,7 @@ import {
   parseProgramEventRecord,
   type ProgramEventRecord,
   type ProgramJournal,
-} from "./fugue-program-runtime";
+} from "./program-journal";
 
 export const RUN_DIRECTORY_SCHEMA_VERSION = 1;
 
@@ -99,7 +98,6 @@ const ARTIFACTS = "artifacts";
 const AUTHORITY_FILE = "authority.json";
 const PROGRAM_FILE = "program.json";
 const CHECKPOINT_FILE = "checkpoint.json";
-const PROGRESS_FILE = "progress.json";
 const ABANDONMENT_FILE = "abandoned.json";
 
 const FIXED_SUBDIRECTORIES: readonly string[] = [
@@ -1081,16 +1079,13 @@ function writeCheckpointOperation(directory: string) {
   };
 }
 
-/** Append-only event log plus the checkpoint and progress projections. */
+/** Append-only event log plus the checkpoint projection. */
 function journalOperations(directory: string) {
   return {
     appendEvent: appendEventOperation(directory),
     readEvents: readEventsOperation(directory),
     readCheckpoint: readCheckpointOperation(directory),
     writeCheckpoint: writeCheckpointOperation(directory),
-    writeProgress: async (percent: number): Promise<void> => {
-      writeRunFileNoFollow(join(directory, PROGRESS_FILE), JSON.stringify({ percent }));
-    },
   };
 }
 

@@ -6,71 +6,17 @@ import {
   startRefutationDispatchProgram,
 } from "../../core/panel-program";
 import {
-  planArchitecturePanelPersistence,
-  planRefutationPanelPersistence,
-  type PersistentArchitecturePanelHistory,
-  type PersistentArchitectureStep,
-  type PersistentRefutationPanelHistory,
-  type PersistentRefutationStep,
-} from "../../core/persistent-panel";
-import type { PublicationAuthorityResolver } from "../../core/orchestration-contract";
-import {
   translateLegacyPanelJournal,
   PANELS,
-  type LegacyPanelJournal,
   type LegacyPanelKind,
 } from "../../core/legacy-archive";
 
 const USAGE = `Usage: helper panel-program <${PANELS.join("|")}> < program.json`;
 
-export type BytePreservingLegacyJournalTranslation =
-  | Readonly<{ ok: true; value: Readonly<{ source: string; journal: LegacyPanelJournal }> }>
-  | Readonly<{ ok: false; error: string }>;
-
-/**
- * Parses a historical journal while retaining its exact caller-owned UTF-8
- * spelling. New-session persistence never rewrites this source; the parsed
- * journal is an in-memory compatibility view only.
- */
-export function translateLegacyPanelJournalBytes(
-  panel: LegacyPanelKind,
-  source: string,
-): BytePreservingLegacyJournalTranslation {
-  if (typeof source !== "string") return { ok: false, error: "Legacy panel journal source must be text" };
-  let raw: unknown;
-  try { raw = JSON.parse(source) as unknown; }
-  catch (error) { return { ok: false, error: `Legacy panel journal is invalid JSON: ${String(error)}` }; }
-  const translated = translateLegacyPanelJournal(panel, raw);
-  return translated.ok
-    ? { ok: true, value: Object.freeze({ source, journal: translated.value }) }
-    : translated;
-}
-
-/** Panel-specific helper contracts consumed by the filesystem executor. */
-export function prepareArchitecturePanelPersistenceOperations(
-  step: PersistentArchitectureStep,
-  history: PersistentArchitecturePanelHistory,
-  resolver: PublicationAuthorityResolver,
-) {
-  return step.recordedEvent === undefined
-    ? { ok: false as const, error: "Architecture step has no durable event to persist" }
-    : planArchitecturePanelPersistence(step, history, resolver);
-}
-
-export function prepareRefutationPanelPersistenceOperations(
-  step: PersistentRefutationStep,
-  history: PersistentRefutationPanelHistory,
-  resolver: PublicationAuthorityResolver,
-) {
-  return step.recordedEvent === undefined
-    ? { ok: false as const, error: "Refutation step has no durable event to persist" }
-    : planRefutationPanelPersistence(step, history, resolver);
-}
-
 // The legacy v1 journal translation surface moved to the archive (A11): this
-// helper file keeps the byte-preserving shell entry point and re-exports the
-// archive's names so existing import sites (orchestration.ts, tests) keep
-// working. See core/legacy-archive.ts Section D for the deprecation horizon.
+// helper file keeps the replay shell entry point and re-exports the archive's
+// names so existing import sites (orchestration.ts, tests) keep working. See
+// core/legacy-archive.ts Section D for the deprecation horizon.
 export {
   LEGACY_PANEL_PROGRAM_SCHEMA_VERSION,
   translateLegacyPanelJournal,

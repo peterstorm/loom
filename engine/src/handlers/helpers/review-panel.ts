@@ -41,7 +41,6 @@ import {
   refutedIdsOf,
   replayError,
   replayedOutcomes,
-  thresholdError,
   parseRefutationVerdict,
   parseReviewManifest,
   renderFindingBriefMarkdown,
@@ -59,6 +58,12 @@ import {
   type FindingOutcome,
   type WaveFindingId,
 } from "../../core/review-panel";
+
+/** `--threshold` used to move the panel's bar. It is a function of the roster
+ *  now, so the flag is refused by name rather than ignored: a caller who
+ *  believes they raised the bar must learn that they did not. */
+const THRESHOLD_FLAG_REFUSAL =
+  "--threshold is not accepted: the refutation threshold is always the strict majority of the run's lenses";
 import { finalizeStandaloneReview } from "../../core/standalone-review";
 import { parseStandalonePanelOutcomes } from "../../core/standalone-refutation-panel";
 import { serializeAdjudicatedStandaloneReview } from "../../core/standalone-review-records";
@@ -100,9 +105,11 @@ const LAYOUT = REVIEW_LAYOUT;
 /**
  * Every operation this helper implements, in the order one run performs them.
  *
- * Exported because it is a CONTRACT, not an implementation detail: the
- * registered Wave Gate and Standalone Review programs drive these operations in
- * this order, and the ORDER is the contract a reader needs.
+ * Exported because it is a CONTRACT, not an implementation detail: a run that
+ * drives this helper must perform these operations in this order, and the ORDER
+ * is the contract a reader needs. The registered Wave Gate and Standalone Review
+ * programs do not drive it — they run their Refutation Panels through the
+ * persistent panel program — so its callers are the smoke suite and operators.
  *
  * The runbooks deliberately do NOT name them. `tests/runbook-contract.test.ts`
  * asserts the opposite direction for this list — wave-gate.md, review-and-fix
@@ -116,7 +123,7 @@ export const REVIEW_PANEL_OPERATIONS = ["brief", "manifest", "lenses", "verdict"
 const USAGE =
   `Usage: helper review-panel <${REVIEW_PANEL_OPERATIONS.join("|")}> --runs-root <dir> ` +
   "(--run-dir <dir> | --manifest <file>) [--wave N | --standalone <aggregate.json>] " +
-  "[--lenses N] [--lens <name>] [--threshold N]";
+  "[--lenses N] [--lens <name>]";
 
 const usageError: HookResult = { kind: "error", message: USAGE };
 
@@ -542,12 +549,8 @@ const handler: HookHandler = async (stdin, args) => {
   if (!resolved.ok) return contractError("review tally", resolved.errors);
   const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
 
-  const lensesRun = manifest.value.lenses.length;
-  const rawThreshold = argumentValue(args, "--threshold");
-  const threshold = rawThreshold === null ? defaultRefutationThreshold(lensesRun) : positiveInteger(rawThreshold);
-  if (threshold === null) return usageError;
-  const belowFloor = thresholdError(threshold, lensesRun);
-  if (belowFloor !== null) return contractError("review tally", [belowFloor]);
+  if (args.includes("--threshold")) return contractError("review tally", [THRESHOLD_FLAG_REFUSAL]);
+  const threshold = defaultRefutationThreshold(manifest.value.lenses.length);
 
   const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, manifest.value.lenses, (raw, lens) =>
     parseRefutationVerdict(raw, lens, findingIds),

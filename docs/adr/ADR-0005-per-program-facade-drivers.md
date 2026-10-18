@@ -18,7 +18,9 @@ Reading the three façades in full falsified the premise in two ways.
 
 First, the shared lifecycle already lives in deep modules with real seams:
 `fugue-program-runtime` owns durable persistence (journal → checkpoint) for
-every program; `core/persistent-panel` (split from `core/panel-program`) owns the persistent refutation-panel
+every program (*amended 2026-10-18 by ADR-0029:* that runtime was never on a
+production path; the anchored `RunDirHandle` over `orchestration/program-journal`
+owns it); `core/persistent-panel` (split from `core/panel-program`) owns the persistent refutation-panel
 sub-lifecycle and is consumed by BOTH standalone review and the wave gate;
 and the shared `programs/` request modules (`request-publication`, `durable-requests`,
 `spawn-task`, split from the former `programs/helpers`) own spawn-request publication, durable request
@@ -41,7 +43,7 @@ signature.
 ## Decision
 
 The drive functions remain per-program. Shared mechanics continue to be
-extracted DOWNWARD into the existing deep modules (`fugue-program-runtime`,
+extracted DOWNWARD into the existing deep modules (`run-directory-handle`,
 `core/persistent-panel`, the shared `programs/` request modules) when — and only when — two programs
 need the same computation, as `renderSpawnTask` and `durableRequests` were.
 No horizontal driver/framework layer is introduced above them.
