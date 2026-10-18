@@ -17,11 +17,12 @@ import {
   reviewerReservationNaming,
   settleEmptyBatch,
 } from "../fixtures/held-spawn-batch";
-import { fsSessionRegistry, parseAgentId, parseSessionId } from "../../src/machine";
+import { fsSessionRegistry } from "../../src/machine";
 import { issuedGrantTokens, type PiSubagentStopPorts } from "../../../pi/subagent-stop";
 import { createPiParentSessions, type PiSpawnReservation } from "../../../pi/spawn-reservation";
 import { createTrustedReviewWitnesses } from "../../../pi/trusted-review-witness";
 import { piDurableClaimReleasePorts } from "../../../pi/spawn-claim-shell";
+import { agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
 const ENV_KEYS = ["LOOM_SUBAGENT_DIR", "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"] as const;
 let root: string;
@@ -43,10 +44,10 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const owner = parseSessionId("subagent-stop-owner")!;
-const otherSession = parseSessionId("subagent-stop-other")!;
+const owner = sessionIdOf("subagent-stop-owner");
+const otherSession = sessionIdOf("subagent-stop-other");
 const toolCallId = "call-stop-1";
-const rosterId = parseAgentId("pi-subagent-stop-roster-0")!;
+const rosterId = agentIdOf("pi-subagent-stop-roster-0");
 
 /** An ad-hoc reservation of one reviewer slot with no Task identity, naming
  *  `sessionId`: nothing in it is gate-owned, so settlement only releases. */

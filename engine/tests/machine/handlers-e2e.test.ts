@@ -22,8 +22,9 @@ import {
   readEvidence,
   soleActiveBinding,
 } from "../../src/machine/ledger";
-import { eventsForEpoch, parseEpoch, parseSessionId } from "../../src/machine/evidence";
+import { eventsForEpoch, parseEpoch } from "../../src/machine/evidence";
 import { SUBAGENT_DIR } from "../../src/config";
+import { sessionIdOf } from "../fixtures/machine-identities";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
 const fixtureRoot = canonicalTempDir("loom-machine-handler-e2e-");
@@ -32,7 +33,7 @@ const machinesPath = fixtureRoot;
 const previousStatePath = process.env.LOOM_STATE_PATH;
 const previousMachinesPath = process.env.LOOM_MACHINES_DIR;
 // Ledger API takes the branded SessionId; parse once at construction.
-const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
+const sid = (name: string) => sessionIdOf(`${run}-${name}`);
 const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-6b", "e2e-7", "e2e-8"].map(sid);
 
 beforeAll(() => {

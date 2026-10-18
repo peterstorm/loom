@@ -28,6 +28,7 @@ import blockDirectEdits, {
 } from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import { SUBAGENT_DIR, pathExistsFailClosed } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
+import { sessionIdOf } from "../../fixtures/machine-identities";
 
 const orchestrating = () => true;
 
@@ -372,7 +373,7 @@ describe("activeRosterProbe — the adapter that reads the .active file", () => 
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
     writeFileSync(join(SUBAGENT_DIR, `${s}.active`), contents);
   };
-  const read = () => activeRosterProbe(parseSessionId(s)!);
+  const read = () => activeRosterProbe(sessionIdOf(s));
 
   it("answers null when no flag file exists", () => {
     rmSync(join(SUBAGENT_DIR, `${s}.active`), { force: true });
@@ -498,7 +499,7 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
     dirs.push(dir);
     process.env.LOOM_SUBAGENT_DIR = dir;
-    const session = parseSessionId(`roster-eloop-${process.pid}`)!;
+    const session = sessionIdOf(`roster-eloop-${process.pid}`);
     const active = join(dir, `${session}.active`);
     symlinkSync(active, active);
 
@@ -525,7 +526,7 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     const dir = mkdtempSync(join(tmpdir(), "loom-roster-eacces-"));
     dirs.push(dir);
     process.env.LOOM_SUBAGENT_DIR = dir;
-    const session = parseSessionId(`roster-eacces-${process.pid}`)!;
+    const session = sessionIdOf(`roster-eacces-${process.pid}`);
     const active = join(dir, `${session}.active`);
     writeFileSync(active, "agent-1\tcode-reviewer\n");
     chmodSync(active, 0o000);
@@ -556,7 +557,7 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
   });
 
   it("null from the probe makes the gate fail CLOSED", () => {
-    const session = parseSessionId(`roster-null-${process.pid}`)!;
+    const session = sessionIdOf(`roster-null-${process.pid}`);
     expect(shouldBlockDirectEdit("Edit", session, orchestrating, () => null).kind).toBe("block");
   });
 
@@ -564,7 +565,7 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     const dir = mkdtempSync(join(tmpdir(), "loom-roster-absent-"));
     dirs.push(dir);
     process.env.LOOM_SUBAGENT_DIR = dir;
-    const session = parseSessionId(`roster-absent-${process.pid}`)!;
+    const session = sessionIdOf(`roster-absent-${process.pid}`);
 
     const written: string[] = [];
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {

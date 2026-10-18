@@ -1,18 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   epochOf,
-  parseAgentId,
-  parseAgentType,
   phaseGateTarget,
   type EvidenceAttribution,
   type MachineBinding,
 } from "../../src/machine/evidence";
+import { IMPLEMENTER_TYPE, agentIdOf } from "../fixtures/machine-identities";
 
 const binding = ((): MachineBinding => {
-  const agentId = parseAgentId("a-1");
-  const agentType = parseAgentType("code-implementer-agent");
-  if (agentId === null || agentType === null) throw new Error("fixture identity must parse");
-  return { agentId, agentType, epoch: epochOf(agentId, agentType) };
+  const agentId = agentIdOf("a-1");
+  return { agentId, agentType: IMPLEMENTER_TYPE, epoch: epochOf(agentId, IMPLEMENTER_TYPE) };
 })();
 
 describe("phaseGateTarget", () => {

@@ -32,9 +32,6 @@ import type { Evidence } from "../../src/machine/types";
 import {
   epochOf,
   eventsForEpoch,
-  parseAgentId,
-  parseAgentType,
-  parseSessionId,
   resolveSoleActiveBinding,
   type MachineBinding,
   type SessionId,
@@ -45,6 +42,7 @@ import { ledgerPath, machineBindingPath } from "../../src/machine/ledger";
 import { SUBAGENT_DIR } from "../../src/config";
 import { inMemorySessionRegistry } from "./fake-session-registry";
 import { reportSummary } from "./report-summary";
+import { agentIdOf, agentTypeOf, sessionIdOf } from "../fixtures/machine-identities";
 
 // --- Agent pool (mix of machine-gated and ungated agents) ---
 
@@ -63,9 +61,8 @@ const POOL: readonly PoolAgent[] = [
 ];
 
 function bindingOf(agent: PoolAgent): MachineBinding {
-  const agentId = parseAgentId(agent.id);
-  const agentType = parseAgentType(agent.type);
-  if (!agentId || !agentType) throw new Error("pool identity must be parseable");
+  const agentId = agentIdOf(agent.id);
+  const agentType = agentTypeOf(agent.type);
   return { agentId, agentType, epoch: epochOf(agentId, agentType) };
 }
 
@@ -117,10 +114,10 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
     if (m.started.has(agent.key)) return; // an agent instance starts once
     m.started.add(agent.key);
     // Production order (mark-subagent-active): roster first, then bind.
-    await reg.markActive(s, parseAgentId(agent.id)!);
+    await reg.markActive(s, agentIdOf(agent.id));
     m.active.push(agent.id);
     if (agent.gated) {
-      await reg.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
+      await reg.bind(s, agentTypeOf(agent.type), agentIdOf(agent.id));
       m.bindings.push(bindingOf(agent));
     }
   } else if (op.op === "record") {
@@ -143,8 +140,8 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
     // Production order (dispatch → cleanup): snapshot BEFORE unbind, then
     // unbind, then roster removal.
     const snapshot = reg.readEvidence(s);
-    await reg.unbind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
-    await reg.removeActive(s, parseAgentId(agent.id)!);
+    await reg.unbind(s, agentTypeOf(agent.type), agentIdOf(agent.id));
+    await reg.removeActive(s, agentIdOf(agent.id));
     m.bindings = m.bindings.filter((b) => !(b.agentId === agent.id && b.agentType === agent.type));
     m.active = m.active.filter((a) => a !== agent.id);
 
@@ -152,7 +149,7 @@ async function step(reg: SessionRegistry, s: SessionId, m: Model, op: Op): Promi
     // stopping agent's epoch was credited with. Binds no longer truncate the
     // live file at all, so a concurrent sibling cannot erase it either.
     if (agent.gated) {
-      const epoch = epochOf(parseAgentId(agent.id)!, parseAgentType(agent.type)!);
+      const epoch = epochOf(agentIdOf(agent.id), agentTypeOf(agent.type));
       expect(eventsForEpoch(snapshot, epoch)).toEqual(m.epochEvents.get(epoch) ?? []);
     }
   }
@@ -184,7 +181,7 @@ describe("SessionRegistry invariants (in-memory fake)", () => {
   it("(a) sole-active (b) epoch attribution (c) snapshot-before-unbind hold under arbitrary interleavings", async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(opArb, { minLength: 1, maxLength: 30 }), async (ops) => {
-        await runScenario(inMemorySessionRegistry(), parseSessionId("prop-session")!, ops);
+        await runScenario(inMemorySessionRegistry(), sessionIdOf("prop-session"), ops);
       }),
       { numRuns: 250 },
     );
@@ -211,7 +208,7 @@ describe("SessionRegistry invariants (fs adapter conformance)", () => {
     let n = 0;
     await fc.assert(
       fc.asyncProperty(fc.array(opArb, { minLength: 1, maxLength: 15 }), async (ops) => {
-        const session = parseSessionId(`${run}-${n++}`)!;
+        const session = sessionIdOf(`${run}-${n++}`);
         fsSessions.push(session);
         await runScenario(fsSessionRegistry, session, ops);
       }),
@@ -232,29 +229,29 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
 
   it("resolveSoleActiveBinding (the shared pure rule) refuses an empty roster", () => {
     const binding = bindingOf(agent);
-    const id = parseAgentId(agent.id)!;
+    const id = agentIdOf(agent.id);
     expect(resolveSoleActiveBinding([binding], [])).toBeNull();
     expect(resolveSoleActiveBinding([binding], [id])).toEqual(binding);
-    expect(resolveSoleActiveBinding([binding], [parseAgentId("someone-else")!])).toBeNull();
-    expect(resolveSoleActiveBinding([binding], [id, parseAgentId("second")!])).toBeNull();
+    expect(resolveSoleActiveBinding([binding], [agentIdOf("someone-else")])).toBeNull();
+    expect(resolveSoleActiveBinding([binding], [id, agentIdOf("second")])).toBeNull();
     expect(resolveSoleActiveBinding([], [id])).toBeNull();
   });
 
   it("in-memory fake: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {
     const reg = inMemorySessionRegistry();
-    const s = parseSessionId("leaked-binding-fake")!;
-    await reg.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
+    const s = sessionIdOf("leaked-binding-fake");
+    await reg.bind(s, agentTypeOf(agent.type), agentIdOf(agent.id));
     expect(reg.soleActiveBinding(s)).toBeNull(); // leaked shape stands down
-    await reg.markActive(s, parseAgentId(agent.id)!);
+    await reg.markActive(s, agentIdOf(agent.id));
     expect(reg.soleActiveBinding(s)?.agentId).toBe(agent.id);
   });
 
   it("fs adapter: bind without markActive → soleActiveBinding null; roster arrival restores it", async () => {
-    const s = parseSessionId(`${run}-leaked-binding-fs`)!;
+    const s = sessionIdOf(`${run}-leaked-binding-fs`);
     fsSessions.push(s);
-    await fsSessionRegistry.bind(s, parseAgentType(agent.type)!, parseAgentId(agent.id)!);
+    await fsSessionRegistry.bind(s, agentTypeOf(agent.type), agentIdOf(agent.id));
     expect(fsSessionRegistry.soleActiveBinding(s)).toBeNull(); // leaked shape stands down
-    await fsSessionRegistry.markActive(s, parseAgentId(agent.id)!);
+    await fsSessionRegistry.markActive(s, agentIdOf(agent.id));
     expect(fsSessionRegistry.soleActiveBinding(s)?.agentId).toBe(agent.id);
   });
 });
@@ -262,7 +259,7 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
 describe("duplicate SubagentStart deliveries are idempotent on the fake (round-10 Fix 4)", () => {
   it("returns a frozen defensive bindings snapshot", async () => {
     const reg = inMemorySessionRegistry();
-    const session = parseSessionId("bindings-snapshot")!;
+    const session = sessionIdOf("bindings-snapshot");
     const bound = bindingOf(POOL[0]);
     await reg.bind(session, bound.agentType, bound.agentId);
 
@@ -279,7 +276,7 @@ describe("duplicate SubagentStart deliveries are idempotent on the fake (round-1
     await fc.assert(
       fc.asyncProperty(fc.integer({ min: 2, max: 6 }), async (deliveries) => {
         const reg = inMemorySessionRegistry();
-        const session = parseSessionId("dup-start-prop")!;
+        const session = sessionIdOf("dup-start-prop");
         const gated = POOL[0];
         const b = bindingOf(gated);
         for (let i = 0; i < deliveries; i++) {

@@ -9,16 +9,17 @@ import {
 } from "../../../pi/spawn-reservation";
 import { legacyReservedSlot, type ReservedSlot } from "../../../pi/reserved-slot";
 import { slot } from "../fixtures/pi-reserved-slot";
-import { parseAgentId, parseSessionId, type SessionTaskGraphPointerBinding } from "../../src/machine";
+import { type SessionTaskGraphPointerBinding } from "../../src/machine";
 import {
   createImplementationAttemptAuthority,
   parseIsoInstant,
   parseReservationId,
 } from "../../src/core/implementation-completion";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
+import { agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 
-const sessionId = parseSessionId("019fca39-f989-7510-8e62-50dadbcad480")!;
-const rosterId = parseAgentId("pi-spawn-reservation-roster-1")!;
+const sessionId = sessionIdOf("019fca39-f989-7510-8e62-50dadbcad480");
+const rosterId = agentIdOf("pi-spawn-reservation-roster-1");
 const pointer = { directory: "/state", pointerName: "p", registryName: "r", target: "/graph.json" } as unknown as SessionTaskGraphPointerBinding;
 
 const reservation = (overrides: Partial<PiSpawnReservation> = {}): PiSpawnReservation => ({
@@ -146,7 +147,7 @@ describe("reservationItemOf — the per-kind slot invariant at the producer", ()
 });
 
 describe("ownPiSpawnReservation — settlement reads one session", () => {
-  const otherSession = parseSessionId("019fca39-f989-7510-8e62-50dadbcad481")!;
+  const otherSession = sessionIdOf("019fca39-f989-7510-8e62-50dadbcad481");
 
   it("owns a reservation naming its owner session, unchanged", () => {
     const named = reservation({ items: [legacyItem], pointerBinding: pointer });

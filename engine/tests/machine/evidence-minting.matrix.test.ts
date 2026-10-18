@@ -24,21 +24,13 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { runRecordEvidence } from "../../src/handlers/post-tool-use/record-evidence";
-import {
-  epochOf,
-  eventsForEpoch,
-  parseAgentId,
-  parseAgentType,
-  parseSessionId,
-  type AgentId,
-  type SessionId,
-  type SessionTaskGraphPointerBinding,
-} from "../../src/machine";
+import { epochOf, eventsForEpoch, type SessionTaskGraphPointerBinding } from "../../src/machine";
 import type { EvidenceRecord } from "../../src/machine/types";
 import { claudeToolCall, piToolCall } from "../../src/core/harness-tool-call";
 import { createPiEvidenceRecorder } from "../../../pi/evidence-recorder";
 import { createPiChildWriteGrants } from "../../../pi/child-write-grant";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { IMPLEMENTER_TYPE, agentIdOf, sessionIdOf } from "../fixtures/machine-identities";
 import { inMemorySessionRegistry } from "./fake-session-registry";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -49,22 +41,6 @@ mkdirSync(join(repo, "src"), { recursive: true });
 afterAll(() => {
   rmSync(temp, { recursive: true, force: true });
 });
-
-const session = (raw: string): SessionId => {
-  const parsed = parseSessionId(raw);
-  if (parsed === null) throw new Error(`fixture session ${raw} must parse`);
-  return parsed;
-};
-const agent = (raw: string): AgentId => {
-  const parsed = parseAgentId(raw);
-  if (parsed === null) throw new Error(`fixture agent ${raw} must parse`);
-  return parsed;
-};
-const IMPLEMENTER = (() => {
-  const parsed = parseAgentType("code-implementer-agent");
-  if (parsed === null) throw new Error("fixture agent type must parse");
-  return parsed;
-})();
 
 // ─── Fixtures: one tool call, described once, spelled per harness ─────────
 
@@ -202,11 +178,11 @@ const EXPECTED = [
 // ─── Delivery through each sibling entry point ────────────────────────────
 
 const registry = inMemorySessionRegistry();
-const claudeSession = session("matrix-claude-session");
-const claudeAgent = agent("claude-impl-1");
-const parentSession = session("matrix-pi-parent-session");
-const childSession = session("matrix-pi-child-session");
-const piGrantAgent = agent("pi-grant-0123456789abcdef");
+const claudeSession = sessionIdOf("matrix-claude-session");
+const claudeAgent = agentIdOf("claude-impl-1");
+const parentSession = sessionIdOf("matrix-pi-parent-session");
+const childSession = sessionIdOf("matrix-pi-child-session");
+const piGrantAgent = agentIdOf("pi-grant-0123456789abcdef");
 const pointer = { directory: "/state", pointerName: "p", registryName: "r", target: "/graph.json" } as unknown as SessionTaskGraphPointerBinding;
 
 const callIdFor = (index: number): string => `call-${index}`;
@@ -220,7 +196,7 @@ function stageStaleReport(): void {
 
 async function deliverToClaude(): Promise<void> {
   await registry.markActive(claudeSession, claudeAgent);
-  await registry.bind(claudeSession, IMPLEMENTER, claudeAgent);
+  await registry.bind(claudeSession, IMPLEMENTER_TYPE, claudeAgent);
   for (const [index, row] of ROWS.entries()) {
     const callId = callIdFor(index);
     await registry.recordCallStart(claudeSession, callId, Date.now());
@@ -241,7 +217,7 @@ async function deliverToPi(): Promise<void> {
     kind: "active",
     agentId: piGrantAgent,
     pointerBinding: pointer,
-    evidenceLedger: { sessionId: parentSession, agentType: IMPLEMENTER },
+    evidenceLedger: { sessionId: parentSession, agentType: IMPLEMENTER_TYPE },
   });
   const recorder = createPiEvidenceRecorder(grants, {
     registry,
@@ -273,8 +249,8 @@ describe("INV-4: one evidence minting rule for both harnesses", () => {
       vi.restoreAllMocks();
     }
 
-    const claudeEpoch = epochOf(claudeAgent, IMPLEMENTER);
-    const piEpoch = epochOf(piGrantAgent, IMPLEMENTER);
+    const claudeEpoch = epochOf(claudeAgent, IMPLEMENTER_TYPE);
+    const piEpoch = epochOf(piGrantAgent, IMPLEMENTER_TYPE);
     const claudeFacts = eventsForEpoch(registry.readEvidence(claudeSession), claudeEpoch);
     const piFacts = eventsForEpoch(registry.readEvidence(parentSession), piEpoch);
 

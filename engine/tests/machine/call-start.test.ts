@@ -18,16 +18,16 @@ import {
   CALL_START_SUFFIX,
   callStartOf,
   parseCallStartEntries,
-  parseSessionId,
   pruneCallStarts,
   type SessionRegistry,
 } from "../../src/machine/evidence";
 import { fsSessionRegistry } from "../../src/machine/session-registry";
 import { SUBAGENT_DIR } from "../../src/config";
 import { inMemorySessionRegistry } from "./fake-session-registry";
+import { sessionIdOf } from "../fixtures/machine-identities";
 
 const run = `call-start-${process.pid}-${Date.now()}`;
-const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
+const sid = (name: string) => sessionIdOf(`${run}-${name}`);
 const sessions = ["roundtrip", "prune", "restamp", "corrupt", "unreadable"].map(sid);
 
 afterAll(() => {
