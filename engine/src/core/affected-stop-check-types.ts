@@ -16,6 +16,10 @@
  * signatures, budget constants and fixed text tables that the planner, the
  * stop shell and the plan view share. No function is implemented here. This
  * file is the CT-2 contract surface, changed only through a CT-2 amendment.
+ * Every import is type-only except one: `MAX_AFFECTED_RUNNER_TIMEOUT_MS` is
+ * re-exported as a value from its owner, `verification-manifest.ts`.
+ * `orchestration-contract-acyclic.test.ts` refuses any import back from that
+ * module, type-only included, so the re-export can never close a cycle.
  *
  * Layering note: `StopChecksPorts` is the stop shell's port, and the core
  * owns its shape. The core may not import the shell's canonical repository
