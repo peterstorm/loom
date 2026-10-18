@@ -80,11 +80,7 @@ import {
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "./no-follow-fs";
-import {
-  parseProgramEventRecord,
-  type ProgramEventRecord,
-  type ProgramJournal,
-} from "./program-journal";
+import { parseProgramEventRecord, type ProgramEventRecord } from "./program-journal";
 
 export const RUN_DIRECTORY_SCHEMA_VERSION = 1;
 
@@ -484,9 +480,17 @@ function assertEventPolicy(policy: RunEventResourcePolicy | undefined): void {
 const eventDirectoryLimit = (policy: RunEventResourcePolicy | undefined): number | undefined =>
   policy === undefined ? undefined : policy.maxRecords + 8;
 
-export interface RunDirHandle extends ProgramJournal {
+export interface RunDirHandle {
   readCheckpoint(maximumBytes?: number): Promise<string | null>;
+  /** Atomically replace the checkpoint projection; it never outranks the event log. */
+  writeCheckpoint(json: string): Promise<void>;
   readEvents(policy?: RunEventResourcePolicy): Promise<readonly ProgramEventRecord[]>;
+  /**
+   * Idempotent on `dedupKey`: a second append carrying a key already present is
+   * a no-op. That is what makes the append→checkpoint window safe — a crash
+   * between them leaves one event the retry re-derives and this refuses to
+   * duplicate.
+   */
   appendEvent(record: ProgramEventRecord, policy?: RunEventResourcePolicy): Promise<void>;
   readonly identity: RunDirectoryIdentity;
   readonly runId: OrchestrationRunId;

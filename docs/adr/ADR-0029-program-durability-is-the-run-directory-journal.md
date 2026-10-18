@@ -17,7 +17,7 @@ a production caller:
 
 - `runProgram`, `resumeProgram`, `createProgramJob`, `replayProgram` and the checkpoint codec are called only by
   their own test. The one export production used was `parseProgramEventRecord`, together with the
-  `ProgramEventRecord` and `ProgramJournal` types, which `RunDirHandle` implements.
+  `ProgramEventRecord` type and a `ProgramJournal` port whose only adapter was `RunDirHandle`.
 - `createWavePreparationDag`, `createRemediationAuditDag`, `createRemediationStagedSetDag` and the panel and
   standalone DAG factories are called only by `fugue-operation-dags.test.ts`.
 - `planPanelProgramPersistence` and its per-panel wrappers `plan*PanelPersistence`, along with
@@ -28,13 +28,14 @@ The behaviour FR-021 asks for ("a panel session MUST persist its current state, 
 retry consumption, and terminal outcome across process and parent-session interruption") is nonetheless met,
 by a different route that grew up beside the plan:
 
-- **Registered panels** (`programs/legacy-panel.ts`) append dedup-keyed `spawn-outcome` and `engine-outcome`
+- **Registered panels** (`engine/src/handlers/helpers/programs/legacy-panel.ts`) append dedup-keyed `spawn-outcome` and `engine-outcome`
   events to the Run Directory journal (`RunDirHandle.appendEvent`). Resume rebuilds the panel by replaying that
   journal.
 - **The standalone and wave refutation panels** accumulate their events in memory while the panel completes.
   They then persist through `refutationPanelCheckpoint`: an event prefix that must replay exactly to the recorded
   state. It is embedded in the program's own checkpoint and re-proved by `parseRefutationPanelCheckpoint` on
-  every read.
+  every read. (`refutationPanelCheckpoint` and `parseRefutationPanelCheckpoint` are the refutation panel's
+  wrappers over the kernel's generic `panelProgramCheckpoint` and `parsePanelProgramCheckpoint`.)
 - **Remediation** stages through `git-remediation.ts` called directly from its façade. It uses a temporary index
   and installs only on a verified witness, so the DAGs that were meant to describe it add nothing.
 
@@ -71,10 +72,11 @@ proved the planner, not the path a real crash takes.
 projection that never outranks it. Panels persist either as journal events replayed on resume or as a checkpoint
 whose event prefix re-proves its state. Fugue is not part of the engine.**
 
-- **What stays.** `orchestration/program-journal.ts` keeps:
-  - the event record format `ProgramEventRecord` and its parser `parseProgramEventRecord`;
-  - the storage port `ProgramJournal` (`appendEvent`, `readEvents`, `readCheckpoint`, `writeCheckpoint`),
-    implemented by `RunDirHandle`.
+- **What stays.** `orchestration/program-journal.ts` keeps the event record format `ProgramEventRecord` and its
+  parser `parseProgramEventRecord`. The storage operations (`appendEvent`, idempotent on `dedupKey`;
+  `readEvents`; `readCheckpoint`; `writeCheckpoint`) belong to `RunDirHandle` itself. The `ProgramJournal` port
+  is folded into it: with the in-memory and file journals gone it had one adapter and no fake, a hypothetical
+  seam.
 
   The persistent panel kernel keeps replay, checkpoint and checkpoint-parse (`panelProgramCheckpoint` and
   `parsePanelProgramCheckpoint`).

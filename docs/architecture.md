@@ -171,7 +171,7 @@ P5 commands require a matching admitted runtime; see the [bootstrap restriction]
 
 ### Program durability
 
-Each program persists in its Run Directory (ADR-0029). Durable history is an append-only journal of dedup-keyed events (`orchestration/program-journal.ts`: the record format and the `ProgramJournal` port `RunDirHandle` implements). A checkpoint is only a projection beside it.
+Each program persists in its Run Directory (ADR-0029). Durable history is an append-only journal of dedup-keyed events (the record format and its parser in `orchestration/program-journal.ts`; `RunDirHandle` owns the append, read and checkpoint operations). A checkpoint is only a projection beside it.
 
 Panels persist in one of two forms:
 

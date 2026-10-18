@@ -15,8 +15,10 @@
     `45f108b3cb8207b88b45522ec2817ad6d29f23b5020b83e670bbd571d1ff2cd2`
   - `disposition-20261018-pr110-s2b`: `disposition.json` sha256
     `73e893a8bbb2e464f0a2a4d4013e60941990544e91f1887d751e9a570797b15f`
-- **This remediation:** installs the accepted s3 fixes against `review-fix-20261018-pr110-s3`. The s2b fixes
-  are a separate remediation against `-s2b` (see the s2b section below).
+- **Remediations (one per slice with accepted advisories):**
+  - `remediation-20261018-pr110-s3` against `-s3`: installed, verified index
+    `be74ec850f990307d362affa87a861f22fde6766b2d27903fcc4e0af27737d9b`, committed as `86eeba44`.
+  - `remediation-20261018-pr110-s2b` against `-s2b`: installs the s2b fixes below.
 
 ## Surviving / refuted criticals
 
@@ -74,9 +76,44 @@ None in any slice. Defect-family accounting: `{"kind":"not-required"}`.
 | architecture-tech-lead-2 | deferred | Removing or migrating the unused persistent architecture-panel program touches the kernel the live refutation panel shares. It needs its own deepen design session; ADR-0029 Consequences records it as the next decision. |
 | code-simplifier-1 | accepted | ADR-0029 claims to amend ADR-0004 "What shipped", but that table and the hard-dependency consequence still listed the deleted runtime, DAGs and Fugue pin. |
 
+## Accepted s2b fixes
+
+- `engine/src/orchestration/program-journal.ts`:
+  - keeps `PROGRAM_JOURNAL_SCHEMA_VERSION`, `ProgramEventRecord` and `parseProgramEventRecord`;
+  - loses the `ProgramJournal` interface;
+  - its header now describes the record contract alone.
+- `engine/src/orchestration/run-directory-handle.ts`:
+  - `RunDirHandle` no longer `extends ProgramJournal`;
+  - it declares `writeCheckpoint` itself (previously inherited);
+  - `appendEvent` carries the dedup-idempotency contract and the append→checkpoint crash-window rationale.
+- `engine/src/core/run-inspection.ts`: the checkpoint-label comment says the panels' `data.state.stage`
+  envelope is the removed Fugue codec's, carried only by pre-ADR-0029 Run Directories.
+- `docs/deterministic-core.md`: internal programs persist through the Run Directory journal, not Fugue. Events
+  and checkpoints are stored per Run Directory, and the narrow-capabilities section names the real adapters
+  instead of operation DAGs. The user-project `AuthoredDag` and `fugue-generated-integrity` text is unchanged
+  because that rule still exists.
+- `docs/operations.md`: the source-tree line no longer lists a "Fugue runtime/DAGs".
+- `docs/adr/ADR-0029-…md`:
+  - the full `engine/src/handlers/helpers/programs/legacy-panel.ts` path;
+  - one sentence that the refutation checkpoint functions wrap the kernel's generic ones;
+  - "What stays" records the port fold.
+- `docs/adr/ADR-0004-…md`: dated ADR-0029 removal notes on the "Fugue runtime" and "operation DAG" rows of
+  "What shipped", and on the hard-dependency consequence.
+- `docs/adr/ADR-0005-…md`, `docs/architecture.md`, `README.md`: they now name the record format and parser, not
+  a "storage port".
+
+## Support paths for the s2b remediation (outside the s2b frozen scope)
+
+- this plan
+
 ## Validation
 
-- `bun scripts/typecheck.ts` (project typecheck, unused-code gates included): clean
-- focused suites: `panel-program`, `persistent-panel-program`, `standalone-review`, `defect-family-accounting`,
-  `runbook-contract` (213 passed)
-- `npm run verify` (root): exit 0
+- s3:
+  - `bun scripts/typecheck.ts` (project typecheck, unused-code gates included): clean
+  - focused suites: `panel-program`, `persistent-panel-program`, `standalone-review`,
+    `defect-family-accounting`, `runbook-contract` (213 passed)
+  - `npm run verify` (root): exit 0
+- s2b:
+  - `bun scripts/typecheck.ts`: clean
+  - focused suites: `tests/orchestration`, `run-inspection`, `runbook-contract` (556 passed, 1 skipped)
+  - `npm run verify` (root): exit 0
