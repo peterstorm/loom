@@ -403,28 +403,16 @@ describe("review-panel helper CLI", () => {
       expect(task.advisory_findings).toEqual(["prefer a named constant"]);
     });
 
-    it("honours a --threshold that RAISES the bar", () => {
-      // Two of three refute F1, which the default (strict majority of 3 = 2)
-      // would kill. Demanding unanimity keeps it.
+    it.each(["1", "2", "3"])("refuses --threshold %s: the bar is the panel's strict majority", (value) => {
+      // `--threshold 1` let a single lens kill a critical on its own; a raised
+      // bar let a strict majority's refutation be ignored. The threshold is a
+      // function of the roster, so the flag is refused outright — even with the
+      // value the panel would derive — rather than silently ignored.
       writeVerdicts([["refuted", "upheld"], ["refuted", "upheld"], ["upheld", "upheld"]]);
-      expect(tally(["--threshold", "3"]).status).toBe(0);
-      expect(stateTask().critical_findings).toEqual([
-        "unchecked cast in the token reducer",
-        "catch block swallows the error",
-      ]);
-    });
-
-    it("refuses a --threshold below the strict-majority floor", () => {
-      // `--threshold 1` let a single lens kill a critical on its own, inverting
-      // the documented "ties favour keeping the finding" rule — and the runbook
-      // never mentions the flag, so nothing gated an orchestrator that improvised
-      // it. Raising the bar is safe; lowering it is a weaker panel under the
-      // same name.
-      writeVerdicts([["refuted", "upheld"], ["upheld", "upheld"], ["upheld", "upheld"]]);
-      const result = tally(["--threshold", "1"]);
+      const result = tally(["--threshold", value]);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("below the strict majority of 3 lenses (2)");
-      // State is untouched — the weaker panel adjudicated nothing.
+      expect(result.stderr).toContain("the refutation threshold is always the strict majority");
+      // State is untouched — the refused tally adjudicated nothing.
       expect(stateTask().critical_findings).toHaveLength(2);
     });
 

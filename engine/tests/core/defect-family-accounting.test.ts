@@ -412,7 +412,7 @@ function sourceWithEveryFindingClass(): AuthoritativeStandaloneReviewResult {
     if (!submitted.ok) throw new Error(submitted.error.message);
     panelState = submitted.value.state;
   });
-  const panelDone = completePersistentRefutationPanel(panelState, panelResolver, 2);
+  const panelDone = completePersistentRefutationPanel(panelState, panelResolver);
   if (!panelDone.ok || panelDone.value.state.stage !== "done") {
     throw new Error(panelDone.ok ? "done panel required" : panelDone.error.message);
   }

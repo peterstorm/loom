@@ -11,7 +11,6 @@
  *   authority.json                     immutable run/roster/root authority
  *   abandoned.json                     immutable operator retirement marker
  *   program.json                       immutable registered program input
- *   progress.json                      mutable operator-facing progress view
  *   checkpoint.json                    atomic projection, not primary history
  *   events/<sequence>-<dedup>.json     immutable domain events
  *   requests/<request-id>.json         immutable request authority
@@ -81,11 +80,7 @@ import {
   writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "./no-follow-fs";
-import {
-  parseProgramEventRecord,
-  type ProgramEventRecord,
-  type ProgramJournal,
-} from "./fugue-program-runtime";
+import { parseProgramEventRecord, type ProgramEventRecord } from "./program-journal";
 
 export const RUN_DIRECTORY_SCHEMA_VERSION = 1;
 
@@ -99,7 +94,6 @@ const ARTIFACTS = "artifacts";
 const AUTHORITY_FILE = "authority.json";
 const PROGRAM_FILE = "program.json";
 const CHECKPOINT_FILE = "checkpoint.json";
-const PROGRESS_FILE = "progress.json";
 const ABANDONMENT_FILE = "abandoned.json";
 
 const FIXED_SUBDIRECTORIES: readonly string[] = [
@@ -486,9 +480,17 @@ function assertEventPolicy(policy: RunEventResourcePolicy | undefined): void {
 const eventDirectoryLimit = (policy: RunEventResourcePolicy | undefined): number | undefined =>
   policy === undefined ? undefined : policy.maxRecords + 8;
 
-export interface RunDirHandle extends ProgramJournal {
+export interface RunDirHandle {
   readCheckpoint(maximumBytes?: number): Promise<string | null>;
+  /** Atomically replace the checkpoint projection; it never outranks the event log. */
+  writeCheckpoint(json: string): Promise<void>;
   readEvents(policy?: RunEventResourcePolicy): Promise<readonly ProgramEventRecord[]>;
+  /**
+   * Idempotent on `dedupKey`: a second append carrying a key already present is
+   * a no-op. That is what makes the append→checkpoint window safe — a crash
+   * between them leaves one event the retry re-derives and this refuses to
+   * duplicate.
+   */
   appendEvent(record: ProgramEventRecord, policy?: RunEventResourcePolicy): Promise<void>;
   readonly identity: RunDirectoryIdentity;
   readonly runId: OrchestrationRunId;
@@ -1081,16 +1083,13 @@ function writeCheckpointOperation(directory: string) {
   };
 }
 
-/** Append-only event log plus the checkpoint and progress projections. */
+/** Append-only event log plus the checkpoint projection. */
 function journalOperations(directory: string) {
   return {
     appendEvent: appendEventOperation(directory),
     readEvents: readEventsOperation(directory),
     readCheckpoint: readCheckpointOperation(directory),
     writeCheckpoint: writeCheckpointOperation(directory),
-    writeProgress: async (percent: number): Promise<void> => {
-      writeRunFileNoFollow(join(directory, PROGRESS_FILE), JSON.stringify({ percent }));
-    },
   };
 }
 

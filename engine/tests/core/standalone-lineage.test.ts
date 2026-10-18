@@ -119,6 +119,8 @@ describe("Standalone Finding Origin and source membership", () => {
     expect(parseFindingOrigin({ ...row.origin, runId: "run.foreign" }).ok).toBe(false);
     for (const inventory of [[row, row], [{ ...row, finding: { ...row.finding, id: "foreign-1" } }],
       [{ ...row, history: [{ ...row.history[0], threshold: 1 }] }], [{ ...row, history: [{ ...row.history[0], survives: true }] }],
+      // A raised bar that keeps the outcome self-consistent: 2 of 3 refuted, held to 3.
+      [{ ...row, history: [{ ...row.history[0], threshold: 3, survives: true }] }],
       [{ ...row, history: [{ ...row.history[0], refutations: [] }] }]]) expect(parseStandaloneLineageInventory(bytes(inventory)).ok).toBe(false);
   });
   it.each(["code-reviewer:1", "code reviewer-1", `code-reviewer-${Number.MAX_SAFE_INTEGER}0`])(

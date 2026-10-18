@@ -10,31 +10,30 @@
  *   - the reducer guard (`reducePanelProgram`): only a proved, non-terminal
  *     state and a strictly parsed durable event reach a transition, and a
  *     thrown invariant violation fails closed while KEEPING its message;
- *   - replay-equals-state (`replayPanelProgram`, `parsePanelProgramHistory`):
- *     one strict parse-and-reduce of an event prefix from the program's start;
+ *   - replay-equals-state (`replayPanelProgram`): one strict parse-and-reduce
+ *     of an event prefix from the program's start;
  *   - the checkpoint record (`panelProgramCheckpoint`,
- *     `parsePanelProgramCheckpoint`) and the journal/checkpoint persistence
- *     plan with its dedup key (`planPanelProgramPersistence`);
+ *     `parsePanelProgramCheckpoint`), whose event prefix must replay to its
+ *     recorded state — the form a panel persists in (ADR-0029);
  *   - submission recording (`reduceParsedPanelEvent`) and `resumePanelProgram`.
  *
  * Membership is proved, never asserted: each program carries a
- * `PanelProofs` domain (`createPanelProofs`), and a state, event, recorded
- * step or history the kernel accepts must have been minted in THAT domain by
- * the program's own start, parse, reduction, replay or checkpoint parse. A
+ * `PanelProofs` domain (`createPanelProofs`), and a state, event or recorded
+ * step the kernel accepts must have been minted in THAT domain by the
+ * program's own start, parse, reduction, replay or checkpoint parse. A
  * domain is private to the module that creates it, so another module's
  * values can never pass as its own. `core/persistent-panel` instantiates the
  * architecture and refutation programs over one private domain; the kernel's
  * own tests drive a trivial third program with none of either panel.
  *
- * Durable bytes are the programs' own: every checkpoint and effect is built
- * with the key order its persisted form has always had, because checkpoint
+ * Durable bytes are the programs' own: every checkpoint is built with the key
+ * order its persisted form has always had, because checkpoint
  * parsing compares the recorded state with the replayed one as JSON text —
  * each first taken to the program's `canonicalStateJson`, so the kernel itself
  * knows no field of any program's state.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
-import { sha256Hex } from "./digest";
 import { safeArray, safeRecord } from "./exact-data";
 import {
   panelError,
@@ -52,7 +51,7 @@ export type PanelKind = PersistentPanelError["panel"];
 // Membership proofs
 // ---------------------------------------------------------------------------
 
-export type PanelProofTag = `${PanelKind}:${"state" | "event" | "recorded-step" | "history"}`;
+export type PanelProofTag = `${PanelKind}:${"state" | "event" | "recorded-step"}`;
 
 /** One membership domain: which values a module minted, tagged with panel and
  *  role so a refutation state can never pass as an architecture one. */
@@ -107,8 +106,7 @@ export type PanelState<Authority> = Readonly<{ authority: Authority; stage: stri
  * start, next action, strict durable event parser, unguarded stage
  * transition, authority codec, and the canonical form of its state's JSON.
  * Everything else — the reducer guard, replay-equals-state, the recorded-step
- * and history proofs, the checkpoint record, the persistence plan and its
- * dedup key — is the kernel's, once.
+ * proof and the checkpoint record — is the kernel's, once.
  */
 export type PanelProgramDefinition<P extends PanelKind, Authority extends PanelAuthority, AuthorityInput,
   State extends PanelState<Authority>, Action, Event> = Readonly<{
@@ -201,12 +199,12 @@ export function reduceParsedPanelEvent<P extends PanelKind, A extends PanelAutho
 }
 
 // ---------------------------------------------------------------------------
-// Replay and histories
+// Replay
 // ---------------------------------------------------------------------------
 
 type ReplayedPrefix<S, Ac, E> = Readonly<{ step: PanelStep<S, Ac, E>; events: readonly E[] }>;
 
-/** Strictly parse and reduce an event prefix from the program's start: the ONE replay every checkpoint, history and persistence plan trusts. */
+/** Strictly parse and reduce an event prefix from the program's start: the ONE replay every resume and checkpoint trusts. */
 function replayPrefix<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
   program: PanelProgramDefinition<P, A, I, S, Ac, E>,
   authority: A,
@@ -237,24 +235,6 @@ export function replayPanelProgram<P extends PanelKind, A extends PanelAuthority
 ): PersistentPanelResult<PanelStep<S, Ac, E>> {
   const replayed = replayPrefix(program, authority, rawEvents, resolver);
   return replayed.ok ? persistentSuccess(replayed.value.step) : replayed;
-}
-
-export type PanelHistory<P extends PanelKind, A, E> = Readonly<{ panel: P; authority: A; events: readonly E[] }>;
-
-/** Parse and replay an immutable event prefix into a proved history: the persistence authority. */
-export function parsePanelProgramHistory<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
-  authority: A,
-  rawEvents: unknown,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<PanelHistory<P, A, E>> {
-  const replayed = replayPrefix(program, authority, rawEvents, resolver);
-  if (!replayed.ok) return replayed;
-  return persistentSuccess(program.proofs.prove(`${program.panel}:history`, Object.freeze({
-    panel: program.panel,
-    authority,
-    events: replayed.value.events,
-  })));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,54 +281,4 @@ export function parsePanelProgramCheckpoint<P extends PanelKind, A extends Panel
   if (!replayed.ok) return replayed;
   if (!statesAgree(program, checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint state disagrees with its immutable event prefix`));
   return persistentSuccess(replayed.value.step);
-}
-
-// ---------------------------------------------------------------------------
-// Persistence plans
-// ---------------------------------------------------------------------------
-
-export type PanelPersistenceEffect<P extends PanelKind, I, E> =
-  | Readonly<{ schemaVersion: 1; kind: `append-${P}-panel-event`; runId: OrchestrationRunId; sequence: number; dedupKey: string; event: E }>
-  | Readonly<{ schemaVersion: 1; kind: `replace-${P}-panel-checkpoint`; runId: OrchestrationRunId; sequence: number; dedupKey: string; checkpoint: PanelCheckpoint<P, I, E> }>;
-
-function persistenceKey(runId: OrchestrationRunId, sequence: number, payload: unknown): string {
-  return `${runId}:${sequence}:${sha256Hex(JSON.stringify(payload))}`;
-}
-
-/**
- * The journal append and checkpoint replacement of one recorded step: the
- * step must be a proved recorded step over a proved history of the same panel
- * authority, and the history plus the step's event must replay exactly to the
- * step's state before either effect is planned.
- */
-export function planPanelProgramPersistence<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
-  step: PanelStep<S, Ac, E>,
-  history: PanelHistory<P, A, E>,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<readonly [PanelPersistenceEffect<P, I, E>, PanelPersistenceEffect<P, I, E>]> {
-  const { panel, proofs } = program;
-  const event = step.recordedEvent;
-  if (event === undefined || !proofs.proven(`${panel}:recorded-step`, step) ||
-      !proofs.proven(`${panel}:state`, step.state) || !proofs.proven(`${panel}:event`, event)) {
-    return persistentFailure(panelError(panel, "malformed-event", `persistence planning requires a parser/reducer-produced ${panel} step and event`));
-  }
-  const authority = step.state.authority;
-  if (!proofs.proven(`${panel}:history`, history) || history.panel !== panel ||
-      !jsonEqual(program.authorityJson(history.authority), program.authorityJson(authority))) {
-    return persistentFailure(panelError(panel, "malformed-history", `persistence planning requires a replay-proved ${panel} history for the same panel authority`));
-  }
-  const events = Object.freeze([...history.events, event]);
-  const replayed = replayPrefix(program, authority, events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!statesAgree(program, step.state, replayed.value.step.state)) {
-    return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} event prefix does not replay exactly to the proposed checkpoint state`));
-  }
-  const checkpoint = panelProgramCheckpoint(program, replayed.value.step.state, replayed.value.events, resolver);
-  if (!checkpoint.ok) return checkpoint;
-  const { runId } = authority;
-  const sequence = events.length;
-  const append = Object.freeze({ schemaVersion: 1 as const, kind: `append-${panel}-panel-event` as const, runId, sequence, dedupKey: persistenceKey(runId, sequence, event), event });
-  const replace = Object.freeze({ schemaVersion: 1 as const, kind: `replace-${panel}-panel-checkpoint` as const, runId, sequence, dedupKey: persistenceKey(runId, sequence, checkpoint.value), checkpoint: checkpoint.value });
-  return persistentSuccess(Object.freeze([append, replace]) as readonly [PanelPersistenceEffect<P, I, E>, PanelPersistenceEffect<P, I, E>]);
 }

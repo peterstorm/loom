@@ -6,8 +6,8 @@
  * are pinned where they live.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { join, relative } from "node:path";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { parseRegisteredPanelProgram, type RegisteredPanelProgram } from "../../../../src/core/legacy-panel-decisions";
 import {
@@ -127,6 +127,61 @@ describe("submitRegisteredPanelAttempt", () => {
     expect(refusalMessage(await submitRegisteredPanelAttempt(handle, program, request!, verdict)))
       .toContain(`the durable panel verdict source for request ${request!.requestId} is not valid JSON`);
     expect(await spawnOutcomes(handle)).toEqual([]);
+  });
+});
+
+/** The handle as a process that dies after an engine operation publishes its
+ *  artifacts and before its success event reaches the journal. */
+function crashingBeforeEngineOutcome(handle: RunDirHandle): RunDirHandle {
+  return Object.freeze({
+    ...handle,
+    appendEvent: async (record: Parameters<RunDirHandle["appendEvent"]>[0], policy?: Parameters<RunDirHandle["appendEvent"]>[1]) => {
+      if ((record.event as { type?: string }).type === "engine-outcome") throw new Error("injected crash between publication and journal append");
+      return handle.appendEvent(record, policy);
+    },
+  });
+}
+
+/** Every published artifact's bytes, keyed by its path under `artifacts/`. */
+function artifactBytes(runDir: string): ReadonlyMap<string, string> {
+  const root = join(runDir, "artifacts");
+  const files = readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.endsWith(".lock"))
+    .map((entry) => join(entry.parentPath, entry.name));
+  return new Map(files.map((path) => [relative(root, path), readFileSync(path, "utf-8")]));
+}
+
+async function engineOutcomes(handle: RunDirHandle): Promise<readonly string[]> {
+  return (await handle.readEvents()).map(({ event }) => event as { type?: string; operationId?: string })
+    .filter(({ type }) => type === "engine-outcome").map(({ operationId }) => operationId!);
+}
+
+describe("FR-021: a crash between artifact publication and its journal event", () => {
+  it("resumes a crashed tally to byte-identical artifacts and journals the tally exactly once", async () => {
+    const { handle, runDir, program } = await registeredRun("run.driver-crash-tally");
+    const [request] = spawned(await driveRegisteredPanel(handle, program));
+    const prepared = await engineOutcomes(handle);
+    await capture(handle, request!, verdict);
+    // The verdict settles and its outcome is journalled; the tally then publishes
+    // its artifacts and the process dies before journalling the tally's success.
+    await expect(submitRegisteredPanelAttempt(crashingBeforeEngineOutcome(handle), program, request!, verdict))
+      .rejects.toThrow("injected crash");
+    const crashed = artifactBytes(runDir);
+    expect(crashed.has("result.json")).toBe(true);
+    expect(await engineOutcomes(handle)).toEqual(prepared);
+
+    // A fresh process resumes: it re-derives the tally, republishes the very same
+    // bytes over the immutable slots, and journals the success it missed.
+    expect(action(await resumeRegisteredPanel(handle, program)).kind).toBe("done");
+    expect(artifactBytes(runDir)).toEqual(crashed);
+    const outcomes = await engineOutcomes(handle);
+    expect(outcomes.slice(0, prepared.length)).toEqual(prepared);
+    expect(outcomes).toHaveLength(prepared.length + 1);
+    expect(await spawnOutcomes(handle)).toHaveLength(1);
+    // And a second resume changes nothing.
+    expect(action(await resumeRegisteredPanel(handle, program)).kind).toBe("done");
+    expect(await engineOutcomes(handle)).toEqual(outcomes);
+    expect(artifactBytes(runDir)).toEqual(crashed);
   });
 });
 

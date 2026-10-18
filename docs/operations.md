@@ -1230,7 +1230,7 @@ agents/                        source Agent definitions
 hooks/                         Claude Code hook registration and shims
 pi/                            Pi adapter, renderer, transcript adapter, grants
 engine/src/core/               parsers, policy, reducers, domain values
-engine/src/orchestration/      anchored persistence, effects, Fugue runtime/DAGs
+engine/src/orchestration/      anchored persistence, event journal, effects, Git remediation
 engine/src/handlers/           harness/CLI shell
 engine/tests/                  unit, property, integration, contract tests
 scripts/                       sync, lint, calibration, smoke scripts

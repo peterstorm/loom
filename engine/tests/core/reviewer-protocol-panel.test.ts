@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import { attributeFindings, reviewFindingCounts } from "../../src/core/findings";
 import type { CurrentDraftFinding, Finding } from "../../src/types";
-import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, STANDALONE_REVIEW_SUBJECT } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import {
   buildFindingBrief, buildStandaloneFindingBrief, parseFindingBriefJson, parseCurrentBriefFinding,
@@ -11,7 +11,10 @@ import {
   type BriefFinding,
 } from "../../src/core/review-panel";
 import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
-import { canonicalStandalonePanelFindingAuthority, freezeStandalonePanelAuthority, parseFrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
+import {
+  canonicalStandalonePanelFindingAuthority, canonicalStandalonePanelFindings, freezeStandalonePanelAuthority,
+  parseFrozenStandalonePanelAuthority, parseStandalonePanelOutcomes,
+} from "../../src/core/standalone-refutation-panel";
 import { canonicalDigest } from "../../src/core/digest";
 import { type StandaloneReviewAggregate } from "../../src/core/standalone-review-model";
 import { findingId } from "../fixtures/finding-id";
@@ -160,6 +163,11 @@ describe("current brief and independently frozen parent authority refuse downgra
       lenses: ["reproduction", "intent", "blast-radius"], threshold: 2, manifestDigest: "a".repeat(64) };
     const authority = value(freezeStandalonePanelAuthority(input));
     expect(authority.schemaVersion).toBe(2);
+    // The bar is the roster's strict majority: neither lowered nor raised.
+    for (const threshold of [1, 3]) {
+      expect(freezeStandalonePanelAuthority({ ...input, threshold }).ok).toBe(false);
+      expect(parseFrozenStandalonePanelAuthority({ ...authority, threshold }, aggregate).ok).toBe(false);
+    }
     expect(value(parseFrozenStandalonePanelAuthority(JSON.parse(JSON.stringify(authority)), aggregate))).toEqual(authority);
     for (const field of ["basis", "claim", "version"] as const) {
       const changed = JSON.parse(JSON.stringify(panelFindings));
@@ -169,5 +177,22 @@ describe("current brief and independently frozen parent authority refuse downgra
       expect(freezeStandalonePanelAuthority({ ...input, panelFindings: changed }).ok).toBe(false);
       expect(parseFrozenStandalonePanelAuthority({ ...authority, findings: changed, findingBriefDigest: canonicalDigest(changed) }, aggregate).ok).toBe(false);
     }
+  });
+
+  it("refuses panel outcomes held to any bar but the roster's strict majority", () => {
+    const criticals = [current()];
+    const panelFindings = canonicalStandalonePanelFindings(criticals);
+    const lenses = ["reproduction", "intent", "blast-radius"];
+    // One refutation of three survives under the majority (2) and under a raised
+    // bar (3) alike, so only the stated threshold differs between the two.
+    const outcomes = (threshold: number) => ({ lenses, threshold, surviving: 1, refuted: 0, outcomes: [{
+      finding_id: `${STANDALONE_REVIEW_SUBJECT}:${criticals[0]!.id}`, task_id: STANDALONE_REVIEW_SUBJECT,
+      claim: panelFindings[0]!.claim, survives: true, refuted_by: ["reproduction"], reasoning: ["cannot trigger"],
+      upheld_by: ["intent", "blast-radius"], uncertain_from: [],
+    }] });
+    expect(value(parseStandalonePanelOutcomes(outcomes(2), criticals, panelFindings, lenses)).threshold).toBe(2);
+    const raised = parseStandalonePanelOutcomes(outcomes(3), criticals, panelFindings, lenses);
+    expect(raised.ok).toBe(false);
+    expect(!raised.ok && raised.errors.join("\n")).toContain("outcomes.threshold must be the strict majority 2 of its 3 lenses");
   });
 });

@@ -1,12 +1,12 @@
 /**
- * Round-14 remediation: the three run-policy rules that used to be inline in the
- * review-panel shell.
+ * Round-14 remediation: the run-policy rules that used to be inline in the
+ * review-panel shell, and the refutation threshold they are judged against.
  *
  * Each decides whether a tally may proceed, each is a pure comparison over
  * already-parsed values, and each carries a documented bug it prevents. In the
  * shell the only way to reach them was to spawn the CLI against a temp
- * filesystem, so none of the three had a direct test — while the equivalents
- * that already lived in the core each had one.
+ * filesystem, so none of them had a direct test — while the equivalents that
+ * already lived in the core each had one.
  */
 
 import { describe, expect, it } from "vitest";
@@ -18,7 +18,6 @@ import {
   refutedIdsOf,
   replayError,
   replayedOutcomes,
-  thresholdError,
   type FindingOutcome,
   type ReviewLens,
   type WaveFindingId,
@@ -89,30 +88,23 @@ describe("panelSizeConflict — the panel size is fixed for the life of a run", 
   });
 });
 
-describe("thresholdError — a strict majority is the FLOOR, not the default", () => {
-  it("refuses a threshold below the strict majority", () => {
-    // --threshold 1 let one lens kill a critical alone, inverting the documented
-    // "ties favour keeping the finding" rule and promoting blocked → passed when
-    // it was the wave's last critical.
-    const error = thresholdError(1, 3);
-    expect(error).toContain("below the strict majority of 3 lenses (2)");
-  });
-
-  it("permits raising the bar — a stricter panel is always safe", () => {
-    expect(thresholdError(3, 3)).toBeNull();
-    expect(thresholdError(2, 3)).toBeNull();
-  });
-
+describe("defaultRefutationThreshold — the one bar, a function of the roster", () => {
   it("requires unanimity at the minimum panel size", () => {
     expect(defaultRefutationThreshold(2)).toBe(2);
-    expect(thresholdError(1, 2)).not.toBeNull();
   });
 
-  it("property: exactly the thresholds at or above the majority are accepted", () => {
+  it("takes two of three and three of five", () => {
+    expect(defaultRefutationThreshold(3)).toBe(2);
+    expect(defaultRefutationThreshold(5)).toBe(3);
+  });
+
+  it("property: the smallest refutation count that outnumbers every other vote", () => {
+    // A strict majority: one fewer refutation is at most half the panel, so a
+    // tie keeps the finding; and the bar never exceeds the panel itself.
     fc.assert(
-      fc.property(fc.integer({ min: 2, max: 5 }), fc.integer({ min: 1, max: 5 }), (lenses, threshold) => {
-        const ok = threshold >= defaultRefutationThreshold(lenses);
-        return (thresholdError(threshold, lenses) === null) === ok;
+      fc.property(fc.integer({ min: 1, max: 64 }), (lenses) => {
+        const threshold = defaultRefutationThreshold(lenses);
+        return threshold * 2 > lenses && (threshold - 1) * 2 <= lenses && threshold <= lenses;
       }),
     );
   });

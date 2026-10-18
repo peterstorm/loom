@@ -115,7 +115,7 @@ export function standaloneRefutationPreparation(
   const threshold = defaultRefutationThreshold(lenses.length);
   const frozen = freezeStandaloneRefutationPanelAuthority({ standaloneAuthority: authority, aggregate, panelAuthority: verifiers.refutationAuthority, threshold });
   if (!frozen.ok) throw new Error(frozen.error.message);
-  return { brief, lenses, frozen: frozen.value, threshold, ...verifiers };
+  return { brief, lenses, frozen: frozen.value, ...verifiers };
 }
 
 export type StandaloneEvidenceReplayResult =
@@ -599,7 +599,7 @@ export function replayStandaloneResultFromEvidence(
           }
         }
       }
-      const completedPanel = completePersistentRefutationPanel(panelState, resolver, preparation.threshold);
+      const completedPanel = completePersistentRefutationPanel(panelState, resolver);
       if (!completedPanel.ok || completedPanel.value.state.stage !== "done") {
         return failed(completedPanel.ok ? "standalone refutation replay did not complete" : completedPanel.error.message);
       }

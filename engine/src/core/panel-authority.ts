@@ -63,7 +63,6 @@ export type PersistentPanelError = Readonly<{
     | "invalid-authority"
     | "malformed-result"
     | "malformed-event"
-    | "malformed-history"
     | "malformed-checkpoint"
     | "unknown-request"
     | "duplicate-result"
@@ -73,8 +72,7 @@ export type PersistentPanelError = Readonly<{
     | "unexpected-event"
     | "terminal-state"
     | "incomplete-roster"
-    | "invalid-aggregate"
-    | "persistence-receipt-mismatch";
+    | "invalid-aggregate";
   panel: "architecture" | "refutation";
   message: string;
   requestId?: string;

@@ -466,6 +466,57 @@ describe("registered Wave reviewer protocol", () => {
 });
 
 // ---------------------------------------------------------------------------
+// US1 scenario 1 / FR-012: the parent supplies the Wave number and nothing
+// else; the engine derives the whole review scope and the exact spawn batch.
+// ---------------------------------------------------------------------------
+
+describe("US1 scenario 1: a Wave Gate starts from the Wave number alone", () => {
+  it("returns the exact spec-check and reviewer batch with every authority field engine-derived", async () => {
+    const p = project(mixedPriors());
+    const { handle, action } = await start(p);
+    const requests = action.requests!;
+    // The roster is the engine's: the spec-check slot, then every Wave reviewer, in catalog order.
+    expect(requests.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...WAVE_REVIEW_AGENTS]);
+    // Request, slot and output identities are distinct, first attempts, and bound to this run.
+    for (const identity of [
+      requests.map(({ authority }) => authority.requestId),
+      requests.map(({ authority }) => authority.slotId),
+      requests.map(({ authority }) => authority.outputSlot.path),
+    ]) expect(new Set(identity).size).toBe(requests.length);
+    for (const { authority, task } of requests) {
+      expect(authority).toMatchObject({ runId: handle.runId, attempt: 1 });
+      // The model binding and context the parent never named are issued, durable and readable.
+      expect(authority.modelProfile).toEqual(expect.any(String));
+      expect(authority.harnessBinding).toBeDefined();
+      expect(value(handle.readContext(authority.contextDigest)).digest).toBe(authority.contextDigest);
+      // The spawn task is rendered by the engine rather than assembled from parent parts.
+      expect(task.length).toBeGreaterThan(0);
+    }
+    // The returned batch is the durable one: the run holds exactly these requests.
+    expect(value(handle.readIssuedRequests()).map(({ requestId }) => requestId).sort())
+      .toEqual(requests.map(({ authority }) => authority.requestId).sort());
+    // Resuming with no input re-issues the same request authorities, so nothing the parent holds is needed.
+    const resumed = await resume(p, handle);
+    expect(resumed.kind).toBe("spawn-batch");
+    expect(resumed.requests?.map(({ authority }) => authority)).toEqual(requests.map(({ authority }) => authority));
+  }, 60_000);
+
+  it.each([
+    ["a caller-supplied request roster", { requests: [{ role: "code-reviewer" }] }],
+    ["caller-supplied Review Packets", { packets: [{ taskId: "T1" }] }],
+    ["a caller-chosen model binding", { models: { "code-reviewer": "opus" } }],
+  ])("refuses %s beside the Wave number and changes no state", async (_label, extra) => {
+    const p = project();
+    const before = readFileSync(p.statePath);
+    const refused = await cliResult(p, ["start", "wave-gate", "--runs-root", p.runsRoot, "--run", "run.forged"],
+      JSON.stringify({ wave: 1, ...extra }));
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain("wave-gate input must contain exactly wave");
+    expect(readFileSync(p.statePath)).toEqual(before);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
 // Issued emission route controls on the real Wave program path (T6): FR-012
 // issuance joins retained regardless of emission-tool availability, and the
 // non-producer spec-check slot stays byte-identical on both routes.

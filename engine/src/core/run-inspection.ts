@@ -140,7 +140,9 @@ const CAPTURE_REJECTED_EVENT = "request-capture-rejected";
  *
  * Read per registered program kind rather than probed: every writer's shape is
  * known (`programs/standalone.ts`, `programs/remediation.ts`,
- * `programs/wave-gate.ts`, and the Fugue codec for the two panels), and a probe
+ * `programs/wave-gate.ts`; the two panels' `data.state.stage` envelope is the
+ * removed Fugue codec's, which only Run Directories written before ADR-0029
+ * carry — no current writer produces it), and a probe
  * that tried `kind`, then `state.state`, then `data.state.stage` in turn would
  * report whichever field happened to match — including one belonging to a
  * different program's shape after a schema change, which is the one case where

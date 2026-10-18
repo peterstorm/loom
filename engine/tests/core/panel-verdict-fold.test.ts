@@ -4,7 +4,7 @@
  * capture path uses — the emission observation is folded and bound ONCE, the
  * selection runs BEFORE the authoritative parse, and the accepted source is
  * returned by the same decision and carried on the durable accepted event
- * (with the plan's historical projection for pre-feature events). The panel
+ * (with a historical projection for pre-feature events). The panel
  * parsers keep their criterion/lens bindings and complete candidate/finding
  * coverage: a source can choose WHICH bytes are parsed, never what they bind
  * to — a source cannot override issuance.
@@ -27,8 +27,6 @@ import {
   parsePersistentArchitecturePanelEvent,
   parsePersistentRefutationPanelEvent,
   parseRefutationPanelCheckpoint,
-  parsePersistentRefutationPanelHistory,
-  planRefutationPanelPersistence,
   reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
   startPersistentArchitecturePanel,
@@ -648,16 +646,9 @@ describe("the durable accepted-event source arm", () => {
     const persistedEvents = JSON.parse(JSON.stringify(checkpoint.events)) as readonly { type?: string; source?: { toolCallId?: string } }[];
     const persistedEmission = persistedEvents.find((event) => event.type === "refutation-verdict-accepted" && event.source?.toolCallId === "call-cp");
     expect(persistedEmission).toBeDefined();
-    // The persistence plan replays the recorded prefix WITHOUT the step's own
-    // event (the plan appends it) and derives its dedup keys from the SAME
-    // durable event bytes.
-    const history = value(parsePersistentRefutationPanelHistory(fixture.authority, [emissionEvent, extractionEvent], publicationResolver));
-    const planned = value(planRefutationPanelPersistence(completed, history, publicationResolver));
-    expect(planned[0]?.dedupKey).toBeDefined();
-    const replaceEffect = planned[1];
-    expect(replaceEffect?.kind).toBe("replace-refutation-panel-checkpoint");
-    if (replaceEffect?.kind !== "replace-refutation-panel-checkpoint") throw new Error("unreachable");
-    expect(replaceEffect.checkpoint.events.some((event) => event.type === "refutation-verdict-accepted" && event.source.source === "emission-tool" && event.source.toolCallId === "call-cp")).toBe(true);
+    // The reloaded prefix keeps the emission arm exactly as it was recorded.
+    expect(replayed.state.stage === "done" && replayed.state.decision.verdicts).toHaveLength(2);
+    expect(JSON.parse(JSON.stringify(checkpoint.events))[0]).toEqual(JSON.parse(JSON.stringify(emissionEvent)));
   });
 });
 

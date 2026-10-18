@@ -23,7 +23,7 @@ hooks/hooks.json              pi/extension.ts
                     |
        pure domain cores and typed reducers
                     |
-      orchestration façade + Fugue operation DAGs
+      orchestration façade + program drivers
                     |
        +------------+-------------+
        |                          |
@@ -169,19 +169,18 @@ Packets and complete request authorities for Agent work; disposition publication
 no Agents. Harness adapters capture results directly; the parent never rewrites transcripts.
 P5 commands require a matching admitted runtime; see the [bootstrap restriction](operations.md#standalone-lineage-p5).
 
-### Fugue runtime and operation DAGs
+### Program durability
 
-Loom pins `@fuguejs/framework` 0.4.0. `orchestration/fugue-program-runtime.ts` drives Loom reducers with Fugue’s public state-machine APIs and persists append-only events plus a checkpoint projection.
+Each program persists in its Run Directory (ADR-0029). Durable history is an append-only journal of dedup-keyed events (the record format and its parser in `orchestration/program-journal.ts`; `RunDirHandle` owns the append, read and checkpoint operations). A checkpoint is only a projection beside it.
 
-Static operation DAGs under `orchestration/dags/` execute deterministic work for panels, standalone review, Wave Gate, and remediation. They are not a generic workflow DSL. Each domain retains its own state/event algebra.
+Panels persist in one of two forms:
 
-Nodes receive only declared narrow capabilities:
+- **Registered panels** append `spawn-outcome` and `engine-outcome` events and rebuild by replaying them on resume.
+- **Refutation panels** inside a review persist as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read.
 
-- `runArtifacts` — publish a fixed artifact set into an anchored run;
-- `protectedStateCommit` — the only operation-DAG seam that can delegate to `StateManager`;
-- `gitIndex` — observe Git witnesses and install a verified index.
+Because an append is idempotent on its dedup key, a crash between publishing an artifact and journalling its event resumes by republishing the same bytes and journalling the event once.
 
-Pure validation/routing nodes receive no capability.
+Each program's drive function is plain shell code over this journal and the pure reducers (ADR-0005). There is no workflow runtime or DSL; each domain retains its own state/event algebra.
 
 ### Effects and idempotency
 
@@ -214,7 +213,6 @@ run.<id>/
 ├── abandoned.json    # present only once an operator retires the run
 ├── program.json
 ├── checkpoint.json
-├── progress.json
 ├── events/
 ├── requests/
 │   └── correlators/

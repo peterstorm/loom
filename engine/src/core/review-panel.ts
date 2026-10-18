@@ -1045,6 +1045,12 @@ void _outcomeIsAdjudicated;
  * unanimity; with 3, two of three; with 5, three of five. Any split short of
  * the threshold — including a 1-1 tie, and including a panel that mostly said
  * `uncertain` — keeps the finding.
+ *
+ * This is THE threshold, not a default a caller may move. A panel's bar is a
+ * function of its roster alone: one lens killing a critical inverts "ties keep
+ * the finding", and a raised bar lets a strict majority's refutation be
+ * ignored. Every producer derives it here and every persisted reader requires
+ * exactly this value.
  */
 export function defaultRefutationThreshold(lensCount: number): number {
   return Math.floor(lensCount / 2) + 1;
@@ -1056,11 +1062,10 @@ export function defaultRefutationThreshold(lensCount: number): number {
 //
 // These lived in `handlers/helpers/review-panel.ts`, inline in the I/O
 // function. Each one is a pure comparison over already-parsed values — two
-// integer comparisons, an equality, a floor comparison, and a set difference
-// — and each carries a long comment
-// naming a real bug it prevents: a shrunken panel adjudicating under a lower
-// absolute bar, one lens killing a critical alone, a re-tally re-adjudicating a
-// closed decision, a brief for a wave the graph has closed. Rules that
+// integer comparisons, an equality, and a set difference — and each carries a
+// long comment naming a real bug it prevents: a shrunken panel adjudicating
+// under a lower absolute bar, a re-tally re-adjudicating a closed decision, a
+// brief for a wave the graph has closed. Rules that
 // consequential deserve direct unit tests, and inside the shell the only way to
 // reach them was to spawn the CLI against a temp filesystem. The equivalents
 // that were already in the core (`selectLenses`' bounds, `tallyRefutations`'
@@ -1115,23 +1120,6 @@ export function panelSizeConflict(requested: number | null, recorded: number | n
     `--lenses ${requested} would re-size a panel whose verdicts were cast by the ` +
     `recorded one — start a new run directory instead`
   );
-}
-
-/**
- * A strict majority is the FLOOR, not merely the default.
- *
- * `--threshold 1` let one lens kill a critical on its own, inverting the
- * documented "ties favour keeping the finding" rule and promoting
- * blocked → passed when it was the wave's last critical, with nothing in the
- * runbook gating it. Raising the bar is always safe; lowering it is a weaker
- * panel wearing the same name.
- */
-export function thresholdError(threshold: number, lensCount: number): string | null {
-  const floor = defaultRefutationThreshold(lensCount);
-  return threshold >= floor
-    ? null
-    : `threshold ${threshold} is below the strict majority of ${lensCount} lenses (${floor}) — ` +
-      `a weaker panel must not run under the same name`;
 }
 
 /**

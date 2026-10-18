@@ -259,7 +259,7 @@ export function upholdStandaloneCriticals(
     if (!submitted.ok) throw new Error(submitted.error.message);
     panelState = submitted.value.state;
   });
-  const completed = completePersistentRefutationPanel(panelState, resolver, 2);
+  const completed = completePersistentRefutationPanel(panelState, resolver);
   if (!completed.ok || completed.value.state.stage !== "done") {
     throw new Error(completed.ok ? "completed refutation panel required" : completed.error.message);
   }

@@ -99,6 +99,11 @@ from the genuine one it displaced.
 
 ### Fugue used directly; no AuthoredDag sidecar
 
+*(Amended 2026-10-18 by ADR-0029.)* No production path ever ran through the Fugue runtime or the operation
+DAGs. Programs persist through the Run Directory journal and checkpoint instead, so the runtime, the DAGs and
+the `@fuguejs/framework` dependency were removed. The no-sidecar reasoning below still stands; the runtime
+choice does not.
+
 Fugue 0.4.0 is used through its **main public export only** — `Machine`,
 `JobLike`, `runStateMachine`, `replayEvents`, `toJson`/`fromJson`,
 `defineDag`, `runDag`, `createTransformNode`, `createHumanReviewNode`,
@@ -131,9 +136,9 @@ Eleven implementation slices across `engine/src/core/` and a new
 | Slice | Landed as |
 |---|---|
 | Authority kernel, panel programs, lifecycle machines | `core/orchestration-contract/`, `core/panel-program.ts`, `core/wave-gate-machine.ts`, `core/standalone-review.ts` (LC-2 reducer), `core/remediation-machine.ts` |
-| Fugue runtime | `orchestration/fugue-program-runtime.ts` |
+| Fugue runtime | `orchestration/fugue-program-runtime.ts` (*removed 2026-10-18 by ADR-0029:* no production caller; programs persist through the Run Directory journal) |
 | Anchored run directory, context packets, effect receipts | `orchestration/run-directory-handle.ts`, `context-packets.ts`, `effect-runner.ts`, `no-follow-fs.ts` |
-| Four static operation DAG families + capability registry | `orchestration/dags/*-operations.ts`, `orchestration/dags/capabilities.ts` |
+| Four static operation DAG families + capability registry | `orchestration/dags/*-operations.ts`, `orchestration/dags/capabilities.ts` (*removed 2026-10-18 by ADR-0029:* called only by their own test) |
 | Remediation Git boundary | `orchestration/git-remediation.ts` |
 | Façade and status | `handlers/helpers/orchestration.ts` |
 | Cross-harness capture | `core/harness-capture.ts`, `handlers/subagent-stop/capture-orchestration-result.ts` |
@@ -186,6 +191,8 @@ characters, against mandated floors of 70% and 80%.
   This was the panel's central criticism (simplicity 4/10) and it stands.
 - A second execution substrate (Fugue) is now a hard dependency, pinned at
   exactly 0.4.0. Its conditional-edge and id constraints shape Loom's graphs.
+  *(Amended 2026-10-18 by ADR-0029:* the dependency and its constraints are
+  gone from the engine along with the runtime and DAGs.)
 - Migration retains read-only compatibility by design: historical helpers/formats
   remain behind `core/legacy-archive.ts` and historical runs are never rewritten.
   Pi's spawn path now receives run
