@@ -4,7 +4,7 @@
  * the ANSI-C body), locale `$"…"` quoting, and unquoted/double-quoted parameter
  * expansion (`$name` / `${…}`). Both the guard's matching view
  * (core/guard-state-file `collapseVariants`) and the evidence scanner's
- * redirect-target reader (machine/extract-evidence `readRedirectTarget`) build
+ * redirect-target reader (core/shell-write-targets `readRedirectTarget`) build
  * on this, so a rule taught to one (ANSI-C in round 17, line-continuation + NUL
  * in round 18, parameter expansion in round 19) can never again be missing from
  * the other — the "twin scanners diverged" bug class that recurred rounds 15–18

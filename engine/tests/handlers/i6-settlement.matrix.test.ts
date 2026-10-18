@@ -82,7 +82,7 @@ import {
   type SessionId,
 } from "../../src/machine";
 import { parseEvidenceLine } from "../../src/machine/evidence";
-import { extractShellWriteTargets } from "../../src/machine/extract-evidence";
+import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";

@@ -142,7 +142,20 @@ export function stripEnvPrefix(segment: string): string {
   }
 }
 
-/** Classify a complete Bash `>&word` target as fd duplication or file output. */
+/**
+ * Classify a complete Bash `>&word` target as fd duplication or file output.
+ *
+ * Bash's `>&word` (and `n>&word`) is an fd DUPLICATION only when the ENTIRE
+ * word is digits (`2>&1`, `>&2`) or exactly `-` (the close form, `>&-`). A
+ * word that merely STARTS with a digit but continues into a path
+ * (`>&2/../r.json`) is a filename redirect: bash writes the FILE. The guard's
+ * `hasOutputRedirect` and the evidence scanner's `readRedirectTarget` both
+ * classify through this one function so their verdicts cannot drift. Quote
+ * and backslash characters do NOT terminate the word: `>&2"foo"` collapses to
+ * the filename `2foo` in bash, and a word containing them is never pure
+ * digits, so it classifies as a file write (fail-closed).
+ * `start` points just past the `&`; `end` is the index just past the word.
+ */
 export function classifyFdDupWord(
   text: string,
   start: number,

@@ -11,12 +11,14 @@ import { join } from "node:path";
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { extractTestEvidence } from "../../src/core/test-evidence";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
-import { classifyTestCommand, extractEvidence, extractBashOutcome } from "../../src/machine/extract-evidence";
+import { claudeBashOutcome } from "../../src/core/harness-tool-call";
+import { classifyTestCommand, extractEvidence } from "../../src/machine/extract-evidence";
 import { foldEvidence, isToolAllowed, isTerminal, blockExplanation } from "../../src/machine/advance";
 import { parseMachineJson } from "../../src/machine/parse-machine";
 import { machineToMermaid } from "../../src/machine/mermaid";
 import type { Evidence } from "../../src/machine/types";
 import { reportSummary } from "./report-summary";
+import { claudeCall } from "../fixtures/claude-tool-call";
 
 const machinePath = join(__dirname, "../../../machines/code-implementer-agent.machine.json");
 const parsed = parseMachineJson(readFileSync(machinePath, "utf-8"));
@@ -45,7 +47,7 @@ describe("R2 — real exit status beats happy output text", () => {
   });
 
   it("NEW: a ledger failure fact (exit 1) overrides the text — trusted failure", () => {
-    const ledger = extractEvidence("Bash", { command: "mvn test" }, { exit_code: 1, stdout: lyingOutput }, () => null);
+    const ledger = extractEvidence(claudeCall("Bash", { command: "mvn test" }, { exit_code: 1, stdout: lyingOutput }), () => null);
     const resolved = resolveTestEvidence(ledger, bashOutput, true);
     expect(resolved.result).toEqual({ verdict: "trusted-fail" }); // a real nonzero exit is trustworthy failure
     expect(resolved.evidence).toContain("ledger: exit 1");
@@ -55,9 +57,7 @@ describe("R2 — real exit status beats happy output text", () => {
 describe("R2 — reporter-confirmed pass carries explicit provenance in the verdict", () => {
   it("NEW: exit 0 + parsed report → trusted-pass verdict on the task", () => {
     const ledger = extractEvidence(
-      "Bash",
-      { command: "npx vitest run --reporter=json --outputFile=out.json" },
-      { exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command: "npx vitest run --reporter=json --outputFile=out.json" }, { exit_code: 0, stdout: "" }),
       () => reportSummary(9, 0),
     );
     const resolved = resolveTestEvidence(ledger, "", true);
@@ -66,10 +66,10 @@ describe("R2 — reporter-confirmed pass carries explicit provenance in the verd
   });
 
   it("NEW: report cross-check — failures or zero-tests never pass", () => {
-    const failing = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => reportSummary(9, 2));
+    const failing = extractEvidence(claudeCall("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }), () => reportSummary(9, 2));
     expect(resolveTestEvidence(failing, "irrelevant", true).result).toEqual({ verdict: "trusted-fail" });
 
-    const empty = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => reportSummary(0, 0));
+    const empty = extractEvidence(claudeCall("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }), () => reportSummary(0, 0));
     expect(resolveTestEvidence(empty, "", true).result).toEqual({ verdict: "trusted-fail" });
   });
 
@@ -93,14 +93,14 @@ describe("R2 — the spoofs the review found are dead", () => {
     // The review's end-to-end trusted-pass forgery:
     const cmd = `echo '{"numTotalTests":5,"numFailedTests":0}' # npm test --json`;
     expect(classifyTestCommand(cmd)).toBeNull();
-    expect(extractEvidence("Bash", { command: cmd }, { exit_code: 0, stdout: '{"numTotalTests":5,"numFailedTests":0}' }, () => {
+    expect(extractEvidence(claudeCall("Bash", { command: cmd }, { exit_code: 0, stdout: '{"numTotalTests":5,"numFailedTests":0}' }), () => {
       throw new Error("report discovery must not even run for unclassified commands");
     })).toEqual([]);
   });
 
   it("prose false-failures are dead: grep exiting 1 is not a trusted failure", () => {
     const cmd = 'git grep "cargo test" src/';
-    expect(extractEvidence("Bash", { command: cmd }, { exit_code: 1, stdout: "" }, () => null)).toEqual([]);
+    expect(extractEvidence(claudeCall("Bash", { command: cmd }, { exit_code: 1, stdout: "" }), () => null)).toEqual([]);
   });
 
   it("plain echo spoof: unanchored Node/Mocha prose mints no pass", () => {
@@ -109,7 +109,7 @@ describe("R2 — the spoofs the review found are dead", () => {
     const bashOutput = parseBashTestOutput(transcript);
 
     expect(extractTestEvidence(bashOutput)).toEqual({ passed: false, evidence: "" });
-    const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit_code: 0, stdout: "npm test: 5 passing" }, () => null);
+    const ledger = extractEvidence(claudeCall("Bash", { command: spoofCmd }, { exit_code: 0, stdout: "npm test: 5 passing" }), () => null);
     expect(ledger).toEqual([]);
     expect(resolveTestEvidence(ledger, bashOutput, true).result).toEqual({
       verdict: "untrusted",
@@ -173,13 +173,13 @@ describe("R1 — write-before-read is structurally impossible for the bound agen
 describe("transcript text is never evidence (standing invariant)", () => {
   it("narrative text claiming success produces zero evidence events", () => {
     expect(
-      extractEvidence("Bash", { command: "ls -la" }, { exit_code: 0, stdout: "BUILD SUCCESS 99 passing" }, () => null),
+      extractEvidence(claudeCall("Bash", { command: "ls -la" }, { exit_code: 0, stdout: "BUILD SUCCESS 99 passing" }), () => null),
     ).toEqual([]);
   });
 
   it("unknown tool_response shapes yield exit: null → judged untrusted, never success", () => {
-    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "", interrupted: false });
-    const ledger = extractEvidence("Bash", { command: "npm test" }, { weird: true, stdout: "5 passing" }, () => null);
+    expect(claudeBashOutcome({ weird: true })).toEqual({ kind: "exit-unknown", stdout: "" });
+    const ledger = extractEvidence(claudeCall("Bash", { command: "npm test" }, { weird: true, stdout: "5 passing" }), () => null);
     const resolved = resolveTestEvidence(ledger, "", true);
     expect(resolved.result.verdict).toBe("untrusted");
   });

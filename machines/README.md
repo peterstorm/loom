@@ -109,12 +109,13 @@ additionally walks the import closure so the reducer can never re-acquire
 `node:fs` through a dependency:
 
 - **Pure core** (no I/O, no env, no clock): `types.ts`, `advance.ts`
-  (the reducer), `parse-machine.ts`, `extract-evidence.ts`, `mermaid.ts`,
-  `test-report.ts` (report parsing + the trust judgment), `evidence.ts`
-  (identity brands, binding/ledger line parsing, epoch attribution, the
-  `SessionRegistry` port), `harness-tool-call-types.ts` (the normalized
-  `HarnessToolCall` both harness adapters produce; the adapters themselves
-  are pure in `engine/src/core/harness-tool-call.ts`).
+  (the reducer), `parse-machine.ts`, `extract-evidence.ts` (the Bash write
+  targets it mints come from the pure `engine/src/core/shell-write-targets.ts`),
+  `mermaid.ts`, `test-report.ts` (report parsing + the trust judgment),
+  `evidence.ts` (identity brands, binding/ledger line parsing, epoch
+  attribution, the `SessionRegistry` port), `harness-tool-call-types.ts` (the
+  normalized `HarnessToolCall` both harness adapters produce; the adapters
+  themselves are pure in `engine/src/core/harness-tool-call.ts`).
 - **Imperative shell**: `ledger.ts` (binding/roster/ledger files + locks),
   `tool-evidence-recorder.ts` (the one minting shell: report discovery with
   the freshness stamp and artifact veto, cwd resolution, ledger append),

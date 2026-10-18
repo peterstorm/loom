@@ -36,7 +36,7 @@ const SPAWN_AUTHORITY_ALLOWLIST: Readonly<Record<string, string>> = Object.freez
  *  `git`, and why. The exemption covers only that one form: a launch naming git
  *  is still flagged, and an exempt file must hold no spawn authority at all. */
 const GIT_COMMAND_WORD_ALLOWLIST: Readonly<Record<string, string>> = Object.freeze({
-  "engine/src/machine/extract-evidence.ts":
+  "engine/src/core/shell-write-targets.ts":
     "recognizes a literal `git mv` head in an agent's Bash command so its destination mints a FileWrite (FR-034); it spawns nothing",
 });
 const GIT_LITERAL_FORM = "the literal \"git\"";
@@ -245,7 +245,7 @@ describe("the engine has exactly one place that spawns git", () => {
       expect(own.some(({ form }) => form === GIT_LITERAL_FORM), `${path} is word-allowlisted but no longer compares the literal — remove it`).toBe(true);
       expect(own.filter(({ rule }) => rule === "spawn-authority"), `${path} must hold no spawn authority`).toEqual([]);
     }
-    const listed = "engine/src/machine/extract-evidence.ts";
+    const listed = "engine/src/core/shell-write-targets.ts";
     expect(spawnViolations(listed, 'const isGitMove = (w: string) => w === "git";')).toEqual([]);
     expect(spawnViolations(listed, 'execFileSync("git", ["status"]);')).not.toEqual([]);
     expect(spawnViolations(listed, 'import { spawnSync } from "node:child_process";\nconst head = "git";')).not.toEqual([]);
