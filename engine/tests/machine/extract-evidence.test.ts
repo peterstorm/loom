@@ -4,18 +4,17 @@ import {
   attributeExit,
   classifyTestCommand,
   classifyTestCommandDetailed,
-  extractBashOutcome,
   extractEvidence,
-  extractShellWriteTargets,
-  isToolFailure,
 } from "../../src/machine/extract-evidence";
+import { extractShellWriteTargets } from "../../src/machine/shell-write-targets";
 import { judgeTestRun } from "../../src/machine/test-report";
 import { reportSummary } from "./report-summary";
 import { TEST_COMMAND_PATTERNS } from "../../src/core/tool-vocabulary";
+import { claudeCall } from "../fixtures/claude-tool-call";
 
 /** The TestRun event extractEvidence minted for a Bash call, or null. */
 function mintTestRun(command: string, exit: number, stdout = "") {
-  const events = extractEvidence("Bash", { command }, { exit_code: exit, stdout }, () => null);
+  const events = extractEvidence(claudeCall("Bash", { command }, { exit_code: exit, stdout }), () => null);
   const run = events.find((e) => e.kind === "TestRun");
   return run && run.kind === "TestRun" ? run : null;
 }
@@ -281,9 +280,7 @@ describe("exit-status ownership — the line's exit is attributed only when prov
     // …and with a report it still judges trusted-pass end to end:
     const report = reportSummary(5, 0);
     const events = extractEvidence(
-      "Bash",
-      { command: "cd engine && npx vitest run --reporter=json" },
-      { exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command: "cd engine && npx vitest run --reporter=json" }, { exit_code: 0, stdout: "" }),
       () => report,
     );
     const testRun = events.find((e) => e.kind === "TestRun");
@@ -384,9 +381,7 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
 
   it("extractEvidence mints Bash FileWrites BEFORE the TestRun — a test's own redirect never reads as write-after-pass", () => {
     const events = extractEvidence(
-      "Bash",
-      { command: "npm test 2>&1 | tee /tmp/test.log" },
-      { exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command: "npm test 2>&1 | tee /tmp/test.log" }, { exit_code: 0, stdout: "" }),
       () => null,
     );
     expect(events.map((e) => e.kind)).toEqual(["FileWrite", "TestRun"]);
@@ -395,67 +390,28 @@ describe("extractShellWriteTargets — Bash-authored writes are visible to the v
 
   it("a redirect-only Bash call mints FileWrite even on an error-shaped response (the shell truncates the target before the command runs)", () => {
     const events = extractEvidence(
-      "Bash",
-      { command: "cat > /tmp/r.json" },
-      { is_error: true, exit_code: 1 },
+      claudeCall("Bash", { command: "cat > /tmp/r.json" }, { is_error: true, exit_code: 1 }),
       () => null,
     );
     expect(events).toEqual([{ kind: "FileWrite", path: "/tmp/r.json", via: "shell" }]);
   });
 });
 
-describe("extractBashOutcome — defensive harness-shape parsing", () => {
-  it("reads known exit-code field names", () => {
-    expect(extractBashOutcome({ exit_code: 1, stdout: "x" })).toEqual({ exit: 1, stdout: "x", interrupted: false });
-    expect(extractBashOutcome({ exitCode: 0, stdout: "y" })).toEqual({ exit: 0, stdout: "y", interrupted: false });
-    expect(extractBashOutcome({ returnCode: 2 })).toEqual({ exit: 2, stdout: "", interrupted: false });
-    expect(extractBashOutcome({ code: 0, output: "z" })).toEqual({ exit: 0, stdout: "z", interrupted: false });
-  });
-
-  it("never invents an exit code", () => {
-    expect(extractBashOutcome({ exit_code: 1.5 }).exit).toBeNull();
-    expect(extractBashOutcome({ exit_code: "0" }).exit).toBeNull();
-    expect(extractBashOutcome({ weird: true })).toEqual({ exit: null, stdout: "", interrupted: false });
-    expect(extractBashOutcome("raw text")).toEqual({ exit: null, stdout: "raw text", interrupted: false });
-    expect(extractBashOutcome(null)).toEqual({ exit: null, stdout: "", interrupted: false });
-    expect(extractBashOutcome(undefined)).toEqual({ exit: null, stdout: "", interrupted: false });
-  });
-
-  it("interrupted runs have no exit (→ never trusted downstream)", () => {
-    expect(extractBashOutcome({ interrupted: true, exit_code: 0, stdout: "5 passing" })).toEqual({
-      exit: null,
-      stdout: "",
-      interrupted: true,
-    });
-  });
-
-  // An unknown exit and an INTERRUPTED run both arrive as `exit: null`, but only
-  // the second means the command never finished — the distinction the report
-  // guard below depends on, so it must survive parsing rather than be folded
-  // away.
-  it("separates 'no exit reported' from 'the call was killed'", () => {
-    expect(extractBashOutcome({ weird: true }).interrupted).toBe(false);
-    expect(extractBashOutcome({ interrupted: true }).interrupted).toBe(true);
-  });
-});
-
 describe("extractEvidence — facts only", () => {
   it("emits TestRun facts for classified commands, nothing for prose", () => {
     const report = reportSummary(3, 0);
-    const events = extractEvidence("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }, () => report);
+    const events = extractEvidence(claudeCall("Bash", { command: "npm test" }, { exit_code: 0, stdout: "" }), () => report);
     expect(events).toEqual([{ kind: "TestRun", command: "npm test", exit: 0, report }]);
 
     expect(
-      extractEvidence("Bash", { command: 'echo "npm test: 5 passing"' }, { exit_code: 0, stdout: "5 passing" }, () => null),
+      extractEvidence(claudeCall("Bash", { command: 'echo "npm test: 5 passing"' }, { exit_code: 0, stdout: "5 passing" }), () => null),
     ).toEqual([]);
   });
 
   it("passes the classified SEGMENT to report discovery, not the whole command", () => {
     let seen = "";
     extractEvidence(
-      "Bash",
-      { command: "cd pkg && npx vitest run --reporter=json" },
-      { exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command: "cd pkg && npx vitest run --reporter=json" }, { exit_code: 0, stdout: "" }),
       (segment) => {
         seen = segment;
         return null;
@@ -465,14 +421,14 @@ describe("extractEvidence — facts only", () => {
   });
 
   it("maps Read and file-modifying tools; handles path variants", () => {
-    expect(extractEvidence("Read", { file_path: "/a" }, {}, () => null)).toEqual([
+    expect(extractEvidence(claudeCall("Read", { file_path: "/a" }, {}), () => null)).toEqual([
       { kind: "FileRead", path: "/a" },
     ]);
-    expect(extractEvidence("Edit", { path: "/b" }, {}, () => null)).toEqual([
+    expect(extractEvidence(claudeCall("Edit", { path: "/b" }, {}), () => null)).toEqual([
       { kind: "FileWrite", path: "/b", via: "tool" },
     ]);
-    expect(extractEvidence("Write", { file_path: "  " }, {}, () => null)).toEqual([]);
-    expect(extractEvidence("Grep", { pattern: "x" }, {}, () => null)).toEqual([]);
+    expect(extractEvidence(claudeCall("Write", { file_path: "  " }, {}), () => null)).toEqual([]);
+    expect(extractEvidence(claudeCall("Grep", { pattern: "x" }, {}), () => null)).toEqual([]);
   });
 });
 
@@ -485,16 +441,16 @@ describe("extractEvidence — facts mean the tool SUCCEEDED", () => {
       { error: "old_string not found in file" },
       { error: { code: "ENOENT" } },
     ]) {
-      expect(extractEvidence("Read", { file_path: "/a" }, errorShape, () => null)).toEqual([]);
-      expect(extractEvidence("Edit", { file_path: "/a" }, errorShape, () => null)).toEqual([]);
-      expect(extractEvidence("Write", { file_path: "/a" }, errorShape, () => null)).toEqual([]);
-      expect(extractEvidence("MultiEdit", { file_path: "/a" }, errorShape, () => null)).toEqual([]);
+      expect(extractEvidence(claudeCall("Read", { file_path: "/a" }, errorShape), () => null)).toEqual([]);
+      expect(extractEvidence(claudeCall("Edit", { file_path: "/a" }, errorShape), () => null)).toEqual([]);
+      expect(extractEvidence(claudeCall("Write", { file_path: "/a" }, errorShape), () => null)).toEqual([]);
+      expect(extractEvidence(claudeCall("MultiEdit", { file_path: "/a" }, errorShape), () => null)).toEqual([]);
     }
   });
 
   it("still mints for success-shaped and unknown responses (recorder must not starve)", () => {
     for (const okShape of [undefined, null, {}, { type: "text", file: { filePath: "/a" } }, { success: true }, { error: "" }]) {
-      expect(extractEvidence("Read", { file_path: "/a" }, okShape, () => null)).toEqual([
+      expect(extractEvidence(claudeCall("Read", { file_path: "/a" }, okShape), () => null)).toEqual([
         { kind: "FileRead", path: "/a" },
       ]);
     }
@@ -502,28 +458,13 @@ describe("extractEvidence — facts mean the tool SUCCEEDED", () => {
 
   it("Bash keeps minting TestRun on error responses — a failing run IS the ground truth", () => {
     const events = extractEvidence(
-      "Bash",
-      { command: "npm test" },
-      { is_error: true, exit_code: 1, stdout: "3 failing" },
+      claudeCall("Bash", { command: "npm test" }, { is_error: true, exit_code: 1, stdout: "3 failing" }),
       () => null,
     );
     expect(events).toEqual([{ kind: "TestRun", command: "npm test", exit: 1, report: null }]);
     // …and an error response with no usable exit yields exit: null (never trusted):
-    const noExit = extractEvidence("Bash", { command: "npm test" }, { error: "spawn failed" }, () => null);
+    const noExit = extractEvidence(claudeCall("Bash", { command: "npm test" }, { error: "spawn failed" }), () => null);
     expect(noExit).toEqual([{ kind: "TestRun", command: "npm test", exit: null, report: null }]);
-  });
-
-  it("isToolFailure recognizes error shapes and nothing else", () => {
-    expect(isToolFailure({ is_error: true })).toBe(true);
-    expect(isToolFailure({ success: false })).toBe(true);
-    expect(isToolFailure({ error: "boom" })).toBe(true);
-    expect(isToolFailure({ error: { message: "boom" } })).toBe(true);
-    expect(isToolFailure({ is_error: false })).toBe(false);
-    expect(isToolFailure({ success: true })).toBe(false);
-    expect(isToolFailure({ error: "" })).toBe(false);
-    expect(isToolFailure("plain text output")).toBe(false);
-    expect(isToolFailure(null)).toBe(false);
-    expect(isToolFailure(undefined)).toBe(false);
   });
 });
 
@@ -538,9 +479,7 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
   it("drops even a parsed green report for a backgrounded test", () => {
     const green = reportSummary(5, 0);
     const run = (command: string) => extractEvidence(
-      "Bash",
-      { command },
-      { exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command }, { exit_code: 0, stdout: "" }),
       () => green,
     ).find((event) => event.kind === "TestRun");
 
@@ -561,9 +500,7 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
   it("drops even a parsed green report for an interrupted (killed) foreground test", () => {
     const green = reportSummary(5, 0);
     const run = (toolResponse: unknown) => extractEvidence(
-      "Bash",
-      { command: "npm test" },
-      toolResponse,
+      claudeCall("Bash", { command: "npm test" }, toolResponse),
       () => green,
     ).find((event) => event.kind === "TestRun");
 
@@ -579,9 +516,7 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
   it("an interrupted test run is judged untrusted, never a pass", () => {
     const green = reportSummary(5, 0);
     const run = extractEvidence(
-      "Bash",
-      { command: "npm test" },
-      { interrupted: true, exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command: "npm test" }, { interrupted: true, exit_code: 0, stdout: "" }),
       () => green,
     ).find((event) => event.kind === "TestRun");
     if (run?.kind !== "TestRun") throw new Error("expected a TestRun event");
@@ -600,9 +535,7 @@ describe("unquoted & — background compositions (round-10 Fix 3)", () => {
     expect(classified.isBackgrounded).toBe(true);
 
     const run = extractEvidence(
-      "Bash",
-      { command },
-      { exit_code: 0, stdout: "" },
+      claudeCall("Bash", { command }, { exit_code: 0, stdout: "" }),
       () => green,
     ).find((event) => event.kind === "TestRun");
     expect(run).toEqual({ kind: "TestRun", command, exit: null, report: null });

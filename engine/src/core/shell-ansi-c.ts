@@ -1,7 +1,7 @@
 /**
  * Shared bash ANSI-C (`$'…'`) decoding, used by BOTH the guard's matching view
  * (core/guard-state-file) and the evidence scanner's redirect-target reader
- * (machine/extract-evidence). Keeping one implementation is what stops the two
+ * (machine/shell-write-targets). Keeping one implementation is what stops the two
  * from diverging point-wise: the guard is taught to SEE a guarded path spelled
  * `$'\x2e\x63…'`, the scanner is taught to MINT the same decoded path as a
  * FileWrite target. (The standing "shared shell tokenizer" refactor subsumes

@@ -8,7 +8,8 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { extractEvidence, extractShellWriteTargets } from "../../src/machine/extract-evidence";
+import { extractEvidence } from "../../src/machine/extract-evidence";
+import { extractShellWriteTargets } from "../../src/machine/shell-write-targets";
 import type { HarnessToolCall } from "../../src/machine/harness-tool-call-types";
 
 const bash = (command: string): HarnessToolCall => ({

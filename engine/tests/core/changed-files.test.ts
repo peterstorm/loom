@@ -10,7 +10,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { ChangedFilePath } from "../../src/core/affected-stop-check-types";
 import { changedFilesAtStop } from "../../src/core/changed-files";
-import { extractShellWriteTargets } from "../../src/machine/extract-evidence";
+import { extractShellWriteTargets } from "../../src/machine/shell-write-targets";
 import type { Evidence } from "../../src/machine/types";
 
 const ROOT = "/work/repo";

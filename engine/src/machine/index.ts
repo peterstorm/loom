@@ -25,16 +25,12 @@ export {
 } from "./test-report";
 export {
   extractEvidence,
-  extractBashOutcome,
-  extractShellWriteTargets,
-
-  isToolFailure,
   attributeExit,
   classifyTestCommand,
   classifyTestCommandDetailed,
-  type BashOutcome,
   type ClassifiedTestCommand,
 } from "./extract-evidence";
+export { extractShellWriteTargets } from "./shell-write-targets";
 export type {
   EvidenceTarget,
   HarnessToolCall,

@@ -33,6 +33,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/machine/advance.ts",
   "engine/src/machine/parse-machine.ts",
   "engine/src/machine/extract-evidence.ts",
+  "engine/src/machine/shell-write-targets.ts",
   "engine/src/machine/mermaid.ts",
   "engine/src/machine/test-report.ts",
   "engine/src/machine/evidence.ts",
