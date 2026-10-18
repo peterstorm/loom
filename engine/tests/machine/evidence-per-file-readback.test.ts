@@ -34,7 +34,7 @@ function testRun(raw: string): Extract<Evidence, { kind: "TestRun" }> {
 
 describe("TestRun per-file read-back", () => {
   it("AS-001: a recorded summary round-trips through the ledger line byte-for-byte", () => {
-    const summary = parseReportSummary(5, 2, "junit-xml", { files: { kind: "recorded", results: RESULTS } });
+    const summary = parseReportSummary(5, 2, "junit-xml", { kind: "recorded", results: RESULTS });
     const written = line(summary);
     const run = testRun(written);
     expect(run.report?.files).toEqual({ kind: "recorded", results: RESULTS });

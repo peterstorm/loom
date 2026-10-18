@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  mergeSummaries, parseJunitXml, parseReportSummary, parseStructuredTestReportBytes, parseVitestJson,
+  mergeSummaries, parseJunitXml, parseReportCounts, parseReportSummary, parseStructuredTestReportBytes, parseVitestJson,
 } from "../../src/core/structured-test-report";
+import { reportSummary } from "./report-summary";
 
 const parse = (xml: string) => parseStructuredTestReportBytes(new TextEncoder().encode(xml));
 const nodeCounts = (tests = 1, pass = 1, fail = 0, cancelled = 0, skipped = 0, todo = 0) =>
@@ -114,8 +115,8 @@ describe("structural JUnit authorization", () => {
 
 describe("summary minting invariants", () => {
   it("freezes every public summary producer at runtime", () => {
-    const summary = parseReportSummary(1, 0, "junit-xml")!;
-    for (const value of [summary, parseJunitXml(suite)!, parseVitestJson('{"numTotalTests":1,"numFailedTests":0}')!, mergeSummaries([summary])!]) {
+    const summary = reportSummary(1, 0, "junit-xml");
+    for (const value of [summary, parseReportCounts(1, 0, "junit-xml")!, parseJunitXml(suite)!, parseVitestJson('{"numTotalTests":1,"numFailedTests":0}')!, mergeSummaries([summary])!]) {
       expect(Object.isFrozen(value)).toBe(true);
       expect(Reflect.set(value, "total", 99)).toBe(false);
       expect(Reflect.set(value, "failed", 99)).toBe(false);
@@ -126,8 +127,8 @@ describe("summary minting invariants", () => {
   });
 
   it("rejects unsafe integers and overflow during merging", () => {
-    expect(parseReportSummary(Number.MAX_SAFE_INTEGER + 1, 0, "junit-xml")).toBeNull();
-    expect(mergeSummaries([parseReportSummary(Number.MAX_SAFE_INTEGER, 0, "junit-xml")!, parseReportSummary(1, 0, "junit-xml")!])).toBeNull();
+    expect(parseReportSummary(Number.MAX_SAFE_INTEGER + 1, 0, "junit-xml", undefined)).toBeNull();
+    expect(mergeSummaries([reportSummary(Number.MAX_SAFE_INTEGER, 0, "junit-xml"), reportSummary(1, 0, "junit-xml")])).toBeNull();
   });
 
   it("generated comment/CDATA markup cannot add executions", () => {

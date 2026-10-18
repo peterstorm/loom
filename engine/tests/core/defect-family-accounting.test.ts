@@ -22,7 +22,7 @@ import {
   type EngineObservedRepairedCheck,
   type InstallableDefectFamilyAssessment,
 } from "../../src/core/defect-family-accounting";
-import { parseReportSummary } from "../../src/machine/test-report";
+import { parseReportCounts } from "../../src/machine/test-report";
 import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import {
   VERIFICATION_MANIFEST_KIND,
@@ -209,7 +209,7 @@ function observed(
   check: AuthorizedRemediationCheck,
   witness: CandidateRepositoryWitness,
 ): EngineObservedRepairedCheck {
-  const summary = parseReportSummary(3, 0, "vitest-json");
+  const summary = parseReportCounts(3, 0, "vitest-json");
   if (summary === null) throw new Error("summary fixture failed");
   return value(parseRegisteredRemediationCheckObservation(check, witness, witness, {
     kind: "remediation-check-observed",
@@ -803,7 +803,7 @@ describe("fixed command, candidate, and engine-observation authority", () => {
     const plan = selectedPlan();
     const witness = candidate();
     const check = authorization(plan, witness);
-    const summary = parseReportSummary(2, 0, "junit-xml");
+    const summary = parseReportCounts(2, 0, "junit-xml");
     if (summary === null) throw new Error("summary fixture failed");
     const base = {
       kind: "remediation-check-observed",

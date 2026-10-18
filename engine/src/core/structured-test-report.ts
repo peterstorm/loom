@@ -46,22 +46,26 @@ export type TestReportFiles =
   | Readonly<{ kind: "unrecorded" }>
   | Readonly<{ kind: "recorded"; results: readonly TestFileResult[] }>;
 
+declare const REPORT_COUNTS_PARSED: unique symbol;
 declare const REPORT_SUMMARY_PARSED: unique symbol;
 type ReportSource = "vitest-json" | "junit-xml";
-export type TestReportSummary = Readonly<{
-  total: number;
-  failed: number;
-  source: ReportSource;
-  /**
-   * The report's per-file results, reconciled with `total` and `failed`
-   * (INV-8). Present on every summary of a TestRun fact, at capture and at
-   * ledger read-back. Absent only on a counts-only summary minted without
-   * per-file input: the strict executed-count parser and the completion-check
-   * and remediation observations built from it, whose exact-key wire records
-   * carry no per-file results. Absent therefore never satisfies an I6 step.
-   */
-  files?: TestReportFiles;
-}> & { readonly [REPORT_SUMMARY_PARSED]: true };
+type CountFields = Readonly<{ total: number; failed: number; source: ReportSource }>;
+
+/**
+ * A report's counts alone, minted only by `parseReportCounts`: what the strict
+ * executed-count parser yields for the completion-check and remediation
+ * observations, whose exact-key wire records carry exactly these three keys.
+ * It has no per-file results, so it can never stand as a TestRun fact's report.
+ */
+export type ReportCounts = CountFields & { readonly [REPORT_COUNTS_PARSED]: true };
+
+/**
+ * A TestRun fact's report summary, minted only by `parseReportSummary`: counts
+ * plus the report's per-file results, reconciled with them (INV-8), at capture
+ * and at ledger read-back alike. `files` is always present; `unrecorded` is the
+ * one value that never satisfies an I6 step.
+ */
+export type TestReportSummary = CountFields & Readonly<{ files: TestReportFiles }> & { readonly [REPORT_SUMMARY_PARSED]: true };
 
 /** Per-report resource budget, shared by capture, parsing, persistence, and replay. */
 export const MAX_STRUCTURED_REPORT_BYTES = 8 * 1024 * 1024;
@@ -158,6 +162,25 @@ export function reconcileFileResults(
 
 // --- Pure parsers ---
 
+/** Non-negative safe-integer counts with failed ≤ total, or null. */
+function saneCounts(total: unknown, failed: unknown, source: ReportSource): CountFields | null {
+  if (typeof total !== "number" || typeof failed !== "number") return null;
+  if (!Number.isSafeInteger(total) || !Number.isSafeInteger(failed)) return null;
+  if (total < 0 || failed < 0 || failed > total) return null;
+  return { total, failed, source };
+}
+
+/**
+ * The sole constructor of every ReportCounts: non-negative integer counts with
+ * failed ≤ total, as exactly the three own keys the exact-key completion-check
+ * and remediation records require. Fails closed to null.
+ */
+export function parseReportCounts(total: unknown, failed: unknown, source: ReportSource): ReportCounts | null {
+  const counts = saneCounts(total, failed, source);
+  // Sole producer of the branded ReportCounts: saneCounts IS the brand's invariant.
+  return counts === null ? null : Object.freeze(counts) as ReportCounts;
+}
+
 /**
  * The sole constructor of every TestReportSummary (INV-8): a summary that
  * exists has non-negative integer counts with failed ≤ total, and per-file
@@ -167,31 +190,23 @@ export function reconcileFileResults(
  * through here, so an impossible-count or unreconciled report can never exist
  * to vouch — fail closed to null (→ the run stays untrusted).
  *
- * `perFile` selects the summary's kind. Omitted, the summary is counts-only
- * and carries no `files` at all: exactly the pre-feature three own keys, which
- * the exact-key completion-check and remediation records require. Given, the
- * summary is a TestRun fact's and always carries `files`: `perFile.files` is
- * the raw per-file value (a parser's projection, a merge, or a ledger line's
- * field), with `undefined` reading as `unrecorded` (a pre-feature line).
+ * `files` is the raw per-file value (a parser's projection, a merge, or a
+ * ledger line's field); `undefined` reads as `unrecorded` (a pre-feature line).
  */
 export function parseReportSummary(
   total: unknown,
   failed: unknown,
-  source: TestReportSummary["source"],
-  perFile?: Readonly<{ files: unknown }>,
+  source: ReportSource,
+  files: unknown,
 ): TestReportSummary | null {
-  if (typeof total !== "number" || typeof failed !== "number") return null;
-  if (!Number.isSafeInteger(total) || !Number.isSafeInteger(failed)) return null;
-  if (total < 0 || failed < 0 || failed > total) return null;
-  const summary = { total, failed, source };
-  if (perFile !== undefined) {
-    const reconciled = reconcileFileResults(source, total, failed, perFile.files);
-    if (!reconciled.ok) return null;
-    // `files` is enumerable only when recorded, so an unrecorded summary keeps
-    // the pre-feature JSON bytes: a legacy ledger line re-serializes
-    // byte-for-byte, and read-back maps the absent field back to `unrecorded`.
-    Object.defineProperty(summary, "files", { value: reconciled.value, enumerable: reconciled.value.kind === "recorded" });
-  }
+  const summary = saneCounts(total, failed, source);
+  if (summary === null) return null;
+  const reconciled = reconcileFileResults(source, summary.total, summary.failed, files);
+  if (!reconciled.ok) return null;
+  // `files` is enumerable only when recorded, so an unrecorded summary keeps
+  // the pre-feature JSON bytes: a legacy ledger line re-serializes
+  // byte-for-byte, and read-back maps the absent field back to `unrecorded`.
+  Object.defineProperty(summary, "files", { value: reconciled.value, enumerable: reconciled.value.kind === "recorded" });
   // Sole producer of the branded TestReportSummary: the checks above ARE the
   // brand's invariant, so the cast is justified exactly here.
   return Object.freeze(summary) as TestReportSummary;
@@ -241,7 +256,7 @@ export function parseVitestJson(content: string): TestReportSummary | null {
   }
   if (!isPlainRecord(raw)) return null;
   const files = vitestFileResults(raw);
-  return files === null ? null : parseReportSummary(raw.numTotalTests, raw.numFailedTests, "vitest-json", { files });
+  return files === null ? null : parseReportSummary(raw.numTotalTests, raw.numFailedTests, "vitest-json", files);
 }
 
 /**
@@ -274,7 +289,7 @@ export function readJunitReport(content: string): JunitReportRead {
   const counts = parseTraditionalJunit(document.root);
   const summary = counts === null
     ? null
-    : parseReportSummary(counts.total, counts.failed, "junit-xml", { files: junitFileResults(document.root) });
+    : parseReportSummary(counts.total, counts.failed, "junit-xml", junitFileResults(document.root));
   return summary === null ? REFUSED : Object.freeze({ kind: "parsed", summary });
 }
 
@@ -299,14 +314,14 @@ export type StructuredReportError = Readonly<{
   message: string;
 }>;
 
-export type StructuredReportParseResult = DomainResult<TestReportSummary, StructuredReportError>;
+export type StructuredReportParseResult = DomainResult<ReportCounts, StructuredReportError>;
 
 type RecognizedReport = Readonly<{
   recognized: boolean;
-  summary: TestReportSummary | null;
+  summary: ReportCounts | null;
 }>;
 
-const reportSuccess = (value: TestReportSummary): StructuredReportParseResult =>
+const reportSuccess = (value: ReportCounts): StructuredReportParseResult =>
   Object.freeze({ ok: true, value });
 
 const reportFailure = (
@@ -348,7 +363,7 @@ function parseExecutedVitestSummary(content: string): RecognizedReport {
   const executed = passed + failed;
   const declared = executed + pending + todo;
   const summary = Number.isSafeInteger(declared) && declared === total
-    ? parseReportSummary(executed, failed, "vitest-json")
+    ? parseReportCounts(executed, failed, "vitest-json")
     : null;
   return Object.freeze({ recognized: true, summary });
 }
@@ -499,7 +514,7 @@ function nodeLeafCounts(element: ReportElement): JunitCounts | null {
 /** Only direct comments of the actual testsuites root are Node summaries.
  * The comments must reconcile with real leaf cases; suite attributes in Node
  * describe immediate children, not leaf totals, and cannot be summed. */
-function parseNodeJunitSummary(root: ReportElement): TestReportSummary | null {
+function parseNodeJunitSummary(root: ReportElement): ReportCounts | null {
   if (root.name !== "testsuites") return null;
   const counts = new Map<string, number>();
   for (const comment of root.comments) {
@@ -522,7 +537,7 @@ function parseNodeJunitSummary(root: ReportElement): TestReportSummary | null {
   const actual = nodeLeafCounts(root);
   if (declared === null || actual === null || tests !== passed + failed + cancelled + skipped + todo ||
       actual.total !== tests || actual.failed !== declared.failed || actual.skipped !== declared.skipped) return null;
-  return parseReportSummary(tests - declared.skipped, declared.failed, "junit-xml");
+  return parseReportCounts(tests - declared.skipped, declared.failed, "junit-xml");
 }
 
 function parseExecutedJunitSummary(content: string): RecognizedReport {
@@ -535,7 +550,7 @@ function parseExecutedJunitSummary(content: string): RecognizedReport {
     return { recognized: true, summary: parseNodeJunitSummary(root) };
   }
   const counts = parseTraditionalJunit(root);
-  const summary = counts === null ? null : parseReportSummary(counts.total - counts.skipped, counts.failed, "junit-xml");
+  const summary = counts === null ? null : parseReportCounts(counts.total - counts.skipped, counts.failed, "junit-xml");
   return { recognized: true, summary };
 }
 
@@ -543,9 +558,9 @@ function parseExecutedJunitSummary(content: string): RecognizedReport {
  * Parse the exact bytes collected by the hardened runner. This stricter seam
  * counts executed (not merely declared) tests independently of the legacy
  * machine count API, so an all-skipped report cannot become passing evidence.
- * Its summaries are counts-only (no `files`): they are minted into
- * exact-key completion-check and remediation observations, whose wire shape
- * and digests are pinned, and per-file results belong to TestRun facts
+ * It yields `ReportCounts`, never a `TestReportSummary`: its counts are minted
+ * into exact-key completion-check and remediation observations, whose wire
+ * shape and digests are pinned, and per-file results belong to TestRun facts
  * (captured through the legacy parsers by `findReport`), not to those checks.
  */
 export function parseStructuredTestReportBytes(bytes: Uint8Array): StructuredReportParseResult {
@@ -687,11 +702,10 @@ export function parseJunitTestcases(bytes: Uint8Array): JunitTestcasesResult {
 /** Per-file results of a merged run: recorded only when every part recorded
  *  them (a partial list would claim files the run's other reports never
  *  attributed), with a file reported by several parts listed once, summed. */
-function mergeFileResults(parts: readonly (TestReportFiles | undefined)[]): TestReportFiles {
+function mergeFileResults(parts: readonly TestReportFiles[]): TestReportFiles {
   const byFile = new Map<string, TestFileResult>();
   for (const part of parts) {
-    // A counts-only part (no `files`) attributes no file, exactly like an unrecorded one.
-    if (part === undefined || part.kind === "unrecorded") return UNRECORDED;
+    if (part.kind === "unrecorded") return UNRECORDED;
     for (const entry of part.results) {
       const prior = byFile.get(entry.file);
       byFile.set(entry.file, prior === undefined ? entry : {
@@ -723,5 +737,5 @@ export function mergeSummaries(summaries: readonly TestReportSummary[]): TestRep
     total += s.total;
     failed += s.failed;
   }
-  return parseReportSummary(total, failed, summaries[0].source, { files: mergeFileResults(summaries.map((s) => s.files)) });
+  return parseReportSummary(total, failed, summaries[0].source, mergeFileResults(summaries.map((s) => s.files)));
 }

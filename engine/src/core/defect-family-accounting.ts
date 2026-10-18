@@ -39,7 +39,7 @@ import {
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,
 } from "./verification-manifest";
-import { MAX_STRUCTURED_REPORT_BYTES, parseReportSummary, type TestReportSummary } from "./structured-test-report";
+import { MAX_STRUCTURED_REPORT_BYTES, parseReportCounts, type ReportCounts } from "./structured-test-report";
 
 const REPAIR_GROUP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 
@@ -1379,7 +1379,7 @@ type ParsedStructuredReportFacts = Readonly<{
   digest: ArtifactDigest;
   byteLength: number;
   mode: number;
-  summary: TestReportSummary;
+  summary: ReportCounts;
 }>;
 
 declare class EngineObservedRepairedCheckMembership {
@@ -1472,10 +1472,10 @@ export function parseRegisteredRemediationCheckObservation(
     if (typeof mode !== "number" || !Number.isSafeInteger(mode) || mode < 0) failures.push(problem(
       "invalid-engine-observation", "observation.report.mode", "report mode must be a non-negative safe integer",
     ));
-    let summary: TestReportSummary | null = null;
+    let summary: ReportCounts | null = null;
     if (summaryRecord.ok &&
         (summaryRecord.value.source === "vitest-json" || summaryRecord.value.source === "junit-xml")) {
-      const reparsed = parseReportSummary(
+      const reparsed = parseReportCounts(
         summaryRecord.value.total,
         summaryRecord.value.failed,
         summaryRecord.value.source,

@@ -91,8 +91,8 @@ const OWNERSHIP_RULES: readonly OwnershipRow[] = [
   },
   {
     rule: "inv-8-sole-report-summary-constructor",
-    refused: "return { total, failed, source } as TestReportSummary;",
-    allowed: "return parseReportSummary(total, failed, source, files);",
+    refused: "return { total, failed, source } as TestReportSummary;\nreturn { total, failed, source } as ReportCounts;",
+    allowed: "return parseReportSummary(total, failed, source, files);\nreturn parseReportCounts(total, failed, source);",
     owners: ["engine/src/core/structured-test-report.ts"],
   },
 ];

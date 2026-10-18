@@ -4,8 +4,9 @@
  * TestReportSummary is branded (types.ts): parseReportSummary is its sole
  * producer, so tests can no longer inline `{ total, failed, source }` where a
  * TestReportSummary is expected. This helper mints one through the real
- * parser and asserts sanity, so a typo (failed > total) fails loudly in the
- * fixture rather than silently demoting to null.
+ * parser, with per-file results unrecorded (the shape a pre-feature ledger line
+ * reads back as), and asserts sanity, so a typo (failed > total) fails loudly
+ * in the fixture rather than silently demoting to null.
  */
 
 import { parseReportSummary } from "../../src/machine/test-report";
@@ -16,7 +17,7 @@ export function reportSummary(
   failed: number,
   source: TestReportSummary["source"] = "vitest-json",
 ): TestReportSummary {
-  const parsed = parseReportSummary(total, failed, source);
+  const parsed = parseReportSummary(total, failed, source, undefined);
   if (parsed === null) {
     throw new Error(`reportSummary test fixture: impossible counts total=${total} failed=${failed}`);
   }
