@@ -3,8 +3,8 @@
  * the combined plan view (AD-11).
  *
  * `planStopChecks(graph, taskId, changed)` decides both checks. Its
- * acceptance arm must stay the decision `planStopCheck` made before the
- * affected check existed, and its affected arm forms the runner command only
+ * acceptance arm must stay the slice-1 acceptance decision, whatever the
+ * changed files, and its affected arm forms the runner command only
  * through `affectedRunnerCheck`, over the changed files beneath the runner's
  * cwd. `renderStopChecksPlan` prints the CT-1 acceptance lines unchanged and
  * then the affected section, or exactly one off-reason (FR-028, AS-032,

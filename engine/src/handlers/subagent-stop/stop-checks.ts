@@ -50,6 +50,7 @@ import {
   renderAffectedBlock,
   renderStopChecksBlock,
   stopCheckBlockDecision,
+  type Blocking,
   type StopCheckBlockCaps,
   type StopChecksBlockParts,
 } from "../../core/affected-stop-check";
@@ -238,8 +239,15 @@ async function runAffected(
 
 type Results = Readonly<Record<StopCheckName, CheckResult>>;
 type Issued = Readonly<Record<StopCheckName, StopCheckBlockCount>>;
+type Failing = Extract<CheckResult, { kind: "failing" }>;
 
-const NOT_FAILING = Object.freeze({ acceptance: "not-failing", affected: "not-failing" } as const);
+/** The decision's question for one check alone: would it block if it were the only one failing? */
+const FAILING_ALONE = Object.freeze({
+  acceptance: Object.freeze({ acceptance: true, affected: null }),
+  affected: Object.freeze({ acceptance: null, affected: true }),
+} as const);
+
+const failingOf = (result: CheckResult): Failing | null => result.kind === "failing" ? result : null;
 
 const isRunnable = <Plan>(arm: Arm<Plan>): arm is Readonly<{ kind: "runnable"; plan: Plan }> => arm.kind === "runnable";
 
@@ -251,7 +259,7 @@ const isRunnable = <Plan>(arm: Arm<Plan>): arm is Readonly<{ kind: "runnable"; p
  */
 function admitted<Plan>(taskId: string, name: StopCheckName, arm: Arm<Plan>, issued: Issued): Arm<Plan> {
   if (!isRunnable(arm)) return arm;
-  const decision = stopCheckBlockDecision(issued, { ...NOT_FAILING, [name]: "failing" }, CAPS);
+  const decision = stopCheckBlockDecision(issued, FAILING_ALONE[name], CAPS);
   return decision.outcome === "block"
     ? arm
     : Object.freeze({ kind: "note", note: decision.notes.map((note) => `stop checks for ${taskId}: ${note}`).join("\n") });
@@ -266,32 +274,20 @@ type Stopper = Pick<StopChecksInput, "taskId" | "agentKey">;
 
 /** Settle the results into one outcome, writing only the counters the decision names. */
 function settle({ taskId, agentKey }: Stopper, results: Results, issued: Issued, ports: StopCheckShellPorts, extraNotes: readonly string[]): StopChecksOutcome {
-  const decision = stopCheckBlockDecision(issued, {
-    acceptance: results.acceptance.kind === "failing" ? "failing" : "not-failing",
-    affected: results.affected.kind === "failing" ? "failing" : "not-failing",
-  }, CAPS);
+  const decision = stopCheckBlockDecision(issued, { acceptance: failingOf(results.acceptance), affected: failingOf(results.affected) }, CAPS);
   const notes = [...notesOf(results), ...decision.notes.map((note) => `stop checks for ${taskId}: ${note}`), ...extraNotes];
   if (decision.outcome === "proceed") {
     if (notes.length > 0) return Object.freeze({ kind: "note", message: notes.join("\n") });
     return results.acceptance.kind === "passed" || results.affected.kind === "passed" ? Object.freeze({ kind: "passed" }) : Object.freeze({ kind: "skip" });
   }
-  const part = (name: StopCheckName): string | null => {
-    const write = decision.record[name];
-    const result = results[name];
-    return write.kind === "set" && result.kind === "failing" ? result.part(CAPS[name] - write.blocks) : null;
-  };
-  for (const name of STOP_CHECK_NAMES) {
-    const write = decision.record[name];
-    if (write.kind === "set") ports.blocks.record(name, agentKey, write.blocks);
-  }
-  const acceptance = part("acceptance");
-  const affected = part("affected");
-  // Each arm of the non-empty parts type names the failing check it carries.
-  const parts: StopChecksBlockParts | null = acceptance !== null
-    ? { acceptance, affected }
-    : affected !== null ? { acceptance: null, affected } : null;
-  // A block always names a failing check, so parts exist; a defect here becomes the shell's crash note.
-  if (parts === null) throw new Error("unreachable: a block names no failing check");
+  const { blocking } = decision;
+  if (blocking.acceptance !== null) ports.blocks.record("acceptance", agentKey, blocking.acceptance.blocks);
+  if (blocking.affected !== null) ports.blocks.record("affected", agentKey, blocking.affected.blocks);
+  const part = (name: StopCheckName, { failure, blocks }: Blocking<Failing>): string => failure.part(CAPS[name] - blocks);
+  // The block names at least one check, so its parts do too, acceptance first.
+  const parts: StopChecksBlockParts = blocking.acceptance !== null
+    ? { acceptance: part("acceptance", blocking.acceptance), affected: blocking.affected === null ? null : part("affected", blocking.affected) }
+    : { acceptance: null, affected: part("affected", blocking.affected) };
   const body = renderStopChecksBlock(parts);
   return Object.freeze({
     kind: "block",

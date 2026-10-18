@@ -125,8 +125,8 @@ export type AffectedPlan =
   | Readonly<{ kind: "off"; reason: AffectedOffReason }>
   | Readonly<{ kind: "on"; files: NonEmpty<ChangedFilePath>; command: StopCheckCommand; reportPath: string }>;
 
-/** The acceptance check's plan: the `off | on` decision slice 1's
- *  `planStopCheck` made, unchanged, now produced by `planStopChecks`. */
+/** The acceptance check's plan: slice 1's `off | on` decision, unchanged,
+ *  produced by `planStopChecks` whatever the changed files. */
 export type AcceptancePlan =
   | Readonly<{ kind: "off"; reason: StopCheckOffReason }>
   | Readonly<{ kind: "on"; check: OwedStopCheck; command: StopCheckCommand; reportPath: string }>;

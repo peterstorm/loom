@@ -48,9 +48,12 @@ export const judgeAffectedRun: JudgeAffectedRunFn = (projection): AffectedRunVer
 
 // --- The block-counter transition rule ---
 
-/** Whether a check has failures it would block the stop for. A passing,
- *  skipped, off or fail-open check is `not-failing`. */
-export type CheckVerdict = "failing" | "not-failing";
+/**
+ * Each check's failure at this stop, or null when it has none it would block
+ * for: a passing, skipped, off or fail-open check is null. The decision is
+ * generic over the failure so a block can carry the very failure it blocks for.
+ */
+export type StopCheckFailures<Acceptance, Affected> = Readonly<{ acceptance: Acceptance | null; affected: Affected | null }>;
 
 /**
  * Each check's own block cap, typed by what its cap note states.
@@ -63,19 +66,24 @@ export type CheckVerdict = "failing" | "not-failing";
  */
 export type StopCheckBlockCaps = Readonly<{ acceptance: number; affected: typeof AFFECTED_STOP_CHECK_MAX_BLOCKS }>;
 
-/** What a blocking stop writes to one check's counter: unchanged, or the new block count. */
-export type BlockCounterWrite =
-  | Readonly<{ kind: "keep" }>
-  | Readonly<{ kind: "set"; blocks: number }>;
+/** A check that blocks this stop: the failure it blocks for, and the block
+ *  count its counter now records. */
+export type Blocking<Failure> = Readonly<{ failure: Failure; blocks: number }>;
+
+/** The checks one block names: at least one, acceptance first. A check absent
+ *  here keeps its counter unchanged. */
+export type BlockingChecks<Acceptance, Affected> =
+  | Readonly<{ acceptance: Blocking<Acceptance>; affected: Blocking<Affected> | null }>
+  | Readonly<{ acceptance: null; affected: Blocking<Affected> }>;
 
 /**
- * The decision for one stop. A block names each check's counter write, and a
- * check contributes failures to the block exactly when its write is `set`. A
- * proceeding stop clears both counters, so it names no write. `notes` explain
- * every failing check that was not allowed to block.
+ * The decision for one stop. A block names exactly the checks that contribute
+ * failures, with the count each counter records. A proceeding stop clears both
+ * counters, so it names none. `notes` explain every failing check that was not
+ * allowed to block.
  */
-export type StopCheckBlockDecision =
-  | Readonly<{ outcome: "block"; record: Readonly<Record<StopCheckName, BlockCounterWrite>>; notes: readonly string[] }>
+export type StopCheckBlockDecision<Acceptance, Affected> =
+  | Readonly<{ outcome: "block"; blocking: BlockingChecks<Acceptance, Affected>; notes: readonly string[] }>
   | Readonly<{ outcome: "proceed"; notes: readonly string[] }>;
 
 const CAP_NOTE: { readonly [K in StopCheckName]: (cap: StopCheckBlockCaps[K]) => string } = freeze({
@@ -88,31 +96,40 @@ const UNREADABLE_NOTE: Readonly<Record<StopCheckName, (reason: string) => string
   affected: (reason) => `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: ${reason}`,
 });
 
-type CheckStep = Readonly<{ write: BlockCounterWrite; note: string | null }>;
+type CheckStep<Failure> = Readonly<{ blocking: Blocking<Failure> | null; note: string | null }>;
 
-const KEEP: CheckStep = freeze({ write: freeze({ kind: "keep" }), note: null });
+const NOT_BLOCKING: CheckStep<never> = freeze({ blocking: null, note: null });
 
 /** One check's part of the decision: a failing check under its cap blocks
  *  and records `count + 1`; at the cap, or with an unreadable count, it fails open. */
-function checkStep<K extends StopCheckName>(name: K, issued: StopCheckBlockCount, verdict: CheckVerdict, cap: StopCheckBlockCaps[K]): CheckStep {
-  if (verdict === "not-failing") return KEEP;
+function checkStep<K extends StopCheckName, Failure>(
+  name: K,
+  issued: StopCheckBlockCount,
+  failure: Failure | null,
+  cap: StopCheckBlockCaps[K],
+): CheckStep<Failure> {
+  if (failure === null) return NOT_BLOCKING;
   // Without a trustworthy count the cap cannot be enforced, so the check must not block.
-  if (issued.kind === "unreadable") return freeze({ write: KEEP.write, note: UNREADABLE_NOTE[name](issued.reason) });
-  if (issued.blocks >= cap) return freeze({ write: KEEP.write, note: CAP_NOTE[name](cap) });
-  return freeze({ write: freeze({ kind: "set", blocks: issued.blocks + 1 }), note: null });
+  if (issued.kind === "unreadable") return freeze({ blocking: null, note: UNREADABLE_NOTE[name](issued.reason) });
+  if (issued.blocks >= cap) return freeze({ blocking: null, note: CAP_NOTE[name](cap) });
+  return freeze({ blocking: freeze({ failure, blocks: issued.blocks + 1 }), note: null });
 }
 
-export function stopCheckBlockDecision(
+export function stopCheckBlockDecision<Acceptance, Affected>(
   issued: Readonly<Record<StopCheckName, StopCheckBlockCount>>,
-  verdicts: Readonly<Record<StopCheckName, CheckVerdict>>,
+  failures: StopCheckFailures<Acceptance, Affected>,
   caps: StopCheckBlockCaps,
-): StopCheckBlockDecision {
-  const acceptance = checkStep("acceptance", issued.acceptance, verdicts.acceptance, caps.acceptance);
-  const affected = checkStep("affected", issued.affected, verdicts.affected, caps.affected);
+): StopCheckBlockDecision<Acceptance, Affected> {
+  const acceptance = checkStep("acceptance", issued.acceptance, failures.acceptance, caps.acceptance);
+  const affected = checkStep("affected", issued.affected, failures.affected, caps.affected);
   const notes = freeze([acceptance.note, affected.note].filter((note): note is string => note !== null));
-  return acceptance.write.kind === "set" || affected.write.kind === "set"
-    ? freeze({ outcome: "block", record: freeze({ acceptance: acceptance.write, affected: affected.write }), notes })
-    : freeze({ outcome: "proceed", notes });
+  if (acceptance.blocking !== null) {
+    return freeze({ outcome: "block", blocking: freeze({ acceptance: acceptance.blocking, affected: affected.blocking }), notes });
+  }
+  if (affected.blocking !== null) {
+    return freeze({ outcome: "block", blocking: freeze({ acceptance: null, affected: affected.blocking }), notes });
+  }
+  return freeze({ outcome: "proceed", notes });
 }
 
 // --- The block message ---

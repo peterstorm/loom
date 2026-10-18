@@ -103,6 +103,11 @@ keeps an independent block counter per check. Every decision it acts on is a pur
   - a failing verdict under the cap blocks and records `count + 1` for that check only;
   - `proceed` clears both counters.
 
+  *(Amended 2026-10-18.)* The function is now `stopCheckBlockDecision(issued, failures, caps)`, generic over
+  each check's failure (`null` when it is not failing). A block carries `BlockingChecks`: the non-empty set
+  of checks that block, each with the failure it blocks for and its new count. The shell maps that straight
+  to the block message parts, so a block that names no failing check cannot be represented.
+
   The shell reads and writes only the files that this function names. When the stop proceeds,
   `runStopChecks` clears both counters, and if a clear fails, that failure becomes a note rather than a
   throw.
