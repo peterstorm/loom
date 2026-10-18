@@ -124,8 +124,8 @@ function readBack(fixture: Fixture): TestReportSummary | null {
 function merged(fixture: Fixture): TestReportSummary | null {
   const [first, ...rest] = fixture.results;
   if (first === undefined) return null;
-  const head = parseReportSummary(first.executed, first.failed, fixture.source, { files: recorded([first]) });
-  const tail = parseReportSummary(fixture.total - first.executed, fixture.failed - first.failed, fixture.source, { files: recorded(rest) });
+  const head = parseReportSummary(first.executed, first.failed, fixture.source, recorded([first]));
+  const tail = parseReportSummary(fixture.total - first.executed, fixture.failed - first.failed, fixture.source, recorded(rest));
   return head === null || tail === null ? null : mergeSummaries([head, tail]);
 }
 

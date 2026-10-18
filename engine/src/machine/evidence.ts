@@ -341,7 +341,7 @@ function parseReportField(v: unknown): TestReportSummary | null {
   if (typeof v !== "object" || v === null) return null;
   const o = v as Record<string, unknown>;
   if (o.source !== "vitest-json" && o.source !== "junit-xml") return null;
-  return parseReportSummary(o.total, o.failed, o.source, { files: o.files });
+  return parseReportSummary(o.total, o.failed, o.source, o.files);
 }
 
 function parseEvent(raw: unknown): Evidence | null {

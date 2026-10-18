@@ -5,11 +5,13 @@ import type { TestReportSummary } from "../core/structured-test-report";
 export {
   mergeSummaries,
   parseJunitXml,
+  parseReportCounts,
   parseReportSummary,
   parseStructuredTestReportBytes,
   parseVitestJson,
   readJunitReport,
   type JunitReportRead,
+  type ReportCounts,
   type StructuredReportError,
   type StructuredReportErrorReason,
   type StructuredReportParseResult,
@@ -47,7 +49,7 @@ export type TrustedTestVerdict = Extract<TestVerdict, { verdict: "trusted-pass" 
  * counts no testcase for a file that failed to import, so its counts alone
  * would read a run whose only failure is a broken file as a pass. The report's
  * recorded per-file results (INV-8: reconciled with those counts) carry it; an
- * unrecorded or counts-only summary is judged on its counts alone.
+ * unrecorded summary is judged on its counts alone.
  *
  * An unknown exit does NOT sink a run that produced a report. A structured
  * JUnit/vitest-JSON report is STRONGER evidence about what happened than a
@@ -80,4 +82,4 @@ export function judgeTestRun(exit: number | null, report: TestReportSummary | nu
 }
 
 const recordsCollectionError = ({ files }: TestReportSummary): boolean =>
-  files?.kind === "recorded" && files.results.some((result) => result.collectionError);
+  files.kind === "recorded" && files.results.some((result) => result.collectionError);

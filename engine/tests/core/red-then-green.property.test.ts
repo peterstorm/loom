@@ -58,9 +58,7 @@ function summary(results: readonly TestFileResult[] | "unrecorded") {
   const listed = results === "unrecorded" ? [passing(REPORTED_A)] : results;
   const total = listed.reduce((sum, { executed }) => sum + executed, 0);
   const failed = listed.reduce((sum, file) => sum + file.failed, 0);
-  const parsed = parseReportSummary(total, failed, "junit-xml", {
-    files: results === "unrecorded" ? undefined : { kind: "recorded", results },
-  });
+  const parsed = parseReportSummary(total, failed, "junit-xml", results === "unrecorded" ? undefined : { kind: "recorded", results });
   if (parsed === null) throw new Error("fixture report must reconcile");
   return parsed;
 }

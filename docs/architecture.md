@@ -262,7 +262,7 @@ Pi child tool_result event ─ piToolCall ─────┘
   - it runs report discovery, which applies the call-start freshness stamp and the agent-authored-artifact veto;
   - it resolves `FileWrite` paths against the call's cwd;
   - it appends to the target ledger under the target epoch.
-- **Per-file results.** A `TestRun` report summary carries the per-file results its structured report lists. `parseReportSummary` is the only constructor of a summary (INV-8), and it reconciles those results with the counts. When a ledger record's per-file data is malformed, the whole report reads as untrusted.
+- **Per-file results.** A `TestRun` report summary (`TestReportSummary`) always carries the per-file results its structured report lists, `unrecorded` for a pre-feature line. `parseReportSummary` is the only constructor of a summary (INV-8), and it reconciles those results with the counts. When a ledger record's per-file data is malformed, the whole report reads as untrusted. The strict byte parser behind completion checks and remediation yields `ReportCounts` instead, counts alone from `parseReportCounts`, so it can never stand as a TestRun report.
 - **Targets.** Claude Code records into its own session ledger under the epoch that attribution resolves. A Pi child records into the parent session's ledger under `epochOf(grant agent id, agent type)`, the address its parent-issued grant carries. One child process is one agent, so attribution on Pi is exact by construction.
 
 A matrix test feeds the same tool-call fixtures through both adapters and asserts identical records. Consumers read the ledger only through epoch folds:

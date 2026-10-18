@@ -78,7 +78,7 @@ const IMPLEMENTATION = "engine/src/core/ledger.ts";
 /** A trusted failing run whose report names one file, by its reported identity. */
 function failingRun(reported: string): Evidence {
   const report = parseReportSummary(1, 1, "junit-xml", {
-    files: { kind: "recorded", results: [{ file: reported, executed: 1, failed: 1, skipped: 0, collectionError: false }] },
+    kind: "recorded", results: [{ file: reported, executed: 1, failed: 1, skipped: 0, collectionError: false }],
   });
   if (report === null) throw new Error("fixture report must reconcile");
   return { kind: "TestRun", command: "npm test", exit: 1, report };

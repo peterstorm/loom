@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { advance, foldEvidence, isTerminal, isToolAllowed, missingRequirements, tokensFor } from "../../src/machine/advance";
 import { initialState, type Evidence } from "../../src/machine/types";
+import { parseEvidenceLine } from "../../src/machine/evidence";
 import { parseMachine } from "../../src/machine/parse-machine";
 import { judgeTestRun, parseReportSummary } from "../../src/machine/test-report";
 
@@ -37,7 +38,7 @@ const evidenceArb: fc.Arbitrary<Evidence> = fc.oneof(
         failed: fc.integer({ min: 0, max: 100 }),
         source: fc.constantFrom("vitest-json" as const, "junit-xml" as const),
       })
-      .map((r) => parseReportSummary(r.total, r.failed, r.source)),
+      .map((r) => parseReportSummary(r.total, r.failed, r.source, undefined)),
   }),
 );
 
@@ -68,12 +69,15 @@ describe("phase machine — invariants", () => {
   it("stored judgments cannot exist — a ledger roundtrip preserves fold state", () => {
     fc.assert(
       fc.property(fc.array(evidenceArb, { maxLength: 30 }), (events) => {
-        // Serialize as ledger records and re-parse: state must be identical
-        // (this is the replayability property the fold design rests on).
-        const lines = events.map((event) => JSON.stringify({ epoch: "a:b", event }));
-        const reparsed = lines
-          .map((l) => JSON.parse(l) as { event: Evidence })
-          .map((r) => r.event);
+        // Serialize as ledger records and re-parse through the ledger's own
+        // reader: state must be identical (this is the replayability property
+        // the fold design rests on).
+        const lines = events.map((event) => JSON.stringify({ epoch: "agent-1:code-implementer-agent", event }));
+        const reparsed = lines.map((line) => {
+          const record = parseEvidenceLine(line);
+          if (!record.ok) throw new Error(record.error);
+          return record.value.event;
+        });
         expect(foldEvidence(machine, reparsed)).toEqual(foldEvidence(machine, events));
       }),
       { numRuns: 200 },

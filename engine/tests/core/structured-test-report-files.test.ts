@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   mergeSummaries,
   parseJunitXml,
+  parseReportCounts,
   parseReportSummary,
   parseStructuredTestReportBytes,
   parseVitestJson,
@@ -34,7 +35,7 @@ const sum = (results: readonly TestFileResult[], field: "executed" | "failed"): 
 const mint = (
   results: readonly TestFileResult[],
   source: TestReportSummary["source"] = "junit-xml",
-): TestReportSummary | null => parseReportSummary(sum(results, "executed"), sum(results, "failed"), source, { files: recorded(results) });
+): TestReportSummary | null => parseReportSummary(sum(results, "executed"), sum(results, "failed"), source, recorded(results));
 
 const bytes = (content: string): Uint8Array => new TextEncoder().encode(content);
 
@@ -123,23 +124,29 @@ describe("parseReportSummary with per-file results (sole constructor)", () => {
       const summary = mint(results, source);
       expect(summary).not.toBeNull();
       expect(summary?.files).toEqual(recorded(results));
-      expect(parseReportSummary(sum(results, "executed") + 1, sum(results, "failed"), source, { files: recorded(results) })).toBeNull();
+      expect(parseReportSummary(sum(results, "executed") + 1, sum(results, "failed"), source, recorded(results))).toBeNull();
     }));
   });
 
   it("AS-003: a TestRun summary with absent per-file results carries files unrecorded but keeps the pre-feature JSON bytes", () => {
-    const summary = parseReportSummary(5, 2, "junit-xml", { files: undefined });
+    const summary = parseReportSummary(5, 2, "junit-xml", undefined);
     expect(summary?.files).toEqual({ kind: "unrecorded" });
     expect(summary !== null && "files" in summary).toBe(true);
     expect(Object.keys(summary ?? {})).toEqual(["total", "failed", "source"]);
     expect(JSON.stringify(summary)).toBe('{"total":5,"failed":2,"source":"junit-xml"}');
   });
 
-  it("FR-004: a counts-only summary has exactly the three pre-feature own keys, for exact-key wire records", () => {
-    const summary = parseReportSummary(5, 2, "junit-xml");
-    expect(summary).not.toBeNull();
-    expect(Reflect.ownKeys(summary ?? {})).toEqual(["total", "failed", "source"]);
-    expect(summary?.files).toBeUndefined();
+  it("FR-004: counts alone have exactly the three pre-feature own keys, for exact-key wire records", () => {
+    const counts = parseReportCounts(5, 2, "junit-xml");
+    expect(counts).not.toBeNull();
+    expect(Reflect.ownKeys(counts ?? {})).toEqual(["total", "failed", "source"]);
+    expect("files" in (counts ?? {})).toBe(false);
+  });
+
+  it("FR-004: counts alone can never stand as a TestRun fact's report", () => {
+    // @ts-expect-error ReportCounts carries no per-file results, so it is not a TestReportSummary.
+    const asTestRunReport: TestReportSummary | null = parseReportCounts(5, 2, "junit-xml");
+    expect(asTestRunReport).not.toBeNull();
   });
 
   it("AS-001: a recorded summary serializes its per-file results and is deeply frozen", () => {
@@ -310,11 +317,11 @@ describe("JUnit per-file projection", () => {
 });
 
 describe("strict structured-report parser keeps the remediation wire shape", () => {
-  it("FR-004: executed-count summaries are counts-only and keep exactly total, failed and source", () => {
+  it("FR-004: executed-count summaries are counts alone and keep exactly total, failed and source", () => {
     const parsed = parseStructuredTestReportBytes(bytes('<testsuite tests="2" failures="1"><testcase classname="a" name="x"/><testcase classname="a" name="y"><failure/></testcase></testsuite>'));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.value.files).toBeUndefined();
+    expect("files" in parsed.value).toBe(false);
     expect(Reflect.ownKeys(parsed.value)).toEqual(["total", "failed", "source"]);
   });
 });
@@ -330,14 +337,14 @@ describe("mergeSummaries merges per-file results", () => {
   });
 
   it("FR-004: one unrecorded part makes the merged per-file results unrecorded, never a partial list", () => {
-    const merged = mergeSummaries([mint([result("com.example.A", 2, 1)])!, parseReportSummary(3, 0, "junit-xml")!]);
+    const merged = mergeSummaries([mint([result("com.example.A", 2, 1)])!, parseReportSummary(3, 0, "junit-xml", undefined)!]);
     expect(merged).toMatchObject({ total: 5, failed: 1 });
     expect(merged?.files).toEqual({ kind: "unrecorded" });
   });
 
   it("FR-003: merge is associative over per-file results and counts", () => {
     const summaryArb = fc.tuple(resultsArb, fc.boolean()).map(([results, legacy]) =>
-      legacy ? parseReportSummary(sum(results, "executed"), sum(results, "failed"), "junit-xml")! : mint(results)!);
+      legacy ? parseReportSummary(sum(results, "executed"), sum(results, "failed"), "junit-xml", undefined)! : mint(results)!);
     fc.assert(fc.property(summaryArb, summaryArb, summaryArb, (a, b, c) => {
       const flat = mergeSummaries([a, b, c]);
       const left = mergeSummaries([mergeSummaries([a, b])!, c]);
@@ -367,9 +374,9 @@ describe("judgeTestRun over per-file results", () => {
     expect(judgeTestRun(null, collectionOnly)).toEqual({ verdict: "trusted-fail" });
   });
 
-  it("FR-004: unrecorded and counts-only summaries are judged on their counts alone", () => {
+  it("FR-004: unrecorded summaries are judged on their counts alone", () => {
     expect(judgeTestRun(0, parseVitestJson(JSON.stringify({ numTotalTests: 2, numFailedTests: 0 })))).toEqual({ verdict: "trusted-pass" });
-    expect(judgeTestRun(0, parseReportSummary(2, 0, "junit-xml"))).toEqual({ verdict: "trusted-pass" });
+    expect(judgeTestRun(0, parseReportSummary(2, 0, "junit-xml", undefined))).toEqual({ verdict: "trusted-pass" });
     expect(judgeTestRun(0, mint([result("tests/green.test.ts", 2, 0)]))).toEqual({ verdict: "trusted-pass" });
   });
 });

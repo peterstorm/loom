@@ -1,14 +1,14 @@
 {
   "kind": "regex",
   "name": "inv-8-sole-report-summary-constructor",
-  "description": "A TestReportSummary, per-file results included, is minted only by parseReportSummary in engine/src/core/structured-test-report.ts, which runs reconcileFileResults before branding. The report parsers, mergeSummaries and the ledger read-back (parseReportField in engine/src/machine/evidence.ts) all funnel through it, so per-file counts that disagree with the summary can never exist as a summary (G4 slice 2, FR-001, FR-003). This rule refuses a brand cast `as TestReportSummary` anywhere else.",
+  "description": "A TestReportSummary, per-file results included, is minted only by parseReportSummary in engine/src/core/structured-test-report.ts, which runs reconcileFileResults before branding, and a counts-only ReportCounts only by parseReportCounts beside it. The report parsers, mergeSummaries and the ledger read-back (parseReportField in engine/src/machine/evidence.ts) all funnel through parseReportSummary, so per-file counts that disagree with the summary can never exist as a summary (G4 slice 2, FR-001, FR-003). This rule refuses a brand cast `as TestReportSummary` or `as ReportCounts` anywhere else.",
   "extensions": [".ts", ".tsx"],
-  "pattern": "\\bas\\s+TestReportSummary\\b",
+  "pattern": "\\bas\\s+(?:TestReportSummary|ReportCounts)\\b",
   "flags": "",
   "excludePatterns": [
     ".test.ts",
     "engine/src/core/structured-test-report.ts"
   ],
-  "fixHint": "Construct the summary with parseReportSummary(total, failed, source, files) from engine/src/core/structured-test-report.ts; it reconciles per-file results and returns null when they disagree.",
+  "fixHint": "Construct a TestRun summary with parseReportSummary(total, failed, source, files), or counts alone with parseReportCounts(total, failed, source), from engine/src/core/structured-test-report.ts; each returns null when its invariant fails.",
   "enabled": true
 }
