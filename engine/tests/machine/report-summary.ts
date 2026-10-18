@@ -4,10 +4,9 @@
  * TestReportSummary is branded (types.ts): parseReportSummary is its sole
  * producer, so tests can no longer inline `{ total, failed, source }` where a
  * TestReportSummary is expected. This helper mints one through the real
- * parser, with per-file results unrecorded (the counts-only TestRun shape a
- * pre-feature ledger line reads back as), and asserts sanity, so a typo
- * (failed > total) fails loudly in the fixture rather than silently demoting
- * to null.
+ * parser, with per-file results unrecorded (the shape a pre-feature ledger line
+ * reads back as), and asserts sanity, so a typo (failed > total) fails loudly
+ * in the fixture rather than silently demoting to null.
  */
 
 import { parseReportSummary } from "../../src/machine/test-report";

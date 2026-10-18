@@ -7,7 +7,8 @@
  * a Vitest JSON report named by `--outputFile`, and Surefire JUnit reports in
  * `target/surefire-reports`. Read-back is driven through `parseEvidenceLine`,
  * the ledger's one line parser. Per-file results are read off the summary's
- * own `files` field; a summary that carries none reads as `undefined`.
+ * own `files` field, which every TestRun summary carries; only a missing
+ * summary reads as `undefined`.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -155,7 +156,7 @@ ${body}
 
 // --- Reading per-file results off a summary ---
 
-/** The per-file results a summary carries; `undefined` for no summary or a counts-only one. */
+/** The per-file results a summary carries; `undefined` only when there is no summary. */
 const filesOf = (summary: TestReportSummary | null): TestReportFiles | undefined => summary?.files;
 
 const isRecorded = (files: TestReportFiles | undefined): files is Extract<TestReportFiles, { kind: "recorded" }> =>

@@ -163,7 +163,7 @@ export function reconcileFileResults(
 // --- Pure parsers ---
 
 /** Non-negative safe-integer counts with failed ≤ total, or null. */
-function saneCounts(total: unknown, failed: unknown, source: ReportSource): { total: number; failed: number; source: ReportSource } | null {
+function saneCounts(total: unknown, failed: unknown, source: ReportSource): CountFields | null {
   if (typeof total !== "number" || typeof failed !== "number") return null;
   if (!Number.isSafeInteger(total) || !Number.isSafeInteger(failed)) return null;
   if (total < 0 || failed < 0 || failed > total) return null;

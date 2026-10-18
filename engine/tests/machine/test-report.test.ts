@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   parseReportCounts,
-  parseReportSummary,
   parseVitestJson,
   parseJunitXml,
   parseStructuredTestReportBytes,
   mergeSummaries,
   judgeTestRun,
 } from "../../src/machine/test-report";
+import { reportSummary } from "./report-summary";
 
 describe("parseReportCounts (shared count-sanity gate)", () => {
   it("accepts sane non-negative integer counts with failed ≤ total", () => {
@@ -141,8 +141,8 @@ describe("mergeSummaries", () => {
   it("adds totals and failures", () => {
     expect(
       mergeSummaries([
-        parseReportSummary(3, 1, "junit-xml", undefined)!,
-        parseReportSummary(4, 0, "junit-xml", undefined)!,
+        reportSummary(3, 1, "junit-xml"),
+        reportSummary(4, 0, "junit-xml"),
       ]),
     ).toEqual({ total: 7, failed: 1, source: "junit-xml" });
   });
@@ -153,18 +153,18 @@ describe("mergeSummaries", () => {
 });
 
 describe("judgeTestRun — the R2 trust rule", () => {
-  const report = parseReportSummary(5, 0, "vitest-json", undefined)!;
+  const report = reportSummary(5, 0, "vitest-json");
 
   it("exit 0 + clean report → trusted-pass", () => {
     expect(judgeTestRun(0, report)).toEqual({ verdict: "trusted-pass" });
   });
 
   it("exit 0 + report with failures → trusted-fail", () => {
-    expect(judgeTestRun(0, parseReportSummary(5, 1, "vitest-json", undefined)!)).toEqual({ verdict: "trusted-fail" });
+    expect(judgeTestRun(0, reportSummary(5, 1, "vitest-json"))).toEqual({ verdict: "trusted-fail" });
   });
 
   it("exit 0 + report with 0 tests → trusted-fail (nothing ran)", () => {
-    expect(judgeTestRun(0, parseReportSummary(0, 0, "vitest-json", undefined)!)).toEqual({ verdict: "trusted-fail" });
+    expect(judgeTestRun(0, reportSummary(0, 0, "vitest-json"))).toEqual({ verdict: "trusted-fail" });
   });
 
   it("exit 0 + no report → untrusted (echo-spoof shape)", () => {
@@ -188,11 +188,11 @@ describe("judgeTestRun — the R2 trust rule", () => {
   });
 
   it("unknown exit + report with failures → trusted-fail", () => {
-    expect(judgeTestRun(null, parseReportSummary(5, 1, "vitest-json", undefined)!)).toEqual({ verdict: "trusted-fail" });
+    expect(judgeTestRun(null, reportSummary(5, 1, "vitest-json"))).toEqual({ verdict: "trusted-fail" });
   });
 
   it("unknown exit + report with 0 tests → trusted-fail (nothing ran)", () => {
-    expect(judgeTestRun(null, parseReportSummary(0, 0, "vitest-json", undefined)!)).toEqual({ verdict: "trusted-fail" });
+    expect(judgeTestRun(null, reportSummary(0, 0, "vitest-json"))).toEqual({ verdict: "trusted-fail" });
   });
 });
 
@@ -200,8 +200,8 @@ describe("mergeSummaries — source homogeneity enforced at runtime (round-10 Fi
   it("mixed sources fail closed to null instead of mislabeling the sum", () => {
     expect(
       mergeSummaries([
-        parseReportSummary(3, 1, "junit-xml", undefined)!,
-        parseReportSummary(4, 0, "vitest-json", undefined)!,
+        reportSummary(3, 1, "junit-xml"),
+        reportSummary(4, 0, "vitest-json"),
       ]),
     ).toBeNull();
   });
@@ -209,8 +209,8 @@ describe("mergeSummaries — source homogeneity enforced at runtime (round-10 Fi
   it("homogeneous sources still merge", () => {
     expect(
       mergeSummaries([
-        parseReportSummary(1, 0, "vitest-json", undefined)!,
-        parseReportSummary(2, 2, "vitest-json", undefined)!,
+        reportSummary(1, 0, "vitest-json"),
+        reportSummary(2, 2, "vitest-json"),
       ]),
     ).toEqual({ total: 3, failed: 2, source: "vitest-json" });
   });

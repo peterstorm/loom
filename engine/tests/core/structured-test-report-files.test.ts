@@ -23,6 +23,7 @@ import {
   type TestReportSummary,
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
+import { reportSummary } from "../machine/report-summary";
 
 const result = (file: string, executed: number, failed: number, collectionError = false, skipped = 0): TestFileResult =>
   ({ file, executed, failed, skipped, collectionError });
@@ -337,14 +338,14 @@ describe("mergeSummaries merges per-file results", () => {
   });
 
   it("FR-004: one unrecorded part makes the merged per-file results unrecorded, never a partial list", () => {
-    const merged = mergeSummaries([mint([result("com.example.A", 2, 1)])!, parseReportSummary(3, 0, "junit-xml", undefined)!]);
+    const merged = mergeSummaries([mint([result("com.example.A", 2, 1)])!, reportSummary(3, 0, "junit-xml")]);
     expect(merged).toMatchObject({ total: 5, failed: 1 });
     expect(merged?.files).toEqual({ kind: "unrecorded" });
   });
 
   it("FR-003: merge is associative over per-file results and counts", () => {
     const summaryArb = fc.tuple(resultsArb, fc.boolean()).map(([results, legacy]) =>
-      legacy ? parseReportSummary(sum(results, "executed"), sum(results, "failed"), "junit-xml", undefined)! : mint(results)!);
+      legacy ? reportSummary(sum(results, "executed"), sum(results, "failed"), "junit-xml") : mint(results)!);
     fc.assert(fc.property(summaryArb, summaryArb, summaryArb, (a, b, c) => {
       const flat = mergeSummaries([a, b, c]);
       const left = mergeSummaries([mergeSummaries([a, b])!, c]);
@@ -376,7 +377,7 @@ describe("judgeTestRun over per-file results", () => {
 
   it("FR-004: unrecorded summaries are judged on their counts alone", () => {
     expect(judgeTestRun(0, parseVitestJson(JSON.stringify({ numTotalTests: 2, numFailedTests: 0 })))).toEqual({ verdict: "trusted-pass" });
-    expect(judgeTestRun(0, parseReportSummary(2, 0, "junit-xml", undefined))).toEqual({ verdict: "trusted-pass" });
+    expect(judgeTestRun(0, reportSummary(2, 0, "junit-xml"))).toEqual({ verdict: "trusted-pass" });
     expect(judgeTestRun(0, mint([result("tests/green.test.ts", 2, 0)]))).toEqual({ verdict: "trusted-pass" });
   });
 });
