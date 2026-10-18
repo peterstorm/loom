@@ -5,9 +5,9 @@
  * `extractEvidence`, which mints each target as a via-shell FileWrite.
  */
 
-import { normalizeShellSpan } from "../core/shell-normalize";
-import { classifyFdDupWord, splitCommandSegments, stripComment, stripEnvPrefix } from "../core/shell-command";
-import { isShellQuoteChar, type ShellQuoteChar } from "../core/shell-quoting";
+import { normalizeShellSpan } from "./shell-normalize";
+import { classifyFdDupWord, splitCommandSegments, stripComment, stripEnvPrefix } from "./shell-command";
+import { isShellQuoteChar, type ShellQuoteChar } from "./shell-quoting";
 
 /**
  * Read one redirect target starting at `start` (just past the `>`s):

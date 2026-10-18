@@ -257,7 +257,7 @@ Claude PostToolUse payload ─ claudeToolCall ─┐
 Pi child tool_result event ─ piToolCall ─────┘
 ```
 
-- **Pure parts.** `core/harness-tool-call.ts` holds the two pure adapters. They reduce each harness's event to one `HarnessToolCall`: the tool, its input, its outcome (failed, exit, stdout, interrupted), the call id and the cwd. `machine/extract-evidence.ts` turns that call into facts. Its rules cover command classification and exit ownership. The shell write targets it mints come from `machine/shell-write-targets.ts`: redirects, `tee`, and the destinations of a literal `mv`, `git mv` or `cp`.
+- **Pure parts.** `core/harness-tool-call.ts` holds the two pure adapters. They reduce each harness's event to one `HarnessToolCall`: the tool, its input, its outcome (failed, exit, stdout, interrupted), the call id and the cwd. `machine/extract-evidence.ts` turns that call into facts. Its rules cover command classification and exit ownership. The shell write targets it mints come from `core/shell-write-targets.ts`, the evidence twin of the guard's redirect scanner: redirects, `tee`, and the destinations of a literal `mv`, `git mv` or `cp`.
 - **The shell.** `machine/tool-evidence-recorder.ts` is the only production caller of `extractEvidence` and of the ledger append. It does three things:
   - it runs report discovery, which applies the call-start freshness stamp and the agent-authored-artifact veto;
   - it resolves `FileWrite` paths against the call's cwd;

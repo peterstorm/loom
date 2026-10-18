@@ -6,7 +6,7 @@ import {
   classifyTestCommandDetailed,
   extractEvidence,
 } from "../../src/machine/extract-evidence";
-import { extractShellWriteTargets } from "../../src/machine/shell-write-targets";
+import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
 import { judgeTestRun } from "../../src/machine/test-report";
 import { reportSummary } from "./report-summary";
 import { TEST_COMMAND_PATTERNS } from "../../src/core/tool-vocabulary";

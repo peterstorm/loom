@@ -81,7 +81,8 @@ children record into the parent's ledger at an address the parent mints into the
   The probed Pi 0.83 `tool_result` shape is pinned in that module's header comment.
 - **Pure minting rule.** `extractEvidence` in `engine/src/machine/extract-evidence.ts` (already pure) now
   takes a `HarnessToolCall`. `extractShellWriteTargets` mints literal `mv`, `git mv` and `cp` destinations
-  as FileWrites (FR-034).
+  as FileWrites (FR-034). *(Moved 2026-10-18.)* `extractShellWriteTargets` now lives in
+  `engine/src/core/shell-write-targets.ts`, beside the guard's redirect scanner; `extractEvidence` imports it.
 - **Shared shell (INV-4 owner).** `engine/src/machine/tool-evidence-recorder.ts` exports
   `recordToolEvidence(target, call, { registry, nowMs })`. It wires `findReport` with two inputs. One is the
   call-start stamp read from `target.stamps`; a missing call id or stamp fails closed on artifact-backed

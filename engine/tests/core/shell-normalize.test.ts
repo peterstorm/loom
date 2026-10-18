@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { normalizeShellSpan, normalizeShellVariants } from "../../src/core/shell-normalize";
-import { extractShellWriteTargets } from "../../src/machine/shell-write-targets";
+import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
 
 /**

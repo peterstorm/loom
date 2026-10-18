@@ -30,7 +30,7 @@ export {
   classifyTestCommandDetailed,
   type ClassifiedTestCommand,
 } from "./extract-evidence";
-export { extractShellWriteTargets } from "./shell-write-targets";
+export { extractShellWriteTargets } from "../core/shell-write-targets";
 export type {
   EvidenceTarget,
   HarnessToolCall,

@@ -33,7 +33,6 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/machine/advance.ts",
   "engine/src/machine/parse-machine.ts",
   "engine/src/machine/extract-evidence.ts",
-  "engine/src/machine/shell-write-targets.ts",
   "engine/src/machine/mermaid.ts",
   "engine/src/machine/test-report.ts",
   "engine/src/machine/evidence.ts",
@@ -46,6 +45,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/shell-normalize.ts",
   "engine/src/core/shell-quoting.ts",
   "engine/src/core/shell-substitution.ts",
+  "engine/src/core/shell-write-targets.ts",
   // Defect-Family Accounting, including source authority, barrel re-exports,
   // and type dependencies. No directory-wide core/ or infrastructure waiver.
   "engine/src/core/defect-family-accounting.ts",

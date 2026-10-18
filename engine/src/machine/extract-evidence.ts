@@ -4,7 +4,7 @@
  * Pure given its inputs: the harness adapters (`core/harness-tool-call.ts`)
  * normalize the raw call before it arrives, and the shell supplies report
  * lookup, so this module stays testable without IO. The Bash write targets
- * it mints come from `shell-write-targets.ts`.
+ * it mints come from `core/shell-write-targets.ts`.
  *
  * Command classification parses, it does not substring-match: the command
  * is split into simple-command segments (QUOTE-AWARE — a separator inside
@@ -28,7 +28,7 @@ import {
   type SegmentOp,
 } from "../core/shell-command";
 import { scanSubstitutions } from "../core/shell-substitution";
-import { extractShellWriteTargets } from "./shell-write-targets";
+import { extractShellWriteTargets } from "../core/shell-write-targets";
 import type { Evidence, TestReportSummary } from "./types";
 
 /** The runner pattern must end at a token boundary: `npm testify` is not `npm test`. */
