@@ -458,8 +458,8 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   // The panel size is fixed for the LIFE of the run, not per invocation. The
-  // rule itself is `panelSizeConflict` in the core, beside the threshold floor
-  // it is the sibling of; this is just where the two integers are read.
+  // rule itself is `panelSizeConflict` in the core; this is just where the two
+  // integers are read.
   const recordedLensCount = manifestLensCount(manifestRaw);
   const requestedLensCount = rawLensCount === null ? null : positiveInteger(rawLensCount)!;
   const sizeConflict = panelSizeConflict(requestedLensCount, recordedLensCount);

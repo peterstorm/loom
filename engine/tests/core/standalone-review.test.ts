@@ -846,7 +846,7 @@ function completedRefutationPanel(
     events.push(submitted.value.recordedEvent);
     state = submitted.value.state;
   });
-  const done = completePersistentRefutationPanel(state, resolver, 2);
+  const done = completePersistentRefutationPanel(state, resolver);
   expect(done.ok && done.value.state.stage).toBe("done");
   if (!done.ok || done.value.state.stage !== "done" || done.value.recordedEvent === undefined) {
     throw new Error("completed panel required");

@@ -579,7 +579,7 @@ async function resumeAwaitingRefutation(
       }
     }
   }
-  const completed = completePersistentRefutationPanel(panelState, resolver, preparation.threshold);
+  const completed = completePersistentRefutationPanel(panelState, resolver);
   if (!completed.ok || completed.value.state.stage !== "done") return failed(completed.ok ? "refutation did not reach done" : completed.error.message);
   if (completed.value.recordedEvent !== undefined) panelEvents.push(completed.value.recordedEvent);
   const canonical = refutationPanelCheckpoint(completed.value.state, panelEvents, resolver);

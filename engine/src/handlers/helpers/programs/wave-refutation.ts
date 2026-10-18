@@ -4,7 +4,7 @@
  * recover verifier requests, replay captured verdicts and terminal capture
  * rejections, then commit refuted outcomes under exact active authority.
  */
-import { defaultRefutationThreshold, type FindingOutcome } from '../../../core/review-panel';
+import type { FindingOutcome } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, panelRequestIdentity, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/persistent-panel';
 import { buildContextPacket, encodeByteSection } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
@@ -57,7 +57,7 @@ function waveRefutationPreparation(
         : section;
     },
   });
-  return { ...verifiers, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
+  return verifiers;
 }
 
 /**
@@ -170,7 +170,7 @@ export async function driveWaveRefutation(
       }
     }
   }
-  const completed = completePersistentRefutationPanel(panelState, resolver, preparation.threshold);
+  const completed = completePersistentRefutationPanel(panelState, resolver);
   if (!completed.ok || completed.value.state.stage !== "done") {
     return settled(waveBlocked(handle, completed.ok ? "Wave Refutation Panel did not reach done" : completed.error.message));
   }

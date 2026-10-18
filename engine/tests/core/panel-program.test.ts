@@ -1147,7 +1147,7 @@ describe("persistent refutation panel", () => {
     expect(events.at(-1)).not.toHaveProperty("roster");
   });
 
-  it("rejects caller and persisted thresholds above the derived strict majority", () => {
+  it("derives the strict majority itself and rejects a persisted decision carrying a raised threshold", () => {
     const fixture = refutationFixture("strict-majority-threshold");
     let ready = startPersistentRefutationPanel(fixture.authority);
     for (const index of [0, 1, 2]) {
@@ -1159,13 +1159,6 @@ describe("persistent refutation panel", () => {
       ));
     }
     expect(ready.state.stage).toBe("ready-to-tally");
-    expect(completePersistentRefutationPanel(ready.state, publicationResolver, 3)).toMatchObject({
-      ok: false,
-      error: {
-        kind: "invalid-aggregate",
-        message: "threshold must equal the derived strict majority 2",
-      },
-    });
 
     const completed = value(completePersistentRefutationPanel(ready.state, publicationResolver));
     expect(completed.state).toMatchObject({
@@ -1182,7 +1175,7 @@ describe("persistent refutation panel", () => {
       ok: false,
       error: {
         kind: "invalid-aggregate",
-        message: "threshold must equal the derived strict majority 2",
+        message: "persisted decision does not equal the deterministic complete-roster tally",
       },
     });
   });

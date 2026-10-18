@@ -830,10 +830,9 @@ export function parsePersistentRefutationPanelEvent(
       if (exact === null || state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));
       const proof = proveRefutationRoster(state, resolver);
       if (!proof.ok) return proof;
-      const rawDecision = safeRecord(exact.decision, ["threshold", "lenses", "verdicts", "outcomes", "retained", "refuted"]);
-      const threshold = rawDecision?.threshold;
-      if (typeof threshold !== "number") return persistentFailure(panelError("refutation", "invalid-aggregate", "persisted decision threshold is malformed"));
-      const decision = tallyRefutationPanel(state.authority, proof.value, threshold);
+      // The decision is re-derived, never read: a persisted bar other than the
+      // roster's strict majority is just one more way to disagree with it.
+      const decision = tallyRefutationPanel(state.authority, proof.value);
       if (!decision.ok) return decision;
       if (!jsonEqual(exact.decision, decision.value)) return persistentFailure(panelError("refutation", "invalid-aggregate", "persisted decision does not equal the deterministic complete-roster tally"));
       return event({ schemaVersion: 1, type: "refutation-tally-completed", decision: decision.value });
@@ -1380,11 +1379,11 @@ function aggregateArchitecturePanel(authority: ArchitecturePanelAuthority, compl
   }
 }
 
-function tallyRefutationPanel(authority: RefutationPanelAuthority, complete: CompleteRoster<AcceptedAgentResult<VerdictEnvelope<RefutationVerdict>>>, requestedThreshold = defaultRefutationThreshold(authority.lenses.length)): PersistentPanelResult<RefutationDecision> {
+/** The panel's decision under the one bar its roster admits, the strict majority (ADR-0029). */
+function tallyRefutationPanel(authority: RefutationPanelAuthority, complete: CompleteRoster<AcceptedAgentResult<VerdictEnvelope<RefutationVerdict>>>): PersistentPanelResult<RefutationDecision> {
   try {
     if (completeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.verifierRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("refutation", "incomplete-roster", "complete verifier roster is unproved, stale, or belongs to another panel"));
     const strictMajority = defaultRefutationThreshold(authority.lenses.length);
-    if (requestedThreshold !== strictMajority) return persistentFailure(panelError("refutation", "invalid-aggregate", `threshold must equal the derived strict majority ${strictMajority}`));
     const verdicts = complete.ordered.map(({ value }) => value);
     const tallied = tallyRefutations(verdicts, authority.lenses, authority.findings, strictMajority);
     if (!tallied.ok) return persistentFailure(panelError("refutation", "invalid-aggregate", tallied.errors.join("; ")));
@@ -1404,10 +1403,10 @@ export function completePersistentArchitecturePanel(state: ArchitecturePanelStat
   return reduceParsedPanelEvent(ARCHITECTURE_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "architecture-ranking-completed", ranking: ranking.value }), resolver);
 }
 
-export function completePersistentRefutationPanel(state: RefutationPanelState, resolver: PublicationAuthorityResolver, threshold?: number): PersistentPanelResult<PersistentRefutationStep> {
+export function completePersistentRefutationPanel(state: RefutationPanelState, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
   const proof = proveRefutationRoster(state, resolver);
   if (!proof.ok) return proof;
-  const decision = tallyRefutationPanel(state.authority, proof.value, threshold);
+  const decision = tallyRefutationPanel(state.authority, proof.value);
   if (!decision.ok) return decision;
   return reduceParsedPanelEvent(REFUTATION_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "refutation-tally-completed", decision: decision.value }), resolver);
 }

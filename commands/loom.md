@@ -583,7 +583,7 @@ For each wave:
 **The wave-gate spawns these agents (see `commands/wave-gate.md` for full protocol — it is authoritative, this list is a summary):**
 1. `spec-check-invoker` — verifies implementation satisfies spec anchors (1 per wave)
 2. Per task: `code-reviewer`, `silent-failure-hunter`, `pr-test-analyzer`, `type-design-analyzer`, `comment-analyzer`
-3. `review-verifier-agent` — the **refutation panel** (wave-gate Step 3.5), N verifiers per wave, one per lens. MANDATORY whenever the wave has critical findings: an unadjudicated plausible-but-wrong critical costs a full remediation cycle. Driven by the `review-panel` helper (`brief` → `manifest` → `lenses` → `verdict` → `tally`); a majority refutation moves a finding into `refuted_findings` with its reasoning, never deletes it. **Skip only when the wave has zero criticals.**
+3. `review-verifier-agent` — the **refutation panel** (wave-gate Step 3.5), N verifiers per wave, one per lens. MANDATORY whenever the wave has critical findings: an unadjudicated plausible-but-wrong critical costs a full remediation cycle. Driven by the registered Wave Gate through its persistent Refutation Panel program, never by the parent; a majority refutation moves a finding into `refuted_findings` with its reasoning, never deletes it. **Skip only when the wave has zero criticals.**
 
 **Steps 1 and 2 are spawned in parallel via the subagent-spawn tool (`Agent`, named `Task` in older harnesses).** Step 3 runs AFTER them — it adjudicates the findings they produced, so it cannot share their message. SubagentStop hooks automatically update state. Then `complete-wave-gate` helper advances the wave.
 
