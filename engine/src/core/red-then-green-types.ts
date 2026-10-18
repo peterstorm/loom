@@ -3,9 +3,9 @@
  * a TestRun fact carries from its structured report, the split of a Task's
  * `file_list` into test and implementation files, the epoch ledger the
  * settlement shell hands the judge, the judge's verdict, and the judge's pure
- * signature. No logic lives here. It is Acceptance Contract CT-1's frozen
- * types file: `structured-test-report.ts` imports `TestFileResult` and
- * `TestReportFiles` from here, and the proof core imports the rest.
+ * signature. No logic lives here. It is Acceptance Contract CT-1's types
+ * file: it re-exports `TestFileResult` and `TestReportFiles` from their owner,
+ * `structured-test-report.ts`, and the proof core imports the rest.
  *
  * Facts only. A TestRun fact records what its report listed; whether that run
  * was red or green for a Task is judged at read time from the ordered facts
@@ -16,41 +16,9 @@ import type { Evidence } from "../machine/types";
 
 // --- Per-file TestRun results (FR-001..FR-004) ---
 
-/**
- * One test file as its structured report lists it.
- *
- * `file` is the report's identity exactly as written: a JUnit testcase's
- * `classname` (a runner-relative path under Vitest, a JVM class under
- * Surefire), or a Vitest JSON `testResults[].name` (an absolute path). The
- * capture cwd and the command string never rewrite or contribute to it.
- *
- * `executed` and `failed` count this file's testcases under the report
- * format's own counting rule, so the results of one report reconcile with its
- * summary counts. That rule counts every declared testcase, so `skipped`
- * names how many of `executed` never ran (skipped, pending, todo, disabled);
- * `failed + skipped <= executed`, and `executed - skipped` is how many actually
- * ran. `collectionError` is true when the file failed to collect or import:
- * Vitest JUnit's synthetic testcase whose `name` equals its `classname`, or a
- * failed Vitest JSON entry with no `assertionResults`. A file whose only
- * failure is a collection error is never a behavioral red.
- */
-export type TestFileResult = Readonly<{
-  file: string;
-  executed: number;
-  failed: number;
-  skipped: number;
-  collectionError: boolean;
-}>;
-
-/**
- * The per-file results of one report summary. `unrecorded` is a fact captured
- * before per-file results existed (a legacy ledger line): it reads without
- * error and never satisfies an I6 step. `recorded` lists exactly the files
- * the report listed, each once.
- */
-export type TestReportFiles =
-  | Readonly<{ kind: "unrecorded" }>
-  | Readonly<{ kind: "recorded"; results: readonly TestFileResult[] }>;
+/** One test file as its structured report lists it, and the per-file results
+ *  of one report summary. Their owner, the report parser, documents both. */
+export type { TestFileResult, TestReportFiles } from "./structured-test-report";
 
 // --- Test-file classification (FR-013, FR-014) ---
 

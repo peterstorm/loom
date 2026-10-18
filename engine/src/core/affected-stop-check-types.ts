@@ -16,6 +16,10 @@
  * signatures, budget constants and fixed text tables that the planner, the
  * stop shell and the plan view share. No function is implemented here. This
  * file is the CT-2 contract surface, changed only through a CT-2 amendment.
+ * Every import is type-only except one: `MAX_AFFECTED_RUNNER_TIMEOUT_MS` is
+ * re-exported as a value from its owner, `verification-manifest.ts`.
+ * `orchestration-contract-acyclic.test.ts` refuses any import back from that
+ * module, type-only included, so the re-export can never close a cycle.
  *
  * Layering note: `StopChecksPorts` is the stop shell's port, and the core
  * owns its shape. The core may not import the shell's canonical repository
@@ -31,7 +35,7 @@ import type { ReviewPath } from "./review-packet";
 import type { StopCheckOffReason, StopCheckPlanRendering, StopCheckPlanView, StopCheckRunnerCommand } from "./stop-check-plan-types";
 import type { JunitTestcasesResult } from "./structured-test-report";
 import type { FrozenTestFiles } from "./test-file-classification";
-import type { AcceptanceRunner } from "./verification-manifest";
+import type { AffectedRunner } from "./verification-manifest";
 import type { Evidence } from "../machine/types";
 import type { TaskGraph } from "../types";
 
@@ -44,11 +48,12 @@ export const STOP_HOOK_BUDGET_MS = 300_000;
  *  deadline is `hookStartedAtMs + STOP_HOOK_BUDGET_MS - SETTLEMENT_RESERVE_MS`. */
 export const SETTLEMENT_RESERVE_MS = 30_000;
 
-/** The longest `affectedRunner.timeoutMs` a manifest may declare. The
- *  affected runner launches only when the time left before the deadline is
- *  at least its `timeoutMs`. Otherwise the check fails open as
- *  `budget-exhausted`, and the timeout is never clipped. */
-export const MAX_AFFECTED_RUNNER_TIMEOUT_MS = 120_000;
+/** The longest `affectedRunner.timeoutMs` a manifest may declare; its owner is
+ *  the manifest parser that enforces it. The affected runner launches only
+ *  when the time left before the deadline is at least its `timeoutMs`.
+ *  Otherwise the check fails open as `budget-exhausted`, and the timeout is
+ *  never clipped. */
+export { MAX_AFFECTED_RUNNER_TIMEOUT_MS } from "./verification-manifest";
 
 /** At most this many affected-check blocks per spawned agent. The counter is
  *  independent of the acceptance check's own `ACCEPTANCE_STOP_CHECK_MAX_BLOCKS`. */
@@ -58,8 +63,9 @@ export const AFFECTED_STOP_CHECK_MAX_BLOCKS = 3;
 
 /** Same shape and form checks as `acceptanceRunner`, with `timeoutMs <=
  *  MAX_AFFECTED_RUNNER_TIMEOUT_MS`, and a report path distinct from
- *  `acceptanceRunner`'s and from every Wave check's. */
-export type AffectedRunner = AcceptanceRunner;
+ *  `acceptanceRunner`'s and from every Wave check's. Its owner is the manifest
+ *  parser that enforces those checks. */
+export type { AffectedRunner };
 
 /** The frozen test-file classification. The freezer always records it, and it
  *  enters the manifest digest; a manifest frozen before the field existed lacks

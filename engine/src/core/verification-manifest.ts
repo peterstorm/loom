@@ -72,11 +72,11 @@ export const MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS = 240_000;
 /** The check id the affected runner's expanded command carries through the completion runner. */
 export const AFFECTED_RUNNER_CHECK_ID = "project:affected-runner" as const;
 /**
- * The affected runner's timeout cap. This equals CT-2's
- * `MAX_AFFECTED_RUNNER_TIMEOUT_MS`. It is restated here because that types file
- * imports `../types`, which imports this module, so importing it would close a
- * cycle between top-level domains. `verification-manifest-affected.test.ts`
- * asserts the two are equal.
+ * The longest `affectedRunner.timeoutMs` a manifest may declare. Declared here,
+ * by the parser that enforces it: CT-2's types file
+ * (`affected-stop-check-types.ts`) re-exports it, and the import runs only that
+ * way round, because the types file imports `../types`, which imports this
+ * module.
  */
 export const MAX_AFFECTED_RUNNER_TIMEOUT_MS = 120_000;
 
@@ -96,8 +96,8 @@ export type AcceptanceRunner = Readonly<{
 }>;
 
 /** The operator-declared affected-test runner (I7): the acceptance runner's
- *  shape and form checks, capped at `MAX_AFFECTED_RUNNER_TIMEOUT_MS`. This is
- *  the same type as CT-2's `AffectedRunner`. */
+ *  shape and form checks, capped at `MAX_AFFECTED_RUNNER_TIMEOUT_MS`. CT-2's
+ *  types file re-exports it. */
 export type AffectedRunner = AcceptanceRunner;
 
 type VerificationManifestBase = Readonly<{

@@ -24,7 +24,6 @@ import {
   ENGINE_DEFAULT_TEST_FILES,
   classifyTaskFiles,
   isTestFileBySuffixes,
-  type FrozenTestFiles as OwnerFrozenTestFiles,
 } from "../../src/core/test-file-classification";
 import type { FrozenStopCheckManifestFields, FrozenTestFiles } from "../../src/core/affected-stop-check-types";
 import {
@@ -33,7 +32,6 @@ import {
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { isTestFile } from "../../src/linter/programmatic/config";
-import type { Equal } from "../fixtures/type-equality";
 
 const OPERATOR_SUFFIXES = [".spec.ts", ".it.ts", "Test.java"] as const;
 
@@ -69,14 +67,7 @@ const FILE_LIST: readonly string[] = [
   "engine/tests/core/ledger.test.ts.snap",
 ];
 
-// The owner's FrozenTestFiles and CT-2's are one type.
-const sameFrozenTestFiles: Equal<FrozenTestFiles, OwnerFrozenTestFiles> = true;
-
 describe("INV-2: the owner module", () => {
-  it("declares the same FrozenTestFiles shape as the CT-2 contract", () => {
-    expect(sameFrozenTestFiles).toBe(true);
-  });
-
   it("DEFAULT_TEST_FILE_SUFFIXES is the engine's existing default list", () => {
     expect(DEFAULT_TEST_FILE_SUFFIXES).toEqual([".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx"]);
     expect(Object.isFrozen(DEFAULT_TEST_FILE_SUFFIXES)).toBe(true);
