@@ -46,10 +46,12 @@ import {
   type StopChecksOutcome,
 } from "../../core/affected-stop-check-types";
 import {
+  blockAdmission,
   judgeAffectedRun,
   renderAffectedBlock,
   renderStopChecksBlock,
   stopCheckBlockDecision,
+  type BlockAdmission,
   type Blocking,
   type StopCheckBlockCaps,
   type StopChecksBlockParts,
@@ -241,28 +243,19 @@ type Results = Readonly<Record<StopCheckName, CheckResult>>;
 type Issued = Readonly<Record<StopCheckName, StopCheckBlockCount>>;
 type Failing = Extract<CheckResult, { kind: "failing" }>;
 
-/** The decision's question for one check alone: would it block if it were the only one failing? */
-const FAILING_ALONE = Object.freeze({
-  acceptance: Object.freeze({ acceptance: true, affected: null }),
-  affected: Object.freeze({ acceptance: null, affected: true }),
-} as const);
-
 const failingOf = (result: CheckResult): Failing | null => result.kind === "failing" ? result : null;
 
 const isRunnable = <Plan>(arm: Arm<Plan>): arm is Readonly<{ kind: "runnable"; plan: Plan }> => arm.kind === "runnable";
 
 /**
- * A runnable check stays runnable only while it may still block this agent:
- * the decision rule asked about this check failing alone. When it may not,
- * the rule's note says why (the cap, or an unreadable counter), and the
- * check fails open without running.
+ * A runnable check stays runnable only while it may still block this agent,
+ * as `blockAdmission` decides from its counter. When it may not, the gate's
+ * note says why (the cap, or an unreadable counter), and the check fails open
+ * without running.
  */
-function admitted<Plan>(taskId: string, name: StopCheckName, arm: Arm<Plan>, issued: Issued): Arm<Plan> {
-  if (!isRunnable(arm)) return arm;
-  const decision = stopCheckBlockDecision(issued, FAILING_ALONE[name], CAPS);
-  return decision.outcome === "block"
-    ? arm
-    : Object.freeze({ kind: "note", note: decision.notes.map((note) => `stop checks for ${taskId}: ${note}`).join("\n") });
+function admitted<Plan>(taskId: string, arm: Arm<Plan>, admission: BlockAdmission): Arm<Plan> {
+  if (!isRunnable(arm) || admission.kind === "may-block") return arm;
+  return Object.freeze({ kind: "note", note: `stop checks for ${taskId}: ${admission.note}` });
 }
 
 const notesOf = (results: Results): readonly string[] =>
@@ -312,8 +305,8 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
     acceptance: isRunnable(planned.acceptance) ? ports.blocks.issued("acceptance", input.agentKey) : NO_BLOCKS_ISSUED,
     affected: isRunnable(planned.affected) ? ports.blocks.issued("affected", input.agentKey) : NO_BLOCKS_ISSUED,
   });
-  const acceptance = admitted(taskId, "acceptance", planned.acceptance, issued);
-  const affected = admitted(taskId, "affected", planned.affected, issued);
+  const acceptance = admitted(taskId, planned.acceptance, blockAdmission("acceptance", issued.acceptance, CAPS.acceptance));
+  const affected = admitted(taskId, planned.affected, blockAdmission("affected", issued.affected, CAPS.affected));
 
   // Without a root every arm is already settled (a note, or idle when its check is off); the guard also narrows `root`.
   if (!resolvedRoot.ok || (!isRunnable(acceptance) && !isRunnable(affected))) {

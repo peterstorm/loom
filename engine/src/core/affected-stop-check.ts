@@ -2,7 +2,7 @@
  * The affected-test stop check's pure core (I7, AD-10).
  * - `judgeAffectedRun` turns one affected run's parsed JUnit report into a verdict.
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
- *   both stop checks.
+ *   both stop checks, applying `blockAdmission`, the per-check cap gate.
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
  *   message a blocked agent reads.
  *
@@ -96,12 +96,30 @@ const UNREADABLE_NOTE: Readonly<Record<StopCheckName, (reason: string) => string
   affected: (reason) => `${AFFECTED_NOTE_TEXT["counter-unreadable"]}: ${reason}`,
 });
 
+/** Whether one check may still block this agent, and the count its counter
+ *  would then record, or why it fails open. */
+export type BlockAdmission =
+  | Readonly<{ kind: "may-block"; blocks: number }>
+  | Readonly<{ kind: "fails-open"; note: string }>;
+
+/**
+ * The per-check gate: under its cap with a readable count, a check may block
+ * and would record `count + 1`; at the cap, or with an unreadable count, it
+ * fails open. The block decision applies it to each failing check, and the
+ * stop shell asks it before running a check at all.
+ */
+export function blockAdmission<K extends StopCheckName>(name: K, issued: StopCheckBlockCount, cap: StopCheckBlockCaps[K]): BlockAdmission {
+  // Without a trustworthy count the cap cannot be enforced, so the check must not block.
+  if (issued.kind === "unreadable") return freeze({ kind: "fails-open", note: UNREADABLE_NOTE[name](issued.reason) });
+  if (issued.blocks >= cap) return freeze({ kind: "fails-open", note: CAP_NOTE[name](cap) });
+  return freeze({ kind: "may-block", blocks: issued.blocks + 1 });
+}
+
 type CheckStep<Failure> = Readonly<{ blocking: Blocking<Failure> | null; note: string | null }>;
 
 const NOT_BLOCKING: CheckStep<never> = freeze({ blocking: null, note: null });
 
-/** One check's part of the decision: a failing check under its cap blocks
- *  and records `count + 1`; at the cap, or with an unreadable count, it fails open. */
+/** One check's part of the decision: a failing check blocks when its gate admits it. */
 function checkStep<K extends StopCheckName, Failure>(
   name: K,
   issued: StopCheckBlockCount,
@@ -109,10 +127,10 @@ function checkStep<K extends StopCheckName, Failure>(
   cap: StopCheckBlockCaps[K],
 ): CheckStep<Failure> {
   if (failure === null) return NOT_BLOCKING;
-  // Without a trustworthy count the cap cannot be enforced, so the check must not block.
-  if (issued.kind === "unreadable") return freeze({ blocking: null, note: UNREADABLE_NOTE[name](issued.reason) });
-  if (issued.blocks >= cap) return freeze({ blocking: null, note: CAP_NOTE[name](cap) });
-  return freeze({ blocking: freeze({ failure, blocks: issued.blocks + 1 }), note: null });
+  const admission = blockAdmission(name, issued, cap);
+  return admission.kind === "fails-open"
+    ? freeze({ blocking: null, note: admission.note })
+    : freeze({ blocking: freeze({ failure, blocks: admission.blocks }), note: null });
 }
 
 export function stopCheckBlockDecision<Acceptance, Affected>(

@@ -26,6 +26,7 @@ import {
   type StopCheckName,
 } from "../../src/core/affected-stop-check-types";
 import {
+  blockAdmission,
   judgeAffectedRun,
   renderAffectedBlock,
   renderStopChecksBlock,
@@ -217,6 +218,35 @@ describe("stopCheckBlockDecision", () => {
       for (const [name, recorded] of blockedChecks(decision.blocking)) counters[name] = recorded;
     }
     expect(blocks).toBe(CAP);
+  });
+});
+
+describe("blockAdmission", () => {
+  it("admits a check under its cap, naming the count it would record", () => {
+    expect(blockAdmission("affected", count(0), CAP)).toEqual({ kind: "may-block", blocks: 1 });
+    expect(blockAdmission("acceptance", count(CAP - 1), CAP)).toEqual({ kind: "may-block", blocks: CAP });
+  });
+
+  it("fails a check open at its cap or with an unreadable counter, with that check's own note", () => {
+    expect(blockAdmission("affected", count(CAP), CAP)).toEqual({ kind: "fails-open", note: AFFECTED_NOTE_TEXT["cap-reached"] });
+    expect(blockAdmission("acceptance", count(5), 5)).toEqual({ kind: "fails-open", note: "the acceptance stop check reached its 5-block cap" });
+    expect(blockAdmission("acceptance", unreadable("EIO"), CAP))
+      .toEqual({ kind: "fails-open", note: "the acceptance stop check's block counter is unreadable: EIO" });
+  });
+
+  it("is the gate the decision applies: a check failing alone blocks exactly when it is admitted, at the count it names", () => {
+    const issuedArb = fc.oneof(fc.integer({ min: 0, max: CAP + 2 }).map(count), fc.constant(unreadable("lost")));
+    fc.assert(fc.property(fc.constantFrom(...STOP_CHECK_NAMES), issuedArb, (name, issued) => {
+      const admission = blockAdmission(name, issued, CAPS[name]);
+      const failures = name === "acceptance" ? { acceptance: "A", affected: null } : { acceptance: null, affected: "F" };
+      const decision = stopCheckBlockDecision({ acceptance: count(0), affected: count(0), [name]: issued }, failures, CAPS);
+      if (admission.kind === "may-block") {
+        expect(decision.outcome).toBe("block");
+        if (decision.outcome === "block") expect(decision.blocking[name]?.blocks).toBe(admission.blocks);
+      } else {
+        expect(decision).toEqual({ outcome: "proceed", notes: [admission.note] });
+      }
+    }));
   });
 });
 
