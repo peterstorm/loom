@@ -3,15 +3,32 @@
 import { SaxesParser } from "saxes";
 import type { DomainResult } from "./orchestration-contract/identity";
 
-/*
- * TestFileResult and TestReportFiles are CT-1's contract types, declared in
- * red-then-green-types.ts. They are restated structurally here, not imported:
- * that frozen file type-imports machine/types, which imports this module, so
- * an import would close a core → machine → core cycle that
- * orchestration-contract-acyclic.test.ts forbids. structured-test-report-files
- * .test.ts pins the two declarations as identical types at compile time.
+// --- Per-file TestRun results (FR-001..FR-004) ---
+//
+// Declared here, by the parser that mints them: CT-1's types file
+// (`red-then-green-types.ts`) re-exports both. The import runs only that way
+// round, because the types file imports `../machine/types`, which imports this
+// module.
+
+/**
+ * One test file as its structured report lists it.
+ *
+ * `file` is the report's identity exactly as written: a JUnit testcase's
+ * `classname` (a runner-relative path under Vitest, a JVM class under
+ * Surefire), or a Vitest JSON `testResults[].name` (an absolute path). The
+ * capture cwd and the command string never rewrite or contribute to it.
+ *
+ * `executed` and `failed` count this file's testcases under the report
+ * format's own counting rule, so the results of one report reconcile with its
+ * summary counts. That rule counts every declared testcase, so `skipped`
+ * names how many of `executed` never ran (skipped, pending, todo, disabled);
+ * `failed + skipped <= executed`, and `executed - skipped` is how many actually
+ * ran. `collectionError` is true when the file failed to collect or import:
+ * Vitest JUnit's synthetic testcase whose `name` equals its `classname`, or a
+ * failed Vitest JSON entry with no `assertionResults`. A file whose only
+ * failure is a collection error is never a behavioral red.
  */
-type TestFileResult = Readonly<{
+export type TestFileResult = Readonly<{
   file: string;
   executed: number;
   failed: number;
@@ -19,7 +36,13 @@ type TestFileResult = Readonly<{
   collectionError: boolean;
 }>;
 
-type TestReportFiles =
+/**
+ * The per-file results of one report summary. `unrecorded` is a fact captured
+ * before per-file results existed (a legacy ledger line): it reads without
+ * error and never satisfies an I6 step. `recorded` lists exactly the files
+ * the report listed, each once.
+ */
+export type TestReportFiles =
   | Readonly<{ kind: "unrecorded" }>
   | Readonly<{ kind: "recorded"; results: readonly TestFileResult[] }>;
 

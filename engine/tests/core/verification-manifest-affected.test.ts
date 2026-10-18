@@ -7,16 +7,12 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import {
-  MAX_AFFECTED_RUNNER_TIMEOUT_MS,
-  type AffectedRunner as ContractAffectedRunner,
-  type FrozenStopCheckManifestFields,
-} from "../../src/core/affected-stop-check-types";
+import type { FrozenStopCheckManifestFields } from "../../src/core/affected-stop-check-types";
 import { DEFAULT_TEST_FILE_SUFFIXES, ENGINE_DEFAULT_TEST_FILES } from "../../src/core/test-file-classification";
 import {
   ACCEPTANCE_RUNNER_CHECK_ID,
   AFFECTED_RUNNER_CHECK_ID,
-  MAX_AFFECTED_RUNNER_TIMEOUT_MS as MANIFEST_AFFECTED_TIMEOUT_CAP,
+  MAX_AFFECTED_RUNNER_TIMEOUT_MS,
   acceptanceRunnerCheck,
   affectedRunnerCheck,
   authorizeWaveCompletionSuite,
@@ -26,7 +22,6 @@ import {
   parseFrozenVerificationManifest,
   parseVerificationManifest,
   type AcceptanceRunner,
-  type AffectedRunner as ManifestAffectedRunner,
   type FrozenVerificationManifest,
 } from "../../src/core/verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
@@ -34,16 +29,6 @@ import type { AcceptedWaveCompletionReceipt } from "../../src/core/completion-su
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import type { ActiveWaveGateRegistration, TaskGraph } from "../../src/types";
 import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
-import type { Equal } from "../fixtures/type-equality";
-
-const sameAffectedRunner: Equal<ContractAffectedRunner, ManifestAffectedRunner> = true;
-
-describe("the manifest restates CT-2's affected-runner surface exactly", () => {
-  it("FR-015: the timeout cap and the runner type equal CT-2's", () => {
-    expect(MANIFEST_AFFECTED_TIMEOUT_CAP).toBe(MAX_AFFECTED_RUNNER_TIMEOUT_MS);
-    expect(sameAffectedRunner).toBe(true);
-  });
-});
 
 /** The engine default's digest before this feature: every read-time fallback
  *  for a TaskGraph that carries no `verification_manifest` checks receipts

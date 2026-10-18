@@ -9,7 +9,6 @@
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import type { TestFileResult, TestReportFiles } from "../../src/core/red-then-green-types";
 import {
   mergeSummaries,
   parseJunitXml,
@@ -18,10 +17,11 @@ import {
   parseVitestJson,
   readJunitReport,
   reconcileFileResults,
+  type TestFileResult,
+  type TestReportFiles,
   type TestReportSummary,
 } from "../../src/core/structured-test-report";
 import { judgeTestRun } from "../../src/machine/test-report";
-import type { Equal } from "../fixtures/type-equality";
 
 const result = (file: string, executed: number, failed: number, collectionError = false, skipped = 0): TestFileResult =>
   ({ file, executed, failed, skipped, collectionError });
@@ -37,20 +37,6 @@ const mint = (
 ): TestReportSummary | null => parseReportSummary(sum(results, "executed"), sum(results, "failed"), source, { files: recorded(results) });
 
 const bytes = (content: string): Uint8Array => new TextEncoder().encode(content);
-
-// --- The owner restates CT-1's per-file types (an import would close a module
-// cycle); these compile-time pins fail typecheck if the two ever drift apart. ---
-
-type OwnerFiles = NonNullable<TestReportSummary["files"]>;
-type OwnerFileResult = Extract<OwnerFiles, { kind: "recorded" }>["results"][number];
-const filesTypesAgree: Equal<OwnerFiles, TestReportFiles> = true;
-const fileResultTypesAgree: Equal<OwnerFileResult, TestFileResult> = true;
-
-describe("owner per-file types", () => {
-  it("FR-001: the owner's per-file types are identical to the CT-1 contract types", () => {
-    expect([filesTypesAgree, fileResultTypesAgree]).toEqual([true, true]);
-  });
-});
 
 // --- Generators ---
 
