@@ -30,6 +30,7 @@ import {
   refutationPanelCheckpoint,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
+  type RefutationPanelState,
 } from "../../src/core/persistent-panel";
 import {
   parsePanelVerdictSourceRecord,
@@ -136,8 +137,6 @@ const refutationExtractionText = (fixture: RefutationFixture, index: number): st
   })),
 });
 
-type RefutationPanelState = ReturnType<typeof startPersistentRefutationPanel>["state"];
-
 function submitRefutationEmission(
   state: RefutationPanelState,
   fixture: RefutationFixture,
@@ -162,10 +161,6 @@ const refutationHistoryValue = (fixture: RefutationFixture) => ({
     reasoning: "the packet still exhibits the finding",
   })),
 });
-
-// ---------------------------------------------------------------------------
-// Refutation v1 through the persistent seam
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Refutation v1 through the persistent seam

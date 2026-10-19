@@ -63,7 +63,9 @@ program is the refutation panel's alone.**
     `boundCandidateEntry` from `core/panel-authority`;
   - the architecture fixture in `tests/fixtures/panel-authority.ts`.
 - **What narrows:**
-  - `PersistentPanelError.panel`, and with it the kernel's `PanelKind`, is `"refutation"`;
+  - `PersistentPanelError.panel`, and with it the kernel's `PanelKind`, is `"refutation"`. The kernel's
+    one-value program type parameter collapses into it: `PanelProgramDefinition` and `PanelCheckpoint` derive
+    their panel and checkpoint kind from `PanelKind` directly;
   - roster authority checks (`rosterAuthorityErrors`, the legacy ordinal binding) take only the verifier
     shape;
   - one-value panel parameters inside `core/persistent-panel` collapse.

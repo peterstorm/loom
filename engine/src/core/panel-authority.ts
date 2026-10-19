@@ -242,32 +242,6 @@ function rosterAuthorityErrors(
   return errors;
 }
 
-/**
- * The ordered entry slot `slotId` answers for, or `null` when the roster holds
- * no such slot.
- *
- * A roster is paired POSITIONALLY with an ordered list — the refutation
- * `lenses`. Slot `i` answers for entry `i`,
- * and the roster carries nothing that independently names its entry, so equal
- * cardinality is the whole of what the pairing itself can prove. This function is
- * therefore the only sanctioned way to cross from a slot to its entry.
- *
- * `orderedSlots.findIndex(...)` returns -1 for an unknown slot, and indexing a
- * parallel array with -1 yields `undefined` — which a `!` assertion then passes
- * downstream as if it were a real lens. Returning
- * `null` makes that case a refusal the caller must handle instead of a lie the
- * type system was told to ignore.
- */
-function boundEntryForSlot<T>(
-  roster: ExactRoster,
-  ordered: readonly T[],
-  slotId: SlotId,
-): T | null {
-  const index = roster.orderedSlots.findIndex((slot) => slot.slotId === slotId);
-  if (index < 0 || index >= ordered.length) return null;
-  return ordered[index] ?? null;
-}
-
 /** Parse the strict canonical critical-Finding list for the refutation
  * authority, collecting per-entry errors in list order (the joined
  * diagnostic message is part of the contract the fixtures pin). */
@@ -361,15 +335,22 @@ export type RefutationPanelAuthorityInput = Readonly<{
 }>;
 
 /**
- * Resolve the lens a verifier slot answers for, refusing a slot the verifier
- * roster does not hold instead of pairing the result with `undefined`.
+ * The lens a verifier slot answers for, refused rather than assumed.
+ *
+ * The verifier roster is paired POSITIONALLY with the ordered `lenses`: slot
+ * `i` answers for lens `i`, and the roster carries nothing that independently
+ * names its lens, so equal cardinality is the whole of what the pairing itself
+ * can prove. This is therefore the only sanctioned way to cross from a slot to
+ * its lens. An unknown slot, or one whose ordinal lies past the lens list, is a
+ * typed refusal — never `undefined` passed downstream as if it were a lens.
  */
 export function boundRefutationLens(
   authority: RefutationPanelAuthority,
   slotId: SlotId,
 ): PersistentPanelResult<ReviewLens> {
-  const lens = boundEntryForSlot(authority.verifierRoster, authority.lenses, slotId);
-  return lens === null
+  const index = authority.verifierRoster.orderedSlots.findIndex((slot) => slot.slotId === slotId);
+  const lens = index < 0 ? undefined : authority.lenses[index];
+  return lens === undefined
     ? persistentFailure(panelError("refutation", "request-binding-mismatch", `slot ${slotId} is bound to no refutation lens`, { slotId }))
     : persistentSuccess(lens);
 }
@@ -476,9 +457,8 @@ export function issueRefutationPanelAuthority(
   return roster.ok ? refutationPanelAuthority(input, () => roster.value) : roster;
 }
 
-// The architecture and refutation lens vocabularies stay disjoint, so a lens
-// can never be read as the other panel's; this compile-time pin is the rule's
-// only enforcement, and it holds wherever either vocabulary is parsed.
+// PanelLens (design lenses) and ReviewLens (refutation lenses) must stay
+// disjoint: these assignments fail to compile if a value joins both unions.
 const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";
 const _refutationLensRemainsDisjoint: Exclude<ReviewLens, PanelLens> = "reproduction";
 void _architectureLensRemainsDisjoint;

@@ -45,7 +45,7 @@ const tallyState = (state: TallyState): TallyState => proofs.prove("refutation:s
 const tallyAction = (state: TallyState): TallyAction => Object.freeze({ kind: "tally", count: state.count });
 const tallyStep = (state: TallyState): TallyStep => Object.freeze({ state, action: tallyAction(state) });
 
-const TALLY: PanelProgramDefinition<"refutation", TallyAuthority, TallyAuthorityInput, TallyState, TallyAction, TallyEvent> = {
+const TALLY: PanelProgramDefinition<TallyAuthority, TallyAuthorityInput, TallyState, TallyAction, TallyEvent> = {
   panel: "refutation",
   proofs,
   start: (authority) => tallyStep(tallyState({ authority, stage: "counting", count: 0 })),
