@@ -9,13 +9,14 @@
  *
  * Each reads its harness's own result shape and nothing else, so the facts
  * the shared shell (`machine/tool-evidence-recorder.ts`) mints from one call
- * are the same on both harnesses. Both are total and never throw. Neither
- * harness hands over an exit code directly. Claude Code reports a finished
+ * are the same on both harnesses. Both are total and never throw. Claude
+ * Code's current Bash payloads carry no exit field. It reports a finished
  * Bash call through one of two hook events: a success means exit 0, and a
- * failure's `error` names the code (`claudeBashOutcome`). An unknown Claude
- * Code Bash shape degrades to `exit-unknown`, the outcome that trusts least.
- * Pi reads a bash result from `isError` as exit 1 or 0, and an unrecognised
- * one as exit 0 (`piBashOutcome`).
+ * failure's `error` names the code (`claudeBashOutcome`). An explicit exit
+ * field is still honoured when present, and an unknown Claude Code Bash shape
+ * degrades to `exit-unknown`, the outcome that trusts least. Pi uses
+ * `details.exitCode` when it is an integer, and otherwise reads `isError` as
+ * exit 1 or 0, with an unrecognised result as exit 0 (`piBashOutcome`).
  * An unknown file-tool shape counts as success on both, so a harness format
  * change cannot starve the ledger of writes (`isClaudeToolFailure`).
  *
@@ -106,6 +107,8 @@ export type ClaudeToolPayload = Readonly<{
   tool_response?: unknown;
   error?: unknown;
   is_interrupt?: unknown;
+  /** Harness id of this tool call: the ledger idempotency key, so a
+   *  duplicated hook delivery never double-counts. */
   tool_use_id?: unknown;
   cwd: string;
 }>;
@@ -117,14 +120,22 @@ export type ClaudeToolPayload = Readonly<{
  * failure input is `{ tool_name, tool_input, tool_use_id, error, is_interrupt,
  * duration_ms }` beside the session fields, and a Bash `error` starts
  * `Exit code N`.
+ *
+ * A success carries its tool input, because whether a Bash success finished
+ * depends on it (`run_in_background`); a success cannot be read without it.
  */
 export type ClaudeToolResult =
-  | Readonly<{ kind: "succeeded"; toolResponse: unknown }>
+  | Readonly<{ kind: "succeeded"; toolResponse: unknown; input: Readonly<Record<string, unknown>> }>
   | Readonly<{ kind: "failed"; error: string; interrupted: boolean }>;
 
-/** The result a Claude Code hook payload reports. Only an explicit
- *  PostToolUseFailure event is a failure; any other payload carries the
- *  PostToolUse `tool_response`. */
+/**
+ * The result a Claude Code hook payload reports. Only an explicit
+ * PostToolUseFailure event is a failure; any other payload carries the
+ * PostToolUse `tool_response`, and one without a `tool_response` reads as an
+ * unknown exit, never as exit 0. The adapter is total over a failure event
+ * for any tool, while `hooks/hooks.json` wires that event for Bash only: a
+ * failed file tool mints nothing, so only Bash failures are worth recording.
+ */
 export function claudeToolResult(payload: ClaudeToolPayload): ClaudeToolResult {
   return payload.hook_event_name === "PostToolUseFailure"
     ? {
@@ -132,7 +143,7 @@ export function claudeToolResult(payload: ClaudeToolPayload): ClaudeToolResult {
         error: typeof payload.error === "string" ? payload.error : "",
         interrupted: payload.is_interrupt === true,
       }
-    : { kind: "succeeded", toolResponse: payload.tool_response };
+    : { kind: "succeeded", toolResponse: payload.tool_response, input: recordOrEmpty(payload.tool_input) };
 }
 
 /**
@@ -199,21 +210,20 @@ function succeededBashOutcome(toolResponse: unknown, input: Readonly<Record<stri
 }
 
 /** A Claude Code Bash call's outcome, from the hook event that delivered it. */
-export function claudeBashOutcome(result: ClaudeToolResult, input: Readonly<Record<string, unknown>> = {}): BashToolOutcome {
+export function claudeBashOutcome(result: ClaudeToolResult): BashToolOutcome {
   return result.kind === "failed"
     ? failedBashOutcome(result.error, result.interrupted)
-    : succeededBashOutcome(result.toolResponse, input);
+    : succeededBashOutcome(result.toolResponse, result.input);
 }
 
 /** Normalize Claude Code's PostToolUse or PostToolUseFailure payload. */
 export function claudeToolCall(payload: ClaudeToolPayload): HarnessToolCall {
   const result = claudeToolResult(payload);
-  const input = recordOrEmpty(payload.tool_input);
   return normalized(
     toolOf(CLAUDE_TOOLS, payload.tool_name),
-    { input, callId: parseToolCallId(payload.tool_use_id), cwd: payload.cwd },
+    { input: recordOrEmpty(payload.tool_input), callId: parseToolCallId(payload.tool_use_id), cwd: payload.cwd },
     () => (result.kind === "failed" || isClaudeToolFailure(result.toolResponse) ? { kind: "failed" } : { kind: "succeeded" }),
-    () => claudeBashOutcome(result, input),
+    () => claudeBashOutcome(result),
   );
 }
 

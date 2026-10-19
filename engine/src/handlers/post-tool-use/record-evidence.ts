@@ -28,7 +28,7 @@
 import { match } from "ts-pattern";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
-import { claudeToolCall } from "../../core/harness-tool-call";
+import { claudeToolCall, type ClaudeToolPayload } from "../../core/harness-tool-call";
 import {
   attributeEvidence,
   type EvidenceAttribution,
@@ -62,24 +62,16 @@ function standDownNotice(
   return reason === null ? null : `record-evidence: standing down for ${sessionId} — ${reason}; nothing recorded\n`;
 }
 
-interface RecordEvidenceInput {
+/** The hook payload: the identity fields this handler reads, plus the call
+ *  fields `claudeToolCall` parses, declared once in `ClaudeToolPayload`. */
+type RecordEvidenceInput = Readonly<{
   session_id?: string;
-  /** `PostToolUseFailure` for a failed call; any other value is a success. */
-  hook_event_name?: unknown;
   /** Caller identity — set by Claude Code only inside a subagent. Untrusted:
    *  parsed by parseCallerIdentity, never used raw. */
   agent_id?: unknown;
   tool_name?: string;
-  tool_input?: Record<string, unknown>;
-  tool_response?: unknown;
-  /** PostToolUseFailure only: the failure text and whether the user interrupted. */
-  error?: unknown;
-  is_interrupt?: unknown;
   cwd?: string;
-  /** Harness id of this tool call — stamped on ledger records as the
-   *  idempotency key so a duplicated PostToolUse never double-counts. */
-  tool_use_id?: string;
-}
+}> & Omit<ClaudeToolPayload, "tool_name" | "cwd">;
 
 export const runRecordEvidence = async (
   stdin: string,
@@ -128,16 +120,7 @@ export const runRecordEvidence = async (
     // mint nothing and can still stage an artifact.
     recordToolEvidence(
       { kind: "record", ledger: sessionId, epoch: binding.epoch, stamps: sessionId },
-      claudeToolCall({
-        hook_event_name: input.hook_event_name,
-        tool_name: toolName,
-        tool_input: input.tool_input,
-        tool_response: input.tool_response,
-        error: input.error,
-        is_interrupt: input.is_interrupt,
-        tool_use_id: input.tool_use_id,
-        cwd: input.cwd ?? process.cwd(),
-      }),
+      claudeToolCall({ ...input, tool_name: toolName, cwd: input.cwd ?? process.cwd() }),
       { registry, nowMs: Date.now },
     );
 

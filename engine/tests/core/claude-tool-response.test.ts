@@ -7,8 +7,9 @@
  * Claude Code reports a finished Bash call through one of two hook events.
  * PostToolUse fires only when the call succeeded; a command that exits
  * non-zero is a failed call and fires PostToolUseFailure, whose `error`
- * starts `Exit code N`. The real shapes below were taken from Claude Code
- * 2.1.286 (its bundle and a live subagent transcript).
+ * starts `Exit code N`. `SUCCESS_SHAPE` and the `Exit code N` errors were
+ * taken from Claude Code 2.1.286 (its bundle and a live subagent transcript);
+ * the other inputs are synthetic defensive shapes.
  */
 
 import { describe, expect, it } from "vitest";
@@ -20,7 +21,7 @@ import {
 } from "../../src/core/harness-tool-call";
 
 const succeeded = (toolResponse: unknown, input: Record<string, unknown> = {}) =>
-  claudeBashOutcome({ kind: "succeeded", toolResponse }, input);
+  claudeBashOutcome({ kind: "succeeded", toolResponse, input });
 const failed = (error: string, interrupted = false) => claudeBashOutcome({ kind: "failed", error, interrupted });
 
 /** Claude Code 2.1.286's Bash success `tool_response`, verbatim in shape. */
@@ -30,10 +31,15 @@ describe("claudeToolResult — which hook event delivered the call", () => {
   it("only an explicit PostToolUseFailure is a failure", () => {
     expect(claudeToolResult({ hook_event_name: "PostToolUseFailure", tool_name: "Bash", error: "Exit code 1\nboom", is_interrupt: false, cwd: "/r" }))
       .toEqual({ kind: "failed", error: "Exit code 1\nboom", interrupted: false });
-    expect(claudeToolResult({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_response: SUCCESS_SHAPE, cwd: "/r" }))
-      .toEqual({ kind: "succeeded", toolResponse: SUCCESS_SHAPE });
+    expect(claudeToolResult({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "ls" }, tool_response: SUCCESS_SHAPE, cwd: "/r" }))
+      .toEqual({ kind: "succeeded", toolResponse: SUCCESS_SHAPE, input: { command: "ls" } });
     expect(claudeToolResult({ tool_name: "Bash", tool_response: SUCCESS_SHAPE, cwd: "/r" }))
-      .toEqual({ kind: "succeeded", toolResponse: SUCCESS_SHAPE });
+      .toEqual({ kind: "succeeded", toolResponse: SUCCESS_SHAPE, input: {} });
+  });
+
+  it("a success without a tool_response has no known exit, never exit 0", () => {
+    expect(claudeBashOutcome(claudeToolResult({ tool_name: "Bash", error: "Exit code 1", cwd: "/r" })))
+      .toEqual({ kind: "exit-unknown", stdout: "" });
   });
 
   it("reads a malformed failure as an empty, uninterrupted error", () => {
@@ -103,7 +109,7 @@ describe("claudeBashOutcome — a failed call", () => {
   });
 });
 
-describe("claudeToolCall — the failure event reaches the file tools too", () => {
+describe("claudeToolCall — the adapter reads a failure event for any tool (hooks.json wires it for Bash only)", () => {
   it("a file tool delivered by PostToolUseFailure failed, whatever its response", () => {
     expect(claudeToolCall({ hook_event_name: "PostToolUseFailure", tool_name: "Edit", tool_input: { file_path: "/r/a.ts" }, error: "old_string not found", cwd: "/r" }))
       .toEqual({ tool: "Edit", input: { file_path: "/r/a.ts" }, callId: null, cwd: "/r", outcome: { kind: "failed" } });
