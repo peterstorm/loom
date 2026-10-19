@@ -21,9 +21,7 @@ import {
 } from "../../src/core/panel-program";
 import {
   deriveRefutationVerifierBinding,
-  parseArchitecturePanelAuthority,
   parseRefutationPanelAuthority,
-  type ArchitecturePanelAuthority,
   type RefutationPanelAuthority,
 } from "../../src/core/panel-authority";
 import {
@@ -32,35 +30,23 @@ import {
   PANEL_HARNESS_BINDINGS as panelBindings,
   panelRosterSlot as rosterSlot,
   semanticVerifierSlots,
-  type ArchitecturePanelFixture as ArchitectureFixture,
   type RefutationPanelFixture as RefutationFixture,
 } from "../fixtures/panel-authority";
 import { value } from "../fixtures/parse-result";
 import {
-  architecturePanelCheckpoint,
-  completePersistentArchitecturePanel,
   completePersistentRefutationPanel,
   panelRequestIdentity,
-  parseArchitecturePanelCheckpoint,
-  parsePersistentArchitecturePanelEvent,
   parsePersistentRefutationPanelEvent,
   parseRefutationPanelCheckpoint,
-  reducePersistentArchitecturePanel,
+  reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
-  replayPersistentArchitecturePanel,
   replayPersistentRefutationPanel,
-  resumePersistentArchitecturePanel,
-  startPersistentArchitecturePanel,
+  resumePersistentRefutationPanel,
   startPersistentRefutationPanel,
-  selectAcceptedArchitectureCandidates,
-  selectAcceptedArchitectureJudges,
   selectAcceptedRefutationVerdicts,
-  submitArchitectureCandidateResult,
-  submitArchitectureJudgeResult,
   submitRefutationVerdict,
-  type ArchitecturePanelState,
-  type PersistentArchitecturePanelEvent,
   type PersistentRefutationPanelEvent,
+  type RefutationPanelState,
 } from "../../src/core/persistent-panel";
 import { parseWaveFindingId, projectFindingForPanel, type BriefFinding } from "../../src/core/review-panel";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
@@ -68,7 +54,7 @@ import { attributeFindings } from "../../src/core/findings";
 import { createPublicationAuthorityResolver, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 
 /** This suite's private publication store: its resolver reads only the panels issued here. */
-const { architecturePanelFixture, issuePanelRequests: issue, refutationPanelFixture, resolver: publicationResolver, withRewrittenPanelRegistration } =
+const { issuePanelRequests: issue, refutationPanelFixture, resolver: publicationResolver, withRewrittenPanelRegistration } =
   createPanelPublications();
 
 const waveId = (raw: string) => {
@@ -475,26 +461,10 @@ const unavailableResolver = createPublicationAuthorityResolver(() => ({
 }));
 const hexDigest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
 
-const architectureFixture = (suffix: string): ArchitectureFixture => architecturePanelFixture(`run.architecture.${suffix}`);
-
 const REFUTATION_LENSES = ["reproduction", "intent", "blast-radius"] as const;
 const refutationFixture = (suffix: string, entries: readonly [BriefFinding, BriefFinding] = findings): RefutationFixture =>
   refutationPanelFixture(`run.refutation.${suffix}`, REFUTATION_LENSES, entries);
 
-function candidatePayload(authority: ArchitecturePanelAuthority, index: number) {
-  return { lens: authority.candidateLenses[index], candidate: authority.candidateIds[index], artifact: `# Candidate ${index + 1}` };
-}
-function judgeJson(authority: ArchitecturePanelAuthority, index: number): string {
-  return JSON.stringify({
-    criterion: authority.judgeCriteria[index],
-    rankings: authority.candidateIds.map((candidate, candidateIndex) => ({
-      candidate,
-      score: index === 0 ? 9 - candidateIndex : 7 + candidateIndex,
-      fatal_flaw: null,
-      strongest_idea: `idea ${candidateIndex + 1}`,
-    })).sort((left, right) => right.score - left.score),
-  });
-}
 function verdictJson(
   authority: RefutationPanelAuthority,
   index: number,
@@ -510,34 +480,11 @@ function verdictJson(
   });
 }
 
-function submitCandidate(state: ArchitecturePanelState, fixture: ArchitectureFixture, index: number) {
-  return submitArchitectureCandidateResult(state, publicationResolver, panelRequestIdentity(fixture.candidates[index]!), candidatePayload(fixture.authority, index));
-}
-function submitJudge(state: ArchitecturePanelState, fixture: ArchitectureFixture, index: number) {
-  return submitArchitectureJudgeResult(state, publicationResolver, panelRequestIdentity(fixture.judges[index]!), judgeJson(fixture.authority, index));
-}
-
 const votes = [
   ["refuted", "upheld"],
   ["refuted", "upheld"],
   ["uncertain", "uncertain"],
 ] as const;
-
-function fullArchitectureHistory(fixture: ArchitectureFixture) {
-  let step = startPersistentArchitecturePanel(fixture.authority);
-  const events: PersistentArchitecturePanelEvent[] = [];
-  for (const index of [1, 0]) {
-    step = value(submitCandidate(step.state, fixture, index));
-    events.push(step.recordedEvent!);
-  }
-  for (const index of [1, 0]) {
-    step = value(submitJudge(step.state, fixture, index));
-    events.push(step.recordedEvent!);
-  }
-  step = value(completePersistentArchitecturePanel(step.state, publicationResolver));
-  events.push(step.recordedEvent!);
-  return { step, events };
-}
 
 function fullRefutationHistory(fixture: RefutationFixture) {
   let step = startPersistentRefutationPanel(fixture.authority);
@@ -557,8 +504,7 @@ function fullRefutationHistory(fixture: RefutationFixture) {
 }
 
 describe("persistent panel authority", () => {
-  it("fails closed for malformed Findings, unsafe paths, role/program/count mismatch, and cross-roster reuse", () => {
-    const architecture = architectureFixture("negative-authority");
+  it("fails closed for malformed Findings, unsafe paths, and duplicate Findings", () => {
     const refutation = refutationFixture("negative-authority");
     for (const malformed of [
       { ...findings[0], id: "T1:" },
@@ -576,38 +522,6 @@ describe("persistent panel authority", () => {
       })).toMatchObject({ ok: false, error: { kind: "invalid-authority" } });
     }
 
-    expect(parseArchitecturePanelAuthority({
-      runId: architecture.authority.runId,
-      candidateLenses: architecture.authority.candidateLenses,
-      judgeCriteria: architecture.authority.judgeCriteria,
-      candidateSlots: architecture.authority.judgeRoster.orderedSlots,
-      judgeSlots: architecture.authority.candidateRoster.orderedSlots,
-    })).toMatchObject({ ok: false, error: { kind: "invalid-authority" } });
-
-    expect(parseArchitecturePanelAuthority({
-      runId: architecture.authority.runId,
-      candidateLenses: architecture.authority.candidateLenses,
-      judgeCriteria: architecture.authority.judgeCriteria,
-      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
-      judgeSlots: architecture.authority.candidateRoster.orderedSlots,
-    })).toMatchObject({ ok: false, error: { kind: "invalid-authority" } });
-
-    // A criterion outside the closed interview vocabulary is not a criterion:
-    // the brand is minted by lookup, not asserted (see architectureCriterion).
-    expect(parseArchitecturePanelAuthority({
-      runId: architecture.authority.runId,
-      candidateLenses: architecture.authority.candidateLenses,
-      judgeCriteria: [...architecture.authority.judgeCriteria.slice(0, -1), "my own taste"],
-      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
-      judgeSlots: architecture.authority.judgeRoster.orderedSlots,
-    })).toMatchObject({
-      ok: false,
-      error: {
-        kind: "invalid-authority",
-        message: expect.stringContaining("outside the validated interview vocabulary"),
-      },
-    });
-
     expect(parseRefutationPanelAuthority({
       runId: refutation.authority.runId,
       findings: [findings[0], { ...findings[1], id: findings[0].id, taskId: findings[0].taskId }],
@@ -624,7 +538,6 @@ describe("persistent panel authority", () => {
   // paired with.
   it("refuses a roster whose slot count disagrees with the ordered list it is paired with", () => {
     const refutation = refutationFixture("cardinality-authority");
-    const architecture = architectureFixture("cardinality-authority");
 
     expect(parseRefutationPanelAuthority({
       runId: refutation.authority.runId,
@@ -635,48 +548,10 @@ describe("persistent panel authority", () => {
       ok: false,
       error: { kind: "invalid-authority", message: expect.stringContaining("exactly 1 slot") },
     });
-
-    expect(parseArchitecturePanelAuthority({
-      runId: architecture.authority.runId,
-      candidateLenses: architecture.authority.candidateLenses.slice(0, 1),
-      judgeCriteria: architecture.authority.judgeCriteria,
-      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
-      judgeSlots: architecture.authority.judgeRoster.orderedSlots,
-    })).toMatchObject({
-      ok: false,
-      error: { kind: "invalid-authority", message: expect.stringContaining("exactly 1 slot") },
-    });
   });
 
-  it("refuses reordered candidate, judge, and refutation rosters with exact slot diagnostics", () => {
-    const architecture = architectureFixture("reordered-authority");
+  it("refuses a reordered refutation roster with an exact slot diagnostic", () => {
     const refutation = refutationFixture("reordered-authority");
-    const architectureInput = {
-      runId: architecture.authority.runId,
-      candidateLenses: architecture.authority.candidateLenses,
-      judgeCriteria: architecture.authority.judgeCriteria,
-    };
-
-    const candidates = parseArchitecturePanelAuthority({
-      ...architectureInput,
-      candidateSlots: [...architecture.authority.candidateRoster.orderedSlots].reverse(),
-      judgeSlots: architecture.authority.judgeRoster.orderedSlots,
-    });
-    expect(candidates).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("candidate slot 1") },
-    });
-
-    const judges = parseArchitecturePanelAuthority({
-      ...architectureInput,
-      candidateSlots: architecture.authority.candidateRoster.orderedSlots,
-      judgeSlots: [...architecture.authority.judgeRoster.orderedSlots].reverse(),
-    });
-    expect(judges).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("judge slot 1") },
-    });
-
     const verifiers = parseRefutationPanelAuthority({
       runId: refutation.authority.runId,
       findings: refutation.authority.findings,
@@ -757,305 +632,114 @@ describe("persistent panel authority", () => {
   });
 });
 
-describe("persistent architecture panel", () => {
-  it("binds candidate and criterion exactly to the canonical request slot; permutations consume only that slot retry", () => {
-    const fixture = architectureFixture("slot-binding");
-    let step = startPersistentArchitecturePanel(fixture.authority);
-    step = value(submitArchitectureCandidateResult(
-      step.state,
-      publicationResolver,
-      panelRequestIdentity(fixture.candidates[0]!),
-      candidatePayload(fixture.authority, 1),
-    ));
-    expect(step.state.stage).toBe("awaiting-candidates");
-    expect(selectAcceptedArchitectureCandidates(step.state)).toEqual([]);
-    expect(step.action).toMatchObject({ requests: [{ attempt: 2, slotId: fixture.authority.candidateRoster.orderedSlots[0]!.slotId }] });
-
-    const retry = issue([fixture.authority.candidateRoster.orderedSlots[0]!.attempts[1]])[0]!;
-    step = value(submitArchitectureCandidateResult(
-      step.state,
-      publicationResolver,
-      panelRequestIdentity(retry),
-      candidatePayload(fixture.authority, 0),
-    ));
-    step = value(submitCandidate(step.state, fixture, 1));
-    expect(step.state.stage).toBe("awaiting-judges");
-
-    step = value(submitArchitectureJudgeResult(
-      step.state,
-      publicationResolver,
-      panelRequestIdentity(fixture.judges[0]!),
-      judgeJson(fixture.authority, 1),
-    ));
-    expect(step.state.stage).toBe("awaiting-judges");
-    expect(selectAcceptedArchitectureJudges(step.state)).toEqual([]);
-    expect(step.recordedEvent).toMatchObject({
-      type: "architecture-judge-rejected",
-      category: "result-binding-mismatch",
-    });
-    expect(step.recordedEvent?.type === "architecture-judge-rejected" ? step.recordedEvent.message : "").toContain("criterion");
-    expect(step.action).toMatchObject({ requests: [{ attempt: 2, slotId: fixture.authority.judgeRoster.orderedSlots[0]!.slotId }] });
-  });
-
+describe("persistent refutation panel", () => {
   it("accepts only issued request identity plus raw output, preserves exact rehydration errors, and rejects duplicates", () => {
-    const fixture = architectureFixture("submission-contract");
-    const identity = JSON.parse(JSON.stringify(panelRequestIdentity(fixture.candidates[0]!)));
+    const fixture = refutationFixture("submission-contract");
+    const verdict = verdictJson(fixture.authority, 0, votes[0]!);
+    const identity = JSON.parse(JSON.stringify(panelRequestIdentity(fixture.requests[0]!)));
     const malformedIdentity = JSON.parse(JSON.stringify(identity));
     malformedIdentity.issuance.batchIndex = -1;
-    expect(submitArchitectureCandidateResult(
-      startPersistentArchitecturePanel(fixture.authority).state,
+    expect(submitRefutationVerdict(
+      startPersistentRefutationPanel(fixture.authority).state,
       publicationResolver,
       malformedIdentity,
-      candidatePayload(fixture.authority, 0),
+      verdict,
     )).toMatchObject({ ok: false, error: { kind: "malformed-event", message: expect.stringContaining("batchIndex") } });
 
-    const unavailable = submitArchitectureCandidateResult(
-      startPersistentArchitecturePanel(fixture.authority).state,
+    const unavailable = submitRefutationVerdict(
+      startPersistentRefutationPanel(fixture.authority).state,
       unavailableResolver,
       identity,
-      candidatePayload(fixture.authority, 0),
+      verdict,
     );
     expect(unavailable).toMatchObject({
       ok: false,
       error: {
         kind: "request-rehydration-failed",
-        requestId: fixture.candidates[0]!.authority.requestId,
+        requestId: fixture.requests[0]!.authority.requestId,
         rehydration: { kind: "invalid-accepted-agent-result", field: "registration", message: "registration unavailable after restart" },
       },
     });
 
-    let step = value(submitArchitectureCandidateResult(
-      startPersistentArchitecturePanel(fixture.authority).state,
-      publicationResolver,
-      identity,
-      candidatePayload(fixture.authority, 0),
-    ));
+    const step = value(submitRefutationVerdict(startPersistentRefutationPanel(fixture.authority).state, publicationResolver, identity, verdict));
     expect(step.recordedEvent).not.toHaveProperty("result");
     expect(step.recordedEvent).not.toHaveProperty("issuedRequest");
-    const duplicate = submitArchitectureCandidateResult(step.state, publicationResolver, identity, candidatePayload(fixture.authority, 0));
+    const duplicate = submitRefutationVerdict(step.state, publicationResolver, identity, verdict);
     expect(duplicate).toMatchObject({ ok: false, error: { kind: "duplicate-result" } });
-    expect(selectAcceptedArchitectureCandidates(step.state)).toHaveLength(1);
-  });
-
-  it("retries a malformed public judge submission once and terminal-blocks malformed JSON shape on attempt two", () => {
-    const fixture = architectureFixture("judge-malformed-retry");
-    let step = startPersistentArchitecturePanel(fixture.authority);
-    const events: PersistentArchitecturePanelEvent[] = [];
-    for (const index of [0, 1]) {
-      step = value(submitCandidate(step.state, fixture, index));
-      events.push(step.recordedEvent!);
-    }
-
-    const awaitingJudgeState = step.state;
-    step = value(submitArchitectureJudgeResult(
-      awaitingJudgeState,
-      publicationResolver,
-      panelRequestIdentity(fixture.judges[0]!),
-      "not-json",
-    ));
-    events.push(step.recordedEvent!);
-    expect(step.recordedEvent).toMatchObject({
-      type: "architecture-judge-rejected",
-      request: panelRequestIdentity(fixture.judges[0]!),
-      attempt: 1,
-      category: "malformed-result",
-    });
-    expect(step.recordedEvent).not.toHaveProperty("requestId");
-    expect(parsePersistentArchitecturePanelEvent(
-      awaitingJudgeState,
-      JSON.parse(JSON.stringify(step.recordedEvent)),
-      unavailableResolver,
-    )).toMatchObject({
-      ok: false,
-      error: { kind: "request-rehydration-failed", requestId: fixture.judges[0]!.authority.requestId },
-    });
-    expect(step.state.stage).toBe("awaiting-judges");
-    expect(step.action).toMatchObject({
-      kind: "spawn-architecture-judges",
-      requests: [{ attempt: 2, slotId: fixture.authority.judgeRoster.orderedSlots[0]!.slotId }],
-    });
-    expect(selectAcceptedArchitectureCandidates(step.state)).toHaveLength(2);
-    expect(selectAcceptedArchitectureJudges(step.state)).toEqual([]);
-
-    const retry = issue([fixture.authority.judgeRoster.orderedSlots[0]!.attempts[1]])[0]!;
-    step = value(submitArchitectureJudgeResult(
-      step.state,
-      publicationResolver,
-      panelRequestIdentity(retry),
-      JSON.stringify({ criterion: fixture.authority.judgeCriteria[0], rankings: [] }),
-    ));
-    events.push(step.recordedEvent!);
-    expect(step.recordedEvent).toMatchObject({
-      type: "architecture-judge-rejected",
-      attempt: 2,
-      category: "malformed-result",
-    });
-    expect(step.state.stage).toBe("terminal-blocked");
-    expect(step.action).toMatchObject({
-      kind: "architecture-blocked",
-      diagnostic: { retry: { eligible: false } },
-    });
-    expect(selectAcceptedArchitectureCandidates(step.state)).toHaveLength(2);
-    expect(selectAcceptedArchitectureJudges(step.state)).toEqual([]);
-    expect(value(replayPersistentArchitecturePanel(
-      fixture.authority,
-      JSON.parse(JSON.stringify(events)),
-      publicationResolver,
-    )).state).toEqual(step.state);
+    expect(selectAcceptedRefutationVerdicts(step.state)).toHaveLength(1);
   });
 
   it("makes slot progress the only accepted-result authority at compile time and runtime", () => {
-    const fixture = architectureFixture("single-slot-authority");
-    const started = startPersistentArchitecturePanel(fixture.authority);
-    if (started.state.stage !== "awaiting-candidates") throw new Error("expected candidate stage");
+    const fixture = refutationFixture("single-slot-authority");
+    const started = startPersistentRefutationPanel(fixture.authority);
     const structuralState = {
-      panel: "architecture" as const,
+      panel: "refutation" as const,
       authority: fixture.authority,
-      stage: "awaiting-candidates" as const,
+      stage: "awaiting-verdicts" as const,
       slots: started.state.slots,
     };
     // @ts-expect-error persistent states require an inaccessible nominal parser/reducer proof
-    const independentlyConstructed: ArchitecturePanelState = structuralState;
+    const independentlyConstructed: RefutationPanelState = structuralState;
     void independentlyConstructed;
-    expect(resumePersistentArchitecturePanel(structuralState as unknown as ArchitecturePanelState)).toMatchObject({
+    expect(resumePersistentRefutationPanel(structuralState as unknown as RefutationPanelState)).toMatchObject({
       ok: false,
       error: { kind: "malformed-checkpoint" },
     });
 
-    const accepted = value(submitCandidate(started.state, fixture, 0)).state;
-    expect(accepted).not.toHaveProperty("acceptedCandidates");
-    expect(accepted).not.toHaveProperty("acceptedJudges");
-    const selected = selectAcceptedArchitectureCandidates(accepted);
+    expect(started.state).not.toHaveProperty("acceptedVerdicts");
+    expect(selectAcceptedRefutationVerdicts(started.state)).toEqual([]);
+    const accepted = value(submitRefutationVerdict(started.state, publicationResolver, panelRequestIdentity(fixture.requests[0]!), verdictJson(fixture.authority, 0, votes[0]!))).state;
+    expect(accepted).not.toHaveProperty("acceptedVerdicts");
+    const selected = selectAcceptedRefutationVerdicts(accepted);
     expect(selected).toHaveLength(1);
     expect(Object.isFrozen(selected)).toBe(true);
-
-    const refutation = startPersistentRefutationPanel(refutationFixture("single-slot-authority").authority).state;
-    expect(refutation).not.toHaveProperty("acceptedVerdicts");
-    expect(selectAcceptedRefutationVerdicts(refutation)).toEqual([]);
-  });
-
-  it("JSON replays every accepted/completion prefix and checkpoint idempotently through done", () => {
-    const fixture = architectureFixture("restart");
-    let step = startPersistentArchitecturePanel(fixture.authority);
-    const events: PersistentArchitecturePanelEvent[] = [];
-    const submissions = [
-      () => submitCandidate(step.state, fixture, 1),
-      () => submitCandidate(step.state, fixture, 0),
-      () => submitJudge(step.state, fixture, 1),
-      () => submitJudge(step.state, fixture, 0),
-      () => completePersistentArchitecturePanel(step.state, publicationResolver),
-    ];
-    for (const submit of submissions) {
-      step = value(submit());
-      events.push(step.recordedEvent!);
-      const jsonEvents = JSON.parse(JSON.stringify(events));
-      const firstReplay = value(replayPersistentArchitecturePanel(fixture.authority, jsonEvents, publicationResolver));
-      const secondReplay = value(replayPersistentArchitecturePanel(fixture.authority, jsonEvents, publicationResolver));
-      expect(firstReplay.state).toEqual(step.state);
-      expect(secondReplay.state).toEqual(firstReplay.state);
-      const checkpoint = value(architecturePanelCheckpoint(step.state, events, publicationResolver));
-      const resumed = value(parseArchitecturePanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver));
-      expect(JSON.parse(JSON.stringify(resumed.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
-    }
-    expect(step.state.stage).toBe("done");
-    expect(events.at(-1)).not.toHaveProperty("roster");
-  });
-
-  it("strictly rejects forged completion payloads and checkpoint structural disagreement", () => {
-    const fixture = architectureFixture("checkpoint-disagreement");
-    const accepted = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
-    const event = accepted.recordedEvent!;
-    const checkpoint = value(architecturePanelCheckpoint(accepted.state, [event], publicationResolver));
-    const forged = JSON.parse(JSON.stringify(checkpoint));
-    forged.state.slots[0] = {
-      slotId: forged.state.slots[0].slotId,
-      status: "pending",
-      nextAttempt: 1,
-    };
-    expect(parseArchitecturePanelCheckpoint(forged, publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-checkpoint", message: expect.stringContaining("disagrees") },
-    });
-
-    let ready = accepted;
-    ready = value(submitCandidate(ready.state, fixture, 1));
-    ready = value(submitJudge(ready.state, fixture, 0));
-    ready = value(submitJudge(ready.state, fixture, 1));
-    expect(parsePersistentArchitecturePanelEvent(ready.state, {
-      schemaVersion: 1,
-      type: "architecture-ranking-completed",
-      ranking: [],
-    }, publicationResolver)).toMatchObject({ ok: false, error: { kind: "invalid-aggregate" } });
-  });
-
-  it("reloads a checkpoint whose candidate and judge roster views are both legacy serializations", () => {
-    const fixture = architectureFixture("legacy-roster-view");
-    const { step, events } = fullArchitectureHistory(fixture);
-    const durable = () => JSON.parse(JSON.stringify(value(architecturePanelCheckpoint(step.state, events, publicationResolver))));
-    // Both issued rosters carry the derived `byId` view, so both are compared
-    // through the roster's canonical form — `{}` and `{"size":N}` agree.
-    const legacy = durable();
-    for (const field of ["candidateRoster", "judgeRoster"] as const) {
-      const roster = legacy.state.authority[field];
-      expect(roster.byId).toEqual({});
-      roster.byId = { size: roster.orderedSlots.length };
-    }
-    expect(value(parseArchitecturePanelCheckpoint(legacy, publicationResolver)).state.stage).toBe("done");
-    // The slots each view derives from stay recorded content.
-    for (const field of ["candidateRoster", "judgeRoster"] as const) {
-      const reordered = durable();
-      reordered.state.authority[field].orderedSlots.reverse();
-      expect(parseArchitecturePanelCheckpoint(reordered, publicationResolver)).toMatchObject({ ok: false,
-        error: { kind: "malformed-checkpoint", message: expect.stringContaining("disagrees") } });
-    }
   });
 
   it("keeps reduction total for malformed and cross-stage events", () => {
-    const fixture = architectureFixture("transition-totality");
-    const { step: done, events } = fullArchitectureHistory(fixture);
-    const states: ArchitecturePanelState[] = [
-      startPersistentArchitecturePanel(fixture.authority).state,
-      value(replayPersistentArchitecturePanel(fixture.authority, events.slice(0, 2), publicationResolver)).state,
-      value(replayPersistentArchitecturePanel(fixture.authority, events.slice(0, 4), publicationResolver)).state,
+    const fixture = refutationFixture("transition-totality");
+    const { step: done, events } = fullRefutationHistory(fixture);
+    const states: RefutationPanelState[] = [
+      startPersistentRefutationPanel(fixture.authority).state,
+      value(replayPersistentRefutationPanel(fixture.authority, events.slice(0, 2), publicationResolver)).state,
+      value(replayPersistentRefutationPanel(fixture.authority, events.slice(0, 3), publicationResolver)).state,
       done.state,
     ];
-    const malformed = [{}, { schemaVersion: 1, type: "unknown" }, { schemaVersion: 1, type: "architecture-ranking-completed", ranking: [] }];
+    const malformed = [{}, { schemaVersion: 1, type: "unknown" }, { schemaVersion: 1, type: "refutation-tally-completed", decision: {} }];
     for (const state of states) {
       for (const event of malformed) {
-        expect(() => parsePersistentArchitecturePanelEvent(state, event, publicationResolver)).not.toThrow();
-        expect(() => reducePersistentArchitecturePanel(state, event as PersistentArchitecturePanelEvent)).not.toThrow();
+        expect(() => parsePersistentRefutationPanelEvent(state, event, publicationResolver)).not.toThrow();
+        expect(() => reducePersistentRefutationPanel(state, event as PersistentRefutationPanelEvent)).not.toThrow();
       }
     }
   });
 
   it("resumes from the journalled event prefix when a crash lands between event append and checkpoint", () => {
-    const fixture = architectureFixture("persistence-contract");
-    const step = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
+    const fixture = refutationFixture("crash-window");
+    const step = value(submitRefutationVerdict(
+      startPersistentRefutationPanel(fixture.authority).state,
+      publicationResolver,
+      panelRequestIdentity(fixture.requests[0]!),
+      verdictJson(fixture.authority, 0, votes[0]!),
+    ));
     // FR-021: the event reached the journal and the process died before the
     // checkpoint was written. Resume replays the journalled prefix alone.
-    const journal: readonly PersistentArchitecturePanelEvent[] = [JSON.parse(JSON.stringify(step.recordedEvent))];
-    const resumed = value(replayPersistentArchitecturePanel(fixture.authority, journal, publicationResolver));
+    const journal: readonly PersistentRefutationPanelEvent[] = [JSON.parse(JSON.stringify(step.recordedEvent))];
+    const resumed = value(replayPersistentRefutationPanel(fixture.authority, journal, publicationResolver));
     expect(resumed.state).toEqual(step.state);
     // The next submission continues from it, and its checkpoint reloads to the same state.
-    const afterResume = value(submitCandidate(resumed.state, fixture, 1));
-    const checkpoint = value(architecturePanelCheckpoint(afterResume.state, [...journal, afterResume.recordedEvent!], publicationResolver));
-    expect(JSON.parse(JSON.stringify(value(parseArchitecturePanelCheckpoint(
+    const afterResume = value(submitRefutationVerdict(
+      resumed.state,
+      publicationResolver,
+      panelRequestIdentity(fixture.requests[1]!),
+      verdictJson(fixture.authority, 1, votes[1]!),
+    ));
+    const checkpoint = value(refutationPanelCheckpoint(afterResume.state, [...journal, afterResume.recordedEvent!], publicationResolver));
+    expect(JSON.parse(JSON.stringify(value(parseRefutationPanelCheckpoint(
       JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
     )).state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
   });
 
-  it("refuses a checkpoint whose event prefix does not replay to the state", () => {
-    const fixture = architectureFixture("persistence-forgery");
-    const first = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
-    expect(architecturePanelCheckpoint(first.state, [], publicationResolver)).toMatchObject({
-      ok: false,
-      error: { kind: "malformed-checkpoint", message: expect.stringContaining("does not replay") },
-    });
-  });
-});
-
-describe("persistent refutation panel", () => {
   it("structurally hashes verifier authority so delimiter-bearing finding sets cannot collide", () => {
     const runId = value(parseOrchestrationRunId("run.refutation.structural-hash"));
     const firstA = parseWaveFindingId("T:a|b");
@@ -1500,7 +1184,7 @@ describe("a registration diverging from the canonical roster is refused", () => 
     ["role", { role: "arch-judge-agent" }],
     ["attempt", { attempt: 2 }],
     ["modelProfile", { modelProfile: "panel-judge" }],
-    ["requiredSkill", { requiredSkill: null }],
+    ["requiredSkill", { requiredSkill: "architecture-tech-lead" }],
     ["contextDigest", { contextDigest: hexDigest("foreign-context") }],
     ["slotId", { slotId: "slot:foreign" }],
     ["outputSlot", { outputSlot: { kind: "fixed-artifact-slot", path: "artifacts/foreign.md" } }],
@@ -1513,8 +1197,8 @@ describe("a registration diverging from the canonical roster is refused", () => 
   ];
 
   it.each(divergences)("refuses a registration whose %s diverges from the roster", (_field, override) => {
-    const fixture = architectureFixture(`divergent-${String(_field).replace(/\s+/g, "-")}`);
-    const request = fixture.candidates[0]!;
+    const fixture = refutationFixture(`divergent-${String(_field).replace(/\s+/g, "-")}`);
+    const request = fixture.requests[0]!;
     const identity = JSON.parse(JSON.stringify(panelRequestIdentity(request)));
 
     // Re-register the SAME publication identity with a tampered issued request,
@@ -1527,11 +1211,11 @@ describe("a registration diverging from the canonical roster is refused", () => 
           : entry),
     });
 
-    const submitted = withRewrittenPanelRegistration(request, tamper, () => submitArchitectureCandidateResult(
-      startPersistentArchitecturePanel(fixture.authority).state,
+    const submitted = withRewrittenPanelRegistration(request, tamper, () => submitRefutationVerdict(
+      startPersistentRefutationPanel(fixture.authority).state,
       publicationResolver,
       identity,
-      candidatePayload(fixture.authority, 0),
+      verdictJson(fixture.authority, 0, votes[0]!),
     ));
 
     expect(submitted.ok).toBe(false);
@@ -1541,26 +1225,26 @@ describe("a registration diverging from the canonical roster is refused", () => 
   });
 
   it("accepts the untampered registration the divergences are varied from", () => {
-    const fixture = architectureFixture("divergent-control");
-    const submitted = submitArchitectureCandidateResult(
-      startPersistentArchitecturePanel(fixture.authority).state,
+    const fixture = refutationFixture("divergent-control");
+    const submitted = submitRefutationVerdict(
+      startPersistentRefutationPanel(fixture.authority).state,
       publicationResolver,
-      JSON.parse(JSON.stringify(panelRequestIdentity(fixture.candidates[0]!))),
-      candidatePayload(fixture.authority, 0),
+      JSON.parse(JSON.stringify(panelRequestIdentity(fixture.requests[0]!))),
+      verdictJson(fixture.authority, 0, votes[0]!),
     );
     expect(submitted.ok).toBe(true);
   });
 
   it("refuses an identity whose requestId is absent from the canonical roster", () => {
-    const fixture = architectureFixture("unknown-request");
-    const identity = JSON.parse(JSON.stringify(panelRequestIdentity(fixture.candidates[0]!)));
+    const fixture = refutationFixture("unknown-request");
+    const identity = JSON.parse(JSON.stringify(panelRequestIdentity(fixture.requests[0]!)));
     identity.requestId = "request:not-in-roster";
 
-    const submitted = submitArchitectureCandidateResult(
-      startPersistentArchitecturePanel(fixture.authority).state,
+    const submitted = submitRefutationVerdict(
+      startPersistentRefutationPanel(fixture.authority).state,
       publicationResolver,
       identity,
-      candidatePayload(fixture.authority, 0),
+      verdictJson(fixture.authority, 0, votes[0]!),
     );
 
     expect(submitted.ok).toBe(false);

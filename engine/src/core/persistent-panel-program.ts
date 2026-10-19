@@ -22,9 +22,10 @@
  * step the kernel accepts must have been minted in THAT domain by the
  * program's own start, parse, reduction, replay or checkpoint parse. A
  * domain is private to the module that creates it, so another module's
- * values can never pass as its own. `core/persistent-panel` instantiates the
- * architecture and refutation programs over one private domain; the kernel's
- * own tests drive a trivial third program with none of either panel.
+ * values can never pass as its own. The kernel knows no panel: each program
+ * names itself, and that name prefixes its diagnostics and its checkpoint kind.
+ * `core/persistent-panel` instantiates the refutation program over its private
+ * domain; the kernel's own tests drive a second, tally-counter program.
  *
  * Durable bytes are the programs' own: every checkpoint is built with the key
  * order its persisted form has always had, because checkpoint
@@ -39,22 +40,19 @@ import {
   panelError,
   persistentFailure,
   persistentSuccess,
-  type PersistentPanelError,
   type PersistentPanelResult,
 } from "./panel-authority";
 import type { OrchestrationRunId, PublicationAuthorityResolver } from "./orchestration-contract";
-
-/** The panels a persistent program can report as: the durable error's closed panel vocabulary. */
-export type PanelKind = PersistentPanelError["panel"];
 
 // ---------------------------------------------------------------------------
 // Membership proofs
 // ---------------------------------------------------------------------------
 
-export type PanelProofTag = `${PanelKind}:${"state" | "event" | "recorded-step"}`;
+/** A minted value's role. Each domain is private to one program, so the role is the whole tag. */
+export type PanelProofTag = "state" | "event" | "recorded-step";
 
-/** One membership domain: which values a module minted, tagged with panel and
- *  role so a refutation state can never pass as an architecture one. */
+/** One membership domain: which values a module minted, tagged with their role
+ *  so a state can never pass as an event or a recorded step. */
 export type PanelProofs = Readonly<{
   prove: <T extends object>(tag: PanelProofTag, value: T) => T;
   proven: (tag: PanelProofTag, value: unknown) => boolean;
@@ -108,9 +106,10 @@ export type PanelState<Authority> = Readonly<{ authority: Authority; stage: stri
  * Everything else — the reducer guard, replay-equals-state, the recorded-step
  * proof and the checkpoint record — is the kernel's, once.
  */
-export type PanelProgramDefinition<P extends PanelKind, Authority extends PanelAuthority, AuthorityInput,
+export type PanelProgramDefinition<Authority extends PanelAuthority, AuthorityInput,
   State extends PanelState<Authority>, Action, Event> = Readonly<{
-  panel: P;
+  /** The program's name: it prefixes the program's diagnostics and its durable checkpoint kind. */
+  name: string;
   proofs: PanelProofs;
   start: (authority: Authority) => PanelStep<State, Action, Event>;
   action: (state: State) => Action | null;
@@ -136,8 +135,8 @@ export type PanelProgramDefinition<P extends PanelKind, Authority extends PanelA
  * canonical form and compared as JSON text: the comparison is of durable
  * content only, independent of how any derived view happens to serialize.
  */
-function statesAgree<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+function statesAgree<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   recorded: unknown,
   replayed: S,
 ): boolean {
@@ -153,39 +152,38 @@ function statesAgree<P extends PanelKind, A extends PanelAuthority, I, S extends
  * regression indistinguishable from bad input — exactly as `panel-kernel`'s
  * analogous catch already keeps it.
  */
-export function reducePanelProgram<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+export function reducePanelProgram<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   state: S,
   event: E,
 ): PersistentPanelResult<PanelStep<S, Ac, E>> {
-  const { panel, proofs } = program;
+  const { name, proofs } = program;
   try {
-    if (!proofs.proven(`${panel}:state`, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} reducer requires a parser-produced state`));
-    if (state.stage === "done" || state.stage === "terminal-blocked") return persistentFailure(panelError(panel, "terminal-state", `${panel} panel is ${state.stage} and cannot transition`));
-    if (!proofs.proven(`${panel}:event`, event)) return persistentFailure(panelError(panel, "malformed-event", `${panel} reducer requires a strictly parsed durable event`));
+    if (!proofs.proven("state", state)) return persistentFailure(panelError("malformed-checkpoint", `${name} reducer requires a parser-produced state`));
+    if (state.stage === "done" || state.stage === "terminal-blocked") return persistentFailure(panelError("terminal-state", `${name} panel is ${state.stage} and cannot transition`));
+    if (!proofs.proven("event", event)) return persistentFailure(panelError("malformed-event", `${name} reducer requires a strictly parsed durable event`));
     return program.transition(state, event);
   } catch (error) {
     return persistentFailure(panelError(
-      panel,
       "malformed-event",
-      `${panel} event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
+      `${name} event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
     ));
   }
 }
 
 /** A proved state's step: its own next action. */
-export function resumePanelProgram<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+export function resumePanelProgram<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   state: S,
 ): PersistentPanelResult<PanelStep<S, Ac, E>> {
-  return program.proofs.proven(`${program.panel}:state`, state)
+  return program.proofs.proven("state", state)
     ? persistentSuccess(Object.freeze({ state, action: program.action(state) }))
-    : persistentFailure(panelError(program.panel, "malformed-checkpoint", `${program.panel} state must come from start, reduction, replay, or checkpoint parsing`));
+    : persistentFailure(panelError("malformed-checkpoint", `${program.name} state must come from start, reduction, replay, or checkpoint parsing`));
 }
 
 /** Parse a submitted event over `state`, reduce it, and prove the recorded step. */
-export function reduceParsedPanelEvent<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E extends object>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+export function reduceParsedPanelEvent<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E extends object>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   state: S,
   rawEvent: E,
   resolver: PublicationAuthorityResolver,
@@ -194,7 +192,7 @@ export function reduceParsedPanelEvent<P extends PanelKind, A extends PanelAutho
   if (!parsed.ok) return parsed;
   const reduced = reducePanelProgram(program, state, parsed.value);
   return reduced.ok
-    ? persistentSuccess(program.proofs.prove(`${program.panel}:recorded-step`, Object.freeze({ ...reduced.value, recordedEvent: parsed.value })))
+    ? persistentSuccess(program.proofs.prove("recorded-step", Object.freeze({ ...reduced.value, recordedEvent: parsed.value })))
     : reduced;
 }
 
@@ -205,14 +203,14 @@ export function reduceParsedPanelEvent<P extends PanelKind, A extends PanelAutho
 type ReplayedPrefix<S, Ac, E> = Readonly<{ step: PanelStep<S, Ac, E>; events: readonly E[] }>;
 
 /** Strictly parse and reduce an event prefix from the program's start: the ONE replay every resume and checkpoint trusts. */
-function replayPrefix<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+function replayPrefix<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   authority: A,
   rawEvents: unknown,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<ReplayedPrefix<S, Ac, E>> {
   const events = safeArray(rawEvents);
-  if (events === null) return persistentFailure(panelError(program.panel, "malformed-event", `${program.panel} history must be a dense JSON event array`));
+  if (events === null) return persistentFailure(panelError("malformed-event", `${program.name} history must be a dense JSON event array`));
   const parsedEvents: E[] = [];
   let step = program.start(authority);
   for (const raw of events) {
@@ -227,8 +225,8 @@ function replayPrefix<P extends PanelKind, A extends PanelAuthority, I, S extend
 }
 
 /** The step an event prefix replays to from the program's start. */
-export function replayPanelProgram<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+export function replayPanelProgram<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   authority: A,
   rawEvents: unknown,
   resolver: PublicationAuthorityResolver,
@@ -241,25 +239,25 @@ export function replayPanelProgram<P extends PanelKind, A extends PanelAuthority
 // Checkpoints
 // ---------------------------------------------------------------------------
 
-export type PanelCheckpoint<P extends PanelKind, I, E> = Readonly<{ schemaVersion: 2; kind: `${P}-panel-checkpoint`; authority: I; events: readonly E[]; state: unknown }>;
+export type PanelCheckpoint<I, E> = Readonly<{ schemaVersion: 2; kind: `${string}-panel-checkpoint`; authority: I; events: readonly E[]; state: unknown }>;
 
 /** The durable checkpoint of a proved state: its event prefix must replay exactly to it. */
-export function panelProgramCheckpoint<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+export function panelProgramCheckpoint<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   state: S,
   events: readonly E[],
   resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<PanelCheckpoint<P, I, E>> {
-  const { panel } = program;
-  if (!program.proofs.proven(`${panel}:state`, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `checkpoint requires parser-produced ${panel} state`));
+): PersistentPanelResult<PanelCheckpoint<I, E>> {
+  const { name } = program;
+  if (!program.proofs.proven("state", state)) return persistentFailure(panelError("malformed-checkpoint", `checkpoint requires parser-produced ${name} state`));
   const authority = state.authority;
   const replayed = replayPrefix(program, authority, events, resolver);
   if (!replayed.ok) return replayed;
-  if (!statesAgree(program, state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint event prefix does not replay to the supplied state`));
+  if (!statesAgree(program, state, replayed.value.step.state)) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint event prefix does not replay to the supplied state`));
   const replayedState = JSON.parse(JSON.stringify(replayed.value.step.state)) as unknown;
   return persistentSuccess(Object.freeze({
     schemaVersion: 2 as const,
-    kind: `${panel}-panel-checkpoint` as const,
+    kind: `${name}-panel-checkpoint` as const,
     authority: program.authorityJson(authority),
     events: replayed.value.events,
     state: replayedState,
@@ -267,18 +265,18 @@ export function panelProgramCheckpoint<P extends PanelKind, A extends PanelAutho
 }
 
 /** Parse a durable checkpoint: its authority, then its event prefix replayed to exactly its recorded state. */
-export function parsePanelProgramCheckpoint<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
-  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+export function parsePanelProgramCheckpoint<A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<A, I, S, Ac, E>,
   raw: unknown,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<PanelStep<S, Ac, E>> {
-  const { panel } = program;
+  const { name } = program;
   const checkpoint = safeRecord(raw, ["schemaVersion", "kind", "authority", "events", "state"]);
-  if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== `${panel}-panel-checkpoint`) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint must be an exact schemaVersion 2 record`));
+  if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== `${name}-panel-checkpoint`) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint must be an exact schemaVersion 2 record`));
   const authority = program.parseAuthority(checkpoint.authority);
   if (!authority.ok) return authority;
   const replayed = replayPrefix(program, authority.value, checkpoint.events, resolver);
   if (!replayed.ok) return replayed;
-  if (!statesAgree(program, checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint state disagrees with its immutable event prefix`));
+  if (!statesAgree(program, checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError("malformed-checkpoint", `${name} checkpoint state disagrees with its immutable event prefix`));
   return persistentSuccess(replayed.value.step);
 }

@@ -1,88 +1,66 @@
 /**
- * The slot-progress and program kernel both persistent panels share, pinned
- * once as properties over BOTH panels: for any order of slot outcomes, an
- * attempt-1 rejection spawns exactly that slot's attempt 2, an attempt-2
- * rejection is terminal and admits nothing further, a stage advances only once
- * every slot accepted, and every recorded prefix replays and checkpoints back
- * to the exact state the reducer produced.
+ * The slot-progress and program kernel the persistent refutation panel runs
+ * on, pinned as properties over its verifier stage: for any order of slot
+ * outcomes, an attempt-1 rejection spawns exactly that slot's attempt 2, an
+ * attempt-2 rejection is terminal and admits nothing further, the stage
+ * advances only once every slot accepted, and every recorded prefix replays and
+ * checkpoints back to the exact state the reducer produced. A two-verifier panel
+ * enumerates its whole outcome space; a three-verifier panel is sampled. (The
+ * two-slot enumeration moved here from the deleted architecture panel, ADR-0030.)
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   panelRequestIdentity,
-  parseArchitecturePanelCheckpoint,
   parseRefutationPanelCheckpoint,
-  architecturePanelCheckpoint,
   refutationPanelCheckpoint,
-  replayPersistentArchitecturePanel,
   replayPersistentRefutationPanel,
-  startPersistentArchitecturePanel,
   startPersistentRefutationPanel,
-  submitArchitectureCandidateResult,
   submitRefutationVerdict,
-  type PersistentArchitecturePanelEvent,
-  type PersistentArchitectureStep,
   type PersistentRefutationPanelEvent,
   type PersistentRefutationStep,
 } from "../../src/core/persistent-panel";
-import type { PersistentPanelResult } from "../../src/core/panel-authority";
+import type { PersistentPanelResult, RefutationPanelAuthority } from "../../src/core/panel-authority";
 import type { AgentRequestAuthority, ExactRoster, SpawnRequest } from "../../src/core/orchestration-contract";
 import { createPanelPublications } from "../fixtures/panel-authority";
 import { value } from "../fixtures/parse-result";
 
 /** This property's private publication store: its resolver reads only the panels issued here. */
-const { architecturePanelFixture, issuePanelRequests, refutationPanelFixture, resolver } = createPanelPublications();
+const { issuePanelRequests, refutationPanelFixture, resolver } = createPanelPublications();
 
 /** What happens to one slot: accepted at once, accepted on its retry, or rejected twice. */
 const SLOT_PLANS = ["accept", "reject-then-accept", "reject-twice"] as const;
 type SlotPlan = (typeof SLOT_PLANS)[number];
 
-/** One panel stage as the property drives it, whichever panel owns it. */
-type StageDriver<Step> = Readonly<{
-  start: () => Step;
+/** The verifier stage as the property drives it. */
+type StageDriver = Readonly<{
+  start: () => PersistentRefutationStep;
   roster: ExactRoster;
   attempt1: readonly SpawnRequest[];
-  submit: (step: Step, request: SpawnRequest, outcome: "accept" | "reject") => PersistentPanelResult<Step>;
+  submit: (step: PersistentRefutationStep, request: SpawnRequest, outcome: "accept" | "reject") => PersistentPanelResult<PersistentRefutationStep>;
   /** Replay and checkpoint the recorded prefix; returns the replayed state's JSON. */
   persist: (prefix: readonly unknown[]) => string;
-  waitingStage: string;
-  advancedStage: string;
-  spawnKind: string;
-  blockedKind: string;
 }>;
-
-type AnyStep = PersistentArchitectureStep | PersistentRefutationStep;
 
 const json = (raw: unknown): string => JSON.stringify(raw, (key, entry: unknown) => (key === "byId" || key === "bySlot" ? undefined : entry));
 
-/** One panel's persistence surface, bound to its fixture authority and the
- *  shared resolver — the three panel functions the kernel property crosses. */
-type PanelPersistence<Step extends AnyStep, Event, Checkpoint> = Readonly<{
-  replay: (events: readonly Event[]) => PersistentPanelResult<Step>;
-  checkpoint: (state: Step["state"], events: readonly Event[]) => PersistentPanelResult<Checkpoint>;
-  reload: (raw: unknown) => PersistentPanelResult<Step>;
-}>;
-
-/** Replay, checkpoint and reload the recorded prefix through its durable JSON
- *  — the one sequence both panels share — asserting the reloaded state is the
- *  replayed one; returns the replayed state's JSON. */
-function persistPrefix<Step extends AnyStep, Event, Checkpoint>(
-  panel: PanelPersistence<Step, Event, Checkpoint>,
-  prefix: readonly unknown[],
-): string {
-  const events: readonly Event[] = JSON.parse(JSON.stringify(prefix));
-  const replayed = value(panel.replay(events));
-  const checkpoint = value(panel.checkpoint(replayed.state, events));
-  const reloaded = value(panel.reload(JSON.parse(JSON.stringify(checkpoint))));
+/** Replay, checkpoint and reload the recorded prefix through its durable JSON,
+ *  asserting the reloaded state is the replayed one; returns the replayed
+ *  state's JSON. */
+function persistPrefix(authority: RefutationPanelAuthority, prefix: readonly unknown[]): string {
+  const events: readonly PersistentRefutationPanelEvent[] = JSON.parse(JSON.stringify(prefix));
+  const replayed = value(replayPersistentRefutationPanel(authority, events, resolver));
+  const checkpoint = value(refutationPanelCheckpoint(replayed.state, events, resolver));
+  const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), resolver));
   expect(json(reloaded.state)).toBe(json(replayed.state));
   return json(replayed.state);
 }
 
 let runSequence = 0;
 
-function refutationDriver(): StageDriver<PersistentRefutationStep> {
+function refutationDriver(lenses: readonly ("reproduction" | "intent" | "blast-radius")[]): StageDriver {
   runSequence += 1;
-  const fixture = refutationPanelFixture(`run.kernel-property.ref.${runSequence}`, ["reproduction", "intent", "blast-radius"]);
+  const fixture = refutationPanelFixture(`run.kernel-property.ref.${runSequence}`, lenses);
   const verdict = (index: number) => JSON.stringify({
     criterion: fixture.authority.lenses[index],
     verdicts: fixture.authority.findings.map(({ id }) => ({ finding_id: id, verdict: "upheld", reasoning: "still exhibited" })),
@@ -93,46 +71,12 @@ function refutationDriver(): StageDriver<PersistentRefutationStep> {
     roster: fixture.authority.verifierRoster,
     attempt1: fixture.requests,
     submit: (step, request, outcome) => submitRefutationVerdict(step.state, resolver, panelRequestIdentity(request), outcome === "accept" ? verdict(indexOf(request)) : "not json"),
-    persist: (prefix) => persistPrefix({
-      replay: (events: readonly PersistentRefutationPanelEvent[]) => replayPersistentRefutationPanel(fixture.authority, events, resolver),
-      checkpoint: (state, events) => refutationPanelCheckpoint(state, events, resolver),
-      reload: (raw) => parseRefutationPanelCheckpoint(raw, resolver),
-    }, prefix),
-    waitingStage: "awaiting-verdicts",
-    advancedStage: "ready-to-tally",
-    spawnKind: "spawn-refutation-verifiers",
-    blockedKind: "refutation-blocked",
-  };
-}
-
-function architectureDriver(): StageDriver<PersistentArchitectureStep> {
-  runSequence += 1;
-  const fixture = architecturePanelFixture(`run.kernel-property.arch.${runSequence}`);
-  const indexOf = (request: SpawnRequest) => fixture.authority.candidateRoster.orderedSlots.findIndex(({ slotId }) => slotId === request.authority.slotId);
-  return {
-    start: () => startPersistentArchitecturePanel(fixture.authority),
-    roster: fixture.authority.candidateRoster,
-    attempt1: fixture.candidates,
-    submit: (step, request, outcome) => {
-      const index = indexOf(request);
-      return submitArchitectureCandidateResult(step.state, resolver, panelRequestIdentity(request), outcome === "accept"
-        ? { lens: fixture.authority.candidateLenses[index], candidate: fixture.authority.candidateIds[index], artifact: `# candidate ${index}` }
-        : { lens: fixture.authority.candidateLenses[index] });
-    },
-    persist: (prefix) => persistPrefix({
-      replay: (events: readonly PersistentArchitecturePanelEvent[]) => replayPersistentArchitecturePanel(fixture.authority, events, resolver),
-      checkpoint: (state, events) => architecturePanelCheckpoint(state, events, resolver),
-      reload: (raw) => parseArchitecturePanelCheckpoint(raw, resolver),
-    }, prefix),
-    waitingStage: "awaiting-candidates",
-    advancedStage: "awaiting-judges",
-    spawnKind: "spawn-architecture-candidates",
-    blockedKind: "architecture-blocked",
+    persist: (prefix) => persistPrefix(fixture.authority, prefix),
   };
 }
 
 /** Drive one stage through `plans` in slot `order`, asserting the kernel invariants after every step. */
-function driveStage<Step extends AnyStep>(driver: StageDriver<Step>, plans: readonly SlotPlan[], order: readonly number[]): void {
+function driveStage(driver: StageDriver, plans: readonly SlotPlan[], order: readonly number[]): void {
   let step = driver.start();
   const prefix: unknown[] = [];
   const settled = new Set<number>();
@@ -152,14 +96,14 @@ function driveStage<Step extends AnyStep>(driver: StageDriver<Step>, plans: read
       if (attemptIndex === 0) {
         // Attempt 1 rejected: exactly this slot's attempt 2, nothing else.
         const retry: AgentRequestAuthority = driver.roster.orderedSlots[slot]!.attempts[1];
-        expect(step.state.stage).toBe(driver.waitingStage);
-        expect(step.action).toEqual({ kind: driver.spawnKind, runId: retry.runId, requests: [retry] });
+        expect(step.state.stage).toBe("awaiting-verdicts");
+        expect(step.action).toEqual({ kind: "spawn-refutation-verifiers", runId: retry.runId, requests: [retry] });
         request = issuePanelRequests([retry])[0]!;
         continue;
       }
       // Attempt 2 rejected: terminal, and the stage admits nothing further.
       expect(step.state.stage).toBe("terminal-blocked");
-      expect(step.action?.kind).toBe(driver.blockedKind);
+      expect(step.action?.kind).toBe("refutation-blocked");
       const later = driver.attempt1.find((_, index) => index !== slot) ?? driver.attempt1[slot]!;
       const refused = driver.submit(step, later, "accept");
       expect(refused.ok).toBe(false);
@@ -167,7 +111,7 @@ function driveStage<Step extends AnyStep>(driver: StageDriver<Step>, plans: read
       return;
     }
     const complete = settled.size === plans.length;
-    expect(step.state.stage).toBe(complete ? driver.advancedStage : driver.waitingStage);
+    expect(step.state.stage).toBe(complete ? "ready-to-tally" : "awaiting-verdicts");
     if (!complete && plans[slot] === "accept") expect(step.action).toBeNull();
   }
 }
@@ -191,21 +135,21 @@ function everyStagePlan(slots: number): readonly StagePlan[] {
   return plansOf(slots).flatMap((plans) => orders.map((order) => ({ plans, order })));
 }
 
-describe("property: the shared slot-progress and program kernel", () => {
+describe("property: the slot-progress and program kernel", () => {
   // 3 slots span 3^3 plans x 3! orders = 162 cases, too many to enumerate at
   // ~150ms each (every recorded prefix replays through the production
   // publication resolver), so this samples 25 unseeded; a failure reports its
   // fast-check seed and path for replay. The sampling, not the assertion, sets
   // the cost, so the case states its budget.
   it("drives every refutation verifier outcome order through the same retry, terminal and replay invariants", { timeout: 30_000 }, () => {
-    fc.assert(fc.property(stagePlans(3), ({ plans, order }) => driveStage(refutationDriver(), plans, order)), { numRuns: 25 });
+    fc.assert(fc.property(stagePlans(3), ({ plans, order }) => driveStage(refutationDriver(["reproduction", "intent", "blast-radius"]), plans, order)), { numRuns: 25 });
   });
 
   // 2 slots span only 3^2 plans x 2! orders = 18 cases: enumerate them all,
   // which is both exhaustive and cheaper than sampling 25.
-  it("drives every architecture candidate outcome order through the same retry, terminal and replay invariants", () => {
+  it("drives every two-verifier outcome order through the same retry, terminal and replay invariants", { timeout: 30_000 }, () => {
     const space = everyStagePlan(2);
     expect(space).toHaveLength(18);
-    for (const { plans, order } of space) driveStage(architectureDriver(), plans, order);
+    for (const { plans, order } of space) driveStage(refutationDriver(["reproduction", "intent"]), plans, order);
   });
 });

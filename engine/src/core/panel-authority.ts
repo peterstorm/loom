@@ -1,25 +1,16 @@
 /**
- * Durable panel authority (schema v2): the issued roster authority an
- * authority-bound panel runs under, and the typed failure vocabulary every
- * durable panel operation reports in.
+ * Durable panel authority (schema v2): the issued roster authority the
+ * authority-bound refutation panel runs under, and the typed failure
+ * vocabulary every durable panel operation reports in.
  *
  * New panel sessions persist only JSON data. Runtime issuance proofs are
  * rehydrated from T1's independently loaded publication authority before a
- * durable event reaches either pure reducer (`persistent-panel`). This module
- * answers the authority questions those reducers ask: is a roster canonical
- * for its semantic entries, and which lens, criterion or candidate does a
- * roster slot answer for.
+ * durable event reaches the pure reducer (`persistent-panel`). This module
+ * answers the authority questions that reducer asks: is a roster canonical
+ * for its semantic entries, and which lens does a roster slot answer for.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
-import {
-  PANEL_LENSES,
-  architectureCriterion,
-  candidateFilename,
-  type ArchitectureCriterion,
-  type CandidateFilename,
-  type PanelLens,
-} from "./panel-contract";
 import {
   REVIEW_LENSES,
   parseCurrentBriefFinding,
@@ -73,7 +64,6 @@ export type PersistentPanelError = Readonly<{
     | "terminal-state"
     | "incomplete-roster"
     | "invalid-aggregate";
-  panel: "architecture" | "refutation";
   message: string;
   requestId?: string;
   slotId?: string;
@@ -87,7 +77,6 @@ export const boundedPanelMessage = (message: string): string => message.length <
   : `${message.slice(0, 4_083)}…[truncated]`;
 
 export const panelError = (
-  panel: PersistentPanelError["panel"],
   kind: PersistentPanelError["kind"],
   message: string,
   request?: Readonly<{
@@ -95,7 +84,7 @@ export const panelError = (
     slotId?: string;
     rehydration?: PersistentPanelError["rehydration"];
   }>,
-): PersistentPanelError => Object.freeze({ kind, panel, message: boundedPanelMessage(message), ...request });
+): PersistentPanelError => Object.freeze({ kind, message: boundedPanelMessage(message), ...request });
 
 function nonEmptyDistinctStrings(raw: unknown): readonly [string, ...string[]] | null {
   const values = safeArray(raw);
@@ -151,18 +140,15 @@ export function deriveRefutationVerifierBinding(
   }));
 }
 
-type CanonicalPanelSlotBinding = RefutationVerifierBinding;
-
-/** The run-bound legacy ordinal identity of one panel slot — slot
- *  `<stage>:<ordinal>` and requests `<runId>:<stage>:<ordinal>:<attempt>` —
+/** The run-bound legacy ordinal identity of one verifier slot — slot
+ *  `verifier:<ordinal>` and requests `<runId>:verifier:<ordinal>:<attempt>` —
  *  or null when those identities do not parse. */
 function legacyOrdinalBinding(
   runId: OrchestrationRunId,
-  stage: "candidate" | "judge" | "verifier",
   ordinal: number,
-): CanonicalPanelSlotBinding | null {
-  const slotId = parseSlotId(`${stage}:${ordinal}`);
-  const requests = ([1, 2] as const).map((attempt) => parseRequestId(`${runId}:${stage}:${ordinal}:${attempt}`));
+): RefutationVerifierBinding | null {
+  const slotId = parseSlotId(`verifier:${ordinal}`);
+  const requests = ([1, 2] as const).map((attempt) => parseRequestId(`${runId}:verifier:${ordinal}:${attempt}`));
   if (!slotId.ok || !requests[0].ok || !requests[1].ok) return null;
   return Object.freeze({
     slotId: slotId.value,
@@ -170,16 +156,15 @@ function legacyOrdinalBinding(
   });
 }
 
-function parseCanonicalPanelSlotBinding(
+function parseRefutationVerifierBinding(
   runId: OrchestrationRunId,
-  stage: "candidate" | "judge" | "verifier",
   ordinal: number,
   semanticEntry: string,
-  findingIds: readonly string[] = [],
-): CanonicalPanelSlotBinding | null {
-  const legacy = legacyOrdinalBinding(runId, stage, ordinal);
+  findingIds: readonly string[],
+): RefutationVerifierBinding | null {
+  const legacy = legacyOrdinalBinding(runId, ordinal);
   if (legacy === null) return null;
-  if (stage !== "verifier" || findingIds.length === 0) return legacy;
+  if (findingIds.length === 0) return legacy;
 
   // Refutation identities derive from the semantic lens and exact finding set
   // rather than a caller-selected ordinal. Recompute the same authority used
@@ -200,13 +185,12 @@ function parseCanonicalPanelSlotBinding(
 function rosterAuthorityErrors(
   roster: ExactRoster,
   runId: OrchestrationRunId,
-  program: "architecture-panel" | "refutation-panel",
-  role: "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent",
   semanticEntries: readonly string[],
-  stage: "candidate" | "judge" | "verifier",
-  findingIds: readonly string[] = [],
-  semanticRunId: OrchestrationRunId = runId,
+  findingIds: readonly string[],
+  semanticRunId: OrchestrationRunId,
 ): readonly string[] {
+  const program = "refutation-panel";
+  const role = "review-verifier-agent";
   const errors: string[] = [];
   if (roster.runId !== runId) errors.push("roster run does not match panel run");
   if (roster.program !== program) errors.push(`roster program must be ${program}`);
@@ -220,20 +204,20 @@ function rosterAuthorityErrors(
     }
     const semanticEntry = semanticEntries[index];
     if (semanticEntry === undefined) continue;
-    const bindingMatches = (binding: CanonicalPanelSlotBinding): boolean =>
+    const bindingMatches = (binding: RefutationVerifierBinding): boolean =>
       slot.slotId === binding.slotId &&
       slot.attempts.every((request, attemptIndex) => request.requestId === binding.requestIds[attemptIndex]);
-    const expected = parseCanonicalPanelSlotBinding(semanticRunId, stage, index + 1, semanticEntry, findingIds);
+    const expected = parseRefutationVerifierBinding(semanticRunId, index + 1, semanticEntry, findingIds);
     if (expected === null) {
       // The semantic entry cannot derive a canonical slot binding (e.g. a
       // legacy lens no longer in the current table). Admit ONLY the exact
       // run-bound legacy ordinal identity below; a weaker, shapeless ordinal
       // match would re-pair this slot with whatever semantic entry now lives
       // at its position.
-      const legacy = legacyOrdinalBinding(runId, stage, index + 1);
+      const legacy = legacyOrdinalBinding(runId, index + 1);
       if (legacy === null || !bindingMatches(legacy)) {
         errors.push(
-          `${stage} slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
+          `verifier slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
         );
       }
       continue;
@@ -245,180 +229,11 @@ function rosterAuthorityErrors(
     // requests as authoritative evidence for different semantics.
     if (!bindingMatches(expected)) {
       errors.push(
-        `${stage} slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
+        `verifier slot ${index + 1} for ${JSON.stringify(semanticEntry)} has non-canonical slot/request identity`,
       );
     }
   }
   return errors;
-}
-
-/**
- * The ordered entry slot `slotId` answers for, or `null` when the roster holds
- * no such slot.
- *
- * A roster is paired POSITIONALLY with an ordered list — `candidateLenses`,
- * `judgeCriteria`, or the refutation `lenses`. Slot `i` answers for entry `i`,
- * and the roster carries nothing that independently names its entry, so equal
- * cardinality is the whole of what the pairing itself can prove. This function is
- * therefore the only sanctioned way to cross from a slot to its entry.
- *
- * `orderedSlots.findIndex(...)` returns -1 for an unknown slot, and indexing a
- * parallel array with -1 yields `undefined` — which a `!` assertion then passes
- * downstream as if it were a real lens, criterion, or candidate id. Returning
- * `null` makes that case a refusal the caller must handle instead of a lie the
- * type system was told to ignore.
- */
-function boundEntryForSlot<T>(
-  roster: ExactRoster,
-  ordered: readonly T[],
-  slotId: SlotId,
-): T | null {
-  const index = roster.orderedSlots.findIndex((slot) => slot.slotId === slotId);
-  if (index < 0 || index >= ordered.length) return null;
-  return ordered[index] ?? null;
-}
-
-function crossRosterErrors(left: ExactRoster, right: ExactRoster): readonly string[] {
-  const errors: string[] = [];
-  const slots = new Set(left.orderedSlots.map(({ slotId }) => slotId));
-  const requests = new Set(left.orderedSlots.flatMap(({ attempts }) => attempts.map(({ requestId }) => requestId)));
-  const contexts = new Set(left.orderedSlots.flatMap(({ attempts }) => attempts.map(({ contextDigest }) => contextDigest)));
-  const outputs = new Set(left.orderedSlots.flatMap(({ attempts }) => attempts.map(({ outputSlot }) => outputSlot.path)));
-  for (const slot of right.orderedSlots) {
-    if (slots.has(slot.slotId)) errors.push(`slot id is reused across architecture phases: ${slot.slotId}`);
-    for (const request of slot.attempts) {
-      if (requests.has(request.requestId)) errors.push(`request id is reused across architecture phases: ${request.requestId}`);
-      if (contexts.has(request.contextDigest)) errors.push(`context is reused across architecture phases: ${request.contextDigest}`);
-      if (outputs.has(request.outputSlot.path)) errors.push(`output slot is reused across architecture phases: ${request.outputSlot.path}`);
-    }
-  }
-  return errors;
-}
-
-export type ArchitecturePanelAuthority = Readonly<{
-  schemaVersion: 2;
-  panel: "architecture";
-  runId: OrchestrationRunId;
-  candidateLenses: readonly [PanelLens, ...PanelLens[]];
-  candidateIds: readonly [CandidateFilename, ...CandidateFilename[]];
-  judgeCriteria: readonly [ArchitectureCriterion, ...ArchitectureCriterion[]];
-  candidateRoster: ExactRoster;
-  judgeRoster: ExactRoster;
-}>;
-
-export type ArchitecturePanelAuthorityInput = Readonly<{
-  runId: unknown;
-  candidateLenses: unknown;
-  judgeCriteria: unknown;
-  candidateSlots: unknown;
-  judgeSlots: unknown;
-}>;
-
-type ParsedPanelRunId = ReturnType<typeof parseOrchestrationRunId>;
-type ParsedExactRoster = ReturnType<typeof parseExactRoster>;
-
-/** Parse the panel's closed vocabulary entries and collect their exact errors,
- * in the authority parser's canonical order (the joined diagnostic message is
- * part of the contract the fixtures pin). */
-function architectureVocabularyEntries(
-  lenses: readonly [string, ...string[]] | null,
-  criteria: readonly [string, ...string[]] | null,
-): {
-  readonly parsedLenses: readonly PanelLens[];
-  readonly mintedCriteria: readonly ArchitectureCriterion[];
-  readonly errors: readonly string[];
-} {
-  const errors: string[] = [];
-  if (lenses === null) errors.push("candidate lenses must be a non-empty distinct ordered list");
-  if (criteria === null) errors.push("judge criteria must be a non-empty distinct ordered list");
-  const parsedLenses = lenses?.filter((lens): lens is PanelLens => (PANEL_LENSES as readonly string[]).includes(lens)) ?? [];
-  if (lenses !== null && parsedLenses.length !== lenses.length) errors.push("candidate lenses contain an unknown architecture lens");
-  // Criteria are minted through the closed vocabulary, not asserted into
-  // the brand: a checkpoint criterion outside deriveJudgeCriteria's
-  // vocabulary cannot come from a validated digest and is rejected.
-  const mintedCriteria = criteria === null
-    ? []
-    : criteria.flatMap((criterion) => {
-        const minted = architectureCriterion(criterion);
-        return minted === null ? [] : [minted];
-      });
-  if (criteria !== null && mintedCriteria.length !== criteria.length) {
-    errors.push("judge criteria contain a criterion outside the validated interview vocabulary");
-  }
-  return { parsedLenses, mintedCriteria, errors };
-}
-
-/** Roster-shape, roster-authority, and cross-roster errors for the
- * architecture authority, in the parser's canonical diagnostic order. */
-function architectureRosterAuthorityErrors(args: Readonly<{
-  runId: ParsedPanelRunId;
-  lenses: readonly [string, ...string[]] | null;
-  criteria: readonly [string, ...string[]] | null;
-  candidateRoster: ParsedExactRoster;
-  judgeRoster: ParsedExactRoster;
-}>): readonly string[] {
-  const errors: string[] = [];
-  if (!args.candidateRoster.ok) errors.push(...args.candidateRoster.error.violations.map(({ kind }) => `candidate roster: ${kind}`));
-  if (!args.judgeRoster.ok) errors.push(...args.judgeRoster.error.violations.map(({ kind }) => `judge roster: ${kind}`));
-  if (args.runId.ok && args.lenses !== null && args.candidateRoster.ok) {
-    errors.push(...rosterAuthorityErrors(
-      args.candidateRoster.value,
-      args.runId.value,
-      "architecture-panel",
-      "arch-designer-agent",
-      args.lenses,
-      "candidate",
-    ));
-  }
-  if (args.runId.ok && args.criteria !== null && args.judgeRoster.ok) {
-    errors.push(...rosterAuthorityErrors(
-      args.judgeRoster.value,
-      args.runId.value,
-      "architecture-panel",
-      "arch-judge-agent",
-      args.criteria,
-      "judge",
-    ));
-  }
-  if (args.candidateRoster.ok && args.judgeRoster.ok) errors.push(...crossRosterErrors(args.candidateRoster.value, args.judgeRoster.value));
-  return errors;
-}
-
-/** Parse an architecture panel authority from untrusted data: an issued
- *  `ArchitecturePanelAuthorityInput`, or a checkpoint's `authority` field
- *  read back from disk. No shape is assumed of `raw`. */
-export function parseArchitecturePanelAuthority(raw: unknown): PersistentPanelResult<ArchitecturePanelAuthority> {
-  try {
-    const input = safeRecord(raw, ["runId", "candidateLenses", "judgeCriteria", "candidateSlots", "judgeSlots"]);
-    if (input === null) return persistentFailure(panelError("architecture", "invalid-authority", "architecture authority must be an exact data record"));
-    const runId = parseOrchestrationRunId(input.runId);
-    const lenses = nonEmptyDistinctStrings(input.candidateLenses);
-    const criteria = nonEmptyDistinctStrings(input.judgeCriteria);
-    const candidateRoster = parseExactRoster(input.candidateSlots);
-    const judgeRoster = parseExactRoster(input.judgeSlots);
-    const vocab = architectureVocabularyEntries(lenses, criteria);
-    const errors: string[] = [];
-    if (!runId.ok) errors.push(runId.error.message);
-    errors.push(...vocab.errors);
-    errors.push(...architectureRosterAuthorityErrors({ runId, lenses, criteria, candidateRoster, judgeRoster }));
-    if (errors.length > 0 || !runId.ok || lenses === null || criteria === null || !candidateRoster.ok || !judgeRoster.ok || vocab.parsedLenses.length === 0) {
-      return persistentFailure(panelError("architecture", "invalid-authority", errors.join("; ") || "architecture authority is invalid"));
-    }
-    const canonicalLenses = Object.freeze(vocab.parsedLenses) as readonly [PanelLens, ...PanelLens[]];
-    const canonicalCriteria = Object.freeze(vocab.mintedCriteria) as unknown as readonly [ArchitectureCriterion, ...ArchitectureCriterion[]];
-    return persistentSuccess(Object.freeze({
-      schemaVersion: 2 as const,
-      panel: "architecture" as const,
-      runId: runId.value,
-      candidateLenses: canonicalLenses,
-      candidateIds: Object.freeze(canonicalLenses.map(candidateFilename)) as readonly [CandidateFilename, ...CandidateFilename[]],
-      judgeCriteria: canonicalCriteria,
-      candidateRoster: candidateRoster.value,
-      judgeRoster: judgeRoster.value,
-    }));
-  } catch {
-    return persistentFailure(panelError("architecture", "invalid-authority", "architecture authority could not be safely inspected"));
-  }
 }
 
 /** Parse the strict canonical critical-Finding list for the refutation
@@ -514,53 +329,24 @@ export type RefutationPanelAuthorityInput = Readonly<{
 }>;
 
 /**
- * Resolve the lens a verifier slot answers for, refusing a slot the verifier
- * roster does not hold instead of pairing the result with `undefined`.
+ * The lens a verifier slot answers for, refused rather than assumed.
+ *
+ * The verifier roster is paired POSITIONALLY with the ordered `lenses`: slot
+ * `i` answers for lens `i`, and the roster carries nothing that independently
+ * names its lens, so equal cardinality is the whole of what the pairing itself
+ * can prove. This is therefore the only sanctioned way to cross from a slot to
+ * its lens. An unknown slot, or one whose ordinal lies past the lens list, is a
+ * typed refusal — never `undefined` passed downstream as if it were a lens.
  */
 export function boundRefutationLens(
   authority: RefutationPanelAuthority,
   slotId: SlotId,
 ): PersistentPanelResult<ReviewLens> {
-  const lens = boundEntryForSlot(authority.verifierRoster, authority.lenses, slotId);
-  return lens === null
-    ? persistentFailure(panelError("refutation", "request-binding-mismatch", `slot ${slotId} is bound to no refutation lens`, { slotId }))
+  const index = authority.verifierRoster.orderedSlots.findIndex((slot) => slot.slotId === slotId);
+  const lens = index < 0 ? undefined : authority.lenses[index];
+  return lens === undefined
+    ? persistentFailure(panelError("request-binding-mismatch", `slot ${slotId} is bound to no refutation lens`, { slotId }))
     : persistentSuccess(lens);
-}
-
-/**
- * The criterion a judge slot answers for, refused rather than assumed.
- *
- * Both judge paths — the event reducer and the direct submission — used to do
- * `judgeRoster.orderedSlots.findIndex(...)` and then `judgeCriteria[index]!`,
- * which is precisely the pattern `boundEntryForSlot`'s doc exists to forbid: an
- * unknown slot yields -1, indexing with -1 yields `undefined`, and the `!` hands
- * that downstream as if it were a real criterion. The verdict parser would then
- * check the submission against `undefined` and admit whatever it was given.
- */
-export function boundJudgeCriterion(
-  authority: ArchitecturePanelAuthority,
-  slotId: SlotId,
-): PersistentPanelResult<ArchitectureCriterion> {
-  const criterion = boundEntryForSlot(authority.judgeRoster, authority.judgeCriteria, slotId);
-  return criterion === null
-    ? persistentFailure(panelError("architecture", "request-binding-mismatch", `slot ${slotId} is bound to no judge criterion`, { slotId }))
-    : persistentSuccess(criterion);
-}
-
-/**
- * Resolve the lens and candidate id a designer slot answers for. Both come from
- * the same ordinal, so they are resolved together — pairing a lens from one
- * position with a candidate id from another is the mismatch this prevents.
- */
-export function boundCandidateEntry(
-  authority: ArchitecturePanelAuthority,
-  slotId: SlotId,
-): PersistentPanelResult<Readonly<{ lens: PanelLens; candidate: CandidateFilename }>> {
-  const lens = boundEntryForSlot(authority.candidateRoster, authority.candidateLenses, slotId);
-  const candidate = boundEntryForSlot(authority.candidateRoster, authority.candidateIds, slotId);
-  return lens === null || candidate === null
-    ? persistentFailure(panelError("architecture", "request-binding-mismatch", `slot ${slotId} is bound to no candidate lens`, { slotId }))
-    : persistentSuccess(Object.freeze({ lens, candidate }));
 }
 
 /** Parse a refutation panel authority from untrusted data: an issued
@@ -582,7 +368,7 @@ function refutationPanelAuthority(
   try {
     const input = safeRecord(raw, ["runId", "identityRunId", "findings", "lenses", "verifierSlots"]) ??
       safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);
-    if (input === null) return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority must be an exact data record"));
+    if (input === null) return persistentFailure(panelError("invalid-authority", "refutation authority must be an exact data record"));
     const roster = rosterOf(input.verifierSlots);
     const runId = parseOrchestrationRunId(input.runId);
     const identityRunId = parseOrchestrationRunId(input.identityRunId ?? input.runId);
@@ -603,16 +389,13 @@ function refutationPanelAuthority(
       errors.push(...rosterAuthorityErrors(
         roster.value,
         runId.value,
-        "refutation-panel",
-        "review-verifier-agent",
         lenses,
-        "verifier",
         findings.map(({ id }) => id),
         identityRunId.ok ? identityRunId.value : runId.value,
       ));
     }
     if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
-      return persistentFailure(panelError("refutation", "invalid-authority", errors.join("; ") || "refutation authority is invalid"));
+      return persistentFailure(panelError("invalid-authority", errors.join("; ") || "refutation authority is invalid"));
     }
     return persistentSuccess(Object.freeze({
       schemaVersion: 2 as const,
@@ -624,7 +407,7 @@ function refutationPanelAuthority(
       verifierRoster: roster.value,
     }));
   } catch {
-    return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority could not be safely inspected"));
+    return persistentFailure(panelError("invalid-authority", "refutation authority could not be safely inspected"));
   }
 }
 
@@ -667,8 +450,3 @@ export function issueRefutationPanelAuthority(
   const roster = mintableRoster(issueExactRoster(input.verifierSlots));
   return roster.ok ? refutationPanelAuthority(input, () => roster.value) : roster;
 }
-
-const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";
-const _refutationLensRemainsDisjoint: Exclude<ReviewLens, PanelLens> = "reproduction";
-void _architectureLensRemainsDisjoint;
-void _refutationLensRemainsDisjoint;
