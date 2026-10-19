@@ -1,5 +1,10 @@
 /**
- * PostToolUse handler: record-evidence
+ * PostToolUse and PostToolUseFailure handler: record-evidence
+ *
+ * Claude Code fires PostToolUse only for a tool call that succeeded. A Bash
+ * command that exits non-zero is a failed call and arrives as
+ * PostToolUseFailure instead, so a failing test run, the red that I6 must
+ * see, reaches the ledger only through that event.
  *
  * Appends ground-truth evidence records (facts only, epoch-stamped) to the
  * session's ledger — the deterministic core observes what happened at
@@ -59,12 +64,17 @@ function standDownNotice(
 
 interface RecordEvidenceInput {
   session_id?: string;
+  /** `PostToolUseFailure` for a failed call; any other value is a success. */
+  hook_event_name?: unknown;
   /** Caller identity — set by Claude Code only inside a subagent. Untrusted:
    *  parsed by parseCallerIdentity, never used raw. */
   agent_id?: unknown;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   tool_response?: unknown;
+  /** PostToolUseFailure only: the failure text and whether the user interrupted. */
+  error?: unknown;
+  is_interrupt?: unknown;
   cwd?: string;
   /** Harness id of this tool call — stamped on ledger records as the
    *  idempotency key so a duplicated PostToolUse never double-counts. */
@@ -119,9 +129,12 @@ export const runRecordEvidence = async (
     recordToolEvidence(
       { kind: "record", ledger: sessionId, epoch: binding.epoch, stamps: sessionId },
       claudeToolCall({
+        hook_event_name: input.hook_event_name,
         tool_name: toolName,
         tool_input: input.tool_input,
         tool_response: input.tool_response,
+        error: input.error,
+        is_interrupt: input.is_interrupt,
         tool_use_id: input.tool_use_id,
         cwd: input.cwd ?? process.cwd(),
       }),

@@ -3,15 +3,19 @@
  * finished tool call into the harness-neutral `HarnessToolCall` the shared
  * minting rule reads (AD-8, INV-4).
  *
- * - `claudeToolCall(payload)` reads Claude Code's PostToolUse hook payload.
+ * - `claudeToolCall(payload)` reads Claude Code's PostToolUse or
+ *   PostToolUseFailure hook payload.
  * - `piToolCall(event, cwd)` reads a Pi child's `tool_result` event.
  *
  * Each reads its harness's own result shape and nothing else, so the facts
  * the shared shell (`machine/tool-evidence-recorder.ts`) mints from one call
- * are the same on both harnesses. Both are total and never throw. An unknown
- * Claude Code Bash shape degrades to `exit-unknown`, the outcome that trusts
- * least. Pi reports no exit code, so a Pi bash result is read from `isError`
- * as exit 1 or 0, and an unrecognised one reads as exit 0 (`piBashOutcome`).
+ * are the same on both harnesses. Both are total and never throw. Neither
+ * harness hands over an exit code directly. Claude Code reports a finished
+ * Bash call through one of two hook events: a success means exit 0, and a
+ * failure's `error` names the code (`claudeBashOutcome`). An unknown Claude
+ * Code Bash shape degrades to `exit-unknown`, the outcome that trusts least.
+ * Pi reads a bash result from `isError` as exit 1 or 0, and an unrecognised
+ * one as exit 0 (`piBashOutcome`).
  * An unknown file-tool shape counts as success on both, so a harness format
  * change cannot starve the ledger of writes (`isClaudeToolFailure`).
  *
@@ -91,15 +95,45 @@ const CLAUDE_TOOLS: Readonly<Record<string, HarnessToolCall["tool"]>> = Object.f
   Bash: "Bash",
 });
 
-/** The PostToolUse hook payload fields the adapter reads. `cwd` is required:
- *  the hook shell supplies its own fallback when the harness sent none. */
+/** The hook payload fields the adapter reads. PostToolUse carries
+ *  `tool_response`; PostToolUseFailure carries `error` and `is_interrupt`.
+ *  `cwd` is required: the hook shell supplies its own fallback when the
+ *  harness sent none. */
 export type ClaudeToolPayload = Readonly<{
+  hook_event_name?: unknown;
   tool_name: string;
   tool_input?: unknown;
   tool_response?: unknown;
+  error?: unknown;
+  is_interrupt?: unknown;
   tool_use_id?: unknown;
   cwd: string;
 }>;
+
+/**
+ * How Claude Code delivered one finished call. It fires PostToolUse only when
+ * the tool succeeded and PostToolUseFailure when it failed, and a Bash command
+ * that exits non-zero is a failed call. Probed in Claude Code 2.1.286: the
+ * failure input is `{ tool_name, tool_input, tool_use_id, error, is_interrupt,
+ * duration_ms }` beside the session fields, and a Bash `error` starts
+ * `Exit code N`.
+ */
+export type ClaudeToolResult =
+  | Readonly<{ kind: "succeeded"; toolResponse: unknown }>
+  | Readonly<{ kind: "failed"; error: string; interrupted: boolean }>;
+
+/** The result a Claude Code hook payload reports. Only an explicit
+ *  PostToolUseFailure event is a failure; any other payload carries the
+ *  PostToolUse `tool_response`. */
+export function claudeToolResult(payload: ClaudeToolPayload): ClaudeToolResult {
+  return payload.hook_event_name === "PostToolUseFailure"
+    ? {
+        kind: "failed",
+        error: typeof payload.error === "string" ? payload.error : "",
+        interrupted: payload.is_interrupt === true,
+      }
+    : { kind: "succeeded", toolResponse: payload.tool_response };
+}
 
 /**
  * Did Claude Code report this file-tool call as FAILED? Field names vary
@@ -115,30 +149,71 @@ export function isClaudeToolFailure(toolResponse: unknown): boolean {
   return typeof toolResponse.error === "object" && toolResponse.error !== null;
 }
 
+/** The line a failed Claude Code Bash call's `error` starts with. */
+const CLAUDE_EXIT_LINE = /^(?:Error: )?Exit code (\d+)(?:\n|$)/;
+
+/** The status line Claude Code adds when its Bash timeout killed the command. */
+const CLAUDE_TIMED_OUT = /(?:^|\n)Command timed out after /;
+
 /**
- * A Claude Code Bash `tool_response`, read defensively. `interrupted: true`
- * is a kill. An integer `exit_code` (or the `exitCode`, `returnCode`, `code`
- * spellings of other harness versions) is the exit; anything else is an
- * unknown exit, which never counts as success on its own. A bare string
- * response is the stdout of a run with no reported exit.
+ * A failed Claude Code Bash call. An interrupt or a timeout is a kill: the
+ * command never finished, even though a timeout's `error` also starts
+ * `Exit code 143`. Otherwise `Exit code N` is the exit, and the rest of the
+ * error is the captured output. A failure without that line (the command
+ * never spawned) has no known exit.
  */
-export function claudeBashOutcome(toolResponse: unknown): BashToolOutcome {
+function failedBashOutcome(error: string, interrupted: boolean): BashToolOutcome {
+  if (interrupted || CLAUDE_TIMED_OUT.test(error)) return { kind: "interrupted" };
+  const exitLine = CLAUDE_EXIT_LINE.exec(error);
+  if (exitLine === null) return { kind: "exit-unknown", stdout: error };
+  return { kind: "exited", exit: Number(exitLine[1]), stdout: error.slice(exitLine[0].length) };
+}
+
+/**
+ * A successful Claude Code Bash call, read defensively from its
+ * `tool_response`.
+ * - `interrupted: true` is a kill. A backgrounded call (`run_in_background`,
+ *   or a `backgroundTaskId` in the response) returned before its command
+ *   finished, so it reads as unfinished too.
+ * - An integer `exit_code` (or the `exitCode`, `returnCode`, `code`
+ *   spellings of other harness versions) is the exit.
+ * - Claude Code's Bash success shape (`stdout` and a boolean `interrupted`)
+ *   means exit 0, unless it carries a `returnCodeInterpretation`: that marks
+ *   a non-zero exit the harness chose not to call a failure (`grep` finding
+ *   nothing), whose code is unknown.
+ * - Anything else, including a bare string, is an unknown exit, which never
+ *   counts as success on its own.
+ */
+function succeededBashOutcome(toolResponse: unknown, input: Readonly<Record<string, unknown>>): BashToolOutcome {
   if (typeof toolResponse === "string") return { kind: "exit-unknown", stdout: toolResponse };
   if (!isRecord(toolResponse)) return { kind: "exit-unknown", stdout: "" };
   if (toolResponse.interrupted === true) return { kind: "interrupted" };
+  if (input.run_in_background === true || typeof toolResponse.backgroundTaskId === "string") return { kind: "interrupted" };
   const stdoutRaw = toolResponse.stdout ?? toolResponse.output;
   const stdout = typeof stdoutRaw === "string" ? stdoutRaw : "";
   const exit = toolResponse.exit_code ?? toolResponse.exitCode ?? toolResponse.returnCode ?? toolResponse.code;
-  return isIntegerExit(exit) ? { kind: "exited", exit, stdout } : { kind: "exit-unknown", stdout };
+  if (isIntegerExit(exit)) return { kind: "exited", exit, stdout };
+  const successShape = typeof toolResponse.stdout === "string" && typeof toolResponse.interrupted === "boolean";
+  const reinterpreted = typeof toolResponse.returnCodeInterpretation === "string";
+  return successShape && !reinterpreted ? { kind: "exited", exit: 0, stdout } : { kind: "exit-unknown", stdout };
 }
 
-/** Normalize Claude Code's PostToolUse payload. */
+/** A Claude Code Bash call's outcome, from the hook event that delivered it. */
+export function claudeBashOutcome(result: ClaudeToolResult, input: Readonly<Record<string, unknown>> = {}): BashToolOutcome {
+  return result.kind === "failed"
+    ? failedBashOutcome(result.error, result.interrupted)
+    : succeededBashOutcome(result.toolResponse, input);
+}
+
+/** Normalize Claude Code's PostToolUse or PostToolUseFailure payload. */
 export function claudeToolCall(payload: ClaudeToolPayload): HarnessToolCall {
+  const result = claudeToolResult(payload);
+  const input = recordOrEmpty(payload.tool_input);
   return normalized(
     toolOf(CLAUDE_TOOLS, payload.tool_name),
-    { input: recordOrEmpty(payload.tool_input), callId: parseToolCallId(payload.tool_use_id), cwd: payload.cwd },
-    () => (isClaudeToolFailure(payload.tool_response) ? { kind: "failed" } : { kind: "succeeded" }),
-    () => claudeBashOutcome(payload.tool_response),
+    { input, callId: parseToolCallId(payload.tool_use_id), cwd: payload.cwd },
+    () => (result.kind === "failed" || isClaudeToolFailure(result.toolResponse) ? { kind: "failed" } : { kind: "succeeded" }),
+    () => claudeBashOutcome(result, input),
   );
 }
 

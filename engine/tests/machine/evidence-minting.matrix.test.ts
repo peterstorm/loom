@@ -3,8 +3,11 @@
  *
  * The same tool-call fixtures are delivered through both sibling entry points
  * of the owner module `engine/src/machine/tool-evidence-recorder.ts`:
- * - Claude Code: the PostToolUse recorder `runRecordEvidence`, fed hook
- *   payloads (`engine/src/handlers/post-tool-use/record-evidence.ts`);
+ * - Claude Code: the PostToolUse/PostToolUseFailure recorder
+ *   `runRecordEvidence`, fed the hook payloads Claude Code 2.1.286 sends
+ *   (`engine/src/handlers/post-tool-use/record-evidence.ts`): a Bash success
+ *   as a PostToolUse with no exit field, a non-zero exit as a
+ *   PostToolUseFailure whose `error` starts `Exit code N`;
  * - Pi: the child `tool_result` recorder (`pi/evidence-recorder.ts`), fed Pi
  *   tool-result events.
  * Both write into one in-memory registry. The matrix asserts that the two
@@ -12,8 +15,8 @@
  * order, and that those facts are the expected ones, so identity is never
  * vacuous. Rows cover read, write, edit, multi-edit, a failed file tool, a
  * bash redirect, mv / git mv / cp, an unrelated tool, and test runs with a
- * Vitest JSON report, a Bun JUnit report, a stale report and an
- * agent-authored report.
+ * Vitest JSON report, a Bun JUnit report, a stale report, an
+ * agent-authored report and a timeout.
  *
  * A source scan pins the rule's ownership: no production module but the two
  * owners mints (`extractEvidence(`) or appends (`.appendEvidence(`).
@@ -46,7 +49,14 @@ afterAll(() => {
 
 type Row = Readonly<{
   name: string;
-  claude: Readonly<{ tool_name: string; tool_input: Record<string, unknown>; tool_response: unknown }>;
+  claude: Readonly<{
+    hook_event_name?: string;
+    tool_name: string;
+    tool_input: Record<string, unknown>;
+    tool_response?: unknown;
+    error?: string;
+    is_interrupt?: boolean;
+  }>;
   pi: Readonly<{ toolName: string; input: Record<string, unknown>; content: unknown; isError: boolean; details?: unknown }>;
   /** What the tool did on disk, between its call-start stamp and its result. */
   effect?: () => void;
@@ -94,11 +104,22 @@ const vitestReport = join(temp, "vitest-report.json");
 const junitReport = join(temp, "bun-report.xml");
 const staleReport = join(temp, "stale-report.json");
 const stagedReport = join(temp, "staged-report.json");
+const timeoutReport = join(temp, "timeout-report.json");
+const timeoutCommand = `npx vitest run --reporter=json --outputFile=${timeoutReport}`;
+
+/** Claude Code 2.1.286's Bash hook payload for one finished command: a
+ *  PostToolUse success carries no exit field, and a non-zero exit is a
+ *  PostToolUseFailure whose `error` names the code before the output. */
+function claudeBash(command: string, exit: number, stdout: string): Row["claude"] {
+  return exit === 0
+    ? { tool_name: "Bash", tool_input: { command }, tool_response: { stdout, stderr: "", interrupted: false, isImage: false, noOutputExpected: false } }
+    : { hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_input: { command }, error: `Exit code ${exit}\n${stdout}`, is_interrupt: false };
+}
 
 function bashRow(name: string, command: string, exit: number, stdout = "", effect?: () => void): Row {
   return {
     name,
-    claude: { tool_name: "Bash", tool_input: { command }, tool_response: { stdout, stderr: "", interrupted: false, exit_code: exit } },
+    claude: claudeBash(command, exit, stdout),
     pi: { toolName: "bash", input: { command }, content: text(stdout), isError: exit !== 0, details: undefined },
     effect,
   };
@@ -145,6 +166,18 @@ const ROWS: readonly Row[] = [
   fileRow("agent stages a report", "Write", "write", stagedReport, { content: vitestJson(false) }),
   bashRow("agent-authored report cannot vouch", `npx vitest run --reporter=json --outputFile=${stagedReport}`, 0),
   bashRow("failing bun run without a report", "bun test tests/feature.test.ts", 1, "0 pass\n1 fail\n"),
+  {
+    name: "a timed-out run is a kill, so its green report cannot vouch",
+    claude: {
+      hook_event_name: "PostToolUseFailure",
+      tool_name: "Bash",
+      tool_input: { command: timeoutCommand },
+      error: "Exit code 143\nCommand timed out after 2m 0s",
+      is_interrupt: false,
+    },
+    pi: { toolName: "bash", input: { command: timeoutCommand }, content: text("Command timed out after 120 seconds"), isError: true },
+    effect: () => writeFileSync(timeoutReport, vitestJson(false)),
+  },
 ];
 
 /** The facts the rows must mint, in order (report summaries checked by shape). */
@@ -173,6 +206,7 @@ const EXPECTED = [
   { kind: "FileWrite", path: stagedReport, via: "tool" },
   { kind: "TestRun", command: `npx vitest run --reporter=json --outputFile=${stagedReport}`, exit: 0, report: null },
   { kind: "TestRun", command: "bun test tests/feature.test.ts", exit: 1, report: null },
+  { kind: "TestRun", command: timeoutCommand, exit: null, report: null },
 ];
 
 // ─── Delivery through each sibling entry point ────────────────────────────

@@ -17,7 +17,9 @@ model, see [`docs/deterministic-core.md`](../docs/deterministic-core.md).
   (`<agent_id>:<agent_type>`). An *invalid* machine file binds too — the
   gate then fails closed with the parse error instead of enforcement
   silently switching off.
-- **PostToolUse** (`record-evidence`) appends epoch-stamped, **facts-only**
+- **PostToolUse** and, for Bash, **PostToolUseFailure** (`record-evidence`;
+  Claude Code reports a command that exits non-zero only through the failure
+  event) append epoch-stamped, **facts-only**
   records to `<session>.evidence.jsonl`: `FileRead`, `FileWrite`, and
   `TestRun` carrying the real exit status plus a parsed report artifact
   (vitest/jest JSON via `--outputFile`/stdout, JUnit XML — JVM runners

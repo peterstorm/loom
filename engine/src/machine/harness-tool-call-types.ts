@@ -6,7 +6,8 @@
  *
  * One minting rule serves both harnesses (AD-8, INV-4). Each harness adapter
  * normalizes its own tool event into a `HarnessToolCall`:
- * - Claude Code: `claudeToolCall(payload)` over the PostToolUse hook payload;
+ * - Claude Code: `claudeToolCall(payload)` over the PostToolUse or
+ *   PostToolUseFailure hook payload;
  * - Pi: `piToolCall(event)` over the child's `tool_result` event, mapping
  *   Pi's lowercase tool names onto `HarnessTool`.
  *
@@ -57,16 +58,18 @@ export type FileToolOutcome =
  * targets mint in every arm, because the shell opens a redirect target before
  * the command runs.
  * - `exited`: the command finished with this integer exit status (FR-033).
- *   Claude Code: the exit code its `tool_response` carries. Pi:
+ *   Claude Code: 0 for a PostToolUse success, and the `Exit code N` a
+ *   PostToolUseFailure `error` names. Pi:
  *   `details.exitCode` when it is a number, otherwise `isError ? 1 : 0`, so
  *   Pi always lands here or in `interrupted`. A TestRun gets this `exit`
  *   (through exit attribution) and may pair with a discovered report.
  * - `exit-unknown`: the command finished, but the harness exposed no exit
- *   status (an unrecognized Claude `tool_response` shape). A TestRun gets
+ *   status (an unrecognized Claude `tool_response` shape, or a success the
+ *   harness reinterpreted from a non-zero exit). A TestRun gets
  *   `exit: null`, which never counts as success on its own. A report may
  *   still pair with it, because the run finished.
- * - `interrupted`: the harness killed the call (timeout or abort), so the
- *   command never finished. A TestRun gets `exit: null` and `report: null`:
+ * - `interrupted`: the harness killed the call (timeout or abort), or ran it
+ *   in the background, so the command never finished within the call. A TestRun gets `exit: null` and `report: null`:
  *   a killed runner leaves a partial report that can read green, so only a
  *   finished run may vouch. No stdout is carried, because none is trusted.
  *
