@@ -11,7 +11,7 @@
  * Usage: bun cli.ts helper lint-wave-gate [--wave N]
  */
 
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
@@ -22,6 +22,7 @@ import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/rep
 import { repositoryRoot, visibleLeavesAt } from "../../utils/git";
 import { sha256Bytes } from "../../core/digest";
 import { lintRuntimeSkew, renderLintRuntimeSkew, type LintRuleDigests } from "../../core/lint-runtime-skew";
+import { lintRuleSourceFiles } from "../../linter/rule-sources";
 
 // --- Testable helper logic (pure transformations and filesystem adapters) ---
 
@@ -150,54 +151,17 @@ function batchResultLookup(results: ReadonlyMap<string, LintResult>): (file: str
 // --- Imperative shell (I/O at edges) ---
 
 /** The root of the runtime Loom is loaded from: the checkout whose rules every lint executes. */
-export const LINT_RUNTIME_ROOT = dirname(DEFAULT_RULES_DIR);
-
-/** The programmatic linter: a repository that carries it is a Loom checkout. */
-const PROGRAMMATIC_RULES = join("engine", "src", "linter");
-
-/** The two trees whose bytes are the lint's rules: declarative and programmatic. */
-const LINT_RULE_TREES = [
-  { directory: "lint-rules", extension: ".json" },
-  { directory: PROGRAMMATIC_RULES, extension: ".ts" },
-] as const;
-
-function isMissing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === "ENOENT";
-}
-
-/** Every regular rule file under `directory` (symlinks are not rule code the runtime loads). */
-function ruleFiles(root: string, directory: string, extension: string): readonly string[] {
-  return readdirSync(join(root, directory), { withFileTypes: true }).flatMap((entry) => {
-    const relative = join(directory, entry.name);
-    if (entry.isDirectory()) return ruleFiles(root, relative, extension);
-    return entry.isFile() && entry.name.endsWith(extension) ? [relative] : [];
-  });
-}
+const LINT_RUNTIME_ROOT = dirname(DEFAULT_RULES_DIR);
 
 /**
- * The digests of one tree's lint rules, or `null` when it carries no
- * programmatic linter — the repository is not a Loom checkout. A missing
- * `lint-rules/` beside a present linter is an empty declarative tree.
+ * The digests of one tree's lint rules — exactly the files the linter loads
+ * (`linter/rule-sources`), read as the loader reads them, symlinks followed —
+ * or `null` when the tree is not a Loom checkout.
  */
 export function observeLintRuleDigests(root: string): LintRuleDigests | null {
-  try {
-    lstatSync(join(root, PROGRAMMATIC_RULES));
-  } catch (error) {
-    if (isMissing(error)) return null;
-    throw error;
-  }
-  const digests = new Map<string, string>();
-  for (const { directory, extension } of LINT_RULE_TREES) {
-    let files: readonly string[];
-    try {
-      files = ruleFiles(root, directory, extension);
-    } catch (error) {
-      if (isMissing(error)) continue;
-      throw error;
-    }
-    for (const file of files) digests.set(file.split("\\").join("/"), sha256Bytes(readFileSync(join(root, file))));
-  }
-  return digests;
+  const files = lintRuleSourceFiles(root);
+  if (files === null) return null;
+  return new Map(files.map((file) => [file.split("\\").join("/"), sha256Bytes(readFileSync(join(root, file)))] as const));
 }
 
 /**

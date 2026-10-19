@@ -399,12 +399,24 @@ describe("observeLintRuleDigests", () => {
     }
   });
 
-  it("digests every declarative .json and programmatic .ts rule file, nested, and nothing else", () => {
-    const root = ruleTree("loom-skew-tree-", { ...LOOM_RULES, "engine/src/linter/README.md": "docs", "lint-rules/notes.txt": "x" });
+  it("digests exactly the rule files the linter loads: top-level declarative .json and nested programmatic .ts", () => {
+    const root = ruleTree("loom-skew-tree-", {
+      ...LOOM_RULES,
+      "engine/src/linter/README.md": "docs",
+      "lint-rules/notes.txt": "x",
+      // The loader reads lint-rules/ one level deep and reserves config.json.
+      "lint-rules/nested/extra.json": "{}",
+      "lint-rules/config.json": "{}",
+    });
     try {
+      // A symlinked rule is loaded through its target, so it is rule code too.
       symlinkSync(join(root, "engine/src/linter/index.ts"), join(root, "engine/src/linter/linked.ts"));
+      symlinkSync(join(root, "lint-rules/no-console-log.json"), join(root, "lint-rules/aliased.json"));
       const digests = observeLintRuleDigests(root);
-      expect([...(digests?.keys() ?? [])].sort()).toEqual(Object.keys(LOOM_RULES).sort());
+      expect([...(digests?.keys() ?? [])].sort()).toEqual([
+        ...Object.keys(LOOM_RULES), "engine/src/linter/linked.ts", "lint-rules/aliased.json",
+      ].sort());
+      expect(digests?.get("engine/src/linter/linked.ts")).toBe(digests?.get("engine/src/linter/index.ts"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -463,7 +475,7 @@ describe("lintRuntimeSkewNote", () => {
 });
 
 describe("runFullTierWaveLint under runtime skew", () => {
-  it("appends the skew note to a rule refusal of a Loom checkout whose rules differ from the runtime's", () => {
+  it("leads a rule refusal with the skew note when the Loom checkout's rules differ from the runtime's", () => {
     const runtime = ruleTree("loom-skew-runtime-", LOOM_RULES);
     const branch = ruleTree("loom-skew-gated-", {
       "engine/src/linter/index.ts": "export const changed = true;\n",

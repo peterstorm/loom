@@ -12,6 +12,7 @@ import { type RegexRule, type Rule, type Tier, type RuleSource, isRegexRule } fr
 import { analyzeRegex } from "./safety";
 import { createProgrammaticRules } from "./programmatic/index";
 import { loadProjectConfig } from "./programmatic/config";
+import { isDeclarativeRuleFile } from "./rule-sources";
 
 // --- Public API ---
 
@@ -98,7 +99,7 @@ function loadRulesFromDir(dir: string, source: RuleSource, absentIsEmpty = false
     if (absentIsEmpty && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  const files = entries.filter((f) => f.endsWith(".json") && f !== "config.json");
+  const files = entries.filter(isDeclarativeRuleFile);
   const rules: Rule[] = [];
 
   for (const file of files) {
