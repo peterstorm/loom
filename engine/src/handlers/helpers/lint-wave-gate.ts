@@ -11,7 +11,8 @@
  * Usage: bun cli.ts helper lint-wave-gate [--wave N]
  */
 
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -19,6 +20,9 @@ import { lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from ".
 import type { LintResult, LintOutput } from "../../linter/index";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import { repositoryRoot, visibleLeavesAt } from "../../utils/git";
+import { sha256Bytes } from "../../core/digest";
+import { lintRuntimeSkew, renderLintRuntimeSkew, type LintRuleDigests } from "../../core/lint-runtime-skew";
+import { lintRuleSourceFiles } from "../../linter/rule-sources";
 
 // --- Testable helper logic (pure transformations and filesystem adapters) ---
 
@@ -146,6 +150,43 @@ function batchResultLookup(results: ReadonlyMap<string, LintResult>): (file: str
 
 // --- Imperative shell (I/O at edges) ---
 
+/** The root of the runtime Loom is loaded from: the checkout whose rules every lint executes. */
+const LINT_RUNTIME_ROOT = dirname(DEFAULT_RULES_DIR);
+
+/**
+ * The digests of one tree's lint rules — exactly the files the linter loads
+ * (`linter/rule-sources`), read as the loader reads them, symlinks followed —
+ * or `null` when the tree is not a Loom checkout.
+ */
+export function observeLintRuleDigests(root: string): LintRuleDigests | null {
+  const files = lintRuleSourceFiles(root);
+  if (files === null) return null;
+  return new Map(files.map((file) => [file.split("\\").join("/"), sha256Bytes(readFileSync(join(root, file)))] as const));
+}
+
+/**
+ * The skew sentence a lint refusal of `repositoryRoot` should carry, or `null`
+ * when the lint ran the branch's own rules. Never throws: a tree that cannot be
+ * read is reported, because a silent "no skew" is exactly the trap D6 names.
+ */
+export function lintRuntimeSkewNote(repositoryRoot: string, runtimeRoot: string = LINT_RUNTIME_ROOT): string | null {
+  try {
+    const runtime = observeLintRuleDigests(runtimeRoot);
+    if (runtime === null) return `Lint runtime skew could not be checked: the loaded runtime at ${runtimeRoot} carries no engine/src/linter.`;
+    return renderLintRuntimeSkew(lintRuntimeSkew(runtimeRoot, runtime, observeLintRuleDigests(repositoryRoot)));
+  } catch (error) {
+    return `Lint runtime skew could not be checked: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** A rule refusal, led by the skew sentence when the rules were not the branch's.
+ *  It leads so that a bounded copy of a long refusal still carries it. */
+function withRuntimeSkewNote(result: HookResult, root: string, runtimeRoot: string): HookResult {
+  if (result.kind !== "block") return result;
+  const note = lintRuntimeSkewNote(root, runtimeRoot);
+  return note === null ? result : { ...result, message: `⚠ ${note}\n\n${result.message}` };
+}
+
 /** Fail closed: every unexpected engine error blocks the gate with one message shape. */
 function engineError(error: unknown): HookResult {
   return {
@@ -156,12 +197,12 @@ function engineError(error: unknown): HookResult {
 
 /** Execute full-tier lint for one already-authorized Wave task set. Never
  *  throws: every failure becomes the engine-error block. */
-export function runFullTierWaveLint(tasks: readonly Task[]): HookResult {
+export function runFullTierWaveLint(tasks: readonly Task[], runtimeRoot: string = LINT_RUNTIME_ROOT): HookResult {
   try {
     const root = repositoryRoot() ?? process.cwd();
     const existingFiles = resolveLintTargets(root, collectModifiedFiles(tasks));
     if (existingFiles.length === 0) return { kind: "allow" };
-    return aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR));
+    return withRuntimeSkewNote(aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR)), root, runtimeRoot);
   } catch (error) {
     return engineError(error);
   }

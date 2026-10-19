@@ -11,6 +11,8 @@ import {
   aggregateResults,
   lintFiles,
   runFullTierWaveLint,
+  observeLintRuleDigests,
+  lintRuntimeSkewNote,
   type FileLintResult,
 } from "../../../src/handlers/helpers/lint-wave-gate";
 import type { Task, TaskCommonMetadata } from "../../../src/types";
@@ -364,6 +366,151 @@ describe("runFullTierWaveLint", () => {
       }
     } finally {
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- lint runtime skew (issue #57 D6) ---
+
+/** Write `files` (root-relative path → contents) under a fresh temp root. */
+function ruleTree(prefix: string, files: Readonly<Record<string, string>>): string {
+  const root = canonicalTempDir(prefix);
+  for (const [relative, contents] of Object.entries(files)) {
+    const absolute = join(root, relative);
+    mkdirSync(join(absolute, ".."), { recursive: true });
+    writeFileSync(absolute, contents);
+  }
+  return root;
+}
+
+const LOOM_RULES = {
+  "lint-rules/no-console-log.json": '{"name":"no-console-log"}',
+  "engine/src/linter/index.ts": "export {};\n",
+  "engine/src/linter/programmatic/no-cross-boundary-imports.ts": "export const allow = [];\n",
+} as const;
+
+describe("observeLintRuleDigests", () => {
+  it("is null for a repository that carries no programmatic linter", () => {
+    const root = ruleTree("loom-skew-none-", { "lint-rules/no-console-log.json": "{}", "src/a.ts": "export {};\n" });
+    try {
+      expect(observeLintRuleDigests(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("digests exactly the rule files the linter loads: top-level declarative .json and nested programmatic .ts", () => {
+    const root = ruleTree("loom-skew-tree-", {
+      ...LOOM_RULES,
+      "engine/src/linter/README.md": "docs",
+      "lint-rules/notes.txt": "x",
+      // The loader reads lint-rules/ one level deep and reserves config.json.
+      "lint-rules/nested/extra.json": "{}",
+      "lint-rules/config.json": "{}",
+    });
+    try {
+      // A symlinked rule is loaded through its target, so it is rule code too.
+      symlinkSync(join(root, "engine/src/linter/index.ts"), join(root, "engine/src/linter/linked.ts"));
+      symlinkSync(join(root, "lint-rules/no-console-log.json"), join(root, "lint-rules/aliased.json"));
+      const digests = observeLintRuleDigests(root);
+      expect([...(digests?.keys() ?? [])].sort()).toEqual([
+        ...Object.keys(LOOM_RULES), "engine/src/linter/linked.ts", "lint-rules/aliased.json",
+      ].sort());
+      expect(digests?.get("engine/src/linter/linked.ts")).toBe(digests?.get("engine/src/linter/index.ts"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a missing lint-rules directory beside a present linter as no declarative rules", () => {
+    const root = ruleTree("loom-skew-no-declarative-", { "engine/src/linter/index.ts": "export {};\n" });
+    try {
+      expect([...(observeLintRuleDigests(root)?.keys() ?? [])]).toEqual(["engine/src/linter/index.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("lintRuntimeSkewNote", () => {
+  it("says nothing when the branch carries the runtime's exact rules, or no rules at all", () => {
+    const runtime = ruleTree("loom-skew-runtime-", LOOM_RULES);
+    const same = ruleTree("loom-skew-same-", LOOM_RULES);
+    const project = ruleTree("loom-skew-project-", { "src/a.ts": "export {};\n" });
+    try {
+      expect(lintRuntimeSkewNote(same, runtime)).toBeNull();
+      expect(lintRuntimeSkewNote(project, runtime)).toBeNull();
+    } finally {
+      for (const root of [runtime, same, project]) rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names the rule file a branch changed, and the runtime the lint actually ran", () => {
+    const runtime = ruleTree("loom-skew-runtime-", LOOM_RULES);
+    const branch = ruleTree("loom-skew-branch-", {
+      ...LOOM_RULES,
+      "engine/src/linter/programmatic/no-cross-boundary-imports.ts": "export const allow = ['node:crypto'];\n",
+    });
+    try {
+      const note = lintRuntimeSkewNote(branch, runtime);
+      expect(note).toContain(`loaded runtime's lint rules (${runtime})`);
+      expect(note).toContain("engine/src/linter/programmatic/no-cross-boundary-imports.ts");
+      expect(note).not.toContain("lint-rules/no-console-log.json");
+    } finally {
+      for (const root of [runtime, branch]) rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports, rather than hides, a runtime it cannot compare", () => {
+    const runtime = ruleTree("loom-skew-broken-runtime-", { "lint-rules/no-console-log.json": "{}" });
+    const branch = ruleTree("loom-skew-branch-", LOOM_RULES);
+    try {
+      expect(lintRuntimeSkewNote(branch, runtime)).toBe(
+        `Lint runtime skew could not be checked: the loaded runtime at ${runtime} carries no engine/src/linter.`,
+      );
+    } finally {
+      for (const root of [runtime, branch]) rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runFullTierWaveLint under runtime skew", () => {
+  it("leads a rule refusal with the skew note when the Loom checkout's rules differ from the runtime's", () => {
+    const runtime = ruleTree("loom-skew-runtime-", LOOM_RULES);
+    const branch = ruleTree("loom-skew-gated-", {
+      "engine/src/linter/index.ts": "export const changed = true;\n",
+      "src/noisy.ts": "export function noisy(): void {\n  console.log(\"debug\");\n}\n",
+    });
+    const previous = process.cwd();
+    try {
+      git(branch, ["init", "-q"]);
+      process.chdir(branch);
+      const result = runFullTierWaveLint([makeTask({ files_modified: ["src/noisy.ts"] })], runtime);
+      expect(result.kind).toBe("block");
+      if (result.kind !== "block") return;
+      expect(result.message).toContain("no-console-log");
+      expect(result.message).toContain("runtime skew, not a code defect");
+      expect(result.message).toContain("engine/src/linter/index.ts");
+    } finally {
+      process.chdir(previous);
+      for (const root of [runtime, branch]) rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a refusal of a project that is not a Loom checkout exactly as the rules wrote it", () => {
+    const branch = ruleTree("loom-skew-project-", {
+      "src/noisy.ts": "export function noisy(): void {\n  console.log(\"debug\");\n}\n",
+    });
+    const previous = process.cwd();
+    try {
+      git(branch, ["init", "-q"]);
+      process.chdir(branch);
+      const result = runFullTierWaveLint([makeTask({ files_modified: ["src/noisy.ts"] })]);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).not.toContain("⚠");
+    } finally {
+      process.chdir(previous);
+      rmSync(branch, { recursive: true, force: true });
     }
   });
 });
