@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExactRoster } from "../../src/core/orchestration-contract";
-import type { ArchitecturePanelAuthority, RefutationPanelAuthority } from "../../src/core/panel-authority";
+import type { RefutationPanelAuthority } from "../../src/core/panel-authority";
 import {
   canonicalPanelStateJson,
   type PanelAuthorityRosterField,
@@ -11,19 +11,21 @@ import {
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 const assertType = <T extends true>(): T => true as T;
 
+/** An authority shape with two rosters: the set must name both. */
+type TwoRosterAuthority = Readonly<{ runId: string; first: ExactRoster; second: ExactRoster }>;
 /** An authority shape with a roster that may be absent: still a roster field. */
 type OptionalRosterAuthority = Readonly<{ runId: string; primary: ExactRoster; fallback?: ExactRoster | null }>;
 
 describe("panel authority roster fields are derived from the authority type", () => {
   it("names exactly the roster-valued fields of each authority", () => {
-    assertType<Equals<PanelAuthorityRosterField<ArchitecturePanelAuthority>, "candidateRoster" | "judgeRoster">>();
+    assertType<Equals<PanelAuthorityRosterField<TwoRosterAuthority>, "first" | "second">>();
     assertType<Equals<PanelAuthorityRosterField<RefutationPanelAuthority>, "verifierRoster">>();
     assertType<Equals<PanelAuthorityRosterField<OptionalRosterAuthority>, "primary" | "fallback">>();
   });
 
   it("refuses a roster field left out, a non-roster field named, or an authority left unnamed", () => {
     // @ts-expect-error a roster field of the authority is missing from the set.
-    const missing: PanelAuthorityRosterFields<ArchitecturePanelAuthority> = { candidateRoster: true };
+    const missing: PanelAuthorityRosterFields<TwoRosterAuthority> = { first: true };
     // @ts-expect-error a non-roster field cannot be canonicalized as a roster.
     const foreign: PanelAuthorityRosterFields<RefutationPanelAuthority> = { verifierRoster: true, findings: true };
     // @ts-expect-error an optional roster is still a roster field.

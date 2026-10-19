@@ -123,3 +123,5 @@ whose event prefix re-proves its state. Fugue is not part of the engine.**
   of `core/persistent-panel`) is also unused in production. Live architecture panels run on the registered
   legacy driver. It is not removed here because the refutation half shares its kernel and is live. Whether to
   migrate the registered architecture panel onto it, or delete it, needs its own design session.
+  *(Resolved 2026-10-18 by ADR-0030: deleted. The registered driver's journal is the architecture panel's one
+  durable form.)*

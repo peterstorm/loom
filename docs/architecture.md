@@ -175,8 +175,8 @@ Each program persists in its Run Directory (ADR-0029). Durable history is an app
 
 Panels persist in one of two forms:
 
-- **Registered panels** append `spawn-outcome` and `engine-outcome` events and rebuild by replaying them on resume.
-- **Refutation panels** inside a review persist as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read.
+- **Registered panels**, including every architecture panel, append `spawn-outcome` and `engine-outcome` events and rebuild by replaying them on resume (ADR-0030).
+- **Refutation panels** inside a review persist as a checkpoint whose event prefix must replay exactly to its recorded state, and that state is re-proved on every read. The persistent panel program in `core/persistent-panel` is this panel's alone.
 
 Because an append is idempotent on its dedup key, a crash between publishing an artifact and journalling its event resumes by republishing the same bytes and journalling the event once.
 

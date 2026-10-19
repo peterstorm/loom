@@ -21,7 +21,7 @@ describe("createPanelPublications", () => {
   it("mints the same effect ids in every fresh store, whatever another store issued first", () => {
     const earlier = createPanelPublications();
     earlier.refutationPanelFixture("run.store-isolation.earlier", ["reproduction"]);
-    earlier.architecturePanelFixture("run.store-isolation.earlier-arch");
+    earlier.refutationPanelFixture("run.store-isolation.earlier-second", ["intent"]);
     const first = createPanelPublications().refutationPanelFixture("run.store-isolation", ["reproduction"]);
     const second = createPanelPublications().refutationPanelFixture("run.store-isolation", ["reproduction"]);
     expect(first.requests[0]!.issuance.effectId).toBe("effect:panel-fixture:1");

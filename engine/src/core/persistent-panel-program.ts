@@ -23,8 +23,8 @@
  * program's own start, parse, reduction, replay or checkpoint parse. A
  * domain is private to the module that creates it, so another module's
  * values can never pass as its own. `core/persistent-panel` instantiates the
- * architecture and refutation programs over one private domain; the kernel's
- * own tests drive a trivial third program with none of either panel.
+ * refutation program over its private domain; the kernel's own tests drive a
+ * trivial second program with none of the panel's semantics.
  *
  * Durable bytes are the programs' own: every checkpoint is built with the key
  * order its persisted form has always had, because checkpoint
@@ -54,7 +54,7 @@ export type PanelKind = PersistentPanelError["panel"];
 export type PanelProofTag = `${PanelKind}:${"state" | "event" | "recorded-step"}`;
 
 /** One membership domain: which values a module minted, tagged with panel and
- *  role so a refutation state can never pass as an architecture one. */
+ *  role so a state can never pass as an event or a recorded step. */
 export type PanelProofs = Readonly<{
   prove: <T extends object>(tag: PanelProofTag, value: T) => T;
   proven: (tag: PanelProofTag, value: unknown) => boolean;

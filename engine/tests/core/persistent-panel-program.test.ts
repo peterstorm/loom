@@ -1,10 +1,10 @@
 /**
  * The persistent panel program kernel at its own interface, driven by a
- * trivial third program — a tally counter — with neither real panel in
- * sight: the reducer guard, replay-equals-state, checkpoints, and proof-domain
- * isolation. The two
- * real panels' instantiations are pinned by persistent-panel-kernel.property
- * and the persistent panel suites.
+ * trivial second program — a tally counter — with the refutation panel's
+ * semantics out of sight: the reducer guard, replay-equals-state,
+ * checkpoints, and proof-domain isolation. The refutation panel's
+ * instantiation is pinned by persistent-panel-kernel.property and the
+ * persistent panel suites.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -208,10 +208,10 @@ describe("persistent panel program kernel: proof domains", () => {
     expect(refusal(resumePanelProgram(twin, state))).toMatchObject({ kind: "malformed-checkpoint" });
   });
 
-  it("keeps panel and role apart within one domain", () => {
+  it("keeps roles apart within one domain", () => {
     const state = TALLY.start(AUTHORITY).state;
-    expect(proofs.proven("architecture:state", state)).toBe(false);
     expect(proofs.proven("refutation:event", state)).toBe(false);
+    expect(proofs.proven("refutation:recorded-step", state)).toBe(false);
     expect(proofs.proven("refutation:state", null)).toBe(false);
   });
 });
