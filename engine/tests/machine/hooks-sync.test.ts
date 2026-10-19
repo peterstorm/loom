@@ -185,6 +185,17 @@ describe("evidence recorder ↔ hooks.json (PostToolUse coverage)", () => {
   });
 });
 
+describe("evidence recorder ↔ hooks.json (PostToolUseFailure coverage)", () => {
+  // Claude Code fires PostToolUse only for a call that succeeded. A Bash
+  // command that exits non-zero arrives as PostToolUseFailure, so without this
+  // wiring a failing test run, the red I6 must see, never reaches the ledger.
+  it("record-evidence.sh covers Bash on PostToolUseFailure", () => {
+    const recorderEntries = entriesWiring("PostToolUseFailure", "record-evidence.sh");
+    const covered = new Set(recorderEntries.flatMap((e) => matcherTools(e.matcher ?? "*")));
+    expect(covered.has("Bash") || covered.has("*"), "record-evidence.sh's PostToolUseFailure matcher does not cover Bash").toBe(true);
+  });
+});
+
 describe("type diagnostics ↔ hooks.json (PostToolUse advisory wiring)", () => {
   const entries = entriesWiring("PostToolUse", "type-diagnostics.sh");
 
