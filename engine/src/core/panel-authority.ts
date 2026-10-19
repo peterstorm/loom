@@ -11,7 +11,6 @@
  *
  * Pure module: no I/O, no clock, no randomness.
  */
-import type { PanelLens } from "./panel-contract";
 import {
   REVIEW_LENSES,
   parseCurrentBriefFinding,
@@ -65,8 +64,6 @@ export type PersistentPanelError = Readonly<{
     | "terminal-state"
     | "incomplete-roster"
     | "invalid-aggregate";
-  /** The one persistent panel; kept on the durable error so its diagnostics stay self-describing. */
-  panel: "refutation";
   message: string;
   requestId?: string;
   slotId?: string;
@@ -80,7 +77,6 @@ export const boundedPanelMessage = (message: string): string => message.length <
   : `${message.slice(0, 4_083)}…[truncated]`;
 
 export const panelError = (
-  panel: PersistentPanelError["panel"],
   kind: PersistentPanelError["kind"],
   message: string,
   request?: Readonly<{
@@ -88,7 +84,7 @@ export const panelError = (
     slotId?: string;
     rehydration?: PersistentPanelError["rehydration"];
   }>,
-): PersistentPanelError => Object.freeze({ kind, panel, message: boundedPanelMessage(message), ...request });
+): PersistentPanelError => Object.freeze({ kind, message: boundedPanelMessage(message), ...request });
 
 function nonEmptyDistinctStrings(raw: unknown): readonly [string, ...string[]] | null {
   const values = safeArray(raw);
@@ -144,15 +140,13 @@ export function deriveRefutationVerifierBinding(
   }));
 }
 
-type CanonicalPanelSlotBinding = RefutationVerifierBinding;
-
 /** The run-bound legacy ordinal identity of one verifier slot — slot
  *  `verifier:<ordinal>` and requests `<runId>:verifier:<ordinal>:<attempt>` —
  *  or null when those identities do not parse. */
 function legacyOrdinalBinding(
   runId: OrchestrationRunId,
   ordinal: number,
-): CanonicalPanelSlotBinding | null {
+): RefutationVerifierBinding | null {
   const slotId = parseSlotId(`verifier:${ordinal}`);
   const requests = ([1, 2] as const).map((attempt) => parseRequestId(`${runId}:verifier:${ordinal}:${attempt}`));
   if (!slotId.ok || !requests[0].ok || !requests[1].ok) return null;
@@ -162,12 +156,12 @@ function legacyOrdinalBinding(
   });
 }
 
-function parseCanonicalPanelSlotBinding(
+function parseRefutationVerifierBinding(
   runId: OrchestrationRunId,
   ordinal: number,
   semanticEntry: string,
   findingIds: readonly string[],
-): CanonicalPanelSlotBinding | null {
+): RefutationVerifierBinding | null {
   const legacy = legacyOrdinalBinding(runId, ordinal);
   if (legacy === null) return null;
   if (findingIds.length === 0) return legacy;
@@ -210,10 +204,10 @@ function rosterAuthorityErrors(
     }
     const semanticEntry = semanticEntries[index];
     if (semanticEntry === undefined) continue;
-    const bindingMatches = (binding: CanonicalPanelSlotBinding): boolean =>
+    const bindingMatches = (binding: RefutationVerifierBinding): boolean =>
       slot.slotId === binding.slotId &&
       slot.attempts.every((request, attemptIndex) => request.requestId === binding.requestIds[attemptIndex]);
-    const expected = parseCanonicalPanelSlotBinding(semanticRunId, index + 1, semanticEntry, findingIds);
+    const expected = parseRefutationVerifierBinding(semanticRunId, index + 1, semanticEntry, findingIds);
     if (expected === null) {
       // The semantic entry cannot derive a canonical slot binding (e.g. a
       // legacy lens no longer in the current table). Admit ONLY the exact
@@ -351,7 +345,7 @@ export function boundRefutationLens(
   const index = authority.verifierRoster.orderedSlots.findIndex((slot) => slot.slotId === slotId);
   const lens = index < 0 ? undefined : authority.lenses[index];
   return lens === undefined
-    ? persistentFailure(panelError("refutation", "request-binding-mismatch", `slot ${slotId} is bound to no refutation lens`, { slotId }))
+    ? persistentFailure(panelError("request-binding-mismatch", `slot ${slotId} is bound to no refutation lens`, { slotId }))
     : persistentSuccess(lens);
 }
 
@@ -374,7 +368,7 @@ function refutationPanelAuthority(
   try {
     const input = safeRecord(raw, ["runId", "identityRunId", "findings", "lenses", "verifierSlots"]) ??
       safeRecord(raw, ["runId", "findings", "lenses", "verifierSlots"]);
-    if (input === null) return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority must be an exact data record"));
+    if (input === null) return persistentFailure(panelError("invalid-authority", "refutation authority must be an exact data record"));
     const roster = rosterOf(input.verifierSlots);
     const runId = parseOrchestrationRunId(input.runId);
     const identityRunId = parseOrchestrationRunId(input.identityRunId ?? input.runId);
@@ -401,7 +395,7 @@ function refutationPanelAuthority(
       ));
     }
     if (errors.length > 0 || !runId.ok || !identityRunId.ok || !roster.ok || parsedLenses.length === 0 || findings.length === 0) {
-      return persistentFailure(panelError("refutation", "invalid-authority", errors.join("; ") || "refutation authority is invalid"));
+      return persistentFailure(panelError("invalid-authority", errors.join("; ") || "refutation authority is invalid"));
     }
     return persistentSuccess(Object.freeze({
       schemaVersion: 2 as const,
@@ -413,7 +407,7 @@ function refutationPanelAuthority(
       verifierRoster: roster.value,
     }));
   } catch {
-    return persistentFailure(panelError("refutation", "invalid-authority", "refutation authority could not be safely inspected"));
+    return persistentFailure(panelError("invalid-authority", "refutation authority could not be safely inspected"));
   }
 }
 
@@ -456,10 +450,3 @@ export function issueRefutationPanelAuthority(
   const roster = mintableRoster(issueExactRoster(input.verifierSlots));
   return roster.ok ? refutationPanelAuthority(input, () => roster.value) : roster;
 }
-
-// PanelLens (design lenses) and ReviewLens (refutation lenses) must stay
-// disjoint: these assignments fail to compile if a value joins both unions.
-const _architectureLensRemainsDisjoint: Exclude<PanelLens, ReviewLens> = "simplicity-first";
-const _refutationLensRemainsDisjoint: Exclude<ReviewLens, PanelLens> = "reproduction";
-void _architectureLensRemainsDisjoint;
-void _refutationLensRemainsDisjoint;

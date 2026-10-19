@@ -63,3 +63,60 @@ None. Defect-family accounting: `{"kind":"not-required"}`.
 - focused suites: the panel, persistent-panel, fixture, standalone-review and `handlers/helpers/programs`
   suites (36 files, 604 passed)
 - `npm run verify` (root): exit 0, 540 files, 13,284 tests passed (1 skipped)
+
+---
+
+# Round 2
+
+- **Review run:** `.claude/reviews/review-and-fix-runs/review-fix-20261019-pr111-r2`, over the branch at `119d1395`
+  (16 files, including this plan). `result.json` digest
+  `265d7f35a258053ce8845e6c2974393223219e1e43a305de322ccf2b7cb2f267`.
+- **Counts (inspection renderer):** 0 critical and 7 advisory emitted and admitted. After refutation: 0 critical
+  surviving, 0 refuted, 7 advisory. 7 slots issued, 7 captured.
+- **Advisory policy publication:** `.claude/reviews/review-and-fix-runs/disposition-20261019-pr111-r2`, revision
+  `initial`, `disposition.json` sha256 `871d61162380ed2931eb14e823f95b293254442f5e308e8de2a4ec781c724f87`
+  (DECLARED).
+- **Surviving / refuted criticals:** none. Defect-family accounting: `{"kind":"not-required"}`.
+
+## Round-2 advisory dispositions (DECLARED)
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| type-design-analyzer-1 | accepted | `PersistentPanelError.panel` and `panelError`'s first argument carried a one-value discriminator that no `src` module reads. Both are dropped, and the round-1 `refutationError` helper is no longer needed. |
+| comment-analyzer-1 | accepted | Each lens-disjointness assignment pins one sample literal. The comment now says exactly which literals it samples, and that it proves nothing beyond them. |
+| comment-analyzer-2 | accepted | ADR-0030 claimed the only persistent-program tests exercise the refutation path, while the kernel suite drives a test program. The claim is now scoped to tests of the real panel program. |
+| architecture-tech-lead-1 | accepted | The lens pin was the only reason `panel-authority` imported the design-lens vocabulary. It moves to `panel-contract`, beside `PanelLens`, with a type-only `ReviewLens` import; there is no cycle. |
+| architecture-tech-lead-2 | accepted | The kernel no longer knows any panel kind. Each program definition names itself with a plain `name`, which prefixes its diagnostics and its checkpoint kind. Proof tags are role-only, and `PanelKind` is gone. The refutation program is still named `refutation`, so its durable checkpoint kind and its messages are byte-identical. The kernel's tally test program is now named `tally`. |
+| code-simplifier-1 | accepted | `CanonicalPanelSlotBinding` was a pure alias of `RefutationVerifierBinding`. The alias is gone. |
+| code-simplifier-2 | accepted | The four `panelError("refutation", …)` sites in `panel-authority` repeated the literal. Resolved by type-design-analyzer-1. |
+
+## Round-2 accepted fixes
+
+- `engine/src/core/persistent-panel-program.ts`:
+  - `PanelKind` is gone, and `PanelProofTag` is `"state" | "event" | "recorded-step"`;
+  - `PanelProgramDefinition` names its program with `name: string`;
+  - diagnostics read `${name} …`, and the checkpoint kind is `` `${name}-panel-checkpoint` ``;
+  - `panelError` no longer takes a panel.
+- `engine/src/core/panel-authority.ts`:
+  - `PersistentPanelError` has no `panel` field, and `panelError(kind, message, request?)` takes none;
+  - the `CanonicalPanelSlotBinding` alias and the lens pin are gone, along with the pin's `PanelLens` import.
+- `engine/src/core/persistent-panel.ts`:
+  - `refutationError` is removed, so call sites use `panelError` directly;
+  - proof tags are role-only;
+  - `REFUTATION_PROGRAM` is named `refutation`, keeping the durable kind `refutation-panel-checkpoint`.
+- `engine/src/core/panel-contract.ts`: holds the lens-disjointness pin, with an accurate comment.
+- `engine/tests/core/persistent-panel-program.test.ts`: the tally program is named `tally`, and its tags,
+  messages and checkpoint kind follow. "Another program's kind" is now the real `refutation-panel-checkpoint`.
+- `docs/adr/ADR-0030-…md`: "What narrows", "What stays", the Option 1 cons and the Consequences reflect the
+  above.
+
+## Round-2 support paths (outside the round-2 frozen scope)
+
+- `engine/src/core/panel-contract.ts`
+
+## Round-2 validation
+
+- `bun scripts/typecheck.ts`: clean
+- focused: `tests/core`, `tests/handlers/helpers/programs`, `panel-program`, `orchestration`,
+  `tests/orchestration` and `tests/fixtures` (238 files, 6,331 passed, 1 skipped)
+- `npm run verify` (root): exit 0, 540 files, 13,284 tests passed (1 skipped)

@@ -14,6 +14,7 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import type { ReviewLens } from "./review-panel";
 import { sha256Hex } from "./digest";
 import { type ArtifactDigest } from "./orchestration-contract/identity";
 
@@ -931,3 +932,13 @@ export function rankPanelVerdicts(
   const ranked = aggregateVerdicts(verdicts, run.criteria, run.candidates);
   return ranked.ok ? admitted(serializeRankings(ranked.value, run.criteria)) : refused("panel aggregate", ranked.errors);
 }
+
+// PanelLens (design lenses) and ReviewLens (refutation lenses) are meant to stay
+// disjoint. These two assignments sample that rule: the first fails to compile
+// if "simplicity-first" joins ReviewLens, the second if "reproduction" joins
+// PanelLens. They pin those two literals; they do not prove the whole
+// vocabularies disjoint.
+const _designLensStaysOutOfReview: Exclude<PanelLens, ReviewLens> = "simplicity-first";
+const _refutationLensStaysOutOfDesign: Exclude<ReviewLens, PanelLens> = "reproduction";
+void _designLensStaysOutOfReview;
+void _refutationLensStaysOutOfDesign;

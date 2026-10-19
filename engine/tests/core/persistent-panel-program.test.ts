@@ -1,10 +1,11 @@
 /**
  * The persistent panel program kernel at its own interface, driven by a
- * trivial second program — a tally counter — with the refutation panel's
- * semantics out of sight: the reducer guard, replay-equals-state,
- * checkpoints, and proof-domain isolation. The refutation panel's
- * instantiation is pinned by persistent-panel-kernel.property and the
- * persistent panel suites.
+ * second program — a tally counter named "tally" — with the refutation
+ * panel's semantics out of sight: the reducer guard, replay-equals-state,
+ * checkpoints, and proof-domain isolation. Its name prefixing every
+ * diagnostic and its checkpoint kind shows the kernel knows no panel. The
+ * refutation panel's instantiation is pinned by persistent-panel-kernel.property
+ * and the persistent panel suites.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -41,22 +42,22 @@ type TallyStep = PanelStep<TallyState, TallyAction, TallyEvent>;
 /** This suite's private publication store: the resolver every parsed event reads. */
 const { resolver } = createPanelPublications();
 const proofs = createPanelProofs();
-const tallyState = (state: TallyState): TallyState => proofs.prove("refutation:state", Object.freeze(state));
+const tallyState = (state: TallyState): TallyState => proofs.prove("state", Object.freeze(state));
 const tallyAction = (state: TallyState): TallyAction => Object.freeze({ kind: "tally", count: state.count });
 const tallyStep = (state: TallyState): TallyStep => Object.freeze({ state, action: tallyAction(state) });
 
 const TALLY: PanelProgramDefinition<TallyAuthority, TallyAuthorityInput, TallyState, TallyAction, TallyEvent> = {
-  panel: "refutation",
+  name: "tally",
   proofs,
   start: (authority) => tallyStep(tallyState({ authority, stage: "counting", count: 0 })),
   action: tallyAction,
   parseEvent: (state, raw) => {
-    if (!proofs.proven("refutation:state", state)) return persistentFailure(panelError("refutation", "malformed-checkpoint", "tally events parse only over a proved state"));
+    if (!proofs.proven("state", state)) return persistentFailure(panelError("malformed-checkpoint", "tally events parse only over a proved state"));
     const event = safeRecord(raw, ["schemaVersion", "type"]);
     if (event === null || event.schemaVersion !== 1 || (event.type !== "increment" && event.type !== "finish")) {
-      return persistentFailure(panelError("refutation", "malformed-event", "tally event must be an exact increment or finish"));
+      return persistentFailure(panelError("malformed-event", "tally event must be an exact increment or finish"));
     }
-    return persistentSuccess(proofs.prove("refutation:event", Object.freeze({ schemaVersion: 1 as const, type: event.type })));
+    return persistentSuccess(proofs.prove("event", Object.freeze({ schemaVersion: 1 as const, type: event.type })));
   },
   transition: (state, event) => {
     if (event.type === "finish") return persistentSuccess(tallyStep(tallyState({ ...state, stage: "done" })));
@@ -68,7 +69,7 @@ const TALLY: PanelProgramDefinition<TallyAuthority, TallyAuthorityInput, TallySt
     const runId = parseOrchestrationRunId(record?.runId);
     return runId.ok
       ? persistentSuccess(Object.freeze({ runId: runId.value }))
-      : persistentFailure(panelError("refutation", "invalid-authority", runId.error.message));
+      : persistentFailure(panelError("invalid-authority", runId.error.message));
   },
   authorityJson: (authority) => Object.freeze({ runId: authority.runId }),
   // A tally state derives nothing from its own content: its JSON is canonical.
@@ -103,7 +104,7 @@ describe("persistent panel program kernel: the reducer guard", () => {
   it("refuses a state outside the program's proof domain", () => {
     const forged: TallyState = Object.freeze({ authority: AUTHORITY, stage: "counting", count: 0 });
     const event = value(TALLY.parseEvent(TALLY.start(AUTHORITY).state, INCREMENT, resolver));
-    expect(refusal(reducePanelProgram(TALLY, forged, event))).toMatchObject({ kind: "malformed-checkpoint", panel: "refutation" });
+    expect(refusal(reducePanelProgram(TALLY, forged, event))).toMatchObject({ kind: "malformed-checkpoint" });
   });
 
   it("refuses an event that was not strictly parsed", () => {
@@ -114,12 +115,12 @@ describe("persistent panel program kernel: the reducer guard", () => {
   it("admits no transition out of a terminal stage", () => {
     const done = value(reduceParsedPanelEvent(TALLY, TALLY.start(AUTHORITY).state, FINISH, resolver));
     expect(refusal(reduceParsedPanelEvent(TALLY, done.state, INCREMENT, resolver)))
-      .toEqual({ kind: "terminal-state", panel: "refutation", message: "refutation panel is done and cannot transition" });
+      .toEqual({ kind: "terminal-state", message: "tally panel is done and cannot transition" });
   });
 
   it("fails a thrown invariant closed while keeping its message", () => {
-    expect(refusal(reduceParsedPanelEvent(TALLY, recordIncrements(12).state, INCREMENT, resolver))).toEqual({ kind: "malformed-event", panel: "refutation",
-      message: "refutation event could not be safely reduced: tally invariant: thirteen is unrepresentable" });
+    expect(refusal(reduceParsedPanelEvent(TALLY, recordIncrements(12).state, INCREMENT, resolver))).toEqual({ kind: "malformed-event",
+      message: "tally event could not be safely reduced: tally invariant: thirteen is unrepresentable" });
   });
 
   it("resumes only a proved state, with its own next action", () => {
@@ -137,7 +138,7 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
       const replayed = value(replayPanelProgram(TALLY, AUTHORITY, events, resolver));
       expect(jsonEqual(replayed.state, recorded.state)).toBe(true);
       const checkpoint = value(panelProgramCheckpoint(TALLY, recorded.state, record(events).events, resolver));
-      expect(checkpoint).toMatchObject({ schemaVersion: 2, kind: "refutation-panel-checkpoint", authority: { runId: "run.tally" } });
+      expect(checkpoint).toMatchObject({ schemaVersion: 2, kind: "tally-panel-checkpoint", authority: { runId: "run.tally" } });
       const restored = value(parsePanelProgramCheckpoint(TALLY, JSON.parse(JSON.stringify(checkpoint)), resolver));
       expect(jsonEqual(restored.state, recorded.state)).toBe(true);
       expect(value(resumePanelProgram(TALLY, restored.state)).action).toEqual({ kind: "tally", count });
@@ -145,16 +146,16 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
   });
 
   it.each([
-    ["a non-array history", { not: "events" }, "refutation history must be a dense JSON event array"],
+    ["a non-array history", { not: "events" }, "tally history must be a dense JSON event array"],
     ["an unknown event", [INCREMENT, { schemaVersion: 1, type: "decrement" }], "tally event must be an exact increment or finish"],
-    ["an event after the terminal stage", [FINISH, INCREMENT], "refutation panel is done and cannot transition"],
+    ["an event after the terminal stage", [FINISH, INCREMENT], "tally panel is done and cannot transition"],
   ])("refuses to replay %s", (_name, events, message) => {
     expect(refusal(replayPanelProgram(TALLY, AUTHORITY, events, resolver)).message).toBe(message);
   });
 
   it("refuses a checkpoint whose prefix does not replay to the supplied state", () => {
     expect(refusal(panelProgramCheckpoint(TALLY, recordIncrements(2).state, record(increments(1)).events, resolver)))
-      .toMatchObject({ kind: "malformed-checkpoint", message: "refutation checkpoint event prefix does not replay to the supplied state" });
+      .toMatchObject({ kind: "malformed-checkpoint", message: "tally checkpoint event prefix does not replay to the supplied state" });
   });
 
   /** The durable JSON of a two-increment checkpoint, as a shell reads it back. */
@@ -162,11 +163,11 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
     const { step, events } = record(increments(2));
     return JSON.parse(JSON.stringify(value(panelProgramCheckpoint(TALLY, step.state, events, resolver)))) as Record<string, unknown>;
   };
-  const NOT_EXACT = { kind: "malformed-checkpoint", message: "refutation checkpoint must be an exact schemaVersion 2 record" } as const;
-  const DISAGREES = { kind: "malformed-checkpoint", message: "refutation checkpoint state disagrees with its immutable event prefix" } as const;
+  const NOT_EXACT = { kind: "malformed-checkpoint", message: "tally checkpoint must be an exact schemaVersion 2 record" } as const;
+  const DISAGREES = { kind: "malformed-checkpoint", message: "tally checkpoint state disagrees with its immutable event prefix" } as const;
 
   it.each<[string, (raw: Record<string, unknown>) => unknown, Readonly<{ kind: string; message?: string }>]>([
-    ["another program's kind", (raw) => ({ ...raw, kind: "architecture-panel-checkpoint" }), NOT_EXACT],
+    ["another program's kind", (raw) => ({ ...raw, kind: "refutation-panel-checkpoint" }), NOT_EXACT],
     ["a forward schemaVersion", (raw) => ({ ...raw, schemaVersion: 3 }), NOT_EXACT],
     ["a past schemaVersion", (raw) => ({ ...raw, schemaVersion: 1 }), NOT_EXACT],
     ["an extra top-level key", (raw) => ({ ...raw, note: "unrecorded" }), NOT_EXACT],
@@ -199,19 +200,19 @@ describe("persistent panel program kernel: replay and checkpoints", () => {
 });
 
 describe("persistent panel program kernel: proof domains", () => {
-  it("never accepts a value minted in another domain, even under the same panel tag", () => {
+  it("never accepts a value minted in another domain, even under the same role tag", () => {
     const foreign = createPanelProofs();
     const twin = { ...TALLY, proofs: foreign };
     const state = TALLY.start(AUTHORITY).state;
-    expect(proofs.proven("refutation:state", state)).toBe(true);
-    expect(foreign.proven("refutation:state", state)).toBe(false);
+    expect(proofs.proven("state", state)).toBe(true);
+    expect(foreign.proven("state", state)).toBe(false);
     expect(refusal(resumePanelProgram(twin, state))).toMatchObject({ kind: "malformed-checkpoint" });
   });
 
   it("keeps roles apart within one domain", () => {
     const state = TALLY.start(AUTHORITY).state;
-    expect(proofs.proven("refutation:event", state)).toBe(false);
-    expect(proofs.proven("refutation:recorded-step", state)).toBe(false);
-    expect(proofs.proven("refutation:state", null)).toBe(false);
+    expect(proofs.proven("event", state)).toBe(false);
+    expect(proofs.proven("recorded-step", state)).toBe(false);
+    expect(proofs.proven("state", null)).toBe(false);
   });
 });

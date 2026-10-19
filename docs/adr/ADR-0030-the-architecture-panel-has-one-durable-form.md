@@ -36,12 +36,12 @@ written to supply:
    - Pros:
      - one design per panel: architecture panels are the registered driver, refutation panels are the
        persistent program;
-     - the panel vocabulary narrows to the one persistent program that exists, so an architecture-panel error
-       or proof tag becomes unrepresentable;
+     - the kernel stops knowing any panel kind, so an architecture-panel error or proof tag becomes
+       unrepresentable;
      - the tests that proved an unused path are gone, and the kernel contracts they pinned now run on the
        refutation panel.
-   - Cons: a second instantiation of the shared program kernel is lost. The kernel's own suite still drives a
-     trivial test program, so the seam keeps a second adapter.
+   - Cons: a second production instantiation of the shared program kernel is lost. The kernel's own suite
+     still drives a tally-counter program under its own name, so the seam keeps a second adapter.
 2. **Migrate the registered architecture panel onto the persistent program**
    - Pros: matches the August plan literally.
    - Cons:
@@ -63,15 +63,19 @@ program is the refutation panel's alone.**
     `boundCandidateEntry` from `core/panel-authority`;
   - the architecture fixture in `tests/fixtures/panel-authority.ts`.
 - **What narrows:**
-  - `PersistentPanelError.panel`, and with it the kernel's `PanelKind`, is `"refutation"`. The kernel's
-    one-value program type parameter collapses into it: `PanelProgramDefinition` and `PanelCheckpoint` derive
-    their panel and checkpoint kind from `PanelKind` directly;
+  - the kernel knows no panel kind. Each `PanelProgramDefinition` names itself with a plain `name`, which
+    prefixes its diagnostics and its checkpoint kind; the refutation program is still named `refutation`, so
+    its durable `refutation-panel-checkpoint` kind and its messages are byte-identical. `PanelKind`, the
+    kernel's one-value program type parameter and the `panel` field of `PersistentPanelError` (with
+    `panelError`'s panel argument) are gone. Proof tags are role-only (`state`, `event`,
+    `recorded-step`) inside each program's private domain;
   - roster authority checks (`rosterAuthorityErrors`, the legacy ordinal binding) take only the verifier
     shape;
   - one-value panel parameters inside `core/persistent-panel` collapse.
 - **What stays:**
   - the generic program kernel (`core/persistent-panel-program`), whose suite drives a test program;
-  - the compile-time pin that design and refutation lens vocabularies stay disjoint;
+  - the compile-time pin that samples design- and refutation-lens disjointness, moved to
+    `core/panel-contract` beside the design vocabulary it pins;
   - every durable byte the refutation panel writes.
 - **Coverage that moved rather than vanished:**
   - the verdict-fold AD-9 matrix, the misbinding rows, the exact-replay row, the baseline row and
@@ -84,8 +88,8 @@ program is the refutation panel's alone.**
 ## Consequences
 
 **Positive:**
-- "How does an architecture panel survive a crash" has one answer. The only persistent-program tests that
-  remain exercise the live refutation path.
+- "How does an architecture panel survive a crash" has one answer. The only tests of a real persistent
+  panel program that remain exercise the live refutation path; the kernel's own suite drives its tally program.
 - About 670 net lines of production code leave `core/persistent-panel` and `core/panel-authority`, and about
   650 net lines of tests go with them.
 
