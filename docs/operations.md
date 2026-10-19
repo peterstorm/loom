@@ -701,6 +701,8 @@ The Wave Gate's `loom:full-tier-lint` check runs against the branch's files (the
 
 This is the Runtime Revision design working as intended: infrastructure the gate depends on must be loaded before the gate can use it. Land the rule change on the checkout Loom is installed from (merge it, or port it there), run `/reload` (or restart Pi), then start a fresh Wave Gate. Do not weaken the branch's imports or its rules to get past the check.
 
+The refusal names this case itself. When the full-tier lint fails, the gate's diagnostic carries the lint's refusal (`loom:full-tier-lint: …`). If the gated repository is a Loom checkout whose `lint-rules/` or `engine/src/linter/` files differ from the loaded runtime's, the refusal opens with a `⚠` sentence naming the loaded runtime and the differing rule files. A plain project carries no lint rules of its own and never gets the sentence. A replayed rejection keeps only the lint's exit code, so its diagnostic tells you to run `helper lint-wave-gate`, which prints the same refusal and the same skew sentence.
+
 ### Acceptance Stop Check (claimants)
 
 When an implementation agent that claims a frozen Acceptance Contract's Requirement tries to stop, the engine runs that contract's acceptance files before settling the Task. If a testcase the agent owes is still not passing, the stop is blocked and the same agent keeps working with the failures in front of it. A testcase is owed when it decides one of the agent's claims and all its anchors are due by the Task's Wave.

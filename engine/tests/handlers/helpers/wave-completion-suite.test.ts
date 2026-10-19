@@ -236,12 +236,21 @@ function fixture(mode: string, report = true): Fixture {
   return buildFixture(mode, report, null);
 }
 
+/** What the gated Task modified, as the full-tier lint will judge it: a file
+ *  the loaded runtime's rules refuse, in a plain project or in a Loom checkout
+ *  whose own rule code differs from the runtime's (issue #57 D6). */
+type LintTarget = "clean" | "refused" | "refused-under-skew";
+
+function lintFixture(target: Exclude<LintTarget, "clean">): Fixture {
+  return buildFixture("success", true, null, target);
+}
+
 /** A repository whose TaskGraph carries CT-1 at `stage`, gating the stage's Wave. */
 function contractFixture(mode: string, stage: ContractStage): Fixture {
   return buildFixture(mode, true, stage);
 }
 
-function buildFixture(mode: string, report: boolean, stage: ContractStage | null): Fixture {
+function buildFixture(mode: string, report: boolean, stage: ContractStage | null, lint: LintTarget = "clean"): Fixture {
   const wave = stage === null || stage === "contract-wave" ? 1 : 2;
   const root = canonicalTempDir("loom-wave-suite-");
   roots.push(root);
@@ -251,6 +260,8 @@ function buildFixture(mode: string, report: boolean, stage: ContractStage | null
   write(root, ".gitignore", ".loom/bin/\n.loom/completion-reports/\n");
   write(root, "source.ts", "export const value = 1;\n");
   write(root, "completion-check.mjs", completionScript());
+  if (lint !== "clean") write(root, "src/noisy.ts", "export function noisy(): void {\n  console.log(\"debug\");\n}\n");
+  if (lint === "refused-under-skew") write(root, "engine/src/linter/index.ts", "export const branchRules = true;\n");
   if (stage !== null) {
     write(root, ACCEPTANCE_FILE, ACCEPTANCE_SOURCE);
     write(root, "src/payload.ts", "export const wins = () => 2;\n");
@@ -286,6 +297,7 @@ function buildFixture(mode: string, report: boolean, stage: ContractStage | null
           depends_on: [],
           test_result: { verdict: "trusted-pass" },
           new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
+          ...(lint === "clean" ? {} : { files_modified: ["src/noisy.ts"] }),
           review_status: "pending",
           critical_findings: [],
           advisory_findings: [],
@@ -602,6 +614,38 @@ describe("modern Wave completion suite shell", () => {
     });
     expect(reportCount(f.root)).toBe(0);
     expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
+  });
+
+  it("carries the full-tier lint's refusal into the diagnostic, and names how to reproduce it on replay", async () => {
+    const f = lintFixture("refused");
+    const first = await ensure(f);
+    expect(first).toMatchObject({
+      ok: false,
+      error: { diagnostic: { categories: ["semantic"], checkIds: ["loom:full-tier-lint"] } },
+    });
+    if (first.ok) return;
+    const message = first.error.diagnostic.message;
+    expect(message).toContain("Wave completion suite rejected: non-zero-exit");
+    expect(message).toContain("loom:full-tier-lint: 🚫 WAVE-GATE LINT");
+    expect(message).toContain("no-console-log");
+    // A plain project carries no lint rules of its own, so there is no skew to name.
+    expect(message).not.toContain("runtime skew");
+
+    const replayed = await ensure(f);
+    if (replayed.ok) throw new Error("a replayed rejection must still block");
+    expect(replayed.error.diagnostic.checkIds).toEqual(["loom:full-tier-lint"]);
+    expect(replayed.error.diagnostic.message).toContain("run `helper lint-wave-gate` for the refusal");
+  });
+
+  it("names lint runtime skew when the gated Loom checkout's rules differ from the loaded runtime's", async () => {
+    const result = await ensure(lintFixture("refused-under-skew"));
+    if (result.ok) throw new Error("a refused lint must block");
+    const message = result.error.diagnostic.message;
+    expect(message).toContain("no-console-log");
+    expect(message).toContain("runtime skew, not a code defect");
+    expect(message).toContain("engine/src/linter/index.ts");
+    // The note leads the refusal, so the gate's bounded copy of a long refusal keeps it.
+    expect(message.indexOf("runtime skew")).toBeLessThan(message.indexOf("no-console-log"));
   });
 
   it("blocks a workspace-mutating check before artifact or receipt installation", async () => {

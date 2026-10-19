@@ -287,11 +287,15 @@ function observedLintCheckResult(
   });
 }
 
+/** The lint check's stored result, and the refusal it produced. The result
+ *  keeps only the exit code; the refusal reaches the operator's diagnostic. */
+type ObservedLint = Readonly<{ result: CompletionCheckResult; refusal: string | null }>;
+
 function observedLintResult(
   graph: TaskGraph,
   wave: number,
   repositoryRoot: string,
-): CompletionCheckResult {
+): ObservedLint {
   const checkId = lintCheckId();
   const waveTasks = graph.tasks.filter((task) => task.wave === wave);
   const previousCwd = process.cwd();
@@ -306,7 +310,25 @@ function observedLintResult(
     if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
   }
-  return lintCheckResult(checkId, lint);
+  return freeze({ result: lintCheckResult(checkId, lint), refusal: lint.kind === "block" ? lint.message : null });
+}
+
+/** How the lint refusal reads when the gate has no fresh refusal to show (a replayed result). */
+const LINT_REFUSAL_UNAVAILABLE =
+  "the stored completion result keeps only the lint's exit code; run `helper lint-wave-gate` for the refusal";
+
+/**
+ * A rejection that failed the full-tier lint, with the lint's refusal attached
+ * (bounded like any stored failure) — or, for a replayed result, the command
+ * that reproduces it. Every other rejection is returned unchanged. Pure.
+ */
+export function withLintRefusal(
+  rejection: WaveCompletionSuiteDiagnostic,
+  refusal: string | null,
+): WaveCompletionSuiteDiagnostic {
+  if (!rejection.checkIds.some((checkId) => checkId === lintCheckId())) return rejection;
+  const detail = refusal === null ? LINT_REFUSAL_UNAVAILABLE : boundedFailureMessage(refusal, NO_LINT_RESULT);
+  return diagnostic(rejection.categories, rejection.checkIds, `${rejection.message}\n${FULL_TIER_LINT_CHECK_ID_TEXT}: ${detail}`);
 }
 
 const NO_LINT_RESULT = "full-tier lint returned no terminal result";
@@ -753,17 +775,13 @@ export async function ensureWaveCompletionSuite(
       );
     }
     if (replayed.kind === "semantic-rejected") {
-      return blocked(
-        before,
-        replayed.diagnostic.categories,
-        replayed.diagnostic.checkIds,
-        replayed.diagnostic.message,
-      );
+      const rejection = withLintRefusal(replayed.diagnostic, null);
+      return blocked(before, rejection.categories, rejection.checkIds, rejection.message);
     }
     return blocked(before, ["artifact"], replayed.checkIds, `${relativePath}: ${replayed.message}`);
   }
 
-  const lintResult = observedLintResult(graph, active.wave, repositoryRoot);
+  const lint = observedLintResult(graph, active.wave, repositoryRoot);
   const projectChecks = authorized.value.checks.filter(
     (check): check is ProjectCommandCheck => check.kind === "project-command",
   );
@@ -776,7 +794,7 @@ export async function ensureWaveCompletionSuite(
       `completion check ${projectResults.checkId} infrastructure failure: ${projectResults.message}`,
     );
   }
-  const checks = freezeArray([lintResult, ...projectResults.results]);
+  const checks = freezeArray([lint.result, ...projectResults.results]);
   const acceptance = observeAcceptance(repositoryRoot, expectation, projectResults.results);
 
   const after = observeCurrentWaveWorkspace(graph, repositoryRoot);
@@ -829,7 +847,7 @@ export async function ensureWaveCompletionSuite(
     return blocked(after, ["artifact"], [], `completion result artifact publication failed: ${published.error.message}`);
   }
   if (evaluation.kind === "rejected") {
-    const rejection = evaluationDiagnostic(evaluation);
+    const rejection = withLintRefusal(evaluationDiagnostic(evaluation), lint.refusal);
     return blocked(after, rejection.categories, rejection.checkIds, rejection.message);
   }
 
