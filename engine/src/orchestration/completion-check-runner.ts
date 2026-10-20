@@ -133,6 +133,26 @@ const DEFAULT_DIAGNOSTIC_TAIL_BYTES = 64 * 1_024;
 const MAX_TERMINATION_BOUND_MS = 60_000;
 const MAX_DIAGNOSTIC_TAIL_BYTES = 1_024 * 1_024;
 
+/** Variables a harness sets for one hook invocation, naming that invocation's
+ *  project and plugin. They are not the project's environment: the Wave Gate
+ *  runs a project command from the operator's shell, where none is set, while
+ *  a stop check runs the same kind of command from inside a hook. Passed on,
+ *  they retarget the project's own tests (a test that resolves its repository
+ *  from `CLAUDE_PROJECT_DIR` lints the real checkout instead of its fixture),
+ *  so a stop check would fail tests the Wave Gate passes. */
+export const HOOK_INVOCATION_VARIABLES: ReadonlySet<string> = new Set([
+  "CLAUDE_PROJECT_DIR",
+  "CLAUDE_PLUGIN_ROOT",
+  "CLAUDE_PLUGIN_DATA",
+  "CLAUDE_ENV_FILE",
+]);
+
+/** The environment a project command runs under: the caller's, without the
+ *  hook-invocation variables, so it is the same whichever surface launches it. */
+export function projectCommandEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => !HOOK_INVOCATION_VARIABLES.has(name)));
+}
+
 const completionSucceeded = (value: CompletionCheckExecution): CompletionCheckRunnerResult =>
   Object.freeze({ ok: true, value: Object.freeze(value) });
 const failed = (error: CompletionCheckRunnerFailure): Readonly<{ ok: false; error: CompletionCheckRunnerFailure }> =>
@@ -987,6 +1007,7 @@ async function runProjectCommand(
   try {
     child = spawn(check.executable, [...check.args], {
       cwd,
+      env: projectCommandEnvironment(process.env),
       detached: true,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
