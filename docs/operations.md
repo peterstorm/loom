@@ -966,6 +966,75 @@ The plan is `planStopChecks`, the one pure function both live checks decide from
 - the graph is unreadable or corrupt (the load boundary's error; a corrupt graph is never reported as missing);
 - the Task id is not in the TaskGraph (`No task <id> in the TaskGraph`). A typo never reads as "nothing owed".
 
+### Where does a Task stand on I6?
+
+Use this before dispatching a Task, while its attempt is live, or after it fails with `proof:red-then-green-unproven:<gap>`. It prints the Red-Then-Green Status for that Task: whether the Task owes I6, how settlement splits its files, what the live attempt shows so far, and what the frozen Proof stores.
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper red-then-green-status --task T1
+```
+
+It takes exactly one argument, `--task <id>`. The output has four parts, always in this order.
+
+**1. Header.** One line, `<id> (Wave N, <status>): ` followed by one of:
+
+- `owes I6`;
+- `I6 not owed — <reason>`, where the reason is the first of these that applies:
+  - `TaskGraph predates I6`: the frozen manifest carries no `testFiles`;
+  - `claimant (acceptance contract)`: the Task is an Acceptance Contract claimant, which waives its new tests;
+  - `new tests waived: <reason>`: any other new-test waiver, for example `new tests waived: documentation-only`;
+- `I6 undeterminable — <reason>`: the Task's test-file classification or its Proof is not frozen yet, so settlement could not decide either.
+
+The reason only explains a `not owed` answer. The decision itself is `redThenGreenDuty`, the function settlement uses.
+
+**2. Files.** This part is printed only when the header reads `owes I6`. It shows the same split settlement judges by (`classifyTaskFiles`), with each list in `file_list` order:
+
+```text
+test files:
+  <file>
+implementation files:
+  <file>
+```
+
+An empty list prints as a single line, `test files: none` or `implementation files: none`. When you see `test files: none`, the Task fails with `no-test-files` (see [Task fails I6](#task-fails-i6-red-then-green)).
+
+**3. Live attempt.** This is the I6 judgment over the epoch of the live Claude Code attempt so far, computed by `judgeRedThenGreen` exactly as settlement calls it. It prints one of:
+
+- `live attempt not observable on this harness`: under Pi. The live attempt is never inspected;
+- `live attempt: none`: no implementation sidecar names the Task;
+- `live attempt: uninspectable — <reason>`: no readable sidecar names the Task, but some implementation attempt sidecars could not be read, so a live attempt may be missed;
+- `live attempt: unreadable — <reason>`: an attempt is live but cannot be judged. Either several live attempts name the Task, the attempt is rostered without a parseable role, its ledger epoch cannot be read, or the repository root cannot be resolved;
+- `live attempt: not judged (I6 not owed)`: an attempt is live, but there is no obligation to judge it against;
+- `live attempt: shown`, followed by the three facts in order:
+
+  ```text
+  live attempt: shown
+    red #<index> <command>
+    first implementation write <path>
+    green #<index> <command>
+  ```
+
+- `live attempt: proof:red-then-green-unproven:<gap>`, with ` (untrusted runs only)` added when the gap's `untrustedOnly` is true. The gaps are listed in [Task fails I6](#task-fails-i6-red-then-green).
+
+Only a `shown` judgment carries ledger references. `#<index> <command>` names a qualifying run: `index` is the run's 0-based position in the epoch's ordered events, and `command` is that run's command. For an unproven judgment the helper prints only the gap. It does not show references for steps met before the gap, because the judge returns none and inferring them would re-derive the judgment.
+
+**4. Stored result.** This is the red-then-green result recorded in the Task's frozen Proof. The Proof holds each obligation's latest evaluation, so a Task pending a retry shows its latest gap. It prints one of:
+
+- `stored: no proof (legacy)`: the Task carries no frozen Proof;
+- `stored: no red-then-green obligation`: the frozen Proof owes no I6;
+- `stored: pending`;
+- `stored: shown`, followed by the same three indented `red`, `first implementation write` and `green` lines as a live `shown`;
+- `stored: proof:red-then-green-unproven:<gap>`: the failure kind settlement wrote to the receipt. A Proof failure other than an I6 gap reads `stored: proof:<kind>`.
+
+Problems with the live attempt (an uninspectable sidecar set, several live attempts, an unreadable epoch, an unresolvable repository root) and an undeterminable duty each print as their own line, and the helper still exits 0. It exits 1 only in these cases:
+
+- `--task` is missing or has no value, or an argument is left unconsumed;
+- no TaskGraph exists (`No task graph at <path>`);
+- the graph is unreadable or corrupt. The load boundary's error is printed, and a corrupt graph is never reported as missing;
+- the Task id is not in the TaskGraph (`No task <id> in the TaskGraph`). A typo never reads as "not owed".
+
+The helper is read-only. It never writes the State File, the ledger or the runtime directory, and it never takes the TaskGraph lock, so it is safe to run while a Wave or a Wave Gate is live or a subagent is active. Set `LOOM_STATE_PATH` to read a non-default graph.
+
 ### State is malformed
 
 Use only when the load boundary explicitly directs recovery:

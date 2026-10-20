@@ -189,6 +189,12 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/report-file-attribution.ts",
   // The I6 judge over one epoch's ledger facts (T7).
   "engine/src/core/red-then-green.ts",
+  // Red-Then-Green Status: the read-only projection of one Task's I6 duty,
+  // file classification, live judgment and stored result, and its rendering,
+  // with the pure implementation-application rules it asks for the duty
+  // (`redThenGreenDuty`), the one module of its closure not listed before.
+  "engine/src/core/red-then-green-status.ts",
+  "engine/src/core/implementation-application.ts",
   // I7 (T8): the one changed-files derivation at stop (INV-7) and the affected
   // check's judge, block-counter rule and block message. The planner and the
   // plan view it extends are listed with the Stop-Check Plan above.
