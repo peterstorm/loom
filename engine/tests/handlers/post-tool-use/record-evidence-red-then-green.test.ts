@@ -64,7 +64,10 @@ function vitestJson(failed: boolean): string {
 
 const session = sessionIdOf("i6-claude-session");
 const agent = agentIdOf("claude-impl-i6");
-const classification = { testFiles: ["tests/feature.test.ts"], implementationFiles: ["src/feature.ts"] };
+/** A Task that edits `src/feature.ts`, which existed at its first artifact baseline (FR-007). */
+const classification = { testFiles: ["tests/feature.test.ts"], implementationFiles: ["src/feature.ts"], createdImplementationFiles: [] };
+/** The same Task, creating `src/feature.ts` (FR-007a). */
+const creating = { ...classification, createdImplementationFiles: ["src/feature.ts"] };
 
 async function deliver(registry: ReturnType<typeof inMemorySessionRegistry>, callId: string, payload: Record<string, unknown>, effect?: () => void): Promise<void> {
   await registry.recordCallStart(session, callId, Date.now());
@@ -106,7 +109,7 @@ describe("I6 through Claude Code's recorder", () => {
 
     const events = eventsForEpoch(registry.readEvidence(session), epochOf(agent, IMPLEMENTER_TYPE));
     expect(events.filter((event) => event.kind === "TestRun").map((event) => event.kind === "TestRun" && event.exit)).toEqual([1, 0]);
-    expect(judgeRedThenGreen(events, classification, [], repo, false)).toEqual({
+    expect(judgeRedThenGreen(events, classification, repo, false)).toEqual({
       kind: "shown",
       red: { index: 0, command: redCommand },
       implementationWrite: "src/feature.ts",
@@ -152,13 +155,13 @@ describe("I6 through Claude Code's recorder", () => {
       kind: "recorded",
       results: [{ file: join(repo, "tests/feature.test.ts"), executed: 0, failed: 0, skipped: 0, collectionError: true }],
     });
-    expect(judgeRedThenGreen(events, classification, ["src/feature.ts"], repo, false)).toEqual({
+    expect(judgeRedThenGreen(events, creating, repo, false)).toEqual({
       kind: "shown",
       red: { index: 0, command: redCommand },
       implementationWrite: "src/feature.ts",
       green: { index: 2, command: greenCommand },
     });
-    expect(judgeRedThenGreen(events, classification, [], repo, false))
+    expect(judgeRedThenGreen(events, classification, repo, false))
       .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } });
   });
 });

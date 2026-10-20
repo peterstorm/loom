@@ -29,7 +29,7 @@ import { invariantRoles } from "./plan-paths";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
 import { deriveImplementationRetryDisposition } from "./implementation-retry";
-import { createdImplementationFiles, isRedThenGreenFailureKind } from "./red-then-green";
+import { isRedThenGreenFailureKind } from "./red-then-green";
 import type { RedThenGreenFailureKind, TestFileClassification } from "./red-then-green-types";
 import { quoteShellArgument } from "./shell-quoting";
 import { classifyTaskFiles } from "./test-file-classification";
@@ -354,7 +354,6 @@ export function baselineRestoreCommand(source: string, files: readonly string[])
 function redThenGreenRemedy(
   task: Task,
   classification: TestFileClassification,
-  created: readonly string[],
   failures: readonly RedThenGreenFailureKind[],
 ): readonly string[] {
   if (failures.length === 0) return [];
@@ -372,10 +371,13 @@ function redThenGreenRemedy(
         `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
         baseline +
         "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them.",
-    `2. Run your tests and observe red: at least one testcase in one of your test files fails.${createdFilesRed(created)}`,
+    `2. Run your tests and observe red: ${TESTCASE_RED}${createdFilesRed(classification.createdImplementationFiles)}`,
     "3. Then implement, and run your tests green.",
   ];
 }
+
+/** What red is for every Task (FR-007), stated once for both red steps. */
+const TESTCASE_RED = "at least one testcase in one of your test files fails.";
 
 /**
  * The FR-007a sentence for a Task that creates implementation files, appended
@@ -418,15 +420,14 @@ function redThenGreenSection(
     case "owed":
       break;
   }
-  const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles);
-  const created = createdImplementationFiles(classification, task.artifact_baseline);
+  const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
+  const created = classification.createdImplementationFiles;
   return {
     ok: true,
     value: [
       "**I6 red-then-green — BINDING for this Task.** Settlement proves this Task test-first from your attempt's evidence ledger, and only from it, in this order:",
-      created.length === 0
-        ? "1. **Red.** A trusted test run in which at least one testcase in one of your test files fails. A collection or import error with no failing testcase is not red."
-        : `1. **Red.** A trusted test run in which at least one testcase in one of your test files fails.${createdFilesRed(created)}`,
+      `1. **Red.** A trusted test run in which ${TESTCASE_RED}` +
+        (created.length === 0 ? " A collection or import error with no failing testcase is not red." : createdFilesRed(created)),
       "2. **First implementation write.** Your first write to any implementation file below, by a file tool or a shell command (a baseline restore of your own files via `git restore` mints no FileWrite and is exempt). Fixtures, helpers and type files count; writing a test file never does.",
       "3. **Green.** A later trusted run that exits 0 in which every one of your test files runs at least one testcase and none fails or fails to collect.",
       "",
@@ -439,7 +440,7 @@ function redThenGreenSection(
       "Only ledger runs with an exit code and a parsed structured report count, under every evaluation policy: a run without its report, a chained, piped or redirected run, and transcript test evidence never satisfy a step. " +
         "Run each step's tests as one bare report-writing command, in the forms the final verification table at the top of this brief lists. " +
         "I6 is judged per attempt: an earlier attempt's red never counts for this one.",
-      ...redThenGreenRemedy(task, classification, created, inheritedRedThenGreenFailures(task, dispatch)),
+      ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch)),
     ].join("\n"),
   };
 }

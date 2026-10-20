@@ -399,9 +399,9 @@ function withArtifactBaseline(graph: TaskGraph, created: readonly string[]): Tas
 }
 
 /** A Vitest JSON run whose report lists `file` as failed to collect: no testcase at all. */
-const jsonCollectionErrorRun = (file: string): RawEvent => ({
+const jsonCollectionErrorRun = (file: string, command = RED_RUN): RawEvent => ({
   kind: "TestRun",
-  command: RED_RUN,
+  command,
   exit: 1,
   report: { total: 0, failed: 0, source: "vitest-json", files: { kind: "recorded", results: [{ file, executed: 0, failed: 0, skipped: 0, collectionError: true }] } },
 });
@@ -1054,6 +1054,8 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
   }
 
   const reportedRun = (results: readonly TestFileResult[]): RawEvent => run(results, { command: "npx vitest run" });
+  /** The test file fails to load before the implementation write, then passes after it. Only the baseline differs between AS-042 and AS-009. */
+  const collectionRedEpoch = [write(TEST_FILE), jsonCollectionErrorRun(TEST_FILE, "npx vitest run"), write(IMPL_FILE), reportedRun([passing(TEST_FILE)])];
 
   it("judges I6 from the agent's own snapshot epoch, crediting no foreign epoch's facts", async () => {
     const { stop, persistedTask } = await armedOwingTask("own-epoch");
@@ -1068,13 +1070,7 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
   it("AS-042: a test that cannot load the module the Task creates is red, judged against the registered artifact baseline", async () => {
     const { stop, persistedTask } = await armedOwingTask("created-module", "created");
     expect(persistedTask().artifact_baseline).toContainEqual({ artifact: IMPL_FILE, snapshot: { kind: "missing" } });
-    const collectionRed: RawEvent = {
-      kind: "TestRun",
-      command: "npx vitest run",
-      exit: 1,
-      report: { total: 0, failed: 0, source: "vitest-json", files: { kind: "recorded", results: [{ file: TEST_FILE, executed: 0, failed: 0, skipped: 0, collectionError: true }] } },
-    };
-    await stop({ kind: "snapshot", events: records([write(TEST_FILE), collectionRed, write(IMPL_FILE), reportedRun([passing(TEST_FILE)])], CLAUDE_EPOCH) });
+    await stop({ kind: "snapshot", events: records(collectionRedEpoch, CLAUDE_EPOCH) });
     expect(i6ResultOfTask(persistedTask())).toMatchObject({
       state: "satisfied",
       evidence: { kind: "red-then-green", red: { index: 1 }, implementationWrite: IMPL_FILE, green: { index: 3 } },
@@ -1084,13 +1080,7 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
   it("AS-009: the same collection error is not red when the implementation file existed at the baseline", async () => {
     const { stop, persistedTask } = await armedOwingTask("existing-module");
     expect(persistedTask().artifact_baseline).toContainEqual({ artifact: IMPL_FILE, snapshot: expect.objectContaining({ kind: "sha256" }) });
-    const collectionRed: RawEvent = {
-      kind: "TestRun",
-      command: "npx vitest run",
-      exit: 1,
-      report: { total: 0, failed: 0, source: "vitest-json", files: { kind: "recorded", results: [{ file: TEST_FILE, executed: 0, failed: 0, skipped: 0, collectionError: true }] } },
-    };
-    await stop({ kind: "snapshot", events: records([write(TEST_FILE), collectionRed, write(IMPL_FILE), reportedRun([passing(TEST_FILE)])], CLAUDE_EPOCH) });
+    await stop({ kind: "snapshot", events: records(collectionRedEpoch, CLAUDE_EPOCH) });
     expect(i6ResultOfTask(persistedTask())).toMatchObject({
       state: "failed",
       failure: { kind: "red-then-green-unproven", gap: { kind: "red-missing", untrustedOnly: false } },

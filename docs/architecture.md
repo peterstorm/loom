@@ -266,7 +266,7 @@ Pi child tool_result event ─ piToolCall ────────────�
 
 A matrix test feeds the same tool-call fixtures through both adapters and asserts identical records. Consumers read the ledger only through epoch folds:
 - the SubagentStop test-result resolver;
-- I6 settlement (`judgeRedThenGreen`, which also takes the implementation files the Task creates by its first `artifact_baseline`, `createdImplementationFiles`, so a test that cannot yet load a module the Task creates is red: FR-007a);
+- I6 settlement (`judgeRedThenGreen`, whose classification also names the implementation files the Task creates by its first `artifact_baseline`, `createdImplementationFiles`, so a test that cannot yet load a module the Task creates is red: FR-007a);
 - the stop checks' changed files (`changedFilesAtStop`, INV-7);
 - `helper stop-check-plan`.
 

@@ -9,7 +9,6 @@
  * a declared test file only through `attributeReportedFile` (INV-5).
  */
 
-import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { normalizePlanPath } from "./plan-path-match";
 import { attributeReportedFile, repositoryRelative } from "./report-file-attribution";
 import type {
@@ -99,24 +98,6 @@ function readEpoch(
 }
 
 /**
- * The Task's implementation files that its first artifact baseline records as
- * missing: the files the Task creates (FR-007a). `baseline` is the Task-level
- * `artifact_baseline`, captured before its first agent ran, so a retry that
- * deletes a created file to show red again still sees it as created. A Task
- * with no baseline (populated before baselines existed) creates nothing as far
- * as I6 knows, so strict FR-007 holds for it and red fails closed.
- */
-export function createdImplementationFiles(
-  classification: TestFileClassification,
-  baseline: readonly DeclaredArtifactBaseline[] | undefined,
-): readonly string[] {
-  const missing = new Set(
-    (baseline ?? []).filter(({ snapshot }) => snapshot.kind === "missing").map(({ artifact }) => normalizePlanPath(artifact)),
-  );
-  return Object.freeze(classification.implementationFiles.filter((file) => missing.has(normalizePlanPath(file))));
-}
-
-/**
  * A behavioral red: some Task test file has a failing testcase that is not a
  * collection error (FR-007), or, when the Task creates an implementation file,
  * fails to collect (FR-007a). A Vitest JSON collection error records no
@@ -149,13 +130,13 @@ const unproven = (gap: RedThenGreenGap): RedThenGreenObservation =>
  * unmet by qualifying runs is `untrustedOnly` when the epoch holds a
  * non-qualifying TestRun or the Task's test result is Pi-structured.
  */
-export const judgeRedThenGreen: JudgeRedThenGreenFn = (events, classification, created, repositoryRoot, untrustedEvidence) => {
+export const judgeRedThenGreen: JudgeRedThenGreenFn = (events, classification, repositoryRoot, untrustedEvidence) => {
   if (classification.testFiles.length === 0) return unproven({ kind: "no-test-files" });
   const epoch = readEpoch(events, classification, repositoryRoot);
   const write = epoch.firstImplementationWrite;
   if (write === null) return unproven({ kind: "implementation-write-missing" });
   const untrustedOnly = untrustedEvidence || epoch.holdsUntrustedRun;
-  const createsImplementationFile = created.length > 0;
+  const createsImplementationFile = classification.createdImplementationFiles.length > 0;
   const red = epoch.qualifyingRuns.find((run) => isRed(run, createsImplementationFile));
   if (red === undefined) return unproven({ kind: "red-missing", untrustedOnly });
   if (red.ref.index > write.index) return unproven({ kind: "red-after-first-implementation-write" });

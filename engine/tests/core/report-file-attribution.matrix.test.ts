@@ -90,8 +90,7 @@ function failingRun(reported: string): Evidence {
 function judgeRedStep(reported: string): string {
   const observation = judgeRedThenGreen(
     [failingRun(reported), { kind: "FileWrite", path: IMPLEMENTATION, via: "tool" }],
-    { testFiles: DECLARED, implementationFiles: [IMPLEMENTATION] },
-    [],
+    { testFiles: DECLARED, implementationFiles: [IMPLEMENTATION], createdImplementationFiles: [] },
     ROOT,
     false,
   );

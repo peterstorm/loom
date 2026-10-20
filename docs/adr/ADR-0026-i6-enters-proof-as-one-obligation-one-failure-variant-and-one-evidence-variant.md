@@ -147,12 +147,14 @@ whose Task-level `artifact_baseline` entry has `snapshot.kind === "missing"`. Th
 before the Task's first agent, and the retry remedy restores to the same `start_sha`, so the files a retry
 deletes are still created files.
 
-- `JudgeRedThenGreenFn` gains `createdImplementationFiles: readonly string[]` after `classification`.
-  The judge stays pure, total and deterministic over its arguments (FR-012).
-- `createdImplementationFiles(classification, baseline)` in `core/red-then-green.ts` is the one pure
-  owner of "which files does this Task create". It compares paths with `normalizePlanPath`. Exact
-  settlement (`exact-implementation-settlement.ts`, one call site shared by Claude Code and Pi) and the
-  implementation brief both call it.
+- `TestFileClassification` gains `createdImplementationFiles: readonly string[]`, and
+  `classifyTaskFiles(fileList, testFiles, baseline)` (`core/test-file-classification.ts`, INV-2) builds
+  it with the test and implementation split, so it is the one pure owner of "which files does this Task
+  create", and the created files are always a subset of the implementation files. It compares paths
+  with `normalizePlanPath`. Exact settlement (`exact-implementation-settlement.ts`, one call site shared
+  by Claude Code and Pi) and the implementation brief both call it, and so both always agree.
+- `JudgeRedThenGreenFn` keeps its four CT-1 parameters and reads the created files from the
+  classification. The judge stays pure, total and deterministic over its arguments (FR-012).
 - Red per Task test file is now `collectionError ? createsImplementationFile : failed > 0`. A collection
   error decides on its own, rather than only gating `failed > 0`, because the Vitest JSON shape records no
   failing testcase. A JUnit collection error keeps its synthetic failing testcase and is judged the same
@@ -162,7 +164,8 @@ deletes are still created files.
 - The brief's I6 section names the created files in its Red step, and in the retry remedy's red step.
   It says that before they are written, tests failing to load them is red.
 
-**Consequences.** The judge now has five parameters. A test that fails to collect for an unrelated reason,
+**Consequences.** `classifyTaskFiles` now takes the Task's baseline. Every caller must pass it, or
+`undefined` for a caller that has none. A test that fails to collect for an unrelated reason,
 such as a syntax error in the test file, also counts as red in a Task that creates a file. That is
 accepted: the Task's own test file still has to go green after the first implementation write, so the
 order is still proved for the Task's tests, and the exception is bounded to Tasks the frozen baseline says
