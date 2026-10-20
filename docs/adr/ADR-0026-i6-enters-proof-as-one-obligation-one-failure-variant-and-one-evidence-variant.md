@@ -129,3 +129,41 @@ Detail:
   result is accepted.
 - The gap name is a stable string in `failureKinds`. Renaming a gap variant later is a State File and
   lineage compatibility change, not a local refactor.
+
+## Amendment (2026-10-20): a collection error is red for a Task that creates an implementation file (FR-007a)
+
+The G4 slice 2 pilot found a hole in FR-007. On attempt 2, T1's I6 remedy deleted the module the Task
+creates and told the agent to observe red. The Task's test file imports that module statically. Vitest
+reports such a file as failed with no testcase at all: a Vitest JSON entry with `status: "failed"` and no
+`assertionResults`, which `structured-test-report.ts` records as `{ executed: 0, failed: 0,
+collectionError: true }`. The judge never counted a collection error as red. A stub to make the import
+load would itself be the first implementation write, so red would always come too late. Test-first work
+on any new module could therefore never satisfy I6 unless the agent happened to import the module
+dynamically inside a testcase. Attempt 2 is terminal, so the Task would escalate.
+
+**Decision.** FR-007a: a collection error in a Task test file counts as red when the Task creates an
+implementation file. A created implementation file is one of the classification's implementation files
+whose Task-level `artifact_baseline` entry has `snapshot.kind === "missing"`. That baseline is captured
+before the Task's first agent, and the retry remedy restores to the same `start_sha`, so the files a retry
+deletes are still created files.
+
+- `JudgeRedThenGreenFn` gains `createdImplementationFiles: readonly string[]` after `classification`.
+  The judge stays pure, total and deterministic over its arguments (FR-012).
+- `createdImplementationFiles(classification, baseline)` in `core/red-then-green.ts` is the one pure
+  owner of "which files does this Task create". It compares paths with `normalizePlanPath`. Exact
+  settlement (`exact-implementation-settlement.ts`, one call site shared by Claude Code and Pi) and the
+  implementation brief both call it.
+- Red per Task test file is now `collectionError ? createsImplementationFile : failed > 0`. A collection
+  error decides on its own, rather than only gating `failed > 0`, because the Vitest JSON shape records no
+  failing testcase. A JUnit collection error keeps its synthetic failing testcase and is judged the same
+  way. Green is unchanged: a collection error still never greens.
+- A Task with no `artifact_baseline` (a legacy population) gets `[]`. Strict FR-007 then applies and red
+  still fails closed. A Task that only edits existing files is unaffected (AS-009).
+- The brief's I6 section names the created files in its Red step, and in the retry remedy's red step.
+  It says that before they are written, tests failing to load them is red.
+
+**Consequences.** The judge now has five parameters. A test that fails to collect for an unrelated reason,
+such as a syntax error in the test file, also counts as red in a Task that creates a file. That is
+accepted: the Task's own test file still has to go green after the first implementation write, so the
+order is still proved for the Task's tests, and the exception is bounded to Tasks the frozen baseline says
+create a module.

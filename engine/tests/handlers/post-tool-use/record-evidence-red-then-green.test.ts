@@ -106,11 +106,84 @@ describe("I6 through Claude Code's recorder", () => {
 
     const events = eventsForEpoch(registry.readEvidence(session), epochOf(agent, IMPLEMENTER_TYPE));
     expect(events.filter((event) => event.kind === "TestRun").map((event) => event.kind === "TestRun" && event.exit)).toEqual([1, 0]);
-    expect(judgeRedThenGreen(events, classification, repo, false)).toEqual({
+    expect(judgeRedThenGreen(events, classification, [], repo, false)).toEqual({
       kind: "shown",
       red: { index: 0, command: redCommand },
       implementationWrite: "src/feature.ts",
       green: { index: 2, command: greenCommand },
     });
   });
+
+  it("AS-042: a test file that cannot import the module the Task creates is red only for a Task that creates it", async () => {
+    const registry = inMemorySessionRegistry();
+    await registry.markActive(session, agent);
+    await registry.bind(session, IMPLEMENTER_TYPE, agent);
+
+    // What Vitest writes when the test file statically imports a module that does not exist yet.
+    const redReport = report("collection-red.json");
+    const redCommand = `npx vitest run tests/feature.test.ts --reporter=default --reporter=json --outputFile=${redReport}`;
+    await deliver(registry, "collection-red", {
+      hook_event_name: "PostToolUseFailure",
+      tool_name: "Bash",
+      tool_input: { command: redCommand },
+      error: "Exit code 1\n FAIL  tests/feature.test.ts [ tests/feature.test.ts ]\nError: Failed to load url ../src/feature\n",
+      is_interrupt: false,
+    }, () => writeFileSync(redReport, vitestCollectionErrorJson()));
+
+    await deliver(registry, "create", {
+      hook_event_name: "PostToolUse",
+      tool_name: "Write",
+      tool_input: { file_path: join(repo, "src/feature.ts"), content: "export const feature = 1;\n" },
+      tool_response: { type: "create", filePath: join(repo, "src/feature.ts") },
+    });
+
+    const greenReport = report("collection-green.json");
+    const greenCommand = `npx vitest run tests/feature.test.ts --reporter=default --reporter=json --outputFile=${greenReport}`;
+    await deliver(registry, "collection-green", {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: greenCommand },
+      tool_response: { stdout: " Tests  1 passed (1)\n", stderr: "", interrupted: false, isImage: false, noOutputExpected: false },
+    }, () => writeFileSync(greenReport, vitestJson(false)));
+
+    const events = eventsForEpoch(registry.readEvidence(session), epochOf(agent, IMPLEMENTER_TYPE));
+    const red = events[0];
+    expect(red?.kind === "TestRun" && red.report?.files).toEqual({
+      kind: "recorded",
+      results: [{ file: join(repo, "tests/feature.test.ts"), executed: 0, failed: 0, skipped: 0, collectionError: true }],
+    });
+    expect(judgeRedThenGreen(events, classification, ["src/feature.ts"], repo, false)).toEqual({
+      kind: "shown",
+      red: { index: 0, command: redCommand },
+      implementationWrite: "src/feature.ts",
+      green: { index: 2, command: greenCommand },
+    });
+    expect(judgeRedThenGreen(events, classification, [], repo, false))
+      .toEqual({ kind: "unproven", gap: { kind: "red-missing", untrustedOnly: false } });
+  });
 });
+
+/** A Vitest JSON report whose one test file failed to collect: a failed entry with no assertions. */
+function vitestCollectionErrorJson(): string {
+  return JSON.stringify({
+    numTotalTestSuites: 1,
+    numPassedTestSuites: 0,
+    numFailedTestSuites: 1,
+    numPendingTestSuites: 0,
+    numTotalTests: 0,
+    numPassedTests: 0,
+    numFailedTests: 0,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    startTime: Date.now(),
+    success: false,
+    testResults: [{
+      name: join(repo, "tests/feature.test.ts"),
+      status: "failed",
+      message: "Failed to load url ../src/feature (resolved id: ../src/feature) in tests/feature.test.ts. Does the file exist?",
+      startTime: Date.now(),
+      endTime: Date.now(),
+      assertionResults: [],
+    }],
+  });
+}

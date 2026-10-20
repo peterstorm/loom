@@ -13,7 +13,7 @@ import type {
   IsoInstant,
 } from "../../core/implementation-completion";
 import type { ProofEvaluationPolicy } from "../../core/proof-obligations";
-import { judgeRedThenGreen } from "../../core/red-then-green";
+import { createdImplementationFiles, judgeRedThenGreen } from "../../core/red-then-green";
 import type { LedgerObservation, RedThenGreenObservation } from "../../core/red-then-green-types";
 import { classifyTaskFiles } from "../../core/test-file-classification";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
@@ -138,8 +138,9 @@ type RedThenGreenJudgment =
 /**
  * The one place both harnesses split a Task's `file_list` for I6 (INV-2):
  * `classifyTaskFiles` against the frozen classification the `owed` duty
- * carries, handed ready to the pure judge. Only an `owed` Task consults the
- * ledger; the epoch it judges is the one this attempt's transport observed
+ * carries, handed ready to the pure judge with the implementation files the
+ * Task creates by its first artifact baseline (FR-007a). Only an `owed` Task
+ * consults the ledger; the epoch it judges is the one this attempt's transport observed
  * (I6 is judged per attempt epoch). A `proof-unfrozen` duty never reaches
  * here: settlement refuses it before observing anything.
  */
@@ -160,9 +161,16 @@ function judgeAttemptRedThenGreen(
         return { kind: "unavailable", reason: `${facts.transport} evidence ledger unreadable for ${task.id}: ${ledger.reason}` };
       }
       const piStructured = facts.testResult.verdict === "untrusted" && facts.testResult.provenance === "pi-structured";
+      const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles);
       return {
         kind: "judged",
-        observation: judgeRedThenGreen(ledger.events, classifyTaskFiles(task.file_list ?? [], duty.testFiles), repositoryRoot, piStructured),
+        observation: judgeRedThenGreen(
+          ledger.events,
+          classification,
+          createdImplementationFiles(classification, task.artifact_baseline),
+          repositoryRoot,
+          piStructured,
+        ),
       };
     }
   }
