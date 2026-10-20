@@ -39,7 +39,7 @@ Nothing is model-chosen. The runners and the test-file pattern come from the ope
 - AS-006: Given the same Task whose first implementation write comes before any qualifying red run, when proof is evaluated, then proof fails with a failure naming the red step as missing before the first implementation write, and settlement retries the Task
 - AS-007: Given a Task with a qualifying red run and an implementation write but no later run in which its test files pass, when proof is evaluated, then proof fails naming the green step as missing
 - AS-008: Given a Task that has a red run and a green run but never writes an implementation file, when proof is evaluated, then proof fails naming the implementation-write step as missing
-- AS-009: Given a Task whose only failing run of its test files is a collection or import error with no failing testcase in those files, when proof is evaluated, then that run does not count as red, and proof fails naming the red step as missing
+- AS-009: Given a Task that creates no implementation file, whose only failing run of its test files is a collection or import error with no failing testcase in those files, when proof is evaluated, then that run does not count as red, and proof fails naming the red step as missing
 - AS-010: Given a Task that writes a fixture, helper or type file from its `file_list` that does not match the test pattern, before any red run, when proof is evaluated, then that write counts as the first implementation write, and proof fails naming the red step as out of order
 - AS-011: Given a red or green step that is satisfied only by a Pi-structured or otherwise untrusted run, when proof is evaluated under any evaluation policy, then that run does not count, and proof fails naming the unsatisfied step and saying that only trusted ledger runs qualify
 - AS-012: Given a claimant Task (`covered-by-acceptance-contract`), when proof is evaluated, then it owes no observed-red step and is credited red from the frozen acceptance red window
@@ -111,6 +111,7 @@ Nothing is model-chosen. The runners and the test-file pattern come from the ope
 - AS-039: Given a Pi child with no write grant, or whose grant was rejected, when it runs tool calls, then nothing is recorded into any epoch and the child's stderr says why
 - AS-040: Given a Pi implementation Task with a frozen affected runner whose child wrote files, when the batch is settled, then the report-only affected check runs over the changed files taken from that child's epoch
 - AS-041: Given a literal `mv a b`, `git mv a b` or `cp a b` run through either harness, when it is recorded, then a shell FileWrite for `b` is minted, so a renamed file appears among the changed files under its new path
+- AS-042: Given a Task that creates an implementation file (one its artifact baseline records as missing), whose only failing run of its test files before its first implementation write is a collection or import error, followed by that write and a green run, when proof is evaluated, then that run counts as red and I6 is satisfied
 
 ### US7: [P3] Docs state the obligation and its soundness limit
 
@@ -132,7 +133,8 @@ Nothing is model-chosen. The runners and the test-file pattern come from the ope
 ### I6 obligation
 - FR-005: I6 MUST be owed by exactly the non-claimant implementation Tasks whose frozen verification policy has `newTests: required`, in TaskGraphs populated after this feature. TaskGraphs populated earlier MUST NOT be newly obligated
 - FR-006: I6 MUST be satisfied only when the epoch's ordered ledger shows (1) a trusted TestRun in which at least one testcase in one of the Task's test files fails, then (2) the first FileWrite to one of the Task's implementation files, then (3) a later trusted TestRun in which the Task's test files pass
-- FR-007: A file-level collection or import error with no failing testcase MUST NOT count as red for step 1
+- FR-007: A file-level collection or import error with no failing testcase MUST NOT count as red for step 1, except as FR-007a allows
+- FR-007a: When the Task creates an implementation file, meaning a `file_list` implementation file that the Task-level artifact baseline records as missing, a collection or import error in a Task test file MUST count as red for step 1. Before the first write to a module the Task creates, a test that imports it can only fail to load, so that failure is the behavioral absence. A Task with no recorded baseline creates nothing for this purpose, and FR-007 applies unchanged
 - FR-008: Only trusted ledger TestRuns (an exit code and a parsed structured report) MUST count for steps 1 and 3, on both harnesses and under every proof evaluation policy. Untrusted evidence MUST NOT count, even under the Pi structured-evidence policy. This includes Pi-structured transcript evidence, which is not a ledger fact
 - FR-009: Each I6 failure MUST be a distinct proof failure that names which step is missing or out of order (red missing, red after the first implementation write, implementation write missing, green missing, no test files declared, or untrusted run only)
 - FR-010: Claimant Tasks MUST NOT owe step 1. They MUST be credited red from the frozen acceptance red window
@@ -222,7 +224,8 @@ Nothing is model-chosen. The runners and the test-file pattern come from the ope
 | Changed files | The epoch's ledger FileWrite paths, excluding files absent at stop time, with renamed files under their new path |
 | Trusted TestRun | A ledger TestRun fact, minted on either harness, with an exit code and a parsed structured report |
 | Pi ledger recorder | The Pi child's tool-result hook that mints ledger facts through the shared minting rule into the parent session's ledger |
-| Behavioral red | A trusted TestRun in which at least one testcase in a Task test file fails (a collection or import error alone does not count) |
+| Behavioral red | A trusted TestRun in which at least one testcase in a Task test file fails. A collection or import error alone counts only when the Task creates an implementation file (FR-007a) |
+| Created implementation file | An implementation file the Task-level artifact baseline records as missing: a module the Task creates |
 | Per-file result | The pass/fail result of one test file as recorded from the structured report at capture |
 | Claimant | A Task whose policy is `covered-by-acceptance-contract`, credited red from the frozen acceptance red window |
 | Fail open | On infrastructure failure or a reached cap, the stop check notes the cause and does not block |
@@ -232,3 +235,4 @@ Nothing is model-chosen. The runners and the test-file pattern come from the ope
 
 - 2026-10-16: initial spec from brainstorm (Approach A) and interview answers 1A–8A
 - 2026-10-16: amended after architecture interview Q1, where the operator chose C (build the Pi ledger recorder in this slice). Added US8, FR-031 to FR-035, AS-036 to AS-041 and SC-007, and reworded FR-008, NFR-002, SC-006 and OOS-009
+- 2026-10-20: amended after the slice 2 live pilot found that the I6 retry remedy could not be satisfied by a Task that creates a module. Its static import of the deleted module is a collection error, which FR-007 never counted as red. Added FR-007a and AS-042, narrowed AS-009 to Tasks that create no implementation file, and updated the glossary (ADR-0026 amendment, loom #115)
