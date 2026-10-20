@@ -94,7 +94,13 @@ import {
   type PiSpawnBatch,
 } from "../../core/spawn-emission-gate";
 import { parseSpawnBatch, type ParsedSpawnBatch } from "../../core/spawn-request-authority";
-import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
+import {
+  MAX_OPERATOR_NOTES,
+  parseOperatorNote,
+  renderImplementationBriefRequest,
+  type ImplementationBrief,
+  type OperatorNote,
+} from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
@@ -143,6 +149,7 @@ import {
 import {
   parseEffectId,
   type AgentRequestAuthority,
+  type DomainResult,
   type EffectIntent,
 } from "../../core/orchestration-contract";
 import { claudeAgentType, expectedSpawnModel } from "../../core/model-profiles";
@@ -191,7 +198,7 @@ import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
-import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
+import { argumentValue, argumentValues, hasFlag, unconsumedValueArguments } from "./cli-args";
 import { REMEDIATION_EVENT_RESOURCE_POLICY } from "./programs/remediation-events";
 import { parseStandaloneDispositionStartBytes } from "../../core/standalone-disposition-machine";
 import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from "../../core/standalone-lineage-contract";
@@ -214,9 +221,10 @@ function usage(): HookResult {
       "",
       "  status  [--json] [--wave N] [--runs-root <wave-gate-runs-root>]",
       "          --runs-root <root> --run <run-directory> selects read-only Run inspection",
-      "  brief   [--task <task-id>] [--prompt]",
+      "  brief   [--task <task-id> [--note <text>]...] [--prompt]",
       "          (pure read: engine-rendered implementation brief + spawn invocation for each owed dispatch;",
-      "          both harnesses pass the LOOM_IMPLEMENTATION_BRIEF marker, which the spawn gate expands; --prompt adds the full brief to read)",
+      "          both harnesses pass the LOOM_IMPLEMENTATION_BRIEF marker, which the spawn gate expands; --prompt adds the full brief to read;",
+      "          each --note becomes a LOOM_OPERATOR_NOTE line of that Task's marker and an item of its brief's Operator Note section)",
       "  inspect --runs-root <root> --run <run-directory> [--json]",
       "          (pure read: program, state, per-slot capture and rejection diagnostics, event tail)",
       "          --lineage returns authenticated source identity, complete Finding Origins, counts and advisory inventory",
@@ -590,12 +598,12 @@ async function statusOperation(args: readonly string[]): Promise<HookResult> {
   return { kind: "allow" };
 }
 
-/** `brief`'s whole argument grammar: `--task <id>` and the `--prompt` switch.
- *  Brief answers only while canonical status owes implementation dispatches
- *  for the protected current Wave, so a status selector (`--wave`,
- *  `--runs-root`, `--run`) would have nothing to select; it and any other
- *  argument are refused rather than silently ignored. */
-const BRIEF_VALUE_FLAGS: ReadonlySet<string> = new Set(["--task"]);
+/** `brief`'s whole argument grammar: `--task <id>`, repeatable `--note <text>`
+ *  for that Task, and the `--prompt` switch. Brief answers only while canonical
+ *  status owes implementation dispatches for the protected current Wave, so a
+ *  status selector (`--wave`, `--runs-root`, `--run`) would have nothing to
+ *  select; it and any other argument are refused rather than silently ignored. */
+const BRIEF_VALUE_FLAGS: ReadonlySet<string> = new Set(["--task", "--note"]);
 const BRIEF_SWITCHES: ReadonlySet<string> = new Set(["--prompt"]);
 
 /** One owed dispatch's brief and its exact spawn invocation per harness. */
@@ -609,17 +617,40 @@ export type BriefInvocation = Readonly<{
   prompt?: string;
 }>;
 
+/** The operator notes `brief` was given, admitted one by one; they name one Task. */
+function briefOperatorNotes(args: readonly string[], requested: string | null): DomainResult<readonly OperatorNote[], string> {
+  const raw = argumentValues(args, "--note");
+  if (raw === null) return { ok: false, error: "brief --note requires <text>" };
+  if (raw.length === 0) return { ok: true, value: [] };
+  if (requested === null) return { ok: false, error: "brief --note requires --task: an operator note belongs to one Task's brief" };
+  if (raw.length > MAX_OPERATOR_NOTES) return { ok: false, error: `brief takes at most ${MAX_OPERATOR_NOTES} --note values, got ${raw.length}` };
+  const notes: OperatorNote[] = [];
+  for (const text of raw) {
+    const note = parseOperatorNote(text);
+    if (!note.ok) return { ok: false, error: `brief --note: ${note.error}` };
+    notes.push(note.value);
+  }
+  return { ok: true, value: Object.freeze(notes) };
+}
+
 /**
  * Pure harness projection of one rendered brief. Both harnesses pass the
  * brief MARKER, never the brief: the Loom Pi extension, and on Claude Code the
  * `validate-task-execution` PreToolUse hook, expand it to the rendered brief
- * before any gate judges the prompt. `withPrompt` adds the rendered brief for
- * an operator to read. Each harness names the agent the way its registry
+ * before any gate judges the prompt. The marker carries `operatorNotes`, the
+ * notes the brief was rendered with (#119), so the gate renders the same
+ * brief. `withPrompt` adds the rendered brief for an operator to read. Each
+ * harness names the agent the way its registry
  * resolves it: Pi by the bare catalog name, Claude Code by `loom:<agent>`
  * (#117), which the Claude spawn gate requires before it reserves anything.
  */
-export function briefInvocation(brief: ImplementationBrief, claudeModel: string, withPrompt: boolean): BriefInvocation {
-  const marker = `${IMPLEMENTATION_BRIEF_MARKER}: ${brief.taskId}`;
+export function briefInvocation(
+  brief: ImplementationBrief,
+  operatorNotes: readonly OperatorNote[],
+  claudeModel: string,
+  withPrompt: boolean,
+): BriefInvocation {
+  const marker = renderImplementationBriefRequest({ taskId: brief.taskId, operatorNotes });
   return Object.freeze({
     taskId: brief.taskId,
     agent: brief.agent,
@@ -631,8 +662,9 @@ export function briefInvocation(brief: ImplementationBrief, claudeModel: string,
 }
 
 /**
- * `brief [--task Tn] [--prompt]` — the engine-rendered implementation brief
- * for every dispatch canonical status owes (or the one named Task), with the
+ * `brief [--task Tn [--note <text>]...] [--prompt]` — the engine-rendered
+ * implementation brief for every dispatch canonical status owes (or the one
+ * named Task, with its operator notes), with the
  * exact spawn invocation per harness (`briefInvocation`). A pure read: the
  * spawn gate still registers and authorizes the attempt. Any argument outside
  * that grammar, a status selector included, is refused.
@@ -642,9 +674,12 @@ async function briefOperation(args: readonly string[]): Promise<HookResult> {
   if (unconsumed.length > 0) {
     return {
       kind: "error",
-      message: `brief takes only --task <id> and --prompt; unknown or unconsumed argument(s): ${unconsumed.join(" ")}`,
+      message: `brief takes only --task <id>, --note <text> and --prompt; unknown or unconsumed argument(s): ${unconsumed.join(" ")}`,
     };
   }
+  const requested = argumentValue(args, "--task");
+  const operatorNotes = briefOperatorNotes(args, requested);
+  if (!operatorNotes.ok) return { kind: "error", message: operatorNotes.error };
   const status = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
   const action = status.next.action;
   const recovery = action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started"
@@ -654,7 +689,6 @@ async function briefOperation(args: readonly string[]): Promise<HookResult> {
     const owed = recovery?.kind ?? (action.kind === "blocked" ? action.diagnostic.kind : action.kind);
     return { kind: "error", message: `canonical status owes no implementation dispatch (next: ${owed}); run status` };
   }
-  const requested = argumentValue(args, "--task");
   const dispatches = recovery.dispatches.filter(({ taskId }) => requested === null || taskId === requested);
   if (dispatches.length === 0) {
     return {
@@ -665,11 +699,12 @@ async function briefOperation(args: readonly string[]): Promise<HookResult> {
   const withPrompt = hasFlag(args, "--prompt");
   const briefs: BriefInvocation[] = [];
   for (const dispatch of dispatches) {
-    const rendered = renderTaskImplementationBrief(TASK_GRAPH_PATH, LOOM_PACKAGE_ROOT, dispatch.taskId);
+    const request = { taskId: dispatch.taskId, operatorNotes: operatorNotes.value };
+    const rendered = renderTaskImplementationBrief(TASK_GRAPH_PATH, LOOM_PACKAGE_ROOT, request);
     if (!rendered.ok) return { kind: "error", message: rendered.error };
     const claudeModel = expectedSpawnModel(rendered.value.agent, "claude-code");
     if (!claudeModel.ok) return { kind: "error", message: claudeModel.error.message };
-    briefs.push(briefInvocation(rendered.value, claudeModel.value, withPrompt));
+    briefs.push(briefInvocation(rendered.value, request.operatorNotes, claudeModel.value, withPrompt));
   }
   process.stdout.write(`${JSON.stringify({ wave: recovery.wave, briefs }, null, 2)}\n`);
   return { kind: "allow" };

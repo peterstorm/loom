@@ -19,12 +19,16 @@
  * agent is not the Task's agent, is refused whole and yields no rewrite.
  */
 
-import { parseImplementationBriefMarker, type ImplementationBrief } from "../engine/src/core/implementation-brief";
+import {
+  parseImplementationBriefRequest,
+  type ImplementationBrief,
+  type ImplementationBriefRequest,
+} from "../engine/src/core/implementation-brief";
 import type { DomainResult } from "../engine/src/core/orchestration-contract";
 import { spawnBatchEntries } from "./spawn-graph";
 
-/** Port: render one Task's brief against the batch's governing TaskGraph. */
-export type RenderTaskBrief = (taskId: string) => DomainResult<ImplementationBrief, string>;
+/** Port: render the brief a marker requests against the batch's governing TaskGraph. */
+export type RenderTaskBrief = (request: ImplementationBriefRequest) => DomainResult<ImplementationBrief, string>;
 
 /** One marker's replacement: the batch slot whose `task` becomes `prompt`.
  *  `slot` addresses the same entry `spawnEntryAt` does, whichever spawn shape
@@ -43,9 +47,13 @@ export function expandImplementationBriefMarkers(raw: unknown, render: RenderTas
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
     const item = entry as Record<string, unknown>;
     if (typeof item.task !== "string") continue;
-    const taskId = parseImplementationBriefMarker(item.task);
-    if (taskId === null) continue;
-    const rendered = render(taskId);
+    const parsed = parseImplementationBriefRequest(item.task);
+    if (parsed.kind === "none") continue;
+    if (parsed.kind === "malformed") {
+      return Object.freeze({ ok: false, reason: `BLOCKED: spawn item ${index + 1} has a malformed implementation brief marker: ${parsed.reason}` });
+    }
+    const { taskId } = parsed.request;
+    const rendered = render(parsed.request);
     if (!rendered.ok) {
       return Object.freeze({ ok: false, reason: `BLOCKED: spawn item ${index + 1} cannot expand its implementation brief: ${rendered.error}` });
     }

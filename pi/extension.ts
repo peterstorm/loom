@@ -404,7 +404,7 @@ export default function (
           // polarity and the admission's parse still refuses it.
           observeGraph: (input) => observeSpawnBatchGraph(input, ctx.cwd),
           runtimeGraph: { active: graphIsActive, path: () => taskGraphPath() },
-          renderBrief: (graphPath, taskId) => renderTaskImplementationBrief(graphPath, PACKAGE_ROOT, taskId),
+          renderBrief: (graphPath, request) => renderTaskImplementationBrief(graphPath, PACKAGE_ROOT, request),
           // Pi dispatches the live argument object it handed this handler, so
           // the rendered brief is written into it in place.
           rewriteTask: (slot, task) => replacePiSpawnTask(event.input, slot, task),

@@ -25,8 +25,8 @@ function fakePorts(overrides: Partial<{
         return "/runtime/.claude/state/active_task_graph.json";
       },
     },
-    renderBrief: (graphPath, taskId) => {
-      calls.push({ port: "renderBrief", detail: { graphPath, taskId } });
+    renderBrief: (graphPath, { taskId, operatorNotes }) => {
+      calls.push({ port: "renderBrief", detail: { graphPath, taskId, operatorNotes } });
       return overrides.renderFails
         ? { ok: false, error: `Task ${taskId} is not owed a dispatch` }
         : {
@@ -63,7 +63,7 @@ describe("prepareSpawnBatch", () => {
     const input = markerBatch();
     expect(prepareSpawnBatch(input, ports)).toEqual({ kind: "pass-through" });
     expect(calls.map(({ port }) => port)).toEqual(["observeGraph", "renderBrief", "rewriteTask", "admit"]);
-    expect(calls[1]!.detail).toEqual({ graphPath: "/worktree/graph.json", taskId: "T5" });
+    expect(calls[1]!.detail).toEqual({ graphPath: "/worktree/graph.json", taskId: "T5", operatorNotes: [] });
     expect(calls[2]!.detail).toEqual({ slot: 1, task: "rendered T5" });
   });
 

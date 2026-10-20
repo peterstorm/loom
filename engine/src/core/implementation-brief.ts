@@ -89,6 +89,7 @@ const BRIEF_VARIABLES = [
   "predecessor_outputs",
   "verification_policy",
   "implementation_retry_context",
+  "operator_note",
   "task_description",
   "spec_anchors_formatted",
   "spec_contributions_formatted",
@@ -125,6 +126,8 @@ export type ImplementationBriefInput = Readonly<{
   /** The TaskGraph's project root, absolute: where the I6 restore command
    *  runs, spelled literally so no command substitution reaches the guard. */
   repositoryRoot: string;
+  /** The operator's notes from the dispatch marker (#119); empty for none. */
+  operatorNotes: readonly OperatorNote[];
 }>;
 
 export type ImplementationBrief = Readonly<{
@@ -524,6 +527,7 @@ export function renderImplementationBrief(
       ...(redThenGreen.value === null ? [] : ["", redThenGreen.value]),
     ].join("\n"),
     implementation_retry_context: dispatch.promptAppendix ?? NO_RETRY_CONTEXT,
+    operator_note: bulleted(input.operatorNotes, NO_OPERATOR_NOTE),
     task_description: task.description,
     spec_anchors_formatted: anchors.value,
     spec_contributions_formatted: contributions.value,
@@ -561,17 +565,100 @@ export function renderImplementationBrief(
 }
 
 /**
- * The Pi dispatch marker: a spawn item whose whole task is
- * `LOOM_IMPLEMENTATION_BRIEF: T5` asks the Loom extension to substitute the
+ * The dispatch marker: a spawn whose task is `LOOM_IMPLEMENTATION_BRIEF: T5`
+ * asks Loom (the Pi extension, or the Claude Code spawn gate) to substitute the
  * engine-rendered brief before any spawn gate reads the prompt, so the
  * orchestrating model never copies the brief into a tool call.
  */
 export const IMPLEMENTATION_BRIEF_MARKER = "LOOM_IMPLEMENTATION_BRIEF";
 
-const MARKER_LINE = new RegExp(`^${IMPLEMENTATION_BRIEF_MARKER}: (T\\d+)$`);
+/**
+ * The operator channel beside the marker (#119): each following
+ * `LOOM_OPERATOR_NOTE: <text>` line becomes an item of the brief's
+ * Operator Note section. The marker must otherwise be the whole prompt, so an
+ * operator line typed any other way is refused with this channel's grammar
+ * instead of reaching the gates as a hand-written prompt.
+ */
+export const IMPLEMENTATION_BRIEF_OPERATOR_NOTE = "LOOM_OPERATOR_NOTE";
 
-/** The Task a spawn item's task text asks to be expanded, or null when the
- *  task text is not exactly one brief marker. */
-export function parseImplementationBriefMarker(task: string): string | null {
-  return MARKER_LINE.exec(task.trim())?.[1] ?? null;
+/** The bounds the Operator Note section keeps: guidance, not a second brief. */
+export const MAX_OPERATOR_NOTES = 8;
+export const MAX_OPERATOR_NOTE_LENGTH = 500;
+
+/** Literal substituted for `{operator_note}` when the marker carries no note. */
+export const NO_OPERATOR_NOTE = "None — no operator note.";
+
+/** One admitted operator note: only `parseOperatorNote` makes one. */
+export type OperatorNote = string & { readonly __brand: "OperatorNote" };
+
+/** A parsed dispatch marker: the Task to expand and the operator's notes for it. */
+export type ImplementationBriefRequest = Readonly<{ taskId: string; operatorNotes: readonly OperatorNote[] }>;
+
+export type ImplementationBriefRequestParse =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "request"; request: ImplementationBriefRequest }>
+  | Readonly<{ kind: "malformed"; reason: string }>;
+
+const MARKER_LINE = new RegExp(`^${IMPLEMENTATION_BRIEF_MARKER}: (T\\d+)$`);
+const NOTE_LINE = new RegExp(`^${IMPLEMENTATION_BRIEF_OPERATOR_NOTE}:(.*)$`);
+/** A note may not pass for engine authority or for a template variable. */
+const LOOM_TOKEN = /\bLOOM_[A-Z_]+/;
+const TASK_ID_BINDING = /task id:/i;
+
+/**
+ * One note's text, or why it is refused: non-empty, at most
+ * `MAX_OPERATOR_NOTE_LENGTH` characters, and nothing the gates read as engine
+ * authority. A `LOOM_*` token could pass for a request or retry marker, a
+ * `{variable}` would fail the brief as an unsubstituted template variable, and
+ * a `Task ID:` could rebind the brief.
+ */
+export function parseOperatorNote(raw: string): DomainResult<OperatorNote, string> {
+  const text = raw.trim();
+  if (text === "") return { ok: false, error: "an operator note is empty" };
+  if (text.length > MAX_OPERATOR_NOTE_LENGTH) {
+    return { ok: false, error: `an operator note is ${text.length} characters; at most ${MAX_OPERATOR_NOTE_LENGTH} are allowed` };
+  }
+  if (LOOM_TOKEN.test(text)) return { ok: false, error: `an operator note may not carry a LOOM_ token: ${JSON.stringify(text)}` };
+  if (findResidualPlaceholders(text).length > 0) {
+    return { ok: false, error: `an operator note may not carry a {template variable}: ${JSON.stringify(text)}` };
+  }
+  if (TASK_ID_BINDING.test(text)) return { ok: false, error: `an operator note may not carry a Task ID binding: ${JSON.stringify(text)}` };
+  return { ok: true, value: text as OperatorNote };
+}
+
+/**
+ * What a spawn's task text asks for. `none`: no marker line, so it is an
+ * ordinary prompt. `request`: the marker on the first line, followed only by
+ * blank lines and at most `MAX_OPERATOR_NOTES` admitted note lines.
+ * `malformed`: a marker anywhere else, a second marker, or any other line,
+ * named with the channel's grammar.
+ */
+export function parseImplementationBriefRequest(task: string): ImplementationBriefRequestParse {
+  const lines = task.trim().split("\n").map((line) => line.trim());
+  const markers = lines.flatMap((line, index) => MARKER_LINE.test(line) ? [index] : []);
+  if (markers.length === 0) return { kind: "none" };
+  const grammar = `the brief marker must be the first line, followed only by "${IMPLEMENTATION_BRIEF_OPERATOR_NOTE}: <text>" lines`;
+  if (markers.length > 1 || markers[0] !== 0) return { kind: "malformed", reason: `${grammar}; this prompt has the marker elsewhere or more than once` };
+  const taskId = MARKER_LINE.exec(lines[0] ?? "")?.[1] ?? "";
+  const notes: OperatorNote[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (index === 0 || line === "") continue;
+    const text = NOTE_LINE.exec(line)?.[1];
+    if (text === undefined) return { kind: "malformed", reason: `${grammar}; line ${index + 1} is neither: ${JSON.stringify(line.slice(0, 80))}` };
+    const note = parseOperatorNote(text);
+    if (!note.ok) return { kind: "malformed", reason: `line ${index + 1}: ${note.error}` };
+    notes.push(note.value);
+  }
+  if (notes.length > MAX_OPERATOR_NOTES) {
+    return { kind: "malformed", reason: `the brief marker carries ${notes.length} operator notes; at most ${MAX_OPERATOR_NOTES} are allowed` };
+  }
+  return { kind: "request", request: Object.freeze({ taskId, operatorNotes: Object.freeze(notes) }) };
+}
+
+/** The spawn task text for `request`: the marker, then one line per note. The inverse of `parseImplementationBriefRequest`. */
+export function renderImplementationBriefRequest(request: ImplementationBriefRequest): string {
+  return [
+    `${IMPLEMENTATION_BRIEF_MARKER}: ${request.taskId}`,
+    ...request.operatorNotes.map((note) => `${IMPLEMENTATION_BRIEF_OPERATOR_NOTE}: ${note}`),
+  ].join("\n");
 }

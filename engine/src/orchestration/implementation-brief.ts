@@ -13,6 +13,7 @@ import {
   renderImplementationBrief,
   ruleDocumentsFor,
   type ImplementationBrief,
+  type ImplementationBriefRequest,
   type RuleDocument,
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
@@ -40,15 +41,16 @@ function planInvariants(planFile: string | null): DomainResult<readonly PlanInva
 }
 
 /**
- * Render the brief for one Task of the graph at `graphPath`, using the binding
- * rules and template of the Loom package at `packageRoot`. Refusals name the
- * exact cause; nothing here writes.
+ * Render the brief `request` asks for (its Task of the graph at `graphPath`,
+ * with its operator notes), using the binding rules and template of the Loom
+ * package at `packageRoot`. Refusals name the exact cause; nothing here writes.
  */
 export function renderTaskImplementationBrief(
   graphPath: string,
   packageRoot: string,
-  taskId: string,
+  request: ImplementationBriefRequest,
 ): DomainResult<ImplementationBrief, string> {
+  const { taskId } = request;
   try {
     const graph = new StateManager(graphPath).load();
     const task = graph.tasks.find(({ id }) => id === taskId);
@@ -87,6 +89,7 @@ export function renderTaskImplementationBrief(
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,
+      operatorNotes: request.operatorNotes,
     });
     return rendered.ok ? rendered : { ok: false, error: rendered.error.message };
   } catch (error) {

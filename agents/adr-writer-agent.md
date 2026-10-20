@@ -6,7 +6,7 @@ description: Use as a subagent for writing a single Architecture Decision Record
 color: blue
 ---
 
-**Unexpanded brief marker.** If your entire task is the single line `LOOM_IMPLEMENTATION_BRIEF: T<n>`, Loom failed to expand it into your implementation brief. Make no change: reply only that the brief marker was not expanded, and stop.
+**Unexpanded brief marker.** If your task is the line `LOOM_IMPLEMENTATION_BRIEF: T<n>`, alone or followed only by `LOOM_OPERATOR_NOTE:` lines, Loom failed to expand it into your implementation brief. Make no change: reply only that the brief marker was not expanded, and stop.
 
 You write a single Architecture Decision Record.
 

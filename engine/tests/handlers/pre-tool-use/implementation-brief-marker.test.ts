@@ -59,12 +59,26 @@ describe("expandBriefMarker", () => {
     }
   });
 
-  it("never renders for a prompt that is not a marker line", () => {
+  it("never renders for a prompt with no marker line", () => {
     fc.assert(fc.property(fc.string(), (prompt) => {
-      fc.pre(!/^LOOM_IMPLEMENTATION_BRIEF: T\d+$/.test(prompt.trim()));
+      fc.pre(!prompt.split("\n").some((line) => /^LOOM_IMPLEMENTATION_BRIEF: T\d+$/.test(line.trim())));
       const render: RenderTaskBrief = () => { throw new Error("must not render"); };
       expect(expandBriefMarker(spawnInput(prompt), render)).toEqual({ kind: "no-marker" });
     }));
+  });
+
+  it("hands the renderer the marker's operator notes (#119)", () => {
+    const requests: unknown[] = [];
+    const render: RenderTaskBrief = (request) => { requests.push(request); return { ok: true, value: brief("b") }; };
+    expect(expandBriefMarker(spawnInput(`${MARKER}\nLOOM_OPERATOR_NOTE: touch handler-routes.ts`), render)).toMatchObject({ kind: "expanded" });
+    expect(requests).toEqual([{ taskId: "T2", operatorNotes: ["touch handler-routes.ts"] }]);
+  });
+
+  it("refuses an operator line typed outside the channel, naming its grammar, without rendering (#119)", () => {
+    const render: RenderTaskBrief = () => { throw new Error("must not render"); };
+    const expansion = expandBriefMarker(spawnInput(`${MARKER}\nalso touch handler-routes.ts`), render);
+    expect(expansion).toMatchObject({ kind: "refused", message: expect.stringContaining("BLOCKED: the implementation brief marker is malformed") });
+    if (expansion.kind === "refused") expect(expansion.message).toContain("LOOM_OPERATOR_NOTE: <text>");
   });
 
   it("refuses a marker whose brief cannot render, naming the cause", () => {
@@ -223,6 +237,14 @@ describe("validate-task-execution with a brief marker", () => {
     expect(prompt).not.toContain("LOOM_IMPLEMENTATION_BRIEF");
     const graph = JSON.parse(readFileSync(statePath, "utf8")) as { tasks: { id: string; reserved_at?: string }[] };
     expect(graph.tasks.find(({ id }) => id === "T2")?.reserved_at).toEqual(expect.any(String));
+  });
+
+  it("end to end, an operator note reaches the expanded brief and every real gate still admits it (#119)", async () => {
+    activeGraph();
+    const result = await validateTaskExecution(stdinOf(`${MARKER}\nLOOM_OPERATOR_NOTE: touch handler-routes.ts so the affected check selects its importers`), []);
+    expect(result).toMatchObject({ kind: "pre-tool-use-rewrite" });
+    if (result.kind !== "pre-tool-use-rewrite") return;
+    expect(result.updatedInput.prompt as string).toContain("## Operator Note\n\n- touch handler-routes.ts so the affected check selects its importers\n");
   });
 });
 

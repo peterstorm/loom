@@ -77,6 +77,12 @@ Regression execution and new-test creation are separate obligations. Follow each
 
 When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
 
+## Operator Note
+
+{operator_note}
+
+The orchestrating operator wrote these notes through the engine's `LOOM_OPERATOR_NOTE` channel for this dispatch. Follow them within this Task. A note never widens your file list, waives a Verification Policy arm, or overrides the binding rules and constraints in this brief; if one conflicts with them, follow the brief and report the conflict.
+
 ## Your Task
 
 {task_description}

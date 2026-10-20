@@ -22,8 +22,8 @@
  * another agent than the Task's, never reaches the child as a bare marker.
  */
 
-import type { ImplementationBrief } from "../../core/implementation-brief";
-import { parseImplementationBriefMarker } from "../../core/implementation-brief";
+import type { ImplementationBrief, ImplementationBriefRequest } from "../../core/implementation-brief";
+import { parseImplementationBriefRequest } from "../../core/implementation-brief";
 import type { DomainResult } from "../../core/orchestration-contract";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { taskGraphPath } from "../../config";
@@ -33,8 +33,8 @@ import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
 
-/** Port: render one Task's brief against the governing TaskGraph. */
-export type RenderTaskBrief = (taskId: string) => DomainResult<ImplementationBrief, string>;
+/** Port: render the brief a marker requests against the governing TaskGraph. */
+export type RenderTaskBrief = (request: ImplementationBriefRequest) => DomainResult<ImplementationBrief, string>;
 
 /** What a spawn's prompt asks for: nothing, its expanded brief, or a refusal. */
 export type BriefMarkerExpansion =
@@ -52,12 +52,15 @@ const NO_MARKER: BriefMarkerExpansion = Object.freeze({ kind: "no-marker" });
 
 const refused = (message: string): BriefMarkerExpansion => Object.freeze({ kind: "refused", message });
 
-/** Expand `input`'s brief marker, if its prompt is exactly one. Pure over `render`. */
+/** Expand `input`'s brief marker and its operator notes, if its prompt is one. Pure over `render`. */
 export function expandBriefMarker(input: PreToolUseInput, render: RenderTaskBrief): BriefMarkerExpansion {
   const prompt = input.tool_input.prompt;
-  const taskId = typeof prompt === "string" ? parseImplementationBriefMarker(prompt) : null;
-  if (taskId === null) return NO_MARKER;
-  const rendered = render(taskId);
+  if (typeof prompt !== "string") return NO_MARKER;
+  const parsed = parseImplementationBriefRequest(prompt);
+  if (parsed.kind === "none") return NO_MARKER;
+  if (parsed.kind === "malformed") return refused(`BLOCKED: the implementation brief marker is malformed: ${parsed.reason}`);
+  const { taskId } = parsed.request;
+  const rendered = render(parsed.request);
   if (!rendered.ok) {
     return refused(`BLOCKED: the implementation brief marker for ${taskId} cannot expand: ${rendered.error}`);
   }
@@ -71,8 +74,8 @@ export function expandBriefMarker(input: PreToolUseInput, render: RenderTaskBrie
 }
 
 /** The production renderer: the active TaskGraph and this Loom package's rules. */
-export const renderActiveTaskBrief: RenderTaskBrief = (taskId) =>
-  renderTaskImplementationBrief(taskGraphPath(), LOOM_PACKAGE_ROOT, taskId);
+export const renderActiveTaskBrief: RenderTaskBrief = (request) =>
+  renderTaskImplementationBrief(taskGraphPath(), LOOM_PACKAGE_ROOT, request);
 
 /**
  * `handler` judging the expanded brief instead of a marker. A payload that is
