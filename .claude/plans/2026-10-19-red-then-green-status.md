@@ -19,6 +19,12 @@ A thin read-only handler loads the TaskGraph and resolves the live attempt throu
 
 This feature is the vehicle of the G4 slice 2 live pilot (`.claude/plans/2026-10-19-g4-slice-2-pilot.md`). The plan keeps the pilot's intended three-Task shape and declares no `## Contracts`, because an Acceptance Contract claimant is waived from I6.
 
+> **As shipped (2026-10-20).** The code supersedes this plan in four places; the plan below is kept as the frozen `plan_context` it was:
+> - `classifyTaskFiles` takes a third argument, the Task's `artifact_baseline` (FR-007a, loom #115, merged mid-pilot), so the view classifies exactly as settlement does.
+> - `RedThenGreenStatusView.status` is `TaskStatus`, not `string`.
+> - The purity list also enrols `engine/src/core/implementation-application.ts`, the core's one transitive dependency not already enrolled.
+> - `RedThenGreenLiveInput` has an `unreadable { reason }` arm, and its `live` arm carries the read `events` with the `repositoryRoot`, so no root travels without a readable ledger (PR #116 review). The handler turns an unreadable ledger or an unresolvable root into `unreadable`, and `LIVE_NOT_JUDGED` reads `not judged (no I6 obligation to judge it by)` because it covers an undeterminable duty too.
+
 ---
 
 ## Architectural Decisions

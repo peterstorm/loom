@@ -13,14 +13,8 @@
 
 import { describe, expect, it } from "vitest";
 import { redThenGreenDuty } from "../../src/core/implementation-application";
-import {
-  derivePendingTaskProof,
-  evaluateTaskProof,
-  type FailedTaskProof,
-  type RedThenGreenEra,
-} from "../../src/core/proof-obligations";
 import { judgeRedThenGreen, redThenGreenFailureKind } from "../../src/core/red-then-green";
-import type { LedgerObservation, RedThenGreenGap, TestFileResult } from "../../src/core/red-then-green-types";
+import type { RedThenGreenGap, TestFileResult } from "../../src/core/red-then-green-types";
 import {
   GREEN_STEP,
   IMPLEMENTATION_FILES_HEADING,
@@ -50,123 +44,61 @@ import {
   type RedThenGreenLiveInput,
   type RedThenGreenStatusInput,
 } from "../../src/core/red-then-green-status";
-import { parseReportSummary } from "../../src/core/structured-test-report";
 import { UNKNOWN_TASK_PREFIX } from "../../src/core/stop-check-plan-types";
 import { classifyTaskFiles } from "../../src/core/test-file-classification";
-import {
-  defaultVerificationManifest,
-  legacyDefaultVerificationManifest,
-  type FrozenVerificationManifest,
-} from "../../src/core/verification-manifest";
-import { COVERED_BY_ACCEPTANCE_CONTRACT, type NewTestWaiverReason } from "../../src/core/verification-policy";
+import { legacyDefaultVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import { COVERED_BY_ACCEPTANCE_CONTRACT } from "../../src/core/verification-policy";
 import type { Evidence } from "../../src/machine/types";
 import type { Task, TaskGraph } from "../../src/types";
+import {
+  FILES,
+  FIXTURE,
+  GREEN_COMMAND,
+  I6_MANIFEST,
+  IMPL,
+  IMPL_ONLY,
+  OWED_ERA,
+  RED_COMMAND,
+  TEST_A,
+  TEST_B,
+  UNTRUSTED_RED_EVENTS,
+  base,
+  failedProof,
+  failing,
+  passing,
+  report,
+  requiredTask,
+  waivedTask,
+} from "../fixtures/red-then-green-status-fixtures";
 import { graphFixture, satisfiedProof, taskFixture } from "../fixtures/task-lifecycle";
 
-// --- Fixture vocabulary ---
+// --- Fixtures unique to the core ---
 
 const ROOT = "/repo";
-const IMPL = "engine/src/core/ledger.ts";
-const TEST_A = "engine/tests/core/ledger.test.ts";
-const FIXTURE = "engine/tests/fixtures/ledger-fixtures.ts";
-const TEST_B = "engine/tests/core/replay.test.ts";
-/** Test and implementation files interleaved, so `file_list` order is observable. */
-const FILES: readonly string[] = [IMPL, TEST_A, FIXTURE, TEST_B];
-const IMPL_ONLY: readonly string[] = [IMPL, FIXTURE];
-
-const I6_MANIFEST: FrozenVerificationManifest = defaultVerificationManifest();
-const OWED_ERA: RedThenGreenEra = "owed-if-new-tests";
 
 const graphOf = (tasks: readonly Task[], manifest?: FrozenVerificationManifest): TaskGraph => ({
   ...graphFixture(tasks),
   ...(manifest === undefined ? {} : { verification_manifest: manifest }),
 });
 
-const base = (id: string, wave: number, files: readonly string[]) => ({
-  id,
-  description: id,
-  agent: "code-implementer-agent",
-  wave,
-  depends_on: [],
-  file_list: [...files],
-  spec_anchors: [],
-  spec_contributions: [],
-});
-
-/** A Task requiring new tests whose frozen Proof was derived under `era`. */
-const requiredTask = (id: string, era: RedThenGreenEra, files: readonly string[] = FILES, wave = 1): Task =>
-  taskFixture({
-    ...base(id, wave, files),
-    new_tests_required: true,
-    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: files, redThenGreen: era }),
-  });
-
-/** A Task whose new tests are waived with `reason`, its Proof derived in the I6 era. */
-const waivedTask = (id: string, reason: NewTestWaiverReason): Task => {
-  const verificationPolicy = Object.freeze({
-    regression: Object.freeze({ kind: "required" as const }),
-    newTests: Object.freeze({ kind: "waived" as const, reason }),
-  });
-  return taskFixture({
-    ...base(id, 1, FILES),
-    verification_policy: { regression: verificationPolicy.regression, new_tests: verificationPolicy.newTests },
-    proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: FILES, redThenGreen: OWED_ERA }),
-  });
-};
-
 /** A legacy `implemented` Task: no frozen Proof at all. */
 const legacyTask = (id: string): Task => taskFixture({ ...base(id, 2, FILES), new_tests_required: true, status: "implemented" });
 
-/** A failed I6 evaluation, as settlement stores it, minting `gap` (or `ledger-unavailable`). */
-const failedProof = (gap: RedThenGreenGap | "no-ledger"): FailedTaskProof => {
-  const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: FILES, redThenGreen: OWED_ERA },
-    {
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: FILES,
-      newTestsWritten: true,
-      ...(gap === "no-ledger" ? {} : { redThenGreen: { kind: "unproven" as const, gap } }),
-    },
-  );
-  if (evaluated.state !== "failed") throw new Error("failed proof fixture must fail");
-  return evaluated;
-};
-
-// --- Ledger events ---
-
-const passing = (file: string): TestFileResult => ({ file, executed: 2, failed: 0, skipped: 0, collectionError: false });
-const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, skipped: 0, collectionError: false });
 /** A file that failed to load (a missing module's import error): JUnit's one failing synthetic testcase. */
 const collectionError = (file: string): TestFileResult => ({ file, executed: 1, failed: 1, skipped: 0, collectionError: true });
 
-function report(results: readonly TestFileResult[]) {
-  const total = results.reduce((sum, { executed }) => sum + executed, 0);
-  const failed = results.reduce((sum, file) => sum + file.failed, 0);
-  const parsed = parseReportSummary(total, failed, "junit-xml", { kind: "recorded", results });
-  if (parsed === null) throw new Error("fixture report must reconcile");
-  return parsed;
-}
-
-const RED_COMMAND = "bun test --reporter=junit --reporter-outfile=/tmp/red.xml";
-const GREEN_COMMAND = "bun test --reporter=junit --reporter-outfile=/tmp/green.xml";
-
+/** A read before the red, so the shown indices are not the event positions of the helper tests. */
 const SHOWN_EVENTS: readonly Evidence[] = [
   { kind: "FileRead", path: IMPL },
   { kind: "TestRun", command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
   { kind: "TestRun", command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
 ];
-/** Only an untrusted (exit-less) red: red is unmet by qualifying runs alone. */
-const UNTRUSTED_RED_EVENTS: readonly Evidence[] = [
-  { kind: "TestRun", command: RED_COMMAND, exit: null, report: report([failing(TEST_A)]) },
-  { kind: "FileWrite", path: IMPL, via: "tool" },
-];
 /** An implementation write and no run at all. */
 const NO_RED_EVENTS: readonly Evidence[] = [{ kind: "FileWrite", path: IMPL, via: "tool" }];
 
-const read = (events: readonly Evidence[]): LedgerObservation => ({ kind: "read", events });
-const live = (ledger: LedgerObservation): RedThenGreenLiveInput => ({ kind: "live", ledger, repositoryRoot: ROOT });
+const live = (events: readonly Evidence[]): RedThenGreenLiveInput => ({ kind: "live", events, repositoryRoot: ROOT });
+const UNREADABLE_LIVE: RedThenGreenLiveInput = { kind: "unreadable", reason: "ledger torn" };
 const NO_LIVE: RedThenGreenLiveInput = { kind: "no-live-attempt" };
 
 const input = (graph: TaskGraph, taskId: string, liveInput: RedThenGreenLiveInput = NO_LIVE): RedThenGreenStatusInput =>
@@ -308,7 +240,7 @@ describe("redThenGreenStatusView: live attempt", () => {
   });
 
   it("is unreadable with the ledger's reason when the epoch could not be read", () => {
-    const view = redThenGreenStatusView(input(OWED_GRAPH, "T1", live({ kind: "unreadable", reason: "ledger torn" })));
+    const view = redThenGreenStatusView(input(OWED_GRAPH, "T1", UNREADABLE_LIVE));
     expect(view).toMatchObject({ live: { kind: "unreadable", reason: "ledger torn" } });
   });
 
@@ -320,7 +252,7 @@ describe("redThenGreenStatusView: live attempt", () => {
       implementationWrite: IMPL,
       green: { index: 3, command: GREEN_COMMAND },
     });
-    expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(read(SHOWN_EVENTS))))).toMatchObject({
+    expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(SHOWN_EVENTS)))).toMatchObject({
       live: { kind: "judged", observation: expected },
     });
   });
@@ -329,7 +261,7 @@ describe("redThenGreenStatusView: live attempt", () => {
     for (const events of [UNTRUSTED_RED_EVENTS, NO_RED_EVENTS, []]) {
       const expected = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false);
       expect(expected.kind).toBe("unproven");
-      expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(read(events))))).toMatchObject({
+      expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(events)))).toMatchObject({
         live: { kind: "judged", observation: expected },
       });
     }
@@ -345,17 +277,17 @@ describe("redThenGreenStatusView: live attempt", () => {
     const editing = judgeRedThenGreen(events, settlementClassification(OWED_GRAPH, "T1"), ROOT, false);
     expect(creating.kind).toBe("shown");
     expect(editing).toMatchObject({ kind: "unproven", gap: { kind: "red-missing" } });
-    expect(redThenGreenStatusView(input(CREATING_GRAPH, "T1", live(read(events))))).toMatchObject({
+    expect(redThenGreenStatusView(input(CREATING_GRAPH, "T1", live(events)))).toMatchObject({
       live: { kind: "judged", observation: creating },
     });
-    expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(read(events))))).toMatchObject({
+    expect(redThenGreenStatusView(input(OWED_GRAPH, "T1", live(events)))).toMatchObject({
       live: { kind: "judged", observation: editing },
     });
   });
 
   it("is judged as no-test-files when the owed Task declares no test file", () => {
     const graph = graphOf([requiredTask("T1", OWED_ERA, IMPL_ONLY)], I6_MANIFEST);
-    expect(redThenGreenStatusView(input(graph, "T1", live(read(SHOWN_EVENTS))))).toMatchObject({
+    expect(redThenGreenStatusView(input(graph, "T1", live(SHOWN_EVENTS)))).toMatchObject({
       live: { kind: "judged", observation: { kind: "unproven", gap: { kind: "no-test-files" } } },
     });
   });
@@ -366,7 +298,7 @@ describe("redThenGreenStatusView: live attempt", () => {
       graphOf([requiredTask("T1", OWED_ERA)]),
     ];
     for (const graph of graphs) {
-      expect(redThenGreenStatusView(input(graph, "T1", live(read(SHOWN_EVENTS))))).toMatchObject({
+      expect(redThenGreenStatusView(input(graph, "T1", live(SHOWN_EVENTS)))).toMatchObject({
         live: { kind: "not-judged" },
       });
     }
@@ -457,7 +389,7 @@ describe("renderRedThenGreenStatus", () => {
   });
 
   it("prints an owed Task's header, files in file_list order, the live judgment and the stored result", () => {
-    expect(linesOf(input(OWED_GRAPH, "T1", live(read(SHOWN_EVENTS))))).toEqual([
+    expect(linesOf(input(OWED_GRAPH, "T1", live(SHOWN_EVENTS)))).toEqual([
       `T1 (Wave 1, pending): ${RTG_OWES}`,
       TEST_FILES_HEADING,
       `  ${TEST_A}`,
@@ -517,12 +449,12 @@ describe("renderRedThenGreenStatus", () => {
       [OWED_GRAPH, { kind: "no-live-attempt" }, [LIVE_NONE]],
       [OWED_GRAPH, { kind: "not-observable" }, [LIVE_NOT_OBSERVABLE]],
       [OWED_GRAPH, { kind: "uninspectable", reason: "two live sidecars" }, [`${LIVE_PREFIX} ${LIVE_UNINSPECTABLE} — two live sidecars`]],
-      [OWED_GRAPH, live({ kind: "unreadable", reason: "ledger torn" }), [`${LIVE_PREFIX} ${LIVE_UNREADABLE} — ledger torn`]],
-      [waived, live(read(SHOWN_EVENTS)), [`${LIVE_PREFIX} ${LIVE_NOT_JUDGED}`]],
-      [OWED_GRAPH, live(read(NO_RED_EVENTS)), [`${LIVE_PREFIX} ${redThenGreenFailureKind({ kind: "red-missing", untrustedOnly: false })}`]],
+      [OWED_GRAPH, UNREADABLE_LIVE, [`${LIVE_PREFIX} ${LIVE_UNREADABLE} — ledger torn`]],
+      [waived, live(SHOWN_EVENTS), [`${LIVE_PREFIX} ${LIVE_NOT_JUDGED}`]],
+      [OWED_GRAPH, live(NO_RED_EVENTS), [`${LIVE_PREFIX} ${redThenGreenFailureKind({ kind: "red-missing", untrustedOnly: false })}`]],
       [
         OWED_GRAPH,
-        live(read(UNTRUSTED_RED_EVENTS)),
+        live(UNTRUSTED_RED_EVENTS),
         [`${LIVE_PREFIX} ${redThenGreenFailureKind({ kind: "red-missing", untrustedOnly: true })}${UNTRUSTED_ONLY_SUFFIX}`],
       ],
     ];

@@ -18,12 +18,6 @@ import redThenGreenStatus, {
   type RedThenGreenStatusPorts,
 } from "../../../src/handlers/helpers/red-then-green-status";
 import type { LiveAttemptEvidence, LiveAttemptEvidenceFn } from "../../../src/handlers/helpers/stop-check-plan";
-import {
-  derivePendingTaskProof,
-  evaluateTaskProof,
-  type FailedTaskProof,
-  type RedThenGreenEra,
-} from "../../../src/core/proof-obligations";
 import { redThenGreenFailureKind } from "../../../src/core/red-then-green";
 import {
   GREEN_STEP,
@@ -48,14 +42,10 @@ import {
   renderRedThenGreenStatus,
   type RedThenGreenLiveInput,
 } from "../../../src/core/red-then-green-status";
-import type { RedThenGreenGap, TestFileResult } from "../../../src/core/red-then-green-types";
+import type { RedThenGreenGap } from "../../../src/core/red-then-green-types";
 import { UNKNOWN_TASK_PREFIX } from "../../../src/core/stop-check-plan-types";
-import { parseReportSummary } from "../../../src/core/structured-test-report";
-import {
-  defaultVerificationManifest,
-  type FrozenVerificationManifest,
-} from "../../../src/core/verification-manifest";
-import { COVERED_BY_ACCEPTANCE_CONTRACT, type NewTestWaiverReason } from "../../../src/core/verification-policy";
+import type { FrozenVerificationManifest } from "../../../src/core/verification-manifest";
+import { COVERED_BY_ACCEPTANCE_CONTRACT } from "../../../src/core/verification-policy";
 import { WHITELISTED_HELPERS } from "../../../src/config";
 import { KNOWN_HANDLERS, PI_RUNTIME_HANDSHAKE_ROUTES, piRuntimeHandshakeRequired } from "../../../src/handler-routes";
 import { DEFAULT_PURE_MODULES } from "../../../src/linter/programmatic/no-io-in-pure-modules";
@@ -65,73 +55,36 @@ import type { HookResult, Task, TaskGraph } from "../../../src/types";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { gitProject, statePathIn, writeStateFile } from "../../fixtures/contract-status-fixtures";
+import {
+  FILES,
+  FIXTURE,
+  GREEN_COMMAND,
+  I6_MANIFEST,
+  IMPL,
+  IMPL_ONLY,
+  OWED_ERA,
+  RED_COMMAND,
+  TEST_A,
+  TEST_B,
+  UNTRUSTED_RED_EVENTS,
+  base,
+  failedProof,
+  failing,
+  passing,
+  report,
+  requiredTask,
+  waivedTask,
+} from "../../fixtures/red-then-green-status-fixtures";
 import { graphFixture, protectedGraphFixture, satisfiedProof, taskFixture } from "../../fixtures/task-lifecycle";
 
-// --- Fixture vocabulary ---
+// --- Fixtures unique to the helper ---
 
-const IMPL = "engine/src/core/ledger.ts";
-const TEST_A = "engine/tests/core/ledger.test.ts";
-const FIXTURE = "engine/tests/fixtures/ledger-fixtures.ts";
-const TEST_B = "engine/tests/core/replay.test.ts";
-/** Test and implementation files interleaved, so `file_list` order is observable. */
-const FILES: readonly string[] = [IMPL, TEST_A, FIXTURE, TEST_B];
-const IMPL_ONLY: readonly string[] = [IMPL, FIXTURE];
-const OWED_ERA: RedThenGreenEra = "owed-if-new-tests";
-const I6_MANIFEST: FrozenVerificationManifest = defaultVerificationManifest();
 /** The canonical repository root a live epoch is judged against, as the production port mints one. */
 const ROOT: CanonicalRepositoryRoot = (() => {
   const parsed = parseCanonicalRepositoryRoot(canonicalTempDir("loom-red-then-green-status-root-"));
   if (!parsed.ok) throw new Error(`fixture repository root is not canonical: ${parsed.error.kind}`);
   return parsed.value;
 })();
-
-const base = (id: string, wave: number, files: readonly string[]) => ({
-  id,
-  description: id,
-  agent: "code-implementer-agent",
-  wave,
-  depends_on: [],
-  file_list: [...files],
-  spec_anchors: [],
-  spec_contributions: [],
-});
-
-/** A Task requiring new tests whose frozen Proof was derived under `era`. */
-const requiredTask = (id: string, era: RedThenGreenEra, files: readonly string[] = FILES): Task =>
-  taskFixture({
-    ...base(id, 1, files),
-    new_tests_required: true,
-    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: files, redThenGreen: era }),
-  });
-
-/** A Task whose new tests are waived with `reason`, its Proof derived in the I6 era. */
-const waivedTask = (id: string, reason: NewTestWaiverReason): Task => {
-  const verificationPolicy = Object.freeze({
-    regression: Object.freeze({ kind: "required" as const }),
-    newTests: Object.freeze({ kind: "waived" as const, reason }),
-  });
-  return taskFixture({
-    ...base(id, 1, FILES),
-    verification_policy: { regression: verificationPolicy.regression, new_tests: verificationPolicy.newTests },
-    proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: FILES, redThenGreen: OWED_ERA }),
-  });
-};
-
-/** A failed I6 evaluation, exactly as settlement stores it. */
-const failedProof = (gap: RedThenGreenGap): FailedTaskProof => {
-  const evaluated = evaluateTaskProof(
-    { newTestsRequired: true, declaredArtifacts: FILES, redThenGreen: OWED_ERA },
-    {
-      taskCompleted: true,
-      testResult: { verdict: "trusted-pass" },
-      filesModified: FILES,
-      newTestsWritten: true,
-      redThenGreen: { kind: "unproven", gap },
-    },
-  );
-  if (evaluated.state !== "failed") throw new Error("failed proof fixture must fail");
-  return evaluated;
-};
 
 /** A TaskGraph's State File text, after proving the production parser admits it. */
 function graphJson(tasks: readonly Task[], manifest?: FrozenVerificationManifest): string {
@@ -148,29 +101,10 @@ const OWED_JSON = (): string => graphJson([requiredTask("T1", OWED_ERA)], I6_MAN
 
 // --- Ledger events ---
 
-const passing = (file: string): TestFileResult => ({ file, executed: 2, failed: 0, skipped: 0, collectionError: false });
-const failing = (file: string): TestFileResult => ({ file, executed: 2, failed: 1, skipped: 0, collectionError: false });
-
-function report(results: readonly TestFileResult[]) {
-  const total = results.reduce((sum, { executed }) => sum + executed, 0);
-  const failed = results.reduce((sum, file) => sum + file.failed, 0);
-  const parsed = parseReportSummary(total, failed, "junit-xml", { kind: "recorded", results });
-  if (parsed === null) throw new Error("fixture report must reconcile");
-  return parsed;
-}
-
-const RED_COMMAND = "bun test --reporter=junit --reporter-outfile=/tmp/red.xml";
-const GREEN_COMMAND = "bun test --reporter=junit --reporter-outfile=/tmp/green.xml";
-
 const SHOWN_EVENTS: readonly Evidence[] = [
   { kind: "TestRun", command: RED_COMMAND, exit: 1, report: report([failing(TEST_A), passing(TEST_B)]) },
   { kind: "FileWrite", path: IMPL, via: "tool" },
   { kind: "TestRun", command: GREEN_COMMAND, exit: 0, report: report([passing(TEST_A), passing(TEST_B)]) },
-];
-/** Only an untrusted (exit-less) red before the write: red is unmet by qualifying runs. */
-const UNTRUSTED_RED_EVENTS: readonly Evidence[] = [
-  { kind: "TestRun", command: RED_COMMAND, exit: null, report: report([failing(TEST_A)]) },
-  { kind: "FileWrite", path: IMPL, via: "tool" },
 ];
 
 // --- Harness ---
@@ -432,11 +366,7 @@ describe("red-then-green-status helper live attempt", () => {
     expect(lines).toContain(`  ${RED_STEP} #0 ${RED_COMMAND}`);
     expect(lines).toContain(`  ${IMPLEMENTATION_WRITE_STEP} ${IMPL}`);
     expect(lines).toContain(`  ${GREEN_STEP} #2 ${GREEN_COMMAND}`);
-    expect(lines).toEqual(expectedLines(statePath, "T1", {
-      kind: "live",
-      ledger: { kind: "read", events: SHOWN_EVENTS },
-      repositoryRoot: ROOT,
-    }));
+    expect(lines).toEqual(expectedLines(statePath, "T1", { kind: "live", events: SHOWN_EVENTS, repositoryRoot: ROOT }));
     // The port is asked once, for the named Task, against the loaded TaskGraph's path.
     expect(live.calls).toEqual([{ taskId: "T1", statePath }]);
   });
@@ -497,6 +427,20 @@ describe("red-then-green-status helper live attempt", () => {
     await renderedLines(OWED_JSON(), { ports });
 
     expect(asked).toBe(0);
+  });
+
+  it("the repository root is not resolved for an unreadable ledger: no root travels without a readable epoch", async () => {
+    let asked = 0;
+    const ports: RedThenGreenStatusPorts = { repositoryRoot: () => { asked += 1; return { ok: true, root: ROOT }; } };
+    const reason = "ledger torn";
+
+    const lines = await renderedLines(OWED_JSON(), {
+      live: recordingLive({ kind: "live", ledger: { kind: "unreadable", reason } }).port,
+      ports,
+    });
+
+    expect(asked).toBe(0);
+    expect(lines).toContain(`${LIVE_PREFIX} ${LIVE_UNREADABLE} — ${reason}`);
   });
 
   it("NFR-002: under Pi the live attempt reads as not observable and the port is never called", async () => {

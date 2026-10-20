@@ -25,8 +25,8 @@ import { redThenGreenDuty } from "./implementation-application";
 import type { NonEmpty } from "./orchestration-contract";
 import { redThenGreenEra, type ProofFailure, type ProofObligationResult } from "./proof-obligations";
 import { judgeRedThenGreen, redThenGreenFailureKind } from "./red-then-green";
+import type { Evidence } from "../machine/types";
 import type {
-  LedgerObservation,
   RedThenGreenGap,
   RedThenGreenObservation,
   RunRef,
@@ -46,7 +46,10 @@ export type RedThenGreenLiveInput =
   | Readonly<{ kind: "no-live-attempt" }>
   /** The live-attempt evidence port could not decide which attempt is live. */
   | Readonly<{ kind: "uninspectable"; reason: string }>
-  | Readonly<{ kind: "live"; ledger: LedgerObservation; repositoryRoot: string }>;
+  /** An attempt is live, but its epoch cannot be judged: its ledger or the repository root is unreadable. */
+  | Readonly<{ kind: "unreadable"; reason: string }>
+  /** A live attempt's read epoch, with the root it is judged against: no root travels without a readable ledger. */
+  | Readonly<{ kind: "live"; events: readonly Evidence[]; repositoryRoot: string }>;
 
 export type RedThenGreenStatusInput = Readonly<{
   graph: TaskGraph;
@@ -75,7 +78,7 @@ export type LiveView =
   | Readonly<{ kind: "no-live-attempt" }>
   | Readonly<{ kind: "uninspectable"; reason: string }>
   | Readonly<{ kind: "unreadable"; reason: string }>
-  /** A live attempt whose duty is not `owed`: there is nothing to judge it by. */
+  /** A live attempt whose duty is not `owed` (not owed or undeterminable): there is nothing to judge it by. */
   | Readonly<{ kind: "not-judged" }>
   | Readonly<{ kind: "judged"; observation: RedThenGreenObservation }>;
 
@@ -128,7 +131,7 @@ export const LIVE_NONE = `${LIVE_PREFIX} none`;
 export const LIVE_NOT_OBSERVABLE = "live attempt not observable on this harness";
 export const LIVE_UNINSPECTABLE = "uninspectable";
 export const LIVE_UNREADABLE = "unreadable";
-export const LIVE_NOT_JUDGED = "not judged (I6 not owed)";
+export const LIVE_NOT_JUDGED = "not judged (no I6 obligation to judge it by)";
 
 export const STORED_PREFIX = "stored:";
 export const STORED_NO_PROOF = "no proof (legacy)";
@@ -182,12 +185,11 @@ function dutyView(task: Task, manifest: FrozenVerificationManifest | undefined):
 function liveView(live: RedThenGreenLiveInput, duty: DutyView): LiveView {
   return match(live)
     .returnType<LiveView>()
-    .with({ kind: P.union("not-observable", "no-live-attempt", "uninspectable") }, (passthrough) => passthrough)
-    .with({ kind: "live", ledger: { kind: "unreadable" } }, ({ ledger }) => freeze({ kind: "unreadable", reason: ledger.reason }))
-    .with({ kind: "live", ledger: { kind: "read" } }, ({ ledger, repositoryRoot }) =>
+    .with({ kind: P.union("not-observable", "no-live-attempt", "uninspectable", "unreadable") }, (passthrough) => passthrough)
+    .with({ kind: "live" }, ({ events, repositoryRoot }) =>
       duty.kind === "owed"
         // A Claude Code attempt's evidence is never Pi-structured, as in settlement.
-        ? freeze({ kind: "judged", observation: judgeRedThenGreen(ledger.events, duty.classification, repositoryRoot, false) })
+        ? freeze({ kind: "judged", observation: judgeRedThenGreen(events, duty.classification, repositoryRoot, false) })
         : NOT_JUDGED)
     .exhaustive();
 }
@@ -196,23 +198,23 @@ function liveView(live: RedThenGreenLiveInput, duty: DutyView): LiveView {
 const storedFailureKind = (failure: ProofFailure): string =>
   failure.kind === "red-then-green-unproven" ? redThenGreenFailureKind(failure.gap) : `proof:${failure.kind}`;
 
-/** The red-then-green result's stored view, or nothing for any other result. */
-const redThenGreenResult = (result: ProofObligationResult): readonly StoredView[] =>
+/** The red-then-green result's stored view, or undefined for any other result. */
+const redThenGreenResult = (result: ProofObligationResult): StoredView | undefined =>
   match(result)
-    .returnType<readonly StoredView[]>()
-    .with({ state: "pending", obligation: { kind: "red-then-green" } }, () => [STORED_PENDING_VIEW])
+    .returnType<StoredView | undefined>()
+    .with({ state: "pending", obligation: { kind: "red-then-green" } }, () => STORED_PENDING_VIEW)
     .with({ state: "failed", obligation: { kind: "red-then-green" } }, ({ failure }) =>
-      [freeze({ kind: "failed", failureKind: storedFailureKind(failure) })])
+      freeze({ kind: "failed", failureKind: storedFailureKind(failure) }))
     .with({ state: "satisfied", obligation: { kind: "red-then-green" }, evidence: { kind: "red-then-green" } }, ({ evidence }) =>
-      [freeze({ kind: "satisfied", red: evidence.red, implementationWrite: evidence.implementationWrite, green: evidence.green })])
-    .otherwise(() => []);
+      freeze({ kind: "satisfied", red: evidence.red, implementationWrite: evidence.implementationWrite, green: evidence.green }))
+    .otherwise(() => undefined);
 
 /** The Proof's `results` hold each obligation's latest evaluation, so a
  *  retry-pending Task (pending with a failed Proof) shows its latest gap. */
 function storedView(task: Task): StoredView {
   // Only the `legacy_missing_proof` lifecycle arm carries no Proof.
   if (task.proof === undefined) return NO_PROOF;
-  return task.proof.results.flatMap(redThenGreenResult)[0] ?? NO_OBLIGATION;
+  return task.proof.results.map(redThenGreenResult).find((view) => view !== undefined) ?? NO_OBLIGATION;
 }
 
 export function redThenGreenStatusView({ graph, taskId, live }: RedThenGreenStatusInput): RedThenGreenStatusView {

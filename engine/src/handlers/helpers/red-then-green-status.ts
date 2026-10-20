@@ -59,8 +59,9 @@ function parseTaskArgument(args: readonly string[]): Readonly<{ ok: true; taskId
 /**
  * The core's live input. Pi keeps a child's epoch in its parent process, so
  * there the port is never asked. A live attempt is judged against the
- * TaskGraph's repository root; a root that cannot be resolved reads as an
- * unreadable epoch, so it renders rather than refuses.
+ * TaskGraph's repository root, resolved only for a readable ledger; an
+ * unreadable ledger or an unresolvable root reads as an unreadable epoch, so
+ * it renders rather than refuses.
  */
 function liveInput(
   harness: "claude" | "pi",
@@ -72,11 +73,11 @@ function liveInput(
   if (harness === "pi") return NOT_OBSERVABLE;
   const live = liveAttemptEvidence(taskId, statePath);
   if (live.kind !== "live") return live;
+  if (live.ledger.kind === "unreadable") return Object.freeze({ kind: "unreadable", reason: live.ledger.reason });
   const root = ports.repositoryRoot(statePath);
   return root.ok
-    ? Object.freeze({ kind: "live", ledger: live.ledger, repositoryRoot: root.root })
-    // An unreadable ledger is never judged, so no root is read from this input.
-    : Object.freeze({ kind: "live", ledger: Object.freeze({ kind: "unreadable", reason: root.reason }), repositoryRoot: "" });
+    ? Object.freeze({ kind: "live", events: live.ledger.events, repositoryRoot: root.root })
+    : Object.freeze({ kind: "unreadable", reason: root.reason });
 }
 
 function renderedResult(write: (text: string) => void, rendering: RedThenGreenStatusRendering): HookResult {

@@ -983,6 +983,7 @@ It takes exactly one argument, `--task <id>`. The output has four parts, always 
   - `TaskGraph predates I6`: the frozen manifest carries no `testFiles`;
   - `claimant (acceptance contract)`: the Task is an Acceptance Contract claimant, which waives its new tests;
   - `new tests waived: <reason>`: any other new-test waiver, for example `new tests waived: documentation-only`;
+  - `the frozen Proof carries no red-then-green obligation`: the Task requires new tests, but its frozen Proof owes no I6. The State File's load check makes this unreachable for a graph it admits; the line exists so every not-owed answer has a reason;
 - `I6 undeterminable — <reason>`: the Task's test-file classification or its Proof is not frozen yet, so settlement could not decide either.
 
 The reason only explains a `not owed` answer. The decision itself is `redThenGreenDuty`, the function settlement uses.
@@ -1004,7 +1005,7 @@ An empty list prints as a single line, `test files: none` or `implementation fil
 - `live attempt: none`: no implementation sidecar names the Task;
 - `live attempt: uninspectable — <reason>`: no readable sidecar names the Task, but some implementation attempt sidecars could not be read, so a live attempt may be missed;
 - `live attempt: unreadable — <reason>`: an attempt is live but cannot be judged. Either several live attempts name the Task, the attempt is rostered without a parseable role, its ledger epoch cannot be read, or the repository root cannot be resolved;
-- `live attempt: not judged (I6 not owed)`: an attempt is live, but there is no obligation to judge it against;
+- `live attempt: not judged (no I6 obligation to judge it by)`: an attempt is live, but the header reads `I6 not owed` or `I6 undeterminable`, so there is no obligation to judge it against;
 - `live attempt: shown`, followed by the three facts in order:
 
   ```text
