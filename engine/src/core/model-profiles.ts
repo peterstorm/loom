@@ -547,9 +547,38 @@ export function resolveModelProfile(raw: unknown): PolicyResult<LlmProfile> {
     : success(resolved);
 }
 
+/** The plugin namespace Claude Code registers Loom's Agents under (`.claude-plugin/plugin.json` `name`). */
+export const LOOM_AGENT_NAMESPACE = "loom";
+const LOOM_AGENT_PREFIX = `${LOOM_AGENT_NAMESPACE}:`;
+
 /** Reserved harness namespace ownership is independent of catalog membership. */
 export function isLoomNamespacedAgent(raw: unknown): raw is string {
-  return typeof raw === "string" && raw.startsWith("loom:");
+  return typeof raw === "string" && raw.startsWith(LOOM_AGENT_PREFIX);
+}
+
+/**
+ * The `subagent_type` Claude Code resolves a Loom Agent by. A plugin's agents
+ * are registered only under the plugin's namespace, so the bare catalog name
+ * (`code-implementer-agent`) names no agent there; Pi registers the bare name.
+ */
+export const claudeAgentType = (agent: string): string => `${LOOM_AGENT_PREFIX}${agent}`;
+
+/**
+ * Why a Claude Code spawn naming a Loom Agent would be rejected by the harness
+ * after the spawn gates admitted it, or null when it would not (#117): the
+ * name must be exactly `loom:<agent>`. A bare catalog name, or one under a
+ * foreign namespace, resolves to nothing in Claude Code's registry, and a gate
+ * that reserved Task authority for it strands the Task as executing with no
+ * agent. A name that is no Loom Agent under any namespace is not this rule's.
+ */
+export function claudeAgentTypeRefusal(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const agent = parseAgentName(raw.slice(raw.indexOf(":") + 1));
+  if (!agent.ok) return null;
+  const expected = claudeAgentType(agent.value);
+  return raw === expected
+    ? null
+    : `Claude Code registers Loom's agents under the plugin namespace: spawn subagent_type ${JSON.stringify(expected)}, not ${JSON.stringify(raw)}`;
 }
 
 /** Parse a Loom agent name. The harness namespace is accepted, arbitrary namespaces are not. */
@@ -557,7 +586,7 @@ export function parseAgentName(raw: unknown): PolicyResult<LoomAgentName> {
   if (typeof raw !== "string") {
     return failure({ kind: "unknown-agent", message: `agent name must be a string; received ${JSON.stringify(raw)}` });
   }
-  const bare = raw.startsWith("loom:") ? raw.slice("loom:".length) : raw;
+  const bare = raw.startsWith(LOOM_AGENT_PREFIX) ? raw.slice(LOOM_AGENT_PREFIX.length) : raw;
   const policy = AGENT_POLICIES.find(({ agent }) => agent === bare);
   return policy === undefined
     ? failure({ kind: "unknown-agent", message: `no Loom model policy for agent '${raw}'` })

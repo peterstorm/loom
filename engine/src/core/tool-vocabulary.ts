@@ -50,6 +50,9 @@ export function editedFilePath(toolInput: Readonly<Record<string, unknown>> | nu
  */
 export const SUBAGENT_SPAWN_TOOLS: ReadonlySet<string> = frozenSet(["Task", "Agent", "subagent"]);
 
+/** The spawn tool names only Claude Code emits: its plugin agents resolve by namespaced name. */
+export const CLAUDE_SPAWN_TOOLS: ReadonlySet<string> = frozenSet(["Task", "Agent"]);
+
 /** Test command patterns (for bash test output parsing) */
 export const TEST_COMMAND_PATTERNS: readonly string[] = [
   "mvn test", "mvn verify", "mvn -pl",

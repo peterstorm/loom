@@ -175,7 +175,7 @@ Supported names: `Read`, `Write`, `Edit`, `MultiEdit`, `Bash`, `Grep`, `Glob`. P
 
 ## Naming and namespaces
 
-Source policy uses bare Agent names. Claude plugin calls may expose `loom:<name>`; Pi uses generated user-global definitions. Shared parsers strip only the Loom namespace and reject arbitrary namespace substitution.
+Source policy uses bare Agent names. Claude Code registers plugin agents only as `loom:<name>`, so every Claude spawn of a Loom Agent must use that form: `orchestration brief` emits it (`claudeAgentType`), and `validate-task-execution` refuses a bare or foreign-namespaced Loom name on `Task`/`Agent` before it reserves anything (`claudeAgentTypeRefusal`, #117). Pi spawns the bare name from generated user-global definitions. `parseAgentName` accepts the bare name or the `loom:` form and refuses arbitrary namespaces.
 
 When adding an Agent, update and test:
 

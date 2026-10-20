@@ -21,7 +21,8 @@ describe("briefInvocation", () => {
       agent: "code-implementer-agent",
       dispatch: brief.dispatch,
       pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
-      claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2", prompt: "LOOM_IMPLEMENTATION_BRIEF: T2" },
+      // Claude Code registers plugin agents under the plugin namespace; Pi the bare name (#117).
+      claude: { subagent_type: "loom:code-implementer-agent", model: "opus", description: "Implement T2", prompt: "LOOM_IMPLEMENTATION_BRIEF: T2" },
       ...(prompt === undefined ? {} : { prompt }),
     });
     expect("prompt" in invocation).toBe(withPrompt);

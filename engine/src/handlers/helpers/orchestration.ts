@@ -145,7 +145,7 @@ import {
   type AgentRequestAuthority,
   type EffectIntent,
 } from "../../core/orchestration-contract";
-import { expectedSpawnModel } from "../../core/model-profiles";
+import { claudeAgentType, expectedSpawnModel } from "../../core/model-profiles";
 import { captureKey } from "../../core/harness-capture";
 import { translateLegacyPanelJournal } from "./panel-program";
 import {
@@ -614,7 +614,9 @@ export type BriefInvocation = Readonly<{
  * brief MARKER, never the brief: the Loom Pi extension, and on Claude Code the
  * `validate-task-execution` PreToolUse hook, expand it to the rendered brief
  * before any gate judges the prompt. `withPrompt` adds the rendered brief for
- * an operator to read.
+ * an operator to read. Each harness names the agent the way its registry
+ * resolves it: Pi by the bare catalog name, Claude Code by `loom:<agent>`
+ * (#117), which the Claude spawn gate requires before it reserves anything.
  */
 export function briefInvocation(brief: ImplementationBrief, claudeModel: string, withPrompt: boolean): BriefInvocation {
   const marker = `${IMPLEMENTATION_BRIEF_MARKER}: ${brief.taskId}`;
@@ -623,7 +625,7 @@ export function briefInvocation(brief: ImplementationBrief, claudeModel: string,
     agent: brief.agent,
     dispatch: brief.dispatch,
     pi: Object.freeze({ agent: brief.agent, task: marker }),
-    claude: Object.freeze({ subagent_type: brief.agent, model: claudeModel, description: `Implement ${brief.taskId}`, prompt: marker }),
+    claude: Object.freeze({ subagent_type: claudeAgentType(brief.agent), model: claudeModel, description: `Implement ${brief.taskId}`, prompt: marker }),
     ...(withPrompt ? { prompt: brief.prompt } : {}),
   });
 }
