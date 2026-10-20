@@ -472,7 +472,7 @@ _Avoid_: Affected gate, regression check, test cadence
 **Affected Runner**:
 The optional `affectedRunner` key of a schema-2 verification manifest. It is frozen at population and included in the manifest digest only when it is declared. It takes the same form checks as `acceptanceRunner`, with three differences:
 - `{files}` expands to the **Changed Files** beneath its `cwd`, each relative to that `cwd`;
-- `timeoutMs` is at most 120000;
+- `timeoutMs` is at most 240000, the acceptance runner's cap;
 - its `required-file` JUnit report path must differ from the `acceptanceRunner`'s and from every Wave check's.
 
 Loom's own manifest entry is operator-owned.

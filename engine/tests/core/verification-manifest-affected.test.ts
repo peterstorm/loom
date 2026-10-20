@@ -12,6 +12,7 @@ import { DEFAULT_TEST_FILE_SUFFIXES, ENGINE_DEFAULT_TEST_FILES } from "../../src
 import {
   ACCEPTANCE_RUNNER_CHECK_ID,
   AFFECTED_RUNNER_CHECK_ID,
+  MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS,
   MAX_AFFECTED_RUNNER_TIMEOUT_MS,
   acceptanceRunnerCheck,
   affectedRunnerCheck,
@@ -268,9 +269,12 @@ describe("affectedRunner and testFileSuffixes in the source manifest", () => {
     expect(errors.join("\n")).toContain(key);
   });
 
-  it("AS-016: FR-015: the timeout cap is the affected runner's own, below the acceptance runner's", () => {
+  it("AS-016: FR-015: the affected runner's timeout is capped at the acceptance runner's cap, which holds a hub-module run (#120)", () => {
+    expect(MAX_AFFECTED_RUNNER_TIMEOUT_MS).toBe(MAX_ACCEPTANCE_RUNNER_TIMEOUT_MS);
+    // The slice 2 pilot's affected run over handler-routes.ts took 138 s against the old 120 s cap.
+    expect(refusal({ schemaVersion: 2, affectedRunner: { ...AFFECTED_RUNNER, timeoutMs: 180_000 } })).toEqual([]);
+    expect(refusal({ schemaVersion: 2, affectedRunner: { ...AFFECTED_RUNNER, timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS } })).toEqual([]);
     const runner = { ...AFFECTED_RUNNER, timeoutMs: MAX_AFFECTED_RUNNER_TIMEOUT_MS + 1 };
-    expect(refusal({ schemaVersion: 2, acceptanceRunner: { ...runner, report: ACCEPTANCE_RUNNER.report } })).toEqual([]);
     expect(refusal({ schemaVersion: 2, affectedRunner: runner })).toEqual([
       `verificationManifest.affectedRunner.timeoutMs must be at most ${MAX_AFFECTED_RUNNER_TIMEOUT_MS}, inside the stop hook's own timeout`,
     ]);
