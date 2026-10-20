@@ -484,7 +484,7 @@ _Avoid_: Diff, modified files, touched files
 
 **Evidence Minting Rule**:
 The one rule that turns a tool call into ledger facts on both harnesses (INV-4).
-- **Normalization.** Each harness reduces its event to a `HarnessToolCall`: Claude Code's PostToolUse payload through `claudeToolCall`, a Pi child's `tool_result` event through `piToolCall`.
+- **Normalization.** Each harness reduces its event to a `HarnessToolCall`: Claude Code's PostToolUse or PostToolUseFailure payload through `claudeToolCall`, a Pi child's `tool_result` event through `piToolCall`.
 - **Minting.** The pure `extractEvidence` turns the call into facts. `machine/tool-evidence-recorder.ts` is the only caller of `extractEvidence` and of the ledger append. It runs report discovery, which applies the freshness stamp and the agent-authored-artifact veto.
 
 The **Pi Ledger Recorder** is this rule's Pi entry point.

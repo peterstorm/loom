@@ -61,6 +61,7 @@ Claude Code lifecycle coverage:
 
 - **PreToolUse** — phase order, Wave/task order, prompt substitution, model/Skill policy, direct-edit policy, guarded machine tools, state-path Bash guard. An implementation brief marker (`LOOM_IMPLEMENTATION_BRIEF: T5`) is expanded here: `validate-task-execution` renders the brief, runs every spawn veto and the reservation on it, and returns it as the call's `updatedInput`, so the parent sends only the marker. Its sibling gates expand the marker themselves, because hooks on one matcher see only the original input (`engine/src/handlers/pre-tool-use/implementation-brief-marker.ts`).
 - **PostToolUse** — immediate lint, evidence recording, and orchestration-spawn correlation. Evidence recording (`handlers/post-tool-use/record-evidence.ts`) attributes the call to an agent epoch, normalizes the hook payload with `claudeToolCall`, and hands it to the shared minting shell (see [Evidence ledger: one minting rule](#evidence-ledger-one-minting-rule)).
+- **PostToolUseFailure** (Bash) — evidence recording for a failed call. Claude Code fires PostToolUse only when a tool call succeeded; a Bash command that exits non-zero is a failed call, so a failing test run reaches the ledger only through this event.
 - **SubagentStart** — active-Agent tracking and guarded-machine epoch binding.
 - **SubagentStop** — the stop checks (the Acceptance Stop Check, then the Affected-Test Stop Check, run by `handlers/subagent-stop/stop-checks.ts` from the one planner `planStopChecks`), then phase advancement, implementation proof reconciliation (including the I6 red-then-green judgment over the agent's epoch), review/spec evidence capture, orchestration transcript capture, cleanup.
 - **SessionStart** — stale binding cleanup and post-`/clear` context restoration.
@@ -250,12 +251,12 @@ Context Packets split fixed and variable byte sections, hash the complete conten
 The evidence ledger (`<session>.evidence.jsonl`) holds facts only: `FileRead`, `FileWrite` and `TestRun`, each stamped with an agent epoch. Judgments such as trusted, passed or red-then-green are computed from those facts when they are read. Both harnesses mint facts through one rule (INV-4):
 
 ```text
-Claude PostToolUse payload ─ claudeToolCall ─┐
-                                             ├─ HarnessToolCall ─ recordToolEvidence ─ extractEvidence (pure) ─ ledger append
-Pi child tool_result event ─ piToolCall ─────┘
+Claude PostToolUse/PostToolUseFailure payload ─ claudeToolCall ─┐
+                                                                ├─ HarnessToolCall ─ recordToolEvidence ─ extractEvidence (pure) ─ ledger append
+Pi child tool_result event ─ piToolCall ────────────────────────┘
 ```
 
-- **Pure parts.** `core/harness-tool-call.ts` holds the two pure adapters. They reduce each harness's event to one `HarnessToolCall`: the tool, its input, its outcome (failed, exit, stdout, interrupted), the call id and the cwd. `machine/extract-evidence.ts` turns that call into facts. Its rules cover command classification and exit ownership. The shell write targets it mints come from `core/shell-write-targets.ts`, the evidence twin of the guard's redirect scanner: redirects, `tee`, and the destinations of a literal `mv`, `git mv` or `cp`.
+- **Pure parts.** `core/harness-tool-call.ts` holds the two pure adapters. They reduce each harness's event to one `HarnessToolCall`: the tool, its input, its outcome (failed, exit, stdout, interrupted), the call id and the cwd. Claude Code's current Bash payloads carry no exit field. A PostToolUse Bash success is exit 0, unless the harness reinterpreted a non-zero exit (`returnCodeInterpretation`, as for a `grep` that matched nothing) or the call ran in the background; an explicit exit field is honoured when present. A PostToolUseFailure `error` starts `Exit code N`, and a timeout or an interrupt is a kill. Pi uses `details.exitCode` when it is an integer, and otherwise reads `isError` as exit 1 or 0. `machine/extract-evidence.ts` turns that call into facts. Its rules cover command classification and exit ownership. The shell write targets it mints come from `core/shell-write-targets.ts`, the evidence twin of the guard's redirect scanner: redirects, `tee`, and the destinations of a literal `mv`, `git mv` or `cp`.
 - **The shell.** `machine/tool-evidence-recorder.ts` is the only production caller of `extractEvidence` and of the ledger append. It does three things:
   - it runs report discovery, which applies the call-start freshness stamp and the agent-authored-artifact veto;
   - it resolves `FileWrite` paths against the call's cwd;
@@ -265,7 +266,7 @@ Pi child tool_result event ─ piToolCall ─────┘
 
 A matrix test feeds the same tool-call fixtures through both adapters and asserts identical records. Consumers read the ledger only through epoch folds:
 - the SubagentStop test-result resolver;
-- I6 settlement (`judgeRedThenGreen`);
+- I6 settlement (`judgeRedThenGreen`, whose classification also names the implementation files the Task creates by its first `artifact_baseline`, `createdImplementationFiles`, so a test that cannot yet load a module the Task creates is red: FR-007a);
 - the stop checks' changed files (`changedFilesAtStop`, INV-7);
 - `helper stop-check-plan`.
 

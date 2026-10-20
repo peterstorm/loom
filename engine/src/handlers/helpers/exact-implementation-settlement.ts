@@ -138,8 +138,9 @@ type RedThenGreenJudgment =
 /**
  * The one place both harnesses split a Task's `file_list` for I6 (INV-2):
  * `classifyTaskFiles` against the frozen classification the `owed` duty
- * carries, handed ready to the pure judge. Only an `owed` Task consults the
- * ledger; the epoch it judges is the one this attempt's transport observed
+ * carries and the Task's first artifact baseline (which names the files it
+ * creates, FR-007a), handed ready to the pure judge. Only an `owed` Task
+ * consults the ledger; the epoch it judges is the one this attempt's transport observed
  * (I6 is judged per attempt epoch). A `proof-unfrozen` duty never reaches
  * here: settlement refuses it before observing anything.
  */
@@ -160,10 +161,8 @@ function judgeAttemptRedThenGreen(
         return { kind: "unavailable", reason: `${facts.transport} evidence ledger unreadable for ${task.id}: ${ledger.reason}` };
       }
       const piStructured = facts.testResult.verdict === "untrusted" && facts.testResult.provenance === "pi-structured";
-      return {
-        kind: "judged",
-        observation: judgeRedThenGreen(ledger.events, classifyTaskFiles(task.file_list ?? [], duty.testFiles), repositoryRoot, piStructured),
-      };
+      const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
+      return { kind: "judged", observation: judgeRedThenGreen(ledger.events, classification, repositoryRoot, piStructured) };
     }
   }
 }

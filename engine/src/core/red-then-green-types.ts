@@ -26,11 +26,15 @@ export type { TestFileResult, TestReportFiles } from "./structured-test-report";
  * A Task's `file_list`, partitioned by the frozen test-file pattern. Every
  * entry is in exactly one list, in `file_list` order: a test file matches the
  * pattern, and every other entry (fixtures, helpers, type files included) is
- * an implementation file.
+ * an implementation file. `createdImplementationFiles` are the implementation
+ * files the Task creates (FR-007a): those its Task-level `artifact_baseline`
+ * records as missing, in `file_list` order. `classifyTaskFiles` builds the
+ * three lists together, so the created files are always implementation files.
  */
 export type TestFileClassification = Readonly<{
   testFiles: readonly string[];
   implementationFiles: readonly string[];
+  createdImplementationFiles: readonly string[];
 }>;
 
 // --- The epoch ledger the settlement shell observes ---
@@ -67,7 +71,9 @@ export type RunRef = Readonly<{ index: number; command: string }>;
  *     > red-missing | red-after-first-implementation-write
  *     > green-missing
  *
- * `red-missing`: no qualifying run shows a behavioral red in a Task test file.
+ * `red-missing`: no qualifying run shows a behavioral red in a Task test file
+ * (a failing testcase, or under FR-007a a collection error in a Task that
+ * creates an implementation file).
  * `red-after-first-implementation-write`: a qualifying red exists, but only
  * after the first write to a Task implementation file. `untrustedOnly` is true
  * when the step is unmet by qualifying runs while the epoch holds a
@@ -91,7 +97,9 @@ export type RedThenGreenGap =
 
 /**
  * The I6 verdict over one epoch. `shown` names the three facts in order: the
- * first qualifying behavioral red on a Task test file, the first FileWrite
+ * first qualifying behavioral red on a Task test file (a failing testcase
+ * that is not a collection error, or, when the Task creates an implementation
+ * file, a collection error: FR-007a), the first FileWrite
  * (tool or shell) to a Task implementation file after it, and the first
  * qualifying green after that write, which exits 0 and attributes every Task
  * test file with at least one testcase that ran (`executed - skipped >= 1`),
@@ -107,7 +115,11 @@ export type RedThenGreenFailureKind = `proof:red-then-green-unproven:${RedThenGr
 /**
  * Judge I6 over one epoch's ordered events. Pure, total and deterministic: the
  * same events, classification, repository root and untrusted-evidence flag
- * give the same observation. `repositoryRoot` makes an absolute reported file
+ * give the same observation. When the classification names at least one
+ * created implementation file, a collection error in a Task test file is red
+ * (FR-007a): before the Task writes the module, a test that imports it cannot
+ * load, and that failure is the red. When it names none, only a failing
+ * testcase is red (FR-007). `repositoryRoot` makes an absolute reported file
  * identity repository-relative before attribution. `untrustedEvidence` is true
  * when the Task's test result carries `pi-structured` provenance.
  */
