@@ -388,6 +388,24 @@ function expectShownOnBoth(
 const i6Graph = (fileList: readonly string[] = [LEDGER_TEST, LEDGER_IMPL]): TaskGraph =>
   populate([authoredTask("T1", fileList)], defaultVerificationManifest());
 
+/** T1 with a Task-level artifact baseline: `created` files were missing at it, every other declared file present. */
+function withArtifactBaseline(graph: TaskGraph, created: readonly string[]): TaskGraph {
+  const task = taskOf(graph, "T1");
+  const artifact_baseline = [...(task.file_list ?? [])].sort().map((artifact) => ({
+    artifact,
+    snapshot: created.includes(artifact) ? { kind: "missing" as const } : { kind: "sha256" as const, digest: "e".repeat(64) },
+  }));
+  return withTask(graph, { ...task, artifact_baseline });
+}
+
+/** A Vitest JSON run whose report lists `file` as failed to collect: no testcase at all. */
+const jsonCollectionErrorRun = (file: string, command = RED_RUN): RawEvent => ({
+  kind: "TestRun",
+  command,
+  exit: 1,
+  report: { total: 0, failed: 0, source: "vitest-json", files: { kind: "recorded", results: [{ file, executed: 0, failed: 0, skipped: 0, collectionError: true }] } },
+});
+
 // --- The matrix ---
 
 describe("I6 settlement matrix: Claude Code and Pi settle the same epoch facts identically", () => {
@@ -411,8 +429,24 @@ describe("I6 settlement matrix: Claude Code and Pi settle the same epoch facts i
   });
 
   it("AS-009: a collection-error-only failure is not red on both harnesses", () => {
+    expect(taskOf(i6Graph(), "T1").artifact_baseline).toBeUndefined();
     expectGapOnBoth(i6Graph(), [write(LEDGER_TEST), run([collectionError(REPORTED_LEDGER_TEST)]), write(LEDGER_IMPL), green()],
       { kind: "red-missing", untrustedOnly: false });
+  });
+
+  it("AS-009: a collection error is not red for a Task whose implementation files all existed at its artifact baseline", () => {
+    const graph = withArtifactBaseline(i6Graph(), []);
+    expectGapOnBoth(graph, [write(LEDGER_TEST), jsonCollectionErrorRun(REPORTED_LEDGER_TEST), write(LEDGER_IMPL), green()],
+      { kind: "red-missing", untrustedOnly: false });
+  });
+
+  it.each([
+    { shape: "Vitest JSON", collectionRed: jsonCollectionErrorRun(REPORTED_LEDGER_TEST) },
+    { shape: "JUnit", collectionRed: run([collectionError(REPORTED_LEDGER_TEST)]) },
+  ])("AS-042: a $shape collection error is red on both harnesses when the Task creates its implementation file", ({ collectionRed }) => {
+    const graph = withArtifactBaseline(i6Graph(), [LEDGER_TEST, LEDGER_IMPL]);
+    expectShownOnBoth(graph, [write(LEDGER_TEST), collectionRed, write(LEDGER_IMPL), green()],
+      { red: 1, implementationWrite: LEDGER_IMPL, green: 3 });
   });
 
   it("AS-010: a fixture write before red is the first implementation write on both harnesses", () => {
@@ -890,6 +924,37 @@ describe("the implementation brief states I6 up front and names the repair on re
     }));
   });
 
+  it("FR-007a: the Red step of a Task that creates implementation files names them and says a failure to load them is red", () => {
+    const graph = withArtifactBaseline(i6Graph([LEDGER_TEST, LEDGER_TYPES, LEDGER_IMPL]), [LEDGER_TEST, LEDGER_IMPL]);
+    const section = i6Section(renderedPrompt(briefInput(graph, taskOf(graph, "T1"))));
+    const red = section.split("\n").find((line) => line.startsWith("1. **Red.**")) ?? "";
+    expect(red).toBe(
+      "1. **Red.** A trusted test run in which at least one testcase in one of your test files fails. " +
+        `Your Task creates \`${LEDGER_IMPL}\`: before you write it, your tests failing to load it (a collection or import error in one of your test files) IS red.`,
+    );
+  });
+
+  it("FR-007: the Red step of a Task that creates no implementation file keeps the collection-error exclusion", () => {
+    for (const graph of [i6Graph(), withArtifactBaseline(i6Graph(), [LEDGER_TEST])]) {
+      const section = i6Section(renderedPrompt(briefInput(graph, taskOf(graph, "T1"))));
+      expect(section).toContain("A collection or import error with no failing testcase is not red.");
+      expect(section).not.toContain("Your Task creates");
+    }
+  });
+
+  it("FR-007a: the retry remedy's red step names the created files the restore deleted", () => {
+    const created = [LEDGER_TYPES, LEDGER_IMPL];
+    const failed = retryAfter(withArtifactBaseline(i6Graph([LEDGER_TEST, LEDGER_TYPES, LEDGER_IMPL]), [LEDGER_TEST, ...created]),
+      [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
+    const prompt = renderedPrompt(briefInput(failed.graph, failed.task));
+    const remedy = prompt.split("**I6 repair for this retry.**")[1] ?? "";
+    const step2 = remedy.split("\n").find((line) => line.startsWith("2. Run your tests and observe red")) ?? "";
+    expect(step2).toBe(
+      "2. Run your tests and observe red: at least one testcase in one of your test files fails. " +
+        `Your Task creates \`${LEDGER_TYPES}\`, \`${LEDGER_IMPL}\`: before you write them, your tests failing to load them (a collection or import error in one of your test files) IS red.`,
+    );
+  });
+
   it("a retry of a Task with no recorded start commit restores from HEAD and says what that discards", () => {
     const { graph, task } = retryAfter(i6Graph([LEDGER_TEST, LEDGER_IMPL]),
       [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
@@ -930,8 +995,10 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
 
   const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-  /** One owing Task registered against a real repository, its bytes then changed. */
-  async function armedOwingTask(label: string) {
+  /** One owing Task registered against a real repository, its bytes then
+   *  changed. `implementation` says whether the baseline commit already holds
+   *  the implementation file or the Task creates it. */
+  async function armedOwingTask(label: string, implementation: "existing" | "created" = "existing") {
     const repository = canonicalTempDir("loom-i6-handler-");
     roots.push(repository);
     git(repository, "init", "-q");
@@ -939,8 +1006,8 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
     git(repository, "config", "user.email", "loom@example.test");
     mkdirSync(join(repository, "src"));
     writeFileSync(join(repository, ".gitignore"), ".claude/\n");
-    writeFileSync(join(repository, IMPL_FILE), "export const value = 1;\n");
-    git(repository, "add", ".gitignore", IMPL_FILE);
+    if (implementation === "existing") writeFileSync(join(repository, IMPL_FILE), "export const value = 1;\n");
+    git(repository, "add", ".gitignore", ...(implementation === "existing" ? [IMPL_FILE] : []));
     git(repository, "commit", "-qm", "baseline");
     const statePath = join(repository, ".claude", "state", "active_task_graph.json");
     mkdirSync(join(repository, ".claude", "state"), { recursive: true });
@@ -987,6 +1054,8 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
   }
 
   const reportedRun = (results: readonly TestFileResult[]): RawEvent => run(results, { command: "npx vitest run" });
+  /** The test file fails to load before the implementation write, then passes after it. Only the baseline differs between AS-042 and AS-009. */
+  const collectionRedEpoch = [write(TEST_FILE), jsonCollectionErrorRun(TEST_FILE, "npx vitest run"), write(IMPL_FILE), reportedRun([passing(TEST_FILE)])];
 
   it("judges I6 from the agent's own snapshot epoch, crediting no foreign epoch's facts", async () => {
     const { stop, persistedTask } = await armedOwingTask("own-epoch");
@@ -995,6 +1064,26 @@ describe("update-task-status hands settlement the agent's own epoch ledger (clau
     expect(i6ResultOfTask(persistedTask())).toMatchObject({
       state: "satisfied",
       evidence: { kind: "red-then-green", red: { index: 1 }, implementationWrite: IMPL_FILE, green: { index: 3 } },
+    });
+  }, 30_000);
+
+  it("AS-042: a test that cannot load the module the Task creates is red, judged against the registered artifact baseline", async () => {
+    const { stop, persistedTask } = await armedOwingTask("created-module", "created");
+    expect(persistedTask().artifact_baseline).toContainEqual({ artifact: IMPL_FILE, snapshot: { kind: "missing" } });
+    await stop({ kind: "snapshot", events: records(collectionRedEpoch, CLAUDE_EPOCH) });
+    expect(i6ResultOfTask(persistedTask())).toMatchObject({
+      state: "satisfied",
+      evidence: { kind: "red-then-green", red: { index: 1 }, implementationWrite: IMPL_FILE, green: { index: 3 } },
+    });
+  }, 30_000);
+
+  it("AS-009: the same collection error is not red when the implementation file existed at the baseline", async () => {
+    const { stop, persistedTask } = await armedOwingTask("existing-module");
+    expect(persistedTask().artifact_baseline).toContainEqual({ artifact: IMPL_FILE, snapshot: expect.objectContaining({ kind: "sha256" }) });
+    await stop({ kind: "snapshot", events: records(collectionRedEpoch, CLAUDE_EPOCH) });
+    expect(i6ResultOfTask(persistedTask())).toMatchObject({
+      state: "failed",
+      failure: { kind: "red-then-green-unproven", gap: { kind: "red-missing", untrustedOnly: false } },
     });
   }, 30_000);
 

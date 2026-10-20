@@ -371,9 +371,24 @@ function redThenGreenRemedy(
         `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
         baseline +
         "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them.",
-    "2. Run your tests and observe red: at least one testcase in one of your test files fails.",
+    `2. Run your tests and observe red: ${TESTCASE_RED}${createdFilesRed(classification.createdImplementationFiles)}`,
     "3. Then implement, and run your tests green.",
   ];
+}
+
+/** What red is for every Task (FR-007), stated once for both red steps. */
+const TESTCASE_RED = "at least one testcase in one of your test files fails.";
+
+/**
+ * The FR-007a sentence for a Task that creates implementation files, appended
+ * to each statement of the red step; empty for a Task that creates none, which
+ * keeps strict FR-007.
+ */
+function createdFilesRed(created: readonly string[]): string {
+  if (created.length === 0) return "";
+  const them = created.length === 1 ? "it" : "them";
+  return ` Your Task creates ${created.map((file) => `\`${file}\``).join(", ")}: before you write ${them}, ` +
+    `your tests failing to load ${them} (a collection or import error in one of your test files) IS red.`;
 }
 
 /** Why a brief cannot state I6: the duty's own named disagreement. */
@@ -405,12 +420,14 @@ function redThenGreenSection(
     case "owed":
       break;
   }
-  const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles);
+  const classification = classifyTaskFiles(task.file_list ?? [], duty.testFiles, task.artifact_baseline);
+  const created = classification.createdImplementationFiles;
   return {
     ok: true,
     value: [
       "**I6 red-then-green — BINDING for this Task.** Settlement proves this Task test-first from your attempt's evidence ledger, and only from it, in this order:",
-      "1. **Red.** A trusted test run in which at least one testcase in one of your test files fails. A collection or import error with no failing testcase is not red.",
+      `1. **Red.** A trusted test run in which ${TESTCASE_RED}` +
+        (created.length === 0 ? " A collection or import error with no failing testcase is not red." : createdFilesRed(created)),
       "2. **First implementation write.** Your first write to any implementation file below, by a file tool or a shell command (a baseline restore of your own files via `git restore` mints no FileWrite and is exempt). Fixtures, helpers and type files count; writing a test file never does.",
       "3. **Green.** A later trusted run that exits 0 in which every one of your test files runs at least one testcase and none fails or fails to collect.",
       "",
