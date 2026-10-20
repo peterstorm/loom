@@ -3,11 +3,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseAuthorizedWaveCompletionCheck, type AuthorizedWaveCompletionCheck } from "../../src/core/completion-suite";
-import {
-  HOOK_INVOCATION_VARIABLES,
-  projectCommandEnvironment,
-  runCompletionCheck,
-} from "../../src/orchestration/completion-check-runner";
+import { HOOK_INVOCATION_VARIABLES, projectCommandEnvironment } from "../../src/core/project-command-environment";
+import { runCompletionCheck } from "../../src/orchestration/completion-check-runner";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
