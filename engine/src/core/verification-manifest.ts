@@ -76,9 +76,13 @@ export const AFFECTED_RUNNER_CHECK_ID = "project:affected-runner" as const;
  * by the parser that enforces it: CT-2's types file
  * (`affected-stop-check-types.ts`) re-exports it, and the import runs only that
  * way round, because the types file imports `../types`, which imports this
- * module.
+ * module. A change set touching a hub module selects thousands of related tests
+ * (the slice 2 pilot measured 138 s), so the cap matches the acceptance cap.
+ * Each cap bounds one runner; the two run in sequence, and the stop shell
+ * launches the affected runner only when the time left before its deadline
+ * still holds the runner's whole timeout.
  */
-export const MAX_AFFECTED_RUNNER_TIMEOUT_MS = 120_000;
+export const MAX_AFFECTED_RUNNER_TIMEOUT_MS = 240_000;
 
 /**
  * The operator-declared command that runs only some acceptance files: exactly

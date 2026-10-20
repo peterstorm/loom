@@ -53,6 +53,7 @@ import {
 } from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
 import { epochChangedFiles, runStopChecks, stopChecksReportLine } from "../engine/src/handlers/subagent-stop/stop-checks";
 import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
+import { renderStopCheckNotes, type StopCheckNote } from "../engine/src/core/stop-check-note";
 import {
   applyFailedPiResult,
   applyImplementationPiResult,
@@ -172,14 +173,16 @@ const reservedImplementationTaskIds = (reservation: PiSpawnReservation | undefin
  * here, never a block. The affected check runs over the changed files of the
  * child's own epoch in the parent ledger (`ledger`, FR-035), the same epoch
  * settlement judges. The checks are total, so they never raise a processing
- * error. Returns the operator line printed, or null when nothing was printed.
+ * error. Prints the report line to the operator and returns it as the note the
+ * parent model also gets (#121), or null when there is nothing to say.
  */
 export async function reportImplementationStopChecks(
   manager: Readonly<{ load: () => TaskGraph; getPath: () => string }>,
   taskId: string | null,
   ledger: LedgerObservation,
   ports: StopCheckShellPorts = REPORT_ONLY_STOP_CHECK_PORTS,
-): Promise<string | null> {
+  notifyOperator: (line: string) => void = piStderrNote,
+): Promise<StopCheckNote | null> {
   if (taskId === null) return null;
   const outcome = await runStopChecks({
     loadGraph: () => manager.load(),
@@ -191,10 +194,14 @@ export async function reportImplementationStopChecks(
   }, ports);
   const line = stopChecksReportLine(taskId, outcome);
   if (line === null) return null;
-  const printed = `loom(pi): ${line}`;
-  process.stderr.write(`${printed}\n`);
-  return printed;
+  notifyOperator(line);
+  return Object.freeze({ taskId, message: line });
 }
+
+/** An operator line on stderr, the channel Pi always has. */
+const piStderrNote = (line: string): void => {
+  process.stderr.write(`loom(pi): ${line}\n`);
+};
 
 /** Write a notice's stderr line and return the processing error it raises. */
 const emitNotice = (notice: PiResultNotice): readonly string[] => {
@@ -205,6 +212,34 @@ const emitNotice = (notice: PiResultNotice): readonly string[] => {
 /** The processing-error result Pi shows the parent in place of the batch's. */
 export type PiSubagentStopResponse = { content: { type: "text"; text: string }[]; isError: true };
 
+/** The batch's own result with the stop-check notes appended; `isError` is left as Pi reported it. */
+export type PiSubagentStopAmendment<C> = { content: (C | { type: "text"; text: string })[] };
+
+/**
+ * What the parent model is shown after settlement (#121), pure. Processing
+ * errors replace the result, and any stop-check notes follow them. Notes alone
+ * are appended to the batch's own content. Neither means the result stands
+ * untouched.
+ */
+export function piStopResponse<C>(
+  original: Readonly<{ content: readonly C[] }>,
+  processingErrors: readonly string[],
+  stopCheckNotes: readonly StopCheckNote[],
+): PiSubagentStopResponse | PiSubagentStopAmendment<C> | undefined {
+  const rendered = renderStopCheckNotes(stopCheckNotes);
+  const notes = rendered === null ? [] : [{ type: "text" as const, text: rendered }];
+  if (processingErrors.length > 0) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: `Loom Pi subagent evidence processing failed:\n- ${processingErrors.join("\n- ")}`,
+      }, ...notes],
+      isError: true,
+    };
+  }
+  return notes.length === 0 ? undefined : { content: [...original.content, ...notes] };
+}
+
 export type PiSubagentStopPorts = Readonly<{
   parentSessions: PiParentSessions;
   emissionLaunchBridge: PiEmissionLaunchBridge;
@@ -214,6 +249,9 @@ export type PiSubagentStopPorts = Readonly<{
    *  settlement releases the batch's grants, roster entries and lease by —
    *  the same ports admission rollback and shutdown use. */
   durableClaimReleases: (sessionId: PiSessionId) => DurableClaimReleasePorts;
+  /** Where an operator line goes: the extension passes `piOperatorNoteSink`
+   *  (the UI when there is one); unset is stderr, the channel Pi always has. */
+  notifyOperator?: (line: string) => void;
 }>;
 
 /** What every stage of one batch's settlement reads. */
@@ -232,6 +270,7 @@ type PiStopBatch = Readonly<{
   /** Each spawn item's write-grant token, captured before settlement releases
    *  the grants: the parent reads each child's ledger epoch through it. */
   grantTokens: ReadonlyMap<number, string>;
+  notifyOperator: (line: string) => void;
 }>;
 
 /** How one batch's reservation resolved against its owner. */
@@ -654,12 +693,14 @@ type PiResultContext = Readonly<{
 /**
  * Process one parsed result: authority, startup outcome, capture, routing,
  * then — only on a settle route — the TaskGraph applier. Appends the
- * processing errors it raises to `processingErrors` as it goes, so the ones
- * raised before a throw survive it; the caller isolates the throw.
+ * processing errors it raises to `processingErrors`, and any stop-check note
+ * to `stopCheckNotes`, as it goes, so the ones raised before a throw survive
+ * it; the caller isolates the throw.
  */
 async function processPiResult(
   context: PiResultContext,
   processingErrors: string[],
+  stopCheckNotes: StopCheckNote[],
 ): Promise<void> {
   const { batch, reviewWitnesses, event, sessionId, rawResults, resultIndex, result } = context;
   const { toolCallId, resultSessionId, reservation } = batch;
@@ -855,7 +896,10 @@ async function processPiResult(
     case "implementation": {
       // One read of the child's epoch, shared by the report-only stop checks (I7) and settlement (I6).
       const ledger = piImplementationLedger(batch.resultSessionId, batch.grantTokens.get(resultIndex) ?? null, agentType, fsSessionRegistry);
-      await reportImplementationStopChecks(mgr, reservedItem?.taskId ?? null, ledger);
+      const note = await reportImplementationStopChecks(
+        mgr, reservedItem?.taskId ?? null, ledger, REPORT_ONLY_STOP_CHECK_PORTS, batch.notifyOperator,
+      );
+      if (note !== null) stopCheckNotes.push(note);
       return emit(await applyImplementationPiResult({
         store,
         repository,
@@ -888,7 +932,8 @@ async function processPiResult(
   }
 }
 
-/** Settle every authorized result, isolating each one's failure. */
+/** Settle every authorized result, isolating each one's failure. Stop-check
+ *  notes are appended to `stopCheckNotes`; processing errors are returned. */
 async function settleBatchResults(
   batch: PiStopBatch,
   reviewWitnesses: TrustedReviewWitnesses,
@@ -896,6 +941,7 @@ async function settleBatchResults(
   sessionId: string,
   rawResults: readonly unknown[],
   entries: readonly PiSubagentResultEntry[],
+  stopCheckNotes: StopCheckNote[],
 ): Promise<readonly string[]> {
   const { reservation } = batch;
   const processingErrors: string[] = [];
@@ -926,7 +972,7 @@ async function settleBatchResults(
     // while processing result #1 must not abort results #2..N — that leaves
     // tasks stuck "executing" with zero diagnostics.
     try {
-      await processPiResult({ batch, reviewWitnesses, event, sessionId, rawResults, resultIndex, result }, processingErrors);
+      await processPiResult({ batch, reviewWitnesses, event, sessionId, rawResults, resultIndex, result }, processingErrors, stopCheckNotes);
     } catch (err) {
       // Loud + isolated: name the agent, the task (best effort), and the
       // cause, then continue with the next result.
@@ -964,17 +1010,6 @@ export function issuedGrantTokens(owner: SpawnClaimHolder | null, parentSessions
   return new Map(grants.map(({ slot, token }) => [slot, token] as const));
 }
 
-const processingErrorResponse = (processingErrors: readonly string[]): PiSubagentStopResponse | undefined =>
-  processingErrors.length === 0
-    ? undefined
-    : {
-        content: [{
-          type: "text" as const,
-          text: `Loom Pi subagent evidence processing failed:\n- ${processingErrors.join("\n- ")}`,
-        }],
-        isError: true,
-      };
-
 /** A batch's `details.results`, read once: the raw results array, or the
  *  stderr/processing-error diagnostic when a pi version drifts the field away
  *  from an array. Pure. */
@@ -995,13 +1030,14 @@ function piResultsField(rawDetails: unknown): PiResultsField {
       };
 }
 
-/** Settle one completed spawn batch. Resolves the processing-error response
- *  Pi shows the parent, or `undefined` when every result was processed. */
+/** Settle one completed spawn batch. Resolves what `piStopResponse` shows the
+ *  parent: processing errors, stop-check notes, or `undefined` when every
+ *  result was processed and no check had anything to say. */
 export async function dispatchPiSubagentStop(
   event: ToolResultEvent,
   ctx: Readonly<{ sessionManager: Readonly<{ getSessionId: () => string | undefined }> }>,
   ports: PiSubagentStopPorts,
-): Promise<PiSubagentStopResponse | undefined> {
+): Promise<PiSubagentStopResponse | PiSubagentStopAmendment<ToolResultEvent["content"][number]> | undefined> {
   const { parentSessions, emissionLaunchBridge, reviewWitnesses, durableClaimReleases } = ports;
   const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
   const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
@@ -1019,13 +1055,15 @@ export async function dispatchPiSubagentStop(
     parentSessions,
     durableClaimReleases,
     grantTokens: issuedGrantTokens(owner, parentSessions),
+    notifyOperator: ports.notifyOperator ?? piStderrNote,
   });
   const processingErrors: string[] = [
     ...(resolved.resolutionFailure === null ? [] : [resolved.resolutionFailure]),
     ...await releaseSettledClaims(batch, withoutPointerLease),
   ];
+  const stopCheckNotes: StopCheckNote[] = [];
   await retryOrphanedClaims(batch);
-  if (resolved.resolutionFailure !== null) return processingErrorResponse(processingErrors);
+  if (resolved.resolutionFailure !== null) return piStopResponse(event, processingErrors, stopCheckNotes);
   const { reservation } = batch;
 
   const resultsField = piResultsField(event.details);
@@ -1060,9 +1098,9 @@ export async function dispatchPiSubagentStop(
     process.stderr.write(`loom(pi): ${resultsField.diagnostic}\n`);
   } else {
     const sessionId = ctx.sessionManager.getSessionId() ?? "unknown";
-    processingErrors.push(...await settleBatchResults(batch, reviewWitnesses, event, sessionId, rawResults, entries));
+    processingErrors.push(...await settleBatchResults(batch, reviewWitnesses, event, sessionId, rawResults, entries, stopCheckNotes));
   }
   // The pointer lease is released once, last, after every result settled.
   processingErrors.push(...await releaseSettledClaims(batch, pointerLeaseOnly));
-  return processingErrorResponse(processingErrors);
+  return piStopResponse(event, processingErrors, stopCheckNotes);
 }

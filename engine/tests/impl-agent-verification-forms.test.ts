@@ -30,7 +30,7 @@ const SOURCES = {
  *  placeholders filled the way an Agent fills them. A bare runner name in
  *  prose (`bun test`, `npm test`) and elided forms (`…`) are not commands. */
 function documentedCommands(source: string): readonly string[] {
-  return [...source.matchAll(/`((?:bun test|npx vitest|npx jest|npm test)\b[^`]*)`/g)]
+  return [...source.matchAll(/`((?:bun test|npx (?:--prefix \S+ )?(?:vitest|jest)|npm test)\b[^`]*)`/g)]
     .map((m) => m[1]!)
     .filter((cmd) => cmd.includes(" --") && !cmd.includes("…"))
     .map((cmd) => cmd.replaceAll("{task_id}", "T1").replaceAll("<task-id>", "T1"));
@@ -45,6 +45,8 @@ describe("documented final-verification forms stay accepted by the evidence reco
 
     it(`${name} documents Bun, Vitest, Jest, and npm report-writing forms`, () => {
       expect(commands.some((c) => c.startsWith("bun test") && c.includes("--cwd="))).toBe(true);
+      // #118: a sub-project's Vitest runs from its own install, never the npx cache.
+      expect(commands.some((c) => c.startsWith("npx --prefix /abs/sub vitest") && c.includes("--root /abs/sub"))).toBe(true);
       for (const head of ["bun test", "npx vitest", "npx jest", "npm test"]) {
         expect(commands.some((c) => c.startsWith(head)), head).toBe(true);
       }

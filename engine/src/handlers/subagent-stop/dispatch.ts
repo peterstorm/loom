@@ -33,6 +33,7 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "./acceptance-stop-check";
 import { epochChangedFiles, runStopChecks } from "./stop-checks";
 import { claudeEpochLedger } from "./update-task-status";
+import { publishStopCheckNote } from "../../stop-check-note-sidecar";
 
 import {
   snapshotImplementationAttemptSidecar,
@@ -125,7 +126,8 @@ export const runDispatch = async (
   // can look clean while review evidence was silently lost. Cleanup runs after
   // category settlement so the exact TaskGraph pointer lease remains live for
   // every handler that resolves session authority.
-  const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<HookResult | null> => {
+  type ChildFailure = Extract<HookResult, { kind: "error" | "block" }>;
+  const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<ChildFailure | null> => {
     try {
       const result = await fn();
       if (result.kind === "error" || result.kind === "block") return result;
@@ -363,10 +365,21 @@ export const runDispatch = async (
       hookStartedAtMs,
     }, stopCheckPorts);
     if (outcome.kind === "block") return { kind: "block", message: outcome.message };
-    if (outcome.kind === "note") stopCheckNote = outcome.message;
+    if (outcome.kind === "note") {
+      // The systemMessage reaches only the operator. The sidecar carries the
+      // note to the orchestrating model (#121), and is written before
+      // settlement so a settlement failure cannot lose it.
+      const published = publishStopCheckNote(sidecar.sessionId, sidecar.agentId, {
+        taskId: sidecar.authority.taskId,
+        message: outcome.message,
+      });
+      stopCheckNote = published.ok
+        ? outcome.message
+        : `${outcome.message}\n(the note was not kept for the orchestrator: ${published.reason})`;
+    }
   }
 
-  const childFailure: HookResult | null = await match(category)
+  const childFailure: ChildFailure | null = await match(category)
     .with("phase", () => runChild("advancePhase", () => advancePhase(stdin, args)))
     .with("impl", () => runChild("updateTaskStatus", () =>
       runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
@@ -389,13 +402,12 @@ export const runDispatch = async (
     .exhaustive();
 
   const cleanupFailure = await runCleanup();
+  const noted = stopCheckNote === undefined ? "" : `; stop checks noted: ${stopCheckNote}`;
   if (cleanupFailure !== null) {
-    const categoryMessage = childFailure !== null && (childFailure.kind === "error" || childFailure.kind === "block")
-      ? `; category settlement also failed: ${childFailure.message}`
-      : "";
-    return { kind: "error", message: `${cleanupFailure}${categoryMessage}` };
+    const categoryMessage = childFailure === null ? "" : `; category settlement also failed: ${childFailure.message}`;
+    return { kind: "error", message: `${cleanupFailure}${categoryMessage}${noted}` };
   }
-  if (childFailure !== null) return childFailure;
+  if (childFailure !== null) return { ...childFailure, message: `${childFailure.message}${noted}` };
   return stopCheckNote === undefined ? { kind: "passthrough" } : { kind: "passthrough", systemMessage: stopCheckNote };
 };
 

@@ -1,13 +1,14 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { expandImplementationBriefMarkers, type RenderTaskBrief } from "../../../pi/implementation-brief-expansion";
+import { expandImplementationBriefMarkers } from "../../../pi/implementation-brief-expansion";
+import type { RenderTaskBrief } from "../../src/core/implementation-brief";
 
 const briefs: Readonly<Record<string, { agent: string; prompt: string }>> = {
   T5: { agent: "code-implementer-agent", prompt: "**Task ID:** T5 rendered brief" },
   T6: { agent: "ts-test-agent", prompt: "**Task ID:** T6 rendered brief" },
 };
 
-const render: RenderTaskBrief = (taskId) => {
+const render: RenderTaskBrief = ({ taskId, operatorNotes }) => {
   const brief = briefs[taskId];
   return brief === undefined
     ? { ok: false, error: `Task ${taskId} is not owed a dispatch` }
@@ -17,7 +18,7 @@ const render: RenderTaskBrief = (taskId) => {
           taskId,
           agent: brief.agent,
           dispatch: { kind: "initial-implementation", taskId, semanticAttempt: 1, promptAppendix: null },
-          prompt: brief.prompt,
+          prompt: operatorNotes.length === 0 ? brief.prompt : `${brief.prompt}\nnotes: ${operatorNotes.join(" | ")}`,
         },
       };
 };
@@ -86,6 +87,21 @@ describe("expandImplementationBriefMarkers", () => {
       reason: "BLOCKED: spawn item 1 names agent security-agent but T5 is assigned to code-implementer-agent",
     });
     expect(input.tasks[0]!.task).toBe("LOOM_IMPLEMENTATION_BRIEF: T5");
+  });
+
+  it("renders a marker's operator notes into its brief (#119)", () => {
+    const input = { tasks: [{ agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T5\nLOOM_OPERATOR_NOTE: touch handler-routes.ts" }] };
+    expect(expandImplementationBriefMarkers(input, render)).toEqual({
+      ok: true,
+      rewrites: [{ slot: 0, taskId: "T5", prompt: "**Task ID:** T5 rendered brief\nnotes: touch handler-routes.ts" }],
+    });
+  });
+
+  it("refuses the whole batch for a malformed marker, naming the channel's grammar (#119)", () => {
+    const input = { tasks: [{ agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T5\nalso touch handler-routes.ts" }] };
+    const expansion = expandImplementationBriefMarkers(input, render);
+    expect(expansion).toMatchObject({ ok: false, reason: expect.stringContaining("spawn item 1 has a malformed implementation brief marker") });
+    if (!expansion.ok) expect(expansion.reason).toContain("LOOM_OPERATOR_NOTE: <text>");
   });
 
   it("answers a malformed batch with no rewrites", () => {

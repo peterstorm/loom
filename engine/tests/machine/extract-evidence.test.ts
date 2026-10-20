@@ -86,6 +86,19 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
     expect(classifyTestCommand("yarn run attestation")).toBeNull();
   });
 
+  it("`npx --prefix <dir>` names where the runner lives: the runner after it classifies (#118)", () => {
+    const form = "npx --prefix /abs/sub vitest run --root /abs/sub --reporter=json --outputFile=/tmp/r.json";
+    expect(classifyTestCommand(form)).toBe(form);
+    expect(classifyTestCommand("npx --prefix=/abs/sub jest --json --outputFile=/tmp/r.json")).not.toBeNull();
+    expect(classifyTestCommandDetailed(form)!.isSole).toBe(true);
+    // The option does not launder a non-runner, and a quoted or substituted
+    // directory fails closed:
+    expect(classifyTestCommand("npx --prefix /abs/sub tsc --noEmit")).toBeNull();
+    expect(classifyTestCommand("npx --prefix /abs/sub vitesting")).toBeNull();
+    expect(classifyTestCommand('npx --prefix "/abs/my sub" vitest run')).toBeNull();
+    expect(classifyTestCommand("npx --prefix $(pwd) vitest run")).toBeNull();
+  });
+
   it("mvn segments require an actual test goal — `mvn -pl core install` is not a test run", () => {
     expect(classifyTestCommand("mvn -pl core install")).toBeNull();
     expect(classifyTestCommand("mvn -pl core -am compile")).toBeNull();

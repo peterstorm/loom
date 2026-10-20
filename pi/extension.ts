@@ -120,6 +120,8 @@ const LOADED_RUNTIME_IDENTITY = captureLoomRuntimeIdentity(PACKAGE_ROOT);
 // one content-addressed cache. Spawn-facing agent discovery is session setup
 // state instead and is sampled inside the extension factory below.
 const PI_RESOURCE_CACHE = join(resolvePiAgentDirectory(process.env, homedir()), "cache", "loom-resources");
+/** The stderr writer every Pi operator sink falls back to without a UI. */
+const writeStderrLine = (line: string): void => { process.stderr.write(`${line}\n`); };
 const isPiSpawnTool = (toolName: string): boolean =>
   toolName === "subagent" || toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL;
 
@@ -404,7 +406,7 @@ export default function (
           // polarity and the admission's parse still refuses it.
           observeGraph: (input) => observeSpawnBatchGraph(input, ctx.cwd),
           runtimeGraph: { active: graphIsActive, path: () => taskGraphPath() },
-          renderBrief: (graphPath, taskId) => renderTaskImplementationBrief(graphPath, PACKAGE_ROOT, taskId),
+          renderBrief: (graphPath, request) => renderTaskImplementationBrief(graphPath, PACKAGE_ROOT, request),
           // Pi dispatches the live argument object it handed this handler, so
           // the rendered brief is written into it in place.
           rewriteTask: (slot, task) => replacePiSpawnTask(event.input, slot, task),
@@ -587,7 +589,7 @@ export default function (
           return lintFile(filePath, "immediate", loomDefaultRulesDir, pathExistsFailClosed(projectRulesPath) ? projectRulesPath : null);
         },
         advise: (file) => typeDiagnosticsAdvisory(file),
-        notifyOperator: piOperatorNoteSink(ctx, (line) => process.stderr.write(`${line}\n`)),
+        notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
       });
       if (composed) return { content: [...composed.content], isError: composed.isError };
     } catch (error: unknown) {
@@ -614,6 +616,8 @@ export default function (
       emissionLaunchBridge,
       reviewWitnesses,
       durableClaimReleases: piDurableClaimReleasePorts,
+      // Stop-check notes also reach the parent model in the tool result (#121).
+      notifyOperator: piOperatorNoteSink(ctx, writeStderrLine),
     });
   });
 

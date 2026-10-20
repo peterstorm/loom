@@ -727,7 +727,7 @@ When an implementation agent that claims a frozen Acceptance Contract's Requirem
 
 - **The command.** `{files}` must be exactly one whole argument; the engine replaces it with the acceptance file paths, one argument each, written relative to the runner's `cwd` (with `"cwd": "engine"`, `engine/tests/x.test.ts` is passed as `tests/x.test.ts`). An owed file outside `cwd` cannot be named, so the check notes it and does not decide. The executable, argv and report follow the project-check rules: the allowlist, no shell, and a report beneath `.loom/completion-reports/` that no Wave check also uses. `timeoutMs` is at most 240000, inside the SubagentStop hook's 300 s timeout.
 - **Silent when off.** With no runner, or no owed testcase, the check does nothing and says nothing.
-- **Fails open.** In each of these cases the stop proceeds and the operator gets a `systemMessage` saying why the check did not decide:
+- **Fails open.** In each of these cases the stop proceeds, the operator gets a `systemMessage` saying why the check did not decide, and the orchestrating session gets the same note (see [Stop-check notes reach the orchestrator](#stop-check-notes-reach-the-orchestrator)):
   - another claimant's check holds the runner;
   - the runner cannot start or finish, times out, or is killed by a signal (a killed runner's report is partial, so it is not judged);
   - the report is missing or changed;
@@ -740,7 +740,7 @@ When an implementation agent that claims a frozen Acceptance Contract's Requirem
 - **One run per repository at a time.** Every claimant shares the runner's one report path, and the runner resets that file before each launch. Checks are therefore serialized by a lock under the subagent directory. If a claimant stops while a sibling's check is running, its own check does not run, and the Wave Gate judges that claimant. A lock whose holder process has exited, or that is older than the longest permitted run plus 60 s, is reclaimed. Reclaiming renames the lock aside and deletes it only if it still holds the stale bytes. If another stop reclaimed it first and took a fresh lock, the renamed lock is linked back and this stop does not run.
 - **Cap.** An agent is blocked at most 3 times; its next stop proceeds with a `systemMessage` naming the cap. The count is kept per spawned agent under the subagent directory, never in the TaskGraph, and is cleared once that agent's stop proceeds.
 - **Not completion evidence.** Nothing is recorded as a test result or proof; the Wave Gate's completion suite stays the only authority.
-- **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is printed as a `loom(pi):` line and never blocks.
+- **Pi is report-only.** Pi settles after the subagent has ended, so the outcome is an operator note and part of the subagent result the parent model reads. It never blocks.
 
 ### Affected-Test Stop Check
 
@@ -765,13 +765,13 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
   ```
 
   - Loom's own manifest uses this form. `npx` is not on the allowlist, and `npm` must name a script (`run`, `test`, `check` or `build`), so `vitest related` goes through the engine's `test:affected` script. `{files}` reaches the runner relative to its `cwd`.
-  - `affectedRunner` gets the same form checks as `acceptanceRunner`: the allowlist, no shell, `{files}` as one whole argument, and a `required-file` JUnit report beneath `.loom/completion-reports/`. Two further rules apply. `timeoutMs` is at most 120000. The report path must differ from the `acceptanceRunner`'s and from every Wave check's.
+  - `affectedRunner` gets the same form checks as `acceptanceRunner`: the allowlist, no shell, `{files}` as one whole argument, and a `required-file` JUnit report beneath `.loom/completion-reports/`. Two further rules apply. `timeoutMs` is at most 240000, the same cap as the acceptance runner's: a change set touching a hub module can select thousands of related tests (Loom's own `handler-routes.ts` took 138 s). Because the affected runner launches only when the time left holds its whole timeout, its `timeoutMs` plus the acceptance run's actual duration must fit in 270 s. Loom's own manifest declares 200000, which leaves 70 s for the acceptance run. The report path must differ from the `acceptanceRunner`'s and from every Wave check's.
   - `testFileSuffixes` is a non-empty list of distinct suffixes, none containing a path separator. Without it, the freeze records the engine default (`.test.ts`, `.spec.ts`, `.test.tsx`, `.spec.tsx`) as `testFiles: { source: "engine-default", … }`. The same classification decides I6's test and implementation files.
 
   A manifest change reaches only TaskGraphs populated after it. The digest of a TaskGraph frozen earlier never changes.
 - **Changed files.** The changed files are the attempt epoch's ledger `FileWrite` paths, deduplicated in first-write order. Paths outside the repository are dropped, and so are paths absent at stop time, such as a deleted file. A renamed file appears under its new path, because a literal `mv`, `git mv` or `cp` mints a write for its destination. Only files beneath the runner's `cwd` are passed. Each is one argument, written relative to the `cwd`. A file written with no ledger event, for example by an interpreter or a generator, is not a changed file.
 - **Silent when off.** With no `affectedRunner` frozen, the check does nothing and says nothing.
-- **Fails open.** In each of these cases the stop proceeds, and a `systemMessage` names the cause:
+- **Fails open.** In each of these cases the stop proceeds, and a note names the cause to the operator (`systemMessage`) and to the orchestrating session:
   - no changed files, or none beneath the runner `cwd` (the note lists the files outside it);
   - the command cannot be formed for the changed files;
   - the runner cannot start or does not complete;
@@ -788,7 +788,18 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
 - **One lock, one message.** The acceptance check and the affected check run in sequence under one acquisition of the per-repository runner lock described above. Each report is read back digest-checked while the lock is held. When both checks fail, the agent gets one block message with an `## Acceptance stop check` section and an `## Affected-test stop check` section. Under the affected heading, each failure reads `- '<name>' (<file>) — failed` or `- '<name>' (<file>) — failed to collect`.
 - **Separate caps.** Each check has its own per-agent counter (`*.acceptance-stop-check.json` and `*.affected-stop-check.json`), each capped at 3 blocks. A check's counter increases only when that check contributes failures to a block. Both counters clear when the stop proceeds.
 - **Not completion evidence.** No affected-run fact reaches settlement, proof, receipts or Wave Gate evidence. A test proves this by settling the same Task under every affected outcome and finding byte-identical proof and receipts.
-- **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and prints a `loom(pi):` line. It never blocks.
+- **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and reports the outcome as below. It never blocks.
+
+### Stop-check notes reach the orchestrator
+
+A stop check that fails open, or reports only, leaves a note naming the cause. That note is the only trace of a check that did not decide, so it goes to the orchestrating session as well as the operator.
+
+- **Claude Code.** A SubagentStop `systemMessage` reaches the operator's terminal but never the orchestrating model. So the dispatcher also writes the note to `<LOOM_SUBAGENT_DIR>/<session>.<agent>.stop-check-note.json` before settlement, so a settlement failure cannot lose it, and names it in any settlement or cleanup error. The `surface-stop-check-notes` PostToolUse hook on the orchestrator's `Task`/`Agent` calls takes every note of its session, deletes each one, and adds them to the model's context as `additionalContext`, under the heading "Loom stop checks did not decide, or reported only, for these Tasks". It also shows them to the operator.
+  - A foreground spawn's note is waiting when its call returns.
+  - A background spawn's PostToolUse fires at launch, before its stop, so its note arrives with the next `Task`/`Agent` result.
+  - A claimed sidecar is renamed before it is read, so concurrent hooks never deliver a note twice. An unreadable sidecar is named once and removed. An undelivered note is swept with the other runtime files after the stale-subagent TTL.
+  - The shim skips the bun spawn when no note sidecar exists at all.
+- **Pi.** The parent settles after the child has ended. Each report line goes to the operator through the extension's operator sink: to the UI when there is one, otherwise to stderr as a `[loom]` line. The lines are also appended under the same heading to the subagent tool result the parent model reads. When settlement raises processing errors, the notes follow the error text that replaces the result.
 
 ### Pi evidence ledger recorder
 

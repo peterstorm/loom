@@ -42,7 +42,7 @@
       "{files}"
     ],
     "cwd": "engine",
-    "timeoutMs": 120000,
+    "timeoutMs": 200000,
     "report": {
       "kind": "required-file",
       "path": ".loom/completion-reports/affected.junit.xml"

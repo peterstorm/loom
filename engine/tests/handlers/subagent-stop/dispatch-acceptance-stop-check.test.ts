@@ -4,7 +4,7 @@
  * the same agent working, so it must settle nothing and release nothing.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runDispatch } from "../../../src/handlers/subagent-stop/dispatch";
@@ -20,6 +20,9 @@ import type { HookHandler } from "../../../src/types";
 import { sha256Bytes } from "../../../src/core/digest";
 import { parseCanonicalRepositoryRoot } from "../../../src/utils/workspace-digest";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { STOP_CHECK_NOTES_HEADING } from "../../../src/core/stop-check-note";
+import { stopCheckNotePath } from "../../../src/stop-check-note-sidecar";
+import { surfaceStopCheckNotes } from "../../../src/handlers/post-tool-use/surface-stop-check-notes";
 import { contract, frozenPaths, stateFileJson, surface, task } from "../../fixtures/contract-status-fixtures";
 
 const SESSION = "stop-check-session";
@@ -180,3 +183,71 @@ describe("dispatch runs the Acceptance Stop Check before settlement", () => {
     if (result.kind === "passthrough") expect(result.systemMessage).toContain("crashed and did not decide: git exploded");
   });
 });
+
+describe("a stop-check note reaches the orchestrating session (#121)", () => {
+  const spawnResult = JSON.stringify({ session_id: SESSION, tool_name: "Agent", tool_input: {}, tool_response: {} });
+
+  it("keeps the note under the agent's key, and the orchestrator's next Task/Agent result delivers it exactly once", async () => {
+    const root = project();
+    sidecar(stateFile(root));
+
+    const result = await runDispatch(stop, [], async () => ({ kind: "passthrough" }), inertPorts());
+
+    // This fixture's settlement refuses the attempt as stale, so the stop errors;
+    // either way the operator's text and the kept note both name the cause.
+    expect(JSON.stringify(result)).toContain("did not decide (repository root unavailable in this fixture)");
+    expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(true);
+    const delivered = surfaceStopCheckNotes(JSON.parse(spawnResult));
+    expect(delivered).toMatchObject({ kind: "post-tool-use-context", context: expect.stringContaining(STOP_CHECK_NOTES_HEADING) });
+    if (delivered.kind !== "post-tool-use-context") throw new Error("expected context");
+    expect(delivered.context).toContain("- T2: ");
+    expect(delivered.context).toContain("repository root unavailable in this fixture");
+    expect(delivered.systemMessage).toBe(delivered.context);
+    expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(false);
+    expect(surfaceStopCheckNotes(JSON.parse(spawnResult))).toEqual({ kind: "passthrough" });
+  });
+
+  it("keeps the note when settlement or cleanup then fails, and names it in the error", async () => {
+    const root = project();
+    sidecar(stateFile(root));
+
+    const result = await runDispatch(stop, [], async () => ({ kind: "error", message: "cleanup refused" }), inertPorts());
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("cleanup refused") });
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).toContain("stop checks noted: ");
+    expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(true);
+  });
+
+  it("tells the operator when the note could not be kept for the orchestrator", async () => {
+    const root = project();
+    sidecar(stateFile(root));
+    // A directory where the note sidecar cannot be written: its path is taken by a plain file.
+    mkdirSync(stopCheckNotePath(SESSION, AGENT));
+
+    const result = await runDispatch(stop, [], async () => ({ kind: "passthrough" }), inertPorts());
+
+    expect(JSON.stringify(result)).toContain("the note was not kept for the orchestrator");
+    rmSync(stopCheckNotePath(SESSION, AGENT), { recursive: true, force: true });
+  });
+
+  it("leaves no note for a stop whose checks skip", async () => {
+    const root = project();
+    sidecar(writeStateWithoutRunners(root));
+
+    const result = await runDispatch(stop, [], async () => ({ kind: "passthrough" }), inertPorts());
+
+    expect(JSON.stringify(result)).not.toContain("stop checks noted");
+    expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(false);
+  });
+});
+
+/** The same Tasks under a manifest that declares no runner: both checks skip silently. */
+function writeStateWithoutRunners(root: string): string {
+  const path = stateFile(root);
+  const graph = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({ schemaVersion: 2, kind: "loom-verification-manifest", checks: [] })));
+  if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
+  writeFileSync(path, JSON.stringify({ ...graph, verification_manifest: frozen.value }));
+  return path;
+}

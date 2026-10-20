@@ -27,6 +27,18 @@ export function argumentValue(args: readonly string[], flag: string): string | n
   return isFlagValue(value) ? value : null;
 }
 
+/** Every value of a repeatable flag, in order; null when some occurrence has no value. */
+export function argumentValues(args: readonly string[], flag: string): readonly string[] | null {
+  const values: string[] = [];
+  for (const [index, token] of args.entries()) {
+    if (token !== flag) continue;
+    const value = args[index + 1];
+    if (!isFlagValue(value)) return null;
+    values.push(value);
+  }
+  return Object.freeze(values);
+}
+
 /** Return every token not consumed by the recognized value-flag grammar.
  * Recognized flag tokens are always removed; a following non-empty, non-flag
  * value is removed with them. Missing values remain the caller's typed error. */

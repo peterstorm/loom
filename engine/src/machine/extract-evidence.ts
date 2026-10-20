@@ -31,14 +31,21 @@ import { scanSubstitutions } from "../core/shell-substitution";
 import { extractShellWriteTargets } from "../core/shell-write-targets";
 import type { Evidence, TestReportSummary } from "./types";
 
+/** `npx --prefix <dir> vitest …` resolves the runner from `<dir>`'s own
+ *  node_modules — the one npx form that runs a sub-project's pinned runner from
+ *  outside it (a bare `npx vitest` where no runner is installed runs whatever
+ *  the npx cache holds). The option says where the runner lives, not what runs,
+ *  so the runner after it classifies. A quoted or substituted directory never
+ *  matches (fail closed). */
+const NPX_PREFIX_OPTION = /^npx\s+--prefix(?:=|\s+)[^\s'"`$\\]+\s+/;
+
 /** The runner pattern must end at a token boundary: `npm testify` is not `npm test`. */
 function headMatchesRunner(lowerSegment: string): boolean {
+  const head = lowerSegment.replace(NPX_PREFIX_OPTION, "npx ");
   return (
     TEST_COMMAND_PATTERNS.some(
-      (p) =>
-        lowerSegment.startsWith(p) &&
-        (lowerSegment.length === p.length || /\s/.test(lowerSegment.charAt(p.length))),
-    ) || headMatchesPackageRunScript(lowerSegment)
+      (p) => head.startsWith(p) && (head.length === p.length || /\s/.test(head.charAt(p.length))),
+    ) || headMatchesPackageRunScript(head)
   );
 }
 

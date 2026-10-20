@@ -13,9 +13,11 @@
 
 import { preToolUseRewriteResult, type HookHandler, type HookResult, type PreToolUseInput } from "../../types";
 import { validateTaskExecution } from "../task-execution";
-import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
+import { claudeAgentTypeRefusal } from "../../core/model-profiles";
+import { CLAUDE_SPAWN_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { firstSpawnVeto, SPAWN_VETOES, type SpawnVetoEntry } from "./spawn-vetoes";
-import { expandBriefMarker, renderActiveTaskBrief, type RenderTaskBrief } from "./implementation-brief-marker";
+import type { RenderTaskBrief } from "../../core/implementation-brief";
+import { expandBriefMarker, renderActiveTaskBrief } from "./implementation-brief-marker";
 
 /** An admitted marker spawn proceeds with the brief as its prompt; every other result stands. */
 function rewrittenToBrief(result: HookResult, toolInput: Readonly<Record<string, unknown>>): HookResult {
@@ -42,6 +44,10 @@ export function createValidateTaskExecutionHandler(
       };
     }
     if (!SUBAGENT_SPAWN_TOOLS.has(input.tool_name)) return { kind: "allow" };
+    // Before anything reserves: Claude Code rejects a Loom Agent named other
+    // than `loom:<agent>` only after admission, which would strand the reservation.
+    const unresolvable = CLAUDE_SPAWN_TOOLS.has(input.tool_name) ? claudeAgentTypeRefusal(input.tool_input.subagent_type) : null;
+    if (unresolvable !== null) return { kind: "block", message: `validate-task-execution: BLOCKED: ${unresolvable}` };
 
     const expansion = expandBriefMarker(input, render);
     if (expansion.kind === "refused") return { kind: "block", message: `validate-task-execution: ${expansion.message}` };

@@ -19,7 +19,7 @@
  */
 
 import type { SpawnAdmission, SpawnGuardName } from "../engine/src/core/spawn-admission";
-import type { ImplementationBrief } from "../engine/src/core/implementation-brief";
+import type { ImplementationBrief, ImplementationBriefRequest } from "../engine/src/core/implementation-brief";
 import type { DomainResult } from "../engine/src/core/orchestration-contract";
 import { expandImplementationBriefMarkers } from "./implementation-brief-expansion";
 import type { SpawnBatchGraphObservation } from "./spawn-graph";
@@ -42,8 +42,8 @@ export type SpawnPreparationPorts = Readonly<{
   /** The orchestrator runtime's own graph, used when no spawn graph governs.
    *  The path is read lazily: a spawn-governed batch never resolves it. */
   runtimeGraph: Readonly<{ active: boolean; path: () => string }>;
-  /** Render one Task's implementation brief against the governing graph. */
-  renderBrief: (graphPath: string, taskId: string) => DomainResult<ImplementationBrief, string>;
+  /** Render the implementation brief a marker requests against the governing graph. */
+  renderBrief: (graphPath: string, request: ImplementationBriefRequest) => DomainResult<ImplementationBrief, string>;
   /** Write one rendered brief into the live spawn payload at `slot`. */
   rewriteTask: (slot: number, task: string) => void;
   /** Run the Spawn Admission core over the expanded payload. Admission ports
@@ -80,7 +80,7 @@ export function prepareSpawnBatch(input: unknown, ports: SpawnPreparationPorts):
     });
 
     guard = "implementation-brief-expansion";
-    const briefs = expandImplementationBriefMarkers(input, (taskId) => ports.renderBrief(graph.path, taskId));
+    const briefs = expandImplementationBriefMarkers(input, (request) => ports.renderBrief(graph.path, request));
     if (!briefs.ok) return Object.freeze({ kind: "block", guard, reason: briefs.reason });
     for (const { slot, prompt } of briefs.rewrites) ports.rewriteTask(slot, prompt);
 

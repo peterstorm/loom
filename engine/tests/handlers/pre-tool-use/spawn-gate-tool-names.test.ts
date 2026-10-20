@@ -67,7 +67,7 @@ const GATES: ReadonlyArray<{
     // (each has its own row here; the composition is spawn-vetoes.test.ts's).
     handler: async (stdin, args) =>
       (await import("../../../src/handlers/pre-tool-use/validate-task-execution")).createValidateTaskExecutionHandler([])(stdin, args),
-    toolInput: { subagent_type: "code-implementer-agent", prompt: "Task ID: T9", description: "wave-2 task" },
+    toolInput: { subagent_type: "loom:code-implementer-agent", prompt: "Task ID: T9", description: "wave-2 task" },
     expect: "current wave is 1",
   },
   {

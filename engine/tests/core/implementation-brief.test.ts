@@ -7,9 +7,14 @@ import {
   NO_CODE_RULES,
   NO_INVARIANT_OWNERSHIP,
   NO_RETRY_CONTEXT,
+  NO_OPERATOR_NOTE,
   NO_SCENARIO_TEST_NAMES,
-  parseImplementationBriefMarker,
+  MAX_OPERATOR_NOTE_LENGTH,
+  MAX_OPERATOR_NOTES,
+  parseImplementationBriefRequest,
+  parseOperatorNote,
   renderImplementationBrief,
+  renderImplementationBriefRequest,
   ruleDocumentsFor,
   RULE_DOCUMENTS,
   type ImplementationBriefInput,
@@ -29,6 +34,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
+import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
@@ -114,6 +120,8 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   roster: ROSTER,
   invariants: [],
   contracts: [],
+  repositoryRoot: "/repo",
+  operatorNotes: [],
   ...overrides,
 });
 
@@ -194,6 +202,7 @@ describe("renderImplementationBrief", () => {
     expect(prompt).toContain("- **FR-002** — System MUST refuse briefs");
     expect(prompt).toContain("- regression: required\n- new_tests: required");
     expect(prompt).toContain(`## Engine-Issued Implementation Retry Context\n\n${NO_RETRY_CONTEXT}\n\n`);
+    expect(prompt).toContain(`## Operator Note\n\n${NO_OPERATOR_NOTE}\n\n`);
     expect(prompt).toContain("- engine/src/core/implementation-brief.ts\n- engine/tests/core/implementation-brief.test.ts");
     expect(prompt).toContain("Available at: /repo/.claude/plans/plan.md");
     // The harness gates, exactly as they judge a spawn prompt.
@@ -478,15 +487,77 @@ describe("renderImplementationBrief", () => {
   });
 });
 
-describe("parseImplementationBriefMarker", () => {
-  it.each<[string, string | null]>([
-    ["LOOM_IMPLEMENTATION_BRIEF: T5", "T5"],
-    ["  LOOM_IMPLEMENTATION_BRIEF: T12\n", "T12"],
-    ["LOOM_IMPLEMENTATION_BRIEF: T5 and more", null],
-    ["Implement LOOM_IMPLEMENTATION_BRIEF: T5", null],
-    ["LOOM_IMPLEMENTATION_BRIEF: t5", null],
-    ["**Task ID:** T5", null],
-  ])("parses %j", (text, expected) => {
-    expect(parseImplementationBriefMarker(text)).toBe(expected);
+describe("parseImplementationBriefRequest", () => {
+  it.each<[string, string]>([
+    ["no marker at all", "**Task ID:** T5"],
+    ["a marker with trailing words", "LOOM_IMPLEMENTATION_BRIEF: T5 and more"],
+    ["a marker inside prose", "Implement LOOM_IMPLEMENTATION_BRIEF: T5"],
+    ["a lowercase Task id", "LOOM_IMPLEMENTATION_BRIEF: t5"],
+  ])("is none for %s", (_label, text) => {
+    expect(parseImplementationBriefRequest(text)).toEqual({ kind: "none" });
+  });
+
+  it("reads a bare marker, trimmed, as a request with no notes", () => {
+    expect(parseImplementationBriefRequest("  LOOM_IMPLEMENTATION_BRIEF: T12\n")).toEqual({ kind: "request", request: { taskId: "T12", operatorNotes: [] } });
+  });
+
+  it("reads each following LOOM_OPERATOR_NOTE line as a note, skipping blank lines (#119)", () => {
+    expect(parseImplementationBriefRequest([
+      "LOOM_IMPLEMENTATION_BRIEF: T2",
+      "LOOM_OPERATOR_NOTE: touch handler-routes.ts so the affected check selects its importers",
+      "",
+      "LOOM_OPERATOR_NOTE:   keep the change minimal  ",
+    ].join("\n"))).toEqual({
+      kind: "request",
+      request: { taskId: "T2", operatorNotes: ["touch handler-routes.ts so the affected check selects its importers", "keep the change minimal"] },
+    });
+  });
+
+  it.each<[string, string, string]>([
+    ["an ordinary line after the marker", "LOOM_IMPLEMENTATION_BRIEF: T2\nalso touch handler-routes.ts", "line 2 is neither"],
+    ["the marker after an operator line", "please be careful\nLOOM_IMPLEMENTATION_BRIEF: T2", "the marker elsewhere or more than once"],
+    ["two markers", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_IMPLEMENTATION_BRIEF: T3", "the marker elsewhere or more than once"],
+    ["an empty note", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE:   ", "an operator note is empty"],
+    ["a note carrying a LOOM_ token", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: LOOM_REQUEST_ID: req-1", "may not carry a LOOM_ token"],
+    ["a note carrying a template variable", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: fill {task_id}", "may not carry a {template variable}"],
+    ["a note carrying a Task ID binding", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: **Task ID:** T9", "may not carry a Task ID binding"],
+    ["a note carrying a carriage return", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: one\rtwo", "line 2 is neither"],
+    ["an overlong note", `LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: ${"x".repeat(MAX_OPERATOR_NOTE_LENGTH + 1)}`, `at most ${MAX_OPERATOR_NOTE_LENGTH}`],
+    ["too many notes", ["LOOM_IMPLEMENTATION_BRIEF: T2", ...Array.from({ length: MAX_OPERATOR_NOTES + 1 }, (_, i) => `LOOM_OPERATOR_NOTE: note ${i}`)].join("\n"), `at most ${MAX_OPERATOR_NOTES} are allowed`],
+  ])("is malformed, naming the grammar, for %s", (_label, text, reason) => {
+    const parsed = parseImplementationBriefRequest(text);
+    expect(parsed.kind).toBe("malformed");
+    if (parsed.kind === "malformed") expect(parsed.reason).toContain(reason);
+  });
+
+  it("admits only one-line notes, so every OperatorNote renders to exactly one marker line", () => {
+    for (const text of ["one\ntwo", "one\rtwo", "one\r\ntwo"]) {
+      expect(parseOperatorNote(text)).toEqual({ ok: false, error: "an operator note must be one line" });
+    }
+    expect(parseOperatorNote("  one line  ")).toEqual({ ok: true, value: "one line" });
+  });
+
+  it("property: rendering a request and parsing it back is the identity", () => {
+    const requests = [
+      { taskId: "T1", operatorNotes: [] },
+      { taskId: "T42", operatorNotes: [admittedNote("one"), admittedNote("two: with a colon"), admittedNote("x".repeat(MAX_OPERATOR_NOTE_LENGTH))] },
+    ];
+    for (const request of requests) {
+      expect(parseImplementationBriefRequest(renderImplementationBriefRequest(request))).toEqual({ kind: "request", request });
+    }
+  });
+});
+
+describe("the brief's Operator Note section (#119)", () => {
+  it("lists each note, and the brief stays admissible to the real gates", () => {
+    const value = task();
+    const rendered = renderImplementationBrief(input(value, { operatorNotes: [admittedNote("touch handler-routes.ts"), admittedNote("report the affected run time")] }));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.value.prompt).toContain("## Operator Note\n\n- touch handler-routes.ts\n- report the affected run time\n\n");
+    expect(rendered.value.prompt).toContain("never widens your file list");
+    expect(validateTemplateSubstitution(rendered.value.prompt, true)).toEqual({ kind: "allow" });
+    expect(extractTaskId(rendered.value.prompt)).toBe("T5");
+    expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true, kind: "initial" });
   });
 });

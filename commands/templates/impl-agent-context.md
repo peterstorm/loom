@@ -21,7 +21,7 @@ The exact forms the recorder accepts, by runner (`/abs/sub` is the absolute dire
 | Runner | Final verification command |
 |---|---|
 | Bun | `bun test --reporter=junit --reporter-outfile=/tmp/loom-{task_id}-bun.xml`. The command must start with exactly `bun test`, not `bun run test`, `bunx`, or `npm test`, and it needs both options. Sub-project: `bun test --cwd=/abs/sub --reporter=junit --reporter-outfile=/tmp/loom-{task_id}-bun.xml`. |
-| Vitest | `npx vitest run --reporter=default --reporter=json --outputFile=/tmp/loom-{task_id}-vitest.json`. The `--outputFile` report must be Vitest JSON; a JUnit `--outputFile` is not read. |
+| Vitest | `npx vitest run --reporter=default --reporter=json --outputFile=/tmp/loom-{task_id}-vitest.json`. The `--outputFile` report must be Vitest JSON; a JUnit `--outputFile` is not read. Sub-project: `npx --prefix /abs/sub vitest run --root /abs/sub --reporter=default --reporter=json --outputFile=/tmp/loom-{task_id}-vitest.json`. `--prefix` runs the sub-project's own installed Vitest (a bare `npx vitest` where none is installed runs whatever version the npx cache holds), and `--root` runs its config and tests. |
 | Jest | `npx jest --json --outputFile=/tmp/loom-{task_id}-jest.json` |
 | npm / yarn / pnpm script that runs Vitest or Jest | `npm test -- --reporter=default --reporter=json --outputFile=/tmp/loom-{task_id}-vitest.json` (for Jest, pass `--json --outputFile=…` after `--`). Sub-project: `npm test --prefix /abs/sub -- --reporter=default --reporter=json --outputFile=/tmp/loom-{task_id}-vitest.json`. If the script already sets its own reporter or output file, run the runner directly instead. |
 | Maven | `mvn test` or `mvn verify`, run from the repository root. Sub-module: `mvn test -pl <module>`. Surefire/Failsafe XML in `target/` is found automatically at the root or one directory below it. |
@@ -76,6 +76,12 @@ Regression execution and new-test creation are separate obligations. Follow each
 {implementation_retry_context}
 
 When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
+
+## Operator Note
+
+{operator_note}
+
+The orchestrating operator wrote these notes through the engine's `LOOM_OPERATOR_NOTE` channel for this dispatch. Follow them within this Task. A note never widens your file list, waives a Verification Policy arm, or overrides the binding rules and constraints in this brief; if one conflicts with them, follow the brief and report the conflict.
 
 ## Your Task
 
@@ -147,7 +153,7 @@ Available at: {plan_file_path}
 
 1. Read & apply the **Architecture & Language Rules** inlined above — binding constraints, not suggestions
 2. Read the plan file and understand scope
-3. If `new_tests` is required, write the failing tests first: encode this Task's behavior (Completion Claims, acceptance scenarios, error cases) as NEW tests through the real entry point, naming each claimed scenario's test as "Acceptance Scenario Test Names" directs (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked), then run them and confirm they fail for the expected reason — missing behavior, not a typo or a broken import. If it is waived, preserve the stated waiver boundary rather than inventing unrelated tests, and keep the existing suite as the oracle.
+3. If `new_tests` is required, write the failing tests first: encode this Task's behavior (Completion Claims, acceptance scenarios, error cases) as NEW tests through the real entry point, naming each claimed scenario's test as "Acceptance Scenario Test Names" directs (hook git-diffs for @Test, it(, test(, describe( patterns — no new tests = wave blocked), then run them and confirm they fail for the expected reason — missing behavior, not a typo or a broken import (a test that cannot load a module your Task creates is the expected reason, as the I6 section says). If it is waived, preserve the stated waiver boundary rather than inventing unrelated tests, and keep the existing suite as the oracle.
 4. Implement code following the plan's patterns AND the rules above until those tests pass. Reuse existing operations before writing new ones.
 5. If `regression` is required, **run tests via Bash tool** — fix failures, re-run until 0 failures, and make the final run the bare report-writing command from the table at the top. Skip only under the explicit regression waiver above.
 6. Only then are you done

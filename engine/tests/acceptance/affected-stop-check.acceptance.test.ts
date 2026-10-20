@@ -504,7 +504,7 @@ describe("I7 fails open with a named note (CT-2)", () => {
   });
 
   it.each<[string, Run, AffectedStopCheckNoteKind]>([
-    ["times out (120 s)", { kind: "timed-out" }, "timed-out"],
+    ["times out at its cap", { kind: "timed-out" }, "timed-out"],
     ["exits without a readable report", { kind: "no-report" }, "no-readable-report"],
     ["cannot be started", { kind: "start-failed" }, "start-failed"],
     ["is killed", { kind: "killed" }, "killed"],
@@ -629,7 +629,7 @@ describe("I7 shares one lock, one combined message and one budget with the accep
   it.each<[string, number, boolean]>([
     ["leaves less than the affected timeout", deadlineMs - MAX_AFFECTED_RUNNER_TIMEOUT_MS + 1, false],
     ["leaves exactly the affected timeout", deadlineMs - MAX_AFFECTED_RUNNER_TIMEOUT_MS, true],
-    ["leaves more than the affected timeout", 100_000, true],
+    ["leaves more than the affected timeout", deadlineMs - MAX_AFFECTED_RUNNER_TIMEOUT_MS - 10_000, true],
   ])("AS-030: FR-025: an acceptance run that %s of the hook budget decides whether the affected runner launches, and the hook finishes inside 300 s", async (_label, acceptanceMs, launches) => {
     const at = await project(manifest({ acceptance: true, affected: true }), [
       { agentId: "agent-payload", taskId: "T2", writes: [{ path: "src/payload.ts", onDisk: true }] },

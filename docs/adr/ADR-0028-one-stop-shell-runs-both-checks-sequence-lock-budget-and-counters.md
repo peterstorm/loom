@@ -91,6 +91,13 @@ keeps an independent block counter per check. Every decision it acts on is a pur
   The affected runner launches only if `deadline - now >= affectedRunner.timeoutMs`. Otherwise the check
   becomes a `budget-exhausted` note that gives the time left and the time the runner needs (AS-030). The
   timeout is never clipped. The acceptance runner always gets its full limit, because it runs first.
+
+  *(Amended 2026-10-20, #120.)* `MAX_AFFECTED_RUNNER_TIMEOUT_MS` is now 240000, up from 120000, matching the
+  acceptance cap. In the slice 2 pilot, an affected run over a hub module (`handler-routes.ts` and three other
+  files: 2,085 tests in 72 files) took 138 s, so it timed out and failed open on exactly the Task the check
+  targets. No rule bounds the sum of the two declared timeouts. A timeout is a ceiling, not an expected
+  duration, and a fast acceptance run leaves the affected runner its full limit. The runtime launch condition
+  above is the bound, and its `budget-exhausted` note reaches the orchestrator (#121).
 - **Counters.** There is one file per agent per check, beside the other per-agent runtime files and never
   in the TaskGraph:
   - `*.acceptance-stop-check.json`, capped by `ACCEPTANCE_STOP_CHECK_MAX_BLOCKS = 3`;

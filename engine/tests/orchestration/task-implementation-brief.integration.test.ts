@@ -40,9 +40,11 @@ function graphWith(t1Status: "completed" | "implemented", plan?: string | null):
   return path;
 }
 
+const T2 = { taskId: "T2", operatorNotes: [] } as const;
+
 describe("renderTaskImplementationBrief predecessor output", () => {
   it("shows the dependent what its completed dependency actually changed, read from the protected graph", () => {
-    const rendered = renderTaskImplementationBrief(graphWith("completed"), LOOM_PACKAGE_ROOT, "T2");
+    const rendered = renderTaskImplementationBrief(graphWith("completed"), LOOM_PACKAGE_ROOT, T2);
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(rendered.value.prompt).toContain([
@@ -69,7 +71,7 @@ describe("renderTaskImplementationBrief predecessor output", () => {
       "**Matrix test:** `src/seam.matrix.test.ts`",
       "**Statement:** Only the seam parses input.", "",
     ].join("\n");
-    const rendered = renderTaskImplementationBrief(graphWith("completed", plan), LOOM_PACKAGE_ROOT, "T2");
+    const rendered = renderTaskImplementationBrief(graphWith("completed", plan), LOOM_PACKAGE_ROOT, T2);
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(rendered.value.prompt).toContain("**INV-1: The seam owns parsing**");
@@ -77,7 +79,7 @@ describe("renderTaskImplementationBrief predecessor output", () => {
   });
 
   it("refuses when the recorded plan cannot be read, rather than dropping its invariants", () => {
-    const rendered = renderTaskImplementationBrief(graphWith("completed", null), LOOM_PACKAGE_ROOT, "T2");
+    const rendered = renderTaskImplementationBrief(graphWith("completed", null), LOOM_PACKAGE_ROOT, T2);
     expect(rendered.ok).toBe(false);
     if (rendered.ok) return;
     expect(rendered.error).toContain("cannot read the plan");
@@ -85,7 +87,7 @@ describe("renderTaskImplementationBrief predecessor output", () => {
   });
 
   it("refuses a dependent whose dependency has not passed its Wave Gate", () => {
-    const rendered = renderTaskImplementationBrief(graphWith("implemented"), LOOM_PACKAGE_ROOT, "T2");
+    const rendered = renderTaskImplementationBrief(graphWith("implemented"), LOOM_PACKAGE_ROOT, T2);
     expect(rendered).toEqual({
       ok: false,
       error: "T2: dependency T1 is implemented, not completed; a dependent is dispatched only after its dependencies pass their Wave Gate",
