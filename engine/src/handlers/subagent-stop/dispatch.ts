@@ -33,6 +33,7 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "./acceptance-stop-check";
 import { epochChangedFiles, runStopChecks } from "./stop-checks";
 import { claudeEpochLedger } from "./update-task-status";
+import { publishStopCheckNote } from "../../stop-check-note-sidecar";
 
 import {
   snapshotImplementationAttemptSidecar,
@@ -363,7 +364,18 @@ export const runDispatch = async (
       hookStartedAtMs,
     }, stopCheckPorts);
     if (outcome.kind === "block") return { kind: "block", message: outcome.message };
-    if (outcome.kind === "note") stopCheckNote = outcome.message;
+    if (outcome.kind === "note") {
+      // The systemMessage reaches only the operator. The sidecar carries the
+      // note to the orchestrating model (#121), and is written before
+      // settlement so a settlement failure cannot lose it.
+      const published = publishStopCheckNote(sidecar.sessionId, sidecar.agentId, {
+        taskId: sidecar.authority.taskId,
+        message: outcome.message,
+      });
+      stopCheckNote = published.ok
+        ? outcome.message
+        : `${outcome.message}\n(the note was not kept for the orchestrator: ${published.reason})`;
+    }
   }
 
   const childFailure: HookResult | null = await match(category)
@@ -389,13 +401,18 @@ export const runDispatch = async (
     .exhaustive();
 
   const cleanupFailure = await runCleanup();
+  const noted = stopCheckNote === undefined ? "" : `; stop checks noted: ${stopCheckNote}`;
   if (cleanupFailure !== null) {
     const categoryMessage = childFailure !== null && (childFailure.kind === "error" || childFailure.kind === "block")
       ? `; category settlement also failed: ${childFailure.message}`
       : "";
-    return { kind: "error", message: `${cleanupFailure}${categoryMessage}` };
+    return { kind: "error", message: `${cleanupFailure}${categoryMessage}${noted}` };
   }
-  if (childFailure !== null) return childFailure;
+  if (childFailure !== null) {
+    return childFailure.kind === "error" || childFailure.kind === "block"
+      ? { ...childFailure, message: `${childFailure.message}${noted}` }
+      : childFailure;
+  }
   return stopCheckNote === undefined ? { kind: "passthrough" } : { kind: "passthrough", systemMessage: stopCheckNote };
 };
 

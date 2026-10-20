@@ -20,7 +20,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
     "store-reviewer-findings", "store-spec-check-findings",
     "cleanup-subagent-flag", "capture-orchestration-result",
   ]),
-  "post-tool-use": new Set(["lint-file", "type-diagnostics", "record-evidence", "record-orchestration-spawn"]),
+  "post-tool-use": new Set(["lint-file", "type-diagnostics", "record-evidence", "record-orchestration-spawn", "surface-stop-check-notes"]),
   "subagent-start": new Set(["mark-subagent-active"]),
   "session-start": new Set(["cleanup-stale-subagents", "resume-after-clear"]),
   "helper": new Set([

@@ -614,6 +614,8 @@ export default function (
       emissionLaunchBridge,
       reviewWitnesses,
       durableClaimReleases: piDurableClaimReleasePorts,
+      // Stop-check notes also reach the parent model in the tool result (#121).
+      notifyOperator: piOperatorNoteSink(ctx, (line) => process.stderr.write(`${line}\n`)),
     });
   });
 

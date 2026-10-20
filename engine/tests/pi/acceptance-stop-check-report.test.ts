@@ -6,7 +6,8 @@
  * check is off and only the acceptance check runs.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reportImplementationStopChecks } from "../../../pi/subagent-stop";
+import { piStopResponse, reportImplementationStopChecks } from "../../../pi/subagent-stop";
+import { STOP_CHECK_NOTES_HEADING } from "../../src/core/stop-check-note";
 import {
   REPORT_ONLY_STOP_CHECK_PORTS,
   type StopCheckShellPorts,
@@ -77,10 +78,11 @@ describe("Pi reportImplementationStopChecks", () => {
   it("prints a failing owed testcase as one report-only line and resolves, never blocking", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const ports = failingPorts();
-    const line = await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, ports);
-    expect(line).toMatch(/^loom\(pi\): stop checks \(report-only on Pi; the agent has already ended\): T2\n/);
-    expect(line).toContain(NAME);
-    expect(stderr).toHaveBeenCalledWith(`${line}\n`);
+    const note = await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, ports);
+    expect(note?.taskId).toBe("T2");
+    expect(note?.message).toMatch(/^stop checks \(report-only on Pi; the agent has already ended\): T2\n/);
+    expect(note?.message).toContain(NAME);
+    expect(stderr).toHaveBeenCalledWith(`loom(pi): ${note?.message}\n`);
     expect(ports.runs).toBe(1);
   });
 
@@ -92,15 +94,47 @@ describe("Pi reportImplementationStopChecks", () => {
 
   it("turns an unloadable graph into a note instead of a thrown processing error", async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const line = await reportImplementationStopChecks(manager(() => { throw new Error("state file is corrupt"); }), "T2", NO_WRITES, failingPorts());
-    expect(line).toContain("crashed and did not decide: state file is corrupt");
+    const note = await reportImplementationStopChecks(manager(() => { throw new Error("state file is corrupt"); }), "T2", NO_WRITES, failingPorts());
+    expect(note?.message).toContain("crashed and did not decide: state file is corrupt");
   });
 
   it("keeps no block count, so a repeated failure is reported every time", async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const ports = failingPorts();
     for (let stop = 0; stop < 5; stop++) {
-      expect(await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, ports)).toContain("report-only on Pi");
+      expect((await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, ports))?.message).toContain("report-only on Pi");
     }
+  });
+});
+
+describe("the parent model sees each Pi stop-check note (#121)", () => {
+  it("sends the bare report line to an injected operator sink instead of stderr", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const lines: string[] = [];
+    const note = await reportImplementationStopChecks(manager(graph), "T2", NO_WRITES, failingPorts(), (line) => lines.push(line));
+    expect(lines).toEqual([note?.message]);
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  const note = { taskId: "T2", message: "stop checks (report-only on Pi; the agent has already ended): T2\n- failing" };
+  const original = { content: [{ type: "text" as const, text: "child output" }] };
+
+  it("appends the notes to the batch's own result, leaving isError as Pi reported it", () => {
+    expect(piStopResponse(original, [], [note])).toEqual({
+      content: [{ type: "text", text: "child output" }, { type: "text", text: `${STOP_CHECK_NOTES_HEADING}\n- T2: stop checks (report-only on Pi; the agent has already ended): T2\n  - failing` }],
+    });
+  });
+
+  it("keeps the notes after the processing errors that replace the result", () => {
+    const response = piStopResponse(original, ["settlement refused"], [note]);
+    expect(response).toMatchObject({ isError: true });
+    expect(response?.content.map((item) => (item as { text: string }).text)).toEqual([
+      "Loom Pi subagent evidence processing failed:\n- settlement refused",
+      expect.stringContaining(STOP_CHECK_NOTES_HEADING),
+    ]);
+  });
+
+  it("leaves the result untouched with neither", () => {
+    expect(piStopResponse(original, [], [])).toBeUndefined();
   });
 });

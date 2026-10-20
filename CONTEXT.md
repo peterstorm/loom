@@ -465,7 +465,7 @@ _Avoid_: Stop gate, pre-gate (it gates nothing the Wave Gate owns)
 At every implementation agent's SubagentStop, claimant or not, the engine runs the **Affected Runner** over the attempt's **Changed Files** after the **Acceptance Stop Check**. A failing affected test blocks the stop, and the block message names each failing test and its file. The agent can be blocked at most 3 times, on a counter kept apart from the acceptance check's.
 - **Shared with the acceptance check.** Both checks run in sequence under one acquisition of the per-repository runner lock and inside one 300 s hook budget, with a 30 s reserve kept for settlement. When both fail, they produce one combined block message.
 - **Budget.** The affected runner launches only when the remaining budget holds its whole timeout; the timeout is never clipped.
-- **Trust model.** It fails open, with a named note, on every fault: a timeout, a kill, a missing report, budget exhaustion, a held lock, an unreadable counter, the cap, or a crash. It is report-only on Pi. It never reaches proof, receipts or Wave Gate evidence (INV-3).
+- **Trust model.** It fails open, with a named note, on every fault: a timeout, a kill, a missing report, budget exhaustion, a held lock, an unreadable counter, the cap, or a crash. The note reaches the orchestrating session too, not only the operator. It is report-only on Pi. It never reaches proof, receipts or Wave Gate evidence (INV-3).
 
 _Avoid_: Affected gate, regression check, test cadence
 
