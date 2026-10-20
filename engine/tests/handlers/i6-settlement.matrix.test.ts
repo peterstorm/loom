@@ -83,6 +83,7 @@ import {
 } from "../../src/machine";
 import { parseEvidenceLine } from "../../src/machine/evidence";
 import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
+import { guardStateFileDecision } from "../../src/core/guard-state-file";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
@@ -756,6 +757,7 @@ function briefInput(graph: TaskGraph, task: Task, overrides: Partial<Implementat
     invariants: [],
     contracts: [],
     verificationManifest: graph.verification_manifest,
+    repositoryRoot: ROOT,
     ...overrides,
   };
 }
@@ -849,10 +851,23 @@ describe("the implementation brief states I6 up front and names the repair on re
       [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
     const prompt = renderedPrompt(briefInput(graph, task));
     expect(prompt).toContain("proof:red-then-green-unproven:red-after-first-implementation-write");
-    expect(prompt).toContain(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL]));
+    const command = baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL], ROOT);
+    expect(prompt).toContain(command);
     expect(prompt).toMatch(/mints no FileWrite/);
     expect(prompt).toMatch(/observe red[\s\S]*then implement/i);
+    // The restore is the named exception to the template's never-`git restore` constraint.
+    expect(prompt).toMatch(/one exception to the Constraints' never-`git restore` rule/);
     expect(authorizeImplementationSpawn(task, prompt)).toMatchObject({ ok: true, kind: "retry" });
+    // #118: the command the brief renders must pass the agent's own state-file guard.
+    expect(guardStateFileDecision(command).kind).toBe("allow");
+  });
+
+  it("#118: the restore command passes the state-file guard for any repository root, and the old substitution form does not", () => {
+    for (const root of [ROOT, "/home/dev/my repo", "/srv/project's work"]) {
+      expect(guardStateFileDecision(baselineRestoreCommand("d".repeat(40), [LEDGER_TYPES, LEDGER_IMPL], root)).kind).toBe("allow");
+    }
+    // The pilot's form: an opaque `$(…)` the guard must assume could name guarded state.
+    expect(guardStateFileDecision(`(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${"d".repeat(40)}^0)`).kind).toBe("block");
   });
 
   describe("the retry's restore command, run by real bash against a real repository", () => {
@@ -894,7 +909,7 @@ describe("the implementation brief states I6 up front and names the repair on re
     }
 
     it("returns changed files to the baseline, deletes created ones, and mints no FileWrite", () => inRepository((repository) => {
-      const command = baselineRestoreCommand(attemptedRepository(repository), FILES);
+      const command = baselineRestoreCommand(attemptedRepository(repository), FILES, repository);
       expect(bash(command, repository)).toBe(0);
       expect(readFileSync(join(repository, FILES[0]), "utf8")).toBe("baseline\n");
       expect(() => readFileSync(join(repository, FILES[1]))).toThrow(/ENOENT/);
@@ -902,7 +917,7 @@ describe("the implementation brief states I6 up front and names the repair on re
     }));
 
     it("restores the root-relative paths when the agent's cwd is a subdirectory", () => inRepository((repository) => {
-      const command = baselineRestoreCommand(attemptedRepository(repository), FILES);
+      const command = baselineRestoreCommand(attemptedRepository(repository), FILES, repository);
       expect(bash(command, join(repository, "src"))).toBe(0);
       expect(readFileSync(join(repository, FILES[0]), "utf8")).toBe("baseline\n");
       expect(() => readFileSync(join(repository, FILES[1]))).toThrow(/ENOENT/);
@@ -911,15 +926,15 @@ describe("the implementation brief states I6 up front and names the repair on re
     it("fails and deletes nothing when the source is not a commit, so no file is misread as created", () => inRepository((repository) => {
       attemptedRepository(repository);
       for (const source of ["e".repeat(40), "HEAD~5"]) {
-        expect(bash(baselineRestoreCommand(source, FILES), repository)).not.toBe(0);
+        expect(bash(baselineRestoreCommand(source, FILES, repository), repository)).not.toBe(0);
         expect(readFileSync(join(repository, FILES[0]), "utf8")).toBe("attempt\n");
         expect(readFileSync(join(repository, FILES[1]), "utf8")).toBe("created\n");
       }
     }));
 
-    it("fails and deletes nothing outside any repository", () => inRepository((directory) => {
+    it("fails and deletes nothing when the root it names is no repository", () => inRepository((directory) => {
       writeFileSync(join(directory, "ledger.ts"), "attempt\n");
-      expect(bash(baselineRestoreCommand("HEAD", ["ledger.ts"]), directory)).not.toBe(0);
+      expect(bash(baselineRestoreCommand("HEAD", ["ledger.ts"], directory), directory)).not.toBe(0);
       expect(readFileSync(join(directory, "ledger.ts"), "utf8")).toBe("attempt\n");
     }));
   });
@@ -960,7 +975,7 @@ describe("the implementation brief states I6 up front and names the repair on re
       [write(LEDGER_TEST), write(LEDGER_IMPL), red(), green()]);
     const { start_sha: _start, ...unrecorded } = task;
     const prompt = renderedPrompt(briefInput(graph, unrecorded as Task));
-    expect(prompt).toContain(baselineRestoreCommand("HEAD", [LEDGER_IMPL]));
+    expect(prompt).toContain(baselineRestoreCommand("HEAD", [LEDGER_IMPL], ROOT));
     expect(prompt).toMatch(/No start commit was recorded for this Task, so `HEAD` stands in/);
     expect(prompt).not.toContain("<the Task's start commit>");
   });

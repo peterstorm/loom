@@ -114,6 +114,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   roster: ROSTER,
   invariants: [],
   contracts: [],
+  repositoryRoot: "/repo",
   ...overrides,
 });
 

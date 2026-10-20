@@ -122,6 +122,9 @@ export type ImplementationBriefInput = Readonly<{
    *  absent only on a TaskGraph frozen before it existed. Its frozen test-file
    *  classification splits an I6-owing Task's file list for the I6 section. */
   verificationManifest: FrozenVerificationManifest | undefined;
+  /** The TaskGraph's project root, absolute: where the I6 restore command
+   *  runs, spelled literally so no command substitution reaches the guard. */
+  repositoryRoot: string;
 }>;
 
 export type ImplementationBrief = Readonly<{
@@ -327,16 +330,18 @@ function inheritedRedThenGreenFailures(task: Task, dispatch: WaveImplementationD
  * call if one pathspec matches nothing, so each file is decided on its own.
  *
  * "Absent at `source`" is only ever concluded after the command has proved
- * where it stands: it runs in a subshell from the repository root (the paths
- * are root-relative whatever the agent's cwd), and it verifies that `source`
+ * where it stands: it runs in a subshell from `repositoryRoot` (the paths are
+ * root-relative whatever the agent's cwd), and it verifies that `source`
  * names a commit (`^0`) before touching any file. A wrong or unknown
- * `source`, or a cwd outside any repository, therefore stops the call before
+ * `source`, or a root that is no repository, therefore stops the call before
  * the loop, so `git cat-file` cannot misreport every file as absent and
- * nothing is deleted. A failed restore stops the loop too. Paths are
- * shell-quoted.
+ * nothing is deleted. A failed restore stops the loop too. The root and the
+ * paths are shell-quoted literals: a command substitution such as
+ * `$(git rev-parse --show-toplevel)` is opaque to the state-file guard, which
+ * must assume it could name guarded state and refuses the call (#118).
  */
-export function baselineRestoreCommand(source: string, files: readonly string[]): string {
-  return `(cd "$(git rev-parse --show-toplevel)" && git rev-parse --verify --quiet ${source}^0 && ` +
+export function baselineRestoreCommand(source: string, files: readonly string[], repositoryRoot: string): string {
+  return `(cd ${quoteShellArgument(repositoryRoot)} && git rev-parse --verify --quiet ${source}^0 && ` +
     `for f in ${files.map(quoteShellArgument).join(" ")}; do ` +
     `if git cat-file -e ${source}:"$f"; then git restore --source ${source} -- "$f" || exit 1; else rm -f -- "$f"; fi; done)`;
 }
@@ -355,6 +360,7 @@ function redThenGreenRemedy(
   task: Task,
   classification: TestFileClassification,
   failures: readonly RedThenGreenFailureKind[],
+  repositoryRoot: string,
 ): readonly string[] {
   if (failures.length === 0) return [];
   const source = task.start_sha ?? "HEAD";
@@ -367,10 +373,11 @@ function redThenGreenRemedy(
       "This attempt is judged on its own ledger epoch, so it must show the order afresh:",
     classification.implementationFiles.length === 0
       ? "1. Your file list declares no implementation file to restore; skip to step 2."
-      : `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, classification.implementationFiles)}\`. ` +
+      : `1. Return your implementation files to the attempt baseline with one Bash call: \`${baselineRestoreCommand(source, classification.implementationFiles, repositoryRoot)}\`. ` +
         `It runs from the repository root, first checks that \`${source}\` is a commit (if it is not, the call fails and changes nothing), then restores each file \`${source}\` has and deletes each one your Task created since; \`git cat-file\` reports every created file as missing, which is expected. ` +
         baseline +
-        "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them.",
+        "Neither the restore nor the delete mints a FileWrite, so neither is your first implementation write. Touch only these files: they are yours, and no sibling's work lives in them. " +
+        "This exact command is the one exception to the Constraints' never-`git restore` rule: it restores only your own files. Run it as given; do not rewrite it.",
     `2. Run your tests and observe red: ${TESTCASE_RED}${createdFilesRed(classification.createdImplementationFiles)}`,
     "3. Then implement, and run your tests green.",
   ];
@@ -408,6 +415,7 @@ function redThenGreenSection(
   task: Task,
   dispatch: WaveImplementationDispatch,
   manifest: FrozenVerificationManifest | undefined,
+  repositoryRoot: string,
 ): DomainResult<string | null, RedThenGreenSectionRefusal> {
   const duty = redThenGreenDuty(task, manifest);
   switch (duty.kind) {
@@ -440,7 +448,7 @@ function redThenGreenSection(
       "Only ledger runs with an exit code and a parsed structured report count, under every evaluation policy: a run without its report, a chained, piped or redirected run, and transcript test evidence never satisfy a step. " +
         "Run each step's tests as one bare report-writing command, in the forms the final verification table at the top of this brief lists. " +
         "I6 is judged per attempt: an earlier attempt's red never counts for this one.",
-      ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch)),
+      ...redThenGreenRemedy(task, classification, inheritedRedThenGreenFailures(task, dispatch), repositoryRoot),
     ].join("\n"),
   };
 }
@@ -498,7 +506,7 @@ export function renderImplementationBrief(
     return refused("predecessor-output-unavailable", `${task.id}: ${predecessorOutputErrorMessage(predecessors.error)}`);
   }
 
-  const redThenGreen = redThenGreenSection(task, dispatch, input.verificationManifest);
+  const redThenGreen = redThenGreenSection(task, dispatch, input.verificationManifest, input.repositoryRoot);
   if (!redThenGreen.ok) return refused(redThenGreen.error.kind, redThenGreen.error.message);
 
   const policy = taskVerificationPolicy(task);
