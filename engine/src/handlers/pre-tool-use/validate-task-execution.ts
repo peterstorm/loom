@@ -16,7 +16,8 @@ import { validateTaskExecution } from "../task-execution";
 import { claudeAgentTypeRefusal } from "../../core/model-profiles";
 import { CLAUDE_SPAWN_TOOLS, SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { firstSpawnVeto, SPAWN_VETOES, type SpawnVetoEntry } from "./spawn-vetoes";
-import { expandBriefMarker, renderActiveTaskBrief, type RenderTaskBrief } from "./implementation-brief-marker";
+import type { RenderTaskBrief } from "../../core/implementation-brief";
+import { expandBriefMarker, renderActiveTaskBrief } from "./implementation-brief-marker";
 
 /** An admitted marker spawn proceeds with the brief as its prompt; every other result stands. */
 function rewrittenToBrief(result: HookResult, toolInput: Readonly<Record<string, unknown>>): HookResult {

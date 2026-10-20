@@ -615,6 +615,9 @@ const TASK_ID_BINDING = /task id:/i;
 export function parseOperatorNote(raw: string): DomainResult<OperatorNote, string> {
   const text = raw.trim();
   if (text === "") return { ok: false, error: "an operator note is empty" };
+  // One note is one marker line: a line break would split it on render, and
+  // the second half would come back as a malformed line.
+  if (/[\r\n]/.test(text)) return { ok: false, error: "an operator note must be one line" };
   if (text.length > MAX_OPERATOR_NOTE_LENGTH) {
     return { ok: false, error: `an operator note is ${text.length} characters; at most ${MAX_OPERATOR_NOTE_LENGTH} are allowed` };
   }
@@ -635,11 +638,15 @@ export function parseOperatorNote(raw: string): DomainResult<OperatorNote, strin
  */
 export function parseImplementationBriefRequest(task: string): ImplementationBriefRequestParse {
   const lines = task.trim().split("\n").map((line) => line.trim());
-  const markers = lines.flatMap((line, index) => MARKER_LINE.test(line) ? [index] : []);
-  if (markers.length === 0) return { kind: "none" };
+  const markers = lines.flatMap((line, index) => {
+    const taskId = MARKER_LINE.exec(line)?.[1];
+    return taskId === undefined ? [] : [{ index, taskId }];
+  });
+  const [marker, ...otherMarkers] = markers;
+  if (marker === undefined) return { kind: "none" };
   const grammar = `the brief marker must be the first line, followed only by "${IMPLEMENTATION_BRIEF_OPERATOR_NOTE}: <text>" lines`;
-  if (markers.length > 1 || markers[0] !== 0) return { kind: "malformed", reason: `${grammar}; this prompt has the marker elsewhere or more than once` };
-  const taskId = MARKER_LINE.exec(lines[0] ?? "")?.[1] ?? "";
+  if (otherMarkers.length > 0 || marker.index !== 0) return { kind: "malformed", reason: `${grammar}; this prompt has the marker elsewhere or more than once` };
+  const { taskId } = marker;
   const notes: OperatorNote[] = [];
   for (const [index, line] of lines.entries()) {
     if (index === 0 || line === "") continue;
@@ -653,6 +660,32 @@ export function parseImplementationBriefRequest(task: string): ImplementationBri
     return { kind: "malformed", reason: `the brief marker carries ${notes.length} operator notes; at most ${MAX_OPERATOR_NOTES} are allowed` };
   }
   return { kind: "request", request: Object.freeze({ taskId, operatorNotes: Object.freeze(notes) }) };
+}
+
+/** Port: render the brief a marker requests against the governing TaskGraph. */
+export type RenderTaskBrief = (request: ImplementationBriefRequest) => DomainResult<ImplementationBrief, string>;
+
+/**
+ * What one spawn's task text asks for, decided once for both harnesses:
+ * nothing (`none`), a refusal of the marker's grammar (`malformed`), a marker
+ * whose brief cannot render (`unrenderable`), or the rendered brief. Each
+ * harness maps it to its own wire shape and wording, and checks the spawned
+ * agent against `brief.agent` in its own field.
+ */
+export type BriefMarkerTriage =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "malformed"; reason: string }>
+  | Readonly<{ kind: "unrenderable"; taskId: string; error: string }>
+  | Readonly<{ kind: "expanded"; request: ImplementationBriefRequest; brief: ImplementationBrief }>;
+
+/** Triage `task` and render the brief it requests. Pure over `render`, which runs only for a well-formed marker. */
+export function triageBriefMarker(task: string, render: RenderTaskBrief): BriefMarkerTriage {
+  const parsed = parseImplementationBriefRequest(task);
+  if (parsed.kind !== "request") return parsed;
+  const rendered = render(parsed.request);
+  return rendered.ok
+    ? { kind: "expanded", request: parsed.request, brief: rendered.value }
+    : { kind: "unrenderable", taskId: parsed.request.taskId, error: rendered.error };
 }
 
 /** The spawn task text for `request`: the marker, then one line per note. The inverse of `parseImplementationBriefRequest`. */

@@ -60,20 +60,21 @@ describe("validate-task-execution Claude agent namespace", () => {
     expect(readFileSync(statePath)).toEqual(before);
   });
 
-  it("refuses a foreign namespace on a Claude spawn tool", async () => {
+  it("refuses a foreign namespace on a Claude spawn tool, naming the loom form, before reserving anything", async () => {
+    const before = readFileSync(statePath);
     const result = await spawn("Agent", "elsewhere:code-implementer-agent");
-    expect(result.kind).toBe("block");
+    expect(result).toMatchObject({ kind: "block", message: expect.stringContaining('spawn subagent_type "loom:code-implementer-agent", not "elsewhere:code-implementer-agent"') });
+    expect(readFileSync(statePath)).toEqual(before);
   });
 
   it("does not apply the Claude namespace rule to Pi's subagent tool", async () => {
     const result = await spawn("subagent", "code-implementer-agent");
-    // The spawn proceeds to the gate's own rules (here: admitted and reserved), never the namespace refusal.
-    if (result.kind === "block") expect(result.message).not.toContain("plugin namespace");
+    // The spawn proceeds to the gate's own rules: here it is admitted.
+    expect(result.kind).not.toBe("block");
   });
 
   it("lets the plugin-namespaced name through to the reservation", async () => {
     const result = await spawn("Agent", "loom:code-implementer-agent");
-    if (result.kind === "block") expect(result.message).not.toContain("plugin namespace");
     expect(result.kind).not.toBe("block");
   });
 });

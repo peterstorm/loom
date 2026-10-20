@@ -6,6 +6,10 @@
  * launched. The notes reach the model as `additionalContext` and the operator
  * as a `systemMessage`.
  *
+ * Only the orchestrator's own calls drain: Claude Code stamps `agent_id` on
+ * every hook fired inside a subagent, and a nested spawn must not take notes
+ * meant for the orchestrating session.
+ *
  * Fail-open: this is context, never a gate. A sidecar it cannot read is named
  * to both, and the tool result stands.
  */
@@ -18,15 +22,16 @@ import { passthroughResult, postToolUseContextResult, type HookHandler, type Hoo
 /** The notes for one PostToolUse input, drained from `directory`. Total. */
 export function surfaceStopCheckNotes(raw: unknown, directory?: string): HookResult {
   if (typeof raw !== "object" || raw === null) return passthroughResult();
-  const { session_id: sessionId, tool_name: toolName } = raw as Readonly<Record<string, unknown>>;
+  const { session_id: sessionId, tool_name: toolName, agent_id: agentId } = raw as Readonly<Record<string, unknown>>;
   if (typeof sessionId !== "string" || sessionId === "" || typeof toolName !== "string" || !CLAUDE_SPAWN_TOOLS.has(toolName)) {
     return passthroughResult();
   }
+  if (agentId !== undefined && agentId !== null && agentId !== "") return passthroughResult();
   const { notes, faults } = drainStopCheckNotes(sessionId, directory);
   const unread = faults.length === 0 ? null : `Loom could not read ${faults.length} stop-check note(s): ${faults.join("; ")}`;
-  const [first, ...rest] = notes;
-  if (first === undefined) return unread === null ? passthroughResult() : postToolUseContextResult(unread, unread);
-  const rendered = [renderStopCheckNotes([first, ...rest]), ...(unread === null ? [] : [unread])].join("\n");
+  const parts = [renderStopCheckNotes(notes), unread].filter((part): part is string => part !== null);
+  if (parts.length === 0) return passthroughResult();
+  const rendered = parts.join("\n");
   return postToolUseContextResult(rendered, rendered);
 }
 

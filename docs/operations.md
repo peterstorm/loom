@@ -799,7 +799,7 @@ A stop check that fails open, or reports only, leaves a note naming the cause. T
   - A background spawn's PostToolUse fires at launch, before its stop, so its note arrives with the next `Task`/`Agent` result.
   - A claimed sidecar is renamed before it is read, so concurrent hooks never deliver a note twice. An unreadable sidecar is named once and removed. An undelivered note is swept with the other runtime files after the stale-subagent TTL.
   - The shim skips the bun spawn when no note sidecar exists at all.
-- **Pi.** The parent settles after the child has ended. Each report line goes to the operator: to the UI when there is one, otherwise to stderr as a `loom(pi):` line. The lines are also appended under the same heading to the subagent tool result the parent model reads. When settlement raises processing errors, the notes follow the error text that replaces the result.
+- **Pi.** The parent settles after the child has ended. Each report line goes to the operator through the extension's operator sink: to the UI when there is one, otherwise to stderr as a `[loom]` line. The lines are also appended under the same heading to the subagent tool result the parent model reads. When settlement raises processing errors, the notes follow the error text that replaces the result.
 
 ### Pi evidence ledger recorder
 

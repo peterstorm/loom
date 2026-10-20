@@ -13,8 +13,6 @@
  * Pure: the value, its parse from a sidecar's bytes, and the rendering.
  */
 
-import type { NonEmpty } from "./orchestration-contract";
-
 export type StopCheckNote = Readonly<{ taskId: string; message: string }>;
 
 /** A sidecar's JSON as a note, or null when it is not one. */
@@ -29,8 +27,10 @@ export function parseStopCheckNote(raw: unknown): StopCheckNote | null {
 export const STOP_CHECK_NOTES_HEADING =
   "Loom stop checks did not decide, or reported only, for these Tasks. Each stop proceeded; the Wave Gate still judges the Task:";
 
-/** One block for the orchestrating model: the heading, then each note under its Task, continuation lines indented. */
-export function renderStopCheckNotes(notes: NonEmpty<StopCheckNote>): string {
+/** One block for the orchestrating model: the heading, then each note under
+ *  its Task, continuation lines indented; null when there is no note to show. */
+export function renderStopCheckNotes(notes: readonly StopCheckNote[]): string | null {
+  if (notes.length === 0) return null;
   const items = notes.map(({ taskId, message }) =>
     `- ${taskId}: ${message.trim().split("\n").join("\n  ")}`);
   return [STOP_CHECK_NOTES_HEADING, ...items].join("\n");

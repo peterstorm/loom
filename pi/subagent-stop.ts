@@ -226,8 +226,8 @@ export function piStopResponse<C>(
   processingErrors: readonly string[],
   stopCheckNotes: readonly StopCheckNote[],
 ): PiSubagentStopResponse | PiSubagentStopAmendment<C> | undefined {
-  const [first, ...rest] = stopCheckNotes;
-  const notes = first === undefined ? [] : [{ type: "text" as const, text: renderStopCheckNotes([first, ...rest]) }];
+  const rendered = renderStopCheckNotes(stopCheckNotes);
+  const notes = rendered === null ? [] : [{ type: "text" as const, text: rendered }];
   if (processingErrors.length > 0) {
     return {
       content: [{

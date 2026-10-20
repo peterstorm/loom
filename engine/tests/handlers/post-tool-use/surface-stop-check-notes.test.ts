@@ -47,6 +47,7 @@ describe("surfaceStopCheckNotes", () => {
     ["Pi's subagent tool", call("subagent")],
     ["no session id", { tool_name: "Agent" }],
     ["a non-object input", "Agent"],
+    ["a call made inside a subagent (Claude stamps agent_id)", { ...call("Agent"), agent_id: "agent-7" }],
   ])("passes through untouched for %s, draining nothing", (_label, input) => {
     const dir = directory();
     publishStopCheckNote("session-a", "agent-1", { taskId: "T2", message: "kept" }, dir);

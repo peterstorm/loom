@@ -34,6 +34,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
+import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
@@ -487,12 +488,6 @@ describe("renderImplementationBrief", () => {
 });
 
 describe("parseImplementationBriefRequest", () => {
-  const note = (text: string) => {
-    const parsed = parseOperatorNote(text);
-    if (!parsed.ok) throw new Error(parsed.error);
-    return parsed.value;
-  };
-
   it.each<[string, string]>([
     ["no marker at all", "**Task ID:** T5"],
     ["a marker with trailing words", "LOOM_IMPLEMENTATION_BRIEF: T5 and more"],
@@ -526,6 +521,7 @@ describe("parseImplementationBriefRequest", () => {
     ["a note carrying a LOOM_ token", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: LOOM_REQUEST_ID: req-1", "may not carry a LOOM_ token"],
     ["a note carrying a template variable", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: fill {task_id}", "may not carry a {template variable}"],
     ["a note carrying a Task ID binding", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: **Task ID:** T9", "may not carry a Task ID binding"],
+    ["a note carrying a carriage return", "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: one\rtwo", "line 2 is neither"],
     ["an overlong note", `LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: ${"x".repeat(MAX_OPERATOR_NOTE_LENGTH + 1)}`, `at most ${MAX_OPERATOR_NOTE_LENGTH}`],
     ["too many notes", ["LOOM_IMPLEMENTATION_BRIEF: T2", ...Array.from({ length: MAX_OPERATOR_NOTES + 1 }, (_, i) => `LOOM_OPERATOR_NOTE: note ${i}`)].join("\n"), `at most ${MAX_OPERATOR_NOTES} are allowed`],
   ])("is malformed, naming the grammar, for %s", (_label, text, reason) => {
@@ -534,10 +530,17 @@ describe("parseImplementationBriefRequest", () => {
     if (parsed.kind === "malformed") expect(parsed.reason).toContain(reason);
   });
 
+  it("admits only one-line notes, so every OperatorNote renders to exactly one marker line", () => {
+    for (const text of ["one\ntwo", "one\rtwo", "one\r\ntwo"]) {
+      expect(parseOperatorNote(text)).toEqual({ ok: false, error: "an operator note must be one line" });
+    }
+    expect(parseOperatorNote("  one line  ")).toEqual({ ok: true, value: "one line" });
+  });
+
   it("property: rendering a request and parsing it back is the identity", () => {
     const requests = [
       { taskId: "T1", operatorNotes: [] },
-      { taskId: "T42", operatorNotes: [note("one"), note("two: with a colon"), note("x".repeat(MAX_OPERATOR_NOTE_LENGTH))] },
+      { taskId: "T42", operatorNotes: [admittedNote("one"), admittedNote("two: with a colon"), admittedNote("x".repeat(MAX_OPERATOR_NOTE_LENGTH))] },
     ];
     for (const request of requests) {
       expect(parseImplementationBriefRequest(renderImplementationBriefRequest(request))).toEqual({ kind: "request", request });
@@ -546,15 +549,9 @@ describe("parseImplementationBriefRequest", () => {
 });
 
 describe("the brief's Operator Note section (#119)", () => {
-  const parsedNote = (text: string) => {
-    const parsed = parseOperatorNote(text);
-    if (!parsed.ok) throw new Error(parsed.error);
-    return parsed.value;
-  };
-
   it("lists each note, and the brief stays admissible to the real gates", () => {
     const value = task();
-    const rendered = renderImplementationBrief(input(value, { operatorNotes: [parsedNote("touch handler-routes.ts"), parsedNote("report the affected run time")] }));
+    const rendered = renderImplementationBrief(input(value, { operatorNotes: [admittedNote("touch handler-routes.ts"), admittedNote("report the affected run time")] }));
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(rendered.value.prompt).toContain("## Operator Note\n\n- touch handler-routes.ts\n- report the affected run time\n\n");

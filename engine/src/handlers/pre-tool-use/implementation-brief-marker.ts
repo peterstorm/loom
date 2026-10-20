@@ -22,9 +22,7 @@
  * another agent than the Task's, never reaches the child as a bare marker.
  */
 
-import type { ImplementationBrief, ImplementationBriefRequest } from "../../core/implementation-brief";
-import { parseImplementationBriefRequest } from "../../core/implementation-brief";
-import type { DomainResult } from "../../core/orchestration-contract";
+import { triageBriefMarker, type RenderTaskBrief } from "../../core/implementation-brief";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { taskGraphPath } from "../../config";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
@@ -32,9 +30,6 @@ import { blockResult, type HookHandler, type PreToolUseInput } from "../../types
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
-
-/** Port: render the brief a marker requests against the governing TaskGraph. */
-export type RenderTaskBrief = (request: ImplementationBriefRequest) => DomainResult<ImplementationBrief, string>;
 
 /** What a spawn's prompt asks for: nothing, its expanded brief, or a refusal. */
 export type BriefMarkerExpansion =
@@ -56,20 +51,24 @@ const refused = (message: string): BriefMarkerExpansion => Object.freeze({ kind:
 export function expandBriefMarker(input: PreToolUseInput, render: RenderTaskBrief): BriefMarkerExpansion {
   const prompt = input.tool_input.prompt;
   if (typeof prompt !== "string") return NO_MARKER;
-  const parsed = parseImplementationBriefRequest(prompt);
-  if (parsed.kind === "none") return NO_MARKER;
-  if (parsed.kind === "malformed") return refused(`BLOCKED: the implementation brief marker is malformed: ${parsed.reason}`);
-  const { taskId } = parsed.request;
-  const rendered = render(parsed.request);
-  if (!rendered.ok) {
-    return refused(`BLOCKED: the implementation brief marker for ${taskId} cannot expand: ${rendered.error}`);
+  const triage = triageBriefMarker(prompt, render);
+  switch (triage.kind) {
+    case "none":
+      return NO_MARKER;
+    case "malformed":
+      return refused(`BLOCKED: the implementation brief marker is malformed: ${triage.reason}`);
+    case "unrenderable":
+      return refused(`BLOCKED: the implementation brief marker for ${triage.taskId} cannot expand: ${triage.error}`);
+    case "expanded":
+      break;
   }
+  const { brief, request } = triage;
   const requested = input.tool_input.subagent_type;
   const agent = typeof requested === "string" ? stripNamespace(requested) : "";
-  if (agent !== rendered.value.agent) {
-    return refused(`BLOCKED: the brief marker spawns ${JSON.stringify(requested ?? null)} but ${taskId} is assigned to ${rendered.value.agent}`);
+  if (agent !== brief.agent) {
+    return refused(`BLOCKED: the brief marker spawns ${JSON.stringify(requested ?? null)} but ${request.taskId} is assigned to ${brief.agent}`);
   }
-  const toolInput = Object.freeze({ ...input.tool_input, prompt: rendered.value.prompt });
+  const toolInput = Object.freeze({ ...input.tool_input, prompt: brief.prompt });
   return Object.freeze({ kind: "expanded", toolInput, stdin: JSON.stringify({ ...input, tool_input: toolInput }) });
 }
 

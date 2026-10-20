@@ -219,6 +219,18 @@ describe("a stop-check note reaches the orchestrating session (#121)", () => {
     expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(true);
   });
 
+  it("tells the operator when the note could not be kept for the orchestrator", async () => {
+    const root = project();
+    sidecar(stateFile(root));
+    // A directory where the note sidecar cannot be written: its path is taken by a plain file.
+    mkdirSync(stopCheckNotePath(SESSION, AGENT));
+
+    const result = await runDispatch(stop, [], async () => ({ kind: "passthrough" }), inertPorts());
+
+    expect(JSON.stringify(result)).toContain("the note was not kept for the orchestrator");
+    rmSync(stopCheckNotePath(SESSION, AGENT), { recursive: true, force: true });
+  });
+
   it("leaves no note for a stop whose checks skip", async () => {
     const root = project();
     sidecar(writeStateWithoutRunners(root));

@@ -32,12 +32,17 @@ describe("renderStopCheckNotes", () => {
     ].join("\n"));
   });
 
+  it("renders nothing for no notes", () => {
+    expect(renderStopCheckNotes([])).toBeNull();
+  });
+
   it("property: every note's task id and every message line appears, one item per note", () => {
     const line = fc.stringMatching(/^[a-z][a-z ]{0,20}$/);
     fc.assert(fc.property(
       fc.array(fc.record({ taskId: fc.stringMatching(/^T[1-9][0-9]?$/), message: fc.array(line, { minLength: 1, maxLength: 3 }).map((ls) => ls.join("\n")) }), { minLength: 1, maxLength: 5 }),
       (notes) => {
-        const rendered = renderStopCheckNotes(notes as never);
+        const rendered = renderStopCheckNotes(notes);
+        if (rendered === null) throw new Error("a non-empty list must render");
         expect(rendered.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(notes.length);
         for (const { taskId, message } of notes) {
           expect(rendered).toContain(`- ${taskId}: `);

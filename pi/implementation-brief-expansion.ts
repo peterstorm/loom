@@ -19,16 +19,8 @@
  * agent is not the Task's agent, is refused whole and yields no rewrite.
  */
 
-import {
-  parseImplementationBriefRequest,
-  type ImplementationBrief,
-  type ImplementationBriefRequest,
-} from "../engine/src/core/implementation-brief";
-import type { DomainResult } from "../engine/src/core/orchestration-contract";
+import { triageBriefMarker, type RenderTaskBrief } from "../engine/src/core/implementation-brief";
 import { spawnBatchEntries } from "./spawn-graph";
-
-/** Port: render the brief a marker requests against the batch's governing TaskGraph. */
-export type RenderTaskBrief = (request: ImplementationBriefRequest) => DomainResult<ImplementationBrief, string>;
 
 /** One marker's replacement: the batch slot whose `task` becomes `prompt`.
  *  `slot` addresses the same entry `spawnEntryAt` does, whichever spawn shape
@@ -47,23 +39,22 @@ export function expandImplementationBriefMarkers(raw: unknown, render: RenderTas
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
     const item = entry as Record<string, unknown>;
     if (typeof item.task !== "string") continue;
-    const parsed = parseImplementationBriefRequest(item.task);
-    if (parsed.kind === "none") continue;
-    if (parsed.kind === "malformed") {
-      return Object.freeze({ ok: false, reason: `BLOCKED: spawn item ${index + 1} has a malformed implementation brief marker: ${parsed.reason}` });
+    const triage = triageBriefMarker(item.task, render);
+    if (triage.kind === "none") continue;
+    if (triage.kind === "malformed") {
+      return Object.freeze({ ok: false, reason: `BLOCKED: spawn item ${index + 1} has a malformed implementation brief marker: ${triage.reason}` });
     }
-    const { taskId } = parsed.request;
-    const rendered = render(parsed.request);
-    if (!rendered.ok) {
-      return Object.freeze({ ok: false, reason: `BLOCKED: spawn item ${index + 1} cannot expand its implementation brief: ${rendered.error}` });
+    if (triage.kind === "unrenderable") {
+      return Object.freeze({ ok: false, reason: `BLOCKED: spawn item ${index + 1} cannot expand its implementation brief: ${triage.error}` });
     }
-    if (item.agent !== rendered.value.agent) {
+    const { brief, request: { taskId } } = triage;
+    if (item.agent !== brief.agent) {
       return Object.freeze({
         ok: false,
-        reason: `BLOCKED: spawn item ${index + 1} names agent ${String(item.agent)} but ${taskId} is assigned to ${rendered.value.agent}`,
+        reason: `BLOCKED: spawn item ${index + 1} names agent ${String(item.agent)} but ${taskId} is assigned to ${brief.agent}`,
       });
     }
-    rewrites.push(Object.freeze({ slot: index, taskId, prompt: rendered.value.prompt }));
+    rewrites.push(Object.freeze({ slot: index, taskId, prompt: brief.prompt }));
   }
   return Object.freeze({ ok: true, rewrites: Object.freeze(rewrites) });
 }

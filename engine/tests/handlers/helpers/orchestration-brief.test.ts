@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import orchestration, { briefInvocation } from "../../../src/handlers/helpers/orchestration";
-import { parseOperatorNote, type ImplementationBrief } from "../../../src/core/implementation-brief";
+import type { ImplementationBrief } from "../../../src/core/implementation-brief";
+import { admittedNote } from "../../fixtures/operator-note";
 
 /** The typed `orchestration brief` projection and its argument grammar. */
 describe("briefInvocation", () => {
@@ -32,13 +33,11 @@ describe("briefInvocation", () => {
 
 describe("briefInvocation with operator notes (#119)", () => {
   it("puts each note on its own LOOM_OPERATOR_NOTE line of both harnesses' marker", () => {
-    const note = parseOperatorNote("touch handler-routes.ts");
-    if (!note.ok) throw new Error(note.error);
     const brief: ImplementationBrief = {
       taskId: "T2", agent: "code-implementer-agent", prompt: "rendered brief",
       dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
     };
-    const invocation = briefInvocation(brief, [note.value], "opus", false);
+    const invocation = briefInvocation(brief, [admittedNote("touch handler-routes.ts")], "opus", false);
     const marker = "LOOM_IMPLEMENTATION_BRIEF: T2\nLOOM_OPERATOR_NOTE: touch handler-routes.ts";
     expect(invocation.pi.task).toBe(marker);
     expect(invocation.claude.prompt).toBe(marker);

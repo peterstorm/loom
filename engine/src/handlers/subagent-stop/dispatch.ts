@@ -126,7 +126,8 @@ export const runDispatch = async (
   // can look clean while review evidence was silently lost. Cleanup runs after
   // category settlement so the exact TaskGraph pointer lease remains live for
   // every handler that resolves session authority.
-  const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<HookResult | null> => {
+  type ChildFailure = Extract<HookResult, { kind: "error" | "block" }>;
+  const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<ChildFailure | null> => {
     try {
       const result = await fn();
       if (result.kind === "error" || result.kind === "block") return result;
@@ -378,7 +379,7 @@ export const runDispatch = async (
     }
   }
 
-  const childFailure: HookResult | null = await match(category)
+  const childFailure: ChildFailure | null = await match(category)
     .with("phase", () => runChild("advancePhase", () => advancePhase(stdin, args)))
     .with("impl", () => runChild("updateTaskStatus", () =>
       runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
@@ -403,16 +404,10 @@ export const runDispatch = async (
   const cleanupFailure = await runCleanup();
   const noted = stopCheckNote === undefined ? "" : `; stop checks noted: ${stopCheckNote}`;
   if (cleanupFailure !== null) {
-    const categoryMessage = childFailure !== null && (childFailure.kind === "error" || childFailure.kind === "block")
-      ? `; category settlement also failed: ${childFailure.message}`
-      : "";
+    const categoryMessage = childFailure === null ? "" : `; category settlement also failed: ${childFailure.message}`;
     return { kind: "error", message: `${cleanupFailure}${categoryMessage}${noted}` };
   }
-  if (childFailure !== null) {
-    return childFailure.kind === "error" || childFailure.kind === "block"
-      ? { ...childFailure, message: `${childFailure.message}${noted}` }
-      : childFailure;
-  }
+  if (childFailure !== null) return { ...childFailure, message: `${childFailure.message}${noted}` };
   return stopCheckNote === undefined ? { kind: "passthrough" } : { kind: "passthrough", systemMessage: stopCheckNote };
 };
 

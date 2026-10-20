@@ -1,6 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { expandImplementationBriefMarkers, type RenderTaskBrief } from "../../../pi/implementation-brief-expansion";
+import { expandImplementationBriefMarkers } from "../../../pi/implementation-brief-expansion";
+import type { RenderTaskBrief } from "../../src/core/implementation-brief";
 
 const briefs: Readonly<Record<string, { agent: string; prompt: string }>> = {
   T5: { agent: "code-implementer-agent", prompt: "**Task ID:** T5 rendered brief" },
