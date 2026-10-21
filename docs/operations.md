@@ -613,6 +613,50 @@ A failure reads `proof:red-then-green-unproven:<gap>` in the settlement line and
 
 The retry brief tells the agent to return its implementation files to the attempt baseline with one Bash call, observe red, and then implement. The call runs from the repository root and first checks that the baseline is a commit. The baseline is the Task's `start_sha`, or `HEAD` when none was recorded; the brief then says that the uncommitted changes are discarded. The call restores each file the baseline has (`git restore`) and deletes each file the Task created (`rm -f`). If the baseline is not a commit, it fails before changing anything. A `ledger-unavailable` gap, or an unreadable ledger at settlement, is infrastructure. It does not use up the semantic attempt.
 
+To see the facts settlement judged, numbered the way the gap and the stored evidence cite them, read the attempt's epoch (see [Reading an attempt's ledger epoch](#reading-an-attempts-ledger-epoch)). For the I6 judgment itself, use [`helper red-then-green-status`](#where-does-a-task-stand-on-i6).
+
+### Reading an attempt's ledger epoch
+
+Use this when an I6 result, or a `red #3` / `green #5` reference, needs checking against what the agent actually ran and wrote. The script prints one epoch of a session's evidence ledger, or lists the session's epochs. It runs in place from the repository:
+
+```bash
+# List the session's epochs, with each epoch's fact count.
+bun scripts/ledger-epoch.ts --session <session-id>
+
+# Print one attempt's facts, numbered as I6 settlement numbers them.
+bun scripts/ledger-epoch.ts --session <session-id> --agent <agent-id> --type <agent-type>
+```
+
+`--agent` and `--type` are given together or not at all. The session id is the Claude Code session that dispatched the Task (`CLAUDE_CODE_SESSION_ID` in the orchestrator's Bash commands).
+
+**Which epoch is the attempt's.** An epoch is `<agentId>:<agentType>`, the same identity settlement builds with `epochOf` when it judges the attempt. The agent id is the `agentId` of the Task's implementation-attempt sidecar (`<session>.<hex agent id>.implementation-attempt.json` in the subagent directory). The agent type is the subagent type the Task was dispatched with, without its plugin namespace: `loom:code-implementer-agent` is `code-implementer-agent`. The settlement line names the Task, not the agent, and cleanup removes the sidecar once the attempt settles. When neither is at hand, run the index form first: it prints each epoch in the order it first appears in the ledger, as `<agentId>:<agentType> — <n> fact(s)`, below a `<n> epoch(s)` header.
+
+**Positions.** The epoch view opens with `epoch <agentId>:<agentType> — <n> fact(s)` and prints one line per fact, `#<N> <Kind> …`. `N` is the fact's 0-based position in the epoch's ordered events, the same array settlement hands the I6 judge, so it is the number I6 evidence cites. If the evidence reads red `#3`, first write `#4`, green `#5`, those are lines `#3`, `#4` and `#5` here. Duplicate deliveries (the same `callId` and event recorded twice) are already dropped, exactly as settlement drops them, so the numbering never counts a fact twice. Records are printed as recorded. Nothing is reordered, escaped or truncated, and no `callId` is shown.
+
+**How each fact reads.**
+
+- `#N FileWrite <path> (via tool)` or `(via shell)`: a write through an edit tool, or one a shell command minted (such as `mv`, `cp` or a redirect).
+- `#N FileRead <path>`.
+- `#N TestRun <command>`, followed by indented detail lines:
+  - `exit <code>`, or `exit none recorded` when the ledger holds no exit code for the run;
+  - `no structured report` when no runner report was parsed for the run, or `report <source>: total <t>, failed <f>` when one was, followed by:
+    - `per-file results not recorded` when the report carries no per-file results;
+    - otherwise one line per test file, in report order: `<file>: executed <e>, failed <f>, skipped <s>`, with `, collection error` added when the file failed to collect. A report with an empty result list reads `no per-file results`.
+
+A run that reads `exit none recorded`, `no structured report` or `per-file results not recorded` is never a qualifying run, because a qualifying run needs an exit code and a parsed report with per-file results (see [Task fails I6](#task-fails-i6-red-then-green)). Such runs are what a `red-missing` or `green-missing` gap with `untrustedOnly: true` means: tests ran, but no run qualified. The view shows the facts; it does not mark which runs qualify.
+
+**Where the ledger is.** The script reads `$LOOM_SUBAGENT_DIR/<session>.evidence.jsonl`, with `LOOM_SUBAGENT_DIR` defaulting to `/tmp/claude-subagents`, the same file the hooks append to and settlement reads. Set `LOOM_SUBAGENT_DIR` to read a ledger elsewhere. The SessionStart stale sweep deletes old ledgers, so read the epoch while the session's files are still there.
+
+**Outcomes and exit codes.**
+
+- **0**: the view was printed on stdout. An epoch with no facts prints `epoch <agentId>:<agentType> holds no facts`, and an existing ledger with no records prints `ledger holds no epochs`. Both are statements, not refusals: they mean the ledger exists and holds nothing for that query.
+- **1**: a ledger refusal on stderr, with empty stdout. `ledger-epoch: no evidence ledger at <path>` names the path it looked for. A missing ledger is refused rather than read as empty, so it never looks like "the agent recorded nothing". An unreadable or corrupt ledger relays the engine's own message, `ledger-epoch: evidence ledger <path> is corrupt; refusing partial evidence: line N: <error>`. `line N` counts non-blank lines, which in practice is the physical line.
+- **2**: a usage refusal on stderr, with empty stdout: the reason, then the usage line. It covers a missing `--session`, `--agent` without `--type` or the reverse, an unknown or leftover argument, and an id the engine's identity parsers reject, such as `--session ../x`. No argument can address a file outside the subagent directory.
+
+The script is read-only. It never writes, truncates or creates a file, including the ledger and the subagent directory, so it is safe to run while a Wave, a Wave Gate or a subagent is live.
+
+**What it does not do.** It never judges I6: it does not say whether a run qualifies or whether the Task's red-then-green order holds. For that judgment, run [`helper red-then-green-status`](#where-does-a-task-stand-on-i6). It covers only Claude Code attempt epochs. A Pi implementation child's epoch, recorded under its parent-issued write grant, is not covered, and the script prints no machine-readable output.
+
 ### Reviewer evidence is missing
 
 Registered programs derive the exact missing slots and issue retry requests. Resume the program; do not re-run the whole roster or manually write a transcript.

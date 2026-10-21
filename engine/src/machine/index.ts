@@ -91,6 +91,8 @@ export {
   sessionScopedPath,
   appendEvidence,
   readEvidence,
+  readEvidenceLedger,
+  type EvidenceLedgerRead,
   recordCallStart,
   callStartFor,
   readBindings,

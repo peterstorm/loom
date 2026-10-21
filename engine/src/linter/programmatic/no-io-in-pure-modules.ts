@@ -213,6 +213,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // extension, the routing-config loader and the model guard all share; the
   // shells supply os.homedir().
   "engine/src/core/pi-agent-directory.ts",
+  // Ledger Epoch View: the read-only rendering of one epoch's facts as I6
+  // numbers them.
+  "engine/src/core/ledger-epoch-view.ts",
   // The one rule for the environment every project command runs under; the
   // completion-check runner applies it at its single spawn site.
   "engine/src/core/project-command-environment.ts",
