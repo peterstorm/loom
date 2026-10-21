@@ -40,9 +40,11 @@ import {
   closeAnchorGuarded,
   openDirectoryNoFollow,
   readDirectoryFileNoFollow,
+  removeDirectoryRegularFileNoFollow,
   resolveBaseDirectory,
   withAnchoredDirectoryHandleLock,
   writeDirectoryFileAtomicModeNoFollow,
+  writeDirectoryFileExclusiveNoFollow,
   type AnchoredDirectory,
   type AnchoredDirectoryIdentity,
 } from "./orchestration/no-follow-fs";
@@ -572,6 +574,29 @@ export class StateManager {
    */
   async replace(state: TaskGraph): Promise<void> {
     await this.atomicWrite(() => ({ state, value: undefined }));
+  }
+
+  /**
+   * Retire a finished graph: under the TaskGraph lock, load it, let the caller's
+   * pure decision name the archive leaf (or refuse), publish the exact bytes to
+   * that leaf beside the graph (exclusively — an existing archive is never
+   * overwritten), then remove the live graph. The archive is published before
+   * the removal, so a failure in between leaves both, never neither.
+   */
+  async archiveAndRemove(
+    decide: (graph: ParsedTaskGraph) => DomainResult<string, string>,
+  ): Promise<DomainResult<string, string>> {
+    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
+    const directory = this.openAuthorityDirectory();
+    return withStateDirectoryAsync(directory, `TaskGraph archive of ${this.path}`, () =>
+      withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+        const bytes = readDirectoryFileNoFollow(directory, this.authority.leaf);
+        const decision = decide(this.loadFrom(directory));
+        if (!decision.ok) return decision;
+        writeDirectoryFileExclusiveNoFollow(directory, decision.value, bytes);
+        removeDirectoryRegularFileNoFollow(directory, this.authority.leaf);
+        return decision;
+      }));
   }
 
   /** lock → derive/parse → stage read-only bytes → anchored pathname rename → unlock */

@@ -7,12 +7,22 @@
  * look stale on its own mtime while the session is demonstrably live. A
  * session's files are deleted only when the MAX mtime across ALL of its
  * files (every SESSION_SUFFIXES entry — the single source of truth in
- * machine/evidence.ts) exceeds STALE_SUBAGENT_TTL_MS (shared with the
- * machine-binding liveness TTL). Files that match no known session suffix
- * fall back to their own mtime.
+ * machine/evidence.ts — plus the per-agent sidecars) exceeds
+ * STALE_SUBAGENT_TTL_MS (shared with the machine-binding liveness TTL). Files
+ * that match no known session suffix fall back to their own mtime.
+ *
+ * Idle time is not death. A session can sit idle past the TTL and still be
+ * alive (an overnight pause, or an orchestrator waiting on its operator), and
+ * its ledger is the I6 evidence of any attempt it has in flight. So two kinds
+ * of session are never swept, whatever their age:
+ *   - the session that is starting (SessionStart fires on resume too, and the
+ *     resumed session is alive by definition);
+ *   - a session bound to a TaskGraph file that still exists, through its
+ *     `<session>.task_graph` pointer. Once the graph is cleaned up, the
+ *     session's files age out normally.
  */
 
-import { readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { passthroughResult, type HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
@@ -20,10 +30,18 @@ import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
   SESSION_SUFFIXES,
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
+  parseCanonicalTaskGraphPointer,
+  parseSessionId,
 } from "../../machine";
+import { STOP_CHECK_NOTE_SUFFIX, sidecarKey } from "../../stop-check-note-sidecar";
+
+/** The per-session TaskGraph pointer that binds a session to its graph. */
+const TASK_GRAPH_POINTER_SUFFIX = ".task_graph";
 
 /** Pure: session id for a tracking file, or null when the name matches no
- *  known per-session suffix. */
+ *  known per-session suffix. A stop-check note sidecar is keyed by the
+ *  sidecar form of its session id (`sidecarKey`), which equals the id for
+ *  every id made only of letters, digits, `_` and `-`. */
 export function sessionOfEntry(entry: string): string | null {
   for (const suffix of [IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX, TASK_GRAPH_POINTER_BINDING_SUFFIX]) {
     if (!entry.endsWith(suffix)) continue;
@@ -36,6 +54,11 @@ export function sessionOfEntry(entry: string): string | null {
     }
     return null;
   }
+  if (entry.endsWith(STOP_CHECK_NOTE_SUFFIX)) {
+    const keyed = entry.slice(0, -STOP_CHECK_NOTE_SUFFIX.length);
+    const separator = keyed.indexOf(".");
+    return separator > 0 && separator < keyed.length - 1 ? keyed.slice(0, separator) : null;
+  }
   for (const suffix of SESSION_SUFFIXES) {
     if (entry.endsWith(suffix) && entry.length > suffix.length) {
       return entry.slice(0, -suffix.length);
@@ -47,12 +70,13 @@ export function sessionOfEntry(entry: string): string | null {
 /**
  * Pure: which entries are stale, judged per session group. `mtimes` maps
  * each entry to its mtime (ms); entries in the same session group share the
- * group's max mtime, ungrouped entries stand alone.
+ * group's max mtime, ungrouped entries stand alone. A session in
+ * `protectedSessions` (alive, or not observable) is never stale.
  */
 export function staleEntries(
   mtimes: ReadonlyMap<string, number>,
   cutoffMs: number,
-  unobservableSessions: ReadonlySet<string> = new Set(),
+  protectedSessions: ReadonlySet<string> = new Set(),
 ): string[] {
   const groupMax = new Map<string, number>();
   for (const [entry, mtime] of mtimes) {
@@ -63,18 +87,38 @@ export function staleEntries(
   return [...mtimes.entries()]
     .filter(([entry, mtime]) => {
       const session = sessionOfEntry(entry);
-      if (session !== null && unobservableSessions.has(session)) return false;
+      if (session !== null && protectedSessions.has(session)) return false;
       const anchor = session === null ? mtime : (groupMax.get(session) ?? mtime);
       return anchor < cutoffMs;
     })
     .map(([entry]) => entry);
 }
 
+/** Pure: the session ids a starting session's files may be grouped under — the
+ *  id itself and its sidecar key. */
+export function startingSessionKeys(sessionId: string): readonly string[] {
+  return [...new Set([sessionId, sidecarKey(sessionId)])];
+}
+
+/** Pure: the starting session named by SessionStart hook input, or null when the
+ *  input carries no usable `session_id` (then nothing is protected as starting). */
+export function startingSessionOf(stdin: string): string | null {
+  let input: unknown;
+  try {
+    input = JSON.parse(stdin);
+  } catch {
+    return null;
+  }
+  if (typeof input !== "object" || input === null) return null;
+  const raw = (input as Readonly<Record<string, unknown>>)["session_id"];
+  return typeof raw === "string" ? parseSessionId(raw) : null;
+}
+
 /** Shell: sweep one tracking dir. Dir is a parameter so tests can run the
  *  sweep hermetically against a temp dir (SUBAGENT_DIR freezes at first
  *  config import, which a shared-process test run cannot re-point). */
 export type StaleCleanupDiagnostic = Readonly<{
-  operation: "read-directory" | "stat" | "remove";
+  operation: "read-directory" | "stat" | "read" | "remove";
   path: string;
   cause: string;
 }>;
@@ -87,6 +131,9 @@ export type DirectoryProbe =
 export type StaleSessionOperations = Readonly<{
   probeDirectory: (path: string) => DirectoryProbe;
   mtime: (path: string) => number;
+  /** A file's text, or null when it does not exist; any other failure throws. */
+  readText: (path: string) => string | null;
+  exists: (path: string) => boolean;
   remove: (path: string) => void;
 }>;
 
@@ -104,9 +151,20 @@ function probeDirectory(path: string): DirectoryProbe {
   }
 }
 
+function readOptionalText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 const REAL_STALE_SESSION_OPERATIONS: StaleSessionOperations = Object.freeze({
   probeDirectory,
   mtime: (path) => statSync(path).mtimeMs,
+  readText: readOptionalText,
+  exists: existsSync,
   remove: (path) => rmSync(path, { recursive: true, force: true }),
 });
 
@@ -141,11 +199,44 @@ export function isDeadStatFailure(error: unknown): boolean {
   return typeof code === "string" && DEAD_ENTRY_STAT_CODES.has(code);
 }
 
+/**
+ * Shell: the sessions bound to a TaskGraph that still exists. A malformed
+ * pointer binds nothing (it ages out like any stale file); an unreadable one
+ * may be live, so it protects its session and is reported.
+ */
+function graphBoundSessions(
+  dir: string,
+  entries: readonly string[],
+  operations: StaleSessionOperations,
+  diagnostics: StaleCleanupDiagnostic[],
+): ReadonlySet<string> {
+  const bound = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.endsWith(TASK_GRAPH_POINTER_SUFFIX)) continue;
+    const session = sessionOfEntry(entry);
+    if (session === null || entry !== `${session}${TASK_GRAPH_POINTER_SUFFIX}`) continue;
+    const path = join(dir, entry);
+    let raw: string | null;
+    try {
+      raw = operations.readText(path);
+    } catch (error) {
+      bound.add(session);
+      diagnostics.push(diagnostic("read", path, error));
+      continue;
+    }
+    if (raw === null) continue;
+    const pointer = parseCanonicalTaskGraphPointer(raw);
+    if (pointer.ok && operations.exists(pointer.value)) bound.add(session);
+  }
+  return bound;
+}
+
 /** Shell: returns every failed operation with its exact path and cause. */
 export function sweepStaleSessions(
   dir: string,
   cutoffMs: number,
   operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
+  startingSession: string | null = null,
 ): readonly StaleCleanupDiagnostic[] {
   const directory = operations.probeDirectory(dir);
   if (directory.kind === "absent") return Object.freeze([]);
@@ -157,14 +248,14 @@ export function sweepStaleSessions(
 
   const diagnostics: StaleCleanupDiagnostic[] = [];
   const mtimes = new Map<string, number>();
-  const unobservableSessions = new Set<string>();
+  const protectedSessions = new Set<string>(startingSession === null ? [] : startingSessionKeys(startingSession));
   for (const entry of directory.entries) {
     const path = join(dir, entry);
     try {
       mtimes.set(entry, operations.mtime(path));
     } catch (error) {
       const session = sessionOfEntry(entry);
-      if (session !== null) unobservableSessions.add(session);
+      if (session !== null) protectedSessions.add(session);
       if (isDeadStatFailure(error)) {
         // Provably-dead entry (self-referential/dangling symlink): rmSync
         // removes the link itself, never its target. Success heals the
@@ -180,7 +271,10 @@ export function sweepStaleSessions(
       diagnostics.push(diagnostic("stat", path, error));
     }
   }
-  for (const entry of staleEntries(mtimes, cutoffMs, unobservableSessions)) {
+  for (const session of graphBoundSessions(dir, [...mtimes.keys()], operations, diagnostics)) {
+    protectedSessions.add(session);
+  }
+  for (const entry of staleEntries(mtimes, cutoffMs, protectedSessions)) {
     const path = join(dir, entry);
     try {
       operations.remove(path);
@@ -196,14 +290,15 @@ export function runCleanupStaleSubagents(
   dir: string,
   nowMs: number,
   operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
+  startingSession: string | null = null,
 ) {
-  const diagnostics = sweepStaleSessions(dir, nowMs - STALE_SUBAGENT_TTL_MS, operations);
+  const diagnostics = sweepStaleSessions(dir, nowMs - STALE_SUBAGENT_TTL_MS, operations, startingSession);
   return passthroughResult(
     diagnostics.length === 0 ? undefined : diagnostics.map(renderDiagnostic).join("\n"),
   );
 }
 
-const handler: HookHandler = async (_stdin, _args) =>
-  runCleanupStaleSubagents(SUBAGENT_DIR, Date.now());
+const handler: HookHandler = async (stdin, _args) =>
+  runCleanupStaleSubagents(SUBAGENT_DIR, Date.now(), REAL_STALE_SESSION_OPERATIONS, startingSessionOf(stdin));
 
 export default handler;

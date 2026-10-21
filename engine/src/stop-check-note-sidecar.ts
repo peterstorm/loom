@@ -15,10 +15,11 @@ import { join } from "node:path";
 import { subagentDir } from "./config";
 import { parseStopCheckNote, type StopCheckNote } from "./core/stop-check-note";
 
-const SUFFIX = ".stop-check-note.json";
+/** Sidecar name suffix; the SessionStart sweep groups these files with their session. */
+export const STOP_CHECK_NOTE_SUFFIX = ".stop-check-note.json";
 
 /** A key as one file-name segment. "." is excluded, so it separates the session from the agent unambiguously. */
-const safe = (key: string): string => key.replace(/[^A-Za-z0-9_-]/g, "_");
+export const sidecarKey = (key: string): string => key.replace(/[^A-Za-z0-9_-]/g, "_");
 
 const describe = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
 
@@ -26,11 +27,11 @@ const errnoCode = (error: unknown): unknown =>
   typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
 
 /** The session's prefix: every sidecar of the session, and only of it, starts with it. */
-const sessionPrefix = (sessionId: string): string => `${safe(sessionId)}.`;
+const sessionPrefix = (sessionId: string): string => `${sidecarKey(sessionId)}.`;
 
 /** Where one agent's note waits: `<session>.<agent>` with this suffix, beside the agent's other runtime files. */
 export function stopCheckNotePath(sessionId: string, agentId: string, directory: string = subagentDir()): string {
-  return join(directory, `${sessionPrefix(sessionId)}${safe(agentId)}${SUFFIX}`);
+  return join(directory, `${sessionPrefix(sessionId)}${sidecarKey(agentId)}${STOP_CHECK_NOTE_SUFFIX}`);
 }
 
 export type PublishedNote = Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>;
@@ -76,7 +77,7 @@ export function drainStopCheckNotes(sessionId: string, directory: string = subag
   const prefix = sessionPrefix(sessionId);
   const notes: StopCheckNote[] = [];
   const faults: string[] = [];
-  for (const name of [...names].filter((entry) => entry.startsWith(prefix) && entry.endsWith(SUFFIX)).sort()) {
+  for (const name of [...names].filter((entry) => entry.startsWith(prefix) && entry.endsWith(STOP_CHECK_NOTE_SUFFIX)).sort()) {
     const path = join(directory, name);
     const claimed = `${path}.${process.pid}.${randomUUID()}.claimed`;
     try {

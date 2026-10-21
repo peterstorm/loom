@@ -220,6 +220,38 @@ function collectMoveCopyTargets(segment: string, out: string[]): void {
   }
 }
 
+/** The process-stream and sink devices a write can name: `/dev/null`, the
+ *  stdio streams, the controlling terminal, and `/dev/fd/<n>`. */
+const DEVICE_STREAM_PATH = /^\/dev\/(?:null|stdin|stdout|stderr|tty|fd\/\d+)$/;
+
+/**
+ * Whether a write target names a device stream rather than a file: writing
+ * to it stores nothing anyone can read back from the filesystem, so it is
+ * not a file write (`cmd 2>/dev/null`, `| tee /dev/stderr`, `>/dev/fd/3`).
+ *
+ * Only an ABSOLUTE target can be judged here. It is normalized lexically
+ * first, so `//dev/null` and `/dev/./null` match while `/dev/../repo/x`
+ * does not. A relative target is never a device: targets are not resolved
+ * against a cwd in this module (consumers do that), and keeping it can only
+ * over-mint. The set is closed on purpose — `/dev/shm/…` and other paths
+ * under `/dev` are real, readable files and stay write targets.
+ */
+export function isDeviceStreamPath(target: string): boolean {
+  return target.startsWith("/") && DEVICE_STREAM_PATH.test(normalizeAbsolute(target));
+}
+
+/** An absolute path with empty, `.` and `..` segments folded lexically
+ *  (`..` at the root stays at the root) and no trailing slash. Lexical
+ *  only — no symlink is followed, which the pure core cannot see. */
+function normalizeAbsolute(path: string): string {
+  const segments = path.split("/").reduce<readonly string[]>(
+    (kept, segment) =>
+      segment === "" || segment === "." ? kept : segment === ".." ? kept.slice(0, -1) : [...kept, segment],
+    [],
+  );
+  return `/${segments.join("/")}`;
+}
+
 /**
  * Every file path a Bash command line writes, as far as its text names it:
  * redirections (`>`, `>>`, `&>`, `n>`, `n>>`), `tee` targets, and the
@@ -232,6 +264,8 @@ function collectMoveCopyTargets(segment: string, out: string[]): void {
  * Unexpandable targets (`$VAR/…`) are kept as-is: they resolve to paths
  * that match nothing, which only fails closed. Targets are NOT resolved
  * here — consumers normalize with their cwd like every other FileWrite.
+ * A device stream (`isDeviceStreamPath`: `2>/dev/null`, `tee /dev/stderr`)
+ * is not a file and is never a target.
  *
  * Under-minting is the other direction, and it is not closed: only these
  * literal forms are read. A file created by any other command (`ln`,
@@ -248,5 +282,5 @@ export function extractShellWriteTargets(command: string): string[] {
     collectTeeTargets(segment, targets);
     collectMoveCopyTargets(segment, targets);
   }
-  return [...new Set(targets)];
+  return [...new Set(targets)].filter((target) => !isDeviceStreamPath(target));
 }

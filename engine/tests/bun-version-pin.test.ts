@@ -6,11 +6,15 @@
  */
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkBunVersion, describeBunVersionRefusal, type BunVersion } from "../scripts/bun-version-pin";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
+
+const ENGINE = fileURLToPath(new URL("../", import.meta.url));
+const REPOSITORY = fileURLToPath(new URL("../../", import.meta.url));
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -98,7 +102,7 @@ describe("hardCodedBunVersions", () => {
 });
 
 describe("the repository's Bun pin", () => {
-  const repository = resolve("..");
+  const repository = REPOSITORY;
   const pin = readFileSync(join(repository, ".bun-version"), "utf8");
   const read = (path: string): string => readFileSync(join(repository, path), "utf8");
   const workflowsDir = ".github/workflows";
@@ -136,7 +140,7 @@ describe("bun-version-pin CLI", () => {
     dirs.push(root);
     mkdirSync(join(root, "engine/scripts"), { recursive: true });
     mkdirSync(join(root, "bin"));
-    cpSync(resolve("scripts/bun-version-pin.ts"), join(root, "engine/scripts/bun-version-pin.ts"));
+    cpSync(join(ENGINE, "scripts/bun-version-pin.ts"), join(root, "engine/scripts/bun-version-pin.ts"));
     if (pin !== null) writeFileSync(join(root, ".bun-version"), pin);
     writeFileSync(join(root, "bin/version"), local);
     writeFileSync(join(root, "bin/bun"), `#!/usr/bin/env bash\ncat ${JSON.stringify(join(root, "bin/version"))}\nexit ${status}\n`);

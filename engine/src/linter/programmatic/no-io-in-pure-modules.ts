@@ -216,6 +216,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The one rule for the environment every project command runs under; the
   // completion-check runner applies it at its single spawn site.
   "engine/src/core/project-command-environment.ts",
+  // Orchestration Completion: whether a TaskGraph's work is finished, and its
+  // archive name; `helper complete-orchestration` applies it under the lock.
+  "engine/src/core/orchestration-completion.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

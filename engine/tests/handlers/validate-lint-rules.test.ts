@@ -36,6 +36,10 @@ describe("validate-lint-rules helper", () => {
   });
 
   it("passes with no explicit dir when the default project dir is absent — but says so on stderr", async () => {
+    // The default project dir resolves against cwd; an empty cwd makes "absent" true by construction,
+    // whichever directory the runner was started from (the repository root carries real project rules).
+    const previousCwd = process.cwd();
+    process.chdir(tempRulesDir());
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await handler("", []);
@@ -44,6 +48,7 @@ describe("validate-lint-rules helper", () => {
       expect(stderrText).toContain("0 project rules validated");
     } finally {
       stderrSpy.mockRestore();
+      process.chdir(previousCwd);
     }
   });
 

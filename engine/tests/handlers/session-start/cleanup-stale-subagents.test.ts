@@ -22,8 +22,11 @@ import {
   runCleanupStaleSubagents,
   sessionOfEntry,
   staleEntries,
+  startingSessionKeys,
+  startingSessionOf,
   sweepStaleSessions,
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
+import { STOP_CHECK_NOTE_SUFFIX } from "../../../src/stop-check-note-sidecar";
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
   SESSION_SUFFIXES,
@@ -32,6 +35,9 @@ import {
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../fixtures/pi-session";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
+
+/** Injected operations for a directory holding no readable TaskGraph pointer. */
+const NO_POINTERS = { readText: () => null, exists: () => false } as const;
 
 afterAll(() => {
   disposeFixturePiSessions();
@@ -53,6 +59,31 @@ describe("sessionOfEntry (pure)", () => {
 
   it("returns null for unknown names", () => {
     expect(sessionOfEntry("random.txt")).toBeNull();
+  });
+
+  it("groups a stop-check note sidecar with its session", () => {
+    expect(sessionOfEntry(`s-1.aa5f1a5b83ae82b33${STOP_CHECK_NOTE_SUFFIX}`)).toBe("s-1");
+    expect(sessionOfEntry(`s-1.${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionOfEntry(`.agent${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionOfEntry(STOP_CHECK_NOTE_SUFFIX)).toBeNull();
+  });
+});
+
+describe("startingSessionOf (pure)", () => {
+  it("reads a usable session_id from SessionStart input", () => {
+    expect(startingSessionOf(JSON.stringify({ session_id: "2f935faa-edaa", source: "resume" }))).toBe("2f935faa-edaa");
+  });
+
+  it("is null when the input names no usable session", () => {
+    for (const stdin of ["", "not json", "null", "[]", JSON.stringify({}), JSON.stringify({ session_id: 7 }),
+      JSON.stringify({ session_id: "../escape" }), JSON.stringify({ session_id: "" })]) {
+      expect(startingSessionOf(stdin), stdin).toBeNull();
+    }
+  });
+
+  it("keys a session both as itself and as its sidecar form", () => {
+    expect(startingSessionKeys("s-1")).toEqual(["s-1"]);
+    expect(startingSessionKeys("s.1")).toEqual(["s.1", "s_1"]);
   });
 });
 
@@ -185,6 +216,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("a stat failure protects readable siblings in the same session while unrelated stale sessions are swept", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({
         kind: "present",
         entries: ["uncertain.active", "uncertain.machine", "dead.active"],
@@ -207,6 +239,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("removes provably-dead entries, surfacing only failed removals", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({
         kind: "present",
         entries: ["looped.active", "dangling.active", "stale.active"],
@@ -239,6 +272,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({ kind: "present", entries: ["unstatable.active", "stale.active"] }),
       mtime: (path) => {
         if (path.endsWith("unstatable.active")) throw new Error("EACCES stat");
@@ -267,12 +301,14 @@ describe("sweepStaleSessions (fs)", () => {
 
   it("distinguishes ENOENT absence from a directory probe failure", () => {
     expect(sweepStaleSessions("/missing", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({ kind: "absent" }),
       mtime: () => { throw new Error("must not stat an absent directory"); },
       remove: () => { throw new Error("must not remove from an absent directory"); },
     })).toEqual([]);
 
     const diagnostics = sweepStaleSessions("/unreadable", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({ kind: "unavailable", cause: "EACCES readdir" }),
       mtime: () => { throw new Error("must not stat an unreadable directory"); },
       remove: () => { throw new Error("must not remove from an unreadable directory"); },
@@ -349,6 +385,86 @@ describe("sweepStaleSessions (fs)", () => {
       rmSync(privateDir, { recursive: true, force: true });
       rmSync(ambientDir, { recursive: true, force: true });
     }
+  });
+
+  // Idle is not dead: an overnight-paused session resumed and its own SessionStart
+  // swept its I6 ledger (G4 slice 2 re-pilot, N4).
+  describe("live sessions survive however idle they are", () => {
+    const old = new Date(Date.now() - 12 * 3_600_000);
+    const writeOld = (dir: string, name: string, content = "x\n") => {
+      writeFileSync(join(dir, name), content);
+      utimesSync(join(dir, name), old, old);
+    };
+    const freshDir = () => mkdtempSync(join(tmpdir(), "loom-sweep-live-"));
+
+    it("the starting session keeps its whole group, sidecar included", () => {
+      const dir = freshDir();
+      const kept = ["s-resumed.evidence.jsonl", "s-resumed.active", "s-resumed.orchestration-runs.json",
+        `s-resumed.agent1${STOP_CHECK_NOTE_SUFFIX}`];
+      for (const name of [...kept, "s-other.evidence.jsonl"]) writeOld(dir, name);
+
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000, undefined, "s-resumed")).toEqual([]);
+
+      for (const name of kept) expect(existsSync(join(dir, name)), name).toBe(true);
+      expect(existsSync(join(dir, "s-other.evidence.jsonl"))).toBe(false);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("a session bound to an existing TaskGraph is kept; one whose graph is gone ages out", () => {
+      const dir = freshDir();
+      const graph = join(dir, "active_task_graph.json");
+      writeFileSync(graph, "{}");
+      writeOld(dir, "s-bound.evidence.jsonl");
+      writeOld(dir, "s-bound.task_graph", graph);
+      writeOld(dir, "s-orphan.evidence.jsonl");
+      writeOld(dir, "s-orphan.task_graph", join(dir, "removed_task_graph.json"));
+      writeOld(dir, "s-garbled.evidence.jsonl");
+      writeOld(dir, "s-garbled.task_graph", "relative/not-canonical.json");
+
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([]);
+
+      expect(existsSync(join(dir, "s-bound.evidence.jsonl"))).toBe(true);
+      expect(existsSync(join(dir, "s-bound.task_graph"))).toBe(true);
+      for (const name of ["s-orphan.evidence.jsonl", "s-orphan.task_graph", "s-garbled.evidence.jsonl", "s-garbled.task_graph"]) {
+        expect(existsSync(join(dir, name)), `${name} should be swept`).toBe(false);
+      }
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("an unreadable pointer protects its session and is reported", () => {
+      const removed: string[] = [];
+      const diagnostics = sweepStaleSessions("/tracking", 100, {
+        probeDirectory: () => ({ kind: "present", entries: ["s-maybe.task_graph", "s-maybe.evidence.jsonl", "s-dead.evidence.jsonl"] }),
+        mtime: () => 10,
+        readText: () => { throw new Error("EACCES read"); },
+        exists: () => { throw new Error("must not probe a graph it could not read"); },
+        remove: (path) => { removed.push(path); },
+      });
+
+      expect(removed).toEqual([join("/tracking", "s-dead.evidence.jsonl")]);
+      expect(diagnostics).toEqual([{ operation: "read", path: join("/tracking", "s-maybe.task_graph"), cause: "EACCES read" }]);
+    });
+
+    it("the SessionStart handler protects the session named on stdin", async () => {
+      const privateDir = mkdtempSync(join(tmpdir(), "loom-handler-resume-"));
+      try {
+        writeOld(privateDir, "resumed-session.evidence.jsonl");
+        writeOld(privateDir, "idle-other.evidence.jsonl");
+        const modulePath = fileURLToPath(
+          new URL("../../../src/handlers/session-start/cleanup-stale-subagents", import.meta.url),
+        );
+        const stdin = JSON.stringify({ session_id: "resumed-session", source: "resume" });
+        await promisify(execFile)("bun", [
+          "-e",
+          `import handler from ${JSON.stringify(modulePath)};\nconsole.log(JSON.stringify(await handler(${JSON.stringify(stdin)}, [])));`,
+        ], { cwd: privateDir, env: { ...fixturePiEnvironment(privateDir), LOOM_SUBAGENT_DIR: privateDir }, timeout: 15_000 });
+
+        expect(existsSync(join(privateDir, "resumed-session.evidence.jsonl"))).toBe(true);
+        expect(existsSync(join(privateDir, "idle-other.evidence.jsonl"))).toBe(false);
+      } finally {
+        rmSync(privateDir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("a missing dir is a no-op, and a clean injected handler wrapper passes through without diagnostics", () => {

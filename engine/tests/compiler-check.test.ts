@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { checkTypeScriptProject } from "../scripts/typecheck";
 
+const ENGINE = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectories: string[] = [];
 afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 
@@ -81,8 +83,8 @@ describe("real TypeScript compiler boundary", () => {
     const directory = dirname(project({ "src/index.ts": "export {};" }));
     mkdirSync(join(directory, "scripts"));
     mkdirSync(join(directory, "src/core"), { recursive: true });
-    cpSync(resolve("scripts/typecheck.ts"), join(directory, "scripts/typecheck.ts"));
-    cpSync(resolve("src/core/compiler-diagnostic-policy.ts"), join(directory, "src/core/compiler-diagnostic-policy.ts"));
+    cpSync(join(ENGINE, "scripts/typecheck.ts"), join(directory, "scripts/typecheck.ts"));
+    cpSync(join(ENGINE, "src/core/compiler-diagnostic-policy.ts"), join(directory, "src/core/compiler-diagnostic-policy.ts"));
     const result = spawnSync("bun", [join(directory, "scripts/typecheck.ts")], { cwd: directory, encoding: "utf8", timeout: 15_000 });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("typescript/lib/typescript.js");

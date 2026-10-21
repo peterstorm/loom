@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFile, type ExecFileException } from "node:child_process";
 import vitestConfig from "../vitest.config";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
 
-const repository = resolve("..");
+const ENGINE = fileURLToPath(new URL("../", import.meta.url));
+const repository = fileURLToPath(new URL("../../", import.meta.url));
 const rootPackage = JSON.parse(readFileSync(join(repository, "package.json"), "utf8"));
-const enginePackage = JSON.parse(readFileSync("package.json", "utf8"));
+const enginePackage = JSON.parse(readFileSync(join(ENGINE, "package.json"), "utf8"));
 const temporaryDirectories: string[] = [];
 afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 
@@ -52,12 +54,12 @@ if (stage === ${JSON.stringify(failingStage)}) process.exit(17);
   }
   mkdirSync(join(directory, "engine/scripts"), { recursive: true });
   mkdirSync(join(directory, "engine/src/core"), { recursive: true });
-  cpSync(resolve("scripts/typecheck.ts"), join(directory, "engine/scripts/typecheck.ts"));
-  cpSync(resolve("scripts/verify-prerequisites.sh"), join(directory, "engine/scripts/verify-prerequisites.sh"));
-  cpSync(resolve("scripts/bun-version-pin.ts"), join(directory, "engine/scripts/bun-version-pin.ts"));
+  cpSync(join(ENGINE, "scripts/typecheck.ts"), join(directory, "engine/scripts/typecheck.ts"));
+  cpSync(join(ENGINE, "scripts/verify-prerequisites.sh"), join(directory, "engine/scripts/verify-prerequisites.sh"));
+  cpSync(join(ENGINE, "scripts/bun-version-pin.ts"), join(directory, "engine/scripts/bun-version-pin.ts"));
   cpSync(join(repository, ".bun-version"), join(directory, ".bun-version"));
-  cpSync(resolve("src/core/compiler-diagnostic-policy.ts"), join(directory, "engine/src/core/compiler-diagnostic-policy.ts"));
-  symlinkSync(resolve("node_modules/typescript"), join(directory, "engine/node_modules/typescript"), "dir");
+  cpSync(join(ENGINE, "src/core/compiler-diagnostic-policy.ts"), join(directory, "engine/src/core/compiler-diagnostic-policy.ts"));
+  symlinkSync(join(ENGINE, "node_modules/typescript"), join(directory, "engine/node_modules/typescript"), "dir");
   return directory;
 }
 
@@ -214,8 +216,8 @@ describe("canonical verification command", () => {
     const directory = fixture(failingStage);
     // Use the installed runner and its real reporter, not the composition sentinel.
     rmSync(join(directory, "engine/node_modules/.bin/vitest"));
-    symlinkSync(resolve("node_modules/.bin/vitest"), join(directory, "engine/node_modules/.bin/vitest"));
-    symlinkSync(resolve("node_modules/vitest"), join(directory, "engine/node_modules/vitest"), "dir");
+    symlinkSync(join(ENGINE, "node_modules/.bin/vitest"), join(directory, "engine/node_modules/.bin/vitest"));
+    symlinkSync(join(ENGINE, "node_modules/vitest"), join(directory, "engine/node_modules/vitest"), "dir");
     writeFileSync(join(directory, "engine/enrollment.test.ts"), `
 import { beforeAll, describe, expect, it } from 'vitest';
 import { appendFileSync } from 'node:fs';

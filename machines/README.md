@@ -102,6 +102,12 @@ sweep) is treated as absent by every reader and reaped under the binding
 lock — recovery happens after the session idles for the TTL (or at the
 next SessionStart sweep), not the moment the agent dies.
 
+The SessionStart sweep deletes a whole session group (ledger, roster,
+bindings, sidecars) once all of it has idled past the TTL. It never deletes
+the session that is starting, because SessionStart also fires on resume, or
+a session whose `<session>.task_graph` pointer names a TaskGraph that still
+exists. An overnight-paused orchestration therefore keeps its I6 ledger.
+
 ## Module layout (machine-checked purity)
 
 `engine/src/machine/` is split along the FC/IS boundary and the split is
@@ -112,7 +118,8 @@ additionally walks the import closure so the reducer can never re-acquire
 
 - **Pure core** (no I/O, no env, no clock): `types.ts`, `advance.ts`
   (the reducer), `parse-machine.ts`, `extract-evidence.ts` (the Bash write
-  targets it mints come from the pure `engine/src/core/shell-write-targets.ts`),
+  targets it mints come from the pure `engine/src/core/shell-write-targets.ts`,
+  which drops device streams such as `2>/dev/null` via `isDeviceStreamPath`),
   `mermaid.ts`, `test-report.ts` (report parsing + the trust judgment),
   `evidence.ts` (identity brands, binding/ledger line parsing, epoch
   attribution, the `SessionRegistry` port), `harness-tool-call-types.ts` (the

@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 
 describe("orchestration status TaskGraph diagnostics", () => {
   it("preserves the state path and JSON parse cause instead of reporting a schema symptom", () => {
@@ -15,7 +18,7 @@ describe("orchestration status TaskGraph diagnostics", () => {
         "bun",
         ["src/cli.ts", "helper", "orchestration", "status", "--json"],
         {
-          cwd: process.cwd(),
+          cwd: ENGINE,
           encoding: "utf-8",
           env: { ...process.env, LOOM_STATE_PATH: statePath, PI_CODING_AGENT: "" },
         },
