@@ -1,9 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { parseStructuredTestReportBytes } from "../../src/core/structured-test-report";
+import { ENGINE } from "../fixtures/repository-roots";
 
 // These reporter smokes use disposable directories only, never a Loom Run writer.
 describe("real reporter bytes at the parser seam", () => {
@@ -41,8 +42,8 @@ describe("real reporter bytes at the parser seam", () => {
     try {
       const file = join(directory, "reporter.test.mjs");
       const report = join(directory, "report.json");
-      writeFileSync(file, `import { test } from ${JSON.stringify(resolve("node_modules/vitest/dist/index.js"))};\n${body}\n`);
-      const child = spawnSync(process.execPath, [resolve("node_modules/vitest/vitest.mjs"), "run", "--root", directory,
+      writeFileSync(file, `import { test } from ${JSON.stringify(join(ENGINE, "node_modules/vitest/dist/index.js"))};\n${body}\n`);
+      const child = spawnSync(process.execPath, [join(ENGINE, "node_modules/vitest/vitest.mjs"), "run", "--root", directory,
         "--reporter=json", "--outputFile", report, "--maxWorkers=1", "--no-file-parallelism"], { cwd: directory, timeout: 10000 });
       expect(child.error).toBeUndefined();
       expect(child.signal).toBeNull();

@@ -20,39 +20,96 @@ import { promisify } from "node:util";
 import {
   isDeadStatFailure,
   runCleanupStaleSubagents,
-  sessionOfEntry,
   staleEntries,
+  startingSessionOf,
   sweepStaleSessions,
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  parseSessionId,
+  STOP_CHECK_NOTE_SUFFIX,
+  sessionGroupKey,
+  sidecarKey,
+  sessionGroupOfTrackingFile,
   SESSION_SUFFIXES,
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
+  type SessionId,
 } from "../../../src/machine";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../fixtures/pi-session";
 
 const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
+
+/** Injected operations for a directory holding no readable TaskGraph pointer. */
+const NO_POINTERS = { readText: () => null, exists: () => false } as const;
+
+const session = (raw: string): SessionId => {
+  const parsed = parseSessionId(raw);
+  if (parsed === null) throw new Error(`fixture session id ${raw} is unsafe`);
+  return parsed;
+};
 
 afterAll(() => {
   disposeFixturePiSessions();
   rmSync(subDir, { recursive: true, force: true });
 });
 
-describe("sessionOfEntry (pure)", () => {
-  it("maps every per-session suffix (single-sourced SESSION_SUFFIXES) to its session id", () => {
+describe("sessionGroupOfTrackingFile (pure)", () => {
+  it("maps every per-session suffix (single-sourced SESSION_SUFFIXES) to its session group", () => {
     // Driven by the shared machine/evidence tuple — a suffix added to the
     // ledger's path helpers is automatically covered here.
     for (const suffix of SESSION_SUFFIXES) {
       const entry = suffix === IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX || suffix === TASK_GRAPH_POINTER_BINDING_SUFFIX
         ? `s-1.${Buffer.from("agent-1").toString("hex")}${suffix}`
         : `s-1${suffix}`;
-      expect(sessionOfEntry(entry), suffix).toBe("s-1");
-      expect(sessionOfEntry(suffix), `bare ${suffix}`).toBeNull();
+      expect(sessionGroupOfTrackingFile(entry), suffix).toBe("s-1");
+      expect(sessionGroupOfTrackingFile(suffix), `bare ${suffix}`).toBeNull();
     }
   });
 
   it("returns null for unknown names", () => {
-    expect(sessionOfEntry("random.txt")).toBeNull();
+    expect(sessionGroupOfTrackingFile("random.txt")).toBeNull();
+  });
+
+  it("groups a stop-check note sidecar with its session", () => {
+    expect(sessionGroupOfTrackingFile(`s-1.aa5f1a5b83ae82b33${STOP_CHECK_NOTE_SUFFIX}`)).toBe("s-1");
+    expect(sessionGroupOfTrackingFile(`s-1.${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionGroupOfTrackingFile(`.agent${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionGroupOfTrackingFile(STOP_CHECK_NOTE_SUFFIX)).toBeNull();
+  });
+
+  it("classifies every file of one session to ONE key, whatever its spelling", () => {
+    const attempt = `s.1.${Buffer.from("agent-1").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+    const note = `${sidecarKey("s.1")}.agent1${STOP_CHECK_NOTE_SUFFIX}`;
+    const groups = ["s.1.evidence.jsonl", "s.1.machine", attempt, note].map(sessionGroupOfTrackingFile);
+    expect(new Set(groups)).toEqual(new Set([sessionGroupKey("s.1")]));
+    expect(sessionGroupKey("s.1")).toBe("s_1");
+  });
+});
+
+describe("startingSessionOf (pure)", () => {
+  it("reads a usable session_id from SessionStart input", () => {
+    expect(startingSessionOf(JSON.stringify({ session_id: "2f935faa-edaa", source: "resume" })))
+      .toEqual({ kind: "named", sessionId: "2f935faa-edaa" });
+  });
+
+  it("empty input names no session and is not a failure", () => {
+    for (const stdin of ["", "  \n"]) expect(startingSessionOf(stdin)).toEqual({ kind: "absent" });
+  });
+
+  it("input that names no usable session is unusable, with its cause", () => {
+    const cases: readonly (readonly [string, RegExp])[] = [
+      ["not json", /not JSON/],
+      ["null", /not a JSON object/],
+      [JSON.stringify({}), /no string session_id/],
+      [JSON.stringify({ session_id: 7 }), /no string session_id/],
+      [JSON.stringify({ session_id: "../escape" }), /cannot name session files/],
+      [JSON.stringify({ session_id: "" }), /cannot name session files/],
+    ];
+    for (const [stdin, cause] of cases) {
+      const parsed = startingSessionOf(stdin);
+      expect(parsed.kind, stdin).toBe("unusable");
+      if (parsed.kind === "unusable") expect(parsed.cause, stdin).toMatch(cause);
+    }
   });
 });
 
@@ -111,7 +168,7 @@ describe("staleEntries (pure) — group max mtime governs", () => {
       ["uncertain.machine", cutoff - 10],
       ["dead.machine", cutoff - 10],
     ]);
-    expect(staleEntries(mtimes, cutoff, new Set(["uncertain"]))).toEqual(["dead.machine"]);
+    expect(staleEntries(mtimes, cutoff, new Set([sessionGroupKey("uncertain")]))).toEqual(["dead.machine"]);
   });
 });
 
@@ -185,6 +242,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("a stat failure protects readable siblings in the same session while unrelated stale sessions are swept", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({
         kind: "present",
         entries: ["uncertain.active", "uncertain.machine", "dead.active"],
@@ -207,6 +265,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("removes provably-dead entries, surfacing only failed removals", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({
         kind: "present",
         entries: ["looped.active", "dangling.active", "stale.active"],
@@ -239,6 +298,7 @@ describe("sweepStaleSessions (fs)", () => {
   it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({ kind: "present", entries: ["unstatable.active", "stale.active"] }),
       mtime: (path) => {
         if (path.endsWith("unstatable.active")) throw new Error("EACCES stat");
@@ -267,12 +327,14 @@ describe("sweepStaleSessions (fs)", () => {
 
   it("distinguishes ENOENT absence from a directory probe failure", () => {
     expect(sweepStaleSessions("/missing", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({ kind: "absent" }),
       mtime: () => { throw new Error("must not stat an absent directory"); },
       remove: () => { throw new Error("must not remove from an absent directory"); },
     })).toEqual([]);
 
     const diagnostics = sweepStaleSessions("/unreadable", 100, {
+      ...NO_POINTERS,
       probeDirectory: () => ({ kind: "unavailable", cause: "EACCES readdir" }),
       mtime: () => { throw new Error("must not stat an unreadable directory"); },
       remove: () => { throw new Error("must not remove from an unreadable directory"); },
@@ -348,6 +410,125 @@ describe("sweepStaleSessions (fs)", () => {
       chmodSync(join(privateDir, "noexec-dir"), 0o755); // restore before recursive rm
       rmSync(privateDir, { recursive: true, force: true });
       rmSync(ambientDir, { recursive: true, force: true });
+    }
+  });
+
+  // Idle is not dead: an overnight-paused session resumed and its own SessionStart
+  // swept its I6 ledger (G4 slice 2 re-pilot, N4).
+  describe("live sessions survive however idle they are", () => {
+    const old = new Date(Date.now() - 12 * 3_600_000);
+    const writeOld = (dir: string, name: string, content = "x\n") => {
+      writeFileSync(join(dir, name), content);
+      utimesSync(join(dir, name), old, old);
+    };
+    const freshDir = () => mkdtempSync(join(tmpdir(), "loom-sweep-live-"));
+
+    it("the starting session keeps its whole group, sidecar included", () => {
+      const dir = freshDir();
+      const kept = ["s-resumed.evidence.jsonl", "s-resumed.active", "s-resumed.orchestration-runs.json",
+        `s-resumed.agent1${STOP_CHECK_NOTE_SUFFIX}`];
+      for (const name of [...kept, "s-other.evidence.jsonl"]) writeOld(dir, name);
+
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000, undefined, session("s-resumed"))).toEqual([]);
+
+      for (const name of kept) expect(existsSync(join(dir, name)), name).toBe(true);
+      expect(existsSync(join(dir, "s-other.evidence.jsonl"))).toBe(false);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("a graph-bound session keeps its sidecars, including under a differing sidecar key", () => {
+      const dir = freshDir();
+      const graph = join(dir, "active_task_graph.json");
+      writeFileSync(graph, "{}");
+      const attempt = `s.bound.${Buffer.from("agent-1").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+      const note = `${sidecarKey("s.bound")}.agent1${STOP_CHECK_NOTE_SUFFIX}`;
+      writeOld(dir, "s.bound.task_graph", graph);
+      writeOld(dir, "s.bound.machine");
+      writeOld(dir, attempt);
+      writeOld(dir, note);
+
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([]);
+
+      for (const name of ["s.bound.task_graph", "s.bound.machine", attempt, note]) {
+        expect(existsSync(join(dir, name)), name).toBe(true);
+      }
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("a session bound to an existing TaskGraph is kept; one whose graph is gone ages out", () => {
+      const dir = freshDir();
+      const graph = join(dir, "active_task_graph.json");
+      writeFileSync(graph, "{}");
+      writeOld(dir, "s-bound.evidence.jsonl");
+      writeOld(dir, "s-bound.task_graph", graph);
+      writeOld(dir, "s-orphan.evidence.jsonl");
+      writeOld(dir, "s-orphan.task_graph", join(dir, "removed_task_graph.json"));
+      writeOld(dir, "s-garbled.evidence.jsonl");
+      writeOld(dir, "s-garbled.task_graph", "relative/not-canonical.json");
+
+      // The malformed pointer binds nothing, and says so.
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([{
+        operation: "parse",
+        path: join(dir, "s-garbled.task_graph"),
+        cause: "TaskGraph pointer must be one exact canonical absolute path",
+      }]);
+
+      expect(existsSync(join(dir, "s-bound.evidence.jsonl"))).toBe(true);
+      expect(existsSync(join(dir, "s-bound.task_graph"))).toBe(true);
+      for (const name of ["s-orphan.evidence.jsonl", "s-orphan.task_graph", "s-garbled.evidence.jsonl", "s-garbled.task_graph"]) {
+        expect(existsSync(join(dir, name)), `${name} should be swept`).toBe(false);
+      }
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("an unreadable pointer protects its session and is reported", () => {
+      const removed: string[] = [];
+      const diagnostics = sweepStaleSessions("/tracking", 100, {
+        probeDirectory: () => ({ kind: "present", entries: ["s-maybe.task_graph", "s-maybe.evidence.jsonl", "s-dead.evidence.jsonl"] }),
+        mtime: () => 10,
+        readText: () => { throw new Error("EACCES read"); },
+        exists: () => { throw new Error("must not probe a graph it could not read"); },
+        remove: (path) => { removed.push(path); },
+      });
+
+      expect(removed).toEqual([join("/tracking", "s-dead.evidence.jsonl")]);
+      expect(diagnostics).toEqual([{ operation: "read", path: join("/tracking", "s-maybe.task_graph"), cause: "EACCES read" }]);
+    });
+
+    it("the SessionStart handler protects the session named on stdin", async () => {
+      const privateDir = mkdtempSync(join(tmpdir(), "loom-handler-resume-"));
+      try {
+        writeOld(privateDir, "resumed-session.evidence.jsonl");
+        writeOld(privateDir, "idle-other.evidence.jsonl");
+        const modulePath = fileURLToPath(
+          new URL("../../../src/handlers/session-start/cleanup-stale-subagents", import.meta.url),
+        );
+        const stdin = JSON.stringify({ session_id: "resumed-session", source: "resume" });
+        await promisify(execFile)("bun", [
+          "-e",
+          `import handler from ${JSON.stringify(modulePath)};\nconsole.log(JSON.stringify(await handler(${JSON.stringify(stdin)}, [])));`,
+        ], { cwd: privateDir, env: { ...fixturePiEnvironment(privateDir), LOOM_SUBAGENT_DIR: privateDir }, timeout: 15_000 });
+
+        expect(existsSync(join(privateDir, "resumed-session.evidence.jsonl"))).toBe(true);
+        expect(existsSync(join(privateDir, "idle-other.evidence.jsonl"))).toBe(false);
+      } finally {
+        rmSync(privateDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("SessionStart input that names no usable session is reported, and the sweep still runs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-sweep-unusable-"));
+    try {
+      const result = runCleanupStaleSubagents(dir, Date.now(), undefined, startingSessionOf("{\"source\":\"resume\"}"));
+      expect(result.kind).toBe("passthrough");
+      if (result.kind === "passthrough") {
+        expect(result.systemMessage).toBe(
+          "cleanup-stale-subagents: parse failed for SessionStart input: input carries no string session_id",
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

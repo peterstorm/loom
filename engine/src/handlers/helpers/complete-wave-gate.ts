@@ -574,10 +574,10 @@ async function runCompleteWaveGate(
   if (verdict.nextWave != null) {
     process.stderr.write(`Advanced to wave ${verdict.nextWave}.\n`);
   } else {
-    // `/loom --complete` is documented as NOT implemented (README.md,
-    // docs/operations.md, commands/loom.md); the guarded helper is the path.
+    // `/loom --complete` is not a flag (docs/operations.md, commands/loom.md);
+    // the guarded completion helper archives the graph and lifts the guards.
     process.stderr.write(
-      "\n=== All waves complete! ===\nRun `bun engine/src/cli.ts helper cleanup-state` to finalize.\n",
+      "\n=== All waves complete! ===\nRun `bun engine/src/cli.ts helper complete-orchestration` to finalize.\n",
     );
   }
 

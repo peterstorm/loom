@@ -21,6 +21,26 @@ export interface SubstitutionScan {
 }
 
 /**
+ * What a caller may know about one substitution beyond its body text.
+ *
+ *   known-word — a `cat` quoted heredoc (`staticHeredocCat`) standing as an
+ *                entire double-quoted word: whitespace or the line edge before
+ *                the opening `"`, and the closing `"` directly after `)` then
+ *                whitespace, a separator or the line edge. Its output is
+ *                exactly `literal`, one word with no adjacent text to join,
+ *                neither word-split nor globbed.
+ *   opaque     — every other substitution: its output is not statically known.
+ */
+export type SubstitutionContext =
+  | Readonly<{ kind: "known-word"; literal: string }>
+  | Readonly<{ kind: "opaque" }>;
+
+const OPAQUE: SubstitutionContext = Object.freeze({ kind: "opaque" });
+
+const WORD_EDGE_BEFORE = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
+const WORD_EDGE_AFTER = (c: string | undefined): boolean => c === undefined || /[\s;&|)]/.test(c);
+
+/**
  * Quote state is tracked as `'"' | "'" | null`, NOT a lone single-quote flag:
  * a `'` inside double quotes (`"it's"`) is a literal apostrophe that must NOT
  * open a single-quoted region (the round-20 regression that disabled the whole
@@ -28,15 +48,18 @@ export interface SubstitutionScan {
  * substitution `$(…)` and backticks stay LIVE inside double quotes (bash still
  * performs them); process substitution `<(…)`/`>(…)` is a substitution only when
  * UNQUOTED (bash does not perform it inside double quotes), so it is treated
- * literally there. `onBody` maps each body to its replacement; the caller
- * decides the unclosed policy from `scan.unclosed`.
+ * literally there. `onBody` maps each body, with its SubstitutionContext, to
+ * its replacement; the caller decides the unclosed policy from `scan.unclosed`.
  *
  * The walker-divergence property net (tests/core/guard-state-file-walkers.test.ts)
  * pins its span decisions against an independent reference walker: a
  * regression in THIS quote state machine silently disables the guard's
  * substitution defense.
  */
-export function scanSubstitutions(text: string, onBody: (body: string) => string): SubstitutionScan {
+export function scanSubstitutions(
+  text: string,
+  onBody: (body: string, context: SubstitutionContext) => string,
+): SubstitutionScan {
   const bodies: string[] = [];
   let rebuilt = "";
   let quote: '"' | "'" | null = null;
@@ -57,11 +80,16 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
     const isCmdSub = c === "$" && text[i + 1] === "(";
     const isProcSub = quote === null && (c === "<" || c === ">") && text[i + 1] === "(";
     if (isCmdSub || isProcSub) {
-      const close = findClosingParen(text, i + 2);
+      const heredoc = staticHeredocCat(text, i + 2);
+      const close = heredoc?.close ?? findGenericClosingParen(text, i + 2);
       if (close === -1) return { bodies, rebuilt, unclosed: true };
       const body = text.slice(i + 2, close);
       bodies.push(body);
-      rebuilt += onBody(body);
+      const wholeQuotedWord = isCmdSub && quote === '"' && text[i - 1] === '"' && WORD_EDGE_BEFORE(text[i - 2]) &&
+        text[close + 1] === '"' && WORD_EDGE_AFTER(text[close + 2]);
+      rebuilt += onBody(body, heredoc !== null && wholeQuotedWord
+        ? Object.freeze({ kind: "known-word", literal: heredoc.literal })
+        : OPAQUE);
       i = close;
       continue;
     }
@@ -70,7 +98,7 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
       if (close === -1) return { bodies, rebuilt, unclosed: true };
       const body = text.slice(i + 1, close);
       bodies.push(body);
-      rebuilt += onBody(body);
+      rebuilt += onBody(body, OPAQUE);
       i = close;
       continue;
     }
@@ -79,10 +107,50 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
   return { bodies, rebuilt, unclosed: false };
 }
 
+/**
+ * A substitution body that is exactly `cat` reading one QUOTED here-document
+ * (`cat <<'D'` / `cat <<"D"` / `cat <<-'D'`, then the body, then the line `D`,
+ * then only whitespace): bash performs no expansion in such a body, so the
+ * substitution's output is exactly the literal body text. Recognized at the
+ * position just past `$(`/`<(`/`>(`; returns the literal and the index of the
+ * closing `)`, or null for any other shape (an unquoted delimiter, another
+ * command, arguments or a pipe on the opener line, a missing terminator).
+ * The body is data, so quote characters and parentheses inside it never
+ * affect the span — which the generic quote-aware closer would get wrong.
+ */
+export function staticHeredocCat(command: string, start: number): Readonly<{ literal: string; close: number }> | null {
+  const opener = /^[ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\\\n$`]+)")[ \t]*\n/.exec(command.slice(start));
+  if (opener === null) return null;
+  const minus = opener[1] === "-";
+  const delimiter = opener[2] ?? opener[3]!;
+  const lines: string[] = [];
+  let cursor = start + opener[0].length;
+  while (cursor <= command.length) {
+    const newline = command.indexOf("\n", cursor);
+    const end = newline === -1 ? command.length : newline;
+    const raw = command.slice(cursor, end);
+    const line = minus ? raw.replace(/^\t+/, "") : raw;
+    if (line === delimiter) {
+      const after = /^[ \t\n]*\)/.exec(command.slice(end));
+      return after === null ? null : { literal: lines.join("\n"), close: end + after[0].length - 1 };
+    }
+    if (newline === -1) return null; // no terminator line: not this shape
+    lines.push(line);
+    cursor = newline + 1;
+  }
+  return null;
+}
+
 /** Index of the `)` closing a substitution opened before `start`. Paren depth
  *  is counted quote-aware, and a BACKTICK body counts as quoted, so
- *  `` $(`a)b`) `` closes at the final `)`. -1 when unclosed. */
+ *  `` $(`a)b`) `` closes at the final `)`. A `cat` quoted-heredoc body
+ *  (`staticHeredocCat`) is data and closes at its exact span. -1 when unclosed. */
 export function findClosingParen(command: string, start: number): number {
+  return staticHeredocCat(command, start)?.close ?? findGenericClosingParen(command, start);
+}
+
+/** The quote-aware paren-depth closer behind findClosingParen. */
+function findGenericClosingParen(command: string, start: number): number {
   let depth = 1;
   return scanUnquoted<number>(command, start, (c, i) => {
     if (c === "(") depth++;

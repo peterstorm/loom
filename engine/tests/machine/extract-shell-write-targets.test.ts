@@ -4,12 +4,15 @@
  * targets they always minted. A renamed or copied file therefore appears
  * among a Task's changed files under its NEW path, on both harnesses, because
  * both reach this one rule through `extractEvidence`.
+ *
+ * Device streams (`2>/dev/null`, `tee /dev/stderr`, `>/dev/fd/3`) are not
+ * files: `isDeviceStreamPath` keeps them out of the targets.
  */
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { extractEvidence } from "../../src/machine/extract-evidence";
-import { extractShellWriteTargets } from "../../src/core/shell-write-targets";
+import { extractShellWriteTargets, isDeviceStreamPath } from "../../src/core/shell-write-targets";
 import type { HarnessToolCall } from "../../src/machine/harness-tool-call-types";
 
 const bash = (command: string): HarnessToolCall => ({
@@ -93,6 +96,88 @@ describe("extractShellWriteTargets — literal mv, git mv and cp destinations (F
     fc.assert(
       fc.property(head, word, word, (h, src, dst) => {
         expect(extractShellWriteTargets(`${h} ${src} ${dst}`)).toEqual([dst]);
+      }),
+    );
+  });
+});
+
+describe("isDeviceStreamPath — a device stream is not a file", () => {
+  it("names /dev/null, the stdio streams, the terminal and /dev/fd/<n>", () => {
+    for (const path of ["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/0", "/dev/fd/3", "/dev/fd/12"]) {
+      expect(isDeviceStreamPath(path)).toBe(true);
+    }
+  });
+
+  it("normalizes an absolute path lexically before judging it", () => {
+    expect(isDeviceStreamPath("//dev/null")).toBe(true);
+    expect(isDeviceStreamPath("/dev/./null")).toBe(true);
+    expect(isDeviceStreamPath("/tmp/../dev/stderr")).toBe(true);
+    expect(isDeviceStreamPath("/dev/null/")).toBe(true);
+    expect(isDeviceStreamPath("/dev/../repo/out.txt")).toBe(false);
+    expect(isDeviceStreamPath("/dev/fd/3/../x")).toBe(false);
+  });
+
+  it("is a closed set: other paths under /dev are real files, and relative paths are never devices", () => {
+    for (const path of ["/dev/shm/r.json", "/dev/mqueue/q", "/dev/fd/x", "/dev/fd/", "/dev/nullx", "/dev", "/dev/"]) {
+      expect(isDeviceStreamPath(path)).toBe(false);
+    }
+    // Relative: the core never resolves against a cwd, so it keeps the target.
+    for (const path of ["dev/null", "./dev/null", "../../dev/null", "null"]) {
+      expect(isDeviceStreamPath(path)).toBe(false);
+    }
+  });
+});
+
+describe("extractShellWriteTargets — device streams are never write targets", () => {
+  it("drops device redirects in every redirect spelling", () => {
+    expect(extractShellWriteTargets("ls .loom 2>/dev/null")).toEqual([]);
+    expect(extractShellWriteTargets("cmd >/dev/null 2>&1")).toEqual([]);
+    expect(extractShellWriteTargets("cmd &>/dev/null")).toEqual([]);
+    expect(extractShellWriteTargets("cmd &>> /dev/null")).toEqual([]);
+    expect(extractShellWriteTargets("echo x >/dev/fd/3")).toEqual([]);
+    expect(extractShellWriteTargets("echo x > /dev/stderr")).toEqual([]);
+    expect(extractShellWriteTargets("echo x >/dev/tty")).toEqual([]);
+    expect(extractShellWriteTargets("echo x > '/dev/null'")).toEqual([]);
+  });
+
+  it("drops device tee and mv/cp destinations", () => {
+    expect(extractShellWriteTargets("npm test | tee /dev/stderr")).toEqual([]);
+    expect(extractShellWriteTargets("npm test | tee -a out.log /dev/stdout")).toEqual(["out.log"]);
+    expect(extractShellWriteTargets("cp big.bin /dev/null")).toEqual([]);
+  });
+
+  it("keeps the real targets of the same command line", () => {
+    expect(extractShellWriteTargets("echo x > out.txt 2>/dev/null")).toEqual(["out.txt"]);
+    expect(extractShellWriteTargets("cmd 2>/dev/null > a.log; other >/dev/null | tee b.log")).toEqual(["a.log", "b.log"]);
+    expect(extractShellWriteTargets("cat > /dev/shm/r.json 2>/dev/null")).toEqual(["/dev/shm/r.json"]);
+  });
+
+  it("extractEvidence mints no FileWrite for a device write, and hands report discovery only real targets", () => {
+    expect(extractEvidence(bash("ls .loom 2>/dev/null"), () => null)).toEqual([]);
+    const seen: (readonly string[])[] = [];
+    const events = extractEvidence(bash("npx vitest run 2>/dev/null | tee out.log"), (_segment, _stdout, writes) => {
+      seen.push(writes);
+      return null;
+    });
+    expect(events.filter((event) => event.kind === "FileWrite")).toEqual([
+      { kind: "FileWrite", path: "out.log", via: "shell" },
+    ]);
+    expect(seen).toEqual([["out.log"]]);
+  });
+
+  it("a device redirect beside any real redirect yields exactly the real target (property)", () => {
+    const word = fc.stringMatching(/^[a-z][a-z0-9_.]{0,8}(\/[a-z0-9_.]{1,8}){0,2}$/);
+    const device = fc.oneof(
+      fc.constantFrom("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty"),
+      fc.nat({ max: 99 }).map((n) => `/dev/fd/${n}`),
+    );
+    const op = fc.constantFrom(">", ">>", "2>", "&>", "&>>", "1>");
+    fc.assert(
+      fc.property(word, device, op, op, fc.boolean(), (target, dev, realOp, devOp, deviceFirst) => {
+        const real = `${realOp} ${target}`;
+        const sink = `${devOp}${dev}`;
+        const command = deviceFirst ? `cmd ${sink} ${real}` : `cmd ${real} ${sink}`;
+        expect(extractShellWriteTargets(command)).toEqual([target]);
       }),
     );
   });

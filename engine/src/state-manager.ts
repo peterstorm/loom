@@ -23,6 +23,7 @@ import {
   parseCanonicalTaskGraphPointer,
   parseSessionId,
   sessionScopedPath,
+  TASK_GRAPH_POINTER_SUFFIX,
 } from "./machine";
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
@@ -39,7 +40,9 @@ import {
   anchoredDirectoryIdentity,
   closeAnchorGuarded,
   openDirectoryNoFollow,
+  publishDirectoryFileExclusiveNoFollow,
   readDirectoryFileNoFollow,
+  removeDirectoryRegularFileNoFollow,
   resolveBaseDirectory,
   withAnchoredDirectoryHandleLock,
   writeDirectoryFileAtomicModeNoFollow,
@@ -200,7 +203,7 @@ function resolveTaskGraphFileAuthority(sessionId?: string): TaskGraphFileAuthori
       `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — refusing local task-graph fallback`,
     );
   }
-  const sessionFile = sessionScopedPath(parsed, ".task_graph");
+  const sessionFile = sessionScopedPath(parsed, TASK_GRAPH_POINTER_SUFFIX);
   let pointedPath: string;
   try {
     pointedPath = parseSessionPointerFile(sessionFile);
@@ -243,7 +246,7 @@ export function resolveTaskGraph(sessionId?: string): string | null {
 function resolveLocalSessionTaskGraphAuthority(sessionId: string): TaskGraphFileAuthority | null {
   const parsed = parseSessionId(sessionId);
   if (parsed === null) throw new Error(`resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)}`);
-  const sessionFile = sessionScopedPath(parsed, ".task_graph");
+  const sessionFile = sessionScopedPath(parsed, TASK_GRAPH_POINTER_SUFFIX);
   let pointedPath: string;
   try {
     pointedPath = parseSessionPointerFile(sessionFile);
@@ -365,7 +368,10 @@ export class StateManager {
   }
 
   private loadFrom(directory: AnchoredDirectory): ParsedTaskGraph {
-    const bytes = readDirectoryFileNoFollow(directory, this.authority.leaf);
+    return this.parseGraphBytes(readDirectoryFileNoFollow(directory, this.authority.leaf));
+  }
+
+  private parseGraphBytes(bytes: Buffer): ParsedTaskGraph {
     let raw: string;
     try {
       raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -572,6 +578,32 @@ export class StateManager {
    */
   async replace(state: TaskGraph): Promise<void> {
     await this.atomicWrite(() => ({ state, value: undefined }));
+  }
+
+  /**
+   * Retire a finished graph: under the TaskGraph lock, load it, let the caller's
+   * pure decision name the archive leaf (or refuse), publish the exact bytes to
+   * that leaf beside the graph, then remove the live graph. The publish is
+   * exclusive and whole (prepared bytes hard-linked into place: an existing
+   * archive is never overwritten, and no partial archive is ever visible). The
+   * archive is published before the removal, so a failure in between leaves
+   * both, never neither.
+   */
+  async archiveAndRemove(
+    decide: (graph: ParsedTaskGraph) => DomainResult<string, string>,
+  ): Promise<DomainResult<string, string>> {
+    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
+    const directory = this.openAuthorityDirectory();
+    return withStateDirectoryAsync(directory, `TaskGraph archive of ${this.path}`, () =>
+      withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+        // One read: the bytes archived are exactly the bytes judged.
+        const bytes = readDirectoryFileNoFollow(directory, this.authority.leaf);
+        const decision = decide(this.parseGraphBytes(bytes));
+        if (!decision.ok) return decision;
+        publishDirectoryFileExclusiveNoFollow(directory, decision.value, bytes);
+        removeDirectoryRegularFileNoFollow(directory, this.authority.leaf);
+        return decision;
+      }));
   }
 
   /** lock → derive/parse → stage read-only bytes → anchored pathname rename → unlock */

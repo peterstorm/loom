@@ -63,7 +63,11 @@
  *    guard and the evidence ledger agree on substitution spans.
  *  - findClosingParen / findClosingBacktick (core/shell-substitution) and
  *    findClosingBrace — span closers, quote-aware; used by every scanner that
- *    must skip a whole span.
+ *    must skip a whole span. findClosingParen first tries staticHeredocCat:
+ *    `$(cat <<'D' … D)` closes at its exact span (the body is data, so its
+ *    quotes and parens never count), and scanSubstitutions reports such a
+ *    span standing as a whole double-quoted word as a `known-word` context —
+ *    the only case whose output the guard treats as known (KNOWN_TEXT).
  *  - commandWords / splitFusedRedirect / unquote / commandArgs — the simple-
  *    command tokenizer feeding analyzeCommandHead; treats `( ) { }` as
  *    standalone tokens so compound syntax never hides a head.
@@ -85,7 +89,12 @@
 import type { HookResult } from "../types";
 import { normalizeShellVariants } from "./shell-normalize";
 import { CONTINUE, halt, scanUnquoted, skip } from "./shell-quoting";
-import { findClosingBacktick, findClosingParen, scanSubstitutions } from "./shell-substitution";
+import {
+  findClosingBacktick,
+  findClosingParen,
+  scanSubstitutions,
+  type SubstitutionContext,
+} from "./shell-substitution";
 import {
   WHITELISTED_HELPERS,
   stateFilePatterns,
@@ -442,7 +451,30 @@ export function blankSubstitutions(text: string): string {
  * the default/alternate word for collapseVariants to reveal (`${x:-*}` → `*`).
  */
 function wildcardSubstitutions(text: string): string {
-  return scanSubstitutions(text, () => OPAQUE_OUTPUT).rebuilt;
+  return scanSubstitutions(text, (_body, context) => knownWordOutput(context) ?? OPAQUE_OUTPUT).rebuilt;
+}
+
+/**
+ * The one substitution whose output the guard can know: a `cat` quoted
+ * heredoc (`staticHeredocCat`) standing as an entire double-quoted word —
+ * `gh pr create --body "$(cat <<'EOF' … EOF)"`. Its output is the literal body,
+ * one word that joins no adjacent text, so it cannot COMPLETE a guarded
+ * literal the way an opaque output can; it stands as KNOWN_TEXT, a neutral
+ * token of letters and `_` that matches no guarded pattern and can form no
+ * redirect, separator, quote or glob. Whether the literal itself names
+ * guarded state is still judged: the substitutions-LITERAL view keeps the body
+ * text inline, and placeholderFor classifies the body before reaching this.
+ * Every other substitution — an unquoted delimiter, any other command,
+ * unquoted or adjacent placement — keeps the opaque-output wildcard.
+ * bash 3.2 (macOS `/bin/bash`) mis-parses this form, closing `$(` by quote-
+ * tracked paren scanning; an apostrophe in the body is then a syntax error and
+ * nothing runs. Any shorter span it could pick still lies inside the body,
+ * whose text is judged for guarded references either way.
+ */
+const KNOWN_TEXT = "known_heredoc_text";
+
+function knownWordOutput(context: SubstitutionContext): string | null {
+  return context.kind === "known-word" ? KNOWN_TEXT : null;
 }
 
 /**
@@ -619,10 +651,10 @@ interface FlattenedCommand {
  *  and the `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
  *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
  *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
-function placeholderFor(body: string, scope: GuardScope): string {
+function placeholderFor(body: string, scope: GuardScope, context: SubstitutionContext): string {
   if (scope.protectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
   if (scope.guardedState(body)) return "active_task_graph__subst__";
-  return OPAQUE_OUTPUT;
+  return knownWordOutput(context) ?? OPAQUE_OUTPUT;
 }
 
 /**
@@ -640,7 +672,7 @@ export function flattenSubstitutions(
   command: string,
   scope: GuardScope = FAIL_CLOSED_SCOPE,
 ): FlattenedCommand | null {
-  const scan = scanSubstitutions(command, (body) => placeholderFor(body, scope));
+  const scan = scanSubstitutions(command, (body, context) => placeholderFor(body, scope, context));
   if (scan.unclosed) return null;
   return { bodies: scan.bodies, flattened: scan.rebuilt };
 }

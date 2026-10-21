@@ -453,8 +453,13 @@ export function writeDirectoryFileExclusiveNoFollow(
   );
 }
 
-/** Publish complete prepared bytes without ever exposing a partial final leaf. */
-function publishDirectoryFileExclusiveNoFollow(
+/**
+ * Publish complete prepared bytes without ever exposing a partial final leaf:
+ * the bytes land on an exclusively-created prepared name, which is hard-linked
+ * to the final name (EEXIST when it already exists — never replaced) and then
+ * dropped. An interrupted publish leaves at most the prepared name.
+ */
+export function publishDirectoryFileExclusiveNoFollow(
   directory: AnchoredDirectory,
   name: string,
   data: string | Uint8Array,

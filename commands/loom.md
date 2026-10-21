@@ -79,7 +79,7 @@ role. Under Claude Code, use the native Agent/Task tool as usual.
 - `/loom --panel` - Architecture panel mode: N designer agents generate candidates in parallel (each with a lens), adversarial judges rank them against interview-derived criteria, and the finalizer presents the ranked approaches. `--panel=N` requires a decimal integer of at least `PANEL_DESIGNERS_MIN` (currently 2); malformed, fractional, duplicate, or smaller values are rejected. Values above the number of distinct lenses (5) are rejected. Bare `--panel` uses `PANEL_DESIGNERS_DEFAULT` (currently 3). Opt-in; only Phase 3 changes. See [panel-lenses.md](../references/panel-lenses.md) and [Phase 3 (panel mode)](#phase-3-panel-mode-loom---panel).
 - `/loom --status` - Show current status. Runs `bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration status` (add `--json` for the machine form). Both forms project ONE `LoomStatus` value, so they cannot disagree, and neither re-runs a gate check. When authority is unreadable every fact category is still reported as `unavailable` with its reasons and the next action is `blocked` — never a fabricated zero-or-ready value. Prefer this over the ad-hoc `jq` recipes in [Observability](#observability), which read raw fields and can contradict the engine.
 - The engine also exposes registered architecture/refutation panel dispatch through `helper orchestration start`. The detailed Phase 3 runbook below still owns interactive/template/file integration through the panel-contract helper chain; do not mix the two persistence protocols inside one panel run.
-- `/loom --complete` - Not implemented as a flag. After proving completion, use the guarded `helper cleanup-state` only with explicit operator intent.
+- `/loom --complete` - Not implemented as a flag. After the final Wave Gate, run `helper complete-orchestration`. It archives the TaskGraph and lifts the Loom guards, and it refuses while any Task is unfinished.
 - `/loom --abort` - Not implemented as a flag. Use `helper cleanup-state` for deliberate teardown and preserve plan/spec/review audit artifacts.
 
 **Note:** All phases are MANDATORY by default. Skip flags allow explicit bypass with user acknowledgment.
@@ -603,7 +603,7 @@ It renders `commands/templates/impl-agent-context.md` for each dispatch status o
 
 - **Pi:** spawn `pi.agent` with `pi.task`, the one-line marker `LOOM_IMPLEMENTATION_BRIEF: <Task>`, and `agentScope: "user"`; batch several Tasks as `tasks`. The Loom extension expands each marker to the rendered brief before any gate reads it. Pass the marker exactly; do not paste the brief.
 - **Claude Code:** spawn `claude.subagent_type` (always `loom:<agent>`: Claude Code registers plugin agents only under the plugin namespace, so the bare catalog name names no agent there, and the spawn gate refuses any other form before it reserves the Task) with `claude.model`, `claude.description`, and `claude.prompt`, the same one-line marker. The `validate-task-execution` PreToolUse hook expands it to the rendered brief, runs every spawn gate on the brief, and hands the Agent the brief instead of the marker; your own context keeps only the marker. Pass the marker exactly; do not paste the brief. A marker that cannot expand blocks the spawn, naming the cause. `brief --prompt` adds the rendered brief to the output for reading only.
-- **Operator notes (#119).** To add an instruction to one Task's brief, run `brief --task <Task> --note "<text>"` (repeat `--note` for several) and spawn the invocation it prints. The marker then carries one `LOOM_OPERATOR_NOTE: <text>` line per note, and the expansion renders them into the brief's **Operator Note** section. The expanded brief is what the reservation digests, so the notes are part of the attempt's audited prompt. Nothing else may follow the marker: any other line, or a marker that is not the first line, is refused with this grammar rather than judged as a hand-written prompt. Each note is at most 500 characters, at most 8 per marker, and may not carry a `LOOM_` token, a `{template variable}` or a `Task ID:` binding. A note can focus the work inside the Task; the brief tells the agent it never widens the file list, waives a Verification Policy arm, or overrides the binding rules.
+- **Operator notes (#119).** To add an instruction to one Task's brief, run `brief --task <Task> --note "<text>"` (repeat `--note` for several) and spawn the invocation it prints. The marker then carries one `LOOM_OPERATOR_NOTE: <text>` line per note, and the expansion renders them into the brief's **Operator Note** section. The expanded brief is what the reservation digests, so the notes are part of the attempt's audited prompt. Nothing else may follow the marker: any other line, or a marker that is not the first line, is refused with this grammar rather than judged as a hand-written prompt. Each note is at most 500 characters, at most 8 per marker, and may not carry a `LOOM_` token, a `{template variable}` or a `Task ID:` binding. A note can focus the work inside the Task; the brief tells the agent it never widens the file list, waives a Verification Policy arm, or overrides the binding rules. Because of that, a note cannot be used to **induce a check failure** for a pilot. In the G4 slice 2 re-pilot, both agents refused induced notes ("write the code first", "break the exit code and skip the final run") and kept to the rules, so the I6 refusal and the I7 block never fired. A pilot that must exercise a refusal or a block needs a scenario whose natural course triggers it: for I7, a Task touching a widely imported hub file; for I6, a Task whose first test run genuinely passes. Do not rely on a note telling the agent to misbehave.
 
 
 ---
@@ -711,8 +711,23 @@ authority behind that fact could not be parsed, and the action will be
 ### Completion or abort teardown
 
 `/loom --complete` and `/loom --abort` are not implemented argument handlers.
-After verifying completion—or after explicit user confirmation to abandon the
-run—use the guarded cleanup operation rather than direct file removal:
+
+**Completion.** After the final Wave Gate reports `done`, retire the
+orchestration:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper complete-orchestration
+```
+
+It refuses, naming each reason, unless every Task is `completed` and no Wave Gate
+run is active. Then, under the TaskGraph lock, it archives the exact graph bytes
+beside the live graph as `completed_task_graph-<issue>-<stamp>.json` and removes
+the live graph. Every Loom guard (direct-edit block, spawn gates, state guard)
+lifts, so a post-gate `/review-and-fix` can run in the same checkout. Until then
+those guards stay on.
+
+**Abort.** Only with explicit user confirmation to abandon an unfinished run,
+use the guarded teardown rather than direct file removal. It keeps no copy:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper cleanup-state

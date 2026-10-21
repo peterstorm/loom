@@ -2087,6 +2087,40 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     );
   });
 
+  it("names the retirement only when the committed final Wave leaves every Task completed", () => {
+    const base = registeredGraph();
+    const runId = value(parseOrchestrationRunId("final-status-run"));
+    const { active_wave_gate: _active, ...withoutActive } = base;
+    const committed = (tasks: readonly Task[]): TaskGraph => ({
+      ...withoutActive,
+      tasks: [...tasks],
+      wave_gates: { "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
+      wave_gate_history: [{
+        schemaVersion: 1,
+        kind: "completed-wave-gate",
+        runId,
+        wave: 1,
+        authorityDigest: value(parseArtifactDigest("f".repeat(64))),
+        revision: 1,
+        completionReceipt: {
+          kind: "protected-wave-state-committed",
+          effectId: value(parseEffectId("final-status-effect")),
+          runId,
+          committedRevision: 1,
+          stateDigest: value(parseArtifactDigest("e".repeat(64))),
+        },
+      }],
+    });
+
+    const finished = deriveLoomStatusFromParsedGraph(
+      { ok: true, value: committed([taskState({ id: "T1", wave: 1, status: "completed" })]) },
+      statusDeps,
+    );
+    expect(finished.next.action.kind).toBe("done");
+    expect(finished.next.reasons.map(({ kind }) => kind)).toEqual(["run-complete", "orchestration-complete"]);
+    expect(renderLoomStatusHuman(finished)).toContain("[orchestration-complete]");
+  });
+
   it("preserves committed done-action construction failure as unavailable", () => {
     const base = registeredGraph();
     const runId = value(parseOrchestrationRunId("completed-status-run"));
@@ -2816,8 +2850,13 @@ describe("final-Wave compatibility completion replay", () => {
         kind: "done",
         runId: completed.wave_gate_history?.[0]?.runId,
       });
+      // The final Wave with every Task completed: status also names the retirement.
       expect(committedStatus.next.reasons).toEqual([
         expect.objectContaining({ kind: "run-complete" }),
+        expect.objectContaining({
+          kind: "orchestration-complete",
+          message: expect.stringContaining("helper complete-orchestration"),
+        }),
       ]);
       const authority = value(deriveLegacyWaveGateCompatibilityAuthority(completed, null));
       const replay = value(findLegacyWaveGateCompletionReplay(completed, authority));

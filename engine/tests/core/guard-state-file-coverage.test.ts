@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { expandBraces, guardStateFileDecision } from "../../src/core/guard-state-file";
+import { MODERN_BASH } from "../fixtures/modern-bash";
 
 const guardDecision = (command: string): "allow" | "block" =>
   guardStateFileDecision(command).kind === "block" ? "block" : "allow";
@@ -96,31 +97,12 @@ describe("guard-state-file — module-preload flags keep stdin as the program so
  * bash's is exactly an expansion that misses a real command.
  */
 /**
- * The differential pin needs bash >= 4. Brace INCREMENTS (`{a..z..N}`) and
- * zero-padded sequence semantics BOTH arrived in bash 4.0, and macOS still
- * ships 3.2 as `/bin/bash`. Pinning against 3.2 would assert its
- * NON-expansion as the contract — inverting exactly what these fixtures
- * prove — so a newer bash is preferred, and when none exists the differential
- * block is skipped rather than run against a shell that cannot express the
- * syntax under test. The guard's own decisions stay covered unconditionally
- * in the block below.
+ * The differential pin needs bash >= 4 (MODERN_BASH): brace INCREMENTS
+ * (`{a..z..N}`) and zero-padded sequence semantics BOTH arrived in bash 4.0.
+ * When none exists the differential block is skipped rather than run against
+ * a shell that cannot express the syntax under test. The guard's own
+ * decisions stay covered unconditionally in the block below.
  */
-function modernBashPath(): string | null {
-  for (const candidate of ["bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"]) {
-    try {
-      const major = Number(
-        execFileSync(candidate, ["-c", 'printf %s "${BASH_VERSINFO[0]}"'], { encoding: "utf-8" }).trim(),
-      );
-      if (Number.isInteger(major) && major >= 4) return candidate;
-    } catch {
-      // Candidate absent or not executable — try the next one.
-    }
-  }
-  return null;
-}
-
-const MODERN_BASH = modernBashPath();
-
 const bashExpand = (pattern: string): string[] =>
   execFileSync(MODERN_BASH ?? "bash", ["-c", `printf '%s\\n' ${pattern}`], { encoding: "utf-8" })
     .split("\n")

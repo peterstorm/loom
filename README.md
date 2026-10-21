@@ -81,7 +81,7 @@ Skip flags exist for explicit lifecycle bypasses:
 /loom --skip-plan-alignment "..."
 ```
 
-`/loom --complete` and `--abort` are not implemented lifecycle flags. Use the guarded cleanup helper only for deliberate operator teardown; see [Operations](docs/operations.md).
+`/loom --complete` and `--abort` are not implemented lifecycle flags. After the final Wave Gate, `helper complete-orchestration` archives the TaskGraph and lifts the guards. The guarded cleanup helper is only for deliberately abandoning an unfinished run. See [Operations](docs/operations.md).
 
 ## Full feature flow
 
