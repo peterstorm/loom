@@ -808,6 +808,9 @@ export type StatusReasonKind =
   | "wave-gate-not-started"
   | "wave-start-not-ready"
   | "run-complete"
+  /** The final Wave's gate committed and every Task is completed: the
+   *  orchestration is finished and `helper complete-orchestration` retires it. */
+  | "orchestration-complete"
   | "completion-prerequisite-failed"
   | "completion-eligible"
   | "wave-gate-ready";

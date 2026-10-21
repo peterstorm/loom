@@ -51,6 +51,7 @@ import {
   type WaveReadinessSnapshot,
 } from "./wave-gate-machine";
 import { deriveWaveAdvisoryNextAction } from "./wave-gate-preparation";
+import { judgeOrchestrationCompletion } from "./orchestration-completion";
 import { pendingFreezeAdvisories, renderPendingFreezeAdvisories } from "./acceptance-contract";
 import {
   deriveFindingCounts,
@@ -453,6 +454,15 @@ function committedTerminalStatus(
     return unavailableStatus(`cannot construct committed terminal action: ${done.error.message}`);
   }
   const completeReason = statusReason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
+  // No later-Wave Task exists here, so this is the final Wave: when every Task
+  // is completed the whole orchestration is, and status names the retirement.
+  const finishedReasons = judgeOrchestrationCompletion(graph).kind === "complete"
+    ? [statusReason(
+        "orchestration-complete",
+        "Every Wave is complete; retire the orchestration with `helper complete-orchestration`, " +
+          "which archives the TaskGraph and lifts Loom's guards",
+      )]
+    : [];
   return canonicalRecord({
     schemaVersion: 1,
     facts: waveScopedStatusFacts(
@@ -464,7 +474,7 @@ function committedTerminalStatus(
     ),
     next: canonicalRecord({
       action: done.value,
-      reasons: Object.freeze([completeReason]) as NonEmpty<StatusReason>,
+      reasons: Object.freeze([completeReason, ...finishedReasons]) as NonEmpty<StatusReason>,
     }),
   });
 }

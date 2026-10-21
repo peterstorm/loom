@@ -36,7 +36,24 @@ export interface SubstitutionScan {
  * regression in THIS quote state machine silently disables the guard's
  * substitution defense.
  */
-export function scanSubstitutions(text: string, onBody: (body: string) => string): SubstitutionScan {
+/** What a caller may know about one substitution beyond its body text. */
+export type SubstitutionContext = Readonly<{
+  /** The exact output when the body is a `cat` quoted heredoc (`staticHeredocCat`), else null. */
+  staticLiteral: string | null;
+  /** The substitution is an entire double-quoted word — whitespace or the line
+   *  edge before the opening `"`, and the closing `"` directly after `)` then
+   *  whitespace, a separator or the line edge — so its output is one word with
+   *  no adjacent text to join, and is neither word-split nor globbed. */
+  wholeQuotedWord: boolean;
+}>;
+
+const WORD_EDGE_BEFORE = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
+const WORD_EDGE_AFTER = (c: string | undefined): boolean => c === undefined || /[\s;&|)]/.test(c);
+
+export function scanSubstitutions(
+  text: string,
+  onBody: (body: string, context: SubstitutionContext) => string,
+): SubstitutionScan {
   const bodies: string[] = [];
   let rebuilt = "";
   let quote: '"' | "'" | null = null;
@@ -61,7 +78,9 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
       if (close === -1) return { bodies, rebuilt, unclosed: true };
       const body = text.slice(i + 2, close);
       bodies.push(body);
-      rebuilt += onBody(body);
+      const wholeQuotedWord = isCmdSub && quote === '"' && text[i - 1] === '"' && WORD_EDGE_BEFORE(text[i - 2]) &&
+        text[close + 1] === '"' && WORD_EDGE_AFTER(text[close + 2]);
+      rebuilt += onBody(body, { staticLiteral: staticHeredocCat(text, i + 2)?.literal ?? null, wholeQuotedWord });
       i = close;
       continue;
     }
@@ -70,7 +89,7 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
       if (close === -1) return { bodies, rebuilt, unclosed: true };
       const body = text.slice(i + 1, close);
       bodies.push(body);
-      rebuilt += onBody(body);
+      rebuilt += onBody(body, { staticLiteral: null, wholeQuotedWord: false });
       i = close;
       continue;
     }
@@ -79,10 +98,47 @@ export function scanSubstitutions(text: string, onBody: (body: string) => string
   return { bodies, rebuilt, unclosed: false };
 }
 
+/**
+ * A substitution body that is exactly `cat` reading one QUOTED here-document
+ * (`cat <<'D'` / `cat <<"D"` / `cat <<-'D'`, then the body, then the line `D`,
+ * then only whitespace): bash performs no expansion in such a body, so the
+ * substitution's output is exactly the literal body text. Recognized at the
+ * position just past `$(`/`<(`/`>(`; returns the literal and the index of the
+ * closing `)`, or null for any other shape (an unquoted delimiter, another
+ * command, arguments or a pipe on the opener line, a missing terminator).
+ * The body is data, so quote characters and parentheses inside it never
+ * affect the span — which the generic quote-aware closer would get wrong.
+ */
+export function staticHeredocCat(command: string, start: number): Readonly<{ literal: string; close: number }> | null {
+  const opener = /^[ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\\\n$`]+)")[ \t]*\n/.exec(command.slice(start));
+  if (opener === null) return null;
+  const minus = opener[1] === "-";
+  const delimiter = opener[2] ?? opener[3]!;
+  const lines: string[] = [];
+  let cursor = start + opener[0].length;
+  while (cursor <= command.length) {
+    const newline = command.indexOf("\n", cursor);
+    const end = newline === -1 ? command.length : newline;
+    const raw = command.slice(cursor, end);
+    const line = minus ? raw.replace(/^\t+/, "") : raw;
+    if (line === delimiter) {
+      const after = /^[ \t\n]*\)/.exec(command.slice(end));
+      return after === null ? null : { literal: lines.join("\n"), close: end + after[0].length - 1 };
+    }
+    if (newline === -1) return null; // no terminator line: not this shape
+    lines.push(line);
+    cursor = newline + 1;
+  }
+  return null;
+}
+
 /** Index of the `)` closing a substitution opened before `start`. Paren depth
  *  is counted quote-aware, and a BACKTICK body counts as quoted, so
- *  `` $(`a)b`) `` closes at the final `)`. -1 when unclosed. */
+ *  `` $(`a)b`) `` closes at the final `)`. A `cat` quoted-heredoc body
+ *  (`staticHeredocCat`) is data and closes at its exact span. -1 when unclosed. */
 export function findClosingParen(command: string, start: number): number {
+  const heredoc = staticHeredocCat(command, start);
+  if (heredoc !== null) return heredoc.close;
   let depth = 1;
   return scanUnquoted<number>(command, start, (c, i) => {
     if (c === "(") depth++;
