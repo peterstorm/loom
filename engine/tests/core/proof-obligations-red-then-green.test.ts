@@ -30,6 +30,7 @@ import {
   redThenGreenScope,
   taskRedThenGreenEra,
   TRUSTED_LEDGER_ONLY_POLICY,
+  writtenContract,
   type ObservedProofEvidence,
   type ProofObligation,
   type RedThenGreenEra,
@@ -210,7 +211,8 @@ describe("redThenGreenEra (INV-6 owner)", () => {
 describe("taskRedThenGreenEra (contract writers do not owe I6)", () => {
   const ERAS: readonly RedThenGreenEra[] = ["owed-if-new-tests", "not-owed"];
   const scopeOf = (era: RedThenGreenEra, writers: readonly string[]): RedThenGreenScope =>
-    ({ era, contractWriters: new Set(writers) });
+    redThenGreenScope(era === "owed-if-new-tests" ? defaultVerificationManifest() : undefined,
+      writers.map((writer) => ({ id: `CT-${writer}`, contractTask: writer })));
 
   it.each<[string, RedThenGreenEra, readonly string[], string, RedThenGreenEra]>([
     ["a writer in an I6-era graph", "owed-if-new-tests", ["T1"], "T1", "not-owed"],
@@ -223,10 +225,23 @@ describe("taskRedThenGreenEra (contract writers do not owe I6)", () => {
   });
 
   it("redThenGreenScope takes the era from the manifest and the writers from the contracts", () => {
-    const scope = redThenGreenScope(defaultVerificationManifest(), [{ contractTask: "T1" }, { contractTask: "T4" }]);
+    const scope = redThenGreenScope(defaultVerificationManifest(), [
+      { id: "CT-1", contractTask: "T1" },
+      { id: "CT-2", contractTask: "T4" },
+    ]);
     expect(scope.era).toBe("owed-if-new-tests");
-    expect([...scope.contractWriters].sort()).toEqual(["T1", "T4"]);
-    expect(redThenGreenScope(undefined, [{ contractTask: "T1" }]).era).toBe("not-owed");
+    expect(["T1", "T4", "T2"].map((id) => writtenContract(scope, id))).toEqual(["CT-1", "CT-2", undefined]);
+    expect(redThenGreenScope(undefined, [{ id: "CT-1", contractTask: "T1" }]).era).toBe("not-owed");
+  });
+
+  it("writtenContract names a writer's first contract in contract order", () => {
+    const scope = redThenGreenScope(defaultVerificationManifest(), [
+      { id: "CT-1", contractTask: "T2" },
+      { id: "CT-2", contractTask: "T1" },
+      { id: "CT-3", contractTask: "T2" },
+    ]);
+    expect(writtenContract(scope, "T2")).toBe("CT-1");
+    expect(writtenContract(scope, "T1")).toBe("CT-2");
   });
 
   const taskIds = fc.integer({ min: 1, max: 12 }).map((n) => `T${n}`);
@@ -484,7 +499,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     const ERAS: readonly RedThenGreenEra[] = ["owed-if-new-tests", "not-owed"];
     const otherEra = (era: RedThenGreenEra): RedThenGreenEra => era === "owed-if-new-tests" ? "not-owed" : "owed-if-new-tests";
     /** No contracts: every Task takes the graph's era. */
-    const scope = (era: RedThenGreenEra): RedThenGreenScope => ({ era, contractWriters: new Set() });
+    const scope = (era: RedThenGreenEra): RedThenGreenScope => ({ era, contractWriters: new Map() });
     const wiredT1 = (era: RedThenGreenEra): Record<string, unknown> => {
       const row = ERA_ROWS.find((candidate) => candidate.era === era)!;
       const task = (wire(populated(row.manifest())).tasks as Array<Record<string, unknown>>).find((t) => t.id === "T1");
@@ -501,7 +516,7 @@ describe("INV-6: every derivation site agrees with redThenGreenEra", () => {
     });
 
     it("refuses T1's I6-era obligations once T1 writes a contract, and accepts the writer era's", () => {
-      const writerScope: RedThenGreenScope = { era: "owed-if-new-tests", contractWriters: new Set(["T1"]) };
+      const writerScope: RedThenGreenScope = { era: "owed-if-new-tests", contractWriters: new Map([["T1", "CT-1"]]) };
       expect(taskUnionError(wiredT1("owed-if-new-tests"), 0, writerScope)).toContain("proof obligations do not exactly match");
       expect(taskUnionError(wiredT1("not-owed"), 0, writerScope)).toBeNull();
     });

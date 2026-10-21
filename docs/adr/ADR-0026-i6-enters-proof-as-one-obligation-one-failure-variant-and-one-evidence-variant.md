@@ -185,9 +185,10 @@ FR-010 exempted only claimants, through the `covered-by-acceptance-contract` wai
 the contract Task itself.
 
 **Decision.** A contract Task does not owe I6. One pure rule in `core/proof-obligations.ts` decides it.
-`redThenGreenScope(manifest, contracts)` pairs the graph's era with the set of contract Tasks, and
-`taskRedThenGreenEra(scope, taskId)` returns `not-owed` for a contract Task and the graph's era for any
-other Task. The contract gate's observed red window is the contract Task's red evidence. The contract
+`redThenGreenScope(manifest, contracts)` pairs the graph's era with each contract Task and the first
+contract it writes. `writtenContract(scope, taskId)` is the one reader of that pairing, and
+`taskRedThenGreenEra(scope, taskId)` asks it to return `not-owed` for a contract Task and the graph's
+era for any other Task. The contract gate's observed red window is the contract Task's red evidence. The contract
 Task keeps its `new-tests` obligation.
 
 - Every obligation derivation or check that has the graph in hand asks through the rule. These are
@@ -203,7 +204,8 @@ Task keeps its `new-tests` obligation.
   `red-then-green` for a contract Task, so the contract Task settles on its other obligations and its
   brief has no I6 section.
 - Red-Then-Green Status gains the not-owed reason `contract-writer`, which names the contract. It is
-  checked after `predates-i6` and before the new-test policy.
+  checked after `predates-i6` and before the new-test policy, and it reads the contract through
+  `writtenContract` on the same scope, so the reason cannot disagree with the exemption.
 
 **Consequences.** If a contract's `contractTask` changes in the State File, the obligations that Task's
 frozen Proof must carry change too. A Proof frozen under the old contracts is then refused as

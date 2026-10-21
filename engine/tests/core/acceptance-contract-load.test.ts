@@ -3,6 +3,7 @@ import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from ".
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, TaskGraph } from "../../src/types";
+import { withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
 
 const CONTRACT: PlanContract = {
@@ -63,23 +64,6 @@ const withContract = (patch: Record<string, unknown>) => (graph: Record<string, 
   acceptance_contracts: [{ ...(graph.acceptance_contracts as Record<string, unknown>[])[0], ...patch }],
 });
 
-/** T1's Proof as a non-writer's in this I6-era graph: red-then-green after new-tests. A
- *  contract retargeted away from T1 leaves T1 owing I6, which its frozen Proof must show
- *  before the contract's own binding is judged. */
-const withT1OwingI6 = (graph: Record<string, unknown>): Record<string, unknown> => withTasks(graph, (task) => {
-  if (task.id !== "T1") return task;
-  const proof = task.proof as { obligations: Array<{ kind: string }>; results: unknown[] };
-  const at = proof.obligations.findIndex(({ kind }) => kind === "new-tests") + 1;
-  return {
-    ...task,
-    proof: {
-      ...proof,
-      obligations: [...proof.obligations.slice(0, at), { kind: "red-then-green" }, ...proof.obligations.slice(at)],
-      results: [...proof.results.slice(0, at), { state: "pending", obligation: { kind: "red-then-green" } }, ...proof.results.slice(at)],
-    },
-  };
-});
-
 describe("acceptance_contracts at the State File load boundary", () => {
   it("round-trips the contracts population stamped", () => {
     const graph = populated();
@@ -102,8 +86,10 @@ describe("acceptance_contracts at the State File load boundary", () => {
   });
 
   it.each<[string, (graph: Record<string, unknown>) => Record<string, unknown>, string]>([
+    // Retargeted away from T1, the contract leaves T1 owing I6, which its frozen Proof must
+    // show before the contract's own binding is judged.
     ["a contract task missing from the roster",
-      (graph) => withContract({ contractTask: "T9" })(withT1OwingI6(graph)), "contract task T9 is not in tasks"],
+      (graph) => withContract({ contractTask: "T9" })(withRedThenGreen(graph, "T1")), "contract task T9 is not in tasks"],
     ["a frozen path its contract task does not list",
       withContract({ acceptance: [{ path: "tests/other.acceptance.test.ts", anchors: ["FR-001"] }] }),
       "frozen path 'tests/other.acceptance.test.ts' is not in T1's file_list"],

@@ -596,7 +596,7 @@ Do not use `mark-tests-passed` to fabricate evidence. It is an evidence/status o
 
 ### Task fails I6 (red-then-green)
 
-A Task owes I6 when it requires new tests, is neither an Acceptance Contract claimant nor a contract Task, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. A contract Task is exempt because it cannot satisfy I6: its contract Wave Gate requires every acceptance testcase it writes to be collected and failing, so those tests never go green in its attempt, and a test-only contract has no implementation file to write. The gate's observed red window is the contract Task's red evidence. Its Proof still owes `new-tests`, and its brief carries no I6 section. Such a Task settles `implemented` only when its attempt epoch's ledger shows three things in order:
+A Task owes I6 when it requires new tests, is neither an Acceptance Contract claimant nor a contract Task, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. A contract Task is exempt because it cannot satisfy I6: its contract Wave Gate requires every acceptance testcase it writes to be collected and failing, so those tests never go green in its attempt, and a test-only contract has no implementation file to write. The gate's observed red window is the contract Task's red evidence. Its Proof still owes `new-tests`, and its brief carries no I6 section. A Task that owes I6 settles `implemented` only when its attempt epoch's ledger shows three things in order:
 1. a qualifying red on one of its test files;
 2. then its first write to an implementation file;
 3. then a qualifying green covering every one of its test files.

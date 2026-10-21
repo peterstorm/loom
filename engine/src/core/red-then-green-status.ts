@@ -23,7 +23,7 @@ import { match, P } from "ts-pattern";
 import type { TaskGraph, Task, TaskStatus } from "../types";
 import { redThenGreenDuty } from "./implementation-application";
 import type { NonEmpty } from "./orchestration-contract";
-import { redThenGreenEra, type ProofFailure, type ProofObligationResult } from "./proof-obligations";
+import { redThenGreenScope, writtenContract, type ProofFailure, type ProofObligationResult } from "./proof-obligations";
 import { judgeRedThenGreen, redThenGreenFailureKind } from "./red-then-green";
 import type { Evidence } from "../machine/types";
 import type {
@@ -61,7 +61,7 @@ export type RedThenGreenStatusInput = Readonly<{
 /** Why a `not-owed` duty is not owed: the first that applies, in this order. */
 export type NotOwedReason =
   | Readonly<{ kind: "predates-i6" }>
-  /** The Task writes this Acceptance Contract (its id), so `taskRedThenGreenEra` exempts it. */
+  /** The Task writes this Acceptance Contract (its id, from `writtenContract`), so `taskRedThenGreenEra` exempts it. */
   | Readonly<{ kind: "contract-writer"; contract: string }>
   | Readonly<{ kind: "claimant" }>
   | Readonly<{ kind: "new-tests-waived"; reason: NewTestWaiverReason }>
@@ -164,9 +164,10 @@ const NO_OBLIGATION: StoredView = freeze({ kind: "no-obligation" });
 const STORED_PENDING_VIEW: StoredView = freeze({ kind: "pending" });
 
 function notOwedReason(task: Task, graph: TaskGraph): NotOwedReason {
-  if (redThenGreenEra(graph.verification_manifest) === "not-owed") return PREDATES_I6;
-  const written = graph.acceptance_contracts?.find(({ contractTask }) => contractTask === task.id);
-  if (written !== undefined) return freeze({ kind: "contract-writer", contract: written.id });
+  const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
+  if (scope.era === "not-owed") return PREDATES_I6;
+  const contract = writtenContract(scope, task.id);
+  if (contract !== undefined) return freeze({ kind: "contract-writer", contract });
   return match(taskVerificationPolicy(task).newTests)
     .returnType<NotOwedReason>()
     .with({ kind: "waived", reason: COVERED_BY_ACCEPTANCE_CONTRACT }, () => CLAIMANT)

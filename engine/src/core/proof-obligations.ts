@@ -102,24 +102,33 @@ export function redThenGreenEra(manifest: FrozenVerificationManifest | undefined
 
 /**
  * What decides one Task's I6 era: the TaskGraph's era and the Tasks that
- * write an Acceptance Contract. Built once per graph by `redThenGreenScope`
- * and asked per Task through `taskRedThenGreenEra`.
+ * write an Acceptance Contract, each mapped to the first contract (in
+ * contract order) it writes. Built once per graph by `redThenGreenScope` and
+ * asked per Task through `writtenContract` and `taskRedThenGreenEra`.
  */
-export type RedThenGreenScope = Readonly<{ era: RedThenGreenEra; contractWriters: ReadonlySet<string> }>;
+export type RedThenGreenScope = Readonly<{ era: RedThenGreenEra; contractWriters: ReadonlyMap<string, string> }>;
 
 /**
  * The graph's scope, from its frozen manifest and its Acceptance Contracts.
- * Structural on `contractTask` alone, so this module never imports the
- * acceptance-contract model (which imports from here).
+ * Structural on `id` and `contractTask` alone, so this module never imports
+ * the acceptance-contract model (which imports from here).
  */
 export function redThenGreenScope(
   manifest: FrozenVerificationManifest | undefined,
-  contracts: readonly Readonly<{ contractTask: string }>[],
+  contracts: readonly Readonly<{ id: string; contractTask: string }>[],
 ): RedThenGreenScope {
-  return Object.freeze({
-    era: redThenGreenEra(manifest),
-    contractWriters: new Set(contracts.map(({ contractTask }) => contractTask)),
-  });
+  // A later Map entry overwrites an earlier one, so reversing keeps each writer's first contract.
+  const writers = [...contracts].reverse().map(({ id, contractTask }) => [contractTask, id] as const);
+  return Object.freeze({ era: redThenGreenEra(manifest), contractWriters: new Map(writers) });
+}
+
+/**
+ * The Acceptance Contract `taskId` writes (its first, in contract order), or
+ * `undefined` for a Task writing none: the one reader of `contractWriters`,
+ * so the exemption and the contract Red-Then-Green Status names cannot drift.
+ */
+export function writtenContract(scope: RedThenGreenScope, taskId: string): string | undefined {
+  return scope.contractWriters.get(taskId);
 }
 
 /**
@@ -143,7 +152,7 @@ export function redThenGreenScope(
  * contract writer.
  */
 export function taskRedThenGreenEra(scope: RedThenGreenScope, taskId: string): RedThenGreenEra {
-  return scope.contractWriters.has(taskId) ? "not-owed" : scope.era;
+  return writtenContract(scope, taskId) === undefined ? scope.era : "not-owed";
 }
 
 /** Which byte comparison each declared artifact owes.

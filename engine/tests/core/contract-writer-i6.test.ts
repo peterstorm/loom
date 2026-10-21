@@ -23,7 +23,12 @@ import {
   TASK_BYTE_SCOPE_CHECK_ID_TEXT,
 } from "../../src/core/implementation-completion";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../../src/core/implementation-brief";
-import { TRUSTED_LEDGER_ONLY_POLICY, type ProofObligation } from "../../src/core/proof-obligations";
+import {
+  redThenGreenScope,
+  taskRedThenGreenEra,
+  TRUSTED_LEDGER_ONLY_POLICY,
+  type ProofObligation,
+} from "../../src/core/proof-obligations";
 import { NOT_OWED_REASON_TEXT, RTG_NOT_OWED, redThenGreenStatusView, renderRedThenGreenStatus } from "../../src/core/red-then-green-status";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { parseAuthoredTaskRoster, populateTaskGraph, type AuthoredTask } from "../../src/core/task-graph-population";
@@ -33,6 +38,7 @@ import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implement
 import { parseTaskGraph } from "../../src/state-manager";
 import type { PlanContract, Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
+import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
 
 // --- Fixtures ---
@@ -106,28 +112,6 @@ const taskOf = (graph: Readonly<{ tasks: readonly Task[] }>, id: string): Task =
   return found;
 };
 
-type WireProof = { obligations: Array<{ kind: string }>; results: Array<{ state: string; obligation: { kind: string } }> };
-const wireProof = (raw: Record<string, unknown>, id: string): WireProof =>
-  (raw.tasks as Array<Record<string, unknown>>).find((candidate) => candidate.id === id)!.proof as WireProof;
-
-/** The wire graph with `id`'s red-then-green obligation removed (a no-op when it carries none). */
-function withoutRedThenGreen(raw: Record<string, unknown>, id: string): Record<string, unknown> {
-  const proof = wireProof(raw, id);
-  proof.obligations = proof.obligations.filter(({ kind }) => kind !== "red-then-green");
-  proof.results = proof.results.filter(({ obligation }) => obligation.kind !== "red-then-green");
-  return raw;
-}
-
-/** The wire graph with `id`'s red-then-green obligation present, right after new-tests. */
-function withRedThenGreen(raw: Record<string, unknown>, id: string): Record<string, unknown> {
-  withoutRedThenGreen(raw, id);
-  const proof = wireProof(raw, id);
-  const at =proof.obligations.findIndex(({ kind }) => kind === "new-tests") + 1;
-  proof.obligations.splice(at, 0, { kind: "red-then-green" });
-  proof.results.splice(at, 0, { state: "pending", obligation: { kind: "red-then-green" } });
-  return raw;
-}
-
 /** The populated graph as a writer's Proof should be: no red-then-green on T1. */
 const writerProofGraph = (): Record<string, unknown> => withoutRedThenGreen(wire(populated()), "T1");
 
@@ -151,6 +135,11 @@ describe("population: contract writers owe no I6", () => {
     const claimant = kinds(taskOf(populated(), "T2").proof?.obligations);
     expect(claimant).not.toContain("new-tests");
     expect(claimant).not.toContain("red-then-green");
+  });
+
+  it("freezes every Task's Proof, so no contract writer reaches a no-Proof path", () => {
+    // ADR-0026's soundness premise: revalidation and redThenGreenDuty's no-Proof arm take the graph era alone.
+    expect(populated().tasks.filter(({ proof }) => proof === undefined).map(({ id }) => id)).toEqual([]);
   });
 });
 
@@ -233,6 +222,16 @@ describe("Red-Then-Green Status names the writer's true reason", () => {
     expect(redThenGreenStatusView({ graph: loaded(), taskId: "T1", live: { kind: "no-live-attempt" } })).toMatchObject({
       duty: { kind: "not-owed", reason: { kind: "contract-writer", contract: "CT-1" } },
     });
+  });
+
+  it("names contract-writer for exactly the Tasks taskRedThenGreenEra exempts", () => {
+    const graph = loaded();
+    const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
+    for (const { id } of graph.tasks) {
+      const view = redThenGreenStatusView({ graph, taskId: id, live: { kind: "no-live-attempt" } });
+      const named = view.kind === "task" && view.duty.kind === "not-owed" && view.duty.reason.kind === "contract-writer";
+      expect(named, id).toBe(scope.era === "owed-if-new-tests" && taskRedThenGreenEra(scope, id) === "not-owed");
+    }
   });
 
   it("renders the reason in the header", () => {
