@@ -151,6 +151,8 @@ export const ORCHESTRATION_RUNS_SUFFIX = ".orchestration-runs.json" as const;
 export const IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX = ".implementation-attempt.json" as const;
 export const TASK_GRAPH_POINTER_BINDING_SUFFIX = ".task-graph-pointer-binding.json" as const;
 export const TASK_GRAPH_POINTER_LEASES_SUFFIX = ".task-graph-pointer-leases.json" as const;
+/** The per-session pointer naming the TaskGraph file the session is bound to. */
+export const TASK_GRAPH_POINTER_SUFFIX = ".task_graph" as const;
 
 /**
  * Every per-session file suffix written under SUBAGENT_DIR — the single
@@ -164,7 +166,7 @@ export const SESSION_SUFFIXES = [
   MACHINE_SUFFIX,
   ".active",
   ".cleanup",
-  ".task_graph",
+  TASK_GRAPH_POINTER_SUFFIX,
   TASK_GRAPH_POINTER_LEASES_SUFFIX,
   CALL_START_SUFFIX,
   ORCHESTRATION_RUNS_SUFFIX,
@@ -182,22 +184,32 @@ export const STOP_CHECK_NOTE_SUFFIX = ".stop-check-note.json" as const;
  *  key from an agent key unambiguously. */
 export const sidecarKey = (key: string): string => key.replace(/[^A-Za-z0-9_-]/g, "_");
 
-/** The keys a session's tracking files may be grouped under: the id itself and
- *  its sidecar key (they differ only for an id with characters outside
- *  letters, digits, `_` and `-`). */
-export function sessionGroupKeys(sessionId: string): readonly string[] {
-  return [...new Set([sessionId, sidecarKey(sessionId)])];
-}
+/**
+ * The ONE key every tracking file of a session is grouped under: the session's
+ * sidecar key. Stop-check notes can only carry that spelling, so grouping every
+ * other file under it too makes a two-spelling split of one session
+ * unrepresentable. Two ids that differ only outside `[A-Za-z0-9_-]` (`s.1`,
+ * `s_1`) share a group; for the sweep that only ever protects more.
+ */
+declare const SESSION_GROUP_KEY: unique symbol;
+export type SessionGroupKey = string & { readonly [SESSION_GROUP_KEY]: true };
+
+export const sessionGroupKey = (sessionId: string): SessionGroupKey => sidecarKey(sessionId) as SessionGroupKey;
 
 /**
- * The session group key of one tracking file under SUBAGENT_DIR, or null when
- * the name matches no per-session file. The single classification the
- * SessionStart sweep groups by: SESSION_SUFFIXES name `<session><suffix>`; the
- * per-agent sidecars carry an agent segment after the session — hex-encoded for
- * the implementation-attempt and pointer-binding sidecars, a `sidecarKey` for
- * stop-check notes (grouped under the session's sidecar key).
+ * The session group of one tracking file under SUBAGENT_DIR, or null when the
+ * name matches no per-session file. The single classification the SessionStart
+ * sweep groups by: SESSION_SUFFIXES name `<session><suffix>`; the per-agent
+ * sidecars carry an agent segment after the session — hex-encoded for the
+ * implementation-attempt and pointer-binding sidecars, a `sidecarKey` for
+ * stop-check notes.
  */
-export function sessionOfTrackingFile(entry: string): string | null {
+export function sessionGroupOfTrackingFile(entry: string): SessionGroupKey | null {
+  const session = sessionPrefixOfTrackingFile(entry);
+  return session === null ? null : sessionGroupKey(session);
+}
+
+function sessionPrefixOfTrackingFile(entry: string): string | null {
   for (const suffix of [IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX, TASK_GRAPH_POINTER_BINDING_SUFFIX]) {
     if (!entry.endsWith(suffix)) continue;
     const keyed = entry.slice(0, -suffix.length);

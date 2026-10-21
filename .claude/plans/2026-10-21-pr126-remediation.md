@@ -40,3 +40,31 @@ None.
 
 - `bun scripts/typecheck.ts` (engine): exit 0.
 - Root-started full suite (`npx --prefix <abs>/engine vitest run --root <abs>/engine`): 552 files, 13,511 passed, 1 skipped.
+
+# Round 2
+
+Source review `review-fix-20261021-pr126-r2` against head `705d71e8`: 0 critical, 10 advisory. Policy `policy-20261021-pr126-r2` (disposition `dfec2a01`): all 10 accepted.
+
+| Finding | Change |
+|---|---|
+| silent-failure-hunter-1 | `startingSessionOf` returns a `StartingSession` ADT (`named`, `absent`, `unusable` with its cause). Non-empty SessionStart input with no usable `session_id` is reported as a `parse` diagnostic in the hook's message, and a malformed `<session>.task_graph` pointer is reported as a `parse` diagnostic instead of binding nothing silently. |
+| pr-test-analyzer-1 | New `complete-orchestration-publish.test.ts` injects a live-graph removal failure at the no-follow-fs seam. The helper rejects with the failure, the live graph and the archive both hold the exact bytes, and no prepared name remains. |
+| type-design-analyzer-1 | Every tracking file classifies to one branded `SessionGroupKey`, the session's sidecar key (`sessionGroupOfTrackingFile`, `sessionGroupKey`). `sessionGroupKeys` is gone; the two-spelling split cannot be represented. |
+| comment-analyzer-1 | The `scanSubstitutions` docblock sits on the function again, and names the context argument. |
+| architecture-tech-lead-1 | `archiveAndRemove` publishes through `publishDirectoryFileExclusiveNoFollow`, now exported: the bytes are prepared under a temporary name and hard-linked into place, so no partial archive is ever visible. |
+| architecture-tech-lead-2, code-simplifier-1 | `TASK_GRAPH_POINTER_SUFFIX` is one named constant in `machine/evidence.ts`, used by `SESSION_SUFFIXES`, the sweep, `state-manager`, `task-graph-pointer` and `ledger`. |
+| architecture-tech-lead-3, code-simplifier-2 | `SubstitutionContext` is a discriminated union: `known-word` with its literal, or `opaque`. The scanner parses each heredoc span once, and the guard reads one variant. |
+| code-simplifier-3 | The `repository-roots` import joins each test file's import block. |
+
+## Support paths (outside the round-2 frozen scope)
+
+- `engine/src/orchestration/no-follow-fs.ts`
+- `engine/src/machine/task-graph-pointer.ts`
+- `engine/src/machine/ledger.ts`
+- `engine/tests/handlers/helpers/complete-orchestration-publish.test.ts`
+
+## Validation
+
+- `bun scripts/typecheck.ts` (engine): exit 0.
+- Root-started full suite: 554 files, 13,540 passed, 1 skipped.
+- Project lint: 77 violations, the same set as before this round; none in changed code.

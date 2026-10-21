@@ -6,8 +6,8 @@ import { execFile, type ExecFileException } from "node:child_process";
 import vitestConfig from "../vitest.config";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
-
 import { ENGINE, REPOSITORY as repository } from "./fixtures/repository-roots";
+
 const rootPackage = JSON.parse(readFileSync(join(repository, "package.json"), "utf8"));
 const enginePackage = JSON.parse(readFileSync(join(ENGINE, "package.json"), "utf8"));
 const temporaryDirectories: string[] = [];

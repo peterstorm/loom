@@ -107,6 +107,11 @@ bindings, sidecars) once all of it has idled past the TTL. It never deletes
 the session that is starting, because SessionStart also fires on resume, or
 a session whose `<session>.task_graph` pointer names a TaskGraph that still
 exists. An overnight-paused orchestration therefore keeps its I6 ledger.
+Every file of a session groups under one key, its sidecar key
+(`sessionGroupOfTrackingFile`), so a session id with characters outside
+`[A-Za-z0-9_-]` cannot split into two groups. SessionStart input without a
+usable `session_id`, and a malformed pointer, are reported in the hook's
+diagnostics rather than silently protecting nothing.
 
 ## Module layout (machine-checked purity)
 

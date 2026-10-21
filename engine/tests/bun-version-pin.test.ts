@@ -11,7 +11,6 @@ import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkBunVersion, describeBunVersionRefusal, type BunVersion } from "../scripts/bun-version-pin";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
-
 import { ENGINE, REPOSITORY } from "./fixtures/repository-roots";
 
 const dirs: string[] = [];

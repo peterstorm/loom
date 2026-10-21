@@ -20,6 +20,7 @@ import {
   parseSessionId,
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
   TASK_GRAPH_POINTER_LEASES_SUFFIX,
+  TASK_GRAPH_POINTER_SUFFIX,
   type AgentId,
   type SessionId,
 } from "./evidence";
@@ -203,7 +204,7 @@ function acquirePointerLease(
   target: string,
   canonicalDirectory: string,
 ): SessionTaskGraphPointerBinding {
-  const pointerName = `${sessionId}.task_graph`;
+  const pointerName = `${sessionId}${TASK_GRAPH_POINTER_SUFFIX}`;
   const registryName = `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`;
   const pointer = optionalPointer(anchored, pointerName);
   const registry = optionalRegistry(anchored, registryName);
@@ -274,7 +275,7 @@ export async function bindSessionTaskGraphPointer(
 export async function rollbackSessionTaskGraphPointer(
   binding: SessionTaskGraphPointerBinding,
 ): Promise<SessionTaskGraphPointerRollback> {
-  const lockName = `${binding.pointerName.slice(0, -".task_graph".length)}.task-graph-pointer.lock`;
+  const lockName = `${binding.pointerName.slice(0, -TASK_GRAPH_POINTER_SUFFIX.length)}.task-graph-pointer.lock`;
   return withAnchoredDirectoryLock(binding.directory, lockName, (anchored) =>
     releasePointerLease(anchored, binding));
 }
@@ -329,7 +330,7 @@ export function parsePersistedSessionTaskGraphPointerBinding(
   const agentId = typeof record.agentId === "string" ? parseAgentId(record.agentId) : null;
   const binding = parsePointerBinding(record.binding);
   if (sessionId === null || agentId === null || binding === null ||
-      binding.pointerName !== `${sessionId}.task_graph` ||
+      binding.pointerName !== `${sessionId}${TASK_GRAPH_POINTER_SUFFIX}` ||
       binding.registryName !== `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`) {
     return Object.freeze({ ok: false, error: "persisted pointer binding identity or binding is invalid" });
   }

@@ -21,6 +21,26 @@ export interface SubstitutionScan {
 }
 
 /**
+ * What a caller may know about one substitution beyond its body text.
+ *
+ *   known-word — a `cat` quoted heredoc (`staticHeredocCat`) standing as an
+ *                entire double-quoted word: whitespace or the line edge before
+ *                the opening `"`, and the closing `"` directly after `)` then
+ *                whitespace, a separator or the line edge. Its output is
+ *                exactly `literal`, one word with no adjacent text to join,
+ *                neither word-split nor globbed.
+ *   opaque     — every other substitution: its output is not statically known.
+ */
+export type SubstitutionContext =
+  | Readonly<{ kind: "known-word"; literal: string }>
+  | Readonly<{ kind: "opaque" }>;
+
+const OPAQUE: SubstitutionContext = Object.freeze({ kind: "opaque" });
+
+const WORD_EDGE_BEFORE = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
+const WORD_EDGE_AFTER = (c: string | undefined): boolean => c === undefined || /[\s;&|)]/.test(c);
+
+/**
  * Quote state is tracked as `'"' | "'" | null`, NOT a lone single-quote flag:
  * a `'` inside double quotes (`"it's"`) is a literal apostrophe that must NOT
  * open a single-quoted region (the round-20 regression that disabled the whole
@@ -28,28 +48,14 @@ export interface SubstitutionScan {
  * substitution `$(…)` and backticks stay LIVE inside double quotes (bash still
  * performs them); process substitution `<(…)`/`>(…)` is a substitution only when
  * UNQUOTED (bash does not perform it inside double quotes), so it is treated
- * literally there. `onBody` maps each body to its replacement; the caller
- * decides the unclosed policy from `scan.unclosed`.
+ * literally there. `onBody` maps each body, with its SubstitutionContext, to
+ * its replacement; the caller decides the unclosed policy from `scan.unclosed`.
  *
  * The walker-divergence property net (tests/core/guard-state-file-walkers.test.ts)
  * pins its span decisions against an independent reference walker: a
  * regression in THIS quote state machine silently disables the guard's
  * substitution defense.
  */
-/** What a caller may know about one substitution beyond its body text. */
-export type SubstitutionContext = Readonly<{
-  /** The exact output when the body is a `cat` quoted heredoc (`staticHeredocCat`), else null. */
-  staticLiteral: string | null;
-  /** The substitution is an entire double-quoted word — whitespace or the line
-   *  edge before the opening `"`, and the closing `"` directly after `)` then
-   *  whitespace, a separator or the line edge — so its output is one word with
-   *  no adjacent text to join, and is neither word-split nor globbed. */
-  wholeQuotedWord: boolean;
-}>;
-
-const WORD_EDGE_BEFORE = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
-const WORD_EDGE_AFTER = (c: string | undefined): boolean => c === undefined || /[\s;&|)]/.test(c);
-
 export function scanSubstitutions(
   text: string,
   onBody: (body: string, context: SubstitutionContext) => string,
@@ -74,13 +80,16 @@ export function scanSubstitutions(
     const isCmdSub = c === "$" && text[i + 1] === "(";
     const isProcSub = quote === null && (c === "<" || c === ">") && text[i + 1] === "(";
     if (isCmdSub || isProcSub) {
-      const close = findClosingParen(text, i + 2);
+      const heredoc = staticHeredocCat(text, i + 2);
+      const close = heredoc?.close ?? findGenericClosingParen(text, i + 2);
       if (close === -1) return { bodies, rebuilt, unclosed: true };
       const body = text.slice(i + 2, close);
       bodies.push(body);
       const wholeQuotedWord = isCmdSub && quote === '"' && text[i - 1] === '"' && WORD_EDGE_BEFORE(text[i - 2]) &&
         text[close + 1] === '"' && WORD_EDGE_AFTER(text[close + 2]);
-      rebuilt += onBody(body, { staticLiteral: staticHeredocCat(text, i + 2)?.literal ?? null, wholeQuotedWord });
+      rebuilt += onBody(body, heredoc !== null && wholeQuotedWord
+        ? Object.freeze({ kind: "known-word", literal: heredoc.literal })
+        : OPAQUE);
       i = close;
       continue;
     }
@@ -89,7 +98,7 @@ export function scanSubstitutions(
       if (close === -1) return { bodies, rebuilt, unclosed: true };
       const body = text.slice(i + 1, close);
       bodies.push(body);
-      rebuilt += onBody(body, { staticLiteral: null, wholeQuotedWord: false });
+      rebuilt += onBody(body, OPAQUE);
       i = close;
       continue;
     }
@@ -137,8 +146,11 @@ export function staticHeredocCat(command: string, start: number): Readonly<{ lit
  *  `` $(`a)b`) `` closes at the final `)`. A `cat` quoted-heredoc body
  *  (`staticHeredocCat`) is data and closes at its exact span. -1 when unclosed. */
 export function findClosingParen(command: string, start: number): number {
-  const heredoc = staticHeredocCat(command, start);
-  if (heredoc !== null) return heredoc.close;
+  return staticHeredocCat(command, start)?.close ?? findGenericClosingParen(command, start);
+}
+
+/** The quote-aware paren-depth closer behind findClosingParen. */
+function findGenericClosingParen(command: string, start: number): number {
   let depth = 1;
   return scanUnquoted<number>(command, start, (c, i) => {
     if (c === "(") depth++;

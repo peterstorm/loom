@@ -40,17 +40,22 @@ describe("staticHeredocCat (pure)", () => {
     expect(staticHeredocCat(command, 2)).toBeNull();
   });
 
-  it("reports a whole double-quoted word only when no text is adjacent", () => {
+  it("reports a known word only for a quoted cat heredoc that is a whole double-quoted word", () => {
     const contexts = (command: string) => {
-      const seen: boolean[] = [];
-      scanSubstitutions(command, (_body, context) => { seen.push(context.wholeQuotedWord); return ""; });
+      const seen: string[] = [];
+      scanSubstitutions(command, (_body, context) => {
+        seen.push(context.kind === "known-word" ? `known:${context.literal}` : "opaque");
+        return "";
+      });
       return seen;
     };
-    expect(contexts(`a "$(cat <<'E'\nx\nE\n)" b`)).toEqual([true]);
-    expect(contexts(`a x"$(cat <<'E'\nx\nE\n)"`)).toEqual([false]);
-    expect(contexts(`a "$(cat <<'E'\nx\nE\n)"/y`)).toEqual([false]);
-    expect(contexts(`a $(cat <<'E'\nx\nE\n)`)).toEqual([false]);
-    expect(contexts(`a "pre $(cat <<'E'\nx\nE\n)"`)).toEqual([false]);
+    expect(contexts(`a "$(cat <<'E'\nx\nE\n)" b`)).toEqual(["known:x"]);
+    expect(contexts(`a x"$(cat <<'E'\nx\nE\n)"`)).toEqual(["opaque"]);
+    expect(contexts(`a "$(cat <<'E'\nx\nE\n)"/y`)).toEqual(["opaque"]);
+    expect(contexts(`a $(cat <<'E'\nx\nE\n)`)).toEqual(["opaque"]);
+    expect(contexts(`a "pre $(cat <<'E'\nx\nE\n)"`)).toEqual(["opaque"]);
+    expect(contexts(`a "$(cat notes.md)" b`)).toEqual(["opaque"]);
+    expect(contexts("a \"`cat x`\" b")).toEqual(["opaque"]);
   });
 
   // The recognized span and literal must be what bash itself produces.

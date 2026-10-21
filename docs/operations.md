@@ -1065,7 +1065,7 @@ After the final Wave Gate, retire the TaskGraph:
 bun "$LOOM_DIR/engine/src/cli.ts" helper complete-orchestration
 ```
 
-The helper refuses, listing every reason, unless the graph has Tasks, all of them `completed`, and no Wave Gate run is registered as active. Under the TaskGraph lock it publishes the exact graph bytes beside the live graph as `.claude/state/completed_task_graph-<issue|no-issue>-<UTC stamp>.json`, exclusively, so an existing archive is never overwritten. It then removes the live graph. The archive is written before the removal, so a failure leaves both files, never neither.
+The helper refuses, listing every reason, unless the graph has Tasks, all of them `completed`, and no Wave Gate run is registered as active. Under the TaskGraph lock it publishes the exact graph bytes beside the live graph as `.claude/state/completed_task_graph-<issue|no-issue>-<UTC stamp>.json`. The publish is exclusive and whole: the bytes are prepared under a temporary name and hard-linked into place, so an existing archive is never overwritten and a partial archive is never visible. It then removes the live graph. The archive is published before the removal, so a failure leaves both files, never neither.
 
 Every Loom guard keys on the live graph path: `block-direct-edits`, the Task/Agent spawn gates and the state guard. So they all lift, and a post-gate `/review-and-fix` can run in the same checkout. While a finished graph stays live, those guards stay on: Write and Edit are refused, even to a session scratchpad, and spawns are phase-checked.
 

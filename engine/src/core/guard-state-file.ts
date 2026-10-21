@@ -65,8 +65,8 @@
  *    findClosingBrace — span closers, quote-aware; used by every scanner that
  *    must skip a whole span. findClosingParen first tries staticHeredocCat:
  *    `$(cat <<'D' … D)` closes at its exact span (the body is data, so its
- *    quotes and parens never count), and scanSubstitutions reports that
- *    literal plus whether the substitution is a whole double-quoted word —
+ *    quotes and parens never count), and scanSubstitutions reports such a
+ *    span standing as a whole double-quoted word as a `known-word` context —
  *    the only case whose output the guard treats as known (KNOWN_TEXT).
  *  - commandWords / splitFusedRedirect / unquote / commandArgs — the simple-
  *    command tokenizer feeding analyzeCommandHead; treats `( ) { }` as
@@ -470,7 +470,7 @@ function wildcardSubstitutions(text: string): string {
 const KNOWN_TEXT = "known_heredoc_text";
 
 function knownWordOutput(context: SubstitutionContext): string | null {
-  return context.wholeQuotedWord && context.staticLiteral !== null ? KNOWN_TEXT : null;
+  return context.kind === "known-word" ? KNOWN_TEXT : null;
 }
 
 /**

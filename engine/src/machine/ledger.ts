@@ -73,6 +73,7 @@ import {
   type CallStartEntry,
   CALL_START_CAP,
   CALL_START_SUFFIX,
+  TASK_GRAPH_POINTER_SUFFIX,
   callStartOf,
   epochOf,
   parseCallStartEntries,
@@ -332,7 +333,7 @@ export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentO
     }
     try {
       const parsedPointer = parseCanonicalTaskGraphPointer(
-        readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8"),
+        readFileSync(`${subagentDir()}/${session}${TASK_GRAPH_POINTER_SUFFIX}`, "utf-8"),
       );
       if (!parsedPointer.ok) {
         return Object.freeze({

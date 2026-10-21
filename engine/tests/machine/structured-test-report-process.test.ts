@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { parseStructuredTestReportBytes } from "../../src/core/structured-test-report";
-
 import { ENGINE } from "../fixtures/repository-roots";
 
 // These reporter smokes use disposable directories only, never a Loom Run writer.

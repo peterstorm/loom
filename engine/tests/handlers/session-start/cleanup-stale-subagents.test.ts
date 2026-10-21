@@ -26,12 +26,14 @@ import {
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  parseSessionId,
   STOP_CHECK_NOTE_SUFFIX,
-  sessionGroupKeys,
+  sessionGroupKey,
   sidecarKey,
-  sessionOfTrackingFile,
+  sessionGroupOfTrackingFile,
   SESSION_SUFFIXES,
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
+  type SessionId,
 } from "../../../src/machine";
 import { disposeFixturePiSessions, fixturePiEnvironment } from "../../fixtures/pi-session";
 
@@ -40,51 +42,74 @@ const subDir = mkdtempSync(join(tmpdir(), "loom-sweep-"));
 /** Injected operations for a directory holding no readable TaskGraph pointer. */
 const NO_POINTERS = { readText: () => null, exists: () => false } as const;
 
+const session = (raw: string): SessionId => {
+  const parsed = parseSessionId(raw);
+  if (parsed === null) throw new Error(`fixture session id ${raw} is unsafe`);
+  return parsed;
+};
+
 afterAll(() => {
   disposeFixturePiSessions();
   rmSync(subDir, { recursive: true, force: true });
 });
 
-describe("sessionOfTrackingFile (pure)", () => {
-  it("maps every per-session suffix (single-sourced SESSION_SUFFIXES) to its session id", () => {
+describe("sessionGroupOfTrackingFile (pure)", () => {
+  it("maps every per-session suffix (single-sourced SESSION_SUFFIXES) to its session group", () => {
     // Driven by the shared machine/evidence tuple — a suffix added to the
     // ledger's path helpers is automatically covered here.
     for (const suffix of SESSION_SUFFIXES) {
       const entry = suffix === IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX || suffix === TASK_GRAPH_POINTER_BINDING_SUFFIX
         ? `s-1.${Buffer.from("agent-1").toString("hex")}${suffix}`
         : `s-1${suffix}`;
-      expect(sessionOfTrackingFile(entry), suffix).toBe("s-1");
-      expect(sessionOfTrackingFile(suffix), `bare ${suffix}`).toBeNull();
+      expect(sessionGroupOfTrackingFile(entry), suffix).toBe("s-1");
+      expect(sessionGroupOfTrackingFile(suffix), `bare ${suffix}`).toBeNull();
     }
   });
 
   it("returns null for unknown names", () => {
-    expect(sessionOfTrackingFile("random.txt")).toBeNull();
+    expect(sessionGroupOfTrackingFile("random.txt")).toBeNull();
   });
 
   it("groups a stop-check note sidecar with its session", () => {
-    expect(sessionOfTrackingFile(`s-1.aa5f1a5b83ae82b33${STOP_CHECK_NOTE_SUFFIX}`)).toBe("s-1");
-    expect(sessionOfTrackingFile(`s-1.${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
-    expect(sessionOfTrackingFile(`.agent${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
-    expect(sessionOfTrackingFile(STOP_CHECK_NOTE_SUFFIX)).toBeNull();
+    expect(sessionGroupOfTrackingFile(`s-1.aa5f1a5b83ae82b33${STOP_CHECK_NOTE_SUFFIX}`)).toBe("s-1");
+    expect(sessionGroupOfTrackingFile(`s-1.${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionGroupOfTrackingFile(`.agent${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionGroupOfTrackingFile(STOP_CHECK_NOTE_SUFFIX)).toBeNull();
+  });
+
+  it("classifies every file of one session to ONE key, whatever its spelling", () => {
+    const attempt = `s.1.${Buffer.from("agent-1").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+    const note = `${sidecarKey("s.1")}.agent1${STOP_CHECK_NOTE_SUFFIX}`;
+    const groups = ["s.1.evidence.jsonl", "s.1.machine", attempt, note].map(sessionGroupOfTrackingFile);
+    expect(new Set(groups)).toEqual(new Set([sessionGroupKey("s.1")]));
+    expect(sessionGroupKey("s.1")).toBe("s_1");
   });
 });
 
 describe("startingSessionOf (pure)", () => {
   it("reads a usable session_id from SessionStart input", () => {
-    expect(startingSessionOf(JSON.stringify({ session_id: "2f935faa-edaa", source: "resume" }))).toBe("2f935faa-edaa");
+    expect(startingSessionOf(JSON.stringify({ session_id: "2f935faa-edaa", source: "resume" })))
+      .toEqual({ kind: "named", sessionId: "2f935faa-edaa" });
   });
 
-  it("is null when the input names no usable session", () => {
-    for (const stdin of ["", "not json", "null", "[]", JSON.stringify({}), JSON.stringify({ session_id: 7 }),
-      JSON.stringify({ session_id: "../escape" }), JSON.stringify({ session_id: "" })]) {
-      expect(startingSessionOf(stdin), stdin).toBeNull();
+  it("empty input names no session and is not a failure", () => {
+    for (const stdin of ["", "  \n"]) expect(startingSessionOf(stdin)).toEqual({ kind: "absent" });
+  });
+
+  it("input that names no usable session is unusable, with its cause", () => {
+    const cases: readonly (readonly [string, RegExp])[] = [
+      ["not json", /not JSON/],
+      ["null", /not a JSON object/],
+      [JSON.stringify({}), /no string session_id/],
+      [JSON.stringify({ session_id: 7 }), /no string session_id/],
+      [JSON.stringify({ session_id: "../escape" }), /cannot name session files/],
+      [JSON.stringify({ session_id: "" }), /cannot name session files/],
+    ];
+    for (const [stdin, cause] of cases) {
+      const parsed = startingSessionOf(stdin);
+      expect(parsed.kind, stdin).toBe("unusable");
+      if (parsed.kind === "unusable") expect(parsed.cause, stdin).toMatch(cause);
     }
-  });
-
-  it("keys a session both as itself and as its sidecar form", () => {
-    expect(sessionGroupKeys("s-1")).toEqual(["s-1"]);
-    expect(sessionGroupKeys("s.1")).toEqual(["s.1", "s_1"]);
   });
 });
 
@@ -143,7 +168,7 @@ describe("staleEntries (pure) — group max mtime governs", () => {
       ["uncertain.machine", cutoff - 10],
       ["dead.machine", cutoff - 10],
     ]);
-    expect(staleEntries(mtimes, cutoff, new Set(["uncertain"]))).toEqual(["dead.machine"]);
+    expect(staleEntries(mtimes, cutoff, new Set([sessionGroupKey("uncertain")]))).toEqual(["dead.machine"]);
   });
 });
 
@@ -404,7 +429,7 @@ describe("sweepStaleSessions (fs)", () => {
         `s-resumed.agent1${STOP_CHECK_NOTE_SUFFIX}`];
       for (const name of [...kept, "s-other.evidence.jsonl"]) writeOld(dir, name);
 
-      expect(sweepStaleSessions(dir, Date.now() - 3_600_000, undefined, "s-resumed")).toEqual([]);
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000, undefined, session("s-resumed"))).toEqual([]);
 
       for (const name of kept) expect(existsSync(join(dir, name)), name).toBe(true);
       expect(existsSync(join(dir, "s-other.evidence.jsonl"))).toBe(false);
@@ -441,7 +466,12 @@ describe("sweepStaleSessions (fs)", () => {
       writeOld(dir, "s-garbled.evidence.jsonl");
       writeOld(dir, "s-garbled.task_graph", "relative/not-canonical.json");
 
-      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([]);
+      // The malformed pointer binds nothing, and says so.
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([{
+        operation: "parse",
+        path: join(dir, "s-garbled.task_graph"),
+        cause: "TaskGraph pointer must be one exact canonical absolute path",
+      }]);
 
       expect(existsSync(join(dir, "s-bound.evidence.jsonl"))).toBe(true);
       expect(existsSync(join(dir, "s-bound.task_graph"))).toBe(true);
@@ -485,6 +515,21 @@ describe("sweepStaleSessions (fs)", () => {
         rmSync(privateDir, { recursive: true, force: true });
       }
     });
+  });
+
+  it("SessionStart input that names no usable session is reported, and the sweep still runs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loom-sweep-unusable-"));
+    try {
+      const result = runCleanupStaleSubagents(dir, Date.now(), undefined, startingSessionOf("{\"source\":\"resume\"}"));
+      expect(result.kind).toBe("passthrough");
+      if (result.kind === "passthrough") {
+        expect(result.systemMessage).toBe(
+          "cleanup-stale-subagents: parse failed for SessionStart input: input carries no string session_id",
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("a missing dir is a no-op, and a clean injected handler wrapper passes through without diagnostics", () => {
