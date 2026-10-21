@@ -251,9 +251,6 @@ describe("positions agree with I6 settlement", () => {
       .filter((m) => m[2].endsWith(verdict.implementationWrite))
       .map((m) => Number(m[1]))
       .find((position) => position > verdict.red.index);
-    expect(writePosition).toBeDefined();
-    expect(writePosition!).toBeGreaterThan(verdict.red.index);
-    expect(writePosition!).toBeLessThan(verdict.green.index);
     expect([verdict.red.index, writePosition, verdict.green.index]).toEqual([2, 3, 4]);
   });
 });

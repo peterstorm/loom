@@ -745,23 +745,50 @@ export function callStartFor(sessionId: SessionId, toolUseId: string): number | 
   }
 }
 
-export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
+/**
+ * One read of a session's evidence ledger. An absent ledger is its own
+ * outcome, not an empty one: a reader that must refuse a missing ledger
+ * cannot tell the two apart from records alone. `refused` covers an
+ * unreadable path and any corrupt line — the whole ledger is refused rather
+ * than read as a prefix.
+ */
+export type EvidenceLedgerRead =
+  | { readonly kind: "absent"; readonly path: string }
+  | { readonly kind: "refused"; readonly message: string }
+  | { readonly kind: "records"; readonly records: readonly EvidenceRecord[] };
+
+export function readEvidenceLedger(sessionId: SessionId): EvidenceLedgerRead {
   const path = ledgerPath(sessionId);
-  const content = readOptionalTextFile(path, "evidence ledger");
-  if (content === null) return [];
-  const lines = content
+  let content: string | null;
+  try {
+    content = readOptionalTextFile(path, "evidence ledger");
+  } catch (error) {
+    return { kind: "refused", message: error instanceof Error ? error.message : String(error) };
+  }
+  if (content === null) return { kind: "absent", path };
+  const parsed = content
     .split("\n")
-    .filter((l) => l.trim() !== "");
-  const parsed = lines.map(parseEvidenceLine);
+    .filter((l) => l.trim() !== "")
+    .map(parseEvidenceLine);
   const corrupt = parsed.flatMap((result, index) =>
     result.ok ? [] : [`line ${index + 1}: ${result.error}`]);
   if (corrupt.length > 0) {
-    throw new Error(`evidence ledger ${path} is corrupt; refusing partial evidence: ${corrupt.join("; ")}`);
+    return { kind: "refused", message: `evidence ledger ${path} is corrupt; refusing partial evidence: ${corrupt.join("; ")}` };
   }
-  return parsed.map((result) => {
-    if (!result.ok) throw new Error("unreachable: corrupt evidence was rejected above");
-    return result.value;
-  });
+  return { kind: "records", records: parsed.flatMap((result) => (result.ok ? [result.value] : [])) };
+}
+
+/** The ledger's records, an absent ledger reading as none; a refused ledger throws. */
+export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
+  const read = readEvidenceLedger(sessionId);
+  switch (read.kind) {
+    case "absent":
+      return [];
+    case "refused":
+      throw new Error(read.message);
+    case "records":
+      return read.records;
+  }
 }
 
 // --- Machine registry (definitions shipped with the plugin) ---

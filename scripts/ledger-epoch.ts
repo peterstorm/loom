@@ -5,10 +5,11 @@
  *
  * Usage: bun scripts/ledger-epoch.ts --session <session-id> [--agent <agent-id> --type <agent-type>]
  *
- * Read-only: it locates the ledger with the engine's `ledgerPath` (which
- * follows LOOM_SUBAGENT_DIR) and reads it with `readEvidence`; it never
- * writes, truncates or creates a file or directory. The query decision and
- * the rendering are the pure core `engine/src/core/ledger-epoch-view`.
+ * Read-only: it reads the ledger with the engine's `readEvidenceLedger`
+ * (whose path follows LOOM_SUBAGENT_DIR), which tells an absent ledger from
+ * an empty one; it never writes, truncates or creates a file or directory.
+ * The query decision and the rendering are the pure core
+ * `engine/src/core/ledger-epoch-view`.
  *
  * Exit codes: 0 a rendered view (an empty epoch and a ledger with no epochs
  * included); 1 a ledger refusal (no ledger file, naming the path looked for,
@@ -16,9 +17,8 @@
  * line); 2 a usage refusal, with the reason and the usage on stderr. stdout
  * stays empty on every refusal.
  */
-import { existsSync } from "node:fs";
 import { argumentValue, unconsumedValueArguments } from "../engine/src/handlers/helpers/cli-args";
-import { ledgerPath, readEvidence } from "../engine/src/machine/ledger";
+import { readEvidenceLedger } from "../engine/src/machine/ledger";
 import type { EvidenceRecord } from "../engine/src/machine/types";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import {
@@ -43,12 +43,14 @@ function readQuery(argv: readonly string[]): DomainResult<LedgerEpochQuery, stri
 
 /** The session's parsed records, or a refusal naming the missing path or the corrupt line. */
 function readLedger(query: LedgerEpochQuery): DomainResult<readonly EvidenceRecord[], string> {
-  const path = ledgerPath(query.session);
-  if (!existsSync(path)) return failure(`ledger-epoch: no evidence ledger at ${path}`);
-  try {
-    return success(readEvidence(query.session));
-  } catch (cause) {
-    return failure(`ledger-epoch: ${cause instanceof Error ? cause.message : String(cause)}`);
+  const read = readEvidenceLedger(query.session);
+  switch (read.kind) {
+    case "absent":
+      return failure(`ledger-epoch: no evidence ledger at ${read.path}`);
+    case "refused":
+      return failure(`ledger-epoch: ${read.message}`);
+    case "records":
+      return success(read.records);
   }
 }
 
@@ -65,7 +67,7 @@ function main(argv: readonly string[]): void {
     process.exitCode = 1;
     return;
   }
-  // Outside the try: a renderer defect crashes loudly instead of reading as a refusal.
+  // Not a refusal path: a renderer defect crashes loudly instead of reading as a refusal.
   process.stdout.write(`${renderLedgerEpochView(records.value, query.value).join("\n")}\n`);
 }
 

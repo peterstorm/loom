@@ -159,6 +159,52 @@ describe("evidence ledger", () => {
   });
 });
 
+// readEvidence reads an absent ledger as no records; a reader that must refuse
+// a missing ledger needs the distinction, so readEvidenceLedger keeps it.
+describe("evidence ledger read outcome", () => {
+  it("an absent ledger is its own outcome, naming the path, and the read creates nothing", () => {
+    const s = sid("outcome-absent");
+    expect(ledger.readEvidenceLedger(s)).toEqual({ kind: "absent", path: ledger.ledgerPath(s) });
+    expect(existsSync(ledger.ledgerPath(s))).toBe(false);
+  });
+
+  it("an empty ledger file holds no records, unlike an absent one", () => {
+    const s = sid("outcome-empty");
+    writeFileSync(ledger.ledgerPath(s), "");
+    expect(ledger.readEvidenceLedger(s)).toEqual({ kind: "records", records: [] });
+  });
+
+  it("reads the records in ledger order", () => {
+    const s = sid("outcome-records");
+    ledger.appendEvidence(s, ep("a1:code-implementer-agent"), [read("/a.ts"), testRun]);
+    expect(ledger.readEvidenceLedger(s)).toEqual({
+      kind: "records",
+      records: [
+        { epoch: "a1:code-implementer-agent", event: read("/a.ts") },
+        { epoch: "a1:code-implementer-agent", event: testRun },
+      ],
+    });
+  });
+
+  it("refuses a corrupt ledger with the message readEvidence throws", () => {
+    const s = sid("outcome-corrupt");
+    appendFileSync(ledger.ledgerPath(s), `${JSON.stringify({ epoch: "a:b", event: read("/ok.ts") })}\n{torn line\n`);
+    const outcome = ledger.readEvidenceLedger(s);
+    expect(outcome).toMatchObject({ kind: "refused", message: expect.stringMatching(/refusing partial evidence: line 2:/) });
+    if (outcome.kind !== "refused") throw new Error("expected a refused read");
+    expect(() => ledger.readEvidence(s)).toThrow(outcome.message);
+  });
+
+  it("refuses an unreadable ledger rather than reading it as absent", () => {
+    const s = sid("outcome-unreadable");
+    symlinkSync(ledger.ledgerPath(s), ledger.ledgerPath(s));
+    expect(ledger.readEvidenceLedger(s)).toMatchObject({
+      kind: "refused",
+      message: expect.stringMatching(/cannot read evidence ledger.*ELOOP/i),
+    });
+  });
+});
+
 describe("call-start stamp reads", () => {
   it("returns quiet absence only for ENOENT", () => {
     expect(ledger.callStartFor(sid("callstart-absent"), "toolu_missing")).toBeNull();
