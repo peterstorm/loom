@@ -244,11 +244,11 @@ export function isDeviceStreamPath(target: string): boolean {
  *  (`..` at the root stays at the root) and no trailing slash. Lexical
  *  only — no symlink is followed, which the pure core cannot see. */
 function normalizeAbsolute(path: string): string {
-  const segments = path.split("/").reduce<readonly string[]>(
-    (kept, segment) =>
-      segment === "" || segment === "." ? kept : segment === ".." ? kept.slice(0, -1) : [...kept, segment],
-    [],
-  );
+  const segments = path.split("/").reduce<readonly string[]>((kept, segment) => {
+    if (segment === "" || segment === ".") return kept;
+    if (segment === "..") return kept.slice(0, -1);
+    return [...kept, segment];
+  }, []);
   return `/${segments.join("/")}`;
 }
 

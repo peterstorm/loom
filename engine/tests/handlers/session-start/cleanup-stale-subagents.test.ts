@@ -20,15 +20,16 @@ import { promisify } from "node:util";
 import {
   isDeadStatFailure,
   runCleanupStaleSubagents,
-  sessionOfEntry,
   staleEntries,
-  startingSessionKeys,
   startingSessionOf,
   sweepStaleSessions,
 } from "../../../src/handlers/session-start/cleanup-stale-subagents";
-import { STOP_CHECK_NOTE_SUFFIX } from "../../../src/stop-check-note-sidecar";
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  STOP_CHECK_NOTE_SUFFIX,
+  sessionGroupKeys,
+  sidecarKey,
+  sessionOfTrackingFile,
   SESSION_SUFFIXES,
   TASK_GRAPH_POINTER_BINDING_SUFFIX,
 } from "../../../src/machine";
@@ -44,7 +45,7 @@ afterAll(() => {
   rmSync(subDir, { recursive: true, force: true });
 });
 
-describe("sessionOfEntry (pure)", () => {
+describe("sessionOfTrackingFile (pure)", () => {
   it("maps every per-session suffix (single-sourced SESSION_SUFFIXES) to its session id", () => {
     // Driven by the shared machine/evidence tuple — a suffix added to the
     // ledger's path helpers is automatically covered here.
@@ -52,20 +53,20 @@ describe("sessionOfEntry (pure)", () => {
       const entry = suffix === IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX || suffix === TASK_GRAPH_POINTER_BINDING_SUFFIX
         ? `s-1.${Buffer.from("agent-1").toString("hex")}${suffix}`
         : `s-1${suffix}`;
-      expect(sessionOfEntry(entry), suffix).toBe("s-1");
-      expect(sessionOfEntry(suffix), `bare ${suffix}`).toBeNull();
+      expect(sessionOfTrackingFile(entry), suffix).toBe("s-1");
+      expect(sessionOfTrackingFile(suffix), `bare ${suffix}`).toBeNull();
     }
   });
 
   it("returns null for unknown names", () => {
-    expect(sessionOfEntry("random.txt")).toBeNull();
+    expect(sessionOfTrackingFile("random.txt")).toBeNull();
   });
 
   it("groups a stop-check note sidecar with its session", () => {
-    expect(sessionOfEntry(`s-1.aa5f1a5b83ae82b33${STOP_CHECK_NOTE_SUFFIX}`)).toBe("s-1");
-    expect(sessionOfEntry(`s-1.${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
-    expect(sessionOfEntry(`.agent${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
-    expect(sessionOfEntry(STOP_CHECK_NOTE_SUFFIX)).toBeNull();
+    expect(sessionOfTrackingFile(`s-1.aa5f1a5b83ae82b33${STOP_CHECK_NOTE_SUFFIX}`)).toBe("s-1");
+    expect(sessionOfTrackingFile(`s-1.${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionOfTrackingFile(`.agent${STOP_CHECK_NOTE_SUFFIX}`)).toBeNull();
+    expect(sessionOfTrackingFile(STOP_CHECK_NOTE_SUFFIX)).toBeNull();
   });
 });
 
@@ -82,8 +83,8 @@ describe("startingSessionOf (pure)", () => {
   });
 
   it("keys a session both as itself and as its sidecar form", () => {
-    expect(startingSessionKeys("s-1")).toEqual(["s-1"]);
-    expect(startingSessionKeys("s.1")).toEqual(["s.1", "s_1"]);
+    expect(sessionGroupKeys("s-1")).toEqual(["s-1"]);
+    expect(sessionGroupKeys("s.1")).toEqual(["s.1", "s_1"]);
   });
 });
 
@@ -407,6 +408,25 @@ describe("sweepStaleSessions (fs)", () => {
 
       for (const name of kept) expect(existsSync(join(dir, name)), name).toBe(true);
       expect(existsSync(join(dir, "s-other.evidence.jsonl"))).toBe(false);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("a graph-bound session keeps its sidecars, including under a differing sidecar key", () => {
+      const dir = freshDir();
+      const graph = join(dir, "active_task_graph.json");
+      writeFileSync(graph, "{}");
+      const attempt = `s.bound.${Buffer.from("agent-1").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+      const note = `${sidecarKey("s.bound")}.agent1${STOP_CHECK_NOTE_SUFFIX}`;
+      writeOld(dir, "s.bound.task_graph", graph);
+      writeOld(dir, "s.bound.machine");
+      writeOld(dir, attempt);
+      writeOld(dir, note);
+
+      expect(sweepStaleSessions(dir, Date.now() - 3_600_000)).toEqual([]);
+
+      for (const name of ["s.bound.task_graph", "s.bound.machine", attempt, note]) {
+        expect(existsSync(join(dir, name)), name).toBe(true);
+      }
       rmSync(dir, { recursive: true, force: true });
     });
 

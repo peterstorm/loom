@@ -2,10 +2,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
+import { ENGINE } from "../../fixtures/repository-roots";
 
 describe("orchestration status TaskGraph diagnostics", () => {
   it("preserves the state path and JSON parse cause instead of reporting a schema symptom", () => {

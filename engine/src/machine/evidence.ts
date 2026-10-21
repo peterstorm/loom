@@ -174,6 +174,54 @@ export const SESSION_SUFFIXES = [
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];
 
+/** Per-agent stop-check note sidecars: `<sidecarKey(session)>.<sidecarKey(agent)>`
+ *  followed by this suffix. */
+export const STOP_CHECK_NOTE_SUFFIX = ".stop-check-note.json" as const;
+
+/** A key as one file-name segment. "." is excluded, so it separates a session
+ *  key from an agent key unambiguously. */
+export const sidecarKey = (key: string): string => key.replace(/[^A-Za-z0-9_-]/g, "_");
+
+/** The keys a session's tracking files may be grouped under: the id itself and
+ *  its sidecar key (they differ only for an id with characters outside
+ *  letters, digits, `_` and `-`). */
+export function sessionGroupKeys(sessionId: string): readonly string[] {
+  return [...new Set([sessionId, sidecarKey(sessionId)])];
+}
+
+/**
+ * The session group key of one tracking file under SUBAGENT_DIR, or null when
+ * the name matches no per-session file. The single classification the
+ * SessionStart sweep groups by: SESSION_SUFFIXES name `<session><suffix>`; the
+ * per-agent sidecars carry an agent segment after the session — hex-encoded for
+ * the implementation-attempt and pointer-binding sidecars, a `sidecarKey` for
+ * stop-check notes (grouped under the session's sidecar key).
+ */
+export function sessionOfTrackingFile(entry: string): string | null {
+  for (const suffix of [IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX, TASK_GRAPH_POINTER_BINDING_SUFFIX]) {
+    if (!entry.endsWith(suffix)) continue;
+    const keyed = entry.slice(0, -suffix.length);
+    const separator = keyed.lastIndexOf(".");
+    const encodedAgent = separator < 0 ? "" : keyed.slice(separator + 1);
+    if (separator > 0 && encodedAgent.length > 0 && encodedAgent.length % 2 === 0 &&
+        /^[0-9a-f]+$/.test(encodedAgent)) {
+      return keyed.slice(0, separator);
+    }
+    return null;
+  }
+  if (entry.endsWith(STOP_CHECK_NOTE_SUFFIX)) {
+    const keyed = entry.slice(0, -STOP_CHECK_NOTE_SUFFIX.length);
+    const separator = keyed.indexOf(".");
+    return separator > 0 && separator < keyed.length - 1 ? keyed.slice(0, separator) : null;
+  }
+  for (const suffix of SESSION_SUFFIXES) {
+    if (entry.endsWith(suffix) && entry.length > suffix.length) {
+      return entry.slice(0, -suffix.length);
+    }
+  }
+  return null;
+}
+
 // --- Call-start stamps (wire format: JSON array [{ id, startMs }, …], oldest first) ---
 
 /**

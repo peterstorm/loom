@@ -7,14 +7,12 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkBunVersion, describeBunVersionRefusal, type BunVersion } from "../scripts/bun-version-pin";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 
-const ENGINE = fileURLToPath(new URL("../", import.meta.url));
-const REPOSITORY = fileURLToPath(new URL("../../", import.meta.url));
+import { ENGINE, REPOSITORY } from "./fixtures/repository-roots";
 
 const dirs: string[] = [];
 afterEach(() => {

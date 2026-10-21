@@ -27,45 +27,14 @@ import { join } from "node:path";
 import { passthroughResult, type HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
 import {
-  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
-  SESSION_SUFFIXES,
-  TASK_GRAPH_POINTER_BINDING_SUFFIX,
   parseCanonicalTaskGraphPointer,
   parseSessionId,
+  sessionGroupKeys,
+  sessionOfTrackingFile,
 } from "../../machine";
-import { STOP_CHECK_NOTE_SUFFIX, sidecarKey } from "../../stop-check-note-sidecar";
 
 /** The per-session TaskGraph pointer that binds a session to its graph. */
 const TASK_GRAPH_POINTER_SUFFIX = ".task_graph";
-
-/** Pure: session id for a tracking file, or null when the name matches no
- *  known per-session suffix. A stop-check note sidecar is keyed by the
- *  sidecar form of its session id (`sidecarKey`), which equals the id for
- *  every id made only of letters, digits, `_` and `-`. */
-export function sessionOfEntry(entry: string): string | null {
-  for (const suffix of [IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX, TASK_GRAPH_POINTER_BINDING_SUFFIX]) {
-    if (!entry.endsWith(suffix)) continue;
-    const keyed = entry.slice(0, -suffix.length);
-    const separator = keyed.lastIndexOf(".");
-    const encodedAgent = separator < 0 ? "" : keyed.slice(separator + 1);
-    if (separator > 0 && encodedAgent.length > 0 && encodedAgent.length % 2 === 0 &&
-        /^[0-9a-f]+$/.test(encodedAgent)) {
-      return keyed.slice(0, separator);
-    }
-    return null;
-  }
-  if (entry.endsWith(STOP_CHECK_NOTE_SUFFIX)) {
-    const keyed = entry.slice(0, -STOP_CHECK_NOTE_SUFFIX.length);
-    const separator = keyed.indexOf(".");
-    return separator > 0 && separator < keyed.length - 1 ? keyed.slice(0, separator) : null;
-  }
-  for (const suffix of SESSION_SUFFIXES) {
-    if (entry.endsWith(suffix) && entry.length > suffix.length) {
-      return entry.slice(0, -suffix.length);
-    }
-  }
-  return null;
-}
 
 /**
  * Pure: which entries are stale, judged per session group. `mtimes` maps
@@ -80,24 +49,18 @@ export function staleEntries(
 ): string[] {
   const groupMax = new Map<string, number>();
   for (const [entry, mtime] of mtimes) {
-    const session = sessionOfEntry(entry);
+    const session = sessionOfTrackingFile(entry);
     if (session === null) continue;
     groupMax.set(session, Math.max(groupMax.get(session) ?? -Infinity, mtime));
   }
   return [...mtimes.entries()]
     .filter(([entry, mtime]) => {
-      const session = sessionOfEntry(entry);
+      const session = sessionOfTrackingFile(entry);
       if (session !== null && protectedSessions.has(session)) return false;
       const anchor = session === null ? mtime : (groupMax.get(session) ?? mtime);
       return anchor < cutoffMs;
     })
     .map(([entry]) => entry);
-}
-
-/** Pure: the session ids a starting session's files may be grouped under — the
- *  id itself and its sidecar key. */
-export function startingSessionKeys(sessionId: string): readonly string[] {
-  return [...new Set([sessionId, sidecarKey(sessionId)])];
 }
 
 /** Pure: the starting session named by SessionStart hook input, or null when the
@@ -200,35 +163,32 @@ export function isDeadStatFailure(error: unknown): boolean {
 }
 
 /**
- * Shell: the sessions bound to a TaskGraph that still exists. A malformed
+ * Shell: the group keys of every session bound to a TaskGraph that still
+ * exists (both key forms, so its sidecars are covered too). A malformed
  * pointer binds nothing (it ages out like any stale file); an unreadable one
  * may be live, so it protects its session and is reported.
  */
-function graphBoundSessions(
+function graphBoundSessionKeys(
   dir: string,
   entries: readonly string[],
   operations: StaleSessionOperations,
   diagnostics: StaleCleanupDiagnostic[],
-): ReadonlySet<string> {
-  const bound = new Set<string>();
-  for (const entry of entries) {
-    if (!entry.endsWith(TASK_GRAPH_POINTER_SUFFIX)) continue;
-    const session = sessionOfEntry(entry);
-    if (session === null || entry !== `${session}${TASK_GRAPH_POINTER_SUFFIX}`) continue;
+): readonly string[] {
+  return entries.flatMap((entry) => {
+    const session = entry.endsWith(TASK_GRAPH_POINTER_SUFFIX) ? entry.slice(0, -TASK_GRAPH_POINTER_SUFFIX.length) : "";
+    if (session === "") return [];
     const path = join(dir, entry);
     let raw: string | null;
     try {
       raw = operations.readText(path);
     } catch (error) {
-      bound.add(session);
       diagnostics.push(diagnostic("read", path, error));
-      continue;
+      return sessionGroupKeys(session);
     }
-    if (raw === null) continue;
+    if (raw === null) return [];
     const pointer = parseCanonicalTaskGraphPointer(raw);
-    if (pointer.ok && operations.exists(pointer.value)) bound.add(session);
-  }
-  return bound;
+    return pointer.ok && operations.exists(pointer.value) ? sessionGroupKeys(session) : [];
+  });
 }
 
 /** Shell: returns every failed operation with its exact path and cause. */
@@ -248,13 +208,13 @@ export function sweepStaleSessions(
 
   const diagnostics: StaleCleanupDiagnostic[] = [];
   const mtimes = new Map<string, number>();
-  const protectedSessions = new Set<string>(startingSession === null ? [] : startingSessionKeys(startingSession));
+  const protectedSessions = new Set<string>(startingSession === null ? [] : sessionGroupKeys(startingSession));
   for (const entry of directory.entries) {
     const path = join(dir, entry);
     try {
       mtimes.set(entry, operations.mtime(path));
     } catch (error) {
-      const session = sessionOfEntry(entry);
+      const session = sessionOfTrackingFile(entry);
       if (session !== null) protectedSessions.add(session);
       if (isDeadStatFailure(error)) {
         // Provably-dead entry (self-referential/dangling symlink): rmSync
@@ -271,8 +231,8 @@ export function sweepStaleSessions(
       diagnostics.push(diagnostic("stat", path, error));
     }
   }
-  for (const session of graphBoundSessions(dir, [...mtimes.keys()], operations, diagnostics)) {
-    protectedSessions.add(session);
+  for (const key of graphBoundSessionKeys(dir, [...mtimes.keys()], operations, diagnostics)) {
+    protectedSessions.add(key);
   }
   for (const entry of staleEntries(mtimes, cutoffMs, protectedSessions)) {
     const path = join(dir, entry);

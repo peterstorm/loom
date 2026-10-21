@@ -10,32 +10,29 @@
  */
 
 import { basename, dirname, join } from "node:path";
-import type { HookHandler } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
-import { completedGraphArchiveLeaf, judgeOrchestrationCompletion } from "../../core/orchestration-completion";
+import {
+  completedGraphArchiveLeaf,
+  judgeOrchestrationCompletion,
+  renderCompletionRefusal,
+} from "../../core/orchestration-completion";
 
-export async function completeOrchestration(graphPath: string, nowMs: number) {
+export async function completeOrchestration(graphPath: string, nowMs: number): Promise<HookResult> {
   const manager = StateManager.fromPath(graphPath);
-  if (manager === null) return { kind: "error" as const, message: "No active task graph found" };
+  if (manager === null) return { kind: "error", message: "No active task graph found" };
   const archived = await manager.archiveAndRemove((graph) => {
     const completion = judgeOrchestrationCompletion(graph);
     return completion.kind === "complete"
       ? { ok: true, value: completedGraphArchiveLeaf(graph, nowMs) }
-      : {
-          ok: false,
-          error: [
-            `complete-orchestration: refusing — the orchestration is not finished (${basename(graphPath)} left in place):`,
-            ...completion.reasons.map((reason) => `  - ${reason}`),
-            "Finish the remaining Waves, or abort deliberately with `helper cleanup-state`.",
-          ].join("\n"),
-        };
+      : { ok: false, error: renderCompletionRefusal(basename(graphPath), completion.reasons) };
   });
-  if (!archived.ok) return { kind: "error" as const, message: archived.error };
+  if (!archived.ok) return { kind: "error", message: archived.error };
   process.stderr.write(
     `Orchestration complete. Archived ${join(dirname(graphPath), archived.value)}; removed ${graphPath}.\n`,
   );
-  return { kind: "allow" as const };
+  return { kind: "allow" };
 }
 
 const handler: HookHandler = async () => {

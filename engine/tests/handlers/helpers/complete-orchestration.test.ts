@@ -5,12 +5,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
+import { completedGraphArchiveLeaf } from "../../../src/core/orchestration-completion";
+import { completeOrchestration } from "../../../src/handlers/helpers/complete-orchestration";
+import { activeWaveGateFixture, graphFixture, taskFixture } from "../../fixtures/task-lifecycle";
 
 const CLI_PATH = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
 
@@ -23,7 +25,7 @@ describe("complete-orchestration helper", () => {
   let statePath: string;
 
   beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), "loom-complete-"));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), "loom-complete-")));
     stateDir = join(repo, ".claude", "state");
     mkdirSync(stateDir, { recursive: true });
     execFileSync("git", ["init", "-q"], { cwd: repo });
@@ -80,6 +82,33 @@ describe("complete-orchestration helper", () => {
     expect(stderr).toContain("helper cleanup-state");
     expect(readFileSync(statePath, "utf-8")).toBe(bytes);
     expect(archives()).toEqual([]);
+  });
+
+  it("refuses while a Wave Gate run is active, naming the run", () => {
+    const bytes = install({
+      ...graphFixture([task("T1", "completed")]),
+      active_wave_gate: activeWaveGateFixture({ runId: "wg-live", wave: 1, authorityDigest: "a".repeat(64) }),
+    });
+
+    const { exitCode, stderr } = run();
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Wave Gate run wg-live is still registered as active");
+    expect(readFileSync(statePath, "utf-8")).toBe(bytes);
+    expect(archives()).toEqual([]);
+  });
+
+  it("never overwrites an existing archive: the live graph and the old archive both survive", async () => {
+    const nowMs = Date.UTC(2026, 9, 21, 9, 2, 7);
+    const graph = { ...graphFixture([task("T1", "completed")]), github_issue: 7 };
+    const bytes = install(graph);
+    const leaf = completedGraphArchiveLeaf(graph, nowMs);
+    writeFileSync(join(stateDir, leaf), "earlier archive\n");
+
+    await expect(completeOrchestration(statePath, nowMs)).rejects.toThrow();
+
+    expect(readFileSync(statePath, "utf-8")).toBe(bytes);
+    expect(readFileSync(join(stateDir, leaf), "utf-8")).toBe("earlier archive\n");
   });
 
   it("reports when there is no active graph", () => {

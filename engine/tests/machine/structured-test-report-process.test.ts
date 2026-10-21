@@ -1,12 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { parseStructuredTestReportBytes } from "../../src/core/structured-test-report";
 
-const ENGINE = fileURLToPath(new URL("../../", import.meta.url));
+import { ENGINE } from "../fixtures/repository-roots";
 
 // These reporter smokes use disposable directories only, never a Loom Run writer.
 describe("real reporter bytes at the parser seam", () => {

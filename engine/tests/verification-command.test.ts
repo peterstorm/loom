@@ -2,14 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { execFile, type ExecFileException } from "node:child_process";
 import vitestConfig from "../vitest.config";
 import { freezeVerificationManifest } from "../src/core/verification-manifest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../src/core/structured-test-report";
 
-const ENGINE = fileURLToPath(new URL("../", import.meta.url));
-const repository = fileURLToPath(new URL("../../", import.meta.url));
+import { ENGINE, REPOSITORY as repository } from "./fixtures/repository-roots";
 const rootPackage = JSON.parse(readFileSync(join(repository, "package.json"), "utf8"));
 const enginePackage = JSON.parse(readFileSync(join(ENGINE, "package.json"), "utf8"));
 const temporaryDirectories: string[] = [];

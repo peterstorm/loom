@@ -4,7 +4,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { completedGraphArchiveLeaf, judgeOrchestrationCompletion } from "../../src/core/orchestration-completion";
+import {
+  completedGraphArchiveLeaf,
+  judgeOrchestrationCompletion,
+  renderCompletionRefusal,
+} from "../../src/core/orchestration-completion";
 import { activeWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const task = (id: string, status: "pending" | "implemented" | "completed") =>
@@ -13,7 +17,7 @@ const task = (id: string, status: "pending" | "implemented" | "completed") =>
 describe("judgeOrchestrationCompletion", () => {
   it("is complete when every Task is completed and no Wave Gate is active", () => {
     expect(judgeOrchestrationCompletion(graphFixture([task("T1", "completed"), task("T2", "completed")])))
-      .toEqual({ kind: "complete", taskCount: 2 });
+      .toEqual({ kind: "complete" });
   });
 
   it("names every Task that is not completed", () => {
@@ -34,6 +38,18 @@ describe("judgeOrchestrationCompletion", () => {
   it("refuses a graph with no Tasks", () => {
     expect(judgeOrchestrationCompletion(graphFixture([])))
       .toEqual({ kind: "incomplete", reasons: ["the TaskGraph has no Tasks"] });
+  });
+});
+
+describe("renderCompletionRefusal", () => {
+  it("lists every reason and both ways forward", () => {
+    expect(renderCompletionRefusal("active_task_graph.json", ["Task T2 is implemented, not completed", "the TaskGraph has no Tasks"]))
+      .toBe([
+        "complete-orchestration: refusing — the orchestration is not finished (active_task_graph.json left in place):",
+        "  - Task T2 is implemented, not completed",
+        "  - the TaskGraph has no Tasks",
+        "Finish the remaining Waves, or abort deliberately with `helper cleanup-state`.",
+      ].join("\n"));
   });
 });
 

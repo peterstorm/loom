@@ -14,12 +14,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { subagentDir } from "./config";
 import { parseStopCheckNote, type StopCheckNote } from "./core/stop-check-note";
-
-/** Sidecar name suffix; the SessionStart sweep groups these files with their session. */
-export const STOP_CHECK_NOTE_SUFFIX = ".stop-check-note.json";
-
-/** A key as one file-name segment. "." is excluded, so it separates the session from the agent unambiguously. */
-export const sidecarKey = (key: string): string => key.replace(/[^A-Za-z0-9_-]/g, "_");
+import { STOP_CHECK_NOTE_SUFFIX, sidecarKey } from "./machine/evidence";
 
 const describe = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
 

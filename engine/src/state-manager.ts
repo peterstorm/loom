@@ -367,7 +367,10 @@ export class StateManager {
   }
 
   private loadFrom(directory: AnchoredDirectory): ParsedTaskGraph {
-    const bytes = readDirectoryFileNoFollow(directory, this.authority.leaf);
+    return this.parseGraphBytes(readDirectoryFileNoFollow(directory, this.authority.leaf));
+  }
+
+  private parseGraphBytes(bytes: Buffer): ParsedTaskGraph {
     let raw: string;
     try {
       raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -590,8 +593,9 @@ export class StateManager {
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph archive of ${this.path}`, () =>
       withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+        // One read: the bytes archived are exactly the bytes judged.
         const bytes = readDirectoryFileNoFollow(directory, this.authority.leaf);
-        const decision = decide(this.loadFrom(directory));
+        const decision = decide(this.parseGraphBytes(bytes));
         if (!decision.ok) return decision;
         writeDirectoryFileExclusiveNoFollow(directory, decision.value, bytes);
         removeDirectoryRegularFileNoFollow(directory, this.authority.leaf);

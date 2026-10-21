@@ -1,6 +1,6 @@
 /**
- * Orchestration Completion: when a TaskGraph's work is finished, and the name
- * its archived copy takes.
+ * Orchestration Completion: when a TaskGraph's work is finished, the name its
+ * archived copy takes, and the refusal an unfinished graph gets.
  *
  * A finished orchestration must leave the live graph path, because every Loom
  * guard (direct-edit block, spawn gates, state guard) keys on that path's
@@ -13,7 +13,7 @@
 import type { TaskGraph } from "../types";
 
 export type OrchestrationCompletion =
-  | Readonly<{ kind: "complete"; taskCount: number }>
+  | Readonly<{ kind: "complete" }>
   | Readonly<{ kind: "incomplete"; reasons: readonly [string, ...string[]] }>;
 
 /**
@@ -24,7 +24,7 @@ export type OrchestrationCompletion =
 export function judgeOrchestrationCompletion(
   graph: Pick<TaskGraph, "tasks" | "active_wave_gate">,
 ): OrchestrationCompletion {
-  const reasons = [
+  const [first, ...rest] = [
     ...(graph.tasks.length === 0 ? ["the TaskGraph has no Tasks"] : []),
     ...graph.tasks
       .filter((task) => task.status !== "completed")
@@ -33,10 +33,19 @@ export function judgeOrchestrationCompletion(
       ? []
       : [`Wave Gate run ${graph.active_wave_gate.runId} is still registered as active`]),
   ];
-  const [first, ...rest] = reasons;
-  return first === undefined
-    ? Object.freeze({ kind: "complete", taskCount: graph.tasks.length })
-    : Object.freeze({ kind: "incomplete", reasons: Object.freeze([first, ...rest]) as readonly [string, ...string[]] });
+  if (first === undefined) return Object.freeze({ kind: "complete" });
+  const reasons: readonly [string, ...string[]] = Object.freeze([first, ...rest]);
+  return Object.freeze({ kind: "incomplete", reasons });
+}
+
+/** The operator-facing refusal for an unfinished graph: every reason, then the
+ *  two ways forward. */
+export function renderCompletionRefusal(graphLeaf: string, reasons: readonly [string, ...string[]]): string {
+  return [
+    `complete-orchestration: refusing — the orchestration is not finished (${graphLeaf} left in place):`,
+    ...reasons.map((reason) => `  - ${reason}`),
+    "Finish the remaining Waves, or abort deliberately with `helper cleanup-state`.",
+  ].join("\n");
 }
 
 /**

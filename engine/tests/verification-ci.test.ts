@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { REPOSITORY } from "./fixtures/repository-roots";
 
-const workflow = readFileSync(fileURLToPath(new URL("../../.github/workflows/ci.yml", import.meta.url)), "utf8");
+const workflow = readFileSync(join(REPOSITORY, ".github/workflows/ci.yml"), "utf8");
 
 describe("CI verification contract", () => {
   it("verifies PRs, branch pushes, and exact tag revisions with the same command", () => {

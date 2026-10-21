@@ -2,11 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { checkTypeScriptProject } from "../scripts/typecheck";
 
-const ENGINE = fileURLToPath(new URL("../", import.meta.url));
+import { ENGINE } from "./fixtures/repository-roots";
 const temporaryDirectories: string[] = [];
 afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 
