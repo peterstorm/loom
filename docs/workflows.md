@@ -192,6 +192,8 @@ Commands always execute with `shell: false` under an explicit executable/subcomm
 - `npm`, `pnpm`, and `yarn` accept only explicit `run`, `run-script`, `test`, `check`, or `build` script forms; `exec`, `dlx`, `x`, implicit binary dispatch, `npx`, and `bunx` are rejected;
 - runtimes accept bounded file/test/check/build modes. Inline modes are rejected, including Node `-e`/`-p`/`--eval`/`--print`, Bun `eval`/`-e`/`x`, Deno `eval`, Python `-c`, and Perl/Ruby `-e`/`-E`.
 
+Every project command (Wave checks, stop-check runners, remediation checks) runs under the caller's environment minus the hook-invocation variables `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` and `CLAUDE_ENV_FILE`. A stop check launches from inside a hook, where the harness sets them; the Wave Gate launches from the operator's shell, where none is set. Dropping them gives a command the same environment from both, so a project test that reads `CLAUDE_PROJECT_DIR` cannot fail at a stop and pass at the gate.
+
 Shells and generic dispatchers are not allowlisted. Traversal, duplicate/reserved ids, and surplus fields are also rejected. Required reports must live beneath `.loom/completion-reports/`; those report bytes are excluded from workspace authority, while tracked and non-ignored untracked implementation bytes remain bound by the Wave workspace digest. Once the TaskGraph is populated, changing the source file does not change the frozen command authority.
 
 ### Project Verification Coverage

@@ -24,6 +24,7 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/digest";
+import { projectCommandEnvironment } from "../core/project-command-environment";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit, type GitSpawn } from "../utils/git-execution-policy";
 import { describeGitOutcome, gitCleanNegative, gitExitedWith } from "../utils/git-spawn-outcome";
 import { observeGitProbe } from "../utils/git-probe";
@@ -987,6 +988,7 @@ async function runProjectCommand(
   try {
     child = spawn(check.executable, [...check.args], {
       cwd,
+      env: projectCommandEnvironment(process.env),
       detached: true,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],

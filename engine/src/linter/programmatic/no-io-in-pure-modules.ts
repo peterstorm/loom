@@ -216,6 +216,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // Ledger Epoch View: the read-only rendering of one epoch's facts as I6
   // numbers them.
   "engine/src/core/ledger-epoch-view.ts",
+  // The one rule for the environment every project command runs under; the
+  // completion-check runner applies it at its single spawn site.
+  "engine/src/core/project-command-environment.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */
