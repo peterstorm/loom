@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { guardStateFileDecision } from "../../src/core/guard-state-file";
 import { findClosingParen, scanSubstitutions, staticHeredocCat } from "../../src/core/shell-substitution";
+import { MODERN_BASH } from "../fixtures/modern-bash";
 
 const decision = (command: string) => guardStateFileDecision(command).kind;
 
@@ -58,11 +59,13 @@ describe("staticHeredocCat (pure)", () => {
     expect(contexts("a \"`cat x`\" b")).toEqual(["opaque"]);
   });
 
-  // The recognized span and literal must be what bash itself produces.
-  it("agrees with real bash on the literal output", () => {
+  // The recognized span and literal must be what bash itself produces. Needs
+  // bash >= 4: 3.2 cannot parse a heredoc whose body holds an apostrophe
+  // inside `$(…)` at all (a syntax error, so nothing runs).
+  it.skipIf(MODERN_BASH === null)("agrees with real bash on the literal output", () => {
     const literal = "it's (a) `body` $(not run) \"q\"";
     const command = `printf '%s' "$(cat <<'EOF'\n${literal}\nEOF\n)"`;
-    const bash = spawnSync("bash", ["-c", command], { encoding: "utf8" });
+    const bash = spawnSync(MODERN_BASH ?? "bash", ["-c", command], { encoding: "utf8" });
     expect(bash.status).toBe(0);
     expect(bash.stdout).toBe(literal);
     expect(staticHeredocCat(command, command.indexOf("$(") + 2)?.literal).toBe(literal);

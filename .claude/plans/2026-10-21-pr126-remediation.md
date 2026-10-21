@@ -63,6 +63,10 @@ Source review `review-fix-20261021-pr126-r2` against head `705d71e8`: 0 critical
 - `engine/src/machine/ledger.ts`
 - `engine/tests/handlers/helpers/complete-orchestration-publish.test.ts`
 
+## CI follow-up
+
+macOS CI failed the real-bash agreement test: `/bin/bash` there is 3.2, which cannot parse a heredoc holding an apostrophe inside `$(…)`. The test now runs against a bash >= 4 found by the shared `tests/fixtures/modern-bash.ts` (also used by the brace-expansion differential), and skips when none exists. The guard documents why 3.2 cannot exploit the known-word rule.
+
 ## Validation
 
 - `bun scripts/typecheck.ts` (engine): exit 0.

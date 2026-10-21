@@ -466,6 +466,10 @@ function wildcardSubstitutions(text: string): string {
  * text inline, and placeholderFor classifies the body before reaching this.
  * Every other substitution — an unquoted delimiter, any other command,
  * unquoted or adjacent placement — keeps the opaque-output wildcard.
+ * bash 3.2 (macOS `/bin/bash`) mis-parses this form, closing `$(` by quote-
+ * tracked paren scanning; an apostrophe in the body is then a syntax error and
+ * nothing runs. Any shorter span it could pick still lies inside the body,
+ * whose text is judged for guarded references either way.
  */
 const KNOWN_TEXT = "known_heredoc_text";
 
