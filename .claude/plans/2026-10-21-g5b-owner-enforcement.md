@@ -5,7 +5,7 @@
 
 ## Summary
 
-G5b turns G5a's ownership declarations into Wave Gate obligations. Population stamps every owned Invariant into the TaskGraph as an **Owner Obligation**. When a Wave changes an owned family, the completion suite runs a new engine-reserved check, `loom:owner-verification`. The check has two parts:
+G5b turns G5a's ownership declarations into Wave Gate obligations. Population stamps every owned Invariant into the TaskGraph as an **Owner Obligation**. Whenever a graph carries that stamp, the completion suite runs a new engine-reserved check, `loom:owner-verification`. The check always re-reads the plan and blocks on drift between plan and stamp (FR-002). For each owned Invariant whose family the Wave changed, it adds two parts:
 
 - **Sibling coverage.** A pure import-graph decision: the matrix test's imports, closed under re-exports, must reach the owner and every declared sibling.
 - **Mutation verification.** A deterministic mutation plan is built over the owner's lines changed in the Wave, using the TypeScript compiler API. Each mutant runs through the frozen `affectedRunner` in a detached git worktree, and its JUnit report decides killed, survived, invalid or timed out.
@@ -25,10 +25,11 @@ Approach: **B — a new engine check kind in the completion suite** (chosen at t
 **Choice:** Add a third variant, `engine-owner-verification`, to `AuthorizedWaveCompletionCheck` in `engine/src/core/completion-suite.ts`, beside `engine-full-tier-lint`:
 
 ```
-{ kind: "engine-owner-verification"; checkId: "loom:owner-verification"; scope: "wave"; reportPolicy: { kind: "not-required" }; obligationsDigest: ArtifactDigest }
+{ kind: "engine-owner-verification"; checkId: "loom:owner-verification"; scope: "wave"; reportPolicy: { kind: "not-required" }; obligationsDigest: ArtifactDigest; owed: readonly string[] }
 ```
 
-- `authorizeWaveCompletionSuite` (`verification-manifest.ts`) injects the check only when the Wave owes owner verification. That means the graph carries `owner_obligations` and at least one obligation's family was changed by the Wave's Tasks (AD-4).
+- `authorizeWaveCompletionSuite` (`verification-manifest.ts`) **makes no ownership decision**. It takes an `OwnerCheckAuthority | null` parameter, computed by its callers through `ownerCheckAuthority(graph, wave)` in `obligations.ts` (AD-4, INV-3). It injects the check exactly when that parameter is non-null, copying `obligationsDigest` and `owed` (the owed Invariant ids, possibly empty) into the check.
+- `ownerCheckAuthority` returns non-null whenever the graph carries the `owner_obligations` stamp, **including an empty array and including Waves that owe no Invariant**. The check then always carries the plan-integrity part of FR-002 (AD-2). Coverage and mutation run only for the ids in `owed`. A graph without the stamp (pre-feature) gets `null`, so its suite roster and digest are byte-identical to today's (FR-004).
 - `WaveCompletionSuiteResult` and `AcceptedWaveCompletionReceipt` gain an optional `ownerVerification: OwnerVerificationObservation`, mirroring `acceptance?: AcceptanceObservation`.
 - `CompletionSemanticFailure` gains `owner-verification-rejected` (carrying `NonEmpty<OwnerVerificationFailure>`). `CompletionInfrastructureFailure` gains `owner-verification-infrastructure`.
 - The check is part of the suite digest, so receipt reuse, workspace-digest binding, replay and status all come for free. `checkWaveCompletionSuite` in `complete-wave-gate` blocks on it unchanged.
@@ -46,7 +47,13 @@ Approach: **B — a new engine check kind in the completion suite** (chosen at t
 **Choice:**
 - `populate-task-graph` stamps `owner_obligations: readonly OwnerObligation[]` on every graph it populates, including an empty array when the plan declares no owned Invariant. It is derived purely by `obligationsFromPlan(models)`.
 - An **absent** field means the graph was populated before G5b, and it owes nothing (FR-004). Re-population replaces the field, like `acceptance_contracts`.
-- At the gate, the shell re-reads `graph.plan_file` (`loadPlanModelsSource`) and re-derives the obligations. Any of the following blocks as `owner-verification-infrastructure` and never skips: an unreadable plan, a plan with model strays or malformed ownership, or a set of obligations that is not canonically equal to the stamp (FR-002).
+- **Whenever the graph carries the stamp, an empty array included**, the gate's owner check re-reads `graph.plan_file` (`loadPlanModelsSource`) and re-derives the obligations with `obligationsFromPlan`. This happens whether or not the Wave owes any Invariant. Any of the following blocks as `owner-verification-infrastructure` and never skips (FR-002):
+  - the graph names no plan file
+  - the plan is unreadable
+  - the plan has model strays or malformed ownership
+  - the re-derived obligations are not canonically equal to the stamp, for example because the plan gained, lost or changed an owned Invariant after population
+- Only a graph **without** the stamp (pre-feature) skips the re-read.
+- When the plan agrees and the Wave owes nothing, the observation is `{ kind: "verified", verdicts: [] }`: plan integrity proven, and no coverage or mutation runs (AS-004, AS-005).
 
 ```
 OwnerObligation = Readonly<{
@@ -90,7 +97,8 @@ OwnerObligation = Readonly<{
 
 - `waveChangedObligations(waveTasks, obligations)` decides the gate's scope. It is true for an obligation when any Wave Task's `file_list` satisfies `changesFamily(invariantRoles(...))`, meaning the owner or a sibling. A change to the matrix test alone does not trigger the checks.
 - `obligationsTouchedBy(fileList, obligations)` decides review packets and brief duties. It is true when the Task plays any role: owner, sibling or matrix test.
-- `ownerVerificationOwed(graph, wave)` is the predicate used by suite authorization and suite readiness.
+- `ownerVerificationOwed(graph, wave)` returns the obligations the Wave owes coverage and mutation for: `waveChangedObligations` over the Wave's Tasks, or `[]` without a stamp.
+- `ownerCheckAuthority(graph, wave): OwnerCheckAuthority | null` returns `null` exactly when `owner_obligations` is absent. Otherwise it returns `{ obligationsDigest, owed: ids of ownerVerificationOwed }`. Suite authorization runs in both `wave-completion-suite.ts` and `wave-completion-suite-readiness.ts`, and both call it; `verification-manifest.ts` only receives the result as a parameter (OWN-1).
 
 **Why:** G5a's validator, the brief and the gate already classify roles through `plan-paths.ts`. G5b adds selections over obligations, and they must not drift between the gate, readiness, packets and the brief.
 
@@ -311,7 +319,7 @@ engine/tests/handlers/family-sites.test.ts               — NEW helper: JSON, h
 engine/src/types.ts                                      — OwnershipProblem += exemption-without-reason | exemption-on-unowned; owned ownership += mutation: MutationPolicy; TaskGraph += owner_obligations?: readonly OwnerObligation[] (re-exported from core/owner-verification/types.ts)
 engine/src/core/parse-plan-models.ts                     — parse the Mutation exemption label; add it to the misplaced-label list
 engine/src/handlers/helpers/validate-model-bindings.ts   — renderOwnershipProblem for the two new kinds
-engine/src/core/owner-verification/obligations.ts        — NEW pure (INV-3 owner): obligationsFromPlan, obligationsDigest, obligationsAgree, waveChangedObligations, obligationsTouchedBy, ownerVerificationOwed
+engine/src/core/owner-verification/obligations.ts        — NEW pure (INV-3 owner): obligationsFromPlan, obligationsDigest, obligationsAgree, waveChangedObligations, obligationsTouchedBy, ownerVerificationOwed, ownerCheckAuthority
 engine/src/linter/programmatic/no-io-in-pure-modules.ts  — list engine/src/core/owner-verification/
 engine/tests/core/parse-plan-models-exemption.test.ts    — NEW
 engine/tests/core/owner-obligations.matrix.test.ts       — NEW (INV-3 matrix; owner rows)
@@ -377,7 +385,7 @@ engine/tests/core/implementation-brief-owner-duties.test.ts — NEW
 engine/src/core/completion-suite.ts                      — check kind, ownerVerification on result/receipt, failure variants, parsers, evaluation
 engine/src/core/verification-manifest.ts                 — authorizeWaveCompletionSuite: inject the owner check when owed
 engine/src/core/wave-completion-suite-readiness.ts       — authorize with the same owed predicate
-engine/src/handlers/helpers/wave-completion-suite.ts     — plan re-read + drift check, run owner verification, attach observation, diagnostics
+engine/src/handlers/helpers/wave-completion-suite.ts     — plan re-read + drift check whenever the stamp is present (owed [] included), run owner verification for owed Invariants, attach observation, diagnostics
 engine/tests/core/owner-obligations.matrix.test.ts       — add the gate-scope and readiness sibling rows
 engine/tests/core/completion-suite-owner-verification.test.ts — NEW
 engine/tests/handlers/wave-completion-suite-owner-verification.test.ts — NEW
@@ -438,7 +446,7 @@ type MutationVerdict =
 type InvariantVerdict = { invariant: string; title: string; owner: string; matrixTest: string;
   coverage: CoverageVerdict; mutation: MutationVerdict };
 type OwnerVerificationObservation =
-  | { kind: "verified"; obligationsDigest: ArtifactDigest; boundMs: number; verdicts: NonEmpty<InvariantVerdict> }
+  | { kind: "verified"; obligationsDigest: ArtifactDigest; boundMs: number; verdicts: readonly InvariantVerdict[] }   // [] = plan integrity proven, nothing owed
   | { kind: "unavailable"; failure: OwnerInfrastructureFailure };   // plan unreadable/drifted, no runner, workspace changed
 type OwnerInfrastructureFailure = { kind: "plan-unreadable" | "plan-malformed" | "plan-drift" | "runner-missing"
   | "worktree-failed" | "spawn-failed" | "report-missing" | "report-unreadable" | "matrix-test-not-collected"
@@ -470,6 +478,8 @@ obligationsAgree(stamped, fromPlan): boolean                                 // 
 waveChangedObligations(waveTasks: readonly Task[], obligations): readonly OwnerObligation[]   // changesFamily
 obligationsTouchedBy(fileList: readonly string[], obligations): readonly OwnerObligation[]    // any role
 ownerVerificationOwed(graph: TaskGraph, wave: number): readonly OwnerObligation[]             // [] when owner_obligations absent
+ownerCheckAuthority(graph: TaskGraph, wave: number): OwnerCheckAuthority | null               // null iff owner_obligations absent
+type OwnerCheckAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly string[] }>  // owed may be []
 ```
 
 **Depends on:** CT-1 types
@@ -541,7 +551,7 @@ It never throws to the caller. Every failure becomes `unavailable` or a per-Inva
 
 **Responsibility:** Authorize, run, record, evaluate and replay the owner check inside the existing suite.
 **Files:** `completion-suite.ts`, `verification-manifest.ts`, `wave-completion-suite-readiness.ts`, `handlers/helpers/wave-completion-suite.ts`
-**Interface:** `authorizeWaveCompletionSuite(manifest, active, workspaceDigest, owner: { obligationsDigest } | null)`. `evaluateWaveCompletionSuite` adds the owner failures from `ownerVerificationFailures`.
+**Interface:** `authorizeWaveCompletionSuite(manifest, active, workspaceDigest, owner: OwnerCheckAuthority | null)` decides nothing about ownership: non-null injects the check verbatim. Both callers obtain `owner` from `ownerCheckAuthority`. `evaluateWaveCompletionSuite` adds the owner failures from `ownerVerificationFailures`. The owner check re-reads the plan whenever it is present (AD-2).
 **Depends on:** Population and wire; Mutation execution shell
 
 ### Status
@@ -564,11 +574,18 @@ It never throws to the caller. Every failure becomes `unavailable` or a per-Inva
 plan.md ──parsePlanModels──► PlanInvariant[] ──obligationsFromPlan──► owner_obligations (stamped at populate)
                                                                               │
 Wave Gate: ensureWaveCompletionSuite                                          ▼
-  ownerVerificationOwed(graph, wave) ── [] ──► suite without the owner check (bytes as before)
-        │ non-empty
+  ownerCheckAuthority(graph, wave) ── null (no stamp: pre-feature) ──► suite without the owner check (bytes as before)
+        │ non-null (stamp present, [] included)
         ▼
-  re-read plan → obligationsAgree? ── no ──► unavailable(plan-drift) ──► rejected
+  authorizeWaveCompletionSuite(…, authority)   ── injects loom:owner-verification { obligationsDigest, owed }
+        ▼
+  re-read plan_file (ALWAYS when stamped)
+    no plan_file / unreadable / strays / malformed ownership ──► unavailable(plan-unreadable | plan-malformed) ──► rejected
+    obligationsAgree(stamp, obligationsFromPlan)? ── no ──► unavailable(plan-drift) ──► rejected
         │ yes
+        ▼
+  owed = [] ──► verified { verdicts: [] } (plan integrity only; no coverage, no mutation)
+        │ owed non-empty
         ▼
   runOwnerVerification (shell, outside lock)
     digest real workspace
@@ -617,7 +634,7 @@ Everything that decides lives in the pure core. The shell only reads bytes, runs
 - `engine/src/core/wave-review-authority.ts` — obligations a reviewed Task touches, which gate the owner-map section
 - `engine/src/core/implementation-brief.ts` — obligations a Task touches, which drive the duty paragraph
 **Matrix test:** `engine/tests/core/owner-obligations.matrix.test.ts`
-**Statement:** Every call site that decides which Owner Obligations apply calls `waveChangedObligations`, `obligationsTouchedBy` or `ownerVerificationOwed`, and never classifies roles or compares `owner_obligations` inline. That covers gate scope, suite authorization, suite readiness, review-packet owner maps and brief duties. The Wave scope uses G5a's `changesFamily` (owner or sibling); the touch scope uses any role.
+**Statement:** Every call site that decides which Owner Obligations apply calls `waveChangedObligations`, `obligationsTouchedBy`, `ownerVerificationOwed` or `ownerCheckAuthority`, and never classifies roles or compares `owner_obligations` inline. That covers gate scope, suite-authorization input, suite readiness, review-packet owner maps and brief duties. The Wave scope uses G5a's `changesFamily` (owner or sibling); the touch scope uses any role. `engine/src/core/verification-manifest.ts` is deliberately not a sibling: `authorizeWaveCompletionSuite` takes the `OwnerCheckAuthority | null` its callers obtained from `ownerCheckAuthority` as a parameter, makes no ownership decision, and only injects the check when the parameter is non-null.
 
 ---
 
@@ -631,7 +648,7 @@ Everything that decides lives in the pure core. The shell only reads bytes, runs
 - `engine/tests/acceptance/mutation-exemption.acceptance.test.ts` — FR-018, FR-019, AS-019, AS-020
 - `engine/tests/acceptance/owner-verification-gate.acceptance.test.ts` — FR-001, FR-002, FR-008, FR-014, FR-015, FR-016, FR-020, AS-007, AS-008, AS-016, AS-017, AS-018
 **Supported domain:** `engine/tests/acceptance/owner-verification-core.acceptance.test.ts`
-**Statement:** A matrix test covers an owned Invariant only when its direct imports, closed under re-exports and resolved through relative paths and tsconfig aliases to files, include the owner and every declared sibling; otherwise the verdict names every missing path. The mutant set is a pure, deterministic function of owner bytes, changed lines and cap: exactly the six fixed operators, on changed lines only, capped at 24 with an evenly spaced selection and the unmutated count reported. A report with a failing non-collection testcase kills, a timeout kills, collection-only errors are invalid and a passing report survives; a missing, unreadable, empty or exit-unexplained report is infrastructure and never a kill. The plan grammar refuses an exemption without a reason and an exemption on an unowned Invariant. Through `ensureWaveCompletionSuite`, a Wave that changed an owned family blocks on a red baseline before any mutant runs, on any survivor of a non-exempt Invariant, on a missing sibling, on any infrastructure failure, and on an unreadable or drifted plan; it records an exemption and still runs coverage; and it leaves the real workspace byte-identical.
+**Statement:** A matrix test covers an owned Invariant only when its direct imports, closed under re-exports and resolved through relative paths and tsconfig aliases to files, include the owner and every declared sibling; otherwise the verdict names every missing path. The mutant set is a pure, deterministic function of owner bytes, changed lines and cap: exactly the six fixed operators, on changed lines only, capped at 24 with an evenly spaced selection and the unmutated count reported. A report with a failing non-collection testcase kills, a timeout kills, collection-only errors are invalid and a passing report survives; a missing, unreadable, empty or exit-unexplained report is infrastructure and never a kill. The plan grammar refuses an exemption without a reason and an exemption on an unowned Invariant. Through `ensureWaveCompletionSuite`, a Wave that changed an owned family blocks on a red baseline before any mutant runs, on any survivor of a non-exempt Invariant, on a missing sibling, on any infrastructure failure, and it records an exemption and still runs coverage and leaves the real workspace byte-identical. Whenever the graph carries the owner_obligations stamp, an empty one or one whose Wave owes nothing included, the gate re-reads the named plan and blocks on a missing, unreadable or malformed plan and on drift between plan and stamp.
 
 ### CT-2: Second-copy lens, brief duties and status
 
@@ -689,7 +706,7 @@ Twelve Tasks over five Waves. Byte-preservation scenarios already hold today, so
 - **T4 — Plan grammar and obligations** (claims FR-018, FR-019, FR-021, AS-019, AS-020, AS-021; depends on T1).
   - Implement AD-3 in `types.ts`, `parse-plan-models.ts` and `validate-model-bindings.ts`, including the misplaced-label stray.
   - Add `owner_obligations?` to `TaskGraph`.
-  - Implement `obligations.ts` (AD-2, AD-4; INV-3 owner).
+  - Implement `obligations.ts` (AD-2, AD-4; INV-3 owner), including `ownerCheckAuthority`: null iff the stamp is absent, non-null with `owed: []` for a stamped graph whose Wave owes nothing.
   - List `engine/src/core/owner-verification/` in `DEFAULT_PURE_MODULES` (INV-2). This puts the stubs and T5/T6's modules under the purity rule.
   - Write `owner-obligations.matrix.test.ts` with the owner rows: Wave scope vs touch scope over owner-only, sibling-only, matrix-only and unrelated file lists, and absent vs empty `owner_obligations`.
   - Write a regression test that every existing plan fixture, plus `.claude/plans/2026-10-16-g4-slice-2-oracle.md`, parses to the same `PlanModels` apart from `mutation: { kind: "verify" }` (AS-021).
@@ -743,10 +760,23 @@ Twelve Tasks over five Waves. Byte-preservation scenarios already hold today, so
 
 - **T10 — Completion-suite integration** (claims FR-001..FR-003, FR-008, FR-014..FR-016, FR-020, AS-004, AS-005, AS-007, AS-008, AS-016..AS-018; depends on T7 and T8).
   - Implement AD-1: the check kind, its parsers and digest, and the result/receipt `ownerVerification` with its parsers.
-  - Add the evaluation through `ownerVerificationFailures`, authorization in `verification-manifest.ts`, and readiness in `wave-completion-suite-readiness.ts`, both through `ownerVerificationOwed`.
-  - In `wave-completion-suite.ts`: the plan re-read and `obligationsAgree` drift block, the `runOwnerVerification` call outside the lock, and diagnostics that render each failure.
+  - Add the evaluation through `ownerVerificationFailures`.
+  - Add the `owner: OwnerCheckAuthority | null` parameter to `authorizeWaveCompletionSuite` in `verification-manifest.ts`. It makes no decision; it injects the check iff the parameter is non-null.
+  - Make readiness in `wave-completion-suite-readiness.ts` and the suite shell in `wave-completion-suite.ts` both obtain that parameter from `ownerCheckAuthority`.
+  - In `wave-completion-suite.ts`, whenever the check is present (stamp present, `owed` empty included):
+    - re-read the plan
+    - block on a missing `plan_file`, an unreadable plan, strays, malformed ownership, or `obligationsAgree` drift
+    - with `owed = []`, record `verified { verdicts: [] }`; otherwise call `runOwnerVerification` outside the lock
+    - render diagnostics for each failure
+  - FR-002 tests, each with a stamped graph whose Wave owes **nothing**:
+    - an unreadable plan blocks
+    - a malformed plan blocks
+    - a plan that gained an owned Invariant after population blocks as drift
+    - an agreeing plan passes, with `verdicts: []` and no coverage or mutation run
   - Add the gate-scope and readiness rows to the INV-3 matrix test.
-  - Write regression tests that the suite roster and digest are byte-identical to the pre-feature fixtures when nothing is owed (AS-004, AS-005, FR-003).
+  - Write regression tests:
+    - the suite roster and digest are byte-identical to the pre-feature fixtures for a graph **without** the stamp (FR-004)
+    - for a stamped graph whose Wave changed no owned family, or whose plan declares only unowned Invariants (stamp `[]`), the plan is still re-read but no coverage or mutation runs (AS-004, AS-005, FR-003)
   - Write a test that receipt reuse still holds for an unchanged workspace.
   - Write an end-to-end test that the Pi wave-gate program path produces the same verdict as the Claude path from the same fixture (NFR-002).
 - **Files:** see File Structure, T10.
