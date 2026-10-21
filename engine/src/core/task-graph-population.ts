@@ -3,7 +3,7 @@ import { acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-cont
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
-import { derivePendingTaskProof, redThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
+import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
 import {
   ACCEPTANCE_RED_WINDOW,
   serializeVerificationPolicy,
@@ -305,7 +305,7 @@ export function populateTaskGraph(
   const contracts = acceptanceContractsFromPlan(command.contracts, command.tasks);
   if (!contracts.ok) return reject("invalid-contracts", contracts.error.join("; "));
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
-  const redThenGreen = redThenGreenEra(command.verificationManifest);
+  const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
 
   const waves = taskWaves(command.tasks);
   const waveGates = Object.freeze(Object.fromEntries(
@@ -341,7 +341,7 @@ export function populateTaskGraph(
       command.specIndex,
       command.proofBoundary,
       redWindow.has(task.id),
-      redThenGreen,
+      taskRedThenGreenEra(redThenGreen, task.id),
     ))),
     ...(contracts.value.length === 0 ? {} : { acceptance_contracts: contracts.value }),
     current_wave: 1,

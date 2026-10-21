@@ -81,11 +81,14 @@ const PRE_I6_ERA: FrozenRedThenGreenEra = Object.freeze({ kind: "not-owed" });
  * post-feature freeze carries it (the post-feature freezers' return type
  * requires it), so only a TaskGraph frozen before this feature, or one
  * carrying no manifest at all, reads `not-owed`. The INV-6 lint rule is the
- * backstop against a second reader. Population, the State File obligation-match check
- * and revalidation ask through `redThenGreenEra`; settlement, the
- * stored-evidence reconcile and the brief ask through `redThenGreenDuty`,
- * which defers to a Task's frozen Proof and takes the classification from
- * here, so none of them can disagree.
+ * backstop against a second reader. Population, the State File obligation-match
+ * check and the operator validator ask per Task through `taskRedThenGreenEra`,
+ * which exempts Acceptance Contract writers from this era; revalidation and
+ * `redThenGreenDuty`'s no-Proof arm take the graph era alone through
+ * `redThenGreenEra` (see `taskRedThenGreenEra` for why that is sound);
+ * settlement, the stored-evidence reconcile and the brief ask through
+ * `redThenGreenDuty`, which defers to a Task's frozen Proof and takes the
+ * classification from here, so none of them can disagree.
  */
 export function frozenRedThenGreenEra(manifest: FrozenVerificationManifest | undefined): FrozenRedThenGreenEra {
   const testFiles = manifest?.testFiles;
@@ -95,6 +98,52 @@ export function frozenRedThenGreenEra(manifest: FrozenVerificationManifest | und
 /** `frozenRedThenGreenEra`'s era alone. */
 export function redThenGreenEra(manifest: FrozenVerificationManifest | undefined): RedThenGreenEra {
   return frozenRedThenGreenEra(manifest).kind;
+}
+
+/**
+ * What decides one Task's I6 era: the TaskGraph's era and the Tasks that
+ * write an Acceptance Contract. Built once per graph by `redThenGreenScope`
+ * and asked per Task through `taskRedThenGreenEra`.
+ */
+export type RedThenGreenScope = Readonly<{ era: RedThenGreenEra; contractWriters: ReadonlySet<string> }>;
+
+/**
+ * The graph's scope, from its frozen manifest and its Acceptance Contracts.
+ * Structural on `contractTask` alone, so this module never imports the
+ * acceptance-contract model (which imports from here).
+ */
+export function redThenGreenScope(
+  manifest: FrozenVerificationManifest | undefined,
+  contracts: readonly Readonly<{ contractTask: string }>[],
+): RedThenGreenScope {
+  return Object.freeze({
+    era: redThenGreenEra(manifest),
+    contractWriters: new Set(contracts.map(({ contractTask }) => contractTask)),
+  });
+}
+
+/**
+ * One Task's I6 era: `not-owed` for an Acceptance Contract writer, the graph's
+ * era for every other Task (issue 127).
+ *
+ * A contract Task writes the contract's frozen acceptance tests, and any types
+ * file and stubs, and the contract Wave Gate requires every acceptance
+ * testcase collected and FAILING. Its new tests must stay red by contract, so
+ * green never happens in its attempt; a test-only contract has no
+ * implementation file to write at all. The contract gate's observed RED
+ * window is the writer's red evidence, and the claimants that turn the
+ * testcases green owe no I6 either (FR-010's covered-by-acceptance-contract
+ * waiver). The writer keeps its `new-tests` obligation.
+ *
+ * Population, the State File obligation-match check (`taskUnionError`, and
+ * through it the operator validator) and the proof-less pending migration ask
+ * here. Revalidation and `redThenGreenDuty`'s no-Proof arm take the graph era
+ * alone: Acceptance Contracts exist only in TaskGraphs whose population froze
+ * every Task's Proof, so a Task reaching those no-Proof paths is never a
+ * contract writer.
+ */
+export function taskRedThenGreenEra(scope: RedThenGreenScope, taskId: string): RedThenGreenEra {
+  return scope.contractWriters.has(taskId) ? "not-owed" : scope.era;
 }
 
 /** Which byte comparison each declared artifact owes.

@@ -170,3 +170,43 @@ such as a syntax error in the test file, also counts as red in a Task that creat
 accepted: the Task's own test file still has to go green after the first implementation write, so the
 order is still proved for the Task's tests, and the exception is bounded to Tasks the frozen baseline says
 create a module.
+
+## Amendment (2026-10-21): an Acceptance Contract's contract Task does not owe I6 (issue 127)
+
+The G5b orchestration was the first plan to combine Acceptance Contracts (G1) with the I6 era. Decompose
+Rule 12 makes every contract Task (`acceptance_contracts[].contractTask`) require new tests, so
+population froze a `red-then-green` obligation on it. A contract Task can never satisfy that obligation.
+A test-only contract has no implementation file, so the judge reports `implementation-write-missing`:
+G5b T2 settled `retry-required` with `proof:red-then-green-unproven:implementation-write-missing` on
+attempt 1. A contract with a types file or stubs must keep its acceptance tests red, because the contract
+Wave Gate requires every acceptance testcase to be collected and failing, so green never comes. The live
+G5b T1 brief also told the contract Task to finish green, which contradicts its contract. G4 slice 2's
+FR-010 exempted only claimants, through the `covered-by-acceptance-contract` waiver. Nobody considered
+the contract Task itself.
+
+**Decision.** A contract Task does not owe I6. One pure rule in `core/proof-obligations.ts` decides it.
+`redThenGreenScope(manifest, contracts)` pairs the graph's era with the set of contract Tasks, and
+`taskRedThenGreenEra(scope, taskId)` returns `not-owed` for a contract Task and the graph's era for any
+other Task. The contract gate's observed red window is the contract Task's red evidence. The contract
+Task keeps its `new-tests` obligation.
+
+- Every obligation derivation or check that has the graph in hand asks through the rule. These are
+  population, the State File obligation-match check (`taskUnionError`), the load-time migration of a
+  pending Task with no Proof, and the operator validator. The loader now parses the shape of
+  `acceptance_contracts` before the Tasks, because the contract Tasks decide which obligations each
+  stored Proof must carry. It still binds the contracts to the roster after the Tasks. Malformed
+  contracts are refused with their own error.
+- The paths with no Proof (revalidation and the no-Proof arm of `redThenGreenDuty`) still take the graph
+  era alone. This is sound because contracts exist only in graphs whose population froze every Task's
+  Proof, so a Task on those paths is never a contract Task.
+- Settlement, reconcile and the brief are unchanged. They read the frozen Proof, which carries no
+  `red-then-green` for a contract Task, so the contract Task settles on its other obligations and its
+  brief has no I6 section.
+- Red-Then-Green Status gains the not-owed reason `contract-writer`, which names the contract. It is
+  checked after `predates-i6` and before the new-test policy.
+
+**Consequences.** If a contract's `contractTask` changes in the State File, the obligations that Task's
+frozen Proof must carry change too. A Proof frozen under the old contracts is then refused as
+`proof obligations do not exactly match`. This is intended: a writer's Proof and the contracts that
+exempt it must agree. A contract Task's tests are never checked red-then-green within its own attempt.
+That is accepted, because the contract gate observes them red and the claimants' Waves turn them green.

@@ -596,7 +596,7 @@ Do not use `mark-tests-passed` to fabricate evidence. It is an evidence/status o
 
 ### Task fails I6 (red-then-green)
 
-A Task owes I6 when it requires new tests, is not an Acceptance Contract claimant, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. Such a Task settles `implemented` only when its attempt epoch's ledger shows three things in order:
+A Task owes I6 when it requires new tests, is neither an Acceptance Contract claimant nor a contract Task, and its TaskGraph was populated after I6 existed, which means its frozen manifest carries `testFiles`. A contract Task is exempt because it cannot satisfy I6: its contract Wave Gate requires every acceptance testcase it writes to be collected and failing, so those tests never go green in its attempt, and a test-only contract has no implementation file to write. The gate's observed red window is the contract Task's red evidence. Its Proof still owes `new-tests`, and its brief carries no I6 section. Such a Task settles `implemented` only when its attempt epoch's ledger shows three things in order:
 1. a qualifying red on one of its test files;
 2. then its first write to an implementation file;
 3. then a qualifying green covering every one of its test files.
@@ -1036,6 +1036,7 @@ It takes exactly one argument, `--task <id>`. The output has four parts, always 
 - `owes I6`;
 - `I6 not owed — <reason>`, where the reason is the first of these that applies:
   - `TaskGraph predates I6`: the frozen manifest carries no `testFiles`;
+  - `writes Acceptance Contract <id>'s frozen files; the contract gate's red window is its red evidence`: the Task is that contract's contract Task, which never owes I6 (see [Task fails I6](#task-fails-i6-red-then-green));
   - `claimant (acceptance contract)`: the Task is an Acceptance Contract claimant, which waives its new tests;
   - `new tests waived: <reason>`: any other new-test waiver, for example `new tests waived: documentation-only`;
   - `the frozen Proof carries no red-then-green obligation`: the Task requires new tests, but its frozen Proof owes no I6. The State File's load check makes this unreachable for a graph it admits; the line exists so every not-owed answer has a reason;

@@ -31,7 +31,7 @@ const task = (id: string, wave: number, overrides: Partial<AuthoredTask> = {}): 
   ...overrides,
 });
 
-function populated(): TaskGraph {
+function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
   const roster = parseAuthoredTaskRoster([
     task("T1", 1, { file_list: ["tests/load.acceptance.test.ts"] }),
     task("T2", 2, { depends_on: ["T1"], spec_anchors: ["FR-001"] }),
@@ -44,7 +44,7 @@ function populated(): TaskGraph {
     planTitle: "load", validatedPlanFile: "plan.md", tasks: roster.value,
     verificationManifest: defaultVerificationManifest(),
     specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT],
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts,
   });
   if (!result.ok) throw new Error(result.error.message);
   return result.value.state;
@@ -63,6 +63,23 @@ const withContract = (patch: Record<string, unknown>) => (graph: Record<string, 
   acceptance_contracts: [{ ...(graph.acceptance_contracts as Record<string, unknown>[])[0], ...patch }],
 });
 
+/** T1's Proof as a non-writer's in this I6-era graph: red-then-green after new-tests. A
+ *  contract retargeted away from T1 leaves T1 owing I6, which its frozen Proof must show
+ *  before the contract's own binding is judged. */
+const withT1OwingI6 = (graph: Record<string, unknown>): Record<string, unknown> => withTasks(graph, (task) => {
+  if (task.id !== "T1") return task;
+  const proof = task.proof as { obligations: Array<{ kind: string }>; results: unknown[] };
+  const at = proof.obligations.findIndex(({ kind }) => kind === "new-tests") + 1;
+  return {
+    ...task,
+    proof: {
+      ...proof,
+      obligations: [...proof.obligations.slice(0, at), { kind: "red-then-green" }, ...proof.obligations.slice(at)],
+      results: [...proof.results.slice(0, at), { state: "pending", obligation: { kind: "red-then-green" } }, ...proof.results.slice(at)],
+    },
+  };
+});
+
 describe("acceptance_contracts at the State File load boundary", () => {
   it("round-trips the contracts population stamped", () => {
     const graph = populated();
@@ -72,12 +89,21 @@ describe("acceptance_contracts at the State File load boundary", () => {
   });
 
   it("accepts an explicitly empty contract list", () => {
-    const raw = JSON.parse(JSON.stringify(populated())) as Record<string, unknown>;
+    const raw = JSON.parse(JSON.stringify(populated([]))) as Record<string, unknown>;
     expect(parseTaskGraph({ ...raw, acceptance_contracts: [] })).toMatchObject({ ok: true });
   });
 
+  it("refuses the writer's Proof once the contract list that exempted it is emptied", () => {
+    const raw = JSON.parse(JSON.stringify(populated())) as Record<string, unknown>;
+    expect(parseTaskGraph({ ...raw, acceptance_contracts: [] })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('tasks[0] ("T1"): proof obligations do not exactly match'),
+    });
+  });
+
   it.each<[string, (graph: Record<string, unknown>) => Record<string, unknown>, string]>([
-    ["a contract task missing from the roster", withContract({ contractTask: "T9" }), "contract task T9 is not in tasks"],
+    ["a contract task missing from the roster",
+      (graph) => withContract({ contractTask: "T9" })(withT1OwingI6(graph)), "contract task T9 is not in tasks"],
     ["a frozen path its contract task does not list",
       withContract({ acceptance: [{ path: "tests/other.acceptance.test.ts", anchors: ["FR-001"] }] }),
       "frozen path 'tests/other.acceptance.test.ts' is not in T1's file_list"],
