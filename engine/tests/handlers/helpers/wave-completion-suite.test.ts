@@ -183,7 +183,8 @@ const contractRevisions = (stage: ContractStage): AcceptanceContract["revisions"
     }]
   : [];
 
-/** T1 writes the contract in Wave 1; T2 claims AS-001 in Wave 2; T3 claims AS-002 in Wave 3. */
+/** T1 writes the contract in Wave 1; T2 claims AS-001 in Wave 2; T3 claims AS-002 in Wave 3.
+ *  T1 is CT-1's contract Task, which never owes I6 (`taskRedThenGreenEra`). */
 function contractTasks(stage: ContractStage): Task[] {
   const contractWave = stage === "contract-wave";
   return [{
@@ -192,7 +193,7 @@ function contractTasks(stage: ContractStage): Task[] {
     agent: "code-implementer-agent",
     wave: 1,
     status: contractWave ? "implemented" : "completed",
-    proof: satisfiedProof([ACCEPTANCE_FILE], ERA),
+    proof: satisfiedProof([ACCEPTANCE_FILE], "not-owed"),
     depends_on: [],
     file_list: [ACCEPTANCE_FILE],
     review_status: contractWave ? "pending" : "passed",

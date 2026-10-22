@@ -23,7 +23,7 @@ import { match, P } from "ts-pattern";
 import type { TaskGraph, Task, TaskStatus } from "../types";
 import { redThenGreenDuty } from "./implementation-application";
 import type { NonEmpty } from "./orchestration-contract";
-import { redThenGreenEra, type ProofFailure, type ProofObligationResult } from "./proof-obligations";
+import { redThenGreenScope, writtenContract, type ProofFailure, type ProofObligationResult } from "./proof-obligations";
 import { judgeRedThenGreen, redThenGreenFailureKind } from "./red-then-green";
 import type { Evidence } from "../machine/types";
 import type {
@@ -34,7 +34,6 @@ import type {
 } from "./red-then-green-types";
 import { UNKNOWN_TASK_PREFIX } from "./stop-check-plan-types";
 import { classifyTaskFiles } from "./test-file-classification";
-import type { FrozenVerificationManifest } from "./verification-manifest";
 import { COVERED_BY_ACCEPTANCE_CONTRACT, taskVerificationPolicy, type NewTestWaiverReason } from "./verification-policy";
 
 // --- Inputs ---
@@ -62,6 +61,8 @@ export type RedThenGreenStatusInput = Readonly<{
 /** Why a `not-owed` duty is not owed: the first that applies, in this order. */
 export type NotOwedReason =
   | Readonly<{ kind: "predates-i6" }>
+  /** The Task writes this Acceptance Contract (its id, from `writtenContract`), so `taskRedThenGreenEra` exempts it. */
+  | Readonly<{ kind: "contract-writer"; contract: string }>
   | Readonly<{ kind: "claimant" }>
   | Readonly<{ kind: "new-tests-waived"; reason: NewTestWaiverReason }>
   /** For totality only: INV-6's load check makes it unreachable for a parsed graph. */
@@ -113,9 +114,11 @@ export type RedThenGreenStatusRendering =
 export const RTG_OWES = "owes I6";
 export const RTG_NOT_OWED = "I6 not owed";
 export const RTG_UNDETERMINABLE = "I6 undeterminable";
-/** `new-tests-waived` is followed by `: <waiver reason>`. */
+/** `new-tests-waived` is followed by `: <waiver reason>`; `contract-writer` is
+ *  preceded by `writes Acceptance Contract <id>'s frozen files; `. */
 export const NOT_OWED_REASON_TEXT: Readonly<Record<NotOwedReason["kind"], string>> = Object.freeze({
   "predates-i6": "TaskGraph predates I6",
+  "contract-writer": "the contract gate's red window is its red evidence",
   claimant: "claimant (acceptance contract)",
   "new-tests-waived": "new tests waived",
   "no-obligation-in-proof": "the frozen Proof carries no red-then-green obligation",
@@ -160,8 +163,11 @@ const NO_PROOF: StoredView = freeze({ kind: "no-proof" });
 const NO_OBLIGATION: StoredView = freeze({ kind: "no-obligation" });
 const STORED_PENDING_VIEW: StoredView = freeze({ kind: "pending" });
 
-function notOwedReason(task: Task, manifest: FrozenVerificationManifest | undefined): NotOwedReason {
-  if (redThenGreenEra(manifest) === "not-owed") return PREDATES_I6;
+function notOwedReason(task: Task, graph: TaskGraph): NotOwedReason {
+  const scope = redThenGreenScope(graph.verification_manifest, graph.acceptance_contracts ?? []);
+  if (scope.era === "not-owed") return PREDATES_I6;
+  const contract = writtenContract(scope, task.id);
+  if (contract !== undefined) return freeze({ kind: "contract-writer", contract });
   return match(taskVerificationPolicy(task).newTests)
     .returnType<NotOwedReason>()
     .with({ kind: "waived", reason: COVERED_BY_ACCEPTANCE_CONTRACT }, () => CLAIMANT)
@@ -170,13 +176,13 @@ function notOwedReason(task: Task, manifest: FrozenVerificationManifest | undefi
     .exhaustive();
 }
 
-function dutyView(task: Task, manifest: FrozenVerificationManifest | undefined): DutyView {
-  return match(redThenGreenDuty(task, manifest))
+function dutyView(task: Task, graph: TaskGraph): DutyView {
+  return match(redThenGreenDuty(task, graph.verification_manifest))
     .returnType<DutyView>()
     .with({ kind: "owed" }, (owed) =>
       // The same arguments settlement classifies by, so a Task that creates its module is judged by FR-007a.
       freeze({ kind: "owed", classification: classifyTaskFiles(task.file_list ?? [], owed.testFiles, task.artifact_baseline) }))
-    .with({ kind: "not-owed" }, () => freeze({ kind: "not-owed", reason: notOwedReason(task, manifest) }))
+    .with({ kind: "not-owed" }, () => freeze({ kind: "not-owed", reason: notOwedReason(task, graph) }))
     .with({ kind: P.union("classification-unfrozen", "proof-unfrozen") }, ({ reason }) =>
       freeze({ kind: "undeterminable", reason }))
     .exhaustive();
@@ -220,7 +226,7 @@ function storedView(task: Task): StoredView {
 export function redThenGreenStatusView({ graph, taskId, live }: RedThenGreenStatusInput): RedThenGreenStatusView {
   const task = graph.tasks.find((candidate) => candidate.id === taskId);
   if (task === undefined) return freeze({ kind: "unknown-task", taskId });
-  const duty = dutyView(task, graph.verification_manifest);
+  const duty = dutyView(task, graph);
   return freeze({
     kind: "task",
     taskId,
@@ -237,9 +243,12 @@ export function redThenGreenStatusView({ graph, taskId, live }: RedThenGreenStat
 type KnownTaskView = Extract<RedThenGreenStatusView, { kind: "task" }>;
 
 const notOwedText = (reason: NotOwedReason): string =>
-  reason.kind === "new-tests-waived"
-    ? `${NOT_OWED_REASON_TEXT[reason.kind]}: ${reason.reason}`
-    : NOT_OWED_REASON_TEXT[reason.kind];
+  match(reason)
+    .returnType<string>()
+    .with({ kind: "new-tests-waived" }, ({ kind, reason: waiver }) => `${NOT_OWED_REASON_TEXT[kind]}: ${waiver}`)
+    .with({ kind: "contract-writer" }, ({ kind, contract }) =>
+      `writes Acceptance Contract ${contract}'s frozen files; ${NOT_OWED_REASON_TEXT[kind]}`)
+    .otherwise(({ kind }) => NOT_OWED_REASON_TEXT[kind]);
 
 const headerLine = ({ taskId, wave, status, duty }: KnownTaskView): string =>
   `${taskId} (Wave ${wave}, ${status}): ${match(duty)

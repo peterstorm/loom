@@ -81,6 +81,23 @@ const graphOf = (tasks: readonly Task[], manifest?: FrozenVerificationManifest):
   ...(manifest === undefined ? {} : { verification_manifest: manifest }),
 });
 
+/** `graph` with T1 writing Acceptance Contract CT-1 (a test-only contract over TEST_A). */
+const withT1WritingContract = (graph: TaskGraph): TaskGraph => ({
+  ...graph,
+  acceptance_contracts: [{
+    schemaVersion: 1,
+    id: "CT-1",
+    title: "Ledger contract",
+    statement: "The ledger loads.",
+    contractTask: "T1",
+    types: { kind: "none", reason: "the slice consumes another surface" },
+    acceptance: [{ path: TEST_A, anchors: ["FR-001"] }],
+    supportedDomain: null,
+    freeze: { state: "awaiting-red" },
+    revisions: [],
+  }],
+});
+
 /** A legacy `implemented` Task: no frozen Proof at all. */
 const legacyTask = (id: string): Task => taskFixture({ ...base(id, 2, FILES), new_tests_required: true, status: "implemented" });
 
@@ -174,6 +191,21 @@ describe("redThenGreenStatusView: duty", () => {
         duty: { kind: "not-owed", reason: { kind: "predates-i6" } },
       });
     }
+  });
+
+  it("is not owed because the Task writes an Acceptance Contract, naming the contract", () => {
+    const graph = withT1WritingContract(graphOf([requiredTask("T1", "not-owed")], I6_MANIFEST));
+    expect(redThenGreenDuty(taskOf(graph, "T1"), graph.verification_manifest)).toEqual({ kind: "not-owed" });
+    expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({
+      duty: { kind: "not-owed", reason: { kind: "contract-writer", contract: "CT-1" } },
+    });
+  });
+
+  it("reports predates-i6 before contract-writer for a writer in a pre-I6 TaskGraph", () => {
+    const graph = withT1WritingContract(graphOf([requiredTask("T1", "not-owed")]));
+    expect(redThenGreenStatusView(input(graph, "T1"))).toMatchObject({
+      duty: { kind: "not-owed", reason: { kind: "predates-i6" } },
+    });
   });
 
   it("is not owed because the Task is an Acceptance Contract claimant", () => {
@@ -419,6 +451,10 @@ describe("renderRedThenGreenStatus", () => {
   it("prints each not-owed reason in the header, and no files section", () => {
     const cases: readonly (readonly [TaskGraph, string])[] = [
       [graphOf([requiredTask("T1", "not-owed")]), NOT_OWED_REASON_TEXT["predates-i6"]],
+      [
+        withT1WritingContract(graphOf([requiredTask("T1", "not-owed")], I6_MANIFEST)),
+        `writes Acceptance Contract CT-1's frozen files; ${NOT_OWED_REASON_TEXT["contract-writer"]}`,
+      ],
       [graphOf([waivedTask("T1", COVERED_BY_ACCEPTANCE_CONTRACT)], I6_MANIFEST), NOT_OWED_REASON_TEXT.claimant],
       [graphOf([waivedTask("T1", "documentation-only")], I6_MANIFEST), `${NOT_OWED_REASON_TEXT["new-tests-waived"]}: documentation-only`],
       [graphOf([requiredTask("T1", "not-owed")], I6_MANIFEST), NOT_OWED_REASON_TEXT["no-obligation-in-proof"]],

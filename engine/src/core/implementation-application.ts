@@ -429,10 +429,12 @@ export type IncomingImplementationEvidence = Readonly<{
  * reconcile and the brief.
  *
  * The frozen Proof is authoritative: population derived its obligations from
- * the era of the TaskGraph's frozen manifest, and the State File load refuses
- * a Task whose stored obligations disagree with that era (INV-6), so a loaded
- * Task's obligations already carry its era. The era (`frozenRedThenGreenEra`)
- * decides only for a Task carrying no frozen Proof, and otherwise supplies
+ * the Task's era (`taskRedThenGreenEra`: the TaskGraph's frozen-manifest era,
+ * or `not-owed` for an Acceptance Contract writer), and the State File load
+ * refuses a Task whose stored obligations disagree with that era (INV-6), so a
+ * loaded Task's obligations already carry its era. The graph era
+ * (`frozenRedThenGreenEra`) decides only for a Task carrying no frozen Proof —
+ * never a contract writer, whose graph froze every Proof — and otherwise supplies
  * the classification an owed Proof is judged by. Every way the two
  * could still disagree is its own named arm, never a silent "not owed":
  * - `owed` carries the frozen test-file classification the judge and the

@@ -64,8 +64,9 @@ import {
   deriveProofObligations,
   parseTaskProof,
   parseTaskTestResult,
-  redThenGreenEra,
-  type RedThenGreenEra,
+  redThenGreenScope,
+  taskRedThenGreenEra,
+  type RedThenGreenScope,
 } from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import {
@@ -946,12 +947,14 @@ export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]):
  * first non-null error still wins — so the diagnostic a drifted graph
  * produces is unchanged.
  *
- * `era` is the TaskGraph's I6 era (`redThenGreenEra(graph.verification_manifest)`,
- * INV-6), which decides whether a Task's stored obligations must include
- * `red-then-green`. It is required: the obligation check matches exactly that
- * era's derivation, so no caller can prove a Task against "either era".
+ * `scope` is the TaskGraph's I6 scope (`redThenGreenScope` of its
+ * `verification_manifest` and `acceptance_contracts`, INV-6), whose
+ * `taskRedThenGreenEra` decides whether this Task's stored obligations must
+ * include `red-then-green`: never for an Acceptance Contract writer. It is
+ * required: the obligation check matches exactly that era's derivation, so no
+ * caller can prove a Task against "either era".
  */
-export function taskUnionError(v: unknown, index: number, era: RedThenGreenEra): string | null {
+export function taskUnionError(v: unknown, index: number, scope: RedThenGreenScope): string | null {
   if (!isRecord(v)) {
     return `tasks[${index}] must be an object`;
   }
@@ -966,7 +969,7 @@ export function taskUnionError(v: unknown, index: number, era: RedThenGreenEra):
     ?? taskAttemptAuthorityError(t, index, id)
     ?? taskRepositoryCarryError(t, index, id)
     ?? taskPacketError(t, index, id)
-    ?? taskStatusError(t, index, id, era)
+    ?? taskStatusError(t, index, id, scope)
     ?? taskEvidenceError(t, index, id)
     ?? taskFindingsError(t, index, id);
 }
@@ -1399,7 +1402,7 @@ function taskStatusError(
   t: Record<string, unknown>,
   index: number,
   id: string,
-  era: RedThenGreenEra,
+  scope: RedThenGreenScope,
 ): string | null {
   const label = `tasks[${index}] ("${id}")`;
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
@@ -1461,7 +1464,7 @@ function taskStatusError(
     verificationPolicy: verification.value.policy,
     declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
     declaredArtifactExpectation: expectation,
-    redThenGreen: era,
+    redThenGreen: taskRedThenGreenEra(scope, id),
   });
   const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
     proof.value.obligations.every((actual, obligationIndex) => {
@@ -1847,7 +1850,7 @@ function migrateParsedTask(
   task: Record<string, unknown>,
   index: number,
   executing: ReadonlySet<string>,
-  era: RedThenGreenEra,
+  scope: RedThenGreenScope,
 ): ParseResult<Record<string, unknown>> {
   const identity = parseTaskId(task.id, `tasks[${index}].id`);
   if (!identity.ok) return parseErr(identity.error.errors.join("; "));
@@ -1864,7 +1867,7 @@ function migrateParsedTask(
         verificationPolicy: verification.value.policy,
         declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
         declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
-        redThenGreen: era,
+        redThenGreen: taskRedThenGreenEra(scope, identity.value),
       }),
     };
   } else if (task.proof === undefined && (task.status === "implemented" || task.status === "completed")) {
@@ -1967,16 +1970,16 @@ function migrateParsedTask(
 function parseTaskGraphTasks(
   obj: Record<string, unknown>,
   executingTasks: readonly TaskId[],
-  era: RedThenGreenEra,
+  scope: RedThenGreenScope,
 ): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
   const executing = new Set<string>(executingTasks);
   const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
-    const err = taskUnionError(tasks[i], i, era);
+    const err = taskUnionError(tasks[i], i, scope);
     if (err !== null) return parseErr(err);
-    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing, era);
+    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing, scope);
     if (!migrated.ok) return migrated;
     parsedTasks.push(migrated.value);
   }
@@ -2248,19 +2251,27 @@ function renderWriterProblem(contract: AcceptanceContract, problem: ContractWrit
 }
 
 /**
- * The persisted contracts, parsed exactly and bound to the roster: each names
- * a Task that exists and is, by the one writer rule, the only Task listing
- * every path the contract freezes; and a freeze names a Wave no earlier than
- * that Task's. A contract whose writer vanished could never be observed RED.
+ * The persisted contracts' exact shape, which needs no Task: parsed before
+ * the Tasks because their writers decide each Task's I6 era (INV-6).
  */
-function parseAcceptanceContractsField(
-  raw: unknown,
-  tasks: readonly Record<string, unknown>[],
-): ParseResult<readonly AcceptanceContract[] | undefined> {
+function parseAcceptanceContractsShape(raw: unknown): ParseResult<readonly AcceptanceContract[] | undefined> {
   if (raw === undefined) return parseOk(undefined);
   const parsed = parseAcceptanceContracts(raw);
-  if (!parsed.ok) return parseErr(parsed.error);
-  for (const contract of parsed.value) {
+  return parsed.ok ? parseOk(parsed.value) : parseErr(parsed.error);
+}
+
+/**
+ * The shape-parsed contracts bound to the roster: each names a Task that
+ * exists and is, by the one writer rule, the only Task listing every path the
+ * contract freezes; and a freeze names a Wave no earlier than that Task's. A
+ * contract whose writer vanished could never be observed RED.
+ */
+function bindAcceptanceContracts(
+  contracts: readonly AcceptanceContract[] | undefined,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<readonly AcceptanceContract[] | undefined> {
+  if (contracts === undefined) return parseOk(undefined);
+  for (const contract of contracts) {
     const writer = tasks.find(({ id }) => id === contract.contractTask);
     if (writer === undefined) {
       return parseErr(`acceptance_contracts ${contract.id}: contract task ${contract.contractTask} is not in tasks`);
@@ -2280,7 +2291,7 @@ function parseAcceptanceContractsField(
       return parseErr(`acceptance_contracts ${contract.id}: freeze.wave ${contract.freeze.wave} precedes contract task ${contract.contractTask}'s Wave ${writer.wave}`);
     }
   }
-  return parseOk(parsed.value);
+  return parseOk(contracts);
 }
 
 type ParsedTaskGraphParts = Readonly<{
@@ -2441,11 +2452,19 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!documents.ok) return parseErr(documents.error);
   const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
   if (!executingTasks.ok) return parseErr(executingTasks.error);
-  // The frozen manifest is parsed before the Tasks: it decides their I6 era,
-  // and so which obligations their stored Proof must carry (INV-6).
+  // The frozen manifest and the contracts' shape are parsed before the Tasks:
+  // the manifest decides the graph's I6 era and the contracts name the
+  // writers it exempts, and so which obligations each stored Proof must carry
+  // (INV-6). The contracts are bound to the roster once the Tasks are proven.
   const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
   if (!verificationManifest.ok) return parseErr(verificationManifest.error);
-  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? [], redThenGreenEra(verificationManifest.value));
+  const contractShapes = parseAcceptanceContractsShape(obj.acceptance_contracts);
+  if (!contractShapes.ok) return parseErr(contractShapes.error);
+  const tasks = parseTaskGraphTasks(
+    obj,
+    executingTasks.value ?? [],
+    redThenGreenScope(verificationManifest.value, contractShapes.value ?? []),
+  );
   if (!tasks.ok) return parseErr(tasks.error);
   const gating = parseTaskGraphGating(obj, tasks.value);
   if (!gating.ok) return parseErr(gating.error);
@@ -2458,8 +2477,8 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     tasks.value as Record<string, unknown>[],
   );
   if (!history.ok) return parseErr(history.error);
-  const acceptanceContracts = parseAcceptanceContractsField(
-    obj.acceptance_contracts,
+  const acceptanceContracts = bindAcceptanceContracts(
+    contractShapes.value,
     tasks.value as Record<string, unknown>[],
   );
   if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
