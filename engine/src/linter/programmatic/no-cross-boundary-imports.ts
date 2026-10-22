@@ -144,6 +144,12 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/panel-contract.ts": ["zod/v4"],
       "engine/src/core/review-panel.ts": ["zod/v4"],
       "engine/src/core/emission-tool.ts": ["zod/v4"],
+      // ADR-0042 (G5b INV-1): the TypeScript compiler API enters the pure core
+      // through exactly these two seams, each parsing text it is given; no
+      // other core module may import it. Landed ahead of the G5b branch that
+      // adds both files, so the gate runtime admits them (lint runtime skew).
+      "engine/src/core/owner-verification/import-graph.ts": ["typescript"],
+      "engine/src/core/owner-verification/mutation-plan.ts": ["typescript"],
     },
     perFileAllow: {
       // The direct-edit guard normalizes panel/spec-artifact targets with pure
