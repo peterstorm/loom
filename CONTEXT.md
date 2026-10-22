@@ -331,7 +331,7 @@ The **Proof Obligation** that a Task show test-first work within one attempt epo
 3. then a qualifying green that covers every one of its test files.
 
 A qualifying run is a ledger `TestRun` with an exit code and a parsed structured report that records per-file results.
-- **Who owes it.** A Task that requires new tests, is not a claimant, and sits in a TaskGraph whose frozen manifest carries `testFiles`. Only `frozenRedThenGreenEra` decides that last condition (INV-6), and the era it returns carries the classification the Task is judged by, so a TaskGraph populated before I6 existed is never newly obligated.
+- **Who owes it.** A Task that requires new tests, is neither a claimant nor an Acceptance Contract's contract Task, and sits in a TaskGraph whose frozen manifest carries `testFiles`. Only `frozenRedThenGreenEra` decides that last condition (INV-6), and the era it returns carries the classification the Task is judged by, so a TaskGraph populated before I6 existed is never newly obligated. `taskRedThenGreenEra` applies the contract-Task exemption: a contract Task's acceptance tests must stay red for its contract Wave Gate, so they never go green in its attempt, and the gate's observed red window is its red evidence.
 - **Judgment.** The pure `judgeRedThenGreen` judges it at settlement and fails closed. The failure is named `proof:red-then-green-unproven:<gap>`, and an unreadable ledger is infrastructure.
 - **Soundness limit.** The proof covers logged facts only. A write that emits no ledger event, such as one by an interpreter, a generator or an unseen tool, is a silent hole. Shell writes are logged but cannot be vetoed.
 
