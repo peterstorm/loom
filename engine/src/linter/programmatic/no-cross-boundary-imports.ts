@@ -280,6 +280,13 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "zod",
       "ts-pattern",
     ],
+    // G5b AD-8: the owner-verification runner reads the matrix test's tsconfig
+    // `paths`, which is JSONC; it parses it with the same audited package the
+    // reviewer codec uses rather than a second tokenizer. Exact specifier only.
+    // Landed ahead of the G5b branch that adds the file (lint runtime skew).
+    perFileExactAllow: {
+      "engine/src/orchestration/owner-verification-runner.ts": ["jsonc-parser"],
+    },
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",
