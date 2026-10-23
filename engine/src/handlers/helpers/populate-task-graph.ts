@@ -451,6 +451,9 @@ const handler: HookHandler = async (stdin, args) => {
     ...(repo === undefined ? {} : { repo }),
     proofBoundary,
     contracts: bindings.models.contracts,
+    // Validated by checkPlanModelBindings above (exemptions included), so the
+    // locked transform stamps Owner Obligations from proven plan data.
+    invariants: bindings.models.invariants,
   });
   const preflight = populateTaskGraph(existingState, command);
   if (!preflight.ok) return { kind: "error", message: preflight.error.message };

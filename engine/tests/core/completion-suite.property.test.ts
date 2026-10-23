@@ -366,7 +366,7 @@ describe("canonical exact Wave suite authority", () => {
       expect(Object.isFrozen(right.checks)).toBe(true);
       expect(right.checks.every(Object.isFrozen)).toBe(true);
       expect(right.checks.every((check) => Object.isFrozen(check.reportPolicy))).toBe(true);
-      expect(right.checks.every((check) => check.kind === "engine-full-tier-lint" || Object.isFrozen(check.args))).toBe(true);
+      expect(right.checks.every((check) => check.kind !== "project-command" || Object.isFrozen(check.args))).toBe(true);
     }));
   });
 

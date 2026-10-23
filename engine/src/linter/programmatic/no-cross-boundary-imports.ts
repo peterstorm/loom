@@ -144,6 +144,11 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/panel-contract.ts": ["zod/v4"],
       "engine/src/core/review-panel.ts": ["zod/v4"],
       "engine/src/core/emission-tool.ts": ["zod/v4"],
+      // ADR-0042 (G5b INV-1): the TypeScript compiler API enters the pure core
+      // through exactly these two seams, each parsing text it is given; no
+      // other core module may import it. machine-purity pins the same pair.
+      "engine/src/core/owner-verification/import-graph.ts": ["typescript"],
+      "engine/src/core/owner-verification/mutation-plan.ts": ["typescript"],
     },
     perFileAllow: {
       // The direct-edit guard normalizes panel/spec-artifact targets with pure
@@ -274,6 +279,12 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "zod",
       "ts-pattern",
     ],
+    // G5b AD-8: the owner-verification runner reads the matrix test's tsconfig
+    // `paths`, which is JSONC; it parses it with the same audited package the
+    // reviewer codec uses rather than a second tokenizer. Exact specifier only.
+    perFileExactAllow: {
+      "engine/src/orchestration/owner-verification-runner.ts": ["jsonc-parser"],
+    },
     deny: [
       "engine/src/linter/",
       "engine/src/handlers/",

@@ -13,7 +13,7 @@ export function acceptedWaveCompletionSuite(
   active: NonNullable<TaskGraph["active_wave_gate"]>,
   manifest: FrozenVerificationManifest = legacyDefaultVerificationManifest(),
 ) {
-  const authorized = authorizeWaveCompletionSuite(manifest, active, "c".repeat(64));
+  const authorized = authorizeWaveCompletionSuite(manifest, active, "c".repeat(64), null);
   if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));
   const evaluated = evaluateAsRecorded(authorized.value, {
     kind: "wave-completion-suite-result",

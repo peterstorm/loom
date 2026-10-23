@@ -166,7 +166,7 @@ describe("wave-completion-suite-readiness falls back to the legacy default", () 
   const workspaceDigest = "b".repeat(64) as ArtifactDigest;
 
   function receiptUnder(manifest: FrozenVerificationManifest): AcceptedWaveCompletionReceipt {
-    const authority = authorizeWaveCompletionSuite(manifest, registration, workspaceDigest);
+    const authority = authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, null);
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
     const evaluated = evaluateAsRecorded(authority.value, {
       kind: "wave-completion-suite-result",

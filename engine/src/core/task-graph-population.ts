@@ -1,6 +1,7 @@
-import type { Phase, PlanContract, Task, TaskGraph } from "../types";
+import type { OwnerObligation, Phase, PlanContract, PlanInvariant, Task, TaskGraph } from "../types";
 import { acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import { obligationsFromPlan } from "./owner-verification/obligations";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
@@ -117,6 +118,9 @@ export type TaskGraphPopulationCommand = Readonly<{
   proofBoundary: PopulationProofBoundary;
   /** The validated plan's `## Contracts`; empty when the plan declares none. */
   contracts: readonly PlanContract[];
+  /** The validated plan's `## Invariants`; empty when the plan declares none.
+   *  Population stamps their Owner Obligations, `[]` included (AD-2). */
+  invariants: readonly PlanInvariant[];
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
@@ -129,7 +133,8 @@ export type TaskGraphPopulationError = Readonly<{
     | "spec-observation-mismatch"
     | "spec-index-unavailable"
     | "unknown-requirement"
-    | "invalid-contracts";
+    | "invalid-contracts"
+    | "owner-verification-runner-missing";
   message: string;
 }>;
 
@@ -194,6 +199,39 @@ function specIndexRefusal(
         "TaskGraph population refused: Tasks name ids the Spec Index does not define as a completable FR or AS entry: " +
           `${renderRequirementTraceEdges(unproven.edges)}. Remove them from spec_anchors/spec_contributions, ` +
           "or add them to the specification.",
+      );
+}
+
+/**
+ * The Owner Obligations the plan's Invariants stamp: `obligationsFromPlan`
+ * is the one derivation (INV-3) and reads only the Invariants of the models
+ * it is given, so the other model sections are supplied empty.
+ */
+function ownerObligationsOf(invariants: readonly PlanInvariant[]): readonly OwnerObligation[] {
+  return obligationsFromPlan({ lifecycles: [], pipeline: null, invariants, contracts: [], strays: [] });
+}
+
+/**
+ * Mutation verification runs each mutant through the frozen `affectedRunner`
+ * (AD-8), so a plan owing it to some owned Invariant cannot be honoured by a
+ * manifest without one: refuse it now rather than block every Wave Gate that
+ * changes the family. An exempt Invariant owes coverage only, which needs no
+ * runner.
+ */
+function ownerRunnerRefusal(
+  obligations: readonly OwnerObligation[],
+  manifest: FrozenVerificationManifest,
+): TaskGraphPopulationResult | null {
+  if (manifest.affectedRunner !== undefined) return null;
+  const verified = obligations.filter(({ mutation }) => mutation.kind === "verify").map(({ invariant }) => invariant);
+  return verified.length === 0
+    ? null
+    : reject(
+        "owner-verification-runner-missing",
+        `TaskGraph population refused: owned Invariant(s) ${verified.join(", ")} owe mutation verification, ` +
+          "which runs through the frozen manifest's affectedRunner, and the verification manifest declares none. " +
+          "Install .loom/verification-manifest.json with an \"affectedRunner\" (schemaVersion 2), or give each such " +
+          "Invariant a reasoned **Mutation exemption:**, then re-run populate-task-graph.",
       );
 }
 
@@ -304,6 +342,9 @@ export function populateTaskGraph(
 
   const contracts = acceptanceContractsFromPlan(command.contracts, command.tasks);
   if (!contracts.ok) return reject("invalid-contracts", contracts.error.join("; "));
+  const ownerObligations = ownerObligationsOf(command.invariants);
+  const runnerRefusal = ownerRunnerRefusal(ownerObligations, command.verificationManifest);
+  if (runnerRefusal !== null) return runnerRefusal;
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
 
@@ -324,6 +365,7 @@ export function populateTaskGraph(
     spec_index_observation: _staleSpecIndexObservation,
     proof_boundary_observation: _staleProofBoundaryObservation,
     acceptance_contracts: _staleAcceptanceContracts,
+    owner_obligations: _staleOwnerObligations,
     ...existingWithoutWaveAuthority
   } = existing;
   const state: TaskGraph = Object.freeze({
@@ -344,6 +386,9 @@ export function populateTaskGraph(
       taskRedThenGreenEra(redThenGreen, task.id),
     ))),
     ...(contracts.value.length === 0 ? {} : { acceptance_contracts: contracts.value }),
+    // Always stamped, `[]` included: only a graph populated before owner
+    // verification lacks the field, and it alone owes nothing (FR-004).
+    owner_obligations: ownerObligations,
     current_wave: 1,
     executing_tasks: Object.freeze([]),
     wave_gates: waveGates,

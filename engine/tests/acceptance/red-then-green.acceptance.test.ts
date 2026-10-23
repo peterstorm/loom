@@ -194,6 +194,7 @@ function populate(tasks: readonly AuthoredTask[], manifest: FrozenVerificationMa
       force: false,
       proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
       contracts: [],
+      invariants: [],
     },
   );
   if (!populated.ok) throw new Error(`fixture population refused: ${populated.error.message}`);

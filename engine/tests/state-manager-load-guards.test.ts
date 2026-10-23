@@ -646,7 +646,7 @@ function acceptedReceipt(
   manifest: FrozenVerificationManifest = defaultVerificationManifest(),
 ): AcceptedWaveCompletionReceipt {
   const active = activeWaveGate();
-  const authority = value(authorizeWaveCompletionSuite(manifest, active, DIGEST("c")));
+  const authority = value(authorizeWaveCompletionSuite(manifest, active, DIGEST("c"), null));
   const rawResult = {
     kind: "wave-completion-suite-result",
     runId: authority.runId,

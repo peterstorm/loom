@@ -1171,12 +1171,25 @@ function validatedRepositoryRoot(
   return failed({ kind: "invalid-runner-authority", message });
 }
 
-/** Existing Wave wrapper. Its public result and report projection remain unchanged. */
-export async function runCompletionCheck(
+/** One parser-proven project command's execution: a spawn failure, or the
+ *  observed process with the report it left, a produced report carrying the
+ *  exact bytes of its one stable no-follow read. */
+export type ProjectCommandExecution = CommandExecution;
+export type CommandExecutionResult = CommandRunnerResult;
+
+/**
+ * Execute one project command under an explicit repository root: the root is
+ * where its `cwd` and report path resolve, so the same frozen command runs in
+ * the real workspace or in an isolated worktree of it (owner verification).
+ * The process-group containment and report observation are exactly the Wave
+ * check's; the result keeps the report's bytes instead of projecting them
+ * away, so the caller classifies the very bytes the runner observed.
+ */
+export async function runProjectCommandAt(
   rawCheck: ProjectCommandCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions = {},
-): Promise<CompletionCheckRunnerResult> {
+): Promise<CommandExecutionResult> {
   const parsedCheck = parseAuthorizedWaveCompletionCheck(rawCheck);
   if (!parsedCheck.ok || parsedCheck.value.kind !== "project-command") {
     return failed({
@@ -1186,7 +1199,16 @@ export async function runCompletionCheck(
   }
   const root = validatedRepositoryRoot(repositoryRoot);
   if (!root.ok) return root;
-  const execution = await runProjectCommand(parsedCheck.value, root.value, options);
+  return runProjectCommand(parsedCheck.value, root.value, options);
+}
+
+/** Existing Wave wrapper. Its public result and report projection remain unchanged. */
+export async function runCompletionCheck(
+  rawCheck: ProjectCommandCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+  options: CompletionCheckRunnerOptions = {},
+): Promise<CompletionCheckRunnerResult> {
+  const execution = await runProjectCommandAt(rawCheck, repositoryRoot, options);
   if (!execution.ok) return execution;
   const outcome: CompletionProcessOutcome = execution.value.kind === "spawn-failed"
     ? execution.value.process
@@ -1195,7 +1217,7 @@ export async function runCompletionCheck(
         report: completionReportOutcome(execution.value.report),
       });
   const checkResult: CompletionCheckResult = Object.freeze({
-    checkId: parsedCheck.value.checkId,
+    checkId: rawCheck.checkId,
     scope: "wave",
     outcome,
   });

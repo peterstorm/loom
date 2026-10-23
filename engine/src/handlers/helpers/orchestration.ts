@@ -109,6 +109,7 @@ import type {
   HookHandler,
   HookResult,
   LoomStatus,
+  LoomStatusDocument,
   Task,
   WaveCompletionResultObservation,
 } from "../../types";
@@ -117,6 +118,7 @@ import type { GateDeps } from "../../core/wave-gate-checks";
 import type { ImplementationReservationStatusObservation } from "../../core/implementation-window";
 import {
   deriveLoomStatusFromParsedGraph,
+  ownerVerificationStatusOf,
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
@@ -299,8 +301,19 @@ function renderParsedStatus(
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation,
 ): string {
-  const status = deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory);
-  return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+  return renderStatusRead(Object.freeze({
+    status: deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory),
+    deps,
+  }), asJson);
+}
+
+/** A derived status and the observations it was derived from. */
+type StatusRead = Readonly<{ status: LoomStatus; deps: StatusDeps }>;
+
+/** Human or `--json` output: the canonical status plus the one owner-verification projection. */
+function renderStatusRead({ status, deps }: StatusRead, asJson: boolean): string {
+  const document: LoomStatusDocument = { ...status, ownerVerification: ownerVerificationStatusOf(deps) };
+  return asJson ? renderLoomStatusJson(document) : renderLoomStatusHuman(document);
 }
 
 export function renderStatus(
@@ -561,8 +574,7 @@ export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<string> {
-  const status = await deriveCurrentOrchestrationStatus(args, statePath);
-  return hasFlag(args, "--json") ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+  return renderStatusRead(await deriveCurrentOrchestrationStatus(args, statePath), hasFlag(args, "--json"));
 }
 
 /** The canonical status of the protected graph, with every shell observation
@@ -570,7 +582,7 @@ export async function currentOrchestrationStatus(
 async function deriveCurrentOrchestrationStatus(
   args: readonly string[],
   statePath: string,
-): Promise<LoomStatus> {
+): Promise<StatusRead> {
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
@@ -590,7 +602,10 @@ async function deriveCurrentOrchestrationStatus(
         advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, gateDeps, workspace, binding.handle),
       })
     : base;
-  return deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation);
+  return Object.freeze({
+    status: deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation),
+    deps: statusDeps,
+  });
 }
 
 async function statusOperation(args: readonly string[]): Promise<HookResult> {
@@ -680,7 +695,7 @@ async function briefOperation(args: readonly string[]): Promise<HookResult> {
   const requested = argumentValue(args, "--task");
   const operatorNotes = briefOperatorNotes(args, requested);
   if (!operatorNotes.ok) return { kind: "error", message: operatorNotes.error };
-  const status = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
+  const { status } = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
   const action = status.next.action;
   const recovery = action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started"
     ? action.diagnostic.recovery

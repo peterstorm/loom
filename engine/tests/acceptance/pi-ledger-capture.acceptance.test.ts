@@ -237,6 +237,7 @@ function populate(repository: Repository, manifest: FrozenVerificationManifest):
     force: false,
     proofBoundary: { kind: "absent", cause: "fixture: first dispatch stamps its own baseline" },
     contracts: [],
+    invariants: [],
   });
   if (!populated.ok) throw new Error(`fixture population must succeed: ${populated.error.message}`);
   writeFileSync(repository.statePath, JSON.stringify(populated.value.state, null, 2));

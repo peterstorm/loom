@@ -23,6 +23,7 @@ import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import {
   AGENT_REQUIRED_SKILLS,
   canonicalRecord,
+  isNonEmpty,
   mintAgentRequestAuthority,
   parseArtifactDigest,
   canonicalStructuralEquals,
@@ -37,6 +38,8 @@ import {
 } from "./orchestration-contract";
 import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
+import { obligationsTouchedBy } from "./owner-verification/obligations";
+import { isOwnerMapRole, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
@@ -860,6 +863,25 @@ export function prepareWaveReviewBatch(
     }
   }
 
+  // The owner map (plan AD-9): only reviewer packets of a schema-2 Wave over a
+  // stamped graph, and only for a Task touching some owned family. Every other
+  // packet keeps its exact pre-feature bytes (SC-005).
+  const ownerMapByTask = new Map<string, ByteSection>();
+  const stamp = graph.owner_obligations;
+  if (registration.schemaVersion === 2 && stamp !== undefined) {
+    for (const task of tasks) {
+      const touched = obligationsTouchedBy(task.file_list ?? [], stamp);
+      if (!isNonEmpty(touched)) continue;
+      const planFile = graph.plan_file;
+      if (planFile === null || planFile === undefined) {
+        return failure(`Task ${task.id} touches owned Invariants but the stamped TaskGraph records no plan_file to cite`);
+      }
+      const ownerMap = encodeByteSection(OWNER_MAP_SECTION, renderOwnerMapSection(planFile, touched));
+      if (!ownerMap.ok) return failure(ownerMap.error.message);
+      ownerMapByTask.set(task.id, ownerMap.value);
+    }
+  }
+
   const subjects = waveReviewSubjects(registration.taskIds);
   const requests: IssuedWaveReviewRequest[] = [];
   const packets: ContextPacket[] = [];
@@ -934,9 +956,13 @@ export function prepareWaveReviewBatch(
       : null;
     if (coverageSection !== null && !coverageSection.ok) return failure(coverageSection.error.message);
     const sourceSection = subject.taskId === null ? null : frozenSourceByTask.get(subject.taskId) ?? null;
+    const ownerMapSection = subject.taskId !== null && isOwnerMapRole(subject.role)
+      ? ownerMapByTask.get(subject.taskId) ?? null
+      : null;
     const fixedContext = [
       section.value,
       ...(sourceSection === null ? [] : [sourceSection]),
+      ...(ownerMapSection === null ? [] : [ownerMapSection]),
       ...(coverageSection === null ? [] : [coverageSection.value]),
     ];
     const packetInput = {

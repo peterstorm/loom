@@ -97,7 +97,7 @@ function populated(): TaskGraph {
     // No manifest file: the I6-era default every post-feature population freezes.
     verificationManifest: defaultVerificationManifest(),
     specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT],
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT], invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);
   return result.value.state;

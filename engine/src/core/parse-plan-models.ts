@@ -12,7 +12,8 @@
  *                        (bound to a lint-rule file, enforced fail-closed) or
  *                        `advisory` (prose, never enforced), each declaring its
  *                        owner module, sibling entry points and matrix test —
- *                        or `**Owner module:** none` with a reason
+ *                        or `**Owner module:** none` with a reason — and, when
+ *                        owned, optionally a reasoned `**Mutation exemption:**`
  *   - `## Contracts`   — `### CT-N: {title}` blocks, each naming a
  *                        declarations-only types file (or `none` with a
  *                        reason), the dedicated acceptance test files and the
@@ -38,6 +39,7 @@ import type {
   BlockSection,
   InvariantOwnership,
   ModelSection,
+  MutationPolicy,
   OwnershipProblem,
   PlanInvariant,
   PlanInvariantTier,
@@ -170,15 +172,25 @@ function idBlocks(body: string, prefix: string): { id: string; title: string; bl
   });
 }
 
-/** Value of a `**{label}:** value` line inside a block, backticks stripped;
- *  null if the line is absent or its value is empty. The value never crosses
- *  the line break: an empty label must not capture the next line. */
-function fieldValue(block: string, label: string): string | null {
+/** A `**{label}:** value` line of one block: absent, or present with its
+ *  value, backticks stripped — null when that value is empty. */
+type FieldLine = Readonly<{ kind: "absent" }> | Readonly<{ kind: "present"; value: string | null }>;
+
+/** The first `**{label}:**` line inside a block. The value never crosses the
+ *  line break: an empty label must not capture the next line. */
+function fieldLine(block: string, label: string): FieldLine {
   const re = new RegExp(`^\\*\\*${label}:\\*\\*[ \\t]*(.*)$`, "im");
   const m = re.exec(block);
-  if (!m) return null;
+  if (!m) return { kind: "absent" };
   const value = m[1].trim().replace(/^`(.*)`$/, "$1").trim();
-  return value.length > 0 ? value : null;
+  return { kind: "present", value: value.length > 0 ? value : null };
+}
+
+/** Value of a `**{label}:** value` line inside a block, backticks stripped;
+ *  null if the line is absent or its value is empty. */
+function fieldValue(block: string, label: string): string | null {
+  const line = fieldLine(block, label);
+  return line.kind === "absent" ? null : line.value;
 }
 
 /** Node names from the first column of a `| Node | Kind | … |` markdown table
@@ -269,11 +281,17 @@ function siblingDeclaration(block: string): SiblingDeclaration {
  * since whether siblings and a matrix test are owed depends on the owner. An
  * owned or unowned value exists only when the declaration is complete and
  * consistent.
+ *
+ * `**Mutation exemption:**` is meaningful only on an owned invariant: there a
+ * reason makes it `exempt` and a blank one is `exemption-without-reason`; on
+ * an unowned one any exemption line is `exemption-on-unowned`. Without an
+ * owner line whether it is owed cannot be decided, like siblings.
  */
 function parseOwnership(block: string): InvariantOwnership {
   const owner = fieldValue(block, "Owner module");
   const reason = fieldValue(block, "Unowned reason");
   const matrixTest = fieldValue(block, "Matrix test");
+  const exemption = fieldLine(block, "Mutation exemption");
   const siblings = siblingDeclaration(block);
   const malformedSibling: readonly OwnershipProblem[] =
     siblings.status === "malformed" ? [{ kind: "malformed-sibling", line: siblings.line }] : [];
@@ -284,17 +302,22 @@ function parseOwnership(block: string): InvariantOwnership {
       ...(siblings.status === "absent" ? [] : ["Sibling entry points"]),
       ...(matrixTest === null ? [] : ["Matrix test"]),
     ];
-    const labelProblems: readonly OwnershipProblem[] =
-      ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels }] : [];
+    const labelProblems: readonly OwnershipProblem[] = [
+      ...(ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels } as const] : []),
+      ...(exemption.kind === "absent" ? [] : [{ kind: "exemption-on-unowned" } as const]),
+    ];
     if (reason === null) return { kind: "malformed", problems: [{ kind: "unowned-without-reason" }, ...labelProblems] };
     const [first, ...rest] = labelProblems;
     return first === undefined ? { kind: "unowned", reason } : { kind: "malformed", problems: [first, ...rest] };
   }
 
-  if (reason === null && siblings.status === "declared" && matrixTest !== null) {
-    return { kind: "owned", owner, siblings: siblings.entries, matrixTest };
+  const mutation: MutationPolicy | null = exemption.kind === "absent"
+    ? { kind: "verify" }
+    : exemption.value === null ? null : { kind: "exempt", reason: exemption.value };
+  if (reason === null && siblings.status === "declared" && matrixTest !== null && mutation !== null) {
+    return { kind: "owned", owner, siblings: siblings.entries, matrixTest, mutation };
   }
-  // Not owned, so at least one of these three is present.
+  // Not owned, so at least one of these four is present.
   const [first, ...rest]: readonly OwnershipProblem[] = [
     ...(reason === null ? [] : [{ kind: "reason-on-owned" } as const]),
     ...match(siblings)
@@ -303,6 +326,7 @@ function parseOwnership(block: string): InvariantOwnership {
       .with({ status: "absent" }, { status: "empty" }, () => [{ kind: "missing-siblings" } as const])
       .exhaustive(),
     ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
+    ...(mutation === null ? [{ kind: "exemption-without-reason" } as const] : []),
   ];
   return { kind: "malformed", problems: [first!, ...rest] };
 }
@@ -468,6 +492,7 @@ function collectStrays(
     { label: "Unowned reason", s: invariants, home: "Invariants" },
     { label: "Sibling entry points", s: invariants, home: "Invariants" },
     { label: "Matrix test", s: invariants, home: "Invariants" },
+    { label: "Mutation exemption", s: invariants, home: "Invariants" },
     { label: "Types file", s: contracts, home: "Contracts" },
     { label: "No types reason", s: contracts, home: "Contracts" },
     { label: "Acceptance tests", s: contracts, home: "Contracts" },

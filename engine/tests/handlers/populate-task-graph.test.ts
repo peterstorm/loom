@@ -22,6 +22,7 @@ import {
 } from "../../src/core/verification-manifest";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import { canonicalSpecBeside } from "../fixtures/spec-index-fixture";
+import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
 /**
  * Exercises the REAL populate-task-graph overwrite guard through the handler's
@@ -1030,5 +1031,71 @@ describe("populate-task-graph — Acceptance Contracts", () => {
     for (const task of graph.tasks) {
       expect(task.verification_policy?.regression).toEqual({ kind: "waived", reason: "acceptance-red-window" });
     }
+  });
+});
+
+describe("populate-task-graph — owned Invariants reach population", () => {
+  const OWNED_PLAN = [
+    "# Plan", "",
+    "## Invariants", "",
+    "### INV-1: Fees are computed only by the fee calculator", "",
+    "**Tier:** advisory",
+    "**Owner module:** `src/fees.ts`",
+    "**Sibling entry points:** none",
+    "**Matrix test:** `tests/fees.matrix.test.ts`",
+    "**Statement:** Every fee is computed by computeFee.", "",
+  ].join("\n");
+
+  function ownedPlan(dir: string): string {
+    const planFile = join(dir, "plan.md");
+    writeFileSync(planFile, OWNED_PLAN);
+    return planFile;
+  }
+
+  const ownedDecompose = (planFile: string): string => JSON.stringify({
+    spec_trace_version: 2,
+    plan_title: "t",
+    spec_file: canonicalSpecBeside(planFile),
+    plan_file: planFile,
+    tasks: [{
+      id: "T1", description: "fees", agent: "code-implementer-agent", wave: 1, depends_on: [],
+      spec_anchors: [], spec_contributions: [], verification_policy: REQUIRED_VERIFICATION, plan_context: "",
+      file_list: ["src/fees.ts", "tests/fees.matrix.test.ts"],
+    }],
+  });
+
+  it("forwards the plan's owned Invariants: a non-exempt one without a frozen affectedRunner is refused, writing nothing", async () => {
+    const dir = tempDir();
+    const plan = ownedPlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir);
+    const before = stateBytes(statePath);
+
+    const result = await populate(ownedDecompose(plan), []);
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("owned Invariant(s) INV-1 owe mutation verification") });
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("affectedRunner") });
+    expect(stateBytes(statePath)).toBe(before);
+  });
+
+  it("forwards the plan's owned Invariants: with a frozen affectedRunner the graph is stamped with their obligations", async () => {
+    const dir = tempDir();
+    const plan = ownedPlan(dir);
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir, { ...manifestDocument(), schemaVersion: 2, affectedRunner: AFFECTED_RUNNER });
+
+    const result = await populate(ownedDecompose(plan), []);
+
+    expect(result.kind, result.kind === "error" ? result.message : "").toBe("passthrough");
+    const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(graph.owner_obligations).toEqual([{
+      invariant: "INV-1",
+      title: "Fees are computed only by the fee calculator",
+      statement: "Every fee is computed by computeFee.",
+      owner: "src/fees.ts",
+      siblings: [],
+      matrixTest: "tests/fees.matrix.test.ts",
+      mutation: { kind: "verify" },
+    }]);
   });
 });

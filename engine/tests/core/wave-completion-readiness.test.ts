@@ -100,7 +100,7 @@ function acceptedReceipt(
   reportDigest = digest("c"),
   reportByteLength = 10,
 ): AcceptedWaveCompletionReceipt {
-  const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest));
+  const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, null));
   const evaluated = evaluateAsRecorded(authority, {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
@@ -174,7 +174,7 @@ function observedResult(
     >;
   }>,
 ): WaveCompletionResultObservation {
-  const authority = value(authorizeWaveCompletionSuite(manifest, registration, digest("b")));
+  const authority = value(authorizeWaveCompletionSuite(manifest, registration, digest("b"), null));
   const result: WaveCompletionSuiteResult = {
     kind: "wave-completion-suite-result",
     runId: authority.runId,

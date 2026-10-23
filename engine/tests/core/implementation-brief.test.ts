@@ -136,6 +136,7 @@ const PROBE_FAMILY: PlanInvariant = {
     owner: "engine/src/utils/path-presence.ts",
     siblings: [{ path: "engine/src/utils/route-endpoint.ts", note: "models.json" }, { path: "engine/src/config.ts", note: null }],
     matrixTest: "engine/tests/utils/path-presence.matrix.test.ts",
+    mutation: { kind: "verify" },
   },
 };
 

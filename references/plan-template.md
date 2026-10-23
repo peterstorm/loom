@@ -122,7 +122,9 @@ non-checkable ones are honestly tiered advisory. A rule enforced at two or
 more entry points is an invariant, and EVERY invariant names its owner: the
 one module that implements the rule, every other entry point that applies it,
 and the matrix test that runs the rule through all of them — or
-`**Owner module:** none` with the reason it has no home.
+`**Owner module:** none` with the reason it has no home. An owned invariant
+is mutation-verified at the Wave Gate unless it declares a reasoned
+`**Mutation exemption:**`.
 
 ### INV-1: {Invariant Title}
 
@@ -132,6 +134,7 @@ and the matrix test that runs the rule through all of them — or
 **Sibling entry points:**
 - `{path/to/caller.ts}` — {what this entry point uses the rule for}
 **Matrix test:** `{path/to/owner.matrix.test.ts}`
+**Mutation exemption:** {OPTIONAL, owned only — why the owner's mutants need not be killed; delete the line to keep mutation verification}
 **Statement:** {what must always hold, and which call sites it covers}
 
 ### INV-2: {Invariant Title}
@@ -272,6 +275,21 @@ Per component, not global.
   several rules gets several invariants), and write the `**Statement:**` so it
   says which call sites the rule covers — otherwise the sibling list cannot be
   checked for completeness.
+- **Owner verification (G5b)** — every owned `INV-N` becomes an Owner
+  Obligation. At the Wave Gate of a Wave that changes its owner or a sibling,
+  the matrix test must import the owner and every sibling (directly or through
+  `export … from` re-exports; an import proves reach, not exercise), and every
+  mutant of the owner's lines changed in that Wave must be killed by it (six
+  fixed operators, at most 24 mutants, each run through the verification
+  manifest's `affectedRunner`). A plan with a non-exempt owned invariant needs
+  a schema-2 `.loom/verification-manifest.json` declaring an `affectedRunner`
+  that writes JUnit; population refuses it otherwise.
+- **Mutation exemption** — `**Mutation exemption:** <reason>` on an owned
+  invariant skips only the mutation half; sibling coverage still runs. The
+  reason is mandatory. A blank reason, or the line on an unowned invariant, is
+  malformed ownership and validation refuses the plan. Use it only when the
+  owner's changed lines cannot be meaningfully killed (timing-only code, say),
+  and say why.
 - **Contracts** — `### CT-<n>: <title>` blocks under `## Contracts`. The
   `**Types file:**` is a NEW file holding declarations only (types,
   interfaces, sealed ADTs, the signatures consumers import) — never an

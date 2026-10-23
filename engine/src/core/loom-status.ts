@@ -16,6 +16,7 @@ import type {
   CanonicalStatusFacts,
   EngineResumeAction,
   LoomStatus,
+  LoomStatusDocument,
   NextActionDecision,
   StatusReason,
   TaskGraph,
@@ -68,6 +69,13 @@ import {
   remediateEscalationCommand,
   type ImplementationReservationStatusObservation,
 } from "./implementation-window";
+import {
+  ownerVerificationNotObserved,
+  ownerVerificationRemedies,
+  projectOwnerVerificationStatus,
+  renderOwnerVerificationStatus,
+  type OwnerVerificationStatusReport,
+} from "./owner-verification/status";
 
 /** What status reads: the gate's own deps plus the one observation only the
  *  implementation-window projection consumes. Gate checks never see it. */
@@ -591,12 +599,86 @@ function projectedAdvisoryStatus(
       );
 }
 
+/** The unavailable status a live registration's Run Directory observation forces, or null when it is healthy. */
+function runDirectoryUnavailableStatus(
+  graph: TaskGraph,
+  runDirectory: ActiveRunDirectoryObservation,
+): LoomStatus | null {
+  const active = graph.active_wave_gate;
+  if (active?.terminalOutcome !== null || runDirectory.kind === "unverified") return null;
+  if (runDirectory.runId !== active.runId) {
+    return unavailableStatus(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`);
+  }
+  if (runDirectory.kind === "abandoned") return unavailableStatus(unstampedAbandonmentMessage(runDirectory));
+  if (runDirectory.kind === "absent") {
+    return unavailableStatus(
+      `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
+      `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
+    );
+  }
+  if (runDirectory.kind === "invalid") {
+    return unavailableStatus(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`);
+  }
+  if (runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "unavailable") {
+    return unavailableStatus(
+      `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
+    );
+  }
+  return null;
+}
+
+/** The owner verification that status read from the latest persisted completion result, if it read one carrying it. */
+const persistedOwnerVerification = (deps: StatusDeps) =>
+  deps.currentWaveCompletionResult?.kind === "observed" ? deps.currentWaveCompletionResult.result.ownerVerification : undefined;
+
+/**
+ * The one owner-verification projection both status renderers serialize
+ * (AD-10). A persisted result status could not read is not observed, with
+ * the read failure as its reason, so it never passes for "no result".
+ */
+export const ownerVerificationStatusOf = (deps: StatusDeps): OwnerVerificationStatusReport =>
+  deps.currentWaveCompletionResult?.kind === "unavailable"
+    ? ownerVerificationNotObserved(`the persisted completion result is unavailable: ${deps.currentWaveCompletionResult.reason}`)
+    : projectOwnerVerificationStatus(persistedOwnerVerification(deps));
+
+/**
+ * When the completion suite rejected the Wave for owner verification, the
+ * next action names each blocking Invariant and its remedy. Readiness judged
+ * the very result the remedies are read from, so they cannot disagree.
+ */
+function withOwnerVerificationRemedies(status: LoomStatus, deps: StatusDeps): LoomStatus {
+  const suite = status.facts.waveCompletionSuiteReadiness;
+  const rejectedForOwner = suite.kind === "known" && suite.value.kind === "rejected" &&
+    suite.value.failureKinds.includes("owner-verification-rejected");
+  const remedies = rejectedForOwner ? ownerVerificationRemedies(persistedOwnerVerification(deps)) : [];
+  if (remedies.length === 0) return status;
+  const reasons = remedies.map((remedy) =>
+    statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
+  return canonicalRecord({
+    ...status,
+    next: canonicalRecord({
+      ...status.next,
+      reasons: Object.freeze([...status.next.reasons, ...reasons]) as NonEmpty<StatusReason>,
+    }),
+  });
+}
+
 /** Anti-corruption adapter from the protected-state parser into the canonical status contract. */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
   deps: StatusDeps,
   lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
+): LoomStatus {
+  return withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory), deps);
+}
+
+/** Route a parsed graph to exactly one status branch. */
+function routeLoomStatus(
+  parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
+  deps: StatusDeps,
+  lifecycleProof: WaveLifecycleProof | null,
+  runDirectory: ActiveRunDirectoryObservation,
 ): LoomStatus {
   if (!parsed.ok) {
     return unavailableStatus(`protected authority is malformed: ${parsed.error}`);
@@ -608,27 +690,8 @@ export function deriveLoomStatusFromParsedGraph(
       deps.currentWaveCompletionResult,
     );
   }
-  const active = parsed.value.active_wave_gate;
-  if (active?.terminalOutcome === null && runDirectory.kind !== "unverified") {
-    if (runDirectory.runId !== active.runId) {
-      return unavailableStatus(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`);
-    }
-    if (runDirectory.kind === "abandoned") return unavailableStatus(unstampedAbandonmentMessage(runDirectory));
-    if (runDirectory.kind === "absent") {
-      return unavailableStatus(
-        `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
-        `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
-      );
-    }
-    if (runDirectory.kind === "invalid") {
-      return unavailableStatus(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`);
-    }
-    if (runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "unavailable") {
-      return unavailableStatus(
-        `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
-      );
-    }
-  }
+  const directoryUnavailable = runDirectoryUnavailableStatus(parsed.value, runDirectory);
+  if (directoryUnavailable !== null) return directoryUnavailable;
   const persistedBlocked = persistedTerminalBlockedStatus(
     parsed.value,
     deps.currentWaveWorkspace,
@@ -655,10 +718,11 @@ export function deriveLoomStatusFromParsedGraph(
     : deriveUnavailableLoomStatus(readiness.error.reasons);
 }
 
-/** Versioned machine renderer. It serializes the canonical read model and
- * contains no readiness or action policy. */
-export function renderLoomStatusJson(status: LoomStatus): string {
-  return JSON.stringify(status, null, 2);
+/** Versioned machine renderer. It serializes the status document exactly: the
+ * canonical read model and, when present, the owner-verification projection;
+ * it contains no readiness or action policy. */
+export function renderLoomStatusJson(document: LoomStatusDocument): string {
+  return JSON.stringify(document, null, 2);
 }
 
 function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
@@ -667,8 +731,9 @@ function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
   return [`- ${renderProjectVerificationCoverage(fact.value.projectVerificationCoverage)}`];
 }
 
-/** Versioned human renderer over the same value used by the JSON renderer. */
-export function renderLoomStatusHuman(status: LoomStatus): string {
+/** Versioned human renderer over the same values used by the JSON renderer. */
+export function renderLoomStatusHuman(document: LoomStatusDocument): string {
+  const { ownerVerification, ...status } = document;
   const fact = (name: keyof CanonicalStatusFacts): string => {
     const value = status.facts[name];
     return value.kind === "known"
@@ -690,6 +755,7 @@ export function renderLoomStatusHuman(status: LoomStatus): string {
     `Loom Status v${status.schemaVersion}`,
     ...categories.map(fact),
     ...projectCoverageDiagnostic(status),
+    ...(ownerVerification === undefined ? [] : renderOwnerVerificationStatus(ownerVerification)),
     `- nextAction: ${status.next.action.kind}`,
     `- nextActionPayload: ${JSON.stringify(status.next.action)}`,
     "- reasons:",

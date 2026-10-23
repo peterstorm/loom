@@ -66,6 +66,7 @@ const OWNED: InvariantOwnership = {
   owner: "src/probe.ts",
   siblings: [{ path: "src/panel.ts", note: null }, { path: "src/review.ts", note: "replay guard" }],
   matrixTest: "tests/probe.matrix.test.ts",
+  mutation: { kind: "verify" },
 };
 
 function task(overrides: Record<string, unknown>): Record<string, unknown> {

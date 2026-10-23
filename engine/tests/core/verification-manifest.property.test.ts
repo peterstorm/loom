@@ -63,7 +63,7 @@ function deepFrozen(raw: unknown): boolean {
 }
 
 function suiteFor(manifest: FrozenVerificationManifest) {
-  return value(authorizeWaveCompletionSuite(manifest, activeAuthority, digest("b")));
+  return value(authorizeWaveCompletionSuite(manifest, activeAuthority, digest("b"), null));
 }
 
 const safeIdSuffix = fc.stringMatching(/^[a-z][a-z0-9-]{0,15}$/);
@@ -87,6 +87,7 @@ describe("verification manifest exact parsing", () => {
         raw as FrozenVerificationManifest,
         raw as typeof activeAuthority,
         raw,
+        null,
       )).not.toThrow();
     }), { numRuns: 500 });
   });

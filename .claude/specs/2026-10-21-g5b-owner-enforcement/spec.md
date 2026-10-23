@@ -197,7 +197,7 @@ Nothing is model-chosen. Mutation sites come from the owner's changed lines, mut
 | Term | Definition |
 |------|------------|
 | Owned Invariant | A plan INV whose ownership is `owned`: one owner module, its sibling entry points and a matrix test |
-| Family change | G5a's rule that a Wave touches an Invariant's family when its Tasks' files include the owner, a sibling or the matrix test |
+| Family change | G5a's rule (`changesFamily`) that a Wave changes an Invariant's family when its Tasks' files include the owner or a sibling entry point; a change to the matrix test alone is not a family change |
 | Sibling coverage | The matrix test's import graph reaches the owner and every declared sibling entry point |
 | Mutant | A copy of the owner module with one fixed operator applied to one site on a line changed in the Wave |
 | Killed | The matrix test's report shows at least one failing testcase against the mutant, or the run timed out |
@@ -210,3 +210,4 @@ Nothing is model-chosen. Mutation sites come from the owner's changed lines, mut
 ## Change Log
 
 - 2026-10-21: initial spec from the G5 proposal, the G5a D7 deferrals and the operator's decisions on mutation tooling, survivor policy and hygiene scope
+- 2026-10-23: glossary amendment (plan AD-4): "Family change" is the owner or a sibling entry point, matching G5a's `changesFamily`; the matrix test was wrongly included. No FR or AS changes

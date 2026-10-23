@@ -125,6 +125,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Advisory publication (P5) | `standalone-disposition-machine.ts` | No-agent immutable DECLARED publication and exact effect reconciliation |
 | Wave Gate | `wave-gate-machine.ts` (LC-1 reducer, proof-carrying readiness snapshot, next-action proof, completion commit), `wave-gate-checks.ts` (gate evaluation), `wave-completion-suite-readiness.ts`, `wave-gate-preparation.ts` (refutation/advisory actions), `wave-gate-registration.ts` (admission, install with abandoned-run supersession, review-authority reset), `wave-status-facts.ts`, `loom-status.ts` (canonical status read model), `task-implementation-dispatch.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
 | Acceptance Contracts | `acceptance-contract/` behind one curated `index.ts`: `kernel.ts` (private result helpers), `model.ts` (shapes), `tasks.ts` (writer rule, claimants, red window, contract roles, population), `binding.ts` (plan-binding validation, with the transitive-dependency rule from `task-dependencies.ts`), `gate.ts` (Wave Gate expectation, attribution, RED/GREEN judgment, the recorded observation and its verdict), `freeze.ts` (Acceptance Freeze, drift), `wire.ts` (persisted parsers); `contract-revision.ts` (operator Contract Revision) | Contracts before code: frozen acceptance tests observed red, then green by Requirement |
+| Owner verification (G5b) | `owner-verification/` (pure; INV-2 purity-linted): `types.ts` (CT-1 declarations), `obligations.ts` (the one owner of which Owner Obligations a Wave or Task owes), `import-graph.ts` and `mutation-plan.ts` (the only two modules allowed to import `typescript`, parsing already-read text), `coverage.ts`, `outcome.ts`, `verdict.ts`, `owner-map.ts`, `status.ts` (the one status projection both `helper orchestration status` renderers serialize); beside it, `core/family-sites.ts` (the family-site metric, not part of `owner-verification/`) | Sibling coverage, deterministic mutation plans, report-only outcome classification, per-Invariant verdicts, the reviewer owner map |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths, audit/stage/install lifecycle |
 | Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts` (derived agent sets, phase map, producer kinds), `pi-spawn-input.ts` (Pi `subagent` input parse), `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, and deterministic calibration scoring |
 | Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |
@@ -337,6 +338,35 @@ are simultaneous boundary budgets, not an all-reads or whole-process heap proof.
 Formal wording/digests do not prove semantics; no formal planning tool, automatic
 previousRun, fork merge, similarity matching, severity override or review reuse is added.
 
+## Owner verification in the completion suite (G5b)
+
+Plan ownership declarations (G5a) become Wave Gate obligations through the existing Wave completion suite, not a new gate stage:
+
+```text
+plan ─parsePlanModels─► obligationsFromPlan ─► owner_obligations (stamped at population, [] included)
+Wave Gate ─ ensureWaveCompletionSuite
+  ownerCheckAuthority(graph, wave) ── null (no stamp: pre-G5b graph) ──► suite roster and digest unchanged
+        │ non-null
+        ▼
+  authorizeWaveCompletionSuite(…, authority) ─► loom:owner-verification { obligationsDigest, owed }
+  re-read plan_file ─► blocked on unreadable / malformed / drifted plan
+  owed = [] ─► verified, no verdicts
+  owed ≠ [] ─► runOwnerVerification (shell, outside the StateManager lock)
+                 coverage: read the matrix test's import frontier ─► coverageOverFiles
+                 mutation: Wave base ─► changedHeadLines ─► mutationPlan ─► detached worktree:
+                           baseline, then each mutant via the frozen affectedRunner ─► classify*
+                 invariantVerdict per owed obligation; real-workspace digest before = after
+  result.ownerVerification ─► evaluateWaveCompletionSuite ─► receipt or rejection
+```
+
+- **One selection owner.** `core/owner-verification/obligations.ts` decides the Wave scope (owner or sibling changed, G5a's `changesFamily`), the touch scope (any role, for review packets and brief duties) and the check authority. `verification-manifest.ts` makes no ownership decision: its `owner` parameter is required, and it injects the check exactly when its callers (`handlers/helpers/wave-completion-suite.ts`, `core/wave-completion-suite-readiness.ts`, `state-file-wire.ts`) pass a non-null authority.
+- **Functional core, imperative shell.** Coverage, the mutation plan, outcome classification and the verdict are pure functions in `core/owner-verification/`. All effects live in `orchestration/owner-verification-runner.ts` (file reads, tsconfig `paths` via `jsonc-parser`, Git base resolution, runner execution) and `orchestration/owner-mutation-workspace.ts` (worktree create, overlay of the reviewed workspace, `node_modules` symlinks, per-mutant rewrite and restore, removal in `finally`). The command is always the frozen `affectedRunner`'s, formed by `affectedRunnerCheck` with the matrix test as its only file; no command text comes from the plan.
+- **Fail closed.** `runOwnerVerification` never throws, by construction: every repository read is total (a file the filesystem refuses is `repository-file-unreadable`, never a missing sibling), the workspace observer and the obligation runs are guarded, and a throw that still escapes a step is the named `unexpected-error`, after which the real-workspace digest is still compared. The suite shell keeps a last-resort catch for the injected runner port with the same `unexpected-error` kind, and its own post-check digest comparison runs whatever the owner check returned. A worktree that cannot be removed after a throwing run is named in the rethrown error. Every ambiguous observation (no report, unparseable report, nothing collected, an exit the report does not explain, a baseline timeout, a missing Wave base, a changed real workspace) is infrastructure and never a kill. A result whose only infrastructure failures are the owner check's is published as an attempt record beside the result slot, so a retry at the same workspace runs the check again.
+- **Receipt semantics unchanged.** The check is part of the suite digest, so receipt reuse, workspace binding, replay and status come from the existing suite. `checkWaveCompletionSuite` (`wave-gate-checks.ts`, run by `complete-wave-gate`) blocks on it without new code; both harnesses reach it through `programs/wave-gate.ts`.
+- **Review and brief.** `wave-review-authority.ts` appends the `owner-map` fixed section (`owner-map.ts`) to schema-2 code-reviewer and architecture-tech-lead packets of a Task that touches an owned family; it is inside the packet digest, and every other packet is byte-identical. `core/implementation-brief.ts` adds the coverage and mutation duty (or the exemption) to the ownership section of each touched Task's brief. Standalone review builds no wave packet, so it never carries an owner map.
+
+Operator detail, status fields and remedies: [Operations — Owner verification](operations.md#owner-verification-blocks-a-wave-gate-g5b). Plan grammar and limits: `references/executable-models.md`.
+
 ## Security and failure posture
 
 Loom’s default is refusal when authority is incomplete or ambiguous:
@@ -344,7 +374,7 @@ Loom’s default is refusal when authority is incomplete or ambiguous:
 - guarded spawn routes fail closed on handler crashes;
 - Pi runtime/CLI version skew is rejected before Run Directory or TaskGraph mutation;
 - state and evidence paths are denied to arbitrary Bash writers;
-- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (moving the remaining raw `existsSync` checks onto it, with a lint ban, is tracked as G5a INV-1);
+- decisions that probe a path through `utils/path-presence.ts` treat it as absent only on ENOENT: "present but unreadable" is its own answer, so an unreadable routing config, rule, run marker or agent definition refuses instead of reading as missing (moving the remaining raw `existsSync` checks onto it, with a lint ban, is tracked as G5a INV-1; `helper family-sites` counts what remains — 124 raw sites at the G5b base `626db7fb`, see [Operations](operations.md#measuring-second-sites-the-family-site-metric));
 - a test command counts as evidence only at a real top-level position: a runner inside `$(…)`/`<(…)` never owns the line's exit or output;
 - Run Directory paths must be direct children and are accessed no-follow;
 - model and Skill bindings are explicit;

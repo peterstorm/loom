@@ -110,7 +110,8 @@ pasted into `plan_context`.
 
 ## 3. Invariants → lint rules (or honest prose)
 
-The plan declares invariants in an `## Invariants` section, each tiered:
+The plan declares invariants in an `## Invariants` section, each tiered (the
+order-domain paths below are illustrative):
 
 ```markdown
 ## Invariants
@@ -157,20 +158,26 @@ The plan declares invariants in an `## Invariants` section, each tiered:
 
 Most repeated review rounds fixed one copy of a rule and missed the others.
 So a rule enforced at two or more entry points is an invariant, and every
-invariant names who owns it:
+invariant names who owns it. The owned example below is Loom's own G5b
+invariant (`.claude/plans/2026-10-21-g5b-owner-enforcement.md`, INV-3,
+statement abridged): every path it names exists in this repository. The
+unowned INV-4 is **illustrative**: `src/domain/` and its rule file belong to
+a hypothetical project, like the order domain of INV-1 and INV-2 above.
 
 ```markdown
-### INV-3: Path probes that decide authority fail closed
+### INV-3: Which owned Invariants a Wave or Task owes is decided only by obligations.ts
 
 **Tier:** advisory
-**Owner module:** `engine/src/utils/path-presence.ts`
+**Owner module:** `engine/src/core/owner-verification/obligations.ts`
 **Sibling entry points:**
-- `engine/src/utils/route-endpoint.ts` — models.json presence
-- `engine/src/handlers/helpers/review-panel.ts` — run markers
-**Matrix test:** `engine/tests/utils/path-presence.matrix.test.ts`
-**Statement:** Where an authority decision depends on a path existing, only ENOENT means absent.
+- `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave's owed obligations that the owner check runs for
+- `engine/src/core/wave-completion-suite-readiness.ts` — re-authorizing the suite roster with the same owed predicate
+- `engine/src/core/wave-review-authority.ts` — obligations a reviewed Task touches, which gate the owner-map section
+- `engine/src/core/implementation-brief.ts` — obligations a Task touches, which drive the duty paragraph
+**Matrix test:** `engine/tests/core/owner-obligations.matrix.test.ts`
+**Statement:** Every call site that decides which Owner Obligations apply calls the obligations.ts selections and never classifies roles inline.
 
-### INV-4: No console output in the domain
+### INV-4: No console output in the domain (illustrative)
 
 **Tier:** checkable
 **Rule file:** `.claude/linter/rules/inv-4-no-console-in-domain.json`
@@ -192,6 +199,12 @@ invariant names who owns it:
   normalization vs. command splitting) gets several invariants.
 - **The statement defines scope**: it says which call sites the rule covers,
   so the sibling list can be judged complete.
+- `**Mutation exemption:** <reason>` (optional, owned invariants only) opts
+  the invariant out of mutation verification — see below. It must carry a
+  non-blank reason, and it may not sit on an unowned invariant: validation
+  (populate, repair and `validate-task-graph`) refuses either as malformed
+  ownership (`exemption-without-reason`, `exemption-on-unowned`). Outside
+  `## Invariants` the label is a stray, never ignored.
 
 **Decompose** never creates invariant tasks, but an owned family shapes the
 graph: a task changing a sibling depends on the task building the owner, and
@@ -199,6 +212,86 @@ any change to the family includes the matrix test. **The engine renders each
 Task's role** — owner, sibling, matrix-test author — and the whole family into
 its implementation brief from the plan, so the instruction does not depend on
 a model copying plan text into `plan_context`.
+
+### Owner verification at the Wave Gate (G5b)
+
+Declaring an owner makes it an obligation the Wave Gate checks.
+
+- **The stamp.** Population stamps every owned invariant into the TaskGraph
+  as an **Owner Obligation** (`owner_obligations`: id, title, statement,
+  owner, siblings, matrix test, mutation policy). The stamp is always
+  written, `[]` included; only a graph populated before G5b lacks it, and such
+  a graph owes nothing.
+- **Plan integrity.** Whenever the graph carries the stamp, the completion
+  suite gains the engine-reserved check `loom:owner-verification`. It re-reads
+  the plan the graph names and blocks when there is no `plan_file`, the plan
+  is unreadable, it has strays or malformed ownership, or the obligations it
+  derives differ from the stamp (`plan-drift`: re-populate, or restore the
+  plan). This runs even in a Wave that owes nothing.
+- **Which invariants are checked.** Exactly the owned invariants whose family
+  the Wave changed: some Wave Task's `file_list` holds the owner or a
+  sibling. A change to the matrix test alone does not trigger the checks.
+  Unowned invariants are never checked. One module decides this
+  (`core/owner-verification/obligations.ts`).
+- **Sibling coverage.** The matrix test's direct imports — static `import`,
+  side-effect imports, `import x = require`, string-literal `import()` and
+  `require()` — plus everything reached through `export … from` re-exports,
+  resolved to files through relative paths (the extension
+  ladder `""`, `.ts`, `.tsx`, `.mts`, `.cts`, a `.js`-family specifier mapped
+  to its TypeScript source, then `index.ts`/`index.tsx`) and the matrix test's
+  tsconfig `paths`, must include the owner and every declared sibling. A
+  plain import chain is followed one hop only: siblings import the owner, so
+  following them would make the owner "reached" through any sibling. A miss
+  blocks, naming every missing path, owner first. Bare package specifiers
+  reach nothing; a frontier of more than 512 files is an infrastructure
+  failure.
+- **Mutation verification.** The owner's lines changed in the Wave — against
+  the `start_sha` of the Wave Tasks listing the owner, or their octopus
+  merge-base — are mutated by six fixed operators: condition negation,
+  comparison flip, logical swap, boolean-literal flip, return-value
+  replacement (`return undefined`) and expression-statement removal. Sites
+  are found with the TypeScript compiler API; the set is deterministic, at
+  most 24 per invariant (evenly spaced over the candidates, the rest
+  reported as unmutated). Each mutant runs in one detached git worktree per
+  invariant (HEAD plus every uncommitted, untracked and deleted path of the
+  real workspace, `node_modules` shared by symlink) through the frozen
+  manifest's `affectedRunner`, with the matrix test as its only file and a
+  time limit of 60 s clamped to the runner's own timeout. The matrix test
+  must first pass unmutated: a red baseline blocks and runs no mutant. The
+  runner's JUnit report decides each mutant: a failing testcase kills it, a
+  timeout kills it, only collection errors make it invalid, a passing report
+  means it survived. Any survivor blocks. A missing, unreadable or empty
+  report, a spawn failure, or a passing report with a non-zero exit is an
+  infrastructure failure that blocks and is never a kill. The real workspace
+  is digested before and after, and any difference blocks
+  (`real-workspace-changed`).
+- **The runner.** Mutation verification needs a schema-2 verification
+  manifest with an `affectedRunner` writing JUnit. Population refuses a plan
+  with a non-exempt owned invariant and no such runner
+  (`owner-verification-runner-missing`). An exempt invariant needs none.
+- **Mutation exemption.** It disables only the mutation half; coverage still
+  runs, and the exemption and its reason are recorded in the verdict and in
+  status.
+- **Where it shows.** The implementation brief of every Task that touches the
+  family (as owner, sibling or matrix-test author) states the coverage duty
+  and the mutation duty, or names the exemption. `helper orchestration
+  status` reports each invariant's coverage and mutant counts, or the
+  exemption, and a blocked gate's next action names the invariant and the
+  remedy.
+
+### The second-copy lens (G5b)
+
+A Wave review packet for the code-reviewer and the architecture-tech-lead,
+for a Task that touches an owned family, carries an engine-issued **owner
+map**: each touched invariant's id, title, statement, owner, siblings, matrix
+test and `<plan file>#INV-N` contract, then the fixed second-copy rule. The
+section is inside the packet digest. The rule: a diff that implements a
+declared-owned invariant's predicate outside its owner is a finding citing
+`<plan file>#INV-N`; it is critical when the copy diverges from the owner on
+some input (that input is the consequence), advisory when it is behaviorally
+identical. Severity rules and the Refutation Panel apply unchanged. Packets
+for the other roles, for Tasks touching no owned family and for standalone
+reviews are byte-identical to what they were.
 
 ## 4. Contracts → frozen acceptance tests (contracts before code)
 
@@ -340,19 +433,54 @@ pending failures — into its brief.
    Wave owes something (RED in the contract Wave, GREEN by Requirement after),
    stamps the Acceptance Freeze from the accepted receipt in the same locked
    write, and blocks on frozen-path drift before reusing any receipt.
+   Whenever the TaskGraph carries `owner_obligations`, the same suite runs
+   `loom:owner-verification`: the plan re-read, then sibling coverage and
+   mutation verification for each owned invariant whose family the Wave
+   changed (see "Owner verification at the Wave Gate").
 
 ## Known residuals (honest limits)
 
 - **Sibling completeness is declared, not proven.** Validation checks that
   every declared path is real and correctly ordered; it cannot know an entry
-  point the plan forgot. Plan alignment (`OWN-N`) and review catch omissions;
-  a matrix test that exercises the real entry points — and, later, mutation
-  checks on it — is the mechanical correction.
+  point the plan forgot. Plan alignment (`OWN-N`) and review catch omissions.
+  Sibling coverage proves the matrix test imports every *declared* entry
+  point, and mutation verification proves it kills mutants of the owner; a
+  forgotten entry point stays invisible to both.
+- **An import is not proof of exercise.** Sibling coverage is a static import
+  check: a matrix test that imports a sibling but never calls it through the
+  rule passes coverage. Mutation verification mutates the owner only, never a
+  sibling, so a sibling that bypasses the owner is caught only by a matrix
+  test that really drives it — and by the second-copy lens in review.
+- **Mutation covers the owner's changed lines only.** Unchanged owner lines,
+  siblings and every other file are never mutated, and a Wave that changed
+  only a sibling runs the baseline but zero mutants (`owner unchanged in
+  Wave`). Only constructs the six fixed operators can rewrite count; at most
+  24 mutants run per invariant and the rest are reported as unmutated.
+- **Invalid mutants are neither killed nor survived.** A mutant whose run
+  shows only collection or import errors is counted `invalid`. A run whose
+  every mutant is invalid has no survivor, so it passes — and says so: the
+  verdict and status report the invalid count.
+- **A matrix-test-only change triggers nothing.** The checks run when the Wave
+  changed the owner or a sibling; a Wave touching only the matrix test owes
+  no coverage or mutation run (the plan is still re-read).
+- **The second-copy lens is review judgment.** Whether a copy diverges or is
+  identical is the reviewer's call, checked by the Refutation Panel; an
+  identical copy is advisory, so it does not block a Wave by itself.
+  Standalone reviews carry no owner map at all: there is no TaskGraph to read
+  obligations from, and there is no repository-wide owner registry.
 - **"The matrix test exists" is not "the matrix test is complete".** A test
-  that covers only well-formed input still satisfies the path check.
+  that covers only well-formed input still satisfies the path check; mutation
+  verification narrows this only for the owner's changed lines.
 - **RED/GREEN is not discrimination.** A frozen acceptance test that a wrong
-  implementation also passes still turns green. Mutation checks against the
-  frozen tests are the follow-up (G5b).
+  implementation also passes still turns green. G5b's mutation verification
+  runs against owned invariants' matrix tests, not against frozen acceptance
+  tests, so this residual stands for contracts.
+- **Mutation evidence is JUnit only.** The `affectedRunner` report is read as
+  JUnit; testcases are attributed to the matrix test by reported file. A
+  runner writing another format makes every run an infrastructure failure.
+- **The family-site metric is a gauge.** `helper family-sites` counts line
+  regex hits per known family outside its owners; a pattern can miss a
+  reworded copy or count an innocent line. It blocks nothing.
 - **Acceptance is observed through JUnit only.** Testcases are attributed by
   file (Vitest's relative `classname`, or a JVM class name) and by the
   `FR-n:`/`AS-n:` name prefix; a report in another format cannot carry a

@@ -86,6 +86,9 @@ export function renderTaskImplementationBrief(
       rules,
       roster: graph.tasks,
       invariants: invariants.value,
+      // The stamp is passed only when the graph carries it: a graph populated
+      // before owner verification is owed no owner duty (plan AD-10).
+      ...(graph.owner_obligations === undefined ? {} : { ownerObligations: graph.owner_obligations }),
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,
