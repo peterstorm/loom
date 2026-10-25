@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   FAMILIES,
+  SCANNED_ROOT,
   familySiteDelta,
+  isScannedSource,
   parseFamilySiteBaseline,
   renderFamilySites,
   scanFamilySites,
@@ -165,14 +167,26 @@ describe("family-site metric (pure core)", () => {
       }),
       { selector: ({ path }) => path },
     );
-    fc.assert(fc.property(sources, fc.nat(), (files, seed) => {
-      const shuffled = [...files].sort((a, b) => ((a.path.length * 31 + seed) % 7) - ((b.path.length * 31 + seed) % 7));
+    /** The files and a real permutation of all of them: every element, any order fast-check can reach. */
+    const filesAndPermutation = sources.chain((files) =>
+      fc.tuple(fc.constant(files), fc.shuffledSubarray(files, { minLength: files.length, maxLength: files.length })));
+    const byPath = (a: SourceFile, b: SourceFile): number => a.path.localeCompare(b.path);
+    fc.assert(fc.property(filesAndPermutation, ([files, shuffled]) => {
+      expect([...shuffled].sort(byPath)).toEqual([...files].sort(byPath));
       const first = serializeFamilySites(scanFamilySites(files), null);
       const second = serializeFamilySites(scanFamilySites(shuffled), null);
       expect(second).toBe(first);
       expect(renderFamilySites(scanFamilySites(shuffled), null)).toBe(renderFamilySites(scanFamilySites(files), null));
       for (const family of JSON.parse(first).families) expect(family.count).toBe(family.sites.length);
     }));
+  });
+
+  it("defines the scanned scope once: SCANNED_ROOT TypeScript sources that are not tests", () => {
+    expect(SCANNED_ROOT).toBe("engine/src/");
+    expect(isScannedSource(`${SCANNED_ROOT}core/a.ts`)).toBe(true);
+    expect(isScannedSource(`${SCANNED_ROOT}core/a.test.ts`)).toBe(false);
+    expect(isScannedSource(`${SCANNED_ROOT}core/a.js`)).toBe(false);
+    expect(isScannedSource("engine/tests/core/a.ts")).toBe(false);
   });
 
   it("derives each family's count from its sites: the report stores no count, the JSON writes it in baseline key order", () => {

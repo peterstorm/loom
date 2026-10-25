@@ -68,11 +68,12 @@ Several forces constrain both halves:
 result's `ownerVerification`, taking its remedies from the gate's own diagnostic source.**
 
 ### Brief half
-- `engine/src/orchestration/implementation-brief.ts` passes `graph.owner_obligations` through as
-  `ownerObligations` only when the stamp is present. A pre-feature graph passes nothing, so no duty is
-  rendered (the comment there cites AD-10).
-- `engine/src/core/implementation-brief.ts`: `invariantOwnership` selects the touched obligations through
-  INV-3's owner, `obligationsTouchedBy(task.file_list, ownerScope)` in
+- `engine/src/orchestration/implementation-brief.ts` calls `ownerScopeOf(graph)` and hands the opaque
+  `OwnerScope` to the renderer as `ownerScope`; it never holds the raw `owner_obligations` stamp and decides
+  nothing (ADR-0034, PR #131 review remediation). A pre-feature graph yields an unstamped scope, which touches
+  nothing, so no duty is rendered (the comment there cites AD-10).
+- `engine/src/core/implementation-brief.ts`: `invariantOwnership` receives the touched obligations that INV-3's
+  owner selects, `obligationsTouchedBy(input.ownerScope, task.file_list ?? [])` in
   `engine/src/core/owner-verification/obligations.ts`. This is the touch scope, in which any role counts,
   including the matrix test. It is wider than the gate's `ownerVerificationOwed(scope, wave)` scope, because whoever
   writes the matrix test needs to know the duty.

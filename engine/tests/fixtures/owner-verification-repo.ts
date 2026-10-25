@@ -78,9 +78,13 @@ export type OwnerVerificationRepoOptions = Readonly<{
   /**
    * The runner stand-in. `faithful` (default) decides by marker; `red` fails
    * every testcase; `no-report` exits 0 without a report; `unstartable`
-   * freezes an executable that does not exist.
+   * freezes an executable that does not exist; `hang` never exits, and
+   * `hang-mutants` never exits while the owner differs from the Wave's (a
+   * faithful baseline, every mutant hanging). Both hanging modes freeze the
+   * runner with the short `HANGING_RUNNER_TIMEOUT_MS`, so the frozen time
+   * limit ends each hanging run.
    */
-  runner?: "faithful" | "red" | "no-report" | "unstartable";
+  runner?: "faithful" | "red" | "no-report" | "unstartable" | "hang" | "hang-mutants";
   /** `blocked` makes `git worktree add` fail: `.git/worktrees` is a file. */
   worktree?: "available" | "blocked";
   /**
@@ -206,9 +210,11 @@ function matrixTestText(kind: MatrixTestKind): string {
  * The runner stand-in. `faithful`: a matrix test marked discriminating fails
  * whenever the owner's bytes differ from `original` (the Wave's), one marked
  * vacuous always passes. `red`: every testcase fails. `no-report`: exit 0
- * with no report. Every launch is logged first.
+ * with no report. `hang`: never exits. `hang-mutants`: never exits while the
+ * owner's bytes differ from `original`, otherwise faithful. Every launch is
+ * logged first.
  */
-function runnerScript(log: string, original: string, mode: "faithful" | "red" | "no-report"): string {
+function runnerScript(log: string, original: string, mode: Exclude<RunnerMode, "unstartable">): string {
   return `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
@@ -223,6 +229,9 @@ const files = process.argv.slice(2);
 const owner = existsSync(OWNER) ? createHash("sha256").update(readFileSync(OWNER)).digest("hex") : null;
 appendFileSync(LOG, JSON.stringify({ cwd: process.cwd(), files, owner }) + "\\n");
 if (MODE === "no-report") process.exit(0);
+if (MODE === "hang" || (MODE === "hang-mutants" && owner !== ORIGINAL)) {
+  setInterval(() => {}, 60_000);
+} else {
 
 const escape = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const cases = files.map((file) => {
@@ -245,6 +254,7 @@ writeFileSync(REPORT, [
   "</testsuites>",
 ].join("\\n"));
 process.exit(failures > 0 ? 1 : 0);
+}
 `;
 }
 
@@ -314,7 +324,10 @@ function waveChange(options: OwnerVerificationRepoOptions): Readonly<{ path: str
   }
 }
 
-function manifestOf(runner: OwnerVerificationRepoOptions["runner"]): FrozenVerificationManifest {
+/** The frozen runner time limit of the hanging runner modes: long enough for a faithful baseline, short enough to end each hanging run quickly. */
+export const HANGING_RUNNER_TIMEOUT_MS = 3_000;
+
+function manifestOf(runner: RunnerMode): FrozenVerificationManifest {
   const frozen = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
     schemaVersion: 2,
     kind: "loom-verification-manifest",
@@ -324,7 +337,7 @@ function manifestOf(runner: OwnerVerificationRepoOptions["runner"]): FrozenVerif
       executable: runner === "unstartable" ? ".loom/bin/node" : "node",
       args: [OWNER_FIXTURE.runner, "{files}"],
       cwd: ".",
-      timeoutMs: 30_000,
+      timeoutMs: runner === "hang" || runner === "hang-mutants" ? HANGING_RUNNER_TIMEOUT_MS : 30_000,
       report: { kind: "required-file", path: OWNER_FIXTURE.report },
     },
   })));

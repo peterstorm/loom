@@ -1,14 +1,15 @@
 /**
  * `helper family-sites [--json] [--baseline <file>] [--root <dir>]` (AD-11).
  *
- * A read-only shell around the pure family-site metric: it reads every
- * TypeScript file under `<root>/engine/src`, hands the bytes to
- * `scanFamilySites`, and prints the human report or, with `--json`, the JSON
- * document. `--baseline` names an earlier `--json` output to compare against;
- * the per-family delta is printed with the report. `--root` defaults to the
- * Loom package that owns this engine, so the metric measures Loom itself
- * wherever it is invoked from; pointing it at a checkout of another commit is
- * how the recorded baseline was made.
+ * A read-only shell around the pure family-site metric: it walks the core's
+ * `SCANNED_ROOT` (`<root>/engine/src`), reads every file the core's
+ * `isScannedSource` wants, hands the bytes to `scanFamilySites`, and prints the
+ * human report or, with `--json`, the JSON document. The scope is defined once,
+ * in the core; this shell only does the reading. `--baseline` names an earlier
+ * `--json` output to compare against; the per-family delta is printed with the
+ * report. `--root` defaults to the Loom package that owns this engine, so the
+ * metric measures Loom itself wherever it is invoked from; pointing it at a
+ * checkout of another commit is how the recorded baseline was made.
  *
  * It never writes a file and never touches the State File. Symlinks are not
  * followed, so the scan cannot leave the tree it was pointed at.
@@ -19,7 +20,9 @@ import { join, posix, resolve } from "node:path";
 import type { HookHandler, HookResult } from "../../types";
 import { errorResult, passthroughResult } from "../../types";
 import {
+  SCANNED_ROOT,
   familySiteDelta,
+  isScannedSource,
   parseFamilySiteBaseline,
   renderFamilySites,
   scanFamilySites,
@@ -32,7 +35,6 @@ import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
 
 const USAGE = "usage: helper family-sites [--json] [--baseline <file>] [--root <dir>]";
-const SCANNED_DIRECTORY = "engine/src";
 const VALUE_FLAGS: ReadonlySet<string> = new Set(["--baseline", "--root"]);
 
 type Options = Readonly<{ json: boolean; root: string; baseline: string | null }>;
@@ -54,17 +56,17 @@ function parseOptions(args: readonly string[]): DomainResult<Options, string> {
   });
 }
 
-/** Every `.ts` file under `<root>/engine/src`, by repository-relative path. Directories and regular files only. */
+/** Every scanned source under `<root>/SCANNED_ROOT`, by repository-relative path. Directories and regular files only. */
 function readSources(root: string): readonly SourceFile[] {
   const files: SourceFile[] = [];
   const walk = (relative: string): void => {
     for (const entry of readdirSync(join(root, relative), { withFileTypes: true })) {
       const path = posix.join(relative, entry.name);
       if (entry.isDirectory()) walk(path);
-      else if (entry.isFile() && path.endsWith(".ts")) files.push({ path, text: readFileSync(join(root, path), "utf-8") });
+      else if (entry.isFile() && isScannedSource(path)) files.push({ path, text: readFileSync(join(root, path), "utf-8") });
     }
   };
-  walk(SCANNED_DIRECTORY);
+  walk(SCANNED_ROOT);
   return files;
 }
 
@@ -92,7 +94,7 @@ export function createFamilySitesHandler(write: (text: string) => void = (text) 
     try {
       sources = readSources(root);
     } catch (error) {
-      return errorResult(`cannot read ${SCANNED_DIRECTORY} under ${root}: ${describe(error)}`);
+      return errorResult(`cannot read ${SCANNED_ROOT} under ${root}: ${describe(error)}`);
     }
 
     const report = scanFamilySites(sources);

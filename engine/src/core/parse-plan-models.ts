@@ -276,6 +276,34 @@ function siblingDeclaration(block: string): SiblingDeclaration {
 }
 
 /**
+ * Exemption reasons that state no reason, compared trimmed, case-insensitive
+ * and without trailing punctuation: `**Mutation exemption:** none` mirrors
+ * `**Owner module:** none` but would otherwise opt the owner out of mutation
+ * verification with the "reason" `none`. The plan grammar and the State File
+ * stamp parser both refuse through `isPlaceholderExemptionReason`.
+ */
+const PLACEHOLDER_EXEMPTION_REASONS: ReadonlySet<string> = new Set([
+  "none", "n/a", "na", "tbd", "todo", "-", "—", "null", "nil", "no", "nothing",
+]);
+
+export const isPlaceholderExemptionReason = (reason: string): boolean =>
+  PLACEHOLDER_EXEMPTION_REASONS.has(reason.trim().replace(/[.!?,;:]+$/, "").trim().toLowerCase());
+
+/** An owned invariant's mutation policy, or the problem that refuses its exemption line. */
+type MutationPolicyReading =
+  | Readonly<{ kind: "policy"; policy: MutationPolicy }>
+  | Readonly<{ kind: "refused"; problem: Extract<OwnershipProblem, { kind: "exemption-without-reason" | "exemption-placeholder-reason" }> }>;
+
+/** No line verifies; a stated reason exempts; a blank or placeholder reason is refused, never an opt-out. */
+function mutationPolicyOf(exemption: FieldLine): MutationPolicyReading {
+  if (exemption.kind === "absent") return { kind: "policy", policy: { kind: "verify" } };
+  if (exemption.value === null) return { kind: "refused", problem: { kind: "exemption-without-reason" } };
+  return isPlaceholderExemptionReason(exemption.value)
+    ? { kind: "refused", problem: { kind: "exemption-placeholder-reason", reason: exemption.value } }
+    : { kind: "policy", policy: { kind: "exempt", reason: exemption.value } };
+}
+
+/**
  * The block's ownership declaration as its three real states. Every problem
  * decidable from the text is collected, so one validation run names all of
  * them — without an owner line, only a malformed sibling line is decidable,
@@ -284,9 +312,10 @@ function siblingDeclaration(block: string): SiblingDeclaration {
  * consistent.
  *
  * `**Mutation exemption:**` is meaningful only on an owned invariant: there a
- * reason makes it `exempt` and a blank one is `exemption-without-reason`; on
- * an unowned one any exemption line is `exemption-on-unowned`. Without an
- * owner line whether it is owed cannot be decided, like siblings.
+ * reason makes it `exempt`, a blank one is `exemption-without-reason` and a
+ * placeholder one is `exemption-placeholder-reason`; on an unowned one any
+ * exemption line is `exemption-on-unowned`. Without an owner line whether it
+ * is owed cannot be decided, like siblings.
  */
 function parseOwnership(block: string): InvariantOwnership {
   const owner = fieldValue(block, "Owner module");
@@ -312,11 +341,9 @@ function parseOwnership(block: string): InvariantOwnership {
     return first === undefined ? { kind: "unowned", reason } : { kind: "malformed", problems: [first, ...rest] };
   }
 
-  const mutation: MutationPolicy | null = exemption.kind === "absent"
-    ? { kind: "verify" }
-    : exemption.value === null ? null : { kind: "exempt", reason: exemption.value };
-  if (reason === null && siblings.status === "declared" && matrixTest !== null && mutation !== null) {
-    return { kind: "owned", owner, siblings: siblings.entries, matrixTest, mutation };
+  const mutation = mutationPolicyOf(exemption);
+  if (reason === null && siblings.status === "declared" && matrixTest !== null && mutation.kind === "policy") {
+    return { kind: "owned", owner, siblings: siblings.entries, matrixTest, mutation: mutation.policy };
   }
   // Not owned, so at least one of these four is present.
   const [first, ...rest]: readonly OwnershipProblem[] = [
@@ -327,7 +354,7 @@ function parseOwnership(block: string): InvariantOwnership {
       .with({ status: "absent" }, { status: "empty" }, () => [{ kind: "missing-siblings" } as const])
       .exhaustive(),
     ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
-    ...(mutation === null ? [{ kind: "exemption-without-reason" } as const] : []),
+    ...(mutation.kind === "refused" ? [mutation.problem] : []),
   ];
   return { kind: "malformed", problems: [first!, ...rest] };
 }

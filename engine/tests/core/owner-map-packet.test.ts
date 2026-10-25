@@ -84,6 +84,10 @@ describe("renderOwnerMapSection — the pure owner map", () => {
   it("names exactly the two owner-map reviewer roles", () => {
     expect([...OWNER_MAP_ROLES]).toEqual(["code-reviewer", "architecture-tech-lead"]);
   });
+
+  it("pins the wire label reviewers read: a rename of OWNER_MAP_SECTION fails here (AD-9)", () => {
+    expect(OWNER_MAP_SECTION).toBe("owner-map");
+  });
 });
 
 // ---------------------------------------------------------------------------

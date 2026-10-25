@@ -7,9 +7,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { parseReviewPath, type ReviewPath } from "../../src/core/review-packet";
 import { withMutationWorkspace, type MutationWorkspaceSpec } from "../../src/orchestration/owner-mutation-workspace";
 import {
   buildOwnerVerificationRepo as build,
@@ -23,11 +24,18 @@ afterEach(cleanupOwnerVerificationRepos);
 
 const TIMEOUT_MS = 30_000;
 
+/** A repository-relative fixture path, parsed as the spec requires. */
+function pathOf(raw: string): ReviewPath {
+  const parsed = parseReviewPath(raw);
+  if (!parsed.ok) throw new Error(`not a repository-relative path: ${raw}`);
+  return parsed.value;
+}
+
 function specOf(repo: OwnerVerificationRepo): MutationWorkspaceSpec {
   return {
     repositoryRoot: canonicalRoot(repo.root),
-    ownerPath: OWNER_FIXTURE.owner,
-    reportPath: OWNER_FIXTURE.report,
+    ownerPath: pathOf(OWNER_FIXTURE.owner),
+    reportPath: pathOf(OWNER_FIXTURE.report),
     runnerCwd: ".",
   };
 }
@@ -63,13 +71,55 @@ describe("withMutationWorkspace", () => {
     expect(result).toEqual({ ok: true, value: false });
   }, TIMEOUT_MS);
 
+  it("AS-016: an untracked symlink is overlaid as the same link, an untracked nested directory with all its files, and a directory entry (an embedded repository) whole", async () => {
+    const repo = build();
+    // Git names an embedded repository by one trailing-slash directory entry, even under --untracked-files=all.
+    const embedded = join(repo.root, "vendor", "embedded");
+    mkdirSync(embedded, { recursive: true });
+    execFileSync("git", ["-C", embedded, "init", "-q"]);
+    writeFileSync(join(embedded, "lib.ts"), "export const lib = 3;\n");
+    symlinkSync("lib.ts", join(embedded, "lib-link.ts"));
+    expect(execFileSync("git", ["-C", repo.root, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" })).toContain("?? vendor/embedded/\n");
+    symlinkSync("rules/owner.ts", join(repo.root, "src", "owner-link.ts"));
+    mkdirSync(join(repo.root, "src", "generated", "deep"), { recursive: true });
+    writeFileSync(join(repo.root, "src", "generated", "top.ts"), "export const top = 1;\n");
+    writeFileSync(join(repo.root, "src", "generated", "deep", "leaf.ts"), "export const leaf = 2;\n");
+    const before = repo.workspaceBytes();
+    const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
+      const link = join(workspace.root, "src", "owner-link.ts");
+      return {
+        linkIsLink: lstatSync(link).isSymbolicLink(),
+        linkTarget: readlinkSync(link),
+        top: read(workspace.root, "src/generated/top.ts"),
+        leaf: read(workspace.root, "src/generated/deep/leaf.ts"),
+        deepIsDirectory: lstatSync(join(workspace.root, "src", "generated", "deep")).isDirectory(),
+        embeddedLib: read(workspace.root, "vendor/embedded/lib.ts"),
+        embeddedLinkTarget: readlinkSync(join(workspace.root, "vendor", "embedded", "lib-link.ts")),
+      };
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        linkIsLink: true,
+        linkTarget: "rules/owner.ts",
+        top: "export const top = 1;\n",
+        leaf: "export const leaf = 2;\n",
+        deepIsDirectory: true,
+        embeddedLib: "export const lib = 3;\n",
+        embeddedLinkTarget: "lib.ts",
+      },
+    });
+    expect(repo.worktrees()).toEqual([repo.root]);
+    expect(repo.workspaceBytes()).toEqual(before);
+  }, TIMEOUT_MS);
+
   it("shares the repository root's and the runner cwd's node_modules by symlink, never by copy", async () => {
     const repo = build();
     appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\n");
     mkdirSync(join(repo.root, "node_modules", "pkg"), { recursive: true });
     writeFileSync(join(repo.root, "node_modules", "pkg", "index.js"), "export {};\n");
     mkdirSync(join(repo.root, "tests", "node_modules"), { recursive: true });
-    const result = await withMutationWorkspace({ ...specOf(repo), runnerCwd: "tests" }, async (workspace) => {
+    const result = await withMutationWorkspace({ ...specOf(repo), runnerCwd: pathOf("tests") }, async (workspace) => {
       const rootLink = join(workspace.root, "node_modules");
       const cwdLink = join(workspace.root, "tests", "node_modules");
       return {
@@ -98,12 +148,12 @@ describe("withMutationWorkspace", () => {
       const report = join(workspace.root, ...OWNER_FIXTURE.report.split("/"));
       mkdirSync(join(report, ".."), { recursive: true });
       writeFileSync(report, "stale report from an earlier run");
-      const during = await workspace.runWithOwner("export const mutated = true;\n", async (root) => ({
+      const during = await workspace.runWithOwner({ kind: "mutant", text: "export const mutated = true;\n" }, async (root) => ({
         owner: read(root, OWNER_FIXTURE.owner),
         reportPresent: existsSync(join(root, ...OWNER_FIXTURE.report.split("/"))),
         sibling: read(root, OWNER_FIXTURE.siblings[0]),
       }));
-      const baseline = await workspace.runWithOwner(null, async (root) => read(root, OWNER_FIXTURE.owner));
+      const baseline = await workspace.runWithOwner({ kind: "baseline" }, async (root) => read(root, OWNER_FIXTURE.owner));
       return { during, baseline, after: read(workspace.root, OWNER_FIXTURE.owner) };
     });
     expect(result).toEqual({
@@ -121,7 +171,7 @@ describe("withMutationWorkspace", () => {
     const repo = build();
     const original = read(repo.root, OWNER_FIXTURE.owner);
     const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
-      await expect(workspace.runWithOwner("broken();\n", async () => { throw new Error("run exploded"); })).rejects.toThrow("run exploded");
+      await expect(workspace.runWithOwner({ kind: "mutant", text: "broken();\n" }, async () => { throw new Error("run exploded"); })).rejects.toThrow("run exploded");
       return read(workspace.root, OWNER_FIXTURE.owner);
     });
     expect(result).toEqual({ ok: true, value: original });
@@ -131,7 +181,7 @@ describe("withMutationWorkspace", () => {
     const repo = build();
     const exploded = new Error("run exploded");
     const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
-      const thrown = await workspace.runWithOwner("broken();\n", async (root) => {
+      const thrown = await workspace.runWithOwner({ kind: "mutant", text: "broken();\n" }, async (root) => {
         const owner = join(root, ...OWNER_FIXTURE.owner.split("/"));
         rmSync(owner);
         mkdirSync(owner);

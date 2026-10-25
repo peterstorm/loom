@@ -2,7 +2,8 @@
  * Owned-Invariant families the owner-verification tests share, and the
  * paragraph matcher their rendered-text assertions use. Every obligation is
  * built through `ownerObligation`, the engine's own constructor, so a change
- * to the stamp's shape is edited here once.
+ * to the stamp's shape is edited here once; every plan text is derived from
+ * its obligations through `invariantPlanBlock`, so the two agree by construction.
  *
  * - FEES / CLOCK: a verified fee family (two noted siblings) and an exempt
  *   clock family, with the plan text that declares them.
@@ -12,6 +13,36 @@
 
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { ownerObligation } from "./owner-obligation";
+
+// ---------------------------------------------------------------------------
+// Plan text derived from obligations
+// ---------------------------------------------------------------------------
+
+/**
+ * The plan-grammar block that declares `obligation`: Tier, Owner module,
+ * Sibling entry points (or none), Matrix test, the Mutation exemption when
+ * exempt, and the Statement when it has one. Every fixture plan is derived
+ * through it, so a stamp and its plan text agree by construction.
+ */
+function invariantPlanBlock(obligation: OwnerObligation): readonly string[] {
+  const { invariant, title, statement, owner, siblings, matrixTest, mutation } = obligation;
+  return [
+    `### ${invariant}: ${title}`, "",
+    "**Tier:** advisory",
+    `**Owner module:** \`${owner}\``,
+    ...(siblings.length === 0
+      ? ["**Sibling entry points:** none"]
+      : ["**Sibling entry points:**", ...siblings.map(({ path, note }) => note === null ? `- \`${path}\`` : `- \`${path}\` — ${note}`)]),
+    `**Matrix test:** \`${matrixTest}\``,
+    ...(mutation.kind === "exempt" ? [`**Mutation exemption:** ${mutation.reason}`] : []),
+    ...(statement === null ? [] : [`**Statement:** ${statement}`]),
+    "",
+  ];
+}
+
+/** A whole plan declaring `obligations` under `## Invariants`, in order. */
+const planText = (name: string, obligations: readonly OwnerObligation[]): string =>
+  [`# Plan: ${name}`, "", "## Invariants", "", ...obligations.flatMap(invariantPlanBlock)].join("\n");
 
 // ---------------------------------------------------------------------------
 // FEES / CLOCK
@@ -47,25 +78,7 @@ export const CLOCK = ownerObligation({
 });
 
 /** The plan declaring FEES (noted siblings) and CLOCK (bare sibling, exemption). */
-export const FEES_CLOCK_PLAN_TEXT = [
-  "# Plan: fees", "",
-  "## Invariants", "",
-  `### ${FEES.invariant}: ${FEES.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${FEES.owner}\``,
-  "**Sibling entry points:**",
-  ...FEES.siblings.map(({ path, note }) => `- \`${path}\` — ${note}`),
-  `**Matrix test:** \`${FEES.matrixTest}\``,
-  `**Statement:** ${FEES.statement}`, "",
-  `### ${CLOCK.invariant}: ${CLOCK.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${CLOCK.owner}\``,
-  "**Sibling entry points:**",
-  ...CLOCK.siblings.map(({ path }) => `- \`${path}\``),
-  `**Matrix test:** \`${CLOCK.matrixTest}\``,
-  `**Mutation exemption:** ${CLOCK_EXEMPTION}`,
-  `**Statement:** ${CLOCK.statement}`, "",
-].join("\n");
+export const FEES_CLOCK_PLAN_TEXT = planText("fees", [FEES, CLOCK]);
 
 // ---------------------------------------------------------------------------
 // ADMISSION / FEE_TABLE
@@ -98,23 +111,7 @@ export const FEE_TABLE = ownerObligation({
 export const ADMISSION_FEE_TABLE_STAMP: readonly OwnerObligation[] = [ADMISSION, FEE_TABLE];
 
 /** The plan ADMISSION_FEE_TABLE_STAMP is derived from. */
-export const ADMISSION_FEE_TABLE_PLAN_TEXT = [
-  "# Plan: duties", "",
-  "## Invariants", "",
-  `### ${ADMISSION.invariant}: ${ADMISSION.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${ADMISSION.owner}\``,
-  "**Sibling entry points:**",
-  ...ADMISSION.siblings.map(({ path, note }) => note === null ? `- \`${path}\`` : `- \`${path}\` — ${note}`),
-  `**Matrix test:** \`${ADMISSION.matrixTest}\``,
-  `**Statement:** ${ADMISSION.statement}`, "",
-  `### ${FEE_TABLE.invariant}: ${FEE_TABLE.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** ${FEE_TABLE.owner}`,
-  "**Sibling entry points:** none",
-  `**Matrix test:** ${FEE_TABLE.matrixTest}`,
-  "**Mutation exemption:** generated lookup table", "",
-].join("\n");
+export const ADMISSION_FEE_TABLE_PLAN_TEXT = planText("duties", ADMISSION_FEE_TABLE_STAMP);
 
 // ---------------------------------------------------------------------------
 // Paragraph matcher

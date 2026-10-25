@@ -1,10 +1,12 @@
 /**
  * The plan's mutation-exemption grammar (AD-3): `**Mutation exemption:**
- * <reason>` on an owned Invariant reads into `owned.mutation`; a blank one and
- * one on an unowned Invariant are malformed ownership, which the one plan
- * validator (populate, repair and validate) refuses naming the Invariant. A
- * plan without the field parses exactly as before, apart from the new
- * `mutation: { kind: "verify" }` member (FR-021).
+ * <reason>` on an owned Invariant reads into `owned.mutation`; a blank one, a
+ * placeholder one (`none`, `n/a`, `TBD`, ...) and one on an unowned
+ * Invariant are malformed ownership, which the one plan validator (populate,
+ * repair and validate) refuses naming the Invariant. A plan without the field
+ * parses exactly as before, apart from the new `mutation: { kind: "verify" }`
+ * member (FR-021): pinned against frozen copies of two pre-feature plans
+ * (`tests/fixtures/plans/`), so editing a live plan never fails this suite.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -21,7 +23,19 @@ import {
 import type { InvariantOwnership } from "../../src/types";
 
 const PLAN_FILE = ".claude/plans/exemption.md";
+/** The live plans directory, swept only for "no exemption problem", never pinned. */
 const PLANS = resolve(__dirname, "../../../.claude/plans");
+/** Byte-for-byte frozen copies of two plans written before the exemption grammar. */
+const FROZEN_PLANS = resolve(__dirname, "../fixtures/plans");
+
+/**
+ * Placeholder reasons the grammar refuses, written as a plan author might:
+ * any case, padded, with trailing punctuation. An oracle independent of the
+ * parser's own list.
+ */
+const PLACEHOLDERS = ["none", "n/a", "na", "tbd", "todo", "-", "—", "null", "nil", "no", "nothing"] as const;
+const isPlaceholder = (reason: string): boolean =>
+  (PLACEHOLDERS as readonly string[]).includes(reason.trim().replace(/[.!?,;:]+$/, "").trim().toLowerCase());
 
 const OWNED_FIELDS = [
   "**Tier:** advisory",
@@ -123,6 +137,47 @@ describe("mutation exemption — parse states", () => {
     });
   });
 
+  it("an exemption whose reason is a placeholder is malformed ownership naming the placeholder, never exempt", () => {
+    for (const reason of [...PLACEHOLDERS, "None", "N/A", "TBD.", "  todo!  ", "nothing;", "NA:", "No."]) {
+      const text = plan("INV-1: Owned", [...OWNED_FIELDS, `**Mutation exemption:** ${reason}`]);
+      expect(ownershipOf(text), reason).toEqual({
+        kind: "malformed",
+        problems: [{ kind: "exemption-placeholder-reason", reason: reason.trim() }],
+      });
+    }
+    expect(ownershipOf(plan("INV-1: Owned", [...OWNED_FIELDS, "**Mutation exemption:** `n/a`"])))
+      .toEqual({ kind: "malformed", problems: [{ kind: "exemption-placeholder-reason", reason: "n/a" }] });
+  });
+
+  it("property — a placeholder in any case, padded, with trailing punctuation, is refused and never exempt", () => {
+    const variant = fc.record({
+      word: fc.constantFrom(...PLACEHOLDERS),
+      upper: fc.array(fc.boolean(), { minLength: 7, maxLength: 7 }),
+      pad: fc.constantFrom("", " ", "  ", "\t"),
+      tail: fc.stringMatching(/^[.!?,;:]{0,3}$/),
+    }).map(({ word, upper, pad, tail }) =>
+      `${pad}${[...word].map((char, index) => upper[index] ? char.toUpperCase() : char).join("")}${tail}${pad}`);
+    fc.assert(fc.property(variant, (reason) => {
+      const ownership = ownershipOf(plan("INV-1: Owned", [...OWNED_FIELDS, `**Mutation exemption:** ${reason}`]));
+      expect(ownership).toEqual({ kind: "malformed", problems: [{ kind: "exemption-placeholder-reason", reason: reason.trim() }] });
+    }));
+  });
+
+  it("a reason that merely starts or ends with a placeholder word is a real reason", () => {
+    for (const reason of ["nothing to mutate", "none of the mutants are observable", "no runtime branches", "N/A — generated code", "todo-list renderer"]) {
+      expect(ownershipOf(plan("INV-1: Owned", [...OWNED_FIELDS, `**Mutation exemption:** ${reason}`])), reason)
+        .toMatchObject({ kind: "owned", mutation: { kind: "exempt", reason } });
+    }
+  });
+
+  it("a placeholder exemption is named beside every other problem of the owned declaration", () => {
+    const text = plan("INV-1: Owned", ["**Owner module:** src/a.ts", "**Mutation exemption:** none"]);
+    expect(ownershipOf(text)).toEqual({
+      kind: "malformed",
+      problems: [{ kind: "missing-siblings" }, { kind: "missing-matrix-test" }, { kind: "exemption-placeholder-reason", reason: "none" }],
+    });
+  });
+
   it("AS-020: an exemption on an unowned Invariant is malformed, reasoned or blank", () => {
     for (const line of ["**Mutation exemption:** nothing to mutate", "**Mutation exemption:**"]) {
       expect(ownershipOf(plan("INV-2: Unowned", [...UNOWNED_FIELDS, line])), line)
@@ -158,6 +213,15 @@ describe("mutation exemption — validation refuses malformed exemptions naming 
     ]);
   });
 
+  it("validation fails on a placeholder exemption, naming the Invariant, the field and the placeholder", () => {
+    const errors = errorsOf(plan("INV-9: Owned", [...OWNED_FIELDS, "**Mutation exemption:** none"]));
+    expect(errors).toEqual([
+      expect.stringMatching(/^INV-9 \("Owned"\): '\*\*Mutation exemption:\*\* none' is a placeholder, not a reason/),
+    ]);
+    const refused = checked(plan("INV-9: Owned", [...OWNED_FIELDS, "**Mutation exemption:** TBD"]));
+    expect(refused).toMatchObject({ ok: false, kind: "invalid-bindings", errors: [expect.stringContaining("INV-9")] });
+  });
+
   it("AS-020: validation fails on an exemption on an unowned Invariant, naming the Invariant and the field", () => {
     const errors = errorsOf(plan("INV-8: Unowned", [...UNOWNED_FIELDS, "**Mutation exemption:** x"]));
     expect(errors).toEqual([
@@ -179,8 +243,9 @@ describe("plans without the field validate exactly as before (FR-021)", () => {
   /**
    * The canonical digests the pre-feature parser and validator produced for
    * plans written before this feature, recorded before the exemption grammar
-   * landed. A deliberate change to these plans, or to the PlanModels shape,
-   * re-records them.
+   * landed. They pin the frozen fixture copies under `tests/fixtures/plans/`,
+   * never the live plans, so only a change to the PlanModels shape or the
+   * validator re-records them.
    */
   const PRE_FEATURE = [
     {
@@ -195,16 +260,16 @@ describe("plans without the field validate exactly as before (FR-021)", () => {
     },
   ] as const;
 
-  it.each(PRE_FEATURE)("AS-021: $plan parses and validates to its pre-feature result apart from mutation verify", ({ plan: name, models, validation }) => {
-    const text = readFileSync(resolve(PLANS, name), "utf-8");
+  it.each(PRE_FEATURE)("AS-021: frozen $plan parses and validates to its pre-feature result apart from mutation verify", ({ plan: name, models, validation }) => {
+    const text = readFileSync(resolve(FROZEN_PLANS, name), "utf-8");
     expect(text).not.toMatch(/Mutation exemption/i);
     const parsed = parsePlanModels(text);
     expect(canonicalDigest(preFeatureModels(parsed))).toBe(models);
     expect(canonicalDigest(validateModelBindings(parsed, [], DEPS))).toBe(validation);
   });
 
-  it("AS-021: the oracle plan's owned Invariants all default to mutation verification", () => {
-    const parsed = parsePlanModels(readFileSync(resolve(PLANS, "2026-10-16-g4-slice-2-oracle.md"), "utf-8"));
+  it("AS-021: the frozen oracle plan's owned Invariants all default to mutation verification", () => {
+    const parsed = parsePlanModels(readFileSync(resolve(FROZEN_PLANS, "2026-10-16-g4-slice-2-oracle.md"), "utf-8"));
     const owned = parsed.invariants.filter(({ ownership }) => ownership.kind === "owned");
     expect(owned.length).toBe(7);
     for (const { ownership } of owned) expect(ownership).toMatchObject({ mutation: { kind: "verify" } });
@@ -228,7 +293,7 @@ describe("plans without the field validate exactly as before (FR-021)", () => {
   it("FR-021: property — adding a reasoned exemption to an owned block changes only its mutation policy", () => {
     const reason = fc.string({ minLength: 1, maxLength: 40 })
       .map((raw) => raw.replace(/[\r\n`*]/g, "x").trim())
-      .filter((raw) => raw.length > 0);
+      .filter((raw) => raw.length > 0 && !isPlaceholder(raw));
     const path = fc.stringMatching(/^[a-z]{1,8}\/[a-z]{1,8}\.ts$/);
     fc.assert(fc.property(path, fc.array(path, { maxLength: 3 }), path, reason, (owner, siblings, matrixTest, why) => {
       const fields = [

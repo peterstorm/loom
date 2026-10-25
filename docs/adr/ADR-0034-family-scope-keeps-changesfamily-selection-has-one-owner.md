@@ -66,7 +66,8 @@ defined "Family change" to include the matrix test, which contradicts G5a's `cha
    - Pros:
      - No new module. Each call site reads like the local logic it serves.
    - Cons:
-     - Nine call sites (the table under Decision), several questions and two scopes, kept in sync by convention. This is exactly the drift
+     - Ten call sites in nine modules (the table under Decision), several questions and two scopes, kept in sync
+       by convention. This is exactly the drift
        INV-3 exists to forbid.
      - The absent-vs-empty stamp distinction (`undefined` owes nothing and has no check, while `[]` still carries
        the plan-integrity check) would be re-encoded at each site. A mistake would change pre-G5b suite digests.
@@ -122,7 +123,7 @@ Callers in the shipped code:
 | Obligations the check runs for | `engine/src/handlers/helpers/wave-completion-suite.ts` | `ownerVerificationOwed` |
 | Plan drift against the stamp | `engine/src/core/owner-verification/plan-integrity.ts` | `stampAgreement` |
 | Receipt roster validation on read | `engine/src/state-file-wire.ts` | `ownerCheckAuthority` |
-| Which owed obligations run mutants | `engine/src/orchestration/owner-verification-runner.ts` | `verifyOwed` |
+| Which owed obligations run mutants | `engine/src/orchestration/owner-verification-runner.ts` | `verifyOwed`, through `verificationRuns` in `core/owner-verification/owed-verification.ts` |
 | Whether population needs an `affectedRunner` | `engine/src/core/task-graph-population.ts` | `verifyOwed` |
 | Reviewer-packet owner map | `engine/src/core/wave-review-authority.ts` | `obligationsTouchedBy` |
 | Brief owner duties | `engine/src/core/implementation-brief.ts` | `obligationsTouchedBy` |
@@ -130,7 +131,9 @@ Callers in the shipped code:
 `engine/src/orchestration/implementation-brief.ts` calls `ownerScopeOf` to build the scope it hands the brief
 renderer and decides nothing. The State File wire re-derives the check authority from the stamp on purpose rather
 than reading it off the receipt: a persisted receipt must not certify its own roster. The runner no longer
-re-derives the authority; it receives the check the gate authorized (PR #131 review remediation).
+re-derives the authority; it receives the `OwedVerification` the gate decided (`ownerObservationDecision` in
+`core/owner-verification/owed-verification.ts`: the owed obligations with the authorized digest) (PR #131 review
+remediation).
 
 `authorizeWaveCompletionSuite` in `engine/src/core/verification-manifest.ts` is deliberately not a sibling. It
 takes the `OwnerCheckAuthority | null` its callers obtained as a parameter, makes no ownership decision, and
@@ -143,8 +146,9 @@ The matrix test `engine/tests/core/owner-obligations.matrix.test.ts` covers:
 
 - **Owner rows:** Wave scope against touch scope over owner-only, sibling-only, matrix-only and unrelated file
   lists, plus absent against empty `owner_obligations`.
-- **Sibling rows:** one per caller in the table. The packet and brief follow `obligationsTouchedBy`; suite
-  authority, readiness and the State File wire follow `ownerCheckAuthority`; the gate helper hands the runner
+- **Sibling rows:** nine, one per caller in the table except the gate helper's suite authorization. That call goes
+  through `suite-authority.ts`, so the suite-authority rows cover it. The packet and brief
+  follow `obligationsTouchedBy`; suite authority, readiness and the State File wire follow `ownerCheckAuthority`; the gate helper hands the runner
   exactly `ownerVerificationOwed`; plan integrity follows `stampAgreement`; the runner and population follow
   `verifyOwed`.
 - **Properties:** the Wave scope is a subset of the touch scope; an absent stamp owes nothing and has no

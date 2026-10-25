@@ -87,11 +87,11 @@ exactly when the TaskGraph carries the `owner_obligations` stamp.**
     scope: "wave";
     reportPolicy: Readonly<{ kind: "not-required" }>;
     obligationsDigest: ArtifactDigest;       // digest of the stamped owner_obligations
-    owed: readonly string[];                 // owed Invariant ids, plan order, possibly empty
+    owed: readonly InvariantId[];            // owed Invariant ids (branded, parseOwedInvariantIds), plan order, possibly empty
   }>
 ```
 
-- `authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, owner: OwnerCheckAuthority | null = null)`
+- `authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, owner: OwnerCheckAuthority | null)`
   makes no ownership decision. It builds the roster as `[ENGINE_LINT_CHECK, …(owner === null ? [] :
   [engineOwnerCheck(owner)]), …projectChecks]`, copying `obligationsDigest` and `owed` verbatim. With `null`
   the roster, and so the suite digest, is byte-identical to the pre-G5b roster (FR-004). A project check
@@ -106,11 +106,10 @@ exactly when the TaskGraph carries the `owner_obligations` stamp.**
   readiness (`engine/src/core/wave-completion-suite-readiness.ts`, re-authorizing for readiness and status)
   both call it. `engine/src/state-file-wire.ts` re-derives the authority from the stamp when an installed
   receipt loads, on purpose: a receipt must not certify its own roster. The runner
-  (`engine/src/orchestration/owner-verification-runner.ts`) receives the authorized check from the gate and
-  records its digest, never re-deriving it (PR #131 review remediation). They all read the same graph, so they
-  cannot disagree; and
-  `authorizeWaveCompletionSuite` takes the authority as a required parameter, so no caller can drop it by
-  omission.
+  (`engine/src/orchestration/owner-verification-runner.ts`) receives from the gate an `OwedVerification` (the
+  owed obligations and the authorized digest) and records that digest, never re-deriving it (PR #131 review
+  remediation). They all read the same graph, so they cannot disagree; and `authorizeWaveCompletionSuite` takes the authority as a required parameter with no default, so no caller can
+  drop it by omission (a test pins its arity at 4 and a `@ts-expect-error` on the three-argument call).
 - **Deviation from the plan:** the plan placed `OwnerCheckAuthority` in `obligations.ts`. It ships in its own
   leaf module, `engine/src/core/owner-check-authority.ts`, and `obligations.ts` re-exports it.
   `verification-manifest.ts` (which `types.ts` imports) and `obligations.ts` (which imports `types.ts`) both
@@ -129,9 +128,17 @@ field joins the strict-field parse only when present.
 
 1. Whenever the check is authorized, the plan named by `plan_file` is re-read and must re-derive the stamp
    (FR-002, AD-2). An unreadable plan is `plan-unreadable`, strays or malformed ownership are `plan-malformed`,
-   and any difference from the stamp is `plan-drift`. This runs even when `owed` is empty.
-2. When nothing is owed, the observation is `verified` with no verdicts and `boundMs: 0`.
-3. Otherwise `runOwnerVerification` (`engine/src/orchestration/owner-verification-runner.ts`) runs coverage
+   and any difference from the stamp is `plan-drift`. This runs even when `owed` is empty. The shell only reads
+   the file; the pure `planModelsIntegrityFailure` (`engine/src/core/owner-verification/plan-integrity.ts`)
+   decides.
+2. The pure `ownerObservationDecision` (`engine/src/core/owner-verification/owed-verification.ts`, PR #131
+   round 2) then decides from the integrity result, `ownerVerificationOwed(scope, wave)` and the authorized
+   check: `unavailable` (the plan failed, or the owed obligations are not the check's `owed` ids, which is
+   `plan-drift`), `verified-empty` when nothing is owed (`verified` with no verdicts and `boundMs: 0`), or
+   `must-run` over a branded `OwedVerification` that pairs the owed obligations with the stamp digest.
+3. On `must-run`, `runOwnerVerification` (`engine/src/orchestration/owner-verification-runner.ts`) receives that
+   `OwedVerification`; `verificationRuns` in the same pure module fixes each obligation's run (mutate through
+   the frozen runner, or exempt) once, before anything runs. The runner then runs coverage
    and mutation for the owed obligations, using `withMutationWorkspace`
    (`engine/src/orchestration/owner-mutation-workspace.ts`) for the isolated worktree (AD-8). It digests the
    real workspace before and after the run. It never throws, by construction (total reads, guarded steps, a

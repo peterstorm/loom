@@ -25,7 +25,7 @@ Approach: **B — a new engine check kind in the completion suite** (chosen at t
 **Choice:** Add a third variant, `engine-owner-verification`, to `AuthorizedWaveCompletionCheck` in `engine/src/core/completion-suite.ts`, beside `engine-full-tier-lint`:
 
 ```
-{ kind: "engine-owner-verification"; checkId: "loom:owner-verification"; scope: "wave"; reportPolicy: { kind: "not-required" }; obligationsDigest: ArtifactDigest; owed: readonly string[] }
+{ kind: "engine-owner-verification"; checkId: "loom:owner-verification"; scope: "wave"; reportPolicy: { kind: "not-required" }; obligationsDigest: ArtifactDigest; owed: readonly InvariantId[] }
 ```
 
 - `authorizeWaveCompletionSuite` (`verification-manifest.ts`) **makes no ownership decision**. It takes an `OwnerCheckAuthority | null` parameter, computed by its callers through `ownerCheckAuthority(ownerScopeOf(graph), wave)` in `obligations.ts` (AD-4, INV-3); since PR #131 the one such caller on the gate side is `authorizeGraphCompletionSuite` in `core/owner-verification/suite-authority.ts`. It injects the check exactly when that parameter is non-null, copying `obligationsDigest` and `owed` (the owed Invariant ids, possibly empty) into the check.
@@ -93,15 +93,15 @@ OwnerObligation = Readonly<{
 
 ### AD-4: Family scope keeps G5a's `changesFamily`; selection has one owner (interview Q1d; INV-3)
 
-**Choice:** `engine/src/core/owner-verification/obligations.ts` is the sole home of three selections:
+**Choice:** `engine/src/core/owner-verification/obligations.ts` is the sole home of every selection over Owner Obligations. Callers never hold the raw stamp: `ownerScopeOf(graph)` builds an opaque `OwnerScope` (`unstamped` when `owner_obligations` is absent, `stamped` with the obligations, `[]` included, and the Tasks), and every selection takes it.
 
-> **PR #131 review remediation:** the selections below now take an opaque `OwnerScope` built by `ownerScopeOf(graph)` instead of a raw graph or stamp, `waveChangedObligations` is folded into `ownerVerificationOwed(scope, wave)`, and `stampAgreement` and `verifyOwed` joined the module. INV-3 lists every caller; ADR-0034 records the shipped shape.
+> **As shipped (PR #131 review remediation).** The first draft of this decision named `waveChangedObligations(waveTasks, obligations)` and selections over a raw graph or stamp, with the gate helper and readiness each calling `ownerCheckAuthority`. That shape is superseded by the bullets below; ADR-0034 records it, and INV-3 lists every caller.
 
-
-- `waveChangedObligations(waveTasks, obligations)` decides the gate's scope. It is true for an obligation when any Wave Task's `file_list` satisfies `changesFamily(invariantRoles(...))`, meaning the owner or a sibling. A change to the matrix test alone does not trigger the checks.
-- `obligationsTouchedBy(fileList, obligations)` decides review packets and brief duties. It is true when the Task plays any role: owner, sibling or matrix test.
-- `ownerVerificationOwed(graph, wave)` returns the obligations the Wave owes coverage and mutation for: `waveChangedObligations` over the Wave's Tasks, or `[]` without a stamp.
-- `ownerCheckAuthority(graph, wave): OwnerCheckAuthority | null` returns `null` exactly when `owner_obligations` is absent. Otherwise it returns `{ obligationsDigest, owed: ids of ownerVerificationOwed }`. Suite authorization runs in both `wave-completion-suite.ts` and `wave-completion-suite-readiness.ts`, and both call it; `verification-manifest.ts` only receives the result as a parameter (OWN-1).
+- `ownerVerificationOwed(scope, wave)` decides the gate's scope: the obligations for which some Task of that Wave has a `file_list` satisfying `changesFamily(invariantRoles(...))`, meaning the owner or a sibling, in stamp order; `[]` when unstamped. A change to the matrix test alone does not trigger the checks.
+- `obligationsTouchedBy(scope, fileList)` decides review packets and brief duties. It keeps an obligation when the Task plays any role: owner, sibling or matrix test; `[]` when unstamped.
+- `ownerCheckAuthority(scope, wave): OwnerCheckAuthority | null` returns `null` exactly when the scope is unstamped. Otherwise it returns `{ obligationsDigest, owed: ids of ownerVerificationOwed }`. Its one gate-side caller is `authorizeGraphCompletionSuite(graph, workspaceDigest)` in `core/owner-verification/suite-authority.ts`, the one authorize-from-TaskGraph function, which the gate helper (`wave-completion-suite.ts`) and readiness (`wave-completion-suite-readiness.ts`) both call. The State File wire re-derives the authority from the stamp on purpose. `verification-manifest.ts` only receives the result as a required parameter (OWN-1).
+- `stampAgreement(scope, models)` is the gate's drift check (`agrees`, `drifted`, `unstamped`, `underivable`); `core/owner-verification/plan-integrity.ts` turns it into the `plan-malformed` / `plan-drift` failure.
+- `verifyOwed(obligations)` decides which obligations owe mutation (policy `verify`), for population and the runner.
 
 **Why:** G5a's validator, the brief and the gate already classify roles through `plan-paths.ts`. G5b adds selections over obligations, and they must not drift between the gate, readiness, packets and the brief.
 
@@ -226,8 +226,8 @@ A Wave that owes non-exempt owner verification with no frozen `affectedRunner` b
 - `registration.schemaVersion === 2`
 - `subject.taskId !== null`
 - `subject.role` is `code-reviewer` or `architecture-tech-lead`
-- `graph.owner_obligations` is defined
-- `obligationsTouchedBy(task.file_list)` is non-empty
+- the graph is stamped (`ownerScopeOf(graph)` is not unstamped; an unstamped scope touches nothing)
+- `obligationsTouchedBy(ownerScopeOf(graph), task.file_list)` is non-empty
 
 Every other packet is byte-identical (AS-024, AS-026, AS-027; SC-005). Standalone review never sees a TaskGraph, so it is untouched by construction.
 
@@ -335,6 +335,7 @@ engine/tests/core/owner-obligations.matrix.test.ts       — NEW (INV-3 matrix; 
 ```
 engine/src/core/owner-verification/import-graph.ts       — NEW pure TS seam: moduleEdges
 engine/src/core/owner-verification/coverage.ts           — implement: resolveSpecifier, coverageFrontier, reachedFiles, decideCoverage, coverageOverFiles
+engine/src/core/owner-verification/repo-path.ts          — NEW pure (PR #131 round 2): the one repository-path rule coverage.ts and tsconfig-paths.ts share
 engine/tests/core/owner-verification-import-graph.test.ts — NEW
 engine/tests/core/owner-verification-coverage.test.ts    — NEW incl. fast-check properties
 ```
@@ -367,6 +368,10 @@ engine/tests/state-file-wire-owner-obligations.test.ts   — NEW
 ```
 engine/src/orchestration/owner-mutation-workspace.ts     — NEW shell: worktree create/overlay/symlink/rewrite/restore/remove
 engine/src/orchestration/owner-verification-runner.ts    — NEW shell: coverage file gathering, Wave base + changed lines, baseline run, mutant runs, observation
+engine/src/core/owner-verification/ls-tree.ts            — NEW pure (PR #131 round 2): ownerAtBaseEntry, what `git ls-tree` says about the owner at the Wave base
+engine/src/core/owner-verification/tsconfig-paths.ts     — NEW pure (PR #131): pathAliasesOf, the matrix test's tsconfig `paths` (reads and JSONC parse injected)
+engine/src/core/owner-verification/wave-base.ts          — NEW pure: which start_sha commits the owner is diffed against
+engine/src/core/owner-verification/status-paths.ts       — NEW pure: the overlay path set from `git status --porcelain=v2`
 engine/src/orchestration/completion-check-runner.ts      — export a root-parameterized runner-command execution
 engine/tests/orchestration/owner-mutation-workspace.test.ts — NEW (real git fixture)
 engine/tests/orchestration/owner-verification-runner.test.ts — NEW (real git fixture + fake runner)
@@ -388,9 +393,14 @@ engine/tests/core/implementation-brief-owner-duties.test.ts — NEW
 
 ```
 engine/src/core/completion-suite.ts                      — check kind, ownerVerification on result/receipt, failure variants, parsers, evaluation
-engine/src/core/verification-manifest.ts                 — authorizeWaveCompletionSuite: inject the owner check when owed
-engine/src/core/wave-completion-suite-readiness.ts       — authorize with the same owed predicate
-engine/src/handlers/helpers/wave-completion-suite.ts     — plan re-read + drift check whenever the stamp is present (owed [] included), run owner verification for owed Invariants, attach observation, diagnostics
+engine/src/core/owner-verification/parse.ts              — NEW pure (PR #131): the owner observation and owed-id wire parsers, beside the types they rebuild
+engine/src/core/verification-manifest.ts                 — authorizeWaveCompletionSuite: required owner: OwnerCheckAuthority | null; inject the owner check exactly when non-null
+engine/src/core/owner-check-authority.ts                 — NEW leaf: the OwnerCheckAuthority type the manifest module and obligations.ts share (acyclic source domains)
+engine/src/core/owner-verification/suite-authority.ts    — NEW pure (INV-3 sibling, PR #131): authorizeGraphCompletionSuite(graph, workspaceDigest), the one authorize-from-TaskGraph function
+engine/src/core/owner-verification/plan-integrity.ts     — NEW pure (INV-3 sibling, PR #131): planModelsIntegrityFailure(planPath, models, scope) over stampAgreement
+engine/src/core/owner-verification/owed-verification.ts  — NEW pure (PR #131 round 2): ownerObservationDecision (unavailable / verified-empty / must-run over a branded OwedVerification) and verificationRuns (each owed obligation mutate or exempt, via verifyOwed)
+engine/src/core/wave-completion-suite-readiness.ts       — re-authorize through authorizeGraphCompletionSuite
+engine/src/handlers/helpers/wave-completion-suite.ts     — authorize through authorizeGraphCompletionSuite; read the plan file and hand it to plan-integrity.ts whenever the stamp is present (owed [] included); run owner verification for ownerVerificationOwed; attach observation, diagnostics
 engine/tests/core/owner-obligations.matrix.test.ts       — add the gate-scope and readiness sibling rows
 engine/tests/core/completion-suite-owner-verification.test.ts — NEW
 engine/tests/handlers/wave-completion-suite-owner-verification.test.ts — NEW
@@ -457,7 +467,7 @@ type OwnerInfrastructureFailure = { kind: "plan-unreadable" | "plan-malformed" |
   | "worktree-failed" | "spawn-failed" | "report-missing" | "report-unreadable" | "matrix-test-not-collected"
   | "exit-unexplained-by-report" | "baseline-timed-out" | "missing-wave-base" | "coverage-bound-exceeded"
   | "real-workspace-changed" | "repository-file-unreadable" | "unexpected-error" | "owner-unparseable"
-  | "no-valid-mutants"; detail: string };   // PR #131: an owner with syntax errors and an all-invalid run block
+  | "no-valid-mutants" | "alias-config-unresolvable"; detail: string };   // PR #131: an owner with syntax errors and an all-invalid run block; round 2: an unresolvable tsconfig/alias graph has its own kind
 type OwnerVerificationFailure = /* missing-siblings | red-baseline | survivor | infrastructure, each naming the Invariant */;
 type CoverageOverFilesFn = (input: { matrixTest: string; obligation: OwnerObligation;
   files: ReadonlyMap<string, string>; aliases: PathAliases }) => CoverageVerdict;
@@ -488,7 +498,7 @@ obligationsTouchedBy(scope: OwnerScope, fileList: readonly string[]): readonly O
 ownerCheckAuthority(scope: OwnerScope, wave: number): OwnerCheckAuthority | null              // null iff unstamped
 stampAgreement(scope: OwnerScope, models): agrees | drifted | unstamped | underivable          // the gate's drift check
 verifyOwed(obligations): MutationOwed                                                         // the ones whose policy is verify
-type OwnerCheckAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly string[] }>  // owed may be []
+type OwnerCheckAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly InvariantId[] }>  // owed may be []; leaf core/owner-check-authority.ts, re-exported here
 ```
 
 **Depends on:** CT-1 types
@@ -559,8 +569,8 @@ It never throws to the caller. Every failure becomes `unavailable` or a per-Inva
 ### Completion-suite integration
 
 **Responsibility:** Authorize, run, record, evaluate and replay the owner check inside the existing suite.
-**Files:** `completion-suite.ts`, `verification-manifest.ts`, `wave-completion-suite-readiness.ts`, `handlers/helpers/wave-completion-suite.ts`
-**Interface:** `authorizeWaveCompletionSuite(manifest, active, workspaceDigest, owner: OwnerCheckAuthority | null)` decides nothing about ownership: non-null injects the check verbatim. Both callers obtain `owner` from `ownerCheckAuthority`. `evaluateWaveCompletionSuite` adds the owner failures from `ownerVerificationFailures`. The owner check re-reads the plan whenever it is present (AD-2).
+**Files:** `completion-suite.ts`, `verification-manifest.ts`, `owner-check-authority.ts`, `owner-verification/suite-authority.ts`, `owner-verification/plan-integrity.ts`, `wave-completion-suite-readiness.ts`, `handlers/helpers/wave-completion-suite.ts`
+**Interface:** `authorizeWaveCompletionSuite(manifest, active, workspaceDigest, owner: OwnerCheckAuthority | null)` decides nothing about ownership: the parameter is required (no default), and non-null injects the check verbatim. Its only gate-side caller is `authorizeGraphCompletionSuite(graph, workspaceDigest)` in `suite-authority.ts`, which derives `owner` as `ownerCheckAuthority(ownerScopeOf(graph), active.wave)`; the gate helper and readiness both call it, so they cannot disagree. `evaluateWaveCompletionSuite` adds the owner failures from `ownerVerificationFailures`. Whenever the check is present the shell re-reads the plan and the pure `planModelsIntegrityFailure(planPath, models, scope)` decides it against the stamp through `stampAgreement` (AD-2). *(As first planned, both the gate helper and readiness called `ownerCheckAuthority` themselves and the shell compared with `obligationsAgree`; superseded by PR #131.)*
 **Depends on:** Population and wire; Mutation execution shell
 
 ### Status
@@ -582,21 +592,26 @@ It never throws to the caller. Every failure becomes `unavailable` or a per-Inva
 ```
 plan.md ──parsePlanModels──► PlanInvariant[] ──obligationsFromPlan──► owner_obligations (stamped at populate)
                                                                               │
-Wave Gate: ensureWaveCompletionSuite                                          ▼
-  ownerCheckAuthority(ownerScopeOf(graph), wave) ── null (no stamp: pre-feature) ──► suite without the owner check (bytes as before)
+Wave Gate: ensureWaveCompletionSuite (readiness re-authorizes through the same function)  ▼
+  authorizeGraphCompletionSuite(graph, workspaceDigest)            (core/owner-verification/suite-authority.ts)
+    ownerCheckAuthority(ownerScopeOf(graph), wave) ── null (no stamp: pre-feature) ──► suite without the owner check (bytes as before)
         │ non-null (stamp present, [] included)
         ▼
-  authorizeWaveCompletionSuite(…, authority)   ── injects loom:owner-verification { obligationsDigest, owed }
+    authorizeWaveCompletionSuite(…, authority)   ── injects loom:owner-verification { obligationsDigest, owed }
         ▼
-  re-read plan_file (ALWAYS when stamped)
-    no plan_file / unreadable / strays / malformed ownership ──► unavailable(plan-unreadable | plan-malformed) ──► rejected
-    obligationsAgree(stamp, obligationsFromPlan)? ── no ──► unavailable(plan-drift) ──► rejected
-        │ yes
+  re-read plan_file (ALWAYS when stamped; the shell reads, parsePlanModels parses)
+    no plan_file / unreadable ──► unavailable(plan-unreadable) ──► rejected
+    planModelsIntegrityFailure(planPath, models, scope)            (core/owner-verification/plan-integrity.ts)
+      strays / malformed ownership / stampAgreement underivable ──► unavailable(plan-malformed) ──► rejected
+      stampAgreement(scope, models) drifted / unstamped ──► unavailable(plan-drift) ──► rejected
+        │ agrees
         ▼
-  owed = [] ──► verified { verdicts: [] } (plan integrity only; no coverage, no mutation)
-        │ owed non-empty
+  ownerObservationDecision(integrity, ownerVerificationOwed(scope, wave), authority)   (core/owner-verification/owed-verification.ts)
+    owed ids ≠ authority.owed ──► unavailable(plan-drift) ──► rejected
+    owed = [] ──► verified { verdicts: [] } (plan integrity only; no coverage, no mutation)
+        │ must-run: OwedVerification (owed obligations + authorized digest)
         ▼
-  runOwnerVerification (shell, outside lock)
+  runOwnerVerification (shell, outside lock); verificationRuns fixes each obligation: mutate or exempt
     digest real workspace
     per owed obligation:
       read matrix-test import frontier ──coverageOverFiles──► CoverageVerdict
@@ -776,10 +791,10 @@ Twelve Tasks over five Waves. Byte-preservation scenarios already hold today, so
   - Implement AD-1: the check kind, its parsers and digest, and the result/receipt `ownerVerification` with its parsers.
   - Add the evaluation through `ownerVerificationFailures`.
   - Add the `owner: OwnerCheckAuthority | null` parameter to `authorizeWaveCompletionSuite` in `verification-manifest.ts`. It makes no decision; it injects the check iff the parameter is non-null.
-  - Make readiness in `wave-completion-suite-readiness.ts` and the suite shell in `wave-completion-suite.ts` both obtain that parameter from `ownerCheckAuthority`.
+  - Make readiness in `wave-completion-suite-readiness.ts` and the suite shell in `wave-completion-suite.ts` both authorize through `authorizeGraphCompletionSuite` in `core/owner-verification/suite-authority.ts`, the one function that obtains that parameter from `ownerCheckAuthority(ownerScopeOf(graph), wave)`. *(As first planned, each called `ownerCheckAuthority` itself; superseded by PR #131 so the two cannot disagree, per INV-3.)*
   - In `wave-completion-suite.ts`, whenever the check is present (stamp present, `owed` empty included):
     - re-read the plan
-    - block on a missing `plan_file`, an unreadable plan, strays, malformed ownership, or `obligationsAgree` drift
+    - block on a missing `plan_file` or an unreadable plan; hand the parsed models to `planModelsIntegrityFailure` (`core/owner-verification/plan-integrity.ts`), which blocks on strays, malformed ownership, or `stampAgreement` drift *(first planned as an inline `obligationsAgree` comparison; superseded by PR #131)*
     - with `owed = []`, record `verified { verdicts: [] }`; otherwise call `runOwnerVerification` outside the lock
     - render diagnostics for each failure
   - FR-002 tests, each with a stamped graph whose Wave owes **nothing**:

@@ -29,7 +29,10 @@ import {
   ADMISSION,
   ADMISSION_FEE_TABLE_PLAN_TEXT,
   ADMISSION_FEE_TABLE_STAMP,
+  CLOCK,
   FEE_TABLE,
+  FEES,
+  FEES_CLOCK_PLAN_TEXT,
   paragraphs,
   someParagraph,
 } from "../fixtures/owner-families";
@@ -79,6 +82,10 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
 describe("owner duties in the brief (AD-10)", () => {
   it("the fixture stamp is the one population derives from the fixture plan", () => {
     expect(obligationsFromPlan(PLAN_MODELS)).toEqual({ ok: true, value: STAMP });
+  });
+
+  it("the FEES / CLOCK fixture plan derives exactly the FEES / CLOCK obligations", () => {
+    expect(obligationsFromPlan(parsePlanModels(FEES_CLOCK_PLAN_TEXT))).toEqual({ ok: true, value: [FEES, CLOCK] });
   });
 
   it("AS-028: the owner Task's brief names the import duty over owner and every sibling, and the mutation duty", () => {

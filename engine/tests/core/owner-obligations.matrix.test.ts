@@ -64,6 +64,7 @@ import {
   ownerCheckAuthority,
   ownerScopeOf,
   ownerVerificationOwed,
+  parseOwnerObligations,
   stampAgreement,
   verifyOwed,
   type OwnerCheckAuthority,
@@ -72,6 +73,7 @@ import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import { planModelsIntegrityFailure } from "../../src/core/owner-verification/plan-integrity";
+import { ownerObservationDecision } from "../../src/core/owner-verification/owed-verification";
 import { emptyAcceptanceExpectation } from "../../src/core/acceptance-contract";
 import { evaluateWaveCompletionSuite } from "../../src/core/completion-suite";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
@@ -117,6 +119,31 @@ const FEES: OwnerObligation = ownerObligation({
 });
 
 const OBLIGATIONS = [ADMISSION, FEES] as const;
+
+/** The plan block `ADMISSION` is derived from: INV-1, owned, with two siblings and a statement. */
+const INV_1_BLOCK: readonly string[] = [
+  "### INV-1: Admission is decided only by the owner", "",
+  "**Tier:** advisory",
+  "**Owner module:** `src/rules/owner.ts`",
+  "**Sibling entry points:**",
+  "- `src/rules/sibling-a.ts` — admits members",
+  "- `src/rules/sibling-b.ts`",
+  "**Matrix test:** `tests/rules.matrix.test.ts`",
+  "**Statement:** Every entry point admits through decide().", "",
+];
+
+/** The plan block `FEES` is derived from: INV-4, owned, no siblings, mutation-exempt. */
+const INV_4_BLOCK: readonly string[] = [
+  "### INV-4: Fees are computed only by the fee table", "",
+  "**Tier:** advisory",
+  "**Owner module:** src/fees/table.ts",
+  "**Sibling entry points:** none",
+  "**Matrix test:** tests/fees.matrix.test.ts",
+  "**Mutation exemption:** generated lookup table", "",
+];
+
+/** The two-Invariant plan whose derived stamp is `OBLIGATIONS`, parsed once. */
+const OWNED_PLAN_MODELS = parsePlanModels(["## Invariants", "", ...INV_1_BLOCK, ...INV_4_BLOCK].join("\n"));
 
 const task = (id: string, wave: number, fileList: readonly string[]): Task =>
   taskFixture({ id, description: id, agent: "code-implementer-agent", wave, depends_on: [], file_list: fileList });
@@ -224,23 +251,6 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
   const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
   const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
     [name, readFileSync(join(LOOM_PACKAGE_ROOT, "rules", name), "utf8")] as const));
-  const PLAN_INVARIANTS = parsePlanModels([
-    "## Invariants", "",
-    "### INV-1: Admission is decided only by the owner", "",
-    "**Tier:** advisory",
-    "**Owner module:** `src/rules/owner.ts`",
-    "**Sibling entry points:**",
-    "- `src/rules/sibling-a.ts` — admits members",
-    "- `src/rules/sibling-b.ts`",
-    "**Matrix test:** `tests/rules.matrix.test.ts`",
-    "**Statement:** Every entry point admits through decide().", "",
-    "### INV-4: Fees are computed only by the fee table", "",
-    "**Tier:** advisory",
-    "**Owner module:** src/fees/table.ts",
-    "**Sibling entry points:** none",
-    "**Matrix test:** tests/fees.matrix.test.ts",
-    "**Mutation exemption:** generated lookup table", "",
-  ].join("\n")).invariants;
 
   /** The Invariants whose duty paragraph the sibling `implementation-brief.ts` renders, in order. */
   function briefDuties(files: readonly string[], stamp: readonly OwnerObligation[] | undefined): readonly string[] {
@@ -250,7 +260,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,
       planFile: PLAN_FILE, spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules: RULES,
-      roster: [], invariants: PLAN_INVARIANTS, contracts: [], repositoryRoot: "/repo", operatorNotes: [],
+      roster: [], invariants: OWNED_PLAN_MODELS.invariants, contracts: [], repositoryRoot: "/repo", operatorNotes: [],
       ownerScope: ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }),
     });
     if (!rendered.ok) throw new Error(rendered.error.message);
@@ -401,25 +411,8 @@ describe("INV-3 sibling row — population's runner requirement follows verifyOw
       new_tests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
     },
   })]));
-  const INVARIANTS = parsePlanModels([
-    "## Invariants", "",
-    "### INV-1: Admission is decided only by the owner", "",
-    "**Tier:** advisory",
-    "**Owner module:** `src/rules/owner.ts`",
-    "**Sibling entry points:**",
-    "- `src/rules/sibling-a.ts` — admits members",
-    "- `src/rules/sibling-b.ts`",
-    "**Matrix test:** `tests/rules.matrix.test.ts`",
-    "**Statement:** Every entry point admits through decide().", "",
-    "### INV-4: Fees are computed only by the fee table", "",
-    "**Tier:** advisory",
-    "**Owner module:** src/fees/table.ts",
-    "**Sibling entry points:** none",
-    "**Matrix test:** tests/fees.matrix.test.ts",
-    "**Mutation exemption:** generated lookup table", "",
-  ].join("\n")).invariants;
 
-  const populate = (invariants: typeof INVARIANTS, withRunner: boolean) => populateTaskGraph(
+  const populate = (invariants: typeof OWNED_PLAN_MODELS.invariants, withRunner: boolean) => populateTaskGraph(
     { current_phase: "decompose", phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: "plan.md", tasks: [], wave_gates: {} },
     {
       planTitle: "INV-3 matrix", validatedPlanFile: "plan.md", tasks: ROSTER,
@@ -435,7 +428,7 @@ describe("INV-3 sibling row — population's runner requirement follows verifyOw
     { name: "exempt only", pick: [1] },
     { name: "no owned Invariant", pick: [] },
   ])("$name: without an affectedRunner, population refuses exactly when verifyOwed selects some obligation", ({ pick }) => {
-    const invariants = pick.map((index) => INVARIANTS[index]!);
+    const invariants = pick.map((index) => OWNED_PLAN_MODELS.invariants[index]!);
     const owed = ids(verifyOwed(labelledValue("obligations", obligationsFromPlan({ invariants }))));
     const refused = populate(invariants, false);
     if (owed.length === 0) {
@@ -467,8 +460,8 @@ describe("INV-3 sibling rows — the gate runs owner verification for ownerVerif
       const loaded = repo.manager.load();
       const wave = loaded.active_wave_gate!.wave;
       const owed = ids(ownerVerificationOwed(ownerScopeOf(loaded), wave));
-      expect(seen.map((input) => ids(input.owed))).toEqual(owed.length === 0 ? [] : [owed]);
-      for (const input of seen) expect(input.authority).toMatchObject(ownerCheckAuthority(ownerScopeOf(loaded), wave)!);
+      expect(seen.map((input) => ids(input.owed.obligations))).toEqual(owed.length === 0 ? [] : [owed]);
+      for (const input of seen) expect(input.owed.obligationsDigest).toBe(ownerCheckAuthority(ownerScopeOf(loaded), wave)!.obligationsDigest);
     },
     GATE_TIMEOUT_MS,
   );
@@ -482,10 +475,15 @@ describe("INV-3 sibling rows — the gate runs owner verification for ownerVerif
   ] as const)("$name: owner-verification-runner needs a runner exactly when verifyOwed selects some obligation", async ({ owed }) => {
     const root = canonicalTempDir("loom-inv3-runner-");
     try {
+      const decision = ownerObservationDecision({
+        integrity: null,
+        owed,
+        authority: { obligationsDigest: obligationsDigest(OBLIGATIONS), owed: owed.map(({ invariant }) => invariant) },
+      });
+      if (decision.kind !== "must-run") throw new Error(`fixture must run the owner check, got ${decision.kind}`);
       const observation = await runOwnerVerification({
         root: canonicalRoot(root), graph: graph([], OBLIGATIONS), wave: 1,
-        authority: { obligationsDigest: obligationsDigest(OBLIGATIONS), owed: owed.map(({ invariant }) => invariant) },
-        owed: [owed[0], ...owed.slice(1)], manifest: NO_RUNNER,
+        owed: decision.owed, manifest: NO_RUNNER,
         observeWorkspace: () => ({ ok: true, value: WORKSPACE_DIGEST }),
       });
       const mutating = ids(verifyOwed(owed));
@@ -533,16 +531,7 @@ describe("obligationsFromPlan — owned Invariants only, in plan order", () => {
     "",
     "## Invariants",
     "",
-    "### INV-1: Admission is decided only by the owner",
-    "",
-    "**Tier:** advisory",
-    "**Owner module:** `src/rules/owner.ts`",
-    "**Sibling entry points:**",
-    "- `src/rules/sibling-a.ts` — admits members",
-    "- `src/rules/sibling-b.ts`",
-    "**Matrix test:** `tests/rules.matrix.test.ts`",
-    "**Statement:** Every entry point admits through decide().",
-    "",
+    ...INV_1_BLOCK,
     "### INV-2: No clock reads",
     "",
     "**Tier:** advisory",
@@ -554,14 +543,7 @@ describe("obligationsFromPlan — owned Invariants only, in plan order", () => {
     "**Tier:** advisory",
     "**Owner module:** src/x.ts",
     "",
-    "### INV-4: Fees are computed only by the fee table",
-    "",
-    "**Tier:** advisory",
-    "**Owner module:** src/fees/table.ts",
-    "**Sibling entry points:** none",
-    "**Matrix test:** tests/fees.matrix.test.ts",
-    "**Mutation exemption:** generated lookup table",
-    "",
+    ...INV_4_BLOCK,
   ].join("\n");
 
   it("derives one obligation per owned Invariant, carrying title, statement, family and mutation policy", () => {
@@ -570,6 +552,21 @@ describe("obligationsFromPlan — owned Invariants only, in plan order", () => {
 
   it("a plan without owned Invariants derives the empty stamp", () => {
     expect(obligationsFromPlan(parsePlanModels("# Plan: none\n"))).toEqual({ ok: true, value: [] });
+  });
+});
+
+describe("parseOwnerObligations — the stamp's wire parser beside its constructor", () => {
+  it("reads a serialized stamp back to the same obligations, `[]` included", () => {
+    expect(parseOwnerObligations(JSON.parse(JSON.stringify(OBLIGATIONS)))).toEqual({ ok: true, value: OBLIGATIONS });
+    expect(parseOwnerObligations([])).toEqual({ ok: true, value: [] });
+  });
+
+  it("refuses a non-array, a repeated Invariant and a role conflict with one indexed sentence", () => {
+    expect(parseOwnerObligations({})).toEqual({ ok: false, error: "owner_obligations must be an array" });
+    expect(parseOwnerObligations([ADMISSION, ADMISSION])).toEqual({ ok: false, error: "owner_obligations names INV-1 more than once" });
+    expect(parseOwnerObligations([{ ...FEES, matrixTest: FEES.owner }])).toEqual({
+      ok: false, error: "owner_obligations[0]: INV-4: 'src/fees/table.ts' is both the owner module and the matrix test",
+    });
   });
 });
 
@@ -609,35 +606,18 @@ describe("obligationsDigest and obligationsAgree — the stamp's identity", () =
 });
 
 describe("stampAgreement — the gate's drift check reads the scope, never the raw stamp", () => {
-  const PLAN_MODELS = parsePlanModels([
-    "## Invariants", "",
-    "### INV-1: Admission is decided only by the owner", "",
-    "**Tier:** advisory",
-    "**Owner module:** `src/rules/owner.ts`",
-    "**Sibling entry points:**",
-    "- `src/rules/sibling-a.ts` — admits members",
-    "- `src/rules/sibling-b.ts`",
-    "**Matrix test:** `tests/rules.matrix.test.ts`",
-    "**Statement:** Every entry point admits through decide().", "",
-    "### INV-4: Fees are computed only by the fee table", "",
-    "**Tier:** advisory",
-    "**Owner module:** src/fees/table.ts",
-    "**Sibling entry points:** none",
-    "**Matrix test:** tests/fees.matrix.test.ts",
-    "**Mutation exemption:** generated lookup table", "",
-  ].join("\n"));
   const scopeOf = (stamp?: readonly OwnerObligation[]) => ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp });
 
   it("agrees with the stamp the plan derives, and drifts from any other, an empty one included", () => {
-    expect(stampAgreement(scopeOf(OBLIGATIONS), PLAN_MODELS)).toEqual({ kind: "agrees" });
-    expect(stampAgreement(scopeOf([ADMISSION]), PLAN_MODELS)).toEqual({ kind: "drifted" });
-    expect(stampAgreement(scopeOf([FEES, ADMISSION]), PLAN_MODELS)).toEqual({ kind: "drifted" });
-    expect(stampAgreement(scopeOf([]), PLAN_MODELS)).toEqual({ kind: "drifted" });
+    expect(stampAgreement(scopeOf(OBLIGATIONS), OWNED_PLAN_MODELS)).toEqual({ kind: "agrees" });
+    expect(stampAgreement(scopeOf([ADMISSION]), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
+    expect(stampAgreement(scopeOf([FEES, ADMISSION]), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
+    expect(stampAgreement(scopeOf([]), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
     expect(stampAgreement(scopeOf([]), parsePlanModels("# Plan: none\n"))).toEqual({ kind: "agrees" });
   });
 
   it("an absent stamp is unstamped, never agreement", () => {
-    expect(stampAgreement(scopeOf(), PLAN_MODELS)).toEqual({ kind: "unstamped" });
+    expect(stampAgreement(scopeOf(), OWNED_PLAN_MODELS)).toEqual({ kind: "unstamped" });
     expect(stampAgreement(scopeOf(), parsePlanModels("# Plan: none\n"))).toEqual({ kind: "unstamped" });
   });
 
@@ -657,7 +637,7 @@ describe("stampAgreement — the gate's drift check reads the scope, never the r
   });
 
   it("sibling row: plan-integrity blocks on exactly the stamps stampAgreement does not find in agreement", () => {
-    const failureOf = (scope: ReturnType<typeof scopeOf>, models = PLAN_MODELS) => planModelsIntegrityFailure("plan.md", models, scope)?.kind ?? null;
+    const failureOf = (scope: ReturnType<typeof scopeOf>, models = OWNED_PLAN_MODELS) => planModelsIntegrityFailure("plan.md", models, scope)?.kind ?? null;
     expect(failureOf(scopeOf(OBLIGATIONS))).toBeNull();
     expect(failureOf(scopeOf([ADMISSION]))).toBe("plan-drift");
     expect(failureOf(scopeOf([]))).toBe("plan-drift");

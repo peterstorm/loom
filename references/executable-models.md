@@ -244,9 +244,12 @@ Declaring an owner makes it an obligation the Wave Gate checks.
   resolved to files through relative paths (the extension
   ladder `""`, `.ts`, `.tsx`, `.mts`, `.cts`, a `.js`-family specifier mapped
   to its TypeScript source, then `index.ts`/`index.tsx`) and the matrix test's
-  tsconfig `paths`, must include the owner and every declared sibling. A
-  plain import chain is followed one hop only: siblings import the owner, so
-  following them would make the owner "reached" through any sibling. A miss
+  tsconfig `paths`, must include the owner and every declared sibling.
+  Direct imports and re-export chains of any length count; plain import
+  chains are not followed, so a module that merely imports the owner does
+  not credit it: siblings import the owner, so following them would make the
+  owner "reached" through any sibling. Type-only imports and type-only
+  re-exports are erased at runtime and never count. A miss
   blocks, naming every missing path, owner first. Bare package specifiers
   reach nothing; a frontier of more than 512 files is an infrastructure
   failure.

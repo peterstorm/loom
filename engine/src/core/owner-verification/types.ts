@@ -30,8 +30,9 @@ export type { InvariantId } from "../invariant-id";
 /**
  * Whether an owned Invariant's owner is mutation-verified. `exempt` exists
  * only with a non-blank reason: the plan grammar refuses an exemption without
- * one (`exemption-without-reason`) and an exemption on an unowned Invariant
- * (`exemption-on-unowned`), so neither is ever a silent opt-out.
+ * one (`exemption-without-reason`), one whose reason is a placeholder such as
+ * `none` or `n/a` (`exemption-placeholder-reason`) and an exemption on an
+ * unowned Invariant (`exemption-on-unowned`), so none is ever a silent opt-out.
  */
 export type MutationPolicy =
   | Readonly<{ kind: "verify" }>
@@ -108,8 +109,9 @@ export type PathAliases = readonly PathAlias[];
  * declared sibling. `missing` names every unreached path in declared order,
  * the owner first. `infrastructure` is the shell's failure to gather the
  * import frontier: a frontier file that exists but cannot be read
- * (`repository-file-unreadable`), an unresolvable tsconfig, or the frontier
- * bound exceeded. An unreadable file is never reported as a missing path.
+ * (`repository-file-unreadable`), an unresolvable tsconfig
+ * (`alias-config-unresolvable`), or the frontier bound exceeded
+ * (`coverage-bound-exceeded`). An unreadable file is never reported as a missing path.
  */
 export type CoverageVerdict =
   | Readonly<{ kind: "covered" }>
@@ -188,8 +190,10 @@ export type MutationPlanFields = Readonly<{
  * on a changed line and `mutants` holds the evenly spaced selection of at
  * most `cap` of them; the sites the cap left unmutated number
  * `candidates - mutants.length`, derived and never stored. Branded: only
- * `MutationPlanOfFn` builds one, so `mutants.length <= cap` and
- * `mutants.length <= candidates` hold for every plan.
+ * `MutationPlanOfFn`, which checks the fields it is handed, and the plan's
+ * own selection, which holds `min(candidates, cap)` mutants by construction,
+ * build one, so `mutants.length <= cap` and `mutants.length <= candidates`
+ * hold for every plan.
  */
 export type MutationPlan = MutationPlanFields & { readonly [MUTATION_PLAN]: true };
 
@@ -261,6 +265,10 @@ export type MatrixTestRun =
  *   mutation sites cannot be trusted.
  * - `no-valid-mutants`: mutants were generated, but every one only failed to
  *   collect, so the run carries no mutation evidence.
+ * - `alias-config-unresolvable`: the tsconfig chain governing the matrix
+ *   test (its `extends`, `baseUrl` or `paths`) cannot be resolved, so the
+ *   aliases its imports resolve through are unknown and coverage cannot be
+ *   decided. The plan is fine; the remedy is the tsconfig.
  */
 export type OwnerInfrastructureFailureKind =
   | "plan-unreadable"
@@ -280,7 +288,8 @@ export type OwnerInfrastructureFailureKind =
   | "repository-file-unreadable"
   | "unexpected-error"
   | "owner-unparseable"
-  | "no-valid-mutants";
+  | "no-valid-mutants"
+  | "alias-config-unresolvable";
 
 export type OwnerInfrastructureFailure = Readonly<{ kind: OwnerInfrastructureFailureKind; detail: string }>;
 

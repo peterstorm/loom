@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -87,6 +87,16 @@ describe("helper family-sites", () => {
 
     const { output } = await run(["--json", "--root", root]);
 
+    expect(JSON.parse(output).families[0].sites).toEqual(["engine/src/handlers/probe.ts:2"]);
+  });
+
+  it("reads only the files the core's isScannedSource wants: an unreadable test file is never opened", async () => {
+    const root = repository(FIXTURE);
+    chmodSync(join(root, "engine/src/handlers/probe.test.ts"), 0o000);
+
+    const { result, output } = await run(["--json", "--root", root]);
+
+    expect(result).toEqual({ kind: "passthrough" });
     expect(JSON.parse(output).families[0].sites).toEqual(["engine/src/handlers/probe.ts:2"]);
   });
 

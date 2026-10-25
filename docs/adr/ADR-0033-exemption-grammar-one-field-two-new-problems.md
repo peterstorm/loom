@@ -109,9 +109,25 @@ plan check refuses.**
 - **Stamp and wire**
   - `engine/src/core/owner-verification/obligations.ts` (the INV-3 owner) copies `ownership.mutation` into
     each stamped `OwnerObligation`.
-  - `parseMutationPolicy` in `engine/src/state-file-wire.ts` accepts only `{kind:"verify"}` or
-    `{kind:"exempt", reason}`, with exact fields and a non-blank reason. A hand-edited blank exemption in
-    TaskGraph state is refused on load instead of loading as an opt-out.
+  - `parseMutationPolicy` in `obligations.ts` (reached from `engine/src/state-file-wire.ts` through
+    `parseOwnerObligations`) accepts only `{kind:"verify"}` or `{kind:"exempt", reason}`, with exact fields
+    and a non-blank reason. A hand-edited blank exemption in TaskGraph state is refused on load instead of
+    loading as an opt-out.
+- **Post-review addition (PR #131 round 2): a third refusal, `exemption-placeholder-reason`.** The grammar
+  above accepted any non-blank reason, so `**Mutation exemption:** none` (the natural mirror of
+  `**Owner module:** none`) exempted the owner with the "reason" `none`. A placeholder reason is now refused:
+  - `isPlaceholderExemptionReason` in `parse-plan-models.ts` is the one predicate. The reason is trimmed,
+    trailing punctuation (`. ! ? , ; :`) is dropped, and the rest is compared case-insensitively against
+    `none`, `n/a`, `na`, `tbd`, `todo`, `-`, `—`, `null`, `nil`, `no`, `nothing`. Only the whole reason is
+    compared, so a sentence that contains one of these words still passes.
+  - On an owned block, `mutationPolicyOf` adds `{ kind: "exemption-placeholder-reason", reason }` to the
+    block's problems, alongside the other problems it has. `renderOwnershipProblem` names the placeholder
+    and asks for the real reason.
+  - The State File stamp parser (`parseMutationPolicy`) refuses the same reasons with
+    `owner_obligations[N].mutation.reason must state why the owner is exempt, not a placeholder`. Both
+    producers share the predicate, so the wire never loads a policy the grammar refuses.
+  - Tests: `engine/tests/core/parse-plan-models-exemption.test.ts` (grammar) and
+    `engine/tests/state-file-wire-owner-obligations.test.ts` (wire).
 - **Effect**
   - An `exempt` obligation skips only the mutation half. `verdict.ts` reports `{ kind: "exempt", reason }`,
     and coverage still runs (FR-020).
@@ -155,5 +171,6 @@ plan check refuses.**
   phase.
 - An exemption line on a block with no owner line is not reported until the owner line is added. The author
   can fix `missing-owner` and then hit a second refusal for the same block.
-- The grammar checks that a reason exists, not that it is good. A one-word reason passes, so judging the
+- The grammar checks that a reason exists, not that it is good. Beyond the fixed placeholder list
+  (`exemption-placeholder-reason`, added after PR #131 review), a one-word reason passes, so judging the
   reason is left to plan review.

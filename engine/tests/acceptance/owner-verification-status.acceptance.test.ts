@@ -43,7 +43,8 @@ import { ownerCheckAuthority, ownerScopeOf } from "../../src/core/owner-verifica
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
-import type { StatusDeps } from "../../src/core/loom-status";
+import { ownerVerificationStatusOf, type StatusDeps } from "../../src/core/loom-status";
+import { renderOwnerVerificationStatus, type OwnerVerificationStatusReport } from "../../src/core/owner-verification/status";
 import { renderStatus } from "../../src/handlers/helpers/orchestration";
 import { renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
 import { parseTaskGraph } from "../../src/state-manager";
@@ -277,8 +278,17 @@ function persistedResult(
     : { kind: "unavailable", reason: `completion result is malformed: ${parsed.error.errors.join("; ")}` };
 }
 
-/** `helper orchestration status`, human and `--json`, from one graph and one persisted result. */
-function status(currentWaveCompletionResult: WaveCompletionResultObservation): Readonly<{ human: string; json: unknown }> {
+/** What `helper orchestration status` printed, and the typed owner-verification report its `--json` document carries. */
+type StatusOutput = Readonly<{ human: string; json: unknown; report: OwnerVerificationStatusReport }>;
+
+/**
+ * `helper orchestration status`, human and `--json`, from one graph and one
+ * persisted result. The `--json` document's `ownerVerification` is proven
+ * equal to the typed `OwnerVerificationStatusReport` that
+ * `ownerVerificationStatusOf` derives from the same result, so every
+ * assertion below reads the report through its type, never by walking JSON.
+ */
+function status(currentWaveCompletionResult: WaveCompletionResultObservation): StatusOutput {
   const deps: StatusDeps = {
     loadPlanModels: () => ({ kind: "loaded", models: parsePlanModels(FEES_CLOCK_PLAN_TEXT) }),
     filePresence: () => ({ ok: true, exists: true }),
@@ -286,70 +296,26 @@ function status(currentWaveCompletionResult: WaveCompletionResultObservation): R
     currentWaveCompletionResult,
   };
   const graph = JSON.parse(JSON.stringify(STATUS_GRAPH)) as unknown;
-  return {
-    human: renderStatus(graph, deps, false),
-    json: JSON.parse(renderStatus(graph, deps, true)) as unknown,
-  };
+  const json = JSON.parse(renderStatus(graph, deps, true)) as unknown;
+  const { report } = ownerVerificationStatusOf(currentWaveCompletionResult);
+  expect(json).toHaveProperty("ownerVerification", JSON.parse(JSON.stringify(report)));
+  return { human: renderStatus(graph, deps, false), json, report };
 }
 
-/** Every object in `node` (depth-first) whose `invariant` is `id`. */
-function entriesFor(node: unknown, id: string): readonly Record<string, unknown>[] {
-  if (Array.isArray(node)) return node.flatMap((item) => entriesFor(item, id));
-  if (typeof node !== "object" || node === null) return [];
-  const record = node as Record<string, unknown>;
-  const own = record.invariant === id ? [record] : [];
-  return [...own, ...Object.values(record).flatMap((child) => entriesFor(child, id))];
+/** Invariant `id`'s verdict in a verified report. */
+function verdictOf(report: OwnerVerificationStatusReport, id: string): InvariantVerdict {
+  if (report.kind !== "verified") throw new Error(`status reports owner verification ${report.kind}, not verified`);
+  const verdict = report.verdicts.find(({ invariant }) => invariant === id);
+  if (verdict === undefined) throw new Error(`status reports no verdict for ${id}`);
+  return verdict;
 }
 
-/** The JSON status entry reported for Invariant `id`. */
-function jsonEntry(json: unknown, id: string): Record<string, unknown> {
-  const [entry] = entriesFor(json, id);
-  expect(entry, `status --json reports no per-Invariant entry for ${id}`).toBeDefined();
-  return entry!;
+/** The human status line the renderer writes for Invariant `id`. */
+function humanLine(human: string, id: string): string {
+  const line = human.split("\n").find((candidate) => candidate.startsWith(`  - ${id} `));
+  expect(line, `human status has no line for ${id}`).toBeDefined();
+  return line!;
 }
-
-/** The first number reported under `key` anywhere inside `node`. */
-function numberAt(node: unknown, key: string): number | undefined {
-  if (Array.isArray(node)) return node.map((item) => numberAt(item, key)).find((found) => found !== undefined);
-  if (typeof node !== "object" || node === null) return undefined;
-  const record = node as Record<string, unknown>;
-  if (typeof record[key] === "number") return record[key] as number;
-  return Object.values(record).map((child) => numberAt(child, key)).find((found) => found !== undefined);
-}
-
-/** The survivor count of an entry: a `survived` count, or the length of its `survivors`. */
-function survivedIn(entry: Record<string, unknown>): number | undefined {
-  const counted = numberAt(entry, "survived");
-  if (counted !== undefined) return counted;
-  const find = (node: unknown): unknown[] | undefined => {
-    if (typeof node !== "object" || node === null) return undefined;
-    const record = node as Record<string, unknown>;
-    if (Array.isArray(record.survivors)) return record.survivors;
-    return Object.values(record).map(find).find((found) => found !== undefined);
-  };
-  return find(entry)?.length;
-}
-
-/** The human text from Invariant `id`'s first mention up to the next other Invariant's. */
-function humanBlock(human: string, id: string, others: readonly string[]): string {
-  const start = human.indexOf(id);
-  expect(start, `human status never mentions ${id}`).toBeGreaterThanOrEqual(0);
-  const ends = others.map((other) => human.indexOf(other, start + id.length)).filter((index) => index >= 0);
-  return human.slice(start, ends.length === 0 ? undefined : Math.min(...ends));
-}
-
-/** `label` reported with `count`: "generated 8", "generated: 8", `"generated":8` or "8 generated". */
-const reportsCount = (text: string, label: string, count: number): boolean =>
-  new RegExp(`(${label}\\W{0,3}${count}\\b)|(\\b${count}\\W{0,3}${label})`, "i").test(text);
-
-const COUNT_LABELS = Object.freeze({
-  generated: "generated",
-  killed: "killed",
-  timedOut: "timed[ _-]?out",
-  invalid: "invalid",
-  survived: "survived",
-  unmutated: "unmutated",
-});
 
 /** The status's next action and its reasons, as one text. */
 const nextActionText = (json: unknown): string =>
@@ -358,52 +324,40 @@ const nextActionText = (json: unknown): string =>
 describe("owner verification in helper orchestration status (CT-2)", () => {
   it("AS-029: FR-028: status --json reports per Invariant the coverage pass and the mutants generated, killed, timed out, invalid, survived and unmutated, or the exemption", () => {
     const mutation = { killed: 5, timedOut: 2, invalid: 1, survivors: [], unmutated: 3 };
-    const { json } = status(persistedResult([feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
+    const { report } = status(persistedResult([feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
 
-    const fees = jsonEntry(json, FEES.invariant);
-    expect(JSON.stringify(fees)).toMatch(/"(pass|covered)"/);
-    expect(numberAt(fees, "generated")).toBe(8);
-    expect(numberAt(fees, "killed")).toBe(5);
-    expect(numberAt(fees, "timedOut")).toBe(2);
-    expect(numberAt(fees, "invalid")).toBe(1);
-    expect(survivedIn(fees)).toBe(0);
-    expect(numberAt(fees, "unmutated")).toBe(3);
+    expect(report).toMatchObject({ kind: "verified", boundMs: 1_500_000 });
+    const fees = verdictOf(report, FEES.invariant);
+    expect(fees.coverage).toEqual({ kind: "covered" });
+    expect(fees.mutation).toEqual({
+      kind: "verified", generated: 8, killed: 5, timedOut: 2, invalid: 1, survivors: [], unmutated: 3, ownerChangedInWave: true,
+    });
 
-    const clock = jsonEntry(json, CLOCK.invariant);
-    expect(JSON.stringify(clock)).toMatch(/"(pass|covered)"/);
-    expect(JSON.stringify(clock)).toMatch(/exempt/i);
-    expect(JSON.stringify(clock)).toContain(CLOCK_EXEMPTION);
-    expect(numberAt(clock, "generated")).toBeUndefined();
+    const clock = verdictOf(report, CLOCK.invariant);
+    expect(clock.coverage).toEqual({ kind: "covered" });
+    expect(clock.mutation).toEqual({ kind: "exempt", reason: CLOCK_EXEMPTION });
   });
 
   it("AS-029: FR-028: human status reports the same per-Invariant coverage, mutant counts and exemption as --json, from one projection", () => {
     const mutation = { killed: 5, timedOut: 2, invalid: 1, survivors: [], unmutated: 3 };
-    const { human, json } = status(persistedResult([feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
+    const { human, report } = status(persistedResult([feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
 
-    const fees = humanBlock(human, FEES.invariant, [CLOCK.invariant]);
-    expect(fees).toMatch(/pass|covered/i);
-    const expected = { generated: 8, killed: 5, timedOut: 2, invalid: 1, survived: 0, unmutated: 3 } as const;
-    for (const [key, count] of Object.entries(expected)) {
-      expect(reportsCount(fees, COUNT_LABELS[key as keyof typeof COUNT_LABELS], count), `human ${FEES.invariant} ${key} ${count}`).toBe(true);
-    }
-    const clock = humanBlock(human, CLOCK.invariant, [FEES.invariant]);
-    expect(clock).toMatch(/exempt/i);
-    expect(clock).toContain(CLOCK_EXEMPTION);
-    // One projection: the JSON entry carries the very counts the human text shows.
-    const feesJson = jsonEntry(json, FEES.invariant);
-    expect(numberAt(feesJson, "generated")).toBe(expected.generated);
-    expect(numberAt(feesJson, "unmutated")).toBe(expected.unmutated);
+    // One projection: the human lines are the renderer's lines over the very report --json carries.
+    for (const line of renderOwnerVerificationStatus(report)) expect(human).toContain(line);
+    expect(humanLine(human, FEES.invariant)).toContain(
+      "coverage pass; mutation generated 8, killed 5, timed out 2, invalid 1, survived 0, unmutated 3");
+    expect(humanLine(human, CLOCK.invariant)).toContain(`coverage pass; mutation exempt: ${CLOCK_EXEMPTION}`);
   });
 
   it("AS-029: FR-028: status reports a missing sibling as the Invariant's coverage result", () => {
     const mutation = { killed: 4, timedOut: 0, invalid: 0, survivors: [], unmutated: 0 };
-    const { human, json } = status(persistedResult(
+    const { human, report } = status(persistedResult(
       [feesVerdict(missingSibling, mutation), clockVerdict()],
       true,
     ));
 
-    expect(JSON.stringify(jsonEntry(json, FEES.invariant))).toContain(MISSING_SIBLING);
-    expect(humanBlock(human, FEES.invariant, [CLOCK.invariant])).toContain(MISSING_SIBLING);
+    expect(verdictOf(report, FEES.invariant).coverage).toEqual({ kind: "missing", paths: [MISSING_SIBLING] });
+    expect(humanLine(human, FEES.invariant)).toContain(`coverage missing ${MISSING_SIBLING}`);
   });
 
   it("AS-030: FR-028: a gate blocked by a missing sibling names the Invariant and the remedy in the next action: strengthen the matrix test to import it", () => {
@@ -435,12 +389,12 @@ describe("owner verification in helper orchestration status (CT-2)", () => {
       replacement: "<=",
     };
     const mutation = { killed: 5, timedOut: 0, invalid: 0, survivors: [survivor], unmutated: 0 };
-    const { human, json } = status(persistedResult(
+    const { human, json, report } = status(persistedResult(
       [feesVerdict({ kind: "covered" }, mutation), clockVerdict()],
       true,
     ));
 
-    expect(survivedIn(jsonEntry(json, FEES.invariant))).toBe(1);
+    expect(verdictOf(report, FEES.invariant).mutation).toMatchObject({ kind: "verified", survivors: [survivor] });
     const next = nextActionText(json);
     expect(next).toContain(FEES.invariant);
     expect(next).toMatch(/strengthen/i);

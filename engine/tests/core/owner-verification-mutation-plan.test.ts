@@ -6,18 +6,14 @@ import {
   applyMutant,
   mutantTimeoutMs,
   mutationPlan,
+  mutationPlanOf,
   parseMutantCap,
 } from "../../src/core/owner-verification/mutation-plan";
 import { sha256Hex } from "../../src/core/digest";
-import type { MutantCap, MutationOperator, MutationPlan } from "../../src/core/owner-verification/types";
+import type { MutationOperator, MutationPlan } from "../../src/core/owner-verification/types";
+import { capOf } from "../fixtures/owner-obligation";
 
 const OWNER = "src/rules/owner.ts";
-
-const capOf = (raw: number): MutantCap => {
-  const parsed = parseMutantCap(raw);
-  if (!parsed.ok) throw new Error(`not a mutant cap: ${raw}`);
-  return parsed.value;
-};
 
 const lines = (from: number, to: number): ReadonlySet<number> =>
   new Set(Array.from({ length: to - from + 1 }, (_, index) => from + index));
@@ -239,6 +235,8 @@ describe("mutationPlan laws", () => {
       expect(plan.candidates).toBe(all.candidates);
       expect(all.mutants).toHaveLength(all.candidates);
       expect(plan.mutants.length).toBe(Math.min(cap, plan.candidates));
+      // The selection's plan is one the constructor admits as it stands: the bound it holds by construction is the bound checked.
+      expect(mutationPlanOf({ mutants: plan.mutants, candidates: plan.candidates, cap: plan.cap })).toEqual({ ok: true, value: plan });
       // The selection is a subsequence of the full candidate list.
       const ids = all.mutants.map((mutant) => mutant.id);
       let cursor = 0;

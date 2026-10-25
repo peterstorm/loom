@@ -6,8 +6,9 @@
  */
 
 import { parseInvariantId, type InvariantId } from "../../src/core/invariant-id";
+import { parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
 import { ownerObligationOf, ownerScopeOf, type OwnerScope } from "../../src/core/owner-verification/obligations";
-import type { OwnerObligation, OwnerObligationFields } from "../../src/core/owner-verification/types";
+import type { MutantCap, OwnerObligation, OwnerObligationFields } from "../../src/core/owner-verification/types";
 
 /** An Invariant id the test spells out; throws on anything but `INV-N`. */
 export function invariantId(raw: string): InvariantId {
@@ -24,6 +25,13 @@ export function ownerObligation(spec: OwnerObligationSpec): OwnerObligation {
   const built = ownerObligationOf({ ...spec, invariant: invariantId(spec.invariant) });
   if (!built.ok) throw new Error(`fixture: ${built.error.kind} (${built.error.path})`);
   return built.value;
+}
+
+/** A mutant cap through its one parser; throws on anything but a positive integer. */
+export function capOf(raw: number): MutantCap {
+  const parsed = parseMutantCap(raw);
+  if (!parsed.ok) throw new Error(`fixture: ${raw} is not a mutant cap`);
+  return parsed.value;
 }
 
 /** The scope of a graph populated before owner verification: no stamp, so nothing is owed. */

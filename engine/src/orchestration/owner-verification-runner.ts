@@ -17,9 +17,10 @@
  *      green, every mutant, each through the frozen `affectedRunner` with the
  *      matrix test as its only file;
  *    - `invariantVerdict` assembles the verdict.
- * The owner check authority (the stamp's digest and the owed ids) arrives
- * from the gate, which took it from the authorized suite: this shell never
- * re-derives it.
+ * What runs is decided once, purely, before anything runs: the gate hands
+ * an `OwedVerification` (`ownerObservationDecision`: the owed obligations
+ * paired with the authorized stamp digest, never re-derived here), and
+ * `verificationRuns` fixes each obligation's run (mutate or exempt).
  *
  * 3. The real workspace's digest is observed again: any difference is the
  *    blocking `real-workspace-changed` failure (SC-004).
@@ -38,14 +39,14 @@
 import { posix } from "node:path";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
-import { failure, success, type DomainResult, type NonEmpty } from "../core/orchestration-contract/identity";
+import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
 import { coverageFrontier, coverageOverFiles, initialCoverageState } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
-import { verifyOwed } from "../core/owner-verification/obligations";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
-import type { OwnerCheckAuthority } from "../core/owner-check-authority";
+import { ownerAtBaseEntry } from "../core/owner-verification/ls-tree";
+import { verificationRuns, type ObligationRun, type OwedVerification } from "../core/owner-verification/owed-verification";
 import { classifyBaseline, classifyMutantRun } from "../core/owner-verification/outcome";
 import type {
   CoverageVerdict,
@@ -61,6 +62,7 @@ import type {
 } from "../core/owner-verification/types";
 import { invariantVerdict, mutationBoundMs, type MutantResult, type MutationEvidence } from "../core/owner-verification/verdict";
 import { parseAuthorizedWaveCompletionCheck, type AuthorizedWaveCompletionCheck } from "../core/completion-suite";
+import { parseReviewPath } from "../core/review-packet";
 import { changedHeadLines } from "../core/unified-diff";
 import { affectedRunnerCheck, type AffectedRunner, type FrozenVerificationManifest } from "../core/verification-manifest";
 import type { TaskGraph } from "../types";
@@ -68,22 +70,23 @@ import { runGit } from "../utils/git-execution-policy";
 import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 import { runProjectCommandAt, type CommandExecutionResult } from "./completion-check-runner";
-import { withMutationWorkspace, type MutationWorkspace } from "./owner-mutation-workspace";
+import { withMutationWorkspace, type MutationWorkspace, type OwnerVariant } from "./owner-mutation-workspace";
 
 export type OwnerVerificationInput = Readonly<{
   /** The real, reviewed workspace. */
   root: CanonicalRepositoryRoot;
   graph: TaskGraph;
   wave: number;
-  /** The owner check the gate authorized: the stamp's digest the observation is bound to. */
-  authority: OwnerCheckAuthority;
-  /** The obligations the Wave owes (`ownerVerificationOwed`), in stamp order. */
-  owed: NonEmpty<OwnerObligation>;
+  /**
+   * The obligations the Wave owes, in stamp order, paired with the stamp digest
+   * the observation is bound to: built only by the gate's
+   * `ownerObservationDecision`, so they agree with the check it authorized.
+   */
+  owed: OwedVerification;
   manifest: FrozenVerificationManifest;
   /** The real workspace's Git-visible digest (`observeCurrentWaveWorkspace`). */
   observeWorkspace: () => DomainResult<ArtifactDigest, string>;
 }>;
-
 
 const infrastructure = (kind: OwnerInfrastructureFailureKind, detail: string): OwnerInfrastructureFailure => ({ kind, detail });
 
@@ -156,7 +159,7 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
   if (first !== undefined) return failure(first);
   return aliases.ok
     ? aliases
-    : failure(infrastructure("plan-unreadable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error}`));
+    : failure(infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error}`));
 }
 
 function coverage(root: CanonicalRepositoryRoot, obligation: OwnerObligation): CoverageVerdict {
@@ -205,10 +208,10 @@ function resolveWaveBase(root: CanonicalRepositoryRoot, owner: string, base: Res
 function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: string): DomainResult<string | null, OwnerInfrastructureFailure> {
   const listed = gitText(root, ["ls-tree", "-z", base, "--", owner]);
   if (!listed.ok) return failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} cannot be listed: ${listed.error}`));
-  const entry = /^\d+ blob ([0-9a-f]+)\t/.exec(listed.value);
-  if (listed.value === "") return success(null);
-  if (entry === null) return failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} is not a file`));
-  const blob = gitText(root, ["cat-file", "blob", entry[1]!]);
+  const entry = ownerAtBaseEntry(listed.value);
+  if (entry.kind === "absent") return success(null);
+  if (entry.kind === "not-a-file") return failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} is not a file`));
+  const blob = gitText(root, ["cat-file", "blob", entry.blob]);
   return blob.ok ? success(blob.value) : failure(infrastructure("missing-wave-base", `${owner} at the Wave base ${base} cannot be read: ${blob.error}`));
 }
 
@@ -224,7 +227,7 @@ function ownerAtBase(root: CanonicalRepositoryRoot, base: string, owner: string)
  */
 export function matrixTestRunOf(execution: CommandExecutionResult, elapsedMs: number): MatrixTestRun {
   if (!execution.ok) return { kind: "spawn-failed", message: `${execution.error.kind}: ${execution.error.message}` };
-  const value = execution.value;
+  const value = execution.value.execution;
   if (value.kind === "spawn-failed") return { kind: "spawn-failed", message: value.process.message };
   if (value.process.timedOut) return { kind: "timed-out", elapsedMs };
   const report = value.report;
@@ -253,28 +256,37 @@ function matrixTestCommand(runner: AffectedRunner, matrixTest: string): DomainRe
   return clamped.value.kind === "project-command" ? success(clamped.value) : failure("the clamped runner command is not a project command");
 }
 
-async function runOnce(workspace: MutationWorkspace, command: MatrixTestCommand, ownerText: string | null): Promise<MatrixTestRun> {
-  return workspace.runWithOwner(ownerText, async (at) => {
+async function runOnce(workspace: MutationWorkspace, command: MatrixTestCommand, owner: OwnerVariant): Promise<MatrixTestRun> {
+  return workspace.runWithOwner(owner, async (at) => {
     const started = Date.now();
     const execution = await runProjectCommandAt(command, at);
     return matrixTestRunOf(execution, Date.now() - started);
   });
 }
 
-/** The baseline, then (only when green) each mutant in plan order; the first infrastructure failure ends the run. */
-async function runPlan(
-  workspace: MutationWorkspace,
-  command: MatrixTestCommand,
-  obligation: OwnerObligation,
+/** One matrix-test run with the owner's bytes as `owner` says: the port `runPlan` sequences. */
+export type RunMatrixTest = (owner: OwnerVariant) => Promise<MatrixTestRun>;
+
+const BASELINE: OwnerVariant = Object.freeze({ kind: "baseline" });
+
+/**
+ * The mutation sequencing policy: the baseline first; with no plan (the
+ * owner is unchanged in the Wave) nothing more; otherwise, only when the
+ * baseline is green, each mutant in plan order, and the first infrastructure
+ * failure ends the run.
+ */
+export async function runPlan(
+  run: RunMatrixTest,
+  matrixTest: string,
   ownerText: string,
   plan: MutationPlan | null,
 ): Promise<MutationEvidence> {
-  const baseline = classifyBaseline(await runOnce(workspace, command, null), obligation.matrixTest);
+  const baseline = classifyBaseline(await run(BASELINE), matrixTest);
   if (plan === null) return { kind: "owner-unchanged", baseline };
   if (baseline.kind !== "green") return { kind: "owner-changed", baseline, plan, results: [] };
   const results: MutantResult[] = [];
   for (const mutant of plan.mutants) {
-    const outcome = classifyMutantRun(await runOnce(workspace, command, applyMutant(ownerText, mutant)), obligation.matrixTest);
+    const outcome = classifyMutantRun(await run({ kind: "mutant", text: applyMutant(ownerText, mutant) }), matrixTest);
     if (outcome.kind === "infrastructure") return { kind: "infrastructure", failure: outcome.failure };
     results.push({ mutant, outcome });
   }
@@ -310,17 +322,26 @@ function planMutation(input: OwnerVerificationInput, obligation: OwnerObligation
   return success({ ownerText, plan: plan.value });
 }
 
-async function mutationEvidence(input: OwnerVerificationInput, obligation: OwnerObligation, runner: AffectedRunner): Promise<MutationEvidence> {
+type MutateRun = Extract<ObligationRun, { readonly kind: "mutate" }>;
+
+async function mutationEvidence(input: OwnerVerificationInput, { obligation, runner }: MutateRun): Promise<MutationEvidence> {
   const command = matrixTestCommand(runner, obligation.matrixTest);
   if (!command.ok) {
     return { kind: "infrastructure", failure: infrastructure("runner-missing", `the affectedRunner cannot run ${obligation.matrixTest}: ${command.error}`) };
   }
+  const ownerPath = parseReviewPath(obligation.owner, "owner path");
+  if (!ownerPath.ok) return { kind: "infrastructure", failure: infrastructure("worktree-failed", ownerPath.errors.join("; ")) };
   const planned = planMutation(input, obligation);
   if (!planned.ok) return { kind: "infrastructure", failure: planned.error };
   try {
     const ran = await withMutationWorkspace(
-      { repositoryRoot: input.root, ownerPath: obligation.owner, reportPath: runner.report.path, runnerCwd: runner.cwd },
-      (workspace) => runPlan(workspace, command.value, obligation, planned.value.ownerText, planned.value.plan),
+      { repositoryRoot: input.root, ownerPath: ownerPath.value, reportPath: runner.report.path, runnerCwd: runner.cwd },
+      (workspace) => runPlan(
+        (owner) => runOnce(workspace, command.value, owner),
+        obligation.matrixTest,
+        planned.value.ownerText,
+        planned.value.plan,
+      ),
     );
     return ran.ok ? ran.value : { kind: "infrastructure", failure: ran.error };
   } catch (cause) {
@@ -352,18 +373,15 @@ async function workspaceDigest(input: OwnerVerificationInput, when: "before" | "
 
 type ObligationRuns = Readonly<{ verdicts: readonly InvariantVerdict[]; plans: ReadonlyMap<InvariantId, MutationPlan> }>;
 
-/** Coverage then mutation per owed obligation, in stamp order; only the obligations `verifyOwed` selects run mutants. */
-async function verifyObligations(input: OwnerVerificationInput, runner: AffectedRunner | undefined): Promise<ObligationRuns> {
+/** Coverage then, for a `mutate` run, mutation per owed obligation, in stamp order. */
+async function verifyObligations(input: OwnerVerificationInput, runs: readonly ObligationRun[]): Promise<ObligationRuns> {
   const verdicts: InvariantVerdict[] = [];
   const plans = new Map<InvariantId, MutationPlan>();
-  const verifying = verifyOwed(input.owed);
-  for (const obligation of input.owed) {
-    const covered = coverage(input.root, obligation);
-    const evidence: MutationEvidence = !verifying.includes(obligation) || runner === undefined
-      ? { kind: "exempt" }
-      : await mutationEvidence(input, obligation, runner);
-    if (evidence.kind === "owner-changed") plans.set(obligation.invariant, evidence.plan);
-    verdicts.push(invariantVerdict(obligation, covered, evidence));
+  for (const run of runs) {
+    const covered = coverage(input.root, run.obligation);
+    const evidence: MutationEvidence = run.kind === "exempt" ? { kind: "exempt" } : await mutationEvidence(input, run);
+    if (evidence.kind === "owner-changed") plans.set(run.obligation.invariant, evidence.plan);
+    verdicts.push(invariantVerdict(run.obligation, covered, evidence));
   }
   return { verdicts, plans };
 }
@@ -375,26 +393,24 @@ async function verifyObligations(input: OwnerVerificationInput, runner: Affected
  * workspace outranks the thrown failure.
  */
 async function verifyWave(input: OwnerVerificationInput): Promise<OwnerVerificationObservation> {
-  const runner = input.manifest.affectedRunner;
-  const verifying = verifyOwed(input.owed);
-  if (verifying.length > 0 && runner === undefined) {
-    return unavailable("runner-missing", `${verifying.map((obligation) => obligation.invariant).join(", ")} owe mutation verification, but the frozen verification manifest declares no affectedRunner`);
-  }
+  const planned = verificationRuns(input.owed, input.manifest.affectedRunner);
+  if (!planned.ok) return unavailableBecause(planned.error);
+  const { runs, verifying, perRunMs } = planned.value;
 
   const before = await workspaceDigest(input, "before");
   if (!before.ok) return unavailableBecause(before.error);
-  const runs = await guarded("verifying the owed obligations", () => verifyObligations(input, runner));
+  const ran = await guarded("verifying the owed obligations", () => verifyObligations(input, runs));
   const after = await workspaceDigest(input, "after");
   if (!after.ok) return unavailableBecause(after.error);
   if (after.value !== before.value) {
     return unavailable("real-workspace-changed", `the real workspace digest changed from ${before.value} to ${after.value} while owner verification ran`);
   }
-  if (!runs.ok) return unavailableBecause(runs.error);
+  if (!ran.ok) return unavailableBecause(ran.error);
   return {
     kind: "verified",
-    obligationsDigest: input.authority.obligationsDigest,
-    boundMs: mutationBoundMs(verifying, runs.value.plans, runner === undefined ? 0 : mutantTimeoutMs(runner.timeoutMs)),
-    verdicts: runs.value.verdicts,
+    obligationsDigest: input.owed.obligationsDigest,
+    boundMs: mutationBoundMs(verifying, ran.value.plans, perRunMs),
+    verdicts: ran.value.verdicts,
   };
 }
 

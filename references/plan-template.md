@@ -286,7 +286,9 @@ Per component, not global.
   that writes JUnit; population refuses it otherwise.
 - **Mutation exemption** — `**Mutation exemption:** <reason>` on an owned
   invariant skips only the mutation half; sibling coverage still runs. The
-  reason is mandatory. A blank reason, or the line on an unowned invariant, is
+  reason is mandatory. A blank reason, a placeholder reason (`none`, `n/a`,
+  `na`, `tbd`, `todo`, `-`, `—`, `null`, `nil`, `no`, `nothing`, in any case,
+  trailing punctuation ignored), or the line on an unowned invariant, is
   malformed ownership and validation refuses the plan. Use it only when the
   owner's changed lines cannot be meaningfully killed (timing-only code, say),
   and say why.

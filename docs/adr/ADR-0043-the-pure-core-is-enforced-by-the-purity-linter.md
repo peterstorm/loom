@@ -9,8 +9,9 @@ interview Q4d.
 ## Context
 G5b adds owner verification. It finds which tests cover an owner module's siblings, plans deterministic
 mutations of the owner, runs the tests against each mutant and turns the results into a verdict. The
-decisions (coverage resolution, mutation planning, outcome classification, verdict assembly, obligations,
-the owner map and the status projection) live in `engine/src/core/owner-verification/`. The work that has
+decisions (coverage resolution, mutation planning, outcome classification, verdict assembly, obligations, suite
+authority, plan integrity, what an owner check runs, the owner map and the status projection) live in
+`engine/src/core/owner-verification/`. The work that has
 effects (creating worktrees, spawning runner processes, reading files) lives in
 `engine/src/orchestration/owner-mutation-workspace.ts` and
 `engine/src/orchestration/owner-verification-runner.ts`. The split only holds if something stops a core
@@ -76,13 +77,21 @@ Concretely:
   entry for `types.ts` once sat beside the directory entry; it was redundant (`isPureModule` treats the
   trailing-slash entry as a prefix, and the closure audit expands it), and the PR #131 review remediation
   removed it.
-- The pure leaves that the package shares with the rest of the engine are listed as exact entries in the
-  same list. `"engine/src/core/sibling-entry-point.ts"` is the `SiblingEntryPoint` shape that `types.ts`
-  and the owner-verification contract both name. `"engine/src/core/owner-check-authority.ts"` is the
-  `OwnerCheckAuthority` that the suite authorization (`core/verification-manifest.ts`) and
-  `core/owner-verification/obligations.ts` share. `"engine/src/core/invariant-id.ts"` is the branded
-  `InvariantId` that the plan model, the owner check authority and the owner-verification core share (PR #131).
-  All three are leaves so that neither side imports the other through them.
+- The pure modules outside the package that the owner-verification core imports are listed as five exact
+  entries in the same list, so the closure audit can follow the core's imports without leaving pure code:
+  - `"engine/src/core/plan-paths.ts"` holds the Invariant role and family rules over a plan's ownership
+    (G5a). The core reaches it through `obligations.ts` (INV-3).
+  - `"engine/src/core/parse-plan-models.ts"` is the plan grammar (`parsePlanModels`).
+    `owner-verification/plan-integrity.ts` renders its strays when the plan the gate re-reads is malformed
+    (PR #131).
+  - `"engine/src/core/sibling-entry-point.ts"` is the `SiblingEntryPoint` shape that `types.ts` and the
+    owner-verification contract both name.
+  - `"engine/src/core/owner-check-authority.ts"` is the `OwnerCheckAuthority` that the suite authorization
+    (`core/verification-manifest.ts`) and `core/owner-verification/obligations.ts` share.
+  - `"engine/src/core/invariant-id.ts"` is the branded `InvariantId` that the plan model, the owner check
+    authority and the owner-verification core share (PR #131).
+
+  The last three are shared leaves, so that neither side imports the other through them.
 - T3 enrolled the G5b family-site metric the same way, as the exact entry
   `"engine/src/core/family-sites.ts"`. Its fs shell is `engine/src/handlers/helpers/family-sites.ts` (see
   ADR-0041).
@@ -106,7 +115,11 @@ Concretely:
 - One purity mechanism covers the whole engine. The owner-verification core is held to exactly the same
   rule, capability grants and closure audit as the machine, acceptance-contract and red-then-green cores.
 - A new file added under `engine/src/core/owner-verification/` is pure by default. Nobody has to remember
-  to enroll it, and the closure audit picks it up through the directory expansion.
+  to enroll it, and the closure audit picks it up through the directory expansion. The PR #131 round-2
+  remediation relied on this: `repo-path.ts` (the repository-path rule coverage and `tsconfig-paths.ts`
+  share), `ls-tree.ts` (what `git ls-tree` says about the owner at the Wave base) and `owed-verification.ts`
+  (the gate's owner-observation decision and the runner's per-obligation run plan) moved decisions out of the
+  shell into the package with no edit to `DEFAULT_PURE_MODULES`.
 - The ban is applied to import specifiers (including `require` and dynamic forms) and banned globals, with
   narrow capability grants, rather than to arbitrary line text. There are fewer false positives and fewer
   evasions than with a project regex rule, but the lint is not evasion-proof: it scans text, so a computed

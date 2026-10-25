@@ -45,33 +45,44 @@ import { dirname, join } from "node:path";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import { statusPaths } from "../core/owner-verification/status-paths";
 import type { OwnerInfrastructureFailure } from "../core/owner-verification/types";
-import { parseReviewPath } from "../core/review-packet";
+import type { RepositoryRelativePath } from "../core/completion-suite";
+import type { ReviewPath } from "../core/review-packet";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../utils/git-execution-policy";
 import { describeGitOutcome, gitExitedWith } from "../utils/git-spawn-outcome";
 import { describeCause } from "../utils/describe-cause";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../utils/workspace-digest";
 
-/** What one isolated workspace is for: the real workspace, the one file a mutant rewrites, and the runner's report and cwd. */
+/**
+ * What one isolated workspace is for: the real workspace, the one file a
+ * mutant rewrites, and the runner's report and cwd. Every path is already
+ * parsed repository-relative (`ReviewPath`), so no spec names a path outside
+ * the worktree.
+ */
 export type MutationWorkspaceSpec = Readonly<{
   /** The real, reviewed workspace. It is only ever read. */
   repositoryRoot: CanonicalRepositoryRoot;
-  /** Repository-relative: the only file a run rewrites. */
-  ownerPath: string;
-  /** Repository-relative: deleted before every run, so a stale report can never be read as this run's. */
-  reportPath: string;
-  /** Repository-relative, or "."; its `node_modules` is shared beside the root's. */
-  runnerCwd: string;
+  /** The only file a run rewrites. */
+  ownerPath: ReviewPath;
+  /** Deleted before every run, so a stale report can never be read as this run's. */
+  reportPath: ReviewPath;
+  /** The runner's cwd, or "."; its `node_modules` is shared beside the root's. */
+  runnerCwd: RepositoryRelativePath;
 }>;
+
+/** The owner bytes one run sees: the Wave's own (the baseline), or a mutant's text. */
+export type OwnerVariant =
+  | Readonly<{ kind: "baseline" }>
+  | Readonly<{ kind: "mutant"; text: string }>;
 
 export type MutationWorkspace = Readonly<{
   /** The worktree's canonical root: where the runner's cwd and report resolve. */
   root: CanonicalRepositoryRoot;
   /**
-   * One run with the owner's bytes replaced by `ownerText` (or left as the
-   * Wave's for `null`, the baseline), the report deleted first, and the
-   * owner's original bytes restored afterwards, even when `execute` throws.
+   * One run with the owner's bytes as `owner` says (a mutant's text, or the
+   * Wave's own for the baseline), the report deleted first, and the owner's
+   * original bytes restored afterwards, even when `execute` throws.
    */
-  runWithOwner: <R>(ownerText: string | null, execute: (root: CanonicalRepositoryRoot) => Promise<R>) => Promise<R>;
+  runWithOwner: <R>(owner: OwnerVariant, execute: (root: CanonicalRepositoryRoot) => Promise<R>) => Promise<R>;
 }>;
 
 type Step<T> = DomainResult<T, string>;
@@ -85,12 +96,6 @@ function git(cwd: string, args: readonly string[]): Step<Buffer> {
   return gitExitedWith(outcome, [0])
     ? success(outcome.stdout)
     : failure(`git ${args[0] ?? ""} ${describeGitOutcome(outcome)}`);
-}
-
-/** A repository-relative path in canonical POSIX form, or why it is not one. */
-function relativePath(raw: string, label: string): Step<string> {
-  const parsed = parseReviewPath(raw, label);
-  return parsed.ok ? success(parsed.value) : failure(parsed.errors.join("; "));
 }
 
 const absolute = (root: string, path: string): string => (path === "." ? root : join(root, ...path.split("/")));
@@ -191,7 +196,7 @@ function restoreAndRethrow(restore: () => void, cause: unknown): never {
   throw cause;
 }
 
-function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: string, reportPath: string): MutationWorkspace {
+function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: ReviewPath, reportPath: ReviewPath): MutationWorkspace {
   const owner = absolute(root, ownerPath);
   const report = absolute(root, reportPath);
   const original = existsSync(owner) ? Uint8Array.from(readFileSync(owner)) : null;
@@ -201,13 +206,13 @@ function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: string, reportPat
   };
   return Object.freeze({
     root,
-    runWithOwner: async <R>(ownerText: string | null, execute: (at: CanonicalRepositoryRoot) => Promise<R>): Promise<R> => {
+    runWithOwner: async <R>(variant: OwnerVariant, execute: (at: CanonicalRepositoryRoot) => Promise<R>): Promise<R> => {
       rmSync(report, { force: true });
       let value: R;
       try {
-        if (ownerText !== null) {
+        if (variant.kind === "mutant") {
           mkdirSync(dirname(owner), { recursive: true });
-          writeFileSync(owner, ownerText);
+          writeFileSync(owner, variant.text);
         }
         value = await execute(root);
       } catch (cause) {
@@ -220,13 +225,6 @@ function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: string, reportPat
 }
 
 function open(spec: MutationWorkspaceSpec): DomainResult<Opened, OwnerInfrastructureFailure> {
-  const ownerPath = relativePath(spec.ownerPath, "owner path");
-  const reportPath = relativePath(spec.reportPath, "report path");
-  const runnerCwd = spec.runnerCwd === "." ? success(".") : relativePath(spec.runnerCwd, "runner cwd");
-  if (!ownerPath.ok || !reportPath.ok || !runnerCwd.ok) {
-    return failure(worktreeFailed([ownerPath, reportPath, runnerCwd].flatMap((step) => step.ok ? [] : [step.error]).join("; ")));
-  }
-
   let directory: string;
   try {
     directory = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-owner-mutation-")));
@@ -242,12 +240,12 @@ function open(spec: MutationWorkspaceSpec): DomainResult<Opened, OwnerInfrastruc
   if (!added.ok) return abandon(`the isolated copy could not be made: ${added.error}`);
   const overlaid = overlay(spec.repositoryRoot, directory);
   if (!overlaid.ok) return abandon(overlaid.error);
-  const shared = shareNodeModules(spec.repositoryRoot, directory, runnerCwd.value);
+  const shared = shareNodeModules(spec.repositoryRoot, directory, spec.runnerCwd);
   if (!shared.ok) return abandon(shared.error);
   const root = parseCanonicalRepositoryRoot(directory);
   if (!root.ok) return abandon(`the isolated copy's root is not canonical: ${"message" in root.error ? root.error.message : root.error.kind}`, shared.value);
   try {
-    return success({ directory, links: shared.value, workspace: workspaceAt(root.value, ownerPath.value, reportPath.value) });
+    return success({ directory, links: shared.value, workspace: workspaceAt(root.value, spec.ownerPath, spec.reportPath) });
   } catch (cause) {
     return abandon(`the isolated copy's owner could not be read: ${describeCause(cause)}`, shared.value);
   }

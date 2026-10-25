@@ -39,10 +39,8 @@ import {
 import type {
   ActiveWaveGateRegistration,
   CompletedWaveGateRegistration,
-  MutationPolicy,
   OrphanedWaveGateRetirement,
   OwnerObligation,
-  SiblingEntryPoint,
   WaveReopeningAudit,
   SpecCheck,
   SpecTraceAmendment,
@@ -129,12 +127,10 @@ import {
   type AcceptanceContract,
   type ContractWriterProblem,
 } from "./core/acceptance-contract";
-import { parseInvariantId, type InvariantId } from "./core/invariant-id";
 import {
   ownerCheckAuthority,
-  ownerObligationOf,
   ownerScopeOf,
-  renderOwnerObligationError,
+  parseOwnerObligations,
   type OwnerCheckAuthority,
 } from "./core/owner-verification/obligations";
 
@@ -2281,116 +2277,15 @@ function parseAcceptanceContractsShape(raw: unknown): ParseResult<readonly Accep
   return parsed.ok ? parseOk(parsed.value) : parseErr(parsed.error);
 }
 
-const OWNER_OBLIGATION_FIELDS = ["invariant", "title", "statement", "owner", "siblings", "matrixTest", "mutation"] as const;
-const SIBLING_ENTRY_POINT_FIELDS = ["path", "note"] as const;
-
-/** Text with a non-whitespace character: every name and path an obligation carries. */
-function nonBlankText(raw: unknown, label: string): ParseResult<string> {
-  return typeof raw === "string" && raw.trim() !== "" ? parseOk(raw) : parseErr(`${label} must be non-blank text`);
-}
-
-/** An Invariant id, minted through its one parser. */
-function invariantIdText(raw: unknown, label: string): ParseResult<InvariantId> {
-  const id = typeof raw === "string" ? parseInvariantId(raw) : null;
-  return id !== null && id.ok ? parseOk(id.value) : parseErr(`${label} must be an Invariant id (INV-N)`);
-}
-
-function nullableText(raw: unknown, label: string): ParseResult<string | null> {
-  return raw === null || typeof raw === "string" ? parseOk(raw) : parseErr(`${label} must be a string or null`);
-}
-
-/** `verify`, or `exempt` with a non-blank reason: the plan grammar's two
- *  states, so a hand-edited blank exemption never loads as a silent opt-out. */
-function parseMutationPolicy(raw: unknown, label: string): ParseResult<MutationPolicy> {
-  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
-  if (raw.kind === "verify") {
-    const fieldsError = exactFieldsError(raw, ["kind"], [], label);
-    return fieldsError === null ? parseOk(Object.freeze({ kind: "verify" as const })) : parseErr(fieldsError);
-  }
-  if (raw.kind === "exempt") {
-    const fieldsError = exactFieldsError(raw, ["kind", "reason"], [], label);
-    if (fieldsError !== null) return parseErr(fieldsError);
-    const reason = nonBlankText(raw.reason, `${label}.reason`);
-    return reason.ok ? parseOk(Object.freeze({ kind: "exempt" as const, reason: reason.value })) : reason;
-  }
-  return parseErr(`${label}.kind must be verify or exempt`);
-}
-
-function parseSiblingEntryPoint(raw: unknown, label: string): ParseResult<SiblingEntryPoint> {
-  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
-  const fieldsError = exactFieldsError(raw, SIBLING_ENTRY_POINT_FIELDS, [], label);
-  if (fieldsError !== null) return parseErr(fieldsError);
-  const path = nonBlankText(raw.path, `${label}.path`);
-  if (!path.ok) return path;
-  const note = nullableText(raw.note, `${label}.note`);
-  return note.ok ? parseOk(Object.freeze({ path: path.value, note: note.value })) : note;
-}
-
-function parseSiblingEntryPoints(raw: unknown, label: string): ParseResult<readonly SiblingEntryPoint[]> {
-  if (!Array.isArray(raw)) return parseErr(`${label} must be an array`);
-  const siblings: SiblingEntryPoint[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const sibling = parseSiblingEntryPoint(entry, `${label}[${index}]`);
-    if (!sibling.ok) return sibling;
-    siblings.push(sibling.value);
-  }
-  return parseOk(Object.freeze(siblings));
-}
-
-/**
- * One stamped Owner Obligation as an exact, fresh, frozen record, built
- * through its one constructor: a stamp the plan grammar could never derive (a
- * path playing two roles) is refused here, not first noticed at the gate.
- */
-function parseOwnerObligation(raw: unknown, label: string): ParseResult<OwnerObligation> {
-  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
-  const fieldsError = exactFieldsError(raw, OWNER_OBLIGATION_FIELDS, [], label);
-  if (fieldsError !== null) return parseErr(fieldsError);
-  const invariant = invariantIdText(raw.invariant, `${label}.invariant`);
-  if (!invariant.ok) return invariant;
-  const title = nonBlankText(raw.title, `${label}.title`);
-  if (!title.ok) return title;
-  const statement = nullableText(raw.statement, `${label}.statement`);
-  if (!statement.ok) return statement;
-  const owner = nonBlankText(raw.owner, `${label}.owner`);
-  if (!owner.ok) return owner;
-  const siblings = parseSiblingEntryPoints(raw.siblings, `${label}.siblings`);
-  if (!siblings.ok) return siblings;
-  const matrixTest = nonBlankText(raw.matrixTest, `${label}.matrixTest`);
-  if (!matrixTest.ok) return matrixTest;
-  const mutation = parseMutationPolicy(raw.mutation, `${label}.mutation`);
-  if (!mutation.ok) return mutation;
-  const obligation = ownerObligationOf({
-    invariant: invariant.value,
-    title: title.value,
-    statement: statement.value,
-    owner: owner.value,
-    siblings: siblings.value,
-    matrixTest: matrixTest.value,
-    mutation: mutation.value,
-  });
-  return obligation.ok ? parseOk(obligation.value) : parseErr(`${label}: ${renderOwnerObligationError(obligation.error)}`);
-}
-
 /**
  * The population stamp (AD-2). Absent stays absent: a graph populated before
  * owner verification owes nothing (FR-004). Present, `[]` included, it is
- * proven entry by entry, and an Invariant appears at most once, since every
- * selection reads it by id.
+ * parsed by the owner-verification core beside the obligation's constructor.
  */
-function parseOwnerObligations(raw: unknown): ParseResult<readonly OwnerObligation[] | undefined> {
+function parseOwnerObligationsField(raw: unknown): ParseResult<readonly OwnerObligation[] | undefined> {
   if (raw === undefined) return parseOk(undefined);
-  if (!Array.isArray(raw)) return parseErr("owner_obligations must be an array");
-  const obligations: OwnerObligation[] = [];
-  for (const [index, entry] of raw.entries()) {
-    const obligation = parseOwnerObligation(entry, `owner_obligations[${index}]`);
-    if (!obligation.ok) return obligation;
-    if (obligations.some(({ invariant }) => invariant === obligation.value.invariant)) {
-      return parseErr(`owner_obligations names ${obligation.value.invariant} more than once`);
-    }
-    obligations.push(obligation.value);
-  }
-  return parseOk(Object.freeze(obligations));
+  const parsed = parseOwnerObligations(raw);
+  return parsed.ok ? parseOk(parsed.value) : parseErr(parsed.error);
 }
 
 /**
@@ -2576,7 +2471,7 @@ function parseTaskGraphObligationFields(
 ): ParseResult<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }> {
   const acceptanceContracts = bindAcceptanceContracts(contractShapes, tasks as Record<string, unknown>[]);
   if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
-  const ownerObligations = parseOwnerObligations(obj.owner_obligations);
+  const ownerObligations = parseOwnerObligationsField(obj.owner_obligations);
   if (!ownerObligations.ok) return parseErr(ownerObligations.error);
   return parseOk({ acceptanceContracts: acceptanceContracts.value, ownerObligations: ownerObligations.value });
 }

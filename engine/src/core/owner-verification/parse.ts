@@ -35,8 +35,10 @@ type Parsed<T> = DomainResult<T, OwnerVerificationParseError>;
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const freezeArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
-const success = <T>(value: T): Parsed<T> => freeze({ ok: true, value });
-const failure = <T>(errors: readonly string[]): Parsed<T> => freeze({
+/** A parsed value, frozen. */
+const parsed = <T>(value: T): Parsed<T> => freeze({ ok: true, value });
+/** A refusal carrying every diagnostic, frozen; never empty. */
+const refused = <T>(errors: readonly string[]): Parsed<T> => freeze({
   ok: false,
   error: freeze({ errors: freezeArray(errors.length === 0 ? ["owner verification is invalid"] : errors) as NonEmpty<string> }),
 });
@@ -44,19 +46,19 @@ const errorsOf = (results: readonly Parsed<unknown>[]): string[] => results.flat
 
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
   const record = parseExactRecord(raw, fields, path);
-  return record.ok ? success(record.value) : failure(exactRecordErrors(record, path, "an object"));
+  return record.ok ? parsed(record.value) : refused(exactRecordErrors(record, path, "an object"));
 }
 
 function collect<T>(results: readonly Parsed<T>[]): Parsed<readonly T[]> {
   const errors = errorsOf(results);
   return errors.length === 0
-    ? success(freezeArray(results.flatMap((result) => result.ok ? [result.value] : [])))
-    : failure(errors);
+    ? parsed(freezeArray(results.flatMap((result) => result.ok ? [result.value] : [])))
+    : refused(errors);
 }
 
 function parseDigest(raw: unknown, path: string): Parsed<ArtifactDigest> {
-  const parsed = parseArtifactDigest(raw);
-  return parsed.ok ? success(parsed.value) : failure([`${path}: ${parsed.error.message}`]);
+  const digest = parseArtifactDigest(raw);
+  return digest.ok ? parsed(digest.value) : refused([`${path}: ${digest.error.message}`]);
 }
 
 /** Every infrastructure kind the owner check names; the record keeps the set exhaustive. */
@@ -66,6 +68,7 @@ const OWNER_INFRASTRUCTURE_KINDS = {
   "matrix-test-not-collected": true, "exit-unexplained-by-report": true, "baseline-timed-out": true,
   "missing-wave-base": true, "coverage-bound-exceeded": true, "real-workspace-changed": true,
   "repository-file-unreadable": true, "unexpected-error": true, "owner-unparseable": true, "no-valid-mutants": true,
+  "alias-config-unresolvable": true,
 } as const satisfies Record<OwnerInfrastructureFailureKind, true>;
 
 /** The fixed mutation operators; the record keeps the set exhaustive. */
@@ -78,33 +81,33 @@ const isKey = <K extends string>(keys: Readonly<Record<K, true>>, raw: unknown):
   typeof raw === "string" && Object.hasOwn(keys, raw);
 
 function parseText(raw: unknown, path: string): Parsed<string> {
-  return typeof raw === "string" && raw.trim().length > 0 ? success(raw) : failure([`${path} must be a non-blank string`]);
+  return typeof raw === "string" && raw.trim().length > 0 ? parsed(raw) : refused([`${path} must be a non-blank string`]);
 }
 
 /** An Invariant id, minted through its one parser. */
 function parseInvariantIdText(raw: unknown, path: string): Parsed<InvariantId> {
   const id = typeof raw === "string" ? parseInvariantId(raw) : null;
-  return id !== null && id.ok ? success(id.value) : failure([`${path} must be an Invariant id (INV-N)`]);
+  return id !== null && id.ok ? parsed(id.value) : refused([`${path} must be an Invariant id (INV-N)`]);
 }
 
 /** Owed Invariant ids: each an Invariant id, each once, in the authorized (plan) order. */
 export function parseOwedInvariantIds(raw: unknown, path: string): Parsed<readonly InvariantId[]> {
-  if (!Array.isArray(raw)) return failure([`${path} must be an array`]);
+  if (!Array.isArray(raw)) return refused([`${path} must be an array`]);
   const ids = collect(raw.map((id, index) => parseInvariantIdText(id, `${path}[${index}]`)));
   if (!ids.ok) return ids;
-  return new Set(ids.value).size === ids.value.length ? ids : failure([`${path} names an Invariant more than once`]);
+  return new Set(ids.value).size === ids.value.length ? ids : refused([`${path} names an Invariant more than once`]);
 }
 
 function parseTexts(raw: unknown, path: string): Parsed<NonEmpty<string>> {
-  if (!Array.isArray(raw) || raw.length === 0) return failure([`${path} must be a non-empty array`]);
+  if (!Array.isArray(raw) || raw.length === 0) return refused([`${path} must be a non-empty array`]);
   const texts = collect(raw.map((entry, index) => parseText(entry, `${path}[${index}]`)));
-  return texts.ok ? success(texts.value as NonEmpty<string>) : texts;
+  return texts.ok ? parsed(texts.value as NonEmpty<string>) : texts;
 }
 
 function parseCount(raw: unknown, path: string): Parsed<number> {
   return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0
-    ? success(raw)
-    : failure([`${path} must be a non-negative safe integer`]);
+    ? parsed(raw)
+    : refused([`${path} must be a non-negative safe integer`]);
 }
 
 function parseOwnerInfrastructureFailure(raw: unknown, path: string): Parsed<OwnerInfrastructureFailure> {
@@ -112,9 +115,9 @@ function parseOwnerInfrastructureFailure(raw: unknown, path: string): Parsed<Own
   if (!record.ok) return record;
   const detail = parseText(record.value.detail, `${path}.detail`);
   if (!isKey(OWNER_INFRASTRUCTURE_KINDS, record.value.kind)) {
-    return failure([`${path}.kind must be an owner-verification infrastructure kind`, ...errorsOf([detail])]);
+    return refused([`${path}.kind must be an owner-verification infrastructure kind`, ...errorsOf([detail])]);
   }
-  return detail.ok ? success(freeze({ kind: record.value.kind, detail: detail.value })) : detail;
+  return detail.ok ? parsed(freeze({ kind: record.value.kind, detail: detail.value })) : detail;
 }
 
 /** A `{ kind, <field> }` variant whose one field the given parser reads. */
@@ -127,20 +130,20 @@ function parseTagged<T, V extends object>(
 ): Parsed<V> {
   const record = exactRecord(raw, ["kind", field], path);
   if (!record.ok) return record;
-  const parsed = parse(record.value[field], `${path}.${field}`);
-  return parsed.ok ? success(freeze(build(parsed.value))) : parsed;
+  const value = parse(record.value[field], `${path}.${field}`);
+  return value.ok ? parsed(freeze(build(value.value))) : value;
 }
 
 function parseCoverageVerdict(raw: unknown, path: string): Parsed<CoverageVerdict> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return refused([`${path} must be an object`]);
   if (raw.kind === "covered") {
     const record = exactRecord(raw, ["kind"], path);
-    return record.ok ? success(freeze({ kind: "covered" })) : record;
+    return record.ok ? parsed(freeze({ kind: "covered" })) : record;
   }
   if (raw.kind === "missing") return parseTagged(raw, path, "paths", parseTexts, (paths): CoverageVerdict => ({ kind: "missing", paths }));
   return raw.kind === "infrastructure"
     ? parseTagged(raw, path, "failure", parseOwnerInfrastructureFailure, (failure): CoverageVerdict => ({ kind: "infrastructure", failure }))
-    : failure([`${path}.kind must be covered, missing or infrastructure`]);
+    : refused([`${path}.kind must be covered, missing or infrastructure`]);
 }
 
 function parseSurvivor(raw: unknown, path: string): Parsed<SurvivorDiagnostic> {
@@ -155,11 +158,11 @@ function parseSurvivor(raw: unknown, path: string): Parsed<SurvivorDiagnostic> {
   }
   if (typeof original !== "string" || typeof replacement !== "string") errors.push(`${path}.original and .replacement must be strings`);
   return errors.length === 0 && id.ok && isKey(MUTATION_OPERATORS, operator)
-    ? success(freeze({
+    ? parsed(freeze({
         mutantId: id.value, operator, line: line as number, column: column as number,
         original: original as string, replacement: replacement as string,
       }))
-    : failure(errors);
+    : refused(errors);
 }
 
 const VERIFIED_MUTATION_FIELDS = ["kind", "generated", "killed", "timedOut", "invalid", "survivors", "unmutated", "ownerChangedInWave"] as const;
@@ -176,24 +179,24 @@ function parseVerifiedMutation(raw: unknown, path: string): Parsed<MutationVerdi
   if (survivors.kind === "not-array") errors.push(`${path}.survivors must be an array`);
   else errors.push(...survivors.errors);
   if (typeof record.value.ownerChangedInWave !== "boolean") errors.push(`${path}.ownerChangedInWave must be a boolean`);
-  if (errors.length > 0 || !counts.ok || survivors.kind === "not-array") return failure(errors);
+  if (errors.length > 0 || !counts.ok || survivors.kind === "not-array") return refused(errors);
   const [generated, killed, timedOut, invalid, unmutated] = counts.value as readonly number[];
   const built = verifiedMutationOf({
     killed: killed!, timedOut: timedOut!, invalid: invalid!, survivors: freezeArray(survivors.values),
     unmutated: unmutated!, ownerChangedInWave: record.value.ownerChangedInWave as boolean,
   });
-  if (!built.ok) return failure([`${path} is not a verified mutation run: ${built.error.kind}`]);
-  return built.value.generated === generated ? success(built.value) : failure([`${path}.generated must equal the mutants its tallies count`]);
+  if (!built.ok) return refused([`${path} is not a verified mutation run: ${built.error.kind}`]);
+  return built.value.generated === generated ? parsed(built.value) : refused([`${path}.generated must equal the mutants its tallies count`]);
 }
 
 function parseMutationVerdict(raw: unknown, path: string): Parsed<MutationVerdict> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return refused([`${path} must be an object`]);
   return match(raw.kind)
     .with("exempt", () => parseTagged(raw, path, "reason", parseText, (reason): MutationVerdict => ({ kind: "exempt", reason })))
     .with("red-baseline", () => parseTagged(raw, path, "failures", parseTexts, (failures): MutationVerdict => ({ kind: "red-baseline", failures })))
     .with("infrastructure", () => parseTagged(raw, path, "failure", parseOwnerInfrastructureFailure, (failure): MutationVerdict => ({ kind: "infrastructure", failure })))
     .with("verified", () => parseVerifiedMutation(raw, path))
-    .otherwise(() => failure([`${path}.kind must be exempt, red-baseline, verified or infrastructure`]));
+    .otherwise(() => refused([`${path}.kind must be exempt, red-baseline, verified or infrastructure`]));
 }
 
 function parseInvariantVerdict(raw: unknown, path: string): Parsed<InvariantVerdict> {
@@ -207,11 +210,11 @@ function parseInvariantVerdict(raw: unknown, path: string): Parsed<InvariantVerd
   const mutation = parseMutationVerdict(record.value.mutation, `${path}.mutation`);
   const errors = errorsOf([invariant, title, owner, matrixTest, coverage, mutation]);
   return errors.length === 0 && invariant.ok && title.ok && owner.ok && matrixTest.ok && coverage.ok && mutation.ok
-    ? success(freeze({
+    ? parsed(freeze({
         invariant: invariant.value, title: title.value, owner: owner.value, matrixTest: matrixTest.value,
         coverage: coverage.value, mutation: mutation.value,
       }))
-    : failure(errors);
+    : refused(errors);
 }
 
 function parseVerifiedObservation(raw: UnknownRecord, path: string): Parsed<OwnerVerificationObservation> {
@@ -224,19 +227,19 @@ function parseVerifiedObservation(raw: UnknownRecord, path: string): Parsed<Owne
   const errors = errorsOf([obligations, boundMs]);
   if (verdicts.kind === "not-array") errors.push(`${path}.verdicts must be an array`);
   else errors.push(...verdicts.errors);
-  if (errors.length > 0 || !obligations.ok || !boundMs.ok || verdicts.kind === "not-array") return failure(errors);
+  if (errors.length > 0 || !obligations.ok || !boundMs.ok || verdicts.kind === "not-array") return refused(errors);
   const ids = verdicts.values.map(({ invariant }) => invariant);
-  if (new Set(ids).size !== ids.length) return failure([`${path}.verdicts names an Invariant more than once`]);
-  return success(freeze({
+  if (new Set(ids).size !== ids.length) return refused([`${path}.verdicts names an Invariant more than once`]);
+  return parsed(freeze({
     kind: "verified", obligationsDigest: obligations.value, boundMs: boundMs.value, verdicts: freezeArray(verdicts.values),
   }));
 }
 
 /** The owner-verification observation at `path`, rebuilt in its canonical shape: `verified` or `unavailable`. */
 export function parseOwnerVerificationObservation(raw: unknown, path: string): Parsed<OwnerVerificationObservation> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return refused([`${path} must be an object`]);
   if (raw.kind === "verified") return parseVerifiedObservation(raw, path);
   return raw.kind === "unavailable"
     ? parseTagged(raw, path, "failure", parseOwnerInfrastructureFailure, (failure): OwnerVerificationObservation => ({ kind: "unavailable", failure }))
-    : failure([`${path}.kind must be verified or unavailable`]);
+    : refused([`${path}.kind must be verified or unavailable`]);
 }

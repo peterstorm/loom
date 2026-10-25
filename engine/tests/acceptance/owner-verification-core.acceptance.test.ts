@@ -220,15 +220,16 @@ const planOf = (ownerText: string, changedLines: ReadonlySet<number>, cap = 24):
 /** The sites the cap left unmutated, derived from the plan. */
 const unmutatedOf = (plan: MutationPlan): number => plan.candidates - plan.mutants.length;
 
+type MutatedLine = readonly [MutationOperator, number, string];
+
+/** Rows in the one order both sides of an assertion use. */
+const sorted = (rows: readonly MutatedLine[]): readonly MutatedLine[] =>
+  [...rows].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+
 /** Each mutant as its operator and the owner line it produces, sorted: the
  *  mutant set's behavior, independent of how a site's span is chosen. */
-const mutatedLines = (ownerText: string, plan: MutationPlan): readonly (readonly [MutationOperator, number, string])[] =>
-  plan.mutants
-    .map((mutant) => [mutant.operator, mutant.line, applyMutant(ownerText, mutant).split("\n")[mutant.line - 1]!] as const)
-    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-
-const sorted = (rows: readonly (readonly [MutationOperator, number, string])[]) =>
-  [...rows].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+const mutatedLines = (ownerText: string, plan: MutationPlan): readonly MutatedLine[] =>
+  sorted(plan.mutants.map((mutant) => [mutant.operator, mutant.line, applyMutant(ownerText, mutant).split("\n")[mutant.line - 1]!] as const));
 
 describe("the mutation plan (CT-1)", () => {
   it("AS-009: each mutant is one fixed operator applied to one site on a changed line", () => {

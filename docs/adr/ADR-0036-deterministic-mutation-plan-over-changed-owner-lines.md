@@ -17,8 +17,8 @@ Several forces shape how the mutants are chosen:
 - **Determinism (SC-003).** The gate's verdict is evidence the Wave Gate settles on. The same owner bytes, the
   same changed lines and the same cap must give the same mutants, in the same order and with the same
   identities. A re-run must never turn a pass into a block, or a block into a pass, by chance.
-- **No new dependency (NFR-003, OOS-002).** The engine already ships `typescript` (a devDependency loaded at
-  runtime by the INV-1 seams). It must not pull in a mutation framework with its own runner, configuration and
+- **No new dependency (NFR-003, OOS-002).** The engine already ships `typescript` (a runtime dependency loaded
+  by the INV-1 seams; see ADR-0042). It must not pull in a mutation framework with its own runner, configuration and
   reporter model.
 - **Bounded cost (NFR-004).** Every mutant is a full run of the matrix test through the operator's frozen
   `affectedRunner`. An owner can offer hundreds of mutation sites, so the work per Invariant needs a hard cap,

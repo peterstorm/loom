@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { parseOwedInvariantIds, parseOwnerVerificationObservation } from "../../src/core/owner-verification/parse";
-import type { OwnerVerificationObservation } from "../../src/core/owner-verification/types";
+import type { OwnerInfrastructureFailureKind, OwnerVerificationObservation } from "../../src/core/owner-verification/types";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { invariantId } from "../fixtures/owner-obligation";
 import { labelledValue } from "../fixtures/parse-result";
@@ -50,6 +50,30 @@ describe("parseOwnerVerificationObservation", () => {
     expect(parseOwnerVerificationObservation(viaDisk(OBSERVATION), "o")).toEqual({ ok: true, value: OBSERVATION });
     const unavailable = { kind: "unavailable", failure: { kind: "plan-drift", detail: "stamp drifted" } };
     expect(parseOwnerVerificationObservation(unavailable, "o")).toEqual({ ok: true, value: unavailable });
+  });
+
+  /** Every infrastructure kind; keyed by the union, so a kind added without a row here fails to compile. */
+  const INFRASTRUCTURE_KINDS = Object.keys({
+    "plan-unreadable": true, "plan-malformed": true, "plan-drift": true, "runner-missing": true,
+    "worktree-failed": true, "spawn-failed": true, "report-missing": true, "report-unreadable": true,
+    "matrix-test-not-collected": true, "exit-unexplained-by-report": true, "baseline-timed-out": true,
+    "missing-wave-base": true, "coverage-bound-exceeded": true, "real-workspace-changed": true,
+    "repository-file-unreadable": true, "unexpected-error": true, "owner-unparseable": true, "no-valid-mutants": true,
+    "alias-config-unresolvable": true,
+  } satisfies Record<OwnerInfrastructureFailureKind, true>) as OwnerInfrastructureFailureKind[];
+
+  it.each(INFRASTRUCTURE_KINDS)("round-trips the %s infrastructure kind, unavailable and as a coverage verdict", (kind) => {
+    const unavailable = { kind: "unavailable", failure: { kind, detail: "why" } };
+    expect(parseOwnerVerificationObservation(viaDisk(unavailable), "o")).toEqual({ ok: true, value: unavailable });
+    const coverage = { ...OBSERVATION, verdicts: [{ ...OBSERVATION.verdicts[0], coverage: { kind: "infrastructure", failure: { kind, detail: "why" } } }] };
+    expect(parseOwnerVerificationObservation(viaDisk(coverage), "o")).toEqual({ ok: true, value: coverage });
+  });
+
+  it("an unresolvable tsconfig chain reads back as alias-config-unresolvable, never as an unreadable plan", () => {
+    const raw = { ...OBSERVATION, verdicts: [{ ...OBSERVATION.verdicts[0], coverage: { kind: "infrastructure", failure: { kind: "alias-config-unresolvable", detail: "tsconfig tsconfig.json does not parse" } } }] };
+    const parsed = parseOwnerVerificationObservation(viaDisk(raw), "o");
+    expect(parsed.ok && parsed.value.kind === "verified" && parsed.value.verdicts[0]!.coverage)
+      .toEqual({ kind: "infrastructure", failure: { kind: "alias-config-unresolvable", detail: "tsconfig tsconfig.json does not parse" } });
   });
 
   it.each([

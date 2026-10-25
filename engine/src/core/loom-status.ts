@@ -646,19 +646,31 @@ export const ownerVerificationStatusOf = (
       : observedOwnerVerificationStatus(ownerVerification))
     .exhaustive();
 
+/** Why an owner-verification rejection carries no remedy: the not-observed reason, or an observation naming no blocker. */
+const unreadRemedyCause = (owner: OwnerVerificationStatus): string =>
+  match(owner.report)
+    .with({ kind: "not-observed" }, ({ reason }) => reason)
+    .with({ kind: "unavailable" }, { kind: "verified" }, () => "the persisted owner verification names no blocking Invariant")
+    .exhaustive();
+
 /**
  * When the completion suite rejected the Wave for owner verification, the
  * next action names each blocking Invariant and its remedy. Readiness judged
- * the very result the remedies are read from, so they cannot disagree; a
- * rejection for any other failure kind adds none.
+ * the very result the remedies are read from, so they should not disagree;
+ * when they do (the owner report yields no remedy), the next action says so
+ * and names why instead of showing a remedy-free rejection. A rejection for
+ * any other failure kind adds none.
  */
 export function withOwnerVerificationRemedies(status: LoomStatus, owner: OwnerVerificationStatus): LoomStatus {
   const suite = status.facts.waveCompletionSuiteReadiness;
   const rejectedForOwner = suite.kind === "known" && suite.value.kind === "rejected" &&
     suite.value.failureKinds.includes("owner-verification-rejected");
-  if (!rejectedForOwner || owner.remedies.length === 0) return status;
-  const reasons = owner.remedies.map((remedy) =>
-    statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
+  if (!rejectedForOwner) return status;
+  const reasons = owner.remedies.length === 0
+    ? [statusReason("completion-prerequisite-failed",
+      `owner verification rejected the Wave but no per-Invariant remedy could be read (${unreadRemedyCause(owner)})`)]
+    : owner.remedies.map((remedy) =>
+      statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
   return canonicalRecord({
     ...status,
     next: canonicalRecord({

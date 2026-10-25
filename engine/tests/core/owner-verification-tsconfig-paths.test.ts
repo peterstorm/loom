@@ -9,11 +9,9 @@ import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc
 import { describe, expect, it } from "vitest";
 import { failure, success } from "../../src/core/orchestration-contract/identity";
 import {
-  directoryOf,
   extendedConfig,
   nearestTsconfig,
   pathAliasesOf,
-  within,
   type ParseJsonc,
 } from "../../src/core/owner-verification/tsconfig-paths";
 
@@ -87,23 +85,7 @@ describe("pathAliasesOf", () => {
   });
 });
 
-describe("the repository-relative path helpers", () => {
-  it.each([
-    ["", "a/b", "a/b"],
-    ["a", "./b/../c", "a/c"],
-    ["a/b", "../..", ""],
-    ["a", "../../x", null],
-    ["", "..", null],
-    ["a", "/b", "a/b"],
-  ] as const)("within(%j, %j) is %j", (directory, relative, expected) => {
-    expect(within(directory, relative)).toBe(expected);
-  });
-
-  it("directoryOf names the containing directory, empty at the root", () => {
-    expect(directoryOf("a/b/c.ts")).toBe("a/b");
-    expect(directoryOf("c.ts")).toBe("");
-  });
-
+describe("config discovery", () => {
   it("nearestTsconfig walks up from the matrix test to the repository root", () => {
     expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "a/tsconfig.json": "{}", "tsconfig.json": "{}" }))).toBe("a/tsconfig.json");
     expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "tsconfig.json": "{}" }))).toBe("tsconfig.json");

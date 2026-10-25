@@ -95,14 +95,18 @@ Task that touches an owned family. Every other packet is byte-identical.**
      replaced by a call to the owner module.
   4. The existing severity rules and the Refutation Panel apply unchanged.
 
-**Selection.** Selection is not re-derived here. `obligationsTouchedBy(task.file_list, stamp)` in
+**Selection.** Selection is not re-derived here. `obligationsTouchedBy(scope, task.file_list ?? [])` in
 `engine/src/core/owner-verification/obligations.ts` (INV-3's owner) returns the obligations in which the file
-list plays any role. That means the Task changes the owner or a sibling, or it writes the matrix test.
+list plays any role. That means the Task changes the owner or a sibling, or it writes the matrix test. The
+`scope` is the opaque `OwnerScope` that `ownerScopeOf(graph)` builds; the issuer never holds the raw
+`owner_obligations` stamp (ADR-0034, PR #131 review remediation).
 
 **Issuance.** `engine/src/core/wave-review-authority.ts` issues the section.
 
-- When `registration.schemaVersion === 2` and `graph.owner_obligations` is defined, it renders one `owner-map`
+- When `registration.schemaVersion === 2`, it builds `ownerScopeOf(graph)` once and renders one `owner-map`
   byte section for each Task with a non-empty touched set. This happens once per Task, before the subject loop.
+  The stamp test is the scope's: an unstamped scope (a graph without `owner_obligations`) touches nothing, so no
+  Task gets a section.
 - In the subject loop, the section is added to `fixedContext` only when both of these hold:
   - `subject.taskId !== null`, which excludes the spec-check subject;
   - `isOwnerMapRole(subject.role)`.

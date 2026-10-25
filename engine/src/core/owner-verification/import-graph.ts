@@ -66,6 +66,8 @@ const everySpecifierTypeOnly = (elements: ts.NodeArray<ts.ImportSpecifier | ts.E
 /** Whether an import declaration binds types only: `import type`, or only `type` specifiers and no default binding. */
 const importIsTypeOnly = (clause: ts.ImportClause | undefined): boolean => {
   if (clause === undefined) return false;
+  // `phaseModifier` exists from TypeScript 5.9; engine/package.json declares
+  // `typescript` a runtime dependency at ^5.9.0, so it is always present here.
   if (clause.phaseModifier === ts.SyntaxKind.TypeKeyword) return true;
   const bindings = clause.namedBindings;
   return clause.name === undefined && bindings !== undefined && ts.isNamedImports(bindings) && everySpecifierTypeOnly(bindings.elements);

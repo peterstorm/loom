@@ -13,11 +13,13 @@
  * Blocking findings and their remedy text are not decided here: they come
  * from `verdict.ts` (`ownerVerificationFailures`,
  * `renderOwnerVerificationFailure`), the same source the gate's diagnostics
- * read, so status names exactly the remedy the gate blocked on.
+ * read, so status names exactly the remedy the gate blocked on. Each
+ * Invariant's mutation summary is `verdict.ts`'s `renderMutationVerdict`,
+ * the one wording of a `MutationVerdict`.
  */
 
 import { match } from "ts-pattern";
-import { ownerVerificationFailures, renderOwnerVerificationFailure } from "./verdict";
+import { ownerVerificationFailures, renderMutationVerdict, renderOwnerVerificationFailure } from "./verdict";
 import type {
   CoverageVerdict,
   InvariantVerdict,
@@ -73,25 +75,11 @@ const renderCoverage = (coverage: CoverageVerdict): string =>
 const renderSurvivor = (owner: string, survivor: SurvivorDiagnostic): string =>
   `    - survivor at ${owner}:${survivor.line}:${survivor.column} (${survivor.operator}): \`${survivor.original}\` -> \`${survivor.replacement}\``;
 
-const renderMutation = (verdict: InvariantVerdict): readonly string[] =>
-  match(verdict.mutation)
-    .with({ kind: "verified" }, (run) => [
-      `mutation generated ${run.generated}, killed ${run.killed}, timed out ${run.timedOut}, invalid ${run.invalid}, ` +
-        `survived ${run.survivors.length}, unmutated ${run.unmutated}${run.ownerChangedInWave ? "" : " (owner unchanged in Wave)"}`,
-      ...run.survivors.map((survivor) => renderSurvivor(verdict.owner, survivor)),
-    ])
-    .with({ kind: "exempt" }, ({ reason }) => [`mutation exempt: ${reason}`])
-    .with({ kind: "red-baseline" }, ({ failures }) => [`mutation baseline red: ${failures.join("; ")}`])
-    .with({ kind: "infrastructure" }, ({ failure }) => [`mutation infrastructure failure (${failure.kind}): ${failure.detail}`])
-    .exhaustive();
-
-const renderInvariant = (verdict: InvariantVerdict): readonly string[] => {
-  const [summary, ...survivors] = renderMutation(verdict);
-  return [
-    `  - ${verdict.invariant} (owner ${verdict.owner}, matrix test ${verdict.matrixTest}): ${renderCoverage(verdict.coverage)}; ${summary}`,
-    ...survivors,
-  ];
-};
+const renderInvariant = (verdict: InvariantVerdict): readonly string[] => [
+  `  - ${verdict.invariant} (owner ${verdict.owner}, matrix test ${verdict.matrixTest}): ` +
+    `${renderCoverage(verdict.coverage)}; ${renderMutationVerdict(verdict.mutation)}`,
+  ...(verdict.mutation.kind === "verified" ? verdict.mutation.survivors.map((survivor) => renderSurvivor(verdict.owner, survivor)) : []),
+];
 
 /** The human lines of the report: a header, then one line per Invariant and one per survivor. */
 export const renderOwnerVerificationStatus = (report: OwnerVerificationStatusReport): readonly string[] =>

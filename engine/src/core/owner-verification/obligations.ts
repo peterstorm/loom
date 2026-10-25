@@ -35,10 +35,13 @@ import { match } from "ts-pattern";
 
 import type { PlanInvariant, PlanModels, Task, TaskGraph } from "../../types";
 import { canonicalDigest } from "../digest";
-import type { InvariantId } from "../invariant-id";
+import { parseInvariantId, type InvariantId } from "../invariant-id";
 import { canonicalStructuralEquals, failure, success, type ArtifactDigest, type DomainResult } from "../orchestration-contract/identity";
+import { isPlaceholderExemptionReason } from "../parse-plan-models";
+import { isRecord } from "../plain-record";
 import { samePlanPath } from "../plan-path-match";
 import { changesFamily, invariantRoles, type InvariantRoles, type OwnedInvariant } from "../plan-paths";
+import type { SiblingEntryPoint } from "../sibling-entry-point";
 import type {
   MutationOwed,
   MutationPolicy,
@@ -121,6 +124,137 @@ export const renderOwnerObligationError = (error: OwnerObligationError): string 
     .with({ kind: "matrix-test-is-sibling" }, ({ invariant, path }) => `${invariant}: '${path}' is both a sibling entry point and the matrix test`)
     .with({ kind: "duplicate-sibling" }, ({ invariant, path }) => `${invariant}: sibling entry point '${path}' is listed twice`)
     .exhaustive();
+
+// ---------------------------------------------------------------------------
+// The stamp's wire parser: untrusted JSON to Owner Obligations, through the constructor
+// ---------------------------------------------------------------------------
+
+type WireResult<T> = DomainResult<T, string>;
+
+const SIBLING_ENTRY_POINT_FIELDS: readonly (keyof SiblingEntryPoint)[] = ["path", "note"];
+
+/** Unknown fields first (sorted), then missing ones; null when the key set is exactly `fields`. */
+function exactFieldsError(record: Readonly<Record<string, unknown>>, fields: readonly string[], label: string): string | null {
+  const unknownFields = Object.keys(record).filter((field) => !fields.includes(field));
+  if (unknownFields.length > 0) return `${label} contains unknown field(s): ${unknownFields.sort().join(", ")}`;
+  const missingFields = fields.filter((field) => !(field in record));
+  return missingFields.length > 0 ? `${label} is missing field(s): ${missingFields.join(", ")}` : null;
+}
+
+/** Text with a non-whitespace character: every name and path an obligation carries. */
+function nonBlankText(raw: unknown, label: string): WireResult<string> {
+  return typeof raw === "string" && raw.trim() !== "" ? success(raw) : failure(`${label} must be non-blank text`);
+}
+
+/** An Invariant id, minted through its one parser. */
+function invariantIdText(raw: unknown, label: string): WireResult<InvariantId> {
+  const id = typeof raw === "string" ? parseInvariantId(raw) : null;
+  return id !== null && id.ok ? success(id.value) : failure(`${label} must be an Invariant id (INV-N)`);
+}
+
+function nullableText(raw: unknown, label: string): WireResult<string | null> {
+  return raw === null || typeof raw === "string" ? success(raw) : failure(`${label} must be a string or null`);
+}
+
+/** `verify`, or `exempt` with a stated reason: the plan grammar's two states,
+ *  so a hand-edited blank or placeholder exemption (`none`, `n/a`, ...) never
+ *  loads as a silent opt-out. */
+function parseMutationPolicy(raw: unknown, label: string): WireResult<MutationPolicy> {
+  if (!isRecord(raw)) return failure(`${label} must be an object`);
+  if (raw.kind === "verify") {
+    const fieldsError = exactFieldsError(raw, ["kind"], label);
+    return fieldsError === null ? success(Object.freeze({ kind: "verify" as const })) : failure(fieldsError);
+  }
+  if (raw.kind === "exempt") {
+    const fieldsError = exactFieldsError(raw, ["kind", "reason"], label);
+    if (fieldsError !== null) return failure(fieldsError);
+    const reason = nonBlankText(raw.reason, `${label}.reason`);
+    if (!reason.ok) return reason;
+    if (isPlaceholderExemptionReason(reason.value)) {
+      return failure(`${label}.reason must state why the owner is exempt, not a placeholder`);
+    }
+    return success(Object.freeze({ kind: "exempt" as const, reason: reason.value }));
+  }
+  return failure(`${label}.kind must be verify or exempt`);
+}
+
+function parseSiblingEntryPoint(raw: unknown, label: string): WireResult<SiblingEntryPoint> {
+  if (!isRecord(raw)) return failure(`${label} must be an object`);
+  const fieldsError = exactFieldsError(raw, SIBLING_ENTRY_POINT_FIELDS, label);
+  if (fieldsError !== null) return failure(fieldsError);
+  const path = nonBlankText(raw.path, `${label}.path`);
+  if (!path.ok) return path;
+  const note = nullableText(raw.note, `${label}.note`);
+  return note.ok ? success(Object.freeze({ path: path.value, note: note.value })) : note;
+}
+
+function parseSiblingEntryPoints(raw: unknown, label: string): WireResult<readonly SiblingEntryPoint[]> {
+  if (!Array.isArray(raw)) return failure(`${label} must be an array`);
+  const siblings: SiblingEntryPoint[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const sibling = parseSiblingEntryPoint(entry, `${label}[${index}]`);
+    if (!sibling.ok) return sibling;
+    siblings.push(sibling.value);
+  }
+  return success(Object.freeze(siblings));
+}
+
+/**
+ * One stamped Owner Obligation as an exact, fresh, frozen record, built
+ * through `ownerObligationOf`: a stamp the plan grammar could never derive (a
+ * path playing two roles) is refused here, not first noticed at the gate.
+ */
+function parseOwnerObligation(raw: unknown, label: string): WireResult<OwnerObligation> {
+  if (!isRecord(raw)) return failure(`${label} must be an object`);
+  // The exact key set is `FIELD_ORDER`, the type's own fields: a field added to the type fails to compile here until it is parsed.
+  const fieldsError = exactFieldsError(raw, FIELD_ORDER, label);
+  if (fieldsError !== null) return failure(fieldsError);
+  const invariant = invariantIdText(raw.invariant, `${label}.invariant`);
+  if (!invariant.ok) return invariant;
+  const title = nonBlankText(raw.title, `${label}.title`);
+  if (!title.ok) return title;
+  const statement = nullableText(raw.statement, `${label}.statement`);
+  if (!statement.ok) return statement;
+  const owner = nonBlankText(raw.owner, `${label}.owner`);
+  if (!owner.ok) return owner;
+  const siblings = parseSiblingEntryPoints(raw.siblings, `${label}.siblings`);
+  if (!siblings.ok) return siblings;
+  const matrixTest = nonBlankText(raw.matrixTest, `${label}.matrixTest`);
+  if (!matrixTest.ok) return matrixTest;
+  const mutation = parseMutationPolicy(raw.mutation, `${label}.mutation`);
+  if (!mutation.ok) return mutation;
+  const obligation = ownerObligationOf({
+    invariant: invariant.value,
+    title: title.value,
+    statement: statement.value,
+    owner: owner.value,
+    siblings: siblings.value,
+    matrixTest: matrixTest.value,
+    mutation: mutation.value,
+  });
+  return obligation.ok ? obligation : failure(`${label}: ${renderOwnerObligationError(obligation.error)}`);
+}
+
+/**
+ * A present population stamp (AD-2), `[]` included, parsed from untrusted
+ * JSON entry by entry; an Invariant appears at most once, since every
+ * selection reads it by id. Whether an absent stamp is allowed is the State
+ * File's call (FR-004), so absence never reaches here. Each refusal is one
+ * indexed `owner_obligations[...]` sentence.
+ */
+export function parseOwnerObligations(raw: unknown): WireResult<readonly OwnerObligation[]> {
+  if (!Array.isArray(raw)) return failure("owner_obligations must be an array");
+  const obligations: OwnerObligation[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const obligation = parseOwnerObligation(entry, `owner_obligations[${index}]`);
+    if (!obligation.ok) return obligation;
+    if (obligations.some(({ invariant }) => invariant === obligation.value.invariant)) {
+      return failure(`owner_obligations names ${obligation.value.invariant} more than once`);
+    }
+    obligations.push(obligation.value);
+  }
+  return success(Object.freeze(obligations));
+}
 
 // ---------------------------------------------------------------------------
 // Derivation from the plan, the owes-mutation rule and the stamp's identity

@@ -111,16 +111,21 @@ export type FamilySiteDelta =
   | Readonly<{ kind: "unrecorded"; family: FamilyId; current: number }>
   | Readonly<{ kind: "retired"; family: string; baseline: number }>;
 
-const SCANNED_ROOT = "engine/src/";
+/** The repository-relative tree the metric scans. The fs shell walks from here, so the scope has one definition. */
+export const SCANNED_ROOT = "engine/src/";
 const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*)/;
 
 const normalizePath = (path: string): string => path.replace(/\\/g, "/");
 
 /** Code-unit order: locale-independent, so the output never depends on the host. */
-const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+function compareText(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
 
-/** An `engine/src` TypeScript source that is not a test file. */
-const isScannedSource = (path: string): boolean =>
+/** An `engine/src` TypeScript source that is not a test file, given a `/`-separated repository-relative path. */
+export const isScannedSource = (path: string): boolean =>
   path.startsWith(SCANNED_ROOT) && path.endsWith(".ts") && !isTestFileBySuffixes(path, DEFAULT_TEST_FILE_SUFFIXES);
 
 function rawSiteLines(family: Family, text: string): readonly number[] {
@@ -227,7 +232,11 @@ export function serializeFamilySites(report: FamilySiteReport, delta: readonly F
   return `${JSON.stringify(document, null, 2)}\n`;
 }
 
-const signed = (value: number): string => (value > 0 ? `+${value}` : value < 0 ? `${value}` : "±0");
+function signed(value: number): string {
+  if (value > 0) return `+${value}`;
+  if (value < 0) return `${value}`;
+  return "±0";
+}
 
 function deltaLine(entry: FamilySiteDelta): string {
   switch (entry.kind) {

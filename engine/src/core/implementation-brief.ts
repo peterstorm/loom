@@ -210,6 +210,38 @@ function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): 
   ].join("\n");
 }
 
+/** One owned Invariant's plan block for a Task playing some role in its family; null when it plays none (or the Invariant is not owned). */
+function planBlock(fileList: readonly string[], invariant: PlanInvariant): string | null {
+  if (invariant.ownership.kind !== "owned") return null;
+  const { owner, siblings, matrixTest } = invariant.ownership;
+  const played = invariantRoles(fileList, invariant.ownership);
+  const roles = [
+    ...(played.owner
+      ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
+      : []),
+    ...(played.siblings.length > 0
+      ? [`- Sibling: you change ${played.siblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
+      : []),
+    ...(played.matrixTest
+      ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
+      : []),
+  ];
+  if (roles.length === 0) return null;
+  return [
+    `**${invariant.id}: ${invariant.title}**`,
+    ...(invariant.statement === null ? [] : [invariant.statement]),
+    "",
+    "**Your role:**",
+    ...roles,
+    "",
+    `**Owner module:** \`${owner}\``,
+    siblings.length === 0
+      ? "**Sibling entry points:** none"
+      : ["**Sibling entry points:**", ...siblings.map(({ path, note }) => `- \`${path}\`${note === null ? "" : ` — ${note}`}`)].join("\n"),
+    `**Matrix test:** \`${matrixTest}\``,
+  ].join("\n");
+}
+
 /**
  * The ownership guidance for every owned invariant whose family this Task
  * changes: its role (owner, sibling, matrix-test author — possibly several),
@@ -229,46 +261,19 @@ function invariantOwnership(
   touched: readonly OwnerObligation[],
 ): string {
   const dutyOf = new Map(touched.map((obligation) => [obligation.invariant, obligation] as const));
-  const planBlocks = invariants.flatMap((invariant) => {
-    if (invariant.ownership.kind !== "owned") return [];
-    const { owner, siblings, matrixTest } = invariant.ownership;
-    const played = invariantRoles(fileList, invariant.ownership);
-    const roles = [
-      ...(played.owner
-        ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
-        : []),
-      ...(played.siblings.length > 0
-        ? [`- Sibling: you change ${played.siblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
-        : []),
-      ...(played.matrixTest
-        ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
-        : []),
-    ];
-    if (roles.length === 0) return [];
-    return [{ id: invariant.id, text: [
-      `**${invariant.id}: ${invariant.title}**`,
-      ...(invariant.statement === null ? [] : [invariant.statement]),
-      "",
-      "**Your role:**",
-      ...roles,
-      "",
-      `**Owner module:** \`${owner}\``,
-      siblings.length === 0
-        ? "**Sibling entry points:** none"
-        : ["**Sibling entry points:**", ...siblings.map(({ path, note }) => `- \`${path}\`${note === null ? "" : ` — ${note}`}`)].join("\n"),
-      `**Matrix test:** \`${matrixTest}\``,
-    ].join("\n") }];
-  });
-  const rendered = new Set(planBlocks.map(({ id }) => id));
-  const blocks = [
-    ...planBlocks.map(({ id, text }) => {
-      const duty = dutyOf.get(id);
-      return duty === undefined ? text : `${text}\n\n${ownerDuties(duty)}`;
-    }),
-    ...touched.filter(({ invariant }) => !rendered.has(invariant)).map((duty) =>
-      `**${duty.invariant}: ${duty.title}**\n\n${ownerDuties(duty)}`),
-  ];
-  return blocks.length === 0 ? NO_INVARIANT_OWNERSHIP : blocks.join("\n\n");
+  const rendered = new Set<string>();
+  const blocks: string[] = [];
+  for (const invariant of invariants) {
+    const block = planBlock(fileList, invariant);
+    if (block === null) continue;
+    rendered.add(invariant.id);
+    const duty = dutyOf.get(invariant.id);
+    blocks.push(duty === undefined ? block : `${block}\n\n${ownerDuties(duty)}`);
+  }
+  const drifted = touched.filter(({ invariant }) => !rendered.has(invariant)).map((duty) =>
+    `**${duty.invariant}: ${duty.title}**\n\n${ownerDuties(duty)}`);
+  const all = [...blocks, ...drifted];
+  return all.length === 0 ? NO_INVARIANT_OWNERSHIP : all.join("\n\n");
 }
 
 const quoted = (path: string): string => `\`${path}\``;

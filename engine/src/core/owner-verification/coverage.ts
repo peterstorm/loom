@@ -24,6 +24,7 @@
 
 import type { NonEmpty } from "../orchestration-contract/identity";
 import { moduleEdges, type EdgeKind, type ModuleEdges } from "./import-graph";
+import { directoryOf, normalizeRepoPath, within } from "./repo-path";
 import type {
   CoverageOverFilesFn,
   CoverageVerdict,
@@ -35,25 +36,6 @@ import type {
 
 /** The most files the coverage frontier may gather before it is an infrastructure failure. */
 export const COVERAGE_FRONTIER_BOUND = 512;
-
-// ---------------------------------------------------------------------------
-// Repository-relative path arithmetic (no `node:path`: this module is pure)
-// ---------------------------------------------------------------------------
-
-/** Collapses `.`, `..` and empty segments; null when the path escapes the repository root. */
-const normalizePath = (path: string): string | null => {
-  const segments = path.split("/").reduce<readonly string[] | null>((kept, segment) => {
-    if (kept === null || segment === "" || segment === ".") return kept;
-    if (segment === "..") return kept.length === 0 ? null : kept.slice(0, -1);
-    return [...kept, segment];
-  }, []);
-  return segments === null ? null : segments.join("/");
-};
-
-const directoryOf = (path: string): string => {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? "" : path.slice(0, slash);
-};
 
 // ---------------------------------------------------------------------------
 // Specifier resolution
@@ -108,10 +90,10 @@ const substitute = (target: string, captured: string): string => {
 /** Every file a specifier may resolve to, in resolution order; empty for an external specifier. */
 const resolutionCandidates = (from: string, specifier: string, aliases: PathAliases): readonly string[] => {
   const bases = (): readonly (string | null)[] => {
-    if (isRelative(specifier)) return [normalizePath(`${directoryOf(from)}/${specifier}`)];
+    if (isRelative(specifier)) return [within(directoryOf(from), specifier)];
     if (specifier.startsWith("/")) return [];
     const match = bestAlias(specifier, aliases);
-    return match === null ? [] : match.alias.targets.map((target) => normalizePath(substitute(target, match.captured)));
+    return match === null ? [] : match.alias.targets.map((target) => normalizeRepoPath(substitute(target, match.captured)));
   };
   return [...new Set(bases().flatMap((base) => (base === null ? [] : extensionLadder(base))))];
 };
@@ -201,7 +183,7 @@ export const decideCoverage = (
   obligation: OwnerObligation,
 ): Extract<CoverageVerdict, { kind: "covered" | "missing" }> => {
   const declared = [obligation.owner, ...obligation.siblings.map((sibling) => sibling.path)];
-  const [first, ...rest] = declared.filter((path) => !reached.has(normalizePath(path) ?? path));
+  const [first, ...rest] = declared.filter((path) => !reached.has(normalizeRepoPath(path) ?? path));
   if (first === undefined) return { kind: "covered" };
   const paths: NonEmpty<string> = [first, ...rest];
   return { kind: "missing", paths };

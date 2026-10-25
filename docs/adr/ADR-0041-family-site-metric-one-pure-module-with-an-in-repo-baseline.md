@@ -46,8 +46,8 @@ in this feature is chartered to pay it down.
    - Cons: each family would need its own syntactic matcher, which costs far more than a gauge is worth.
      "Hand-rolled quote-state tokenizing" and "multiset claim removal" are idioms, not syntax shapes, so
      an AST matcher would still be a heuristic. It would also pull the compiler into a module that otherwise
-     needs nothing. Here `typescript` is a devDependency, loaded at runtime only by the two owner-verification
-     seams (`docs/operations.md`).
+     needs nothing. Here `typescript` is an engine runtime dependency loaded only by the two owner-verification
+     seams (ADR-0042, `docs/operations.md`).
 
 3. **Compute the baseline when it is needed (check out the base commit on demand), or keep it outside the
    repository (vault note, CI artifact)**

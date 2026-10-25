@@ -15,25 +15,33 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ArtifactDigest, DomainResult } from "../../src/core/orchestration-contract";
 import { parseArtifactDigest, success } from "../../src/core/orchestration-contract/identity";
 import { obligationsDigest } from "../../src/core/owner-verification/obligations";
+import { ownerObservationDecision, type OwedVerification } from "../../src/core/owner-verification/owed-verification";
 import type {
   InvariantVerdict,
   MatrixTestRun,
+  MutationPlan,
   OwnerObligation,
   OwnerVerificationObservation,
 } from "../../src/core/owner-verification/types";
 import { parseReviewPath } from "../../src/core/review-packet";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
+import { parseAuthorizedWaveCompletionCheck } from "../../src/core/completion-suite";
+import { applyMutant, mutationPlan, MUTANT_CAP_PER_INVARIANT } from "../../src/core/owner-verification/mutation-plan";
 import type { CommandExecutionResult } from "../../src/orchestration/completion-check-runner";
+import type { OwnerVariant } from "../../src/orchestration/owner-mutation-workspace";
 import {
   matrixTestRunOf,
   runOwnerVerification,
+  runPlan,
   type OwnerVerificationInput,
+  type RunMatrixTest,
 } from "../../src/orchestration/owner-verification-runner";
 import { ownerObligation } from "../fixtures/owner-obligation";
 import {
   buildOwnerVerificationRepo as build,
   canonicalRoot,
   cleanupOwnerVerificationRepos,
+  HANGING_RUNNER_TIMEOUT_MS,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
   type StampedGraph,
@@ -49,22 +57,24 @@ const digestOf = (raw: string): ArtifactDigest => {
   return parsed.value;
 };
 
-/** The owner check authority the gate hands the runner for `owed` under `stamp`. */
-const authorityOf = (stamp: readonly OwnerObligation[], owed: readonly OwnerObligation[]): OwnerVerificationInput["authority"] => ({
-  obligationsDigest: obligationsDigest(stamp),
-  owed: owed.map(({ invariant }) => invariant),
-});
+/** The owed verification the gate hands the runner for `owed` under `stamp`, built the one way the gate builds it. */
+function owedOf(stamp: readonly OwnerObligation[], owed: readonly OwnerObligation[]): OwedVerification {
+  const decision = ownerObservationDecision({
+    integrity: null,
+    owed,
+    authority: { obligationsDigest: obligationsDigest(stamp), owed: owed.map(({ invariant }) => invariant) },
+  });
+  if (decision.kind !== "must-run") throw new Error(`the fixture owes nothing to run: ${decision.kind}`);
+  return decision.owed;
+}
 
 function inputOf(repo: OwnerVerificationRepo, overrides: Partial<OwnerVerificationInput> = {}): OwnerVerificationInput {
   const graph = repo.manager.load() as StampedGraph;
-  const [first, ...rest] = graph.owner_obligations;
-  if (first === undefined) throw new Error("the fixture stamps one obligation");
   return {
     root: canonicalRoot(repo.root),
     graph,
     wave: 1,
-    authority: authorityOf(graph.owner_obligations, graph.owner_obligations),
-    owed: [first, ...rest],
+    owed: owedOf(graph.owner_obligations, graph.owner_obligations),
     manifest: graph.verification_manifest!,
     observeWorkspace: (): DomainResult<ArtifactDigest, string> => success(digestOf(repo.workspaceDigest())),
     ...overrides,
@@ -131,6 +141,24 @@ describe("runOwnerVerification", () => {
     const repo = build({ runner: "red" });
     const verdict = onlyVerdict(await verify(repo));
     expect(verdict.mutation).toMatchObject({ kind: "red-baseline" });
+    expect(repo.runnerLaunches()).toHaveLength(1);
+  }, TIMEOUT_MS);
+
+  it("AS-013: a mutant that hangs past the clamped time limit is killed by timeout; its process group is ended and the worktree removed", async () => {
+    const repo = build({ runner: "hang-mutants" });
+    const observation = await verify(repo);
+    expect(onlyVerdict(observation).mutation).toMatchObject({ kind: "verified", generated: 5, killed: 0, timedOut: 5, survivors: [] });
+    const launches = repo.runnerLaunches();
+    expect(launches).toHaveLength(6);
+    expect(launches[0]!.owner).toBe(repo.ownerDigest);
+    expect(observation).toMatchObject({ kind: "verified", boundMs: 6 * HANGING_RUNNER_TIMEOUT_MS });
+  }, TIMEOUT_MS);
+
+  it("AS-013: a baseline that hangs past the time limit is the baseline-timed-out infrastructure failure, runs no mutant, and leaves no worktree", async () => {
+    const repo = build({ runner: "hang" });
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.mutation).toMatchObject({ kind: "infrastructure", failure: { kind: "baseline-timed-out" } });
+    expect(verdict.mutation).not.toHaveProperty("timedOut");
     expect(repo.runnerLaunches()).toHaveLength(1);
   }, TIMEOUT_MS);
 
@@ -249,11 +277,21 @@ describe("runOwnerVerification", () => {
     expect(repo.worktrees()).toEqual([repo.root]);
   }, TIMEOUT_MS);
 
+  it("a tsconfig that does not parse is the alias-config-unresolvable coverage failure, never an unreadable plan", async () => {
+    const repo = build();
+    writeFileSync(join(repo.root, "tsconfig.json"), "{ \"compilerOptions\": { \"paths\": ");
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.coverage).toEqual({
+      kind: "infrastructure",
+      failure: { kind: "alias-config-unresolvable", detail: expect.stringContaining("tsconfig tsconfig.json does not parse") },
+    });
+  }, TIMEOUT_MS);
+
   it("never throws: a frontier path the filesystem refuses (ENAMETOOLONG) is a coverage infrastructure failure", async () => {
     const repo = build();
     const graph = repo.manager.load() as StampedGraph;
     const obligation: OwnerObligation = { ...graph.owner_obligations[0]!, matrixTest: `tests/${"x".repeat(300)}.matrix.test.ts` };
-    const verdict = onlyVerdict(await verify(repo, { owed: [obligation] }));
+    const verdict = onlyVerdict(await verify(repo, { owed: owedOf(graph.owner_obligations, [obligation]) }));
     expect(verdict.coverage).toMatchObject({
       kind: "infrastructure",
       failure: { kind: "repository-file-unreadable", detail: expect.stringContaining("ENAMETOOLONG") },
@@ -282,7 +320,7 @@ describe("runOwnerVerification", () => {
       calls += 1;
       return success(digestOf("e".repeat(64)));
     };
-    const observation = await verify(repo, { owed: exploding, observeWorkspace });
+    const observation = await verify(repo, { owed: owedOf(graph.owner_obligations, exploding), observeWorkspace });
     expect(observation).toEqual({
       kind: "unavailable",
       failure: { kind: "unexpected-error", detail: expect.stringContaining("EIO: i/o error, read") },
@@ -294,7 +332,7 @@ describe("runOwnerVerification", () => {
       changing += 1;
       return success(digestOf((changing === 1 ? "a" : "b").repeat(64)));
     };
-    const drifted = await verify(repo, { owed: exploding, observeWorkspace: drifting });
+    const drifted = await verify(repo, { owed: owedOf(graph.owner_obligations, exploding), observeWorkspace: drifting });
     expect(drifted).toMatchObject({ kind: "unavailable", failure: { kind: "real-workspace-changed" } });
     expect(changing).toBe(2);
   }, TIMEOUT_MS);
@@ -314,7 +352,7 @@ describe("runOwnerVerification", () => {
       mutation: { kind: "verify" },
     });
     const owed = [absent, admission] as const;
-    const observation = await verify(repo, { owed, authority: authorityOf([...graph.owner_obligations, absent], owed) });
+    const observation = await verify(repo, { owed: owedOf([...graph.owner_obligations, absent], owed) });
     expect(observation.kind, JSON.stringify(observation)).toBe("verified");
     if (observation.kind !== "verified") return;
     expect(observation.obligationsDigest).toBe(obligationsDigest([...graph.owner_obligations, absent]));
@@ -337,7 +375,7 @@ describe("runOwnerVerification", () => {
     const repo = build();
     const graph = repo.manager.load() as StampedGraph;
     const obligation: OwnerObligation = { ...graph.owner_obligations[0]!, matrixTest: "tests/absent.matrix.test.ts" };
-    const verdict = onlyVerdict(await verify(repo, { owed: [obligation] }));
+    const verdict = onlyVerdict(await verify(repo, { owed: owedOf(graph.owner_obligations, [obligation]) }));
     expect(verdict.coverage).toEqual({ kind: "missing", paths: [OWNER_FIXTURE.owner, ...OWNER_FIXTURE.siblings] });
   }, TIMEOUT_MS);
 });
@@ -349,11 +387,22 @@ describe("matrixTestRunOf", () => {
     if (!parsed.ok) throw new Error("fixture path refused");
     return parsed.value;
   })();
+  const check = (() => {
+    const parsed = parseAuthorizedWaveCompletionCheck({
+      kind: "project-command", checkId: "project:matrix", scope: "wave", executable: "node", args: ["runner.mjs"],
+      cwd: ".", timeoutMs: 1_000, reportPolicy: { kind: "required-file", path: "r.xml" },
+    });
+    if (!parsed.ok || parsed.value.kind !== "project-command") throw new Error("fixture check refused");
+    return parsed.value;
+  })();
 
   it("reads a timed-out execution as timed-out, whatever its report", () => {
     const execution: CommandExecutionResult = {
       ok: true,
-      value: { kind: "observed", process: { kind: "observed", exitCode: null, timedOut: true, signal: "SIGTERM" }, report: { kind: "missing", path: reportPath }, diagnostics },
+      value: {
+        check,
+        execution: { kind: "observed", process: { kind: "observed", exitCode: null, timedOut: true, signal: "SIGTERM" }, report: { kind: "missing", path: reportPath }, diagnostics },
+      },
     };
     expect(matrixTestRunOf(execution, 1234)).toEqual<MatrixTestRun>({ kind: "timed-out", elapsedMs: 1234 });
   });
@@ -371,12 +420,105 @@ describe("matrixTestRunOf", () => {
     const execution: CommandExecutionResult = {
       ok: true,
       value: {
-        kind: "observed",
-        process: { kind: "observed", exitCode: 0, timedOut: false, signal: null },
-        report: { outcome: { kind: "produced", path: reportPath, digest: digestOf("c".repeat(64)), byteLength: bytes.byteLength }, bytes, mode: 0o644 },
-        diagnostics,
+        check,
+        execution: {
+          kind: "observed",
+          process: { kind: "observed", exitCode: 0, timedOut: false, signal: null },
+          report: { outcome: { kind: "produced", path: reportPath, digest: digestOf("c".repeat(64)), byteLength: bytes.byteLength }, bytes, mode: 0o644 },
+          diagnostics,
+        },
       },
     };
     expect(matrixTestRunOf(execution, 1)).toEqual<MatrixTestRun>({ kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes } });
+  });
+});
+
+/**
+ * `runPlan`, the mutation sequencing policy, at its own interface: a fake
+ * matrix-test port replays scripted runs and records which owner bytes each
+ * run was asked for, so no worktree or process is involved.
+ */
+describe("runPlan", () => {
+  const MATRIX = "tests/m.matrix.test.ts";
+  const OWNER_TEXT = "export function decide(age: number): boolean {\n  return age >= 18;\n}\n";
+
+  const junit = (failing: boolean): Uint8Array => new TextEncoder().encode([
+    '<?xml version="1.0" encoding="UTF-8" ?>',
+    `<testsuites tests="1" failures="${failing ? 1 : 0}" errors="0">`,
+    `<testsuite name="${MATRIX}" tests="1" failures="${failing ? 1 : 0}" errors="0" skipped="0">`,
+    `<testcase classname="${MATRIX}" name="matrix decides">${failing ? '<failure message="no">no</failure>' : ""}</testcase>`,
+    "</testsuite>",
+    "</testsuites>",
+  ].join("\n"));
+  const green: MatrixTestRun = { kind: "exited", exitCode: 0, signal: null, report: { kind: "produced", bytes: junit(false) } };
+  const red: MatrixTestRun = { kind: "exited", exitCode: 1, signal: null, report: { kind: "produced", bytes: junit(true) } };
+  const timedOut: MatrixTestRun = { kind: "timed-out", elapsedMs: 10 };
+  const unstartable: MatrixTestRun = { kind: "spawn-failed", message: "ENOENT" };
+
+  const plan = (): MutationPlan => {
+    const planned = mutationPlan({ ownerPath: "src/owner.ts", ownerText: OWNER_TEXT, changedLines: new Set([2]), cap: MUTANT_CAP_PER_INVARIANT });
+    if (!planned.ok) throw new Error("fixture owner does not parse");
+    return planned.value;
+  };
+
+  /** A fake port over `script`, one run per call, recording each call's owner variant. */
+  function scripted(script: readonly MatrixTestRun[]): Readonly<{ run: RunMatrixTest; asked: readonly OwnerVariant[] }> {
+    const asked: OwnerVariant[] = [];
+    return {
+      asked,
+      run: async (owner) => {
+        const next = script[asked.length];
+        asked.push(owner);
+        if (next === undefined) throw new Error("runPlan ran more matrix tests than the script holds");
+        return next;
+      },
+    };
+  }
+
+  it("runs the baseline first and then every mutant's text in plan order", async () => {
+    const mutations = plan();
+    expect(mutations.mutants.length).toBeGreaterThan(1);
+    const port = scripted([green, ...mutations.mutants.map(() => red)]);
+    const evidence = await runPlan(port.run, MATRIX, OWNER_TEXT, mutations);
+    expect(port.asked).toEqual([
+      { kind: "baseline" },
+      ...mutations.mutants.map((mutant) => ({ kind: "mutant", text: applyMutant(OWNER_TEXT, mutant) })),
+    ]);
+    expect(evidence).toMatchObject({ kind: "owner-changed", baseline: { kind: "green" } });
+    if (evidence.kind !== "owner-changed") return;
+    expect(evidence.results.map(({ outcome }) => outcome.kind)).toEqual(mutations.mutants.map(() => "killed"));
+  });
+
+  it("with no plan (the owner is unchanged in the Wave) runs the baseline alone", async () => {
+    const port = scripted([green]);
+    expect(await runPlan(port.run, MATRIX, OWNER_TEXT, null)).toEqual({ kind: "owner-unchanged", baseline: { kind: "green" } });
+    expect(port.asked).toEqual([{ kind: "baseline" }]);
+  });
+
+  it.each([
+    ["red", red, "red"],
+    ["timed out", timedOut, "infrastructure"],
+    ["unstartable", unstartable, "infrastructure"],
+  ] as const)("a %s baseline runs no mutant", async (_case, baseline, kind) => {
+    const port = scripted([baseline]);
+    const evidence = await runPlan(port.run, MATRIX, OWNER_TEXT, plan());
+    expect(evidence).toMatchObject({ kind: "owner-changed", baseline: { kind }, results: [] });
+    expect(port.asked).toEqual([{ kind: "baseline" }]);
+  });
+
+  it("a timed-out mutant is a kill, never infrastructure", async () => {
+    const mutations = plan();
+    const port = scripted([green, ...mutations.mutants.map(() => timedOut)]);
+    const evidence = await runPlan(port.run, MATRIX, OWNER_TEXT, mutations);
+    if (evidence.kind !== "owner-changed") throw new Error(JSON.stringify(evidence));
+    expect(evidence.results.map(({ outcome }) => outcome.kind)).toEqual(mutations.mutants.map(() => "timed-out"));
+  });
+
+  it("the first infrastructure failure among the mutants ends the run", async () => {
+    const mutations = plan();
+    const port = scripted([green, red, unstartable, red]);
+    const evidence = await runPlan(port.run, MATRIX, OWNER_TEXT, mutations);
+    expect(evidence).toMatchObject({ kind: "infrastructure", failure: { kind: "spawn-failed" } });
+    expect(port.asked).toHaveLength(3);
   });
 });

@@ -139,11 +139,20 @@ It follows `extends` chains, both relative and under `node_modules`, and rejects
 targets against `baseUrl` when the chain declares one, and otherwise against the directory of the config that
 declared `paths`. The result is a repository-relative `PathAliases` list, which is empty when no tsconfig governs
 the test. A tsconfig that does not parse, or has a malformed `extends`, `baseUrl` or `paths`, makes the aliases
-unknown. Coverage then reports an infrastructure failure (`plan-unreadable`, "the import graph of … cannot be
-resolved") and does not guess.
+unknown. Coverage then reports the infrastructure failure `alias-config-unresolvable` ("the import graph of …
+cannot be resolved") and does not guess. The kind is its own (PR #131 round-2 review remediation): as shipped in
+#127 this case reused `plan-unreadable`, whose remedy row says to restore the plan, although the plan is fine
+and the cause is the tsconfig. Each `OwnerInfrastructureFailureKind` now points at exactly one remedy.
+
+The neighbouring case keeps its kind on purpose. An owned Invariant whose owner path is not a file in the
+workspace (absent, a directory, or a symlink escaping the root) is reported by the runner (`planMutation` in
+`owner-verification-runner.ts`) as `plan-drift`, not as a file failure: the path comes from the stamp, so a
+missing owner means the stamp names a path the Wave no longer has, and the remedy is the drift remedy (restore
+the plan and its owner, or re-populate). An owner, matrix test or reached import that exists but the
+filesystem refuses is still `repository-file-unreadable`.
 
 **Where it is documented.** The operator remedy table in `docs/operations.md` (§ Owner verification) covers
-"missing siblings", `coverage-bound-exceeded` and `repository-file-unreadable`. `references/executable-models.md` describes the sibling-coverage
+"missing siblings", `coverage-bound-exceeded`, `repository-file-unreadable` and `alias-config-unresolvable`. `references/executable-models.md` describes the sibling-coverage
 rule and lists "An import is not proof of exercise" under Known residuals (AS-035).
 
 **Tests.** `engine/tests/core/owner-verification-import-graph.test.ts` covers edge extraction.

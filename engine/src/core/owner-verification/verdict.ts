@@ -36,6 +36,7 @@ import type {
   OwnerVerificationFailure,
   OwnerVerificationObservation,
   SurvivorDiagnostic,
+  VerifiedMutation,
   VerifiedMutationError,
   VerifiedMutationFields,
 } from "./types";
@@ -191,14 +192,22 @@ export const renderOwnerVerificationFailure = (failure: OwnerVerificationFailure
       `${invariant === null ? "owner verification" : invariant}: infrastructure failure (${cause.kind}): ${cause.detail}`)
     .exhaustive();
 
-/** One Invariant's mutation half as a summary line, for the gate evidence and status. */
+/** Why a verified run generated no mutant, when it generated none: the owner was unchanged, or no changed line offers a site. */
+const whyNoMutants = (run: VerifiedMutation): string =>
+  !run.ownerChangedInWave ? " (owner unchanged in Wave)"
+  : run.generated === 0 ? " (no mutable construct on the owner's changed lines)"
+  : "";
+
+/**
+ * One Invariant's mutation half as its summary line: the one wording status
+ * renders (survivors are listed separately, one line each).
+ */
 export const renderMutationVerdict = (verdict: MutationVerdict): string =>
   match(verdict)
     .with({ kind: "exempt" }, ({ reason }) => `mutation exempt: ${reason}`)
-    .with({ kind: "red-baseline" }, ({ failures }) => `baseline red: ${failures.join("; ")}`)
-    .with({ kind: "infrastructure" }, ({ failure }) => `infrastructure (${failure.kind}): ${failure.detail}`)
+    .with({ kind: "red-baseline" }, ({ failures }) => `mutation baseline red: ${failures.join("; ")}`)
+    .with({ kind: "infrastructure" }, ({ failure }) => `mutation infrastructure failure (${failure.kind}): ${failure.detail}`)
     .with({ kind: "verified" }, (run) =>
-      !run.ownerChangedInWave ? "owner unchanged in Wave: 0 mutants generated"
-      : run.generated === 0 && run.unmutated === 0 ? "no mutable construct on the owner's changed lines: 0 mutants generated"
-      : `${run.generated} mutants generated: ${run.killed} killed, ${run.timedOut} timed out, ${run.invalid} invalid, ${run.survivors.length} survived; ${run.unmutated} sites unmutated (cap)`)
+      `mutation generated ${run.generated}, killed ${run.killed}, timed out ${run.timedOut}, invalid ${run.invalid}, ` +
+      `survived ${run.survivors.length}, unmutated ${run.unmutated}${whyNoMutants(run)}`)
     .exhaustive();

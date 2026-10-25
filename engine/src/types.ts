@@ -1328,6 +1328,9 @@ export type OwnershipProblem =
   | Readonly<{ kind: "missing-matrix-test" }>
   /** `**Mutation exemption:**` on an owned invariant with a blank reason. */
   | Readonly<{ kind: "exemption-without-reason" }>
+  /** `**Mutation exemption:**` on an owned invariant whose reason is a
+   *  placeholder (`none`, `n/a`, `TBD`, ...) that states no reason. */
+  | Readonly<{ kind: "exemption-placeholder-reason"; reason: string }>
   /** `**Mutation exemption:**` on an `Owner module: none` invariant: there is no owner to mutate. */
   | Readonly<{ kind: "exemption-on-unowned" }>;
 

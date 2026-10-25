@@ -116,14 +116,18 @@ persisted suite receipt is re-proven against the stamp's digest.
 1. Whenever the suite carries `loom:owner-verification`, the stamp is present. A suite that authorizes the
    check while the stamp is missing blocks as `plan-drift`.
 2. `planIntegrityFailure` re-reads `graph.plan_file`, resolving it against the repository root, and parses it
-   with `parsePlanModels`. This runs on every Wave, whether or not the Wave owes anything. Each of the
+   with `parsePlanModels`; the pure `planModelsIntegrityFailure(planPath, models, scope)` in
+   `engine/src/core/owner-verification/plan-integrity.ts` then decides over the parsed models and
+   `ownerScopeOf(graph)`. This runs on every Wave, whether or not the Wave owes anything. Each of the
    following blocks as an infrastructure failure and never skips (FR-002):
    - **`plan-unreadable`:** the graph names no `plan_file`, or the file cannot be read.
    - **`plan-malformed`:** the plan has model strays, an Invariant whose ownership is `malformed`, or owned
      Invariants that derive no obligation (`stampAgreement` is `underivable`).
    - **`plan-drift`:** `stampAgreement(scope, models)` is `drifted`: the stamp and the obligations the plan
      derives now differ.
-3. When the plan agrees and the Wave owes nothing, the observation is
+3. The pure `ownerObservationDecision` (`engine/src/core/owner-verification/owed-verification.ts`) takes the
+   integrity result, `ownerVerificationOwed(scope, wave)` and the authorized check. Owed ids that differ from
+   the check's `owed` are `plan-drift` too. When the plan agrees and the Wave owes nothing, the observation is
    `{ kind: "verified", obligationsDigest, boundMs: 0, verdicts: [] }`. Plan integrity is proven, and no
    coverage or mutation runs (AS-004, AS-005).
 4. Otherwise `runOwnerVerification` decides. It never throws, by construction; the shell's last-resort catch turns a
@@ -135,10 +139,12 @@ persisted suite receipt is re-proven against the stamp's digest.
 - **Implementation brief:** `engine/src/orchestration/implementation-brief.ts` passes
   `ownerScopeOf(graph)` to `engine/src/core/implementation-brief.ts`.
 - **Reviewer packets:** `engine/src/core/owner-verification/owner-map.ts` and
-  `engine/src/core/wave-review-authority.ts` build the owner map from it.
-- **Status:** `engine/src/core/owner-verification/status.ts` reads it.
+  `engine/src/core/wave-review-authority.ts` build the owner map from the obligations `obligationsTouchedBy` selects
+  over `ownerScopeOf(graph)`.
 
-None of these modules re-reads the plan.
+Status does not read the stamp at all. `engine/src/core/owner-verification/status.ts` projects only the latest
+persisted completion result's `ownerVerification` observation (ADR-0040), so what it reports is what the gate
+judged. None of these modules re-reads the plan.
 
 **Deviations from the plan, as shipped:**
 
@@ -146,8 +152,12 @@ None of these modules re-reads the plan.
   `plan-malformed` and `plan-drift`. Each has its own remedy row in `docs/operations.md` (§ owner verification).
 - The gate reads the plan directly (`readFileSync` plus `parsePlanModels`) rather than through
   `loadPlanModelsSource`, so that each failure keeps its own kind.
-- The owner run also reports an owner path that is not a readable file in the workspace as `plan-drift`
-  (`engine/src/orchestration/owner-verification-runner.ts`).
+- The owner run also reports an owner path that is not a file in the workspace as `plan-drift`
+  (`engine/src/orchestration/owner-verification-runner.ts`). The path comes from the stamp, so its absence means
+  the stamp names a path the Wave no longer has, and the drift remedy (restore, or re-populate) is the right
+  one. An owner that exists but the filesystem refuses is `repository-file-unreadable` instead.
+- A tsconfig or path-alias graph that cannot be resolved during coverage is `alias-config-unresolvable`, not a
+  plan kind: the plan is fine, so it must not send the operator to restore it (ADR-0035).
 
 `docs/architecture.md` ("Owner verification in the completion suite (G5b)") draws the flow.
 

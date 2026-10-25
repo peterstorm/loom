@@ -17,6 +17,7 @@ import {
   completionSuiteDigest,
   evaluateWaveCompletionSuite,
   parseCompletionCheckId,
+  publicationSlotOf,
   rejectionDisposition,
   parseAcceptedWaveCompletionReceipt,
   parseAuthorizedWaveCompletionCheck,
@@ -370,6 +371,24 @@ describe("evaluateWaveCompletionSuite — the observation is bound to the author
     expect(mismatch(evaluate(verified([verdict("INV-1", covered, verifiedRun(0))]), 1))).toEqual(["owner-verification-mismatch"]);
     expect(mismatch(evaluate(verified([verdict("INV-1", covered, verifiedRun(1))]), 0))).toEqual(["owner-verification-mismatch"]);
   });
+
+  /** A passing observation whose owner check outcome is overridden by `process`, its exit agreeing with the findings. */
+  const withOwnerProcess = (process: Readonly<{ timedOut: boolean; signal: string | null }>): CompletionSuiteEvaluation => {
+    const result = resultOf(OWES_INV1, verified([verdict("INV-1", covered, verifiedRun(0))]), 0);
+    const checks = (result.checks as readonly Record<string, unknown>[]).map((check) => check.checkId === OWNER_CHECK
+      ? { ...check, outcome: { ...(check.outcome as Record<string, unknown>), ...process } }
+      : check);
+    return evaluateWaveCompletionSuite(OWES_INV1, { ...result, checks }, EXPECTATION);
+  };
+
+  it.each([
+    ["timed out", { timedOut: true, signal: null }],
+    ["signalled", { timedOut: false, signal: "SIGTERM" }],
+    ["timed out and signalled", { timedOut: true, signal: "SIGKILL" }],
+  ] as const)("an owner check outcome that %s is an authority failure, whatever its exit and findings", (_case, process) => {
+    expect(withOwnerProcess({ timedOut: false, signal: null }).kind).toBe("accepted");
+    expect(mismatch(withOwnerProcess(process))).toEqual(["owner-verification-mismatch"]);
+  });
 });
 
 describe("parseAcceptedWaveCompletionReceipt — a receipt proves its owner verification passed", () => {
@@ -439,5 +458,19 @@ describe("rejectionDisposition — one decision for what a rejection means to th
   it("inexact: a rejection carrying no failure at all", () => {
     expect(rejectionDisposition({ kind: "rejected", authorityFailures: [], infrastructureFailures: [], semanticFailures: [] }))
       .toEqual({ kind: "inexact" });
+  });
+});
+
+describe("publicationSlotOf — where a rejected result is published, decided once", () => {
+  const semantic = rejectionDisposition(rejected(evaluate(verified([verdict("INV-1", { kind: "missing", paths: ["src/rules/sibling-b.ts"] }, verifiedRun(0))]), 1)));
+
+  it.each([
+    ["semantic", semantic, "result-slot"],
+    ["owner-undecided", { kind: "owner-undecided" }, "owner-attempt"],
+    ["authority", { kind: "authority" }, "none"],
+    ["infrastructure", { kind: "infrastructure" }, "none"],
+    ["inexact", { kind: "inexact" }, "none"],
+  ] as const)("%s → %s", (_case, disposition, slot) => {
+    expect(publicationSlotOf(disposition)).toBe(slot);
   });
 });

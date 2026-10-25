@@ -2,7 +2,8 @@
  * T7 / AD-2: the State File wire proves `owner_obligations` before any reader
  * selects from it. Each obligation is an exact record built through the one
  * Owner Obligation constructor, so a path playing two roles is refused; an
- * Invariant id is `INV-N`; an exemption needs a non-blank reason; an absent
+ * Invariant id is `INV-N`; an exemption needs a stated reason, never a blank
+ * or placeholder one (the plan grammar's `isPlaceholderExemptionReason`); an absent
  * field stays absent, so a graph populated before owner verification loads
  * and owes nothing (FR-004).
  */
@@ -160,6 +161,20 @@ describe("owner_obligations on the State File wire", () => {
       .toContain("owner_obligations[0].mutation.reason must be non-blank text");
     expect(refusal([{ ...EXEMPT, mutation: { kind: "exempt" } }]))
       .toContain("owner_obligations[0].mutation is missing field(s): reason");
+  });
+
+  it.each(["none", "N/A", " tbd. ", "TODO!", "-", "—", "nothing"])(
+    "refuses an exemption whose reason is the placeholder %j, as the plan grammar does",
+    (reason) => {
+      expect(refusal([{ ...EXEMPT, mutation: { kind: "exempt", reason } }]))
+        .toContain("owner_obligations[0].mutation.reason must state why the owner is exempt, not a placeholder");
+    },
+  );
+
+  it("loads an exemption whose reason merely contains a placeholder word", () => {
+    const stated = { ...EXEMPT, mutation: { kind: "exempt", reason: "none of its branches are reachable from a mutant" } };
+    const parsed = parseTaskGraph(viaDisk(graph({ owner_obligations: [stated] })));
+    expect(parsed.ok && parsed.value.owner_obligations?.[0]?.mutation).toEqual(stated.mutation);
   });
 
   it("refuses an unknown mutation policy and a verify policy that carries a reason", () => {

@@ -111,11 +111,14 @@ imports.
     seams" proves both refusals.
 - **Test exemption.** Test files may import `typescript`. `machine-purity.test.ts` does so to parse the
   dependencies it audits.
-- **Dependency status (NFR-003).** `typescript` stays where it already was, in `engine/package.json`
-  `devDependencies` (`"typescript": "^5.0.0"`). The documented `(cd engine && bun install --frozen-lockfile)`
-  installs it, the same way it installs `ts-pattern`, which dozens of engine modules under `engine/src`
-  import at runtime. No dependency is added. `docs/operations.md` says that the Wave Gate's owner verification loads
-  `typescript` at runtime, and that an engine checkout without its locked install cannot run the Wave Gate.
+- **Dependency status (NFR-003).** `typescript` is declared an engine runtime dependency: `engine/package.json`
+  `dependencies` carries `"typescript": "^5.9.0"` (PR #131 round-2 review remediation). It was already the
+  engine's compiler, installed as a `devDependency` at `^5.0.0`, so no package enters the tree and NFR-003 holds.
+  The move makes the manifest say what the runtime does: the Wave Gate loads `typescript`, so an install that
+  skips dev dependencies must still get it. The floor is `5.9` because `import-graph.ts` reads
+  `ImportClause.phaseModifier`, which first exists in TypeScript 5.9, to recognise a type-only import
+  (`import type …`); on an older compiler the field is absent and a type-only import would be counted as a
+  runtime edge. `docs/operations.md` records that owner verification loads `typescript` at runtime.
 
 ## Consequences
 
@@ -129,8 +132,9 @@ imports.
   compiler host.
 - The capability stays narrow and visible. The project rule, the programmatic linter and the purity audit
   each list the same two files, so widening the grant requires deliberate edits in three places.
-- No new dependency, and the pure-core and FC/IS boundaries are unchanged. All I/O stays in
-  `owner-verification-runner.ts` and the coverage shell input.
+- No new package (`typescript` was already installed; it is now declared where it runs), and the pure-core
+  and FC/IS boundaries are unchanged. All I/O stays in `owner-verification-runner.ts` and the coverage shell
+  input.
 
 **Negative:**
 - This deviates from interview answer Q4d. Two files hold the compiler-API grant instead of one, and a
@@ -138,9 +142,10 @@ imports.
 - The regex rule cannot import the seam constant, so its JSON (with its `.pi` copy) restates the pair.
   Moving or renaming a seam is one edit to `TYPESCRIPT_COMPILER_API_SEAMS` plus the two rule copies, and the
   mirror test fails until the copies follow.
-- `typescript` is now a runtime requirement of the Wave Gate, even though it is declared as a
-  `devDependency`. An install that skips dev dependencies would break owner verification. The operations
-  docs record this, but `package.json` does not express it.
+- `typescript` is now a runtime requirement of the Wave Gate, and the engine's runtime dependency set grows by
+  one declared entry. The package itself was already installed, but the compiler's version range is now a
+  runtime contract: lowering the `^5.9.0` floor would silently miscount type-only imports, which the comment in
+  `import-graph.ts` relies on.
 - The regex rule matches line text. A multi-line import of `typescript` that splits the specifier from
   `from` could slip past it. The exact-specifier programmatic grant and the closure audit cover that case.
 - Parse-only means no type information. Mutation operators and edge extraction are syntactic. If a future

@@ -5,6 +5,7 @@
  * performs no process, filesystem, clock, or network I/O.
  */
 
+import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import {
   parseArtifactDigest,
@@ -323,10 +324,30 @@ export function rejectionDisposition(rejection: RejectedCompletionSuite): Reject
   if (rejection.authorityFailures.length > 0) return freeze({ kind: "authority" });
   const infrastructure = infrastructureCase(rejection.infrastructureFailures);
   if (infrastructure === "other") return freeze({ kind: "infrastructure" });
-  const [first, ...rest] = rejection.semanticFailures;
-  if (first !== undefined) return freeze({ kind: "semantic", failures: freezeArray([first, ...rest]) as NonEmpty<CompletionSemanticFailure> });
+  if (rejection.semanticFailures.length > 0) {
+    return freeze({ kind: "semantic", failures: asNonEmpty(freezeArray(rejection.semanticFailures)) });
+  }
   return freeze({ kind: infrastructure === "owner-only" ? "owner-undecided" : "inexact" });
 }
+
+/**
+ * Where a rejected result is published, decided once from its disposition:
+ * - `result-slot`: a terminal rejection (`semantic`) fills the workspace's
+ *   result slot and is replayed there;
+ * - `owner-attempt`: an `owner-undecided` rejection is recorded beside the
+ *   slot, which stays free so a retry at the same workspace runs the owner
+ *   check again; the slot therefore never holds one;
+ * - `none`: an `authority`, `infrastructure` or `inexact` rejection is not
+ *   the authorized result and is never published.
+ */
+export type PublicationSlot = "result-slot" | "owner-attempt" | "none";
+
+export const publicationSlotOf = (disposition: RejectionDisposition): PublicationSlot =>
+  match(disposition)
+    .with({ kind: "semantic" }, (): PublicationSlot => "result-slot")
+    .with({ kind: "owner-undecided" }, (): PublicationSlot => "owner-attempt")
+    .with({ kind: "authority" }, { kind: "infrastructure" }, { kind: "inexact" }, (): PublicationSlot => "none")
+    .exhaustive();
 
 type Parsed<T> = DomainResult<T, CompletionSuiteParseError>;
 
@@ -568,19 +589,36 @@ function parseReportPolicy(raw: unknown, path: string): Parsed<ReportPolicy> {
     : reportPath;
 }
 
+type ReservedCheckEnvelope = Readonly<{ id: Parsed<CompletionCheckId>; errors: readonly string[] }>;
+
+/**
+ * The envelope every engine-reserved check shares: its id parses and equals
+ * the reserved `idText`, its scope is the Wave, and it requires no report.
+ * `fields` are the variant's own parsed fields; their errors follow the id's
+ * and the report policy's, before the envelope's own rules, in that order.
+ */
+function reservedCheckEnvelope(
+  record: UnknownRecord,
+  path: string,
+  idText: string,
+  label: string,
+  fields: readonly Parsed<unknown>[] = [],
+): ReservedCheckEnvelope {
+  const id = parseCompletionCheckId(record.checkId, `${path}.checkId`);
+  const reportPolicy = parseReportPolicy(record.reportPolicy, `${path}.reportPolicy`);
+  const errors = [id, reportPolicy, ...fields].flatMap((result) => result.ok ? [] : result.error.errors);
+  if (record.scope !== "wave") errors.push(`${path}.scope must equal wave`);
+  if (record.checkId !== idText) errors.push(`${path}.checkId must equal ${idText} for the ${label}`);
+  if (reportPolicy.ok && reportPolicy.value.kind !== "not-required") {
+    errors.push(`${path}.reportPolicy.kind must equal not-required for the ${label}`);
+  }
+  return { id, errors };
+}
+
 function parseEngineAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<AuthorizedWaveCompletionCheck> {
   const record = exactRecord(raw, ["kind", "checkId", "scope", "reportPolicy"], path);
   if (!record.ok) return record;
-  const id = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
-  const reportPolicy = parseReportPolicy(record.value.reportPolicy, `${path}.reportPolicy`);
-  const errors = [id, reportPolicy].flatMap((result) => result.ok ? [] : result.error.errors);
-  if (record.value.scope !== "wave") errors.push(`${path}.scope must equal wave`);
-  if (record.value.checkId !== FULL_TIER_LINT_CHECK_ID_TEXT) {
-    errors.push(`${path}.checkId must equal ${FULL_TIER_LINT_CHECK_ID_TEXT} for the engine check`);
-  }
-  if (reportPolicy.ok && reportPolicy.value.kind !== "not-required") {
-    errors.push(`${path}.reportPolicy.kind must equal not-required for the engine check`);
-  }
+  const { id, errors } = reservedCheckEnvelope(record.value, path, FULL_TIER_LINT_CHECK_ID_TEXT, "engine check");
   return errors.length === 0 && id.ok
     ? success(freeze({
         kind: "engine-full-tier-lint",
@@ -629,18 +667,9 @@ function parseProjectAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<A
 function parseOwnerAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<AuthorizedWaveCompletionCheck> {
   const record = exactRecord(raw, ["kind", "checkId", "scope", "reportPolicy", "obligationsDigest", "owed"], path);
   if (!record.ok) return record;
-  const id = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
-  const reportPolicy = parseReportPolicy(record.value.reportPolicy, `${path}.reportPolicy`);
   const obligations = parseDigest(record.value.obligationsDigest, `${path}.obligationsDigest`);
   const owed = fromOwnerVerification(parseOwedInvariantIds(record.value.owed, `${path}.owed`));
-  const errors = [id, reportPolicy, obligations, owed].flatMap((result) => result.ok ? [] : result.error.errors);
-  if (record.value.scope !== "wave") errors.push(`${path}.scope must equal wave`);
-  if (record.value.checkId !== OWNER_VERIFICATION_CHECK_ID_TEXT) {
-    errors.push(`${path}.checkId must equal ${OWNER_VERIFICATION_CHECK_ID_TEXT} for the owner check`);
-  }
-  if (reportPolicy.ok && reportPolicy.value.kind !== "not-required") {
-    errors.push(`${path}.reportPolicy.kind must equal not-required for the owner check`);
-  }
+  const { id, errors } = reservedCheckEnvelope(record.value, path, OWNER_VERIFICATION_CHECK_ID_TEXT, "owner check", [obligations, owed]);
   return errors.length === 0 && id.ok && obligations.ok && owed.ok
     ? success(freeze({
         kind: "engine-owner-verification",

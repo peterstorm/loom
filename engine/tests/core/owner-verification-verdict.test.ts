@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { mutationPlan, parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
+import { mutationPlan } from "../../src/core/owner-verification/mutation-plan";
 import {
   invariantVerdict,
   mutationBoundMs,
@@ -9,17 +9,16 @@ import {
   renderOwnerVerificationFailure,
   type MutantResult,
 } from "../../src/core/owner-verification/verdict";
-import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import { verifyOwed } from "../../src/core/owner-verification/obligations";
 import type {
   CoverageVerdict,
   InvariantId,
-  MutantCap,
   MutantOutcome,
   MutationPlan,
   OwnerObligation,
 } from "../../src/core/owner-verification/types";
-import { invariantId, ownerObligation } from "../fixtures/owner-obligation";
+import { digest } from "../fixtures/acceptance-fixtures";
+import { capOf, invariantId, ownerObligation } from "../fixtures/owner-obligation";
 
 const OWNER = "src/rules/owner.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
@@ -34,12 +33,6 @@ const OWNER_TEXT = [
   "}",
   "",
 ].join("\n");
-
-const capOf = (raw: number): MutantCap => {
-  const parsed = parseMutantCap(raw);
-  if (!parsed.ok) throw new Error(`not a cap: ${raw}`);
-  return parsed.value;
-};
 
 const planOf = (changed: readonly number[], cap = 24): MutationPlan => {
   const plan = mutationPlan({ ownerPath: OWNER, ownerText: OWNER_TEXT, changedLines: new Set(changed), cap: capOf(cap) });
@@ -62,11 +55,6 @@ const COVERED: CoverageVerdict = { kind: "covered" };
 const resultsOf = (plan: MutationPlan, outcome: (index: number) => MutantOutcome): readonly MutantResult[] =>
   plan.mutants.map((mutant, index) => ({ mutant, outcome: outcome(index) }));
 
-const digest = (() => {
-  const parsed = parseArtifactDigest("a".repeat(64));
-  if (!parsed.ok) throw new Error("digest");
-  return parsed.value;
-})();
 
 describe("invariantVerdict", () => {
   it("AS-010: AS-013: every mutant killed or timed out verifies with no survivor", () => {
@@ -79,7 +67,7 @@ describe("invariantVerdict", () => {
       invariant: "INV-1", title: "rule INV-1", owner: OWNER, matrixTest: MATRIX, coverage: COVERED,
       mutation: { kind: "verified", generated: 8, killed: 4, timedOut: 4, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: true },
     });
-    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [verdict] })).toEqual([]);
+    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 1, verdicts: [verdict] })).toEqual([]);
   });
 
   it("AS-011: a survivor is recorded with its operator, line, column, original and mutated text", () => {
@@ -115,14 +103,14 @@ describe("invariantVerdict", () => {
   it("AS-014: an owner unchanged in the Wave verifies with zero mutants and says so", () => {
     const verdict = invariantVerdict(obligation(), COVERED, { kind: "owner-unchanged", baseline: { kind: "green" } });
     expect(verdict.mutation).toEqual({ kind: "verified", generated: 0, killed: 0, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: false });
-    expect(renderMutationVerdict(verdict.mutation)).toBe("owner unchanged in Wave: 0 mutants generated");
+    expect(renderMutationVerdict(verdict.mutation)).toBe("mutation generated 0, killed 0, timed out 0, invalid 0, survived 0, unmutated 0 (owner unchanged in Wave)");
   });
 
   it("AS-014: a changed owner with no mutable construct on its changed lines records zero mutants and says so", () => {
     const plan = planOf([1, 4, 7]);
     const verdict = invariantVerdict(obligation(), COVERED, { kind: "owner-changed", baseline: { kind: "green" }, plan, results: [] });
     expect(verdict.mutation).toEqual({ kind: "verified", generated: 0, killed: 0, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: true });
-    expect(renderMutationVerdict(verdict.mutation)).toBe("no mutable construct on the owner's changed lines: 0 mutants generated");
+    expect(renderMutationVerdict(verdict.mutation)).toBe("mutation generated 0, killed 0, timed out 0, invalid 0, survived 0, unmutated 0 (no mutable construct on the owner's changed lines)");
   });
 
   it("FR-008: a red baseline is the verdict, whatever the mutants did", () => {
@@ -165,7 +153,7 @@ describe("invariantVerdict", () => {
     for (const results of [[], killed.slice(1), [...killed].reverse(), [...killed, killed[0]!]]) {
       const verdict = invariantVerdict(obligation(), COVERED, { kind: "owner-changed", baseline: { kind: "green" }, plan, results });
       expect(verdict.mutation).toEqual({ kind: "infrastructure", failure: { kind: "plan-drift", detail: expect.stringContaining("plan order") } });
-      expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [verdict] }))
+      expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 1, verdicts: [verdict] }))
         .toEqual([{ kind: "infrastructure", invariant: "INV-1", failure: verdict.mutation.kind === "infrastructure" ? verdict.mutation.failure : null }]);
     }
   });
@@ -180,7 +168,7 @@ describe("invariantVerdict", () => {
       kind: "infrastructure",
       failure: { kind: "no-valid-mutants", detail: expect.stringContaining(`all ${plan.mutants.length} generated mutants`) },
     });
-    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [verdict] });
+    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 1, verdicts: [verdict] });
     expect(failures.map(({ kind }) => kind)).toEqual(["infrastructure"]);
   });
 
@@ -196,7 +184,7 @@ describe("invariantVerdict", () => {
       results: resultsOf(plan, (index) => index === 0 ? { kind: "survived" } : { kind: "invalid", collectionErrors: ["c"] }),
     });
     expect(withSurvivor.mutation).toMatchObject({ kind: "verified", killed: 0, invalid: plan.mutants.length - 1 });
-    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [withSurvivor] }).map(({ kind }) => kind))
+    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 1, verdicts: [withSurvivor] }).map(({ kind }) => kind))
       .toEqual(["survivor"]);
   });
 });
@@ -212,7 +200,7 @@ describe("ownerVerificationFailures", () => {
   const exemptVerdict = invariantVerdict(obligation("INV-4", { kind: "exempt", reason: "r" }), COVERED, { kind: "exempt" });
 
   it("AS-011: FR-014: every finding names its Invariant: missing siblings, survivors, red baselines and infrastructure", () => {
-    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 0, verdicts: [survivorVerdict, redVerdict, infraVerdict, exemptVerdict] });
+    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 0, verdicts: [survivorVerdict, redVerdict, infraVerdict, exemptVerdict] });
     expect(failures.map((failure) => [failure.kind, failure.invariant])).toEqual([
       ["missing-siblings", "INV-1"],
       ["survivor", "INV-1"],
@@ -234,11 +222,11 @@ describe("ownerVerificationFailures", () => {
   });
 
   it("AS-004: a Wave that owes nothing has no failure", () => {
-    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 0, verdicts: [] })).toEqual([]);
+    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 0, verdicts: [] })).toEqual([]);
   });
 
   it("AS-011: the survivor diagnostic names the Invariant, owner file and line, operator, and original and mutated text", () => {
-    const [, survivor] = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 0, verdicts: [survivorVerdict] });
+    const [, survivor] = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 0, verdicts: [survivorVerdict] });
     const message = renderOwnerVerificationFailure(survivor!);
     expect(message).toContain("INV-1");
     expect(message).toContain(`${OWNER}:2`);
@@ -250,7 +238,7 @@ describe("ownerVerificationFailures", () => {
   });
 
   it("FR-014: every other failure renders its Invariant and evidence", () => {
-    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 0, verdicts: [survivorVerdict, redVerdict, infraVerdict] });
+    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest("a"), boundMs: 0, verdicts: [survivorVerdict, redVerdict, infraVerdict] });
     const [missing] = failures;
     expect(renderOwnerVerificationFailure(missing!)).toContain("src/rules/sibling.ts");
     const red = failures.find((failure) => failure.kind === "red-baseline")!;
@@ -269,10 +257,10 @@ describe("renderMutationVerdict", () => {
       kind: "owner-changed", baseline: { kind: "green" }, plan,
       results: resultsOf(plan, (index): MutantOutcome => index === 0 ? { kind: "survived" } : index === 1 ? { kind: "timed-out" } : index === 2 ? { kind: "invalid", collectionErrors: [MATRIX] } : { kind: "killed" }),
     });
-    expect(renderMutationVerdict(verified.mutation)).toBe("6 mutants generated: 3 killed, 1 timed out, 1 invalid, 1 survived; 2 sites unmutated (cap)");
+    expect(renderMutationVerdict(verified.mutation)).toBe("mutation generated 6, killed 3, timed out 1, invalid 1, survived 1, unmutated 2");
     expect(renderMutationVerdict({ kind: "exempt", reason: "generated code" })).toBe("mutation exempt: generated code");
-    expect(renderMutationVerdict({ kind: "red-baseline", failures: ["a", "b"] })).toBe("baseline red: a; b");
-    expect(renderMutationVerdict({ kind: "infrastructure", failure: { kind: "spawn-failed", detail: "x" } })).toBe("infrastructure (spawn-failed): x");
+    expect(renderMutationVerdict({ kind: "red-baseline", failures: ["a", "b"] })).toBe("mutation baseline red: a; b");
+    expect(renderMutationVerdict({ kind: "infrastructure", failure: { kind: "spawn-failed", detail: "x" } })).toBe("mutation infrastructure failure (spawn-failed): x");
   });
 });
 

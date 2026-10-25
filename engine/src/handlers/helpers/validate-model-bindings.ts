@@ -77,6 +77,8 @@ function renderOwnershipProblem(problem: OwnershipProblem): string {
       "no '**Matrix test:**' declared — name the test that runs the rule through every entry point")
     .with({ kind: "exemption-without-reason" }, () =>
       "'**Mutation exemption:**' has no reason — state why the owner's mutants need not be killed, or remove the line")
+    .with({ kind: "exemption-placeholder-reason" }, ({ reason }) =>
+      `'**Mutation exemption:** ${reason}' is a placeholder, not a reason — state why the owner's mutants need not be killed, or remove the line`)
     .with({ kind: "exemption-on-unowned" }, () =>
       "'**Mutation exemption:**' on an unowned invariant — an exemption is meaningful only on an owned one; remove it, or name the owner module")
     .exhaustive();

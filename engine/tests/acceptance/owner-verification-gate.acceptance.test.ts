@@ -22,10 +22,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ensureWaveCompletionSuite } from "../../src/handlers/helpers/wave-completion-suite";
 import {
   cleanupOwnerVerificationRepos,
-  ownerVerificationRepo,
+  ownerVerificationRepo as build,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
-  type OwnerVerificationRepoOptions,
 } from "../fixtures/owner-verification-repo";
 
 const OWNER_CHECK = "loom:owner-verification";
@@ -71,8 +70,6 @@ function persistedVerdict(repo: OwnerVerificationRepo): Record<string, unknown> 
   expect(verdicts.map((verdict) => verdict.invariant)).toEqual(["INV-1"]);
   return verdicts[0]!;
 }
-
-const build = (options: OwnerVerificationRepoOptions) => ownerVerificationRepo(options);
 
 describe("owner verification at the Wave Gate (CT-1)", () => {
   it("FR-001: a Wave that changed the owner runs sibling coverage and mutation for that owned Invariant", async () => {

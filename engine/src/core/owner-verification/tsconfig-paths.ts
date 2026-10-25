@@ -9,6 +9,7 @@
  */
 
 import { failure, success, type DomainResult } from "../orchestration-contract/identity";
+import { directoryOf, within } from "./repo-path";
 import type { PathAlias, PathAliases } from "./types";
 
 /** A repository-relative file's text, or null when it is not there. */
@@ -32,24 +33,6 @@ type ConfigRecord = Readonly<Record<string, unknown>>;
 type ConfigReader = Readonly<{ read: ReadRepositoryFile; parseJsonc: ParseJsonc }>;
 
 const NO_PATHS: CompilerPaths = Object.freeze({ baseUrl: null, paths: null });
-
-// Repository-relative path arithmetic (no `node:path`: this module is pure).
-
-/** The directory of a repository-relative file path; "" at the repository root. */
-export const directoryOf = (path: string): string => {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? "" : path.slice(0, slash);
-};
-
-/** A repository-relative join that collapses `.`, `..` and empty segments; null when it escapes the repository. */
-export function within(directory: string, relative: string): string | null {
-  const segments = `${directory}/${relative}`.split("/").reduce<readonly string[] | null>((kept, segment) => {
-    if (kept === null || segment === "" || segment === ".") return kept;
-    if (segment === "..") return kept.length === 0 ? null : kept.slice(0, -1);
-    return [...kept, segment];
-  }, []);
-  return segments === null ? null : segments.join("/");
-}
 
 /** The nearest `tsconfig.json` from the matrix test's directory up to the repository root. */
 export function nearestTsconfig(matrixTest: string, read: ReadRepositoryFile): string | null {

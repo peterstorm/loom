@@ -6,9 +6,8 @@
  * carries the population stamp `owner_obligations` (plan AD-2), with a real plan
  * file read through the production document observer. The reviewed Task changes
  * a sibling entry point of INV-1 only, so INV-1 is the one owned Invariant whose
- * family it touches. The section is located by its byte-section label
- * `owner-map` (plan AD-9: `OWNER_MAP_SECTION`), never by a module this file
- * would have to import before it exists.
+ * family it touches. The section is located by its byte-section label,
+ * the imported `OWNER_MAP_SECTION` (plan AD-9).
  *
  * Roles: FR-022 names code-reviewer and architecture-tech-lead. Wave issuance
  * builds a packet for every role in `WAVE_REVIEW_AGENTS`; each testcase checks
@@ -21,6 +20,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ContextPacket } from "../../src/core/context-packets";
 import { parseOrchestrationRunId } from "../../src/core/orchestration-contract";
+import { OWNER_MAP_SECTION } from "../../src/core/owner-verification/owner-map";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import {
@@ -42,8 +42,6 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-/** The byte-section label the plan fixes for the owner map (AD-9). */
-const OWNER_MAP_LABEL = "owner-map";
 /** The two reviewer roles FR-022 owes the owner map. */
 const OWNER_MAP_ROLES: readonly string[] = ["code-reviewer", "architecture-tech-lead"];
 
@@ -115,8 +113,8 @@ function ownerMapRolePackets(batch: WaveRequestBatch): readonly ContextPacket[] 
 
 /** The owner-map section of `packet`, which must be one of its fixed (digest-bound) sections. */
 function ownerMapSection(packet: ContextPacket) {
-  const section = packet.fixedContext.find(({ label }) => label === OWNER_MAP_LABEL);
-  expect(section, `the ${packet.role} packet carries no engine-issued "${OWNER_MAP_LABEL}" fixed section`).toBeDefined();
+  const section = packet.fixedContext.find(({ label }) => label === OWNER_MAP_SECTION);
+  expect(section, `the ${packet.role} packet carries no engine-issued "${OWNER_MAP_SECTION}" fixed section`).toBeDefined();
   return section!;
 }
 

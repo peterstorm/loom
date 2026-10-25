@@ -7,7 +7,7 @@
  * conversion of a throwing owner run into a named infrastructure failure.
  */
 
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -241,9 +241,9 @@ describe("where a rejected result is published (owner-attempt path versus result
   /** A verified observation whose one verdict is both decided (a missing sibling) and undecided (a failed isolated copy). */
   const mixed = (input: OwnerVerificationInput): OwnerVerificationObservation => ({
     kind: "verified",
-    obligationsDigest: input.authority.obligationsDigest,
+    obligationsDigest: input.owed.obligationsDigest,
     boundMs: 0,
-    verdicts: input.owed.map((obligation) => ({
+    verdicts: input.owed.obligations.map((obligation) => ({
       invariant: obligation.invariant,
       title: obligation.title,
       owner: obligation.owner,
@@ -262,8 +262,8 @@ describe("where a rejected result is published (owner-attempt path versus result
     });
     const graph = repo.manager.load() as StampedGraph;
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.authority).toMatchObject({ obligationsDigest: obligationsDigest(graph.owner_obligations), owed: ["INV-1"] });
-    expect(seen[0]!.owed.map(({ invariant }) => invariant)).toEqual(["INV-1"]);
+    expect(seen[0]!.owed.obligationsDigest).toBe(obligationsDigest(graph.owner_obligations));
+    expect(seen[0]!.owed.obligations.map(({ invariant }) => invariant)).toEqual(["INV-1"]);
   }, GATE_TIMEOUT_MS);
 
   it("a rejection mixing a decided owner finding with an undecided one is terminal: it fills the result slot and is replayed, not re-run", async () => {
@@ -303,5 +303,30 @@ describe("where a rejected result is published (owner-attempt path versus result
     const paths = publishedPaths(repo);
     expect(paths).toHaveLength(1);
     expect(paths[0]).toMatch(/\.owner-infrastructure\/[0-9a-f]{64}\.json$/);
+  }, GATE_TIMEOUT_MS);
+});
+
+describe("replaying the result slot (publicationSlotOf)", () => {
+  it("a stale owner-undecided result found in the result slot is an artifact conflict: never replayed as a rejection, never re-run over", async () => {
+    const repo = build({ waveChanges: "owner", matrixTest: "discriminating" });
+    let runs = 0;
+    const undecided: RunOwnerVerification = async () => {
+      runs += 1;
+      return { kind: "unavailable", failure: { kind: "worktree-failed", detail: "the isolated copy could not be made" } };
+    };
+    await blockedDiagnostic(repo, undecided);
+    const [attempt] = publishedPaths(repo);
+    expect(attempt).toMatch(/^([0-9a-f]{64})\/([0-9a-f]{64})\.owner-infrastructure\/[0-9a-f]{64}\.json$/);
+    // Plant the attempt record in the result slot it never belongs in, as a stale or foreign writer would.
+    const root = join(repo.handle.runDirectory, "artifacts", "completion-suites");
+    const slot = attempt!.replace(/\.owner-infrastructure\/[0-9a-f]{64}\.json$/, ".json");
+    copyFileSync(join(root, attempt!), join(root, slot));
+
+    const replayed = await blockedDiagnostic(repo, undecided);
+    expect(runs).toBe(1);
+    expect(replayed.categories).toEqual(["artifact"]);
+    expect(replayed.message).toContain(slot);
+    expect(replayed.message).toContain("persisted completion result conflicts with current authority");
+    expect(repo.manager.load().active_wave_completion_suite).toBeUndefined();
   }, GATE_TIMEOUT_MS);
 });

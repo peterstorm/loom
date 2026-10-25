@@ -1,77 +1,49 @@
 /**
- * T11 / AD-10 status half: the one owner-verification status value (the
- * report and its remedies), the persisted-result read that derives it, the
- * next-action merge that consumes it, and the status document both renderers
- * serialize.
+ * T11 / AD-10 status half, core rows: the one owner-verification status
+ * value (the report and its remedies), the persisted-result read that derives
+ * it, and the next-action merge that consumes it. Every row here exercises a
+ * pure function: `observedOwnerVerificationStatus` over every verdict kind
+ * and blocking finding, `renderOwnerVerificationStatus`,
+ * `ownerVerificationStatusOf` over every persisted result observation, and
+ * `withOwnerVerificationRemedies` over the readiness gate.
  *
- * Unit rows exercise `observedOwnerVerificationStatus` over every verdict
- * kind and blocking finding, `ownerVerificationStatusOf` over every persisted
- * result observation, and `withOwnerVerificationRemedies` over the readiness
- * gate. The shell rows go through `renderStatus` (the renderer behind `helper
- * orchestration status [--json]`) with a stamped graph, a live Wave Gate
- * registration and a persisted completion result authorized exactly as the
- * gate authorizes one.
+ * The shell rows (`renderStatus`, the renderer behind `helper orchestration
+ * status [--json]`, and the AS-029/AS-030 human/--json parity) live in
+ * `tests/handlers/owner-verification-status-render.test.ts`; both share the
+ * persisted-result builder in `tests/fixtures/persisted-completion-result.ts`.
  */
 
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   observedOwnerVerificationStatus,
   ownerVerificationNotObserved,
   renderOwnerVerificationStatus,
-  type OwnerVerificationStatusReport,
 } from "../../src/core/owner-verification/status";
-import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
-import { ownerCheckAuthority, ownerScopeOf } from "../../src/core/owner-verification/obligations";
 import type {
   CoverageVerdict,
   InvariantVerdict,
   MutationVerdict,
-  OwnerObligation,
   OwnerVerificationObservation,
-  SurvivorDiagnostic,
 } from "../../src/core/owner-verification/types";
-import {
-  authorizeWaveCompletionSuite,
-  freezeVerificationManifest,
-  type FrozenVerificationManifest,
-} from "../../src/core/verification-manifest";
-import { parseWaveCompletionSuiteResult } from "../../src/core/completion-suite";
-import { capturedSpecCheck } from "../../src/core/spec-check";
-import { evaluateTaskProof } from "../../src/core/proof-obligations";
-import { parsePlanModels } from "../../src/core/parse-plan-models";
-import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import {
   deriveLoomStatusFromParsedGraph,
   ownerVerificationStatusOf,
   withOwnerVerificationRemedies,
-  type StatusDeps,
 } from "../../src/core/loom-status";
-import { renderStatus } from "../../src/handlers/helpers/orchestration";
-import { parseTaskGraph } from "../../src/state-manager";
-import type {
-  ActiveWaveGateRegistration,
-  LoomStatus,
-  LoomStatusDocument,
-  TaskGraph,
-  WaveCompletionResultObservation,
-} from "../../src/types";
-import { labelledValue, value } from "../fixtures/parse-result";
-import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
-import { invariantId, ownerObligation } from "../fixtures/owner-obligation";
-
-const digest = (fill: string): ArtifactDigest => fill.repeat(64) as ArtifactDigest;
-
-const SURVIVOR: SurvivorDiagnostic = {
-  mutantId: "c".repeat(64),
-  operator: "logical-swap",
-  line: 7,
-  column: 3,
-  original: "&&",
-  replacement: "||",
-};
-
-const verifiedRun = (fields: Readonly<{ killed: number; timedOut: number; invalid: number; survivors: readonly SurvivorDiagnostic[]; unmutated: number }>, changed = true): MutationVerdict =>
-  labelledValue("verified mutation", verifiedMutationOf({ ...fields, ownerChangedInWave: changed }));
+import type { LoomStatus, WaveCompletionResultObservation } from "../../src/types";
+import { digest } from "../fixtures/acceptance-fixtures";
+import { invariantId } from "../fixtures/owner-obligation";
+import {
+  SURVIVOR,
+  ledgerAuthority,
+  ledgerGraph,
+  ledgerStatusDeps,
+  ownerVerificationIn,
+  persistedOwnerResult,
+  suiteResultOf,
+  survivorVerdict,
+  verifiedRun,
+} from "../fixtures/persisted-completion-result";
 
 const verdict = (invariant: string, coverage: CoverageVerdict, mutation: MutationVerdict): InvariantVerdict => ({
   invariant: invariantId(invariant),
@@ -198,132 +170,27 @@ describe("renderOwnerVerificationStatus", () => {
   });
 });
 
+
+describe("renderOwnerVerificationStatus: why a run generated no mutant, and an unresolvable tsconfig", () => {
+  it("says when a changed owner offered no mutable construct on its changed lines", () => {
+    const text = renderOwnerVerificationStatus(observed([
+      verdict("INV-4", { kind: "covered" }, verifiedRun({ killed: 0, timedOut: 0, invalid: 0, survivors: [], unmutated: 0 })),
+    ])).join("\n");
+    expect(text).toMatch(/INV-4.*mutation generated 0, .*unmutated 0 \(no mutable construct on the owner's changed lines\)/);
+  });
+
+  it("renders an unresolvable tsconfig as alias-config-unresolvable coverage, and names it in the remedy", () => {
+    const failure = { kind: "alias-config-unresolvable", detail: "tsconfig tsconfig.json does not parse" } as const;
+    const observation = observed([verdict("INV-5", { kind: "infrastructure", failure }, { kind: "exempt", reason: "r" })]);
+    expect(renderOwnerVerificationStatus(observation).join("\n"))
+      .toMatch(/INV-5.*coverage infrastructure failure \(alias-config-unresolvable\): tsconfig tsconfig\.json does not parse/);
+    expect(remediesOf(observation)).toEqual(["INV-5: infrastructure failure (alias-config-unresolvable): tsconfig tsconfig.json does not parse"]);
+  });
+});
+
 // ---------------------------------------------------------------------------
-// The persisted result read, the next-action merge and helper orchestration
-// status: one value, human and --json
+// The persisted result read and the next-action merge
 // ---------------------------------------------------------------------------
-
-const PLAN_FILE = ".claude/plans/2026-10-22-ledger.md";
-const LEDGER: OwnerObligation = ownerObligation({
-  invariant: "INV-1",
-  title: "Ledger entries are balanced only by the balancer",
-  statement: null,
-  owner: "src/core/balance.ts",
-  siblings: [{ path: "src/api/post.ts", note: null }],
-  matrixTest: "tests/balance.matrix.test.ts",
-  mutation: { kind: "verify" },
-});
-const PLAN_TEXT = [
-  "# Plan: ledger", "", "## Invariants", "",
-  `### ${LEDGER.invariant}: ${LEDGER.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${LEDGER.owner}\``,
-  "**Sibling entry points:**",
-  `- \`${LEDGER.siblings[0]!.path}\``,
-  `**Matrix test:** \`${LEDGER.matrixTest}\``, "",
-].join("\n");
-
-const REGISTRATION: ActiveWaveGateRegistration = {
-  schemaVersion: 1,
-  kind: "active-wave-gate",
-  runId: "run.owner-status-unit" as ActiveWaveGateRegistration["runId"],
-  wave: 1,
-  authorityDigest: digest("a") as ActiveWaveGateRegistration["authorityDigest"],
-  revision: 0,
-  terminalOutcome: null,
-};
-const WORKSPACE = digest("b");
-const MANIFEST: FrozenVerificationManifest = value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
-  schemaVersion: 2, kind: "loom-verification-manifest", checks: [], affectedRunner: AFFECTED_RUNNER,
-}))));
-const FILES = [LEDGER.owner];
-const PROOF = evaluateTaskProof(
-  { newTestsRequired: false, declaredArtifacts: FILES },
-  { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: FILES, newTestsWritten: false },
-);
-
-const GRAPH = Object.freeze({
-  current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [], spec_file: null,
-  plan_file: PLAN_FILE, wave_gates: {},
-  spec_check: capturedSpecCheck({ wave: 1, runAt: "now", criticalFindings: [] }),
-  active_wave_gate: REGISTRATION,
-  verification_manifest: MANIFEST,
-  owner_obligations: [LEDGER],
-  tasks: [{
-    id: "T1", description: "Change the balancer", agent: "code-implementer-agent", wave: 1, status: "implemented",
-    new_tests_required: false, proof: PROOF, depends_on: [], file_list: FILES, files_modified: FILES,
-    test_result: { verdict: "trusted-pass" }, test_evidence: "vitest pass", review_status: "passed",
-    critical_findings: [], advisory_findings: [],
-  }],
-});
-
-const parsedGraph = (): TaskGraph => {
-  const parsed = parseTaskGraph(JSON.parse(JSON.stringify(GRAPH)));
-  if (!parsed.ok) throw new Error(`fixture graph rejected: ${String(parsed.error)}`);
-  return parsed.value;
-};
-
-const OWNER_CHECK_ID = "loom:owner-verification";
-
-/**
- * The persisted result the gate would write for `verdicts`, observed through
- * the production parser. The owner check exits 1 exactly when owner
- * verification blocks, unless `ownerExit` forces an exit that contradicts it.
- */
-function persisted(verdicts: readonly InvariantVerdict[], ownerExit?: number): WaveCompletionResultObservation {
-  const owner = ownerCheckAuthority(ownerScopeOf(parsedGraph()), REGISTRATION.wave);
-  if (owner === null) throw new Error("fixture graph owes no owner check");
-  const ownerVerification: OwnerVerificationObservation = {
-    kind: "verified", obligationsDigest: owner.obligationsDigest, boundMs: 2_000, verdicts,
-  };
-  const exit = ownerExit ?? (remediesOf(ownerVerification).length > 0 ? 1 : 0);
-  const authority = value(authorizeWaveCompletionSuite(MANIFEST, REGISTRATION, WORKSPACE, owner));
-  const parsed = value(parseWaveCompletionSuiteResult({
-    kind: "wave-completion-suite-result",
-    runId: authority.runId, wave: authority.wave, revision: authority.revision,
-    authorityDigest: authority.authorityDigest, manifestDigest: authority.manifestDigest,
-    suiteDigest: authority.suiteDigest, workspaceDigest: authority.workspaceDigest,
-    checks: authority.checks.map((check) => ({
-      checkId: check.checkId,
-      scope: "wave",
-      outcome: {
-        kind: "observed",
-        exitCode: check.checkId === OWNER_CHECK_ID ? exit : 0,
-        timedOut: false, signal: null, report: { kind: "not-required" },
-      },
-    })),
-    ownerVerification,
-  }));
-  return { kind: "observed", result: parsed };
-}
-
-const statusDeps = (result: WaveCompletionResultObservation): StatusDeps => ({
-  loadPlanModels: () => ({ kind: "loaded", models: parsePlanModels(PLAN_TEXT) }),
-  filePresence: () => ({ ok: true, exists: true }),
-  currentWaveWorkspace: { kind: "observed", workspaceDigest: WORKSPACE },
-  currentWaveCompletionResult: result,
-});
-
-function statusOf(result: WaveCompletionResultObservation): Readonly<{ human: string; json: Record<string, unknown> }> {
-  const graph = JSON.parse(JSON.stringify(GRAPH)) as unknown;
-  return {
-    human: renderStatus(graph, statusDeps(result), false),
-    json: JSON.parse(renderStatus(graph, statusDeps(result), true)) as Record<string, unknown>,
-  };
-}
-
-const ledgerVerdict = (coverage: CoverageVerdict, mutation: MutationVerdict): InvariantVerdict => ({
-  invariant: LEDGER.invariant, title: LEDGER.title, owner: LEDGER.owner, matrixTest: LEDGER.matrixTest, coverage, mutation,
-});
-
-const survivorVerdict = (): InvariantVerdict =>
-  ledgerVerdict({ kind: "covered" }, verifiedRun({ killed: 1, timedOut: 0, invalid: 0, survivors: [SURVIVOR], unmutated: 0 }));
-
-/** The persisted observation a result fixture carries. */
-const ownerVerificationIn = (result: WaveCompletionResultObservation): OwnerVerificationObservation => {
-  if (result.kind !== "observed" || result.result.ownerVerification === undefined) throw new Error("fixture carries no owner verification");
-  return result.result.ownerVerification;
-};
 
 const OWNER_REMEDY = /owner verification blocks the Wave Gate/;
 
@@ -343,24 +210,14 @@ describe("ownerVerificationStatusOf: the persisted result, decided once", () => 
   });
 
   it("reports a persisted result without owner verification as not observed, saying so", () => {
-    const authority = value(authorizeWaveCompletionSuite(MANIFEST, REGISTRATION, WORKSPACE, null));
-    const result = value(parseWaveCompletionSuiteResult({
-      kind: "wave-completion-suite-result",
-      runId: authority.runId, wave: authority.wave, revision: authority.revision,
-      authorityDigest: authority.authorityDigest, manifestDigest: authority.manifestDigest,
-      suiteDigest: authority.suiteDigest, workspaceDigest: authority.workspaceDigest,
-      checks: authority.checks.map((check) => ({
-        checkId: check.checkId, scope: "wave",
-        outcome: { kind: "observed", exitCode: 0, timedOut: false, signal: null, report: { kind: "not-required" } },
-      })),
-    }));
+    const result = suiteResultOf(ledgerAuthority(false), () => 0);
     expect(ownerVerificationStatusOf({ kind: "observed", result })).toEqual({
       report: { kind: "not-observed", reason: "the persisted completion result carries no owner verification" }, remedies: [],
     });
   });
 
   it("reports a persisted owner verification as itself, with its blocking findings as remedies", () => {
-    const result = persisted([survivorVerdict()]);
+    const result = persistedOwnerResult([survivorVerdict()]);
     const ownerVerification = ownerVerificationIn(result);
     expect(ownerVerificationStatusOf(result)).toEqual(observedOwnerVerificationStatus(ownerVerification));
     expect(ownerVerificationStatusOf(result).remedies).toHaveLength(1);
@@ -370,19 +227,19 @@ describe("ownerVerificationStatusOf: the persisted result, decided once", () => 
 describe("withOwnerVerificationRemedies: the readiness gate", () => {
   /** The routed status of `result` (remedies already merged) and its owner-verification status. */
   const derived = (result: WaveCompletionResultObservation) => {
-    const { ownerVerification: _report, ...status } = deriveLoomStatusFromParsedGraph({ ok: true, value: parsedGraph() }, statusDeps(result));
+    const { ownerVerification: _report, ...status } = deriveLoomStatusFromParsedGraph({ ok: true, value: ledgerGraph() }, ledgerStatusDeps(result));
     return { status, owner: ownerVerificationStatusOf(result) };
   };
 
   it("adds one reason per remedy when the suite rejected the Wave for owner verification", () => {
-    const { status, owner } = derived(persisted([survivorVerdict()]));
+    const { status, owner } = derived(persistedOwnerResult([survivorVerdict()]));
     const merged = withOwnerVerificationRemedies(status, owner);
     expect(merged.next.reasons).toHaveLength(status.next.reasons.length + owner.remedies.length);
     expect(merged.next.reasons.at(-1)?.message).toMatch(OWNER_REMEDY);
   });
 
   it("adds none when the persisted result carries a survivor but the suite was rejected only for another failure kind", () => {
-    const { status, owner } = derived(persisted([survivorVerdict()]));
+    const { status, owner } = derived(persistedOwnerResult([survivorVerdict()]));
     const suite = status.facts.waveCompletionSuiteReadiness;
     if (suite.kind !== "known" || suite.value.kind !== "rejected") throw new Error("fixture suite must be rejected");
     const otherOnly: LoomStatus = {
@@ -393,67 +250,29 @@ describe("withOwnerVerificationRemedies: the readiness gate", () => {
     expect(withOwnerVerificationRemedies(otherOnly, owner)).toBe(otherOnly);
   });
 
-  it("adds none when the suite rejected for owner verification but the status observed nothing to remedy", () => {
-    const { status } = derived(persisted([survivorVerdict()]));
-    expect(withOwnerVerificationRemedies(status, ownerVerificationNotObserved("no persisted completion result"))).toBe(status);
-  });
-});
-
-describe("helper orchestration status: owner verification", () => {
-  it("AS-029: --json carries the persisted observation as the report and human status renders that very report", () => {
-    const result = persisted([ledgerVerdict({ kind: "covered" }, verifiedRun({ killed: 4, timedOut: 1, invalid: 0, survivors: [], unmutated: 2 }))]);
-    const { human, json } = statusOf(result);
-    const expected: OwnerVerificationStatusReport = ownerVerificationIn(result);
-    expect(json.ownerVerification).toEqual(expected);
-    for (const line of renderOwnerVerificationStatus(expected)) expect(human).toContain(line);
+  it("explains a rejection for owner verification whose status observed nothing to remedy, naming the not-observed reason", () => {
+    const { status } = derived(persistedOwnerResult([survivorVerdict()]));
+    const merged = withOwnerVerificationRemedies(status, ownerVerificationNotObserved("no persisted completion result"));
+    expect(merged.next.reasons).toEqual([
+      ...status.next.reasons,
+      {
+        kind: "completion-prerequisite-failed", taskId: null,
+        message: "owner verification rejected the Wave but no per-Invariant remedy could be read (no persisted completion result)",
+      },
+    ]);
   });
 
-  it("AS-029: without a persisted result, --json and human status report owner verification as not observed", () => {
-    const { human, json } = statusOf({ kind: "absent" });
-    expect(json.ownerVerification).toEqual({ kind: "not-observed", reason: "no persisted completion result" });
-    expect(human).toMatch(/- ownerVerification: not observed/);
-  });
-
-  it("the status document type requires ownerVerification and is exactly the shape --json emits", () => {
-    expectTypeOf<LoomStatusDocument["ownerVerification"]>().toEqualTypeOf<OwnerVerificationStatusReport>();
-    expectTypeOf<ReturnType<typeof deriveLoomStatusFromParsedGraph>>().toEqualTypeOf<LoomStatusDocument>();
-    expectTypeOf<LoomStatus>().not.toHaveProperty("ownerVerification");
-    const keys: readonly (keyof LoomStatusDocument)[] = ["schemaVersion", "facts", "next", "ownerVerification"];
-    const { json } = statusOf({ kind: "absent" });
-    expect(Object.keys(json).sort()).toEqual([...keys].sort());
-  });
-
-  it("an unavailable persisted completion result is reported as not observed, naming why, and names no remedy", () => {
-    const { human, json } = statusOf({ kind: "unavailable", reason: "EIO: i/o error reading the completion result" });
-    expect(json.ownerVerification).toEqual({
-      kind: "not-observed",
-      reason: "the persisted completion result is unavailable: EIO: i/o error reading the completion result",
+  it("explains a rejection for owner verification whose observation names no blocking Invariant", () => {
+    const result = persistedOwnerResult([survivorVerdict()]);
+    const { status } = derived(result);
+    const observation = ownerVerificationIn(result);
+    if (observation.kind !== "verified") throw new Error("fixture owner verification must be verified");
+    const merged = withOwnerVerificationRemedies(status, observedOwnerVerificationStatus({ ...observation, verdicts: [] }));
+    expect(merged.next.reasons.at(-1)).toEqual({
+      kind: "completion-prerequisite-failed", taskId: null,
+      message: "owner verification rejected the Wave but no per-Invariant remedy could be read " +
+        "(the persisted owner verification names no blocking Invariant)",
     });
-    expect(human).toContain("- ownerVerification: not observed (the persisted completion result is unavailable: EIO: i/o error reading the completion result)");
-    expect(JSON.stringify(json.next)).not.toMatch(OWNER_REMEDY);
-  });
-
-  it("AS-030: a gate the suite rejected for a survivor names the Invariant and the remedy in the next action", () => {
-    const { human, json } = statusOf(persisted([survivorVerdict()]));
-    const next = JSON.stringify(json.next);
-    expect(next).toContain("INV-1");
-    expect(next).toContain(`${LEDGER.owner}:${SURVIVOR.line}`);
-    expect(next).toMatch(/strengthen tests\/balance\.matrix\.test\.ts to kill it, or declare a mutation exemption with a reason on INV-1/);
-    expect(human.slice(human.indexOf("- nextAction"))).toContain(`${LEDGER.owner}:${SURVIVOR.line}`);
-  });
-
-  it("a persisted survivor the suite did not reject for owner verification (its owner exit contradicts it) is reported but names no remedy", () => {
-    const { human, json } = statusOf(persisted([survivorVerdict()], 0));
-    expect(JSON.stringify(json.facts)).not.toContain("owner-verification-rejected");
-    expect(JSON.stringify(json.ownerVerification)).toContain(SURVIVOR.mutantId);
-    expect(human).toContain(`survivor at ${LEDGER.owner}:${SURVIVOR.line}`);
-    expect(JSON.stringify(json.next)).not.toMatch(OWNER_REMEDY);
-  });
-
-  it("AS-030: a passing owner verification adds no remedy to the next action", () => {
-    const { json } = statusOf(persisted([
-      ledgerVerdict({ kind: "covered" }, verifiedRun({ killed: 3, timedOut: 0, invalid: 0, survivors: [], unmutated: 0 })),
-    ]));
-    expect(JSON.stringify(json.next)).not.toMatch(/strengthen|mutation exemption/);
+    expect(merged.next.reasons).toHaveLength(status.next.reasons.length + 1);
   });
 });

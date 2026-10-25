@@ -22,9 +22,12 @@
  * A site is a candidate when its replaced span starts on a changed line
  * (1-based). Candidates sort by (start, operator order, end); over the cap the
  * selection is the evenly spaced indices `floor(i * n / cap)` for `i < cap`,
- * so mutants never cluster at the top of the file. The cap's parser and the
- * plan's constructor are the only ways to hold a `MutantCap` and a
- * `MutationPlan`.
+ * so mutants never cluster at the top of the file. The cap's parser is the
+ * only way to hold a `MutantCap`. A `MutationPlan` is held only through its
+ * constructor `mutationPlanOf`, which checks fields it is handed, or through
+ * the selection itself (`selectedPlan`), whose evenly spaced choice holds
+ * `min(candidates, cap)` mutants by construction: the bound has one home and
+ * `mutationPlan` stays total, with no unreachable failure to throw.
  */
 
 import ts from "typescript";
@@ -60,11 +63,15 @@ export const parseMutantCap: ParseMutantCapFn = (raw) =>
 
 const isCount = (value: number): boolean => Number.isInteger(value) && value >= 0;
 
+/** The plan brand's one minting point, reached only once the bounds hold. */
+const mintPlan = (mutants: readonly Mutant[], candidates: number, cap: MutantCap): MutationPlan =>
+  Object.freeze({ mutants: Object.freeze([...mutants]), candidates, cap }) as MutationPlan;
+
 export const mutationPlanOf: MutationPlanOfFn = ({ mutants, candidates, cap }) => {
   if (!isCount(candidates)) return failure({ kind: "candidates-not-a-count", candidates });
   if (mutants.length > candidates) return failure({ kind: "mutants-exceed-candidates", mutants: mutants.length, candidates });
   if (mutants.length > cap) return failure({ kind: "mutants-exceed-cap", mutants: mutants.length, cap });
-  return success(Object.freeze({ mutants: Object.freeze([...mutants]), candidates, cap }) as MutationPlan);
+  return success(mintPlan(mutants, candidates, cap));
 };
 
 const OPERATOR_ORDER: readonly MutationOperator[] = [
@@ -162,11 +169,19 @@ const byPosition = (left: Candidate, right: Candidate): number =>
   || OPERATOR_ORDER.indexOf(left.operator) - OPERATOR_ORDER.indexOf(right.operator)
   || left.end - right.end;
 
-/** The evenly spaced selection of at most `cap` of `candidates`: indices `floor(i * n / cap)`. */
-function select<T>(candidates: readonly T[], cap: number): readonly T[] {
+/**
+ * The plan of the sorted candidates: every one when they fit the cap,
+ * otherwise the evenly spaced indices `floor(i * n / cap)` for `i < cap`.
+ * It holds `min(n, cap)` mutants, so it is within both bounds by construction.
+ */
+function selectedPlan(ownerPath: string, candidates: readonly Candidate[], cap: MutantCap): MutationPlan {
   const n = candidates.length;
-  if (n <= cap) return candidates;
-  return Array.from({ length: cap }, (_, i) => candidates[Math.floor((i * n) / cap)]!);
+  const chosen = n <= cap ? candidates : Array.from({ length: cap }, (_, i) => candidates[Math.floor((i * n) / cap)]!);
+  const mutants = chosen.map((candidate): Mutant => Object.freeze({
+    id: sha256Hex(JSON.stringify([ownerPath, candidate.start, candidate.end, candidate.operator])),
+    ...candidate,
+  }));
+  return mintPlan(mutants, n, cap);
 }
 
 /** The parser's verdict on the owner: its tree, or every syntax error it reported (failing closed when it reports none at all). */
@@ -190,13 +205,7 @@ export const mutationPlan: MutationPlanFn = ({ ownerPath, ownerText, changedLine
     })
     .filter((candidate) => changedLines.has(candidate.line))
     .sort(byPosition);
-  const mutants = select(candidates, cap).map((candidate): Mutant => Object.freeze({
-    id: sha256Hex(JSON.stringify([ownerPath, candidate.start, candidate.end, candidate.operator])),
-    ...candidate,
-  }));
-  const plan = mutationPlanOf({ mutants, candidates: candidates.length, cap });
-  if (!plan.ok) throw new Error(`invariant: the evenly spaced selection broke the plan's bounds (${plan.error.kind})`);
-  return success(plan.value);
+  return success(selectedPlan(ownerPath, candidates, cap));
 };
 
 export const applyMutant: ApplyMutantFn = (ownerText, mutant) =>

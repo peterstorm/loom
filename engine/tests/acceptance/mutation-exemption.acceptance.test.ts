@@ -48,15 +48,15 @@ const plan = (...blocks: readonly (readonly [string, readonly string[]])[]): str
 ].join("\n");
 
 /** Every declared path exists, so only the exemption grammar can fail validation. */
-const DEPS: ModelBindingDeps = {
-  readFile: () => ({ ok: false, error: "ENOENT" }),
-  pathPresence: () => ({ kind: "present" }),
-};
+const EVERY_PATH_PRESENT: Pick<ModelBindingDeps, "pathPresence"> = { pathPresence: () => ({ kind: "present" }) };
 
-/** The populate / repair / validate entry point over plan text. */
+/** No file is readable: validation over already-parsed models. */
+const DEPS: ModelBindingDeps = { ...EVERY_PATH_PRESENT, readFile: () => ({ ok: false, error: "ENOENT" }) };
+
+/** The populate / repair / validate entry point over plan text: only `PLAN_FILE` is readable. */
 const DEPS_WITH_PLAN = (text: string): ModelBindingDeps => ({
+  ...EVERY_PATH_PRESENT,
   readFile: (path) => path === PLAN_FILE ? { ok: true, content: text } : { ok: false, error: "ENOENT" },
-  pathPresence: () => ({ kind: "present" }),
 });
 
 const errorsOf = (text: string): readonly string[] => {

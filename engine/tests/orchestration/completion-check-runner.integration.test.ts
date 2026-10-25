@@ -9,6 +9,7 @@ import {
 } from "../../src/core/completion-suite";
 import {
   runCompletionCheck,
+  runProjectCommandAt,
   runRemediationCheck,
   type CompletionCheckRunnerResult,
   type RemediationCheckRunnerResult,
@@ -699,6 +700,29 @@ describe("completion check process shell", () => {
       ok: false,
       error: { kind: "path-rejected", path: "linked/report.bin" },
     });
+  });
+});
+
+describe("runProjectCommandAt — the parsed check travels with its execution", () => {
+  it("returns the check it parsed and ran, and the Wave wrapper reports that parsed check's id", async () => {
+    const root = fixtureRoot();
+    const raw = check("missing-report");
+    const ran = await runProjectCommandAt(raw, root);
+    expect(ran.ok).toBe(true);
+    if (!ran.ok) return;
+    expect(ran.value.check).toEqual(raw);
+    expect(ran.value.check).not.toBe(raw);
+    expect(Object.isFrozen(ran.value.check)).toBe(true);
+    expect(ran.value.execution).toMatchObject({ kind: "observed", process: { exitCode: 0, timedOut: false, signal: null } });
+    const wrapped = execution(await runCompletionCheck(raw, root));
+    expect(wrapped.checkResult.checkId).toBe(ran.value.check.checkId);
+  });
+
+  it("refuses a check its parser refuses before anything runs, with no execution to read", async () => {
+    const unparsed = { ...check("missing-report"), checkId: "loom:reserved-id" } as unknown as ProjectCommandCheck;
+    const ran = await runProjectCommandAt(unparsed, fixtureRoot());
+    expect(ran).toMatchObject({ ok: false, error: { kind: "invalid-runner-authority" } });
+    expect(await runCompletionCheck(unparsed, fixtureRoot())).toMatchObject({ ok: false, error: { kind: "invalid-runner-authority" } });
   });
 });
 
