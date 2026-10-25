@@ -6,7 +6,10 @@
  * `affectedRunner` runs over the Task's changed files: the attempt epoch's
  * ledger FileWrite paths that still exist. A failing affected test blocks
  * the stop, at most `AFFECTED_STOP_CHECK_MAX_BLOCKS` times per agent, and
- * every fault fails open with a note naming its cause. The acceptance check and
+ * every fault fails open with a note naming its cause. A failing testcase of a
+ * frozen acceptance file that the Task's Wave expects RED never blocks: the
+ * Wave Gate's own rule (`isExpectedRedAcceptanceFailure`) excuses it, and the
+ * stop reports it instead (CT-2 amendment A1). The acceptance check and
  * the affected check run in sequence under one runner lock and inside one hook
  * budget, and they produce one combined block message. Nothing here is
  * completion evidence: no type below reaches proof, receipts or Wave Gate
@@ -29,6 +32,7 @@
  */
 
 import type { OwedStopCheck } from "./acceptance-contract";
+import type { AcceptanceExpectation } from "./acceptance-contract/gate";
 import type { AuthorizedWaveCompletionCheck } from "./completion-suite";
 import type { NonEmpty } from "./orchestration-contract";
 import type { ReviewPath } from "./review-packet";
@@ -149,15 +153,25 @@ export type FailingAffectedTestcase = Readonly<{
   outcome: "failed" | "collection-error";
 }>;
 
+/** One failing testcase of a frozen acceptance file that the Task's Wave
+ *  expects RED, by the Wave Gate's rule (`isExpectedRedAcceptanceFailure`):
+ *  reported, never blocking. `file` is the declared acceptance path. */
+export type ExcusedAcceptanceTestcase = Readonly<{ file: string; name: string }>;
+
 /** The verdict on one affected run's JUnit report. A report with zero
- *  testcases is `passed` with `zero-tests`, and the stop notes it (AS-023). */
+ *  testcases is `passed` with `zero-tests`, and the stop notes it (AS-023).
+ *  A run whose every failure is expected RED is `excused`, and the stop notes
+ *  them; a `failing` run blocks for its other failures and still names the
+ *  excused ones (CT-2 amendment A1). */
 export type AffectedRunVerdict =
   | Readonly<{ kind: "passed"; observed: "some-tests" | "zero-tests" }>
-  | Readonly<{ kind: "failing"; testcases: NonEmpty<FailingAffectedTestcase> }>
+  | Readonly<{ kind: "excused"; excused: NonEmpty<ExcusedAcceptanceTestcase> }>
+  | Readonly<{ kind: "failing"; testcases: NonEmpty<FailingAffectedTestcase>; excused: readonly ExcusedAcceptanceTestcase[] }>
   | Readonly<{ kind: "unobservable"; reason: string }>;
 
-/** `judgeAffectedRun`: pure and total over the parsed report. */
-export type JudgeAffectedRunFn = (projection: JunitTestcasesResult) => AffectedRunVerdict;
+/** `judgeAffectedRun`: pure and total over the parsed report and what the
+ *  Task's Wave owes each contract (`graphAcceptanceExpectation(graph, wave)`). */
+export type JudgeAffectedRunFn = (projection: JunitTestcasesResult, expectation: AcceptanceExpectation) => AffectedRunVerdict;
 
 // --- Stop shell ---
 
@@ -223,11 +237,13 @@ export type StopChecksPorts<Root extends string, RunResult> = Readonly<{
   now: () => number;
 }>;
 
-/** Why the affected check did not decide or block. Each kind's note carries
+/** Why the affected check did not decide or block, or what a passing check
+ *  reports (`zero-tests`, `acceptance-red-excused`). Each kind's note carries
  *  `AFFECTED_NOTE_TEXT[kind]` verbatim, and the stop proceeds. */
 export type AffectedStopCheckNoteKind =
   | "no-changed-files"
   | "zero-tests"
+  | "acceptance-red-excused"
   | "timed-out"
   | "killed"
   | "no-readable-report"
@@ -249,6 +265,7 @@ const COMMAND_REFUSED_TEXT = "the affected runner command could not be formed fo
 export const AFFECTED_NOTE_TEXT: Readonly<Record<AffectedStopCheckNoteKind, string>> = {
   "no-changed-files": "the affected stop check is skipped: this attempt has no changed files",
   "zero-tests": "the affected stop check passes: zero affected tests were found",
+  "acceptance-red-excused": "the affected stop check passes: its only failing tests are acceptance tests this Wave expects to fail (the Wave Gate's rule)",
   "timed-out": "the affected runner timed out",
   "killed": "the affected runner was killed",
   "no-readable-report": "the affected runner left no readable report",
@@ -269,8 +286,14 @@ export const ACCEPTANCE_BLOCK_HEADING = "## Acceptance stop check";
 
 /** The heading of the affected check's part of a block message. It is present
  *  exactly when that check contributes failures. Each failing affected test
- *  under it reads `- '<name>' (<file>) — failed` or `— failed to collect`. */
+ *  under it reads `- '<name>' (<file>) — failed` or `— failed to collect`;
+ *  the run's expected-RED acceptance failures follow under
+ *  `AFFECTED_EXCUSED_HEADING`, each reading `- '<name>' (<file>)`. */
 export const AFFECTED_BLOCK_HEADING = "## Affected-test stop check";
+
+/** The line introducing a blocking run's expected-RED acceptance failures,
+ *  which do not block. */
+export const AFFECTED_EXCUSED_HEADING = "Not blocking — acceptance tests this Wave expects to fail (the Wave Gate's rule):";
 
 // --- Plan view ---
 

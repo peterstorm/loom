@@ -12,7 +12,9 @@
  * the Wave completing all its anchors gates: from then on every Wave Gate needs
  * it present and passing (GREEN). Before that it is **pending**, and its
  * failure is excused — nothing else is. A gate whose report fails outside the
- * acceptance files, or fails a due testcase, is never excused.
+ * acceptance files, or fails a due testcase, is never excused. The I7
+ * affected stop check excuses exactly the same testcases, by the same rule
+ * (`isExpectedRedAcceptanceFailure`).
  *
  * Tasks run between the contract Wave and the last Wave completing one of its
  * anchors see pending testcases fail in any full-suite run, so their
@@ -62,6 +64,7 @@ export {
   acceptanceObservation,
   emptyAcceptanceExpectation,
   graphAcceptanceExpectation,
+  isExpectedRedAcceptanceFailure,
   judgeAcceptance,
   observeAcceptanceFacts,
   owesAcceptance,

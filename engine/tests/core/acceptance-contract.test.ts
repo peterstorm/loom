@@ -9,6 +9,7 @@ import {
   contractWriter,
   frozenPathDrift,
   frozenPaths,
+  isExpectedRedAcceptanceFailure,
   renderFrozenPathDrift,
   judgeAcceptance,
   observeAcceptanceFacts,
@@ -317,6 +318,52 @@ describe("judgeAcceptance — GREEN by anchor after the contract Wave", () => {
           testcase("outside", "failed", "AssertionError", "tests/core/other.test.ts"),
         ];
         return judgeAcceptance(expectation, [facts(expectation, report)]).excusedCheckIds.length === 0;
+      },
+    ));
+  });
+});
+
+describe("isExpectedRedAcceptanceFailure — the one expected-RED rule the gate and I7 share", () => {
+  const observed = (name: string, outcome: ReportTestcase["outcome"], collectionError = false) =>
+    ({ file: ACCEPTANCE, name, outcome, collectionError });
+
+  it("holds for a collected failure in the RED Wave, and for a pending one after it, never for a due one", () => {
+    const red = acceptanceExpectation([contract()], TASKS, 1);
+    expect(isExpectedRedAcceptanceFailure(red, observed(ROSTER[0].name, "failed"))).toBe(true);
+    const wave2 = acceptanceExpectation([contract(FROZEN)], TASKS, 2);
+    expect(isExpectedRedAcceptanceFailure(wave2, observed(ROSTER[1].name, "failed"))).toBe(true);
+    expect(isExpectedRedAcceptanceFailure(wave2, observed(ROSTER[0].name, "failed"))).toBe(false);
+  });
+
+  it("fails closed for a collection error, a passing or unanchored testcase, a foreign file and an unobservable contract", () => {
+    const red = acceptanceExpectation([contract()], TASKS, 1);
+    expect(isExpectedRedAcceptanceFailure(red, observed(ACCEPTANCE, "failed", true))).toBe(false);
+    expect(isExpectedRedAcceptanceFailure(red, observed(ROSTER[0].name, "passed"))).toBe(false);
+    expect(isExpectedRedAcceptanceFailure(red, { ...observed(ROSTER[0].name, "failed"), file: "tests/core/other.test.ts" })).toBe(false);
+    const wave2 = acceptanceExpectation([contract(FROZEN)], TASKS, 2);
+    expect(isExpectedRedAcceptanceFailure(wave2, observed("payload > unanchored", "failed"))).toBe(false);
+    const unobservable = acceptanceExpectation([contract()], TASKS, 2);
+    expect(isExpectedRedAcceptanceFailure(unobservable, observed(ROSTER[1].name, "failed"))).toBe(false);
+  });
+
+  it("property: the gate excuses a check exactly when its report fails only testcases the rule holds for", () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 4 }),
+      fc.boolean(),
+      fc.array(fc.record({
+        name: fc.constantFrom(ROSTER[0].name, ROSTER[1].name, "payload > unanchored", "tests/acceptance/payload.acceptance.test.ts"),
+        outcome: fc.constantFrom("passed", "failed", "skipped") as fc.Arbitrary<ReportTestcase["outcome"]>,
+        outside: fc.boolean(),
+      }), { maxLength: 6 }),
+      (wave, frozen, cases) => {
+        const expectation = acceptanceExpectation([contract(frozen ? FROZEN : { state: "awaiting-red" })], TASKS, wave);
+        const report = cases.map(({ name, outcome, outside }) =>
+          testcase(name, outcome, undefined, outside ? "tests/core/other.test.ts" : undefined));
+        const fact = facts(expectation, report);
+        const failing = report.filter(({ outcome }) => outcome === "failed");
+        const ruleHolds = fact.kind === "projected" && fact.otherFailures === 0 && failing.length > 0 &&
+          fact.testcases.filter(({ outcome }) => outcome === "failed").every((observedCase) => isExpectedRedAcceptanceFailure(expectation, observedCase));
+        expect(judgeAcceptance(expectation, [fact]).excusedCheckIds).toEqual(ruleHolds ? ["verify"] : []);
       },
     ));
   });

@@ -1,6 +1,8 @@
 /**
  * The affected-test stop check's pure core (I7, AD-10).
- * - `judgeAffectedRun` turns one affected run's parsed JUnit report into a verdict.
+ * - `judgeAffectedRun` turns one affected run's parsed JUnit report into a
+ *   verdict. A failure the Wave Gate would excuse as expected RED
+ *   (`isExpectedRedAcceptanceFailure`, the one rule) never blocks.
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
  *   both stop checks, applying `blockAdmission`, the per-check cap gate.
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
@@ -18,32 +20,59 @@
 import {
   ACCEPTANCE_BLOCK_HEADING,
   AFFECTED_BLOCK_HEADING,
+  AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
   type AFFECTED_STOP_CHECK_MAX_BLOCKS,
   type AffectedRunVerdict,
+  type ExcusedAcceptanceTestcase,
   type FailingAffectedTestcase,
   type JudgeAffectedRunFn,
   type StopCheckBlockCount,
   type StopCheckName,
 } from "./affected-stop-check-types";
+import { isExpectedRedAcceptanceFailure, testcaseAcceptanceFile, type AcceptanceExpectation } from "./acceptance-contract/gate";
 import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import type { NonEmpty } from "./orchestration-contract";
 import { attributeReportedFile } from "./report-file-attribution";
-import { isCollectionErrorTestcase } from "./structured-test-report";
+import { isCollectionErrorTestcase, type ReportTestcase } from "./structured-test-report";
 
 // --- Judging an affected run ---
 
-export const judgeAffectedRun: JudgeAffectedRunFn = (projection): AffectedRunVerdict => {
+/** One failed testcase, judged: it blocks, or the Wave Gate's expected-RED rule excuses it. */
+type JudgedFailure =
+  | Readonly<{ kind: "blocking"; testcase: FailingAffectedTestcase }>
+  | Readonly<{ kind: "excused"; testcase: ExcusedAcceptanceTestcase }>;
+
+/**
+ * Judge one failed testcase. It is excused only when the Wave Gate's own
+ * attribution names an acceptance file of an owed contract and the gate's
+ * expected-RED rule holds for it; anything else blocks, a collection error in
+ * an acceptance file included.
+ */
+function judgeFailure(expectation: AcceptanceExpectation, acceptanceFiles: readonly string[], testcase: ReportTestcase): JudgedFailure {
+  const collectionError = isCollectionErrorTestcase(testcase);
+  const file = testcaseAcceptanceFile(acceptanceFiles, testcase.classname);
+  if (file !== null && isExpectedRedAcceptanceFailure(expectation, { file, name: testcase.name, outcome: testcase.outcome, collectionError })) {
+    return freeze({ kind: "excused", testcase: freeze({ file, name: testcase.name }) });
+  }
+  return freeze({
+    kind: "blocking",
+    testcase: freeze({ file: testcase.classname, name: testcase.name, outcome: collectionError ? "collection-error" : "failed" }),
+  });
+}
+
+export const judgeAffectedRun: JudgeAffectedRunFn = (projection, expectation): AffectedRunVerdict => {
   if (!projection.ok) return freeze({ kind: "unobservable", reason: `the affected runner's report could not be read: ${projection.error.message}` });
   if (projection.value.length === 0) return freeze({ kind: "passed", observed: "zero-tests" });
-  const failing = nonEmpty(projection.value
+  const acceptanceFiles = expectation.contracts.flatMap(({ files }) => files.map(({ path }) => path));
+  const judged = projection.value
     .filter(({ outcome }) => outcome === "failed")
-    .map((testcase): FailingAffectedTestcase => freeze({
-      file: testcase.classname,
-      name: testcase.name,
-      outcome: isCollectionErrorTestcase(testcase) ? "collection-error" : "failed",
-    })));
-  return failing === null ? freeze({ kind: "passed", observed: "some-tests" }) : freeze({ kind: "failing", testcases: failing });
+    .map((testcase) => judgeFailure(expectation, acceptanceFiles, testcase));
+  const failing = nonEmpty(judged.flatMap((failure) => failure.kind === "blocking" ? [failure.testcase] : []));
+  const excused = judged.flatMap((failure) => failure.kind === "excused" ? [failure.testcase] : []);
+  if (failing !== null) return freeze({ kind: "failing", testcases: failing, excused: freeze(excused) });
+  const allExcused = nonEmpty(excused);
+  return allExcused === null ? freeze({ kind: "passed", observed: "some-tests" }) : freeze({ kind: "excused", excused: allExcused });
 };
 
 // --- The block-counter transition rule ---
@@ -162,9 +191,14 @@ const OUTCOME_TEXT: Readonly<Record<FailingAffectedTestcase["outcome"], string>>
   "collection-error": "failed to collect",
 });
 
-/** The affected check's part of a block message: what is failing, and what the agent may do about it. */
+/** One expected-RED acceptance failure as a block message or note names it. */
+export const renderExcusedAcceptanceTestcase = ({ file, name }: ExcusedAcceptanceTestcase): string => `'${name}' (${file})`;
+
+/** The affected check's part of a block message: what is failing, what fails
+ *  without blocking, and what the agent may do about it. */
 export function renderAffectedBlock(
   testcases: NonEmpty<FailingAffectedTestcase>,
+  excused: readonly ExcusedAcceptanceTestcase[],
   attribution: AffectedFileAttribution,
   runnerOutput: string,
   blocksRemaining: number,
@@ -177,6 +211,7 @@ export function renderAffectedBlock(
     "LOOM AFFECTED-TEST STOP CHECK: tests affected by the files your attempt changed are failing.",
     "Keep working until they pass:",
     ...lines,
+    ...(excused.length === 0 ? [] : ["", AFFECTED_EXCUSED_HEADING, ...excused.map((testcase) => `- ${renderExcusedAcceptanceTestcase(testcase)}`)]),
     "",
     "Failures can also come from a sibling Task editing concurrently; if your own code is correct, say that and stop.",
     `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`,

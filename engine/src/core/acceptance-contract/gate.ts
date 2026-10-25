@@ -267,6 +267,26 @@ function contractFailures(
 }
 
 /**
+ * The one expected-red rule, shared by the Wave Gate's exit excuse and the I7
+ * affected stop check: a testcase attributed to an acceptance file (`file` is
+ * the declared path) that failed behaviorally, in its contract's RED Wave, or
+ * after it while every anchor it decides is still pending. A collection error,
+ * an unanchored or due testcase, and a file of no owed contract (including an
+ * unobservable one) are never expected RED: they fail closed.
+ */
+export function isExpectedRedAcceptanceFailure(
+  expectation: AcceptanceExpectation,
+  testcase: Pick<ObservedAcceptanceTestcase, "file" | "name" | "outcome" | "collectionError">,
+): boolean {
+  if (testcase.outcome !== "failed" || testcase.collectionError) return false;
+  const expected = expectation.contracts.find(({ files }) => files.some(({ path }) => path === testcase.file));
+  if (expected === undefined) return false;
+  if (expected.phase === "red") return true;
+  const anchors = decidedAnchors(expected, testcase);
+  return anchors.length > 0 && !isDue(expected, anchors, expectation.wave);
+}
+
+/**
  * A check's non-zero exit is excused only when its report shows failures and
  * every one is a collected RED or pending acceptance testcase. The judgment is
  * report-derived: an exit cause that never appears as a failing testcase (a
@@ -277,14 +297,7 @@ function contractFailures(
 function excused(expectation: AcceptanceExpectation, fact: AcceptanceReportFacts): boolean {
   if (fact.kind !== "projected" || fact.otherFailures > 0) return false;
   const failing = fact.testcases.filter(({ outcome }) => outcome === "failed");
-  return failing.length > 0 && failing.every((testcase) => {
-    if (testcase.collectionError) return false;
-    const expected = expectation.contracts.find(({ files }) => files.some(({ path }) => path === testcase.file));
-    if (expected === undefined) return false;
-    if (expected.phase === "red") return true;
-    const anchors = decidedAnchors(expected, testcase);
-    return anchors.length > 0 && !isDue(expected, anchors, expectation.wave);
-  });
+  return failing.length > 0 && failing.every((testcase) => isExpectedRedAcceptanceFailure(expectation, testcase));
 }
 
 export function judgeAcceptance(
