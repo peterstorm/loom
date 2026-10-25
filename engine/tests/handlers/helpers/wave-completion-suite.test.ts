@@ -399,6 +399,7 @@ function resultArtifactAuthority(f: Fixture) {
     graph.verification_manifest,
     graph.active_wave_gate,
     workspace.workspaceDigest,
+    null,
   );
   if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));
   return authorized.value;

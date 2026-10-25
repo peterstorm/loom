@@ -445,6 +445,30 @@ _Avoid_: Caller (too broad — not every caller applies the rule), consumer, cop
 The test an owned invariant names (`**Matrix test:**`) that runs its rule through the owner and every **Sibling Entry Point**, so a divergent second copy fails it. Any Task change to the family must come with a change to its matrix test.
 _Avoid_: Parity test (one specific shape), integration test (says nothing about coverage)
 
+**Owner Obligation**:
+One owned invariant of the plan as population stamps it into the TaskGraph (`owner_obligations`): its id, title, statement, **Invariant Owner**, **Sibling Entry Points**, **Matrix Test** and mutation policy (`verify`, or `exempt` with a reason). Derived purely from the plan by `obligationsFromInvariants` and built only by `ownerObligationOf`, which the State File parser shares: every path plays one role (the owner is no sibling, the matrix test is neither, no sibling twice). Its id is a branded `InvariantId` (`INV-N`). The stamp is always written, `[]` included, so an absent field means only "populated before G5b" and owes nothing. Which obligations a Wave or Task owes is decided only by `core/owner-verification/obligations.ts`, over the opaque **Owner Scope** `ownerScopeOf(graph)` builds (callers never filter the raw stamp): a Wave owes **Owner Verification** for the obligations whose family it changed (owner or sibling — a matrix-test-only change does not count), and a Task is touched by any role it plays, matrix test included. Which owe mutation is `verifyOwed`.
+_Avoid_: Ownership duty (informal), owned invariant (that is the plan declaration; the obligation is its stamped form)
+
+**Owner Verification**:
+The engine-reserved Wave completion-suite check `loom:owner-verification`. Whenever the TaskGraph carries the **Owner Obligation** stamp it re-reads the plan and blocks on a missing, unreadable or malformed plan, or on drift from the stamp. For each owed obligation it then decides two things. **Sibling coverage**: the **Matrix Test**'s direct runtime imports, closed under ordinary re-exports (`export … from` counts; type-only imports and type-only re-exports are erased at runtime and never count) and resolved to files, reach the owner and every sibling. **Mutation verification**: every mutant of the owner's lines changed in the Wave (six fixed operators, at most 24 per invariant, each run in an isolated git worktree through the frozen `affectedRunner`) is killed. A missing path, a red baseline, a survivor or any infrastructure failure (including a run whose every mutant is invalid, `no-valid-mutants`) blocks the gate. An import proves reach, not exercise.
+_Avoid_: Mutation testing (alone — it is one half), owner check (informal)
+
+**Mutation Exemption**:
+An owned invariant's declared, reasoned opt-out of mutation verification: `**Mutation exemption:** <reason>` in its plan block. It disables only the mutation half; sibling coverage still runs. Validation refuses one with a blank reason (`exemption-without-reason`), one whose reason is a placeholder (`exemption-placeholder-reason`: `none`, `n/a`, `na`, `tbd`, `todo`, `-`, `—`, `null`, `nil`, `no` or `nothing`, compared trimmed, case-insensitive, trailing punctuation ignored) and one on an unowned invariant (`exemption-on-unowned`); the State File stamp parser refuses the same placeholder reasons, so it is never a silent opt-out.
+_Avoid_: Waiver (that is a **Verification Policy** arm), skip
+
+**Owner Map**:
+The engine-issued, digest-bound section of a Wave review **Context Packet** for a code-reviewer or architecture-tech-lead reviewing a Task that touches an owned family. It lists each touched invariant's id, title, statement, owner, siblings, matrix test and the `<plan file>#INV-N` contract, followed by the fixed **Second Copy** rule. Every other packet is byte-identical; standalone reviews never carry one.
+_Avoid_: Owner registry (there is no repository-wide one), ownership section (that is the implementation brief's)
+
+**Second Copy**:
+An implementation of a declared-owned invariant's predicate outside its **Invariant Owner**. A reviewer reports it citing `<plan file>#INV-N`: critical when it diverges from the owner on some input (that input is the consequence), advisory when it is behaviorally identical. The reviewer decides which; the **Refutation Panel** checks it.
+_Avoid_: Duplicate (says nothing about the rule), divergent copy (only one of the two severities)
+
+**Family-site Metric**:
+`helper family-sites`: the count and `path:line` list of raw sites per known invariant family (fail-closed path probes, shell tokenizing, claim conservation) outside that family's owner modules, from patterns defined once in `core/family-sites.ts`. Deterministic for the same bytes, available as JSON and comparable with the recorded baseline `docs/family-sites.baseline.json`. The patterns are line regexes, so the counts are a gauge of consolidation progress, not a proof.
+_Avoid_: Duplication count, lint (it blocks nothing)
+
 **Acceptance Contract**:
 A plan's `CT-N` declaration made executable: a declarations-only types file (or `none` with a reason) and dedicated acceptance test files, each naming the Requirements it decides, written before any implementation and persisted in the TaskGraph (`acceptance_contracts`). Its testcases are named after the Requirement they decide (`AS-003: …`); that name prefix is the only attribution.
 _Avoid_: Contract (alone — collides with **Wire Contract** and the orchestration contract), spec test, golden test
@@ -595,6 +619,9 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A Review Packet reviews the **Git-Visible Leaves** of a scoped directory plus the leaves at its base, so a deletion shows; its **Reviewed Workspace Observation** hashes only the **Git-Visible Leaves**, where a deleted leaf has no bytes
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 - Every plan invariant names its **Invariant Owner** (or why it has none); an owned one lists its **Sibling Entry Points** and **Matrix Test**, and the engine renders each **Task**'s role among them into its implementation brief
+- Population stamps one **Owner Obligation** per owned invariant; a **Wave** that changed an obligation's owner or a sibling owes **Owner Verification** at its **Wave Gate**, unless a **Mutation Exemption** removes the mutation half
+- A Task touching an owned family gets its **Owner Verification** duties in its brief, and its code-reviewer and architecture-tech-lead packets carry the **Owner Map**, against which reviewers report each **Second Copy**
+- The **Family-site Metric** measures how many raw second sites remain per known family; it blocks nothing
 - An **Acceptance Contract** has exactly one **Contract Task**; every **Task** claiming a covered Requirement depends on it, may not write a frozen path, and turns the frozen testcases green at its own Wave Gate
 - Only an accepted Wave Gate stamps an **Acceptance Freeze**, and only a **Contract Revision** changes one; a claimant in a completed **Wave** blocks the revision until that Wave is reopened
 

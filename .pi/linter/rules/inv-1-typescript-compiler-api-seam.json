@@ -1,0 +1,15 @@
+{
+  "kind": "regex",
+  "name": "inv-1-typescript-compiler-api-seam",
+  "description": "The TypeScript compiler API enters engine code through exactly two pure seams of the owner-verification core (G5b, NFR-003, FR-011): engine/src/core/owner-verification/mutation-plan.ts (locating mutation sites) and engine/src/core/owner-verification/import-graph.ts (reading a module's import and re-export specifiers for sibling coverage). Both parse already-read text with ts.createSourceFile and never touch ts.sys, a Program or a language service. This rule refuses any other import (including a bare side-effect import), require or dynamic import of 'typescript' (or a 'typescript/...' subpath) outside tests. Its excludePatterns mirror TYPESCRIPT_COMPILER_API_SEAMS (engine/src/linter/programmatic/no-cross-boundary-imports.ts), and engine/tests/linter/project-lint-rules.test.ts fails when the two drift.",
+  "extensions": [".ts", ".tsx", ".mts", ".cts"],
+  "pattern": "\\bfrom\\s*[\"']typescript[/\"']|\\brequire\\(\\s*[\"']typescript[/\"']|\\bimport\\(\\s*[\"']typescript[/\"']|\\bimport\\s*[\"']typescript[/\"']",
+  "flags": "",
+  "excludePatterns": [
+    ".test.ts",
+    "engine/src/core/owner-verification/mutation-plan.ts",
+    "engine/src/core/owner-verification/import-graph.ts"
+  ],
+  "fixHint": "Do not import the TypeScript compiler API here. Call mutationPlan (engine/src/core/owner-verification/mutation-plan.ts) or moduleEdges (engine/src/core/owner-verification/import-graph.ts), or add the parsing you need to one of those two pure seams.",
+  "enabled": true
+}

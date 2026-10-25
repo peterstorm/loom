@@ -114,6 +114,7 @@ function populated(verificationManifest: FrozenVerificationManifest): TaskGraph 
     force: false,
     proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
     contracts: [],
+    invariants: [],
   });
   if (!result.ok) throw new Error(`population refused: ${result.error.message}`);
   return protectedGraphFixture(JSON.parse(JSON.stringify(result.value.state)));

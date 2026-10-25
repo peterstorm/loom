@@ -9,10 +9,15 @@ import {
   renderLoomStatusJson,
 } from "../../src/core/loom-status";
 import {
+  ownerVerificationExitCode,
   parseAcceptedWaveCompletionReceipt,
   type AcceptedWaveCompletionReceipt,
   type WaveCompletionSuiteResult,
 } from "../../src/core/completion-suite";
+import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
+import { authorizeGraphCompletionSuite } from "../../src/core/owner-verification/suite-authority";
+import type { InvariantVerdict, OwnerVerificationObservation } from "../../src/core/owner-verification/types";
+import { ownerObligation } from "../fixtures/owner-obligation";
 import { evaluateAsRecorded } from "../fixtures/completion-suite-evaluation";
 import {
   authorizeWaveCompletionSuite,
@@ -100,7 +105,7 @@ function acceptedReceipt(
   reportDigest = digest("c"),
   reportByteLength = 10,
 ): AcceptedWaveCompletionReceipt {
-  const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest));
+  const authority = value(authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, null));
   const evaluated = evaluateAsRecorded(authority, {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
@@ -174,7 +179,7 @@ function observedResult(
     >;
   }>,
 ): WaveCompletionResultObservation {
-  const authority = value(authorizeWaveCompletionSuite(manifest, registration, digest("b")));
+  const authority = value(authorizeWaveCompletionSuite(manifest, registration, digest("b"), null));
   const result: WaveCompletionSuiteResult = {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
@@ -590,5 +595,157 @@ describe("Wave completion authority and atomic commit", () => {
 
     expect(committed.completedRegistration.schemaVersion).toBe(1);
     expect("completionSuite" in committed.completedRegistration).toBe(false);
+  });
+});
+
+describe("INV-3: readiness of a stamped graph re-authorizes the owner check from the graph", () => {
+  const OWNER = "src/rules/owner.ts";
+  const ADMISSION = ownerObligation({
+    invariant: "INV-1",
+    title: "Admission is decided only by the owner",
+    statement: null,
+    owner: OWNER,
+    siblings: [{ path: "src/rules/sibling-a.ts", note: null }],
+    matrixTest: "tests/rules.matrix.test.ts",
+    mutation: { kind: "verify" },
+  });
+  const unchangedRun = value(verifiedMutationOf({
+    killed: 0, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: false,
+  }));
+
+  /** A stamped graph whose one Wave-1 Task lists `files`: INV-1 is owed exactly when they change its family. */
+  const stampedGraph = (files: readonly string[], receipt?: AcceptedWaveCompletionReceipt): TaskGraph => graph({
+    tasks: [{ ...task, file_list: [...files] }],
+    verification_manifest: manifestWithReport(),
+    owner_obligations: [ADMISSION],
+    ...(receipt === undefined ? {} : { active_wave_completion_suite: receipt }),
+  });
+
+  type OwnerMutation = InvariantVerdict["mutation"];
+
+  /** The result every check of the graph's own suite would record: project exit, and the owner verdicts with `mutation`. */
+  function resultFor(state: TaskGraph, projectExit: number, mutation: OwnerMutation = unchangedRun): WaveCompletionSuiteResult {
+    const authority = value(authorizeGraphCompletionSuite(state, digest("b")));
+    const owner = authority.checks.find((check) => check.kind === "engine-owner-verification");
+    const observation: OwnerVerificationObservation | undefined = owner === undefined || owner.kind !== "engine-owner-verification" ? undefined : {
+      kind: "verified",
+      obligationsDigest: owner.obligationsDigest,
+      boundMs: 0,
+      verdicts: owner.owed.map((invariant) => ({
+        invariant, title: ADMISSION.title, owner: OWNER, matrixTest: ADMISSION.matrixTest, coverage: { kind: "covered" }, mutation,
+      })),
+    };
+    const ownerExit = observation === undefined ? 0 : ownerVerificationExitCode(observation);
+    return {
+      kind: "wave-completion-suite-result",
+      runId: authority.runId, wave: authority.wave, revision: authority.revision, authorityDigest: authority.authorityDigest,
+      manifestDigest: authority.manifestDigest, suiteDigest: authority.suiteDigest, workspaceDigest: authority.workspaceDigest,
+      checks: authority.checks.map((check) => ({
+        checkId: check.checkId,
+        scope: "wave",
+        outcome: {
+          kind: "observed",
+          exitCode: check.kind === "project-command" ? projectExit : check.kind === "engine-owner-verification" ? ownerExit : 0,
+          timedOut: false,
+          signal: null,
+          report: check.reportPolicy.kind === "not-required"
+            ? { kind: "not-required" }
+            : { kind: "produced", path: check.reportPolicy.path, digest: digest("c"), byteLength: 10 },
+        },
+      })),
+      ...(observation === undefined ? {} : { ownerVerification: observation }),
+    };
+  }
+
+  function receiptFor(state: TaskGraph): AcceptedWaveCompletionReceipt {
+    const evaluated = evaluateAsRecorded(value(authorizeGraphCompletionSuite(state, digest("b"))), resultFor(state, 0));
+    if (evaluated.kind !== "accepted") throw new Error(`receipt fixture rejected: ${JSON.stringify(evaluated)}`);
+    return evaluated.receipt;
+  }
+
+  const observed = (result: WaveCompletionSuiteResult): WaveCompletionResultObservation => ({ kind: "observed", result });
+
+  it("a persisted rejected result is judged against the roster carrying the owner check", () => {
+    const state = stampedGraph([OWNER]);
+    const result = resultFor(state, 7);
+    const unstampedSuite = value(authorizeWaveCompletionSuite(manifestWithReport(), registration, digest("b"), null));
+    expect(result.suiteDigest).not.toBe(unstampedSuite.suiteDigest);
+    expect(result.checks.map(({ checkId }) => checkId)).toContain("loom:owner-verification");
+    expect(deriveWaveCompletionSuiteReadiness(state, 1, workspace("b"), observed(result))).toEqual({
+      kind: "rejected",
+      projectVerificationCoverage: { kind: "configured", checkIds: ["project:test"] },
+      verificationManifestDigest: state.verification_manifest!.manifestDigest,
+      suiteDigest: result.suiteDigest,
+      workspaceDigest: digest("b"),
+      failureKinds: ["non-zero-exit"],
+      checkIds: ["project:test"],
+    });
+  });
+
+  it("a persisted result run under the pre-stamp roster is invalid for the stamped graph", () => {
+    const stamped = stampedGraph([OWNER]);
+    const { owner_obligations: _stamp, ...unstamped } = stamped;
+    const preStamp = resultFor(unstamped, 7);
+    expect(deriveWaveCompletionSuiteReadiness(stamped, 1, workspace("b"), observed(preStamp))).toMatchObject({
+      kind: "required",
+      reason: "completion-result-invalid",
+      detail: expect.stringContaining("stale-result"),
+    });
+  });
+
+  it("a semantic rejection beside an undecided owner check stays a rejection, as the gate replays it; the undecided check alone is invalid", () => {
+    const state = stampedGraph([OWNER]);
+    const undecided: OwnerMutation = { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "no isolated copy" } };
+    expect(deriveWaveCompletionSuiteReadiness(state, 1, workspace("b"), observed(resultFor(state, 7, undecided))))
+      .toMatchObject({ kind: "rejected", failureKinds: ["non-zero-exit"], checkIds: ["project:test"] });
+    expect(deriveWaveCompletionSuiteReadiness(state, 1, workspace("b"), observed(resultFor(state, 0, undecided)))).toMatchObject({
+      kind: "required",
+      reason: "completion-result-invalid",
+      detail: expect.stringContaining("owner-verification-infrastructure"),
+    });
+  });
+
+  it("an accepted receipt whose owner roster the graph no longer authorizes is invalid", () => {
+    const receipt = receiptFor(stampedGraph([OWNER]));
+    expect(receipt.ownerVerification).toMatchObject({ kind: "verified", verdicts: [{ invariant: "INV-1" }] });
+    expect(deriveWaveCompletionSuiteReadiness(stampedGraph([OWNER], receipt), 1, workspace("b")))
+      .toMatchObject({ kind: "accepted", resultDigest: receipt.resultDigest, checkCount: 3 });
+    // The Wave no longer changes INV-1's family: the authorized owner check owes nothing, so the roster differs.
+    expect(deriveWaveCompletionSuiteReadiness(stampedGraph(["src/other.ts"], receipt), 1, workspace("b"))).toMatchObject({
+      kind: "required",
+      reason: "accepted-suite-invalid",
+      detail: "accepted suite does not match the exact protected completion roster",
+    });
+    // A receipt minted without the stamp cannot satisfy a stamped graph either.
+    const { owner_obligations: _stamp, ...unstamped } = stampedGraph([OWNER]);
+    expect(deriveWaveCompletionSuiteReadiness(stampedGraph([OWNER], receiptFor(unstamped)), 1, workspace("b")))
+      .toMatchObject({ kind: "required", reason: "accepted-suite-invalid" });
+  });
+
+  it("a terminal receipt carrying ownerVerification stays accepted from history, whatever the live roster", () => {
+    const receipt = receiptFor(stampedGraph([OWNER]));
+    const { active_wave_gate: _active, ...rest } = stampedGraph(["src/other.ts"]);
+    const terminal: TaskGraph = {
+      ...rest,
+      wave_gate_history: [{
+        schemaVersion: 2,
+        kind: "completed-wave-gate",
+        runId: registration.runId,
+        wave: 1,
+        authorityDigest: registration.authorityDigest,
+        revision: 1,
+        completionReceipt: value(commitWaveGateCompletion(value(deriveWaveReadiness(stampedGraph([OWNER], receipt), deps(workspace("b")))))).receipt,
+        completionSuite: receipt,
+      }],
+    };
+    expect(deriveWaveCompletionSuiteReadiness(terminal, 1, workspace("d"))).toEqual({
+      kind: "accepted",
+      projectVerificationCoverage: { kind: "configured", checkIds: ["project:test"] },
+      verificationManifestDigest: receipt.manifestDigest,
+      suiteDigest: receipt.suiteDigest,
+      resultDigest: receipt.resultDigest,
+      workspaceDigest: digest("b"),
+      checkCount: 3,
+    });
   });
 });

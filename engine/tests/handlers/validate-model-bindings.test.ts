@@ -14,6 +14,7 @@ import { pathsMatch } from "../../src/core/plan-path-match";
 import { parseTaskVerificationPolicy } from "../../src/core/verification-policy";
 import { parsePlanModels, type PlanInvariant, type PlanModels } from "../../src/core/parse-plan-models";
 import type { ContractProblem, InvariantOwnership, OwnershipProblem } from "../../src/types";
+import { invariantId } from "../fixtures/owner-obligation";
 
 function errorsOf(r: { ok: true } | { ok: false; errors: readonly string[] }): readonly string[] {
   return r.ok ? [] : r.errors;
@@ -46,7 +47,7 @@ const CHECKABLE: PlanInvariant["tier"] = { status: "ok", tier: "checkable" };
 /** An advisory, unowned invariant with no rule file; each test overrides only
  *  the field it exercises. */
 const invariant = (overrides: Partial<PlanInvariant> = {}): PlanInvariant => ({
-  id: "INV-1",
+  id: invariantId("INV-1"),
   title: "X",
   tier: { status: "ok", tier: "advisory" },
   ruleFile: null,
@@ -58,7 +59,7 @@ const invariant = (overrides: Partial<PlanInvariant> = {}): PlanInvariant => ({
 /** A plan whose one invariant declares the given ownership. */
 const modelsWithOwnership = (ownership: InvariantOwnership): PlanModels => ({
   ...NO_MODELS,
-  invariants: [invariant({ id: "INV-3", title: "Probes fail closed", ownership })],
+  invariants: [invariant({ id: invariantId("INV-3"), title: "Probes fail closed", ownership })],
 });
 
 const OWNED: InvariantOwnership = {
@@ -66,6 +67,7 @@ const OWNED: InvariantOwnership = {
   owner: "src/probe.ts",
   siblings: [{ path: "src/panel.ts", note: null }, { path: "src/review.ts", note: "replay guard" }],
   matrixTest: "tests/probe.matrix.test.ts",
+  mutation: { kind: "verify" },
 };
 
 function task(overrides: Record<string, unknown>): Record<string, unknown> {
@@ -271,7 +273,7 @@ describe("validateModelBindings", () => {
     });
 
     it("accepts an advisory invariant with no rule file (honest prose)", () => {
-      const models: PlanModels = { ...NO_MODELS, invariants: [invariant({ id: "INV-2", title: "SLA" })] };
+      const models: PlanModels = { ...NO_MODELS, invariants: [invariant({ id: invariantId("INV-2"), title: "SLA" })] };
       expect(validateModelBindings(models, [], NO_FILES).ok).toBe(true);
     });
   });

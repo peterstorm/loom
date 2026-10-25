@@ -44,7 +44,7 @@
  * stored evidence and re-emits the run's current action, which is the expected
  * outcome on a harness that captures transcripts itself.
  *
- * `status` is a pure read: it derives ONE `LoomStatus` value and hands it to
+ * `status` is a pure read: it derives ONE `LoomStatusDocument` and hands it to
  * a renderer. Both renderers project that same value, so the human and JSON
  * forms cannot disagree — neither contains readiness or action policy, and
  * neither re-runs a gate check. If authority cannot be parsed, every fact
@@ -108,7 +108,7 @@ import type {
   ActiveWaveGateRegistration,
   HookHandler,
   HookResult,
-  LoomStatus,
+  LoomStatusDocument,
   Task,
   WaveCompletionResultObservation,
 } from "../../types";
@@ -299,8 +299,12 @@ function renderParsedStatus(
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation,
 ): string {
-  const status = deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory);
-  return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+  return renderStatusDocument(deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory), asJson);
+}
+
+/** Human or `--json` output of the one status document. */
+function renderStatusDocument(document: LoomStatusDocument, asJson: boolean): string {
+  return asJson ? renderLoomStatusJson(document) : renderLoomStatusHuman(document);
 }
 
 export function renderStatus(
@@ -561,16 +565,16 @@ export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<string> {
-  const status = await deriveCurrentOrchestrationStatus(args, statePath);
-  return hasFlag(args, "--json") ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+  return renderStatusDocument(await deriveCurrentOrchestrationStatus(args, statePath), hasFlag(args, "--json"));
 }
 
-/** The canonical status of the protected graph, with every shell observation
- *  status depends on. Renderers and the dispatch helpers project this value. */
+/** The canonical status document of the protected graph, derived from every
+ *  shell observation status depends on. Renderers and the dispatch helpers
+ *  project this value. */
 async function deriveCurrentOrchestrationStatus(
   args: readonly string[],
   statePath: string,
-): Promise<LoomStatus> {
+): Promise<LoomStatusDocument> {
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);

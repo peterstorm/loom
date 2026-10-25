@@ -99,6 +99,7 @@ const command = (overrides: Partial<TaskGraphPopulationCommand> = {}): TaskGraph
   force: false,
   proofBoundary: { kind: "absent", cause: "fixture: no Git repository root" },
   contracts: [],
+  invariants: [],
   ...overrides,
 });
 

@@ -5,6 +5,7 @@ import { compareStrings } from "./ordering";
 import {
   COMPLETION_REPORT_ROOT,
   FULL_TIER_LINT_CHECK_ID_TEXT,
+  OWNER_VERIFICATION_CHECK_ID_TEXT,
   createAuthorizedWaveCompletionSuite,
   parseAuthorizedWaveCompletionCheck,
   type AcceptedWaveCompletionReceipt,
@@ -33,6 +34,7 @@ import {
   type UnknownRecord,
 } from "./plain-record";
 import { DEFAULT_TEST_FILE_SUFFIXES, ENGINE_DEFAULT_TEST_FILES, type FrozenTestFiles } from "./test-file-classification";
+import type { OwnerCheckAuthority } from "./owner-check-authority";
 
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;
@@ -194,7 +196,7 @@ export function deriveProjectVerificationCoverage(
     }))
     .with({ kind: "accepted-wave-completion-suite" }, (receipt) => ({
       checkIds: receipt.checks
-        .filter((check) => check.checkId !== FULL_TIER_LINT_CHECK_ID_TEXT)
+        .filter((check) => check.checkId !== FULL_TIER_LINT_CHECK_ID_TEXT && check.checkId !== OWNER_VERIFICATION_CHECK_ID_TEXT)
         .map((check) => check.checkId),
       emptyReason: "historical-unknown" as const,
     }))
@@ -950,11 +952,33 @@ const ENGINE_LINT_CHECK = freeze({
   reportPolicy: freeze({ kind: "not-required" as const }),
 });
 
-/** Inject engine-reserved lint and mint exact Wave suite authority. */
+/** The engine-reserved owner-verification check, carrying `owner` verbatim. */
+const engineOwnerCheck = (owner: OwnerCheckAuthority) => freeze({
+  kind: "engine-owner-verification" as const,
+  checkId: OWNER_VERIFICATION_CHECK_ID_TEXT,
+  scope: "wave" as const,
+  reportPolicy: freeze({ kind: "not-required" as const }),
+  obligationsDigest: owner.obligationsDigest,
+  owed: Object.freeze([...owner.owed]),
+});
+
+/**
+ * Inject the engine-reserved checks and mint exact Wave suite authority.
+ *
+ * `owner` makes no ownership decision here (INV-3): callers obtain it from
+ * `ownerCheckAuthority` in `owner-verification/obligations.ts`, and the
+ * owner-verification check is injected exactly when it is non-null, with its
+ * obligations digest and owed ids copied verbatim. `null` (a graph without the
+ * `owner_obligations` stamp) leaves the roster, and so the suite digest,
+ * byte-identical to the pre-owner-verification roster (FR-004). The parameter
+ * is required, so no caller can drop a stamped graph's owner check by
+ * omission.
+ */
 export function authorizeWaveCompletionSuite(
   frozenManifestAuthority: FrozenVerificationManifest,
   active: ActiveWaveCompletionAuthority,
   workspaceDigest: unknown,
+  owner: OwnerCheckAuthority | null,
 ): Parsed<AuthorizedWaveCompletionSuite> {
   return total(() => {
     const manifest = parseFrozenVerificationManifest(frozenManifestAuthority);
@@ -966,7 +990,7 @@ export function authorizeWaveCompletionSuite(
       authorityDigest: active.authorityDigest,
       manifestDigest: manifest.value.manifestDigest,
       workspaceDigest,
-      checks: [ENGINE_LINT_CHECK, ...manifest.value.projectChecks],
+      checks: [ENGINE_LINT_CHECK, ...(owner === null ? [] : [engineOwnerCheck(owner)]), ...manifest.value.projectChecks],
     });
     return suite.ok ? success(suite.value) : failure(suite.error.errors);
   });

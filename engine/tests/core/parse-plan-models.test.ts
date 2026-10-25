@@ -108,6 +108,7 @@ describe("parsePlanModels", () => {
             { path: "src/jobs/expire.ts", note: null },
           ],
           matrixTest: "src/domain/order/order-machine.matrix.test.ts",
+          mutation: { kind: "verify" },
         },
       },
       {
@@ -167,7 +168,7 @@ describe("parsePlanModels", () => {
 
     it("parses an owned invariant with no siblings declared as `none`", () => {
       expect(inv("**Owner module:** `src/a.ts`\n**Sibling entry points:** none\n**Matrix test:** `src/a.test.ts`\n").ownership)
-        .toEqual({ kind: "owned", owner: "src/a.ts", siblings: [], matrixTest: "src/a.test.ts" });
+        .toEqual({ kind: "owned", owner: "src/a.ts", siblings: [], matrixTest: "src/a.test.ts", mutation: { kind: "verify" } });
     });
 
     it("parses a sibling list that ends at the next label", () => {
@@ -177,6 +178,7 @@ describe("parsePlanModels", () => {
           owner: "src/a.ts",
           siblings: [{ path: "src/b.ts", note: "reads it" }, { path: "src/c.ts", note: null }],
           matrixTest: "src/a.test.ts",
+          mutation: { kind: "verify" },
         });
     });
 
@@ -237,7 +239,7 @@ describe("parsePlanModels", () => {
 
       it("allows blank lines between the label and its first item", () => {
         expect(owned("\n\n- src/b.ts — reads it\n")).toEqual({
-          kind: "owned", owner: "a.ts", siblings: [{ path: "src/b.ts", note: "reads it" }], matrixTest: "t.ts",
+          kind: "owned", owner: "a.ts", siblings: [{ path: "src/b.ts", note: "reads it" }], matrixTest: "t.ts", mutation: { kind: "verify" },
         });
       });
 
@@ -256,6 +258,7 @@ describe("parsePlanModels", () => {
           owner: "a.ts",
           siblings: [{ path: "src/b.ts", note: "reads it" }, { path: "src/c.ts", note: null }],
           matrixTest: "t.ts",
+          mutation: { kind: "verify" },
         });
       });
 

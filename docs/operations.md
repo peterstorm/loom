@@ -32,6 +32,7 @@ Both renderers project one `LoomStatus` value. Status reports:
 - failed proof obligations;
 - test readiness;
 - Wave completion-suite outcome and independent `projectVerificationCoverage`;
+- owner verification per owned Invariant, when the latest completion result ran it (coverage, mutant counts or the exemption, the time bound; see [Owner verification](#owner-verification-blocks-a-wave-gate-g5b));
 - Review Run roster gaps and evidence failures;
 - active/advisory/resolved/refuted Finding counts;
 - whether a Refutation Panel is needed;
@@ -748,6 +749,99 @@ This is the Runtime Revision design working as intended: infrastructure the gate
 
 The refusal names this case itself. When the full-tier lint fails, the gate's diagnostic carries the lint's refusal (`loom:full-tier-lint: …`). If the gated repository is a Loom checkout whose `lint-rules/` or `engine/src/linter/` files differ from the loaded runtime's, the refusal opens with a `⚠` sentence naming the loaded runtime and the differing rule files. A plain project carries no lint rules of its own and never gets the sentence. A replayed rejection keeps only the lint's exit code, so its diagnostic tells you to run `helper lint-wave-gate`, which prints the same refusal and the same skew sentence.
 
+### Owner verification blocks a Wave Gate (G5b)
+
+A plan's owned invariants (`**Owner module:**` a path) are Wave Gate obligations. Population stamps each one into the TaskGraph as an Owner Obligation (`owner_obligations`, written on every population, `[]` included). Whenever that stamp is present, the Wave completion suite carries the engine-reserved check `loom:owner-verification`. A graph populated before G5b has no stamp, owes nothing, and its suite roster and digest are unchanged.
+
+**What the check does, in order:**
+
+1. **Plan integrity, every Wave.** It re-reads the plan the graph names (`plan_file`) and re-derives the obligations. It blocks, as infrastructure, on a missing `plan_file` or an unreadable plan (`plan-unreadable`), on strays or malformed ownership (`plan-malformed`), and on any difference from the stamp (`plan-drift`). This runs even when the Wave owes nothing; then the check records `verified` with no verdicts.
+2. **Scope.** It owes coverage and mutation only for the owned invariants whose family the Wave changed: some Wave Task's `file_list` holds the owner or a sibling. A Wave that touched only the matrix test owes nothing; unowned invariants are never checked.
+3. **Sibling coverage**, per owed invariant: the matrix test's direct imports, followed through `export … from` re-exports and resolved through relative paths and the matrix test's tsconfig `paths`, must include the owner and every declared sibling. Type-only edges (`import type`, `export type … from`, and imports or re-exports whose every specifier is `type`) are erased at runtime and never count.
+4. **Mutation verification**, per owed invariant without a mutation exemption:
+   - the Wave base is the `start_sha` of the Wave Tasks listing the owner (their octopus merge-base when several); the owner's lines changed since then are the only mutation sites;
+   - the owner is parsed with the script kind its extension names (`.tsx`/`.jsx` with JSX), the same rule the coverage import graph uses; an owner with syntax errors blocks as `owner-unparseable` instead of being mutated from a recovered tree;
+   - six fixed operators (condition negation, comparison flip, logical swap, boolean-literal flip, return-value replacement, expression-statement removal) generate a deterministic set of at most 24 mutants, evenly spaced over the candidates; the rest are reported as unmutated;
+   - one detached git worktree per invariant holds HEAD plus every changed, untracked and deleted path of the real workspace, with `node_modules` shared by symlink; it is removed afterwards whatever happened;
+   - the matrix test runs first unmutated (the baseline), then once per mutant, through the frozen `affectedRunner` with the matrix test as its only file and a per-run limit of 60 s, clamped to the runner's own `timeoutMs`;
+   - the runner's JUnit report decides: a failing testcase kills, a timeout kills, collection or import errors only make the mutant invalid, an all-passing report with exit 0 means it survived. A run whose every generated mutant is invalid carries no mutation evidence and blocks as `no-valid-mutants`.
+5. **Isolation proof.** The real workspace's digest is taken before and after; any difference blocks (`real-workspace-changed`).
+
+The reported time bound is Σ over owed, non-exempt invariants of (1 baseline + selected mutants) × the per-run limit.
+
+**Prerequisite.** Mutation runs through the operator's frozen `affectedRunner` (a schema-2 `.loom/verification-manifest.json`, see [Affected-Test Stop Check](#affected-test-stop-check)); its report must be JUnit. Population refuses a plan with a non-exempt owned invariant and no `affectedRunner` (`owner-verification-runner-missing`). An exempt invariant needs no runner. Population also refuses an owned invariant whose path plays two roles (the owner listed as a sibling, the matrix test as the owner or a sibling, a sibling listed twice) or an invariant owned twice (`invalid-owner-obligations`); the State File parser refuses such a stamp too.
+
+**Reading the result.** `helper orchestration status` (human and `--json`, one status document) reports, per owned invariant of the latest completion result:
+
+- coverage: pass, or the missing paths, or the infrastructure failure;
+- mutation: the counts generated, killed, timed out, invalid, survived and unmutated; or the declared exemption and its reason; or the infrastructure failure;
+- the time bound.
+
+In `--json`, `ownerVerification` is the persisted observation itself: `{ "kind": "verified", "obligationsDigest", "boundMs", "verdicts": [ { "invariant", "title", "owner", "matrixTest", "coverage": { "kind": "covered" | "missing" | "infrastructure", … }, "mutation": { "kind": "verified" | "exempt" | "red-baseline" | "infrastructure", … } } ] }`, or `{ "kind": "unavailable", "failure" }`. A verified mutation half carries `survivors`; the survived count is their number.
+
+With no owner verification to report, status says `not observed` and why (`--json`: `{ "kind": "not-observed", "reason": … }`), with exactly one of these reasons: `no persisted completion result`, `the persisted completion result carries no owner verification`, or `the persisted completion result is unavailable: …`.
+
+When the suite rejected the Wave for owner verification, the next action names the invariant and the remedy. The gate's own diagnostic carries one line per finding with the same remedy.
+
+**Remedies:**
+
+| Finding | Meaning | Remedy |
+|---|---|---|
+| missing siblings | the matrix test's imports do not reach the named owner/sibling paths | strengthen the matrix test to import each named path (directly, or through a re-export barrel); importing a module that itself imports the owner does not count |
+| red baseline | the matrix test fails against the unmutated workspace, so no mutant ran | fix the failing testcases the diagnostic names |
+| survivor | a mutant at `<owner>:<line>:<column>` (`<operator>`, original and mutated text shown) was not killed | strengthen the matrix test to kill it, or declare a mutation exemption with a reason on the invariant |
+| `plan-unreadable`, `plan-malformed` | the named plan cannot be re-read, or it has strays or malformed ownership, or an owned invariant names a path in two roles | restore the plan file; fix the named declaration |
+| `plan-drift` | the plan's owned invariants differ from the stamp, or a named owner is not a file in the workspace (the stamp names a path the Wave no longer has, so the stamp, not the filesystem, is what is out of date) | restore the plan's owned invariants (or the owner file), or re-populate the TaskGraph from the plan |
+| `alias-config-unresolvable` | the matrix test's import graph cannot be resolved because the tsconfig that governs it does not parse, or has a malformed `extends`, `baseUrl` or `paths`; the plan itself is fine | fix the tsconfig/path alias configuration the detail names (the nearest `tsconfig.json` above the matrix test and its `extends` chain); re-run the gate |
+| `runner-missing` | the frozen manifest has no `affectedRunner`, or it cannot run the matrix test | install the runner and re-populate, or exempt the invariant |
+| `missing-wave-base` | a Wave Task listing the owner records no `start_sha`, or the base or the owner at it cannot be read, or the owner at the base is not a regular-file blob (a symlink, a gitlink or a directory: its bytes are not the owner's text, so the changed lines cannot be trusted) | make the recorded base commit reachable (fetch full history); a Task with no `start_sha` gets one when its implementation is dispatched; for an owner that was not a regular file at the base, name the real module as the owner, or declare a mutation exemption with a reason |
+| `spawn-failed`, `report-missing`, `report-unreadable`, `matrix-test-not-collected`, `exit-unexplained-by-report`, `baseline-timed-out` | the runner could not give a trustworthy JUnit verdict for the matrix test | fix the runner (it must write a fresh JUnit report naming the matrix test's file, and exit 0 when it passes) or the matrix test's runtime; raise the runner timeout for a slow baseline |
+| `worktree-failed` | the isolated copy could not be set up or removed, or failed during a run (the detail names a leftover worktree when a failed run also could not clean up) | check disk space, `git worktree list`, and stale worktrees (`git worktree prune` runs on each removal); remove a named leftover directory; re-run the gate |
+| `coverage-bound-exceeded` | the matrix test's import frontier exceeded 512 files | import the entry points more directly |
+| `owner-unparseable` | the owner module has syntax errors (the detail lists them as `line:column message`), so its mutation sites cannot be trusted | fix the syntax errors in the owner; a `.tsx`/`.jsx` owner must carry that extension to be parsed with JSX |
+| `no-valid-mutants` | mutants were generated, but every one only failed to collect (a collection or import error), so the matrix test gave no mutation evidence | fix what makes the mutated owner fail to load in the matrix test (an import-time side effect, a module-level throw), or declare a mutation exemption with a reason |
+| `repository-file-unreadable` | a file the check must read (a matrix test, an import it reaches, a tsconfig, the owner) exists but the filesystem refused it: `EACCES`, a symlink loop (`ELOOP`), `EIO`, `EMFILE`, `ENAMETOOLONG`; the detail names the path and the error. It is never reported as a missing sibling | fix the named path's permissions or link, free file descriptors, or shorten the path; re-run the gate |
+| `real-workspace-changed` | the real workspace digest differs after the run, or could not be observed (the observer failed or threw) | find what changed the workspace during the gate (a parallel writer) and re-run |
+| `unexpected-error` | a step built to return its failure as data threw anyway (an engine defect or an unanticipated exception), or an injected owner runner threw; the detail names the step and the error. The workspace digest is still compared, so a changed workspace reports `real-workspace-changed` instead | re-run the gate; if it repeats, report it with the detail, which names the throwing step |
+
+Every infrastructure failure blocks and never counts as a kill. A rejection whose only infrastructure failures are the owner check's, with no semantic failure, is published as an attempt record beside the result slot (`completion-suites/<suite>/<workspace>.owner-infrastructure/<sha256>.json`), so the evidence persists and a retry at the same workspace runs the check again. There is no automatic retry: re-run the Wave Gate. A rejection that also carries a semantic failure is published in the result slot and replays as rejected.
+
+**Declaring a mutation exemption after population is plan drift.** The exemption is part of the stamped obligation, so adding `**Mutation exemption:** <reason>` to the plan mid-flight makes the next gate block with `plan-drift` until the TaskGraph is re-populated, which resets every Task to `pending`. Prefer strengthening the matrix test; decide exemptions in the architecture phase.
+
+**Limits, stated honestly:**
+
+- A runtime import is proof of load, not of exercise. A matrix test that imports a sibling but never drives the rule through it passes coverage. A type-only import is erased at runtime and is not even proof of load, so it never counts.
+- Mutation covers the owner's lines changed in the Wave only: never siblings, never unchanged lines, never other files. A Wave that changed only a sibling runs the baseline and zero mutants (`owner unchanged in Wave`). A changed line with no construct the six operators rewrite yields zero mutants and says so.
+- Invalid mutants are neither killed nor survived; status and the verdict show the invalid count. A run whose every generated mutant is invalid blocks as `no-valid-mutants` (infrastructure, never a pass or a kill).
+- A matrix-test-only change does not trigger coverage or mutation.
+- Reviewers get the owner map and second-copy rule only in Wave review packets of the code-reviewer and architecture-tech-lead for Tasks touching an owned family. An identical second copy is advisory; whether a copy diverges is the reviewer's judgment, checked by the Refutation Panel. Standalone reviews carry no owner map.
+- `typescript` is loaded at runtime by the two owner-verification seams (`core/owner-verification/mutation-plan.ts`, `core/owner-verification/import-graph.ts`). It is declared an engine runtime dependency (`engine/package.json` `dependencies`, `^5.9.0`; it was already the engine's compiler, so no package was added) and installed by the documented `(cd engine && bun install --frozen-lockfile)`. The `5.9` floor is load-bearing: type-only import detection reads `ImportClause.phaseModifier`, which older compilers lack. An engine checkout without its locked install cannot run the Wave Gate.
+
+### Measuring second sites: the family-site metric
+
+`helper family-sites` counts the raw sites each known invariant family still has outside its owner modules. It reads every `.ts` file under `<root>/engine/src`, excludes test files and each family's owners, skips comment lines, and matches line patterns defined once, in `FAMILIES` (`engine/src/core/family-sites.ts`). It is read-only: no State File, no writes.
+
+```bash
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites            # human report
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites --json     # JSON, byte-identical for the same bytes
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites \
+  --baseline docs/family-sites.baseline.json                             # per-family delta since the baseline
+bun "$LOOM_PLUGIN_ROOT/engine/src/cli.ts" helper family-sites --json \
+  --root /path/to/other/checkout                                         # measure another checkout
+```
+
+`--root` defaults to the Loom package that owns the engine, so the metric measures Loom itself wherever it is run from.
+
+**Baseline.** `docs/family-sites.baseline.json` was recorded with `--root` against a detached worktree of `626db7fb`, the `main` merge the G5b owner-enforcement feature started from:
+
+| Family | Owner modules | Raw sites at `626db7fb` |
+|---|---|---|
+| `fail-closed-path-probes` | `engine/src/utils/path-presence.ts` | 124 |
+| `shell-tokenizing` | `engine/src/core/shell-{quoting,command,normalize,substitution,write-targets,ansi-c}.ts` | 23 |
+| `claim-conservation` | `engine/src/core/findings.ts` | 13 |
+
+A delta marks a family whose patterns changed since the baseline, so a count moved by re-calibrated patterns is not mistaken for consolidation. The patterns are line regexes: the count is a gauge of consolidation progress, not a proof, and the metric blocks nothing. Consolidating the sites is separate work.
+
 ### Acceptance Stop Check (claimants)
 
 When an implementation agent that claims a frozen Acceptance Contract's Requirement tries to stop, the engine runs that contract's acceptance files before settling the Task. If a testcase the agent owes is still not passing, the stop is blocked and the same agent keeps working with the failures in front of it. A testcase is owed when it decides one of the agent's claims and all its anchors are due by the Task's Wave.
@@ -1291,7 +1385,7 @@ bun install --frozen-lockfile
 npm run verify
 ```
 
-Both locks are required: root dependencies supply Pi/runtime resources; engine dependencies supply the compiler and Vitest. `preverify` checks required tools, that `bun --version` equals `.bun-version` (`engine/scripts/bun-version-pin.ts`), executable local Vitest/Pi, and that Pi resolves to the root-local locked CLI through npm's PATH. No global/latest Pi or network-fetching compiler fallback is accepted. Local preflight checks tool availability and the exact Bun pin (a different Bun can pass where the pinned one fails (`fs.closeSync(1)` is a silent no-op on 1.3.13 but not on the pinned release)); it does not pin Node, which CI checks explicitly alongside Bun.
+Both locks are required: root dependencies supply Pi/runtime resources; engine dependencies supply the compiler and Vitest, and `typescript`, which the Wave Gate's owner verification also loads at runtime and which is therefore declared under `dependencies` (no new package: it was already the engine's compiler). `preverify` checks required tools, that `bun --version` equals `.bun-version` (`engine/scripts/bun-version-pin.ts`), executable local Vitest/Pi, and that Pi resolves to the root-local locked CLI through npm's PATH. No global/latest Pi or network-fetching compiler fallback is accepted. Local preflight checks tool availability and the exact Bun pin (a different Bun can pass where the pinned one fails (`fs.closeSync(1)` is a silent no-op on 1.3.13 but not on the pinned release)); it does not pin Node, which CI checks explicitly alongside Bun.
 
 The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for PRs/branch pushes/tags, and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 60-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
 
@@ -1376,4 +1470,5 @@ engine/src/handlers/           harness/CLI shell
 engine/tests/                  unit, property, integration, contract tests
 scripts/                       sync, lint, calibration, smoke scripts
 calibration/                   committed corpus; generated results are ignored
+docs/family-sites.baseline.json  family-site metric baseline at 626db7fb
 ```

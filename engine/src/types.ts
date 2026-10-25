@@ -28,8 +28,17 @@ import type { Phase } from "./core/phases";
 import type { SettledFloor, SpecIndexObservation } from "./core/requirement-coverage";
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
 import type { AcceptanceContract, PlanContract } from "./core/acceptance-contract";
+import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/types";
+import type { OwnerVerificationStatusReport } from "./core/owner-verification/status";
+import type { SiblingEntryPoint } from "./core/sibling-entry-point";
+import type { InvariantId } from "./core/invariant-id";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
+// The sibling entry point is owned by its dependency-free leaf, which both
+// this file and the owner-verification contract import, so neither imports
+// the other through it.
+export type { SiblingEntryPoint } from "./core/sibling-entry-point";
+export type { InvariantId } from "./core/invariant-id";
 import type {
   ArtifactDigest,
   ArtifactRef,
@@ -1120,6 +1129,16 @@ export type LoomStatus = Readonly<{
   next: NextActionDecision;
 }>;
 
+/**
+ * The document `helper orchestration status` emits, as `--json` serializes
+ * it and the human renderer reads it: the canonical `LoomStatus` with the
+ * owner-verification report (G5b AD-10) beside it. `ownerVerification` is
+ * required: `deriveLoomStatusFromParsedGraph` is the only producer and always
+ * reports it (`not-observed` when there is nothing to report), so no renderer
+ * handles an absent field. The routed `LoomStatus` stays a separate type.
+ */
+export type LoomStatusDocument = LoomStatus & Readonly<{ ownerVerification: OwnerVerificationStatusReport }>;
+
 export type WaveSpecCheckSlotAuthority = Readonly<{
   readonly slot_id: string;
   readonly attempted: 1 | 2;
@@ -1215,6 +1234,15 @@ export interface TaskGraph {
    * when the plan declares no contract; re-population replaces it.
    */
   readonly acceptance_contracts?: readonly AcceptanceContract[];
+  /**
+   * The plan's owned Invariants, stamped at population as Owner Obligations
+   * (`obligationsFromPlan`), `[]` when the plan owns none. Absent only on a
+   * graph populated before owner verification, which owes nothing; present,
+   * the Wave Gate re-reads the plan and blocks on drift. Re-population
+   * replaces it. Every selection over it goes through
+   * `core/owner-verification/obligations.ts` (INV-3).
+   */
+  readonly owner_obligations?: readonly OwnerObligation[];
   readonly updated_at?: string;
 }
 
@@ -1288,9 +1316,6 @@ export interface PlanPipeline {
   readonly declaredNodes: readonly string[];
 }
 
-/** One `- path — note` line of an invariant's `**Sibling entry points:**` list. */
-export type SiblingEntryPoint = Readonly<{ path: string; note: string | null }>;
-
 /** Why an invariant's ownership declaration is malformed. Each names exactly
  *  one way the plan text failed the grammar, so validation can say which. */
 export type OwnershipProblem =
@@ -1300,7 +1325,14 @@ export type OwnershipProblem =
   | Readonly<{ kind: "reason-on-owned" }>
   | Readonly<{ kind: "missing-siblings" }>
   | Readonly<{ kind: "malformed-sibling"; line: string }>
-  | Readonly<{ kind: "missing-matrix-test" }>;
+  | Readonly<{ kind: "missing-matrix-test" }>
+  /** `**Mutation exemption:**` on an owned invariant with a blank reason. */
+  | Readonly<{ kind: "exemption-without-reason" }>
+  /** `**Mutation exemption:**` on an owned invariant whose reason is a
+   *  placeholder (`none`, `n/a`, `TBD`, ...) that states no reason. */
+  | Readonly<{ kind: "exemption-placeholder-reason"; reason: string }>
+  /** `**Mutation exemption:**` on an `Owner module: none` invariant: there is no owner to mutate. */
+  | Readonly<{ kind: "exemption-on-unowned" }>;
 
 /**
  * Who owns an invariant's implementation. An owned invariant names its one
@@ -1308,16 +1340,23 @@ export type OwnershipProblem =
  * the rule through all of them; an unowned one (a prohibition, an SLA) says
  * why it has no home. A declaration that is neither is `malformed`, carrying
  * at least one problem — never a half-filled owned or unowned value, and never
- * a malformed one that cannot say why.
+ * a malformed one that cannot say why. An owned invariant's `mutation` is
+ * `verify` unless the plan declares a reasoned `**Mutation exemption:**`.
  */
 export type InvariantOwnership =
-  | Readonly<{ kind: "owned"; owner: string; siblings: readonly SiblingEntryPoint[]; matrixTest: string }>
+  | Readonly<{
+      kind: "owned";
+      owner: string;
+      siblings: readonly SiblingEntryPoint[];
+      matrixTest: string;
+      mutation: MutationPolicy;
+    }>
   | Readonly<{ kind: "unowned"; reason: string }>
   | Readonly<{ kind: "malformed"; problems: OrchestrationNonEmpty<OwnershipProblem> }>;
 
 export interface PlanInvariant {
-  /** e.g. "INV-1" */
-  readonly id: string;
+  /** e.g. "INV-1": minted by the plan grammar parser, the one source of plan Invariant ids */
+  readonly id: InvariantId;
   readonly title: string;
   /** The `**Tier:**` line, three-state: absent, recognized, or unrecognized */
   readonly tier: PlanInvariantTier;
@@ -1339,6 +1378,10 @@ export type {
   ContractTypes,
   PlanContract,
 } from "./core/acceptance-contract";
+
+// The Owner Obligation shapes are owned by the frozen owner-verification
+// contract, and re-exported beside the ownership shapes they derive from.
+export type { MutationPolicy, OwnerObligation } from "./core/owner-verification/types";
 
 export interface PlanModels {
   readonly lifecycles: readonly PlanLifecycle[];

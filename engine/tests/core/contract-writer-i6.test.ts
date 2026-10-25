@@ -40,6 +40,7 @@ import type { PlanContract, Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
+import { ownerScopeOf } from "../../src/core/owner-verification/obligations";
 
 // --- Fixtures ---
 
@@ -97,7 +98,7 @@ function populated(): TaskGraph {
     // No manifest file: the I6-era default every post-feature population freezes.
     verificationManifest: defaultVerificationManifest(),
     specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT],
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts: [CONTRACT], invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);
   return result.value.state;
@@ -267,6 +268,7 @@ describe("the brief states no I6 duty to a contract writer", () => {
       rules: RULES,
       roster: graph.tasks,
       invariants: [],
+      ownerScope: ownerScopeOf(graph),
       contracts: graph.acceptance_contracts ?? [],
       repositoryRoot: "/repo",
       operatorNotes: [],

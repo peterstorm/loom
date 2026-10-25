@@ -25,7 +25,10 @@ import { predecessorOutputErrorMessage, predecessorOutputs, renderPredecessorOut
 import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
+import { match } from "ts-pattern";
 import { invariantRoles } from "./plan-paths";
+import { obligationsTouchedBy, type OwnerScope } from "./owner-verification/obligations";
+import type { OwnerObligation } from "./owner-verification/types";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
 import { deriveImplementationRetryDisposition } from "./implementation-retry";
@@ -117,6 +120,10 @@ export type ImplementationBriefInput = Readonly<{
   rules: ReadonlyMap<RuleDocument, string>;
   /** The invariants the protected plan declares; empty when there is no plan. */
   invariants: readonly PlanInvariant[];
+  /** The TaskGraph's Owner Obligations (`ownerScopeOf(graph)`). A graph
+   *  populated before owner verification carries no stamp and is owed no
+   *  owner duty, so the brief states none. */
+  ownerScope: OwnerScope;
   /** The TaskGraph's Acceptance Contracts, with their freeze; empty when none. */
   contracts: readonly AcceptanceContract[];
   /** The TaskGraph's frozen verification manifest (`graph.verification_manifest`),
@@ -203,45 +210,94 @@ function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): 
   ].join("\n");
 }
 
+/** One owned Invariant's plan block for a Task playing some role in its family; null when it plays none (or the Invariant is not owned). */
+function planBlock(fileList: readonly string[], invariant: PlanInvariant): string | null {
+  if (invariant.ownership.kind !== "owned") return null;
+  const { owner, siblings, matrixTest } = invariant.ownership;
+  const played = invariantRoles(fileList, invariant.ownership);
+  const roles = [
+    ...(played.owner
+      ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
+      : []),
+    ...(played.siblings.length > 0
+      ? [`- Sibling: you change ${played.siblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
+      : []),
+    ...(played.matrixTest
+      ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
+      : []),
+  ];
+  if (roles.length === 0) return null;
+  return [
+    `**${invariant.id}: ${invariant.title}**`,
+    ...(invariant.statement === null ? [] : [invariant.statement]),
+    "",
+    "**Your role:**",
+    ...roles,
+    "",
+    `**Owner module:** \`${owner}\``,
+    siblings.length === 0
+      ? "**Sibling entry points:** none"
+      : ["**Sibling entry points:**", ...siblings.map(({ path, note }) => `- \`${path}\`${note === null ? "" : ` — ${note}`}`)].join("\n"),
+    `**Matrix test:** \`${matrixTest}\``,
+  ].join("\n");
+}
+
 /**
  * The ownership guidance for every owned invariant whose family this Task
  * changes: its role (owner, sibling, matrix-test author — possibly several),
  * then the whole family, so a sibling sees its owner and its peers. Unowned
  * and malformed invariants name no files, so they never render here (plan
  * validation has already refused a malformed one).
+ *
+ * Each owned Invariant the Task touches by the population stamp (`touched`,
+ * decided by INV-3's owner `obligationsTouchedBy`) also gets its owner duties
+ * (`ownerDuties`). A touched obligation with no plan block of its own (a stamp
+ * that drifted from the plan, which the Wave Gate blocks) still states its
+ * duties, after the plan's blocks, rather than silently owing nothing.
  */
-function invariantOwnership(fileList: readonly string[], invariants: readonly PlanInvariant[]): string {
-  const blocks = invariants.flatMap((invariant) => {
-    if (invariant.ownership.kind !== "owned") return [];
-    const { owner, siblings, matrixTest } = invariant.ownership;
-    const played = invariantRoles(fileList, invariant.ownership);
-    const roles = [
-      ...(played.owner
-        ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
-        : []),
-      ...(played.siblings.length > 0
-        ? [`- Sibling: you change ${played.siblings.map(({ path }) => `\`${path}\``).join(", ")}. Call the owner module \`${owner}\`; never re-implement the rule.`]
-        : []),
-      ...(played.matrixTest
-        ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
-        : []),
-    ];
-    if (roles.length === 0) return [];
-    return [[
-      `**${invariant.id}: ${invariant.title}**`,
-      ...(invariant.statement === null ? [] : [invariant.statement]),
-      "",
-      "**Your role:**",
-      ...roles,
-      "",
-      `**Owner module:** \`${owner}\``,
-      siblings.length === 0
-        ? "**Sibling entry points:** none"
-        : ["**Sibling entry points:**", ...siblings.map(({ path, note }) => `- \`${path}\`${note === null ? "" : ` — ${note}`}`)].join("\n"),
-      `**Matrix test:** \`${matrixTest}\``,
-    ].join("\n")];
-  });
-  return blocks.length === 0 ? NO_INVARIANT_OWNERSHIP : blocks.join("\n\n");
+function invariantOwnership(
+  fileList: readonly string[],
+  invariants: readonly PlanInvariant[],
+  touched: readonly OwnerObligation[],
+): string {
+  const dutyOf = new Map(touched.map((obligation) => [obligation.invariant, obligation] as const));
+  const rendered = new Set<string>();
+  const blocks: string[] = [];
+  for (const invariant of invariants) {
+    const block = planBlock(fileList, invariant);
+    if (block === null) continue;
+    rendered.add(invariant.id);
+    const duty = dutyOf.get(invariant.id);
+    blocks.push(duty === undefined ? block : `${block}\n\n${ownerDuties(duty)}`);
+  }
+  const drifted = touched.filter(({ invariant }) => !rendered.has(invariant)).map((duty) =>
+    `**${duty.invariant}: ${duty.title}**\n\n${ownerDuties(duty)}`);
+  const all = [...blocks, ...drifted];
+  return all.length === 0 ? NO_INVARIANT_OWNERSHIP : all.join("\n\n");
+}
+
+const quoted = (path: string): string => `\`${path}\``;
+
+/**
+ * The owner duties the Wave Gate holds an owned Invariant's family to (plan
+ * AD-10, FR-027): sibling coverage of the matrix test, then mutation
+ * verification of the owner's changed lines, or the declared exemption.
+ */
+function ownerDuties({ invariant, owner, siblings, matrixTest, mutation }: OwnerObligation): string {
+  const reached = siblings.length === 0
+    ? `the owner module ${quoted(owner)} (${invariant} declares no sibling entry point)`
+    : `the owner module ${quoted(owner)} and every sibling entry point: ${siblings.map(({ path }) => quoted(path)).join(", ")}`;
+  const coverage = `**Owner duties (${invariant}):** the matrix test ${quoted(matrixTest)} must import ${reached}. ` +
+    "The Wave Gate checks that its imports, followed through re-exports, reach each of them.";
+  const mutationDuty = match(mutation)
+    .with({ kind: "verify" }, () =>
+      `The owner's lines changed in the Wave, in ${quoted(owner)}, will be mutation-verified: every mutant the fixed ` +
+      `operator set makes of them must be killed by ${quoted(matrixTest)}.`)
+    .with({ kind: "exempt" }, ({ reason }) =>
+      `${invariant} declares a mutation exemption, so ${quoted(owner)} is exempt from mutation verification; ` +
+      `the declared reason: ${reason}. Sibling coverage still applies.`)
+    .exhaustive();
+  return `${coverage}\n\n${mutationDuty}`;
 }
 
 /** The contract Task's instructions: write the frozen surface and stubs, so
@@ -533,7 +589,11 @@ export function renderImplementationBrief(
     spec_contributions_formatted: contributions.value,
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
-    invariant_ownership: invariantOwnership(task.file_list ?? [], input.invariants),
+    invariant_ownership: invariantOwnership(
+      task.file_list ?? [],
+      input.invariants,
+      obligationsTouchedBy(input.ownerScope, task.file_list ?? []),
+    ),
     acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",

@@ -16,6 +16,7 @@ import type {
   CanonicalStatusFacts,
   EngineResumeAction,
   LoomStatus,
+  LoomStatusDocument,
   NextActionDecision,
   StatusReason,
   TaskGraph,
@@ -68,6 +69,12 @@ import {
   remediateEscalationCommand,
   type ImplementationReservationStatusObservation,
 } from "./implementation-window";
+import {
+  observedOwnerVerificationStatus,
+  ownerVerificationNotObserved,
+  renderOwnerVerificationStatus,
+  type OwnerVerificationStatus,
+} from "./owner-verification/status";
 
 /** What status reads: the gate's own deps plus the one observation only the
  *  implementation-window projection consumes. Gate checks never see it. */
@@ -591,12 +598,111 @@ function projectedAdvisoryStatus(
       );
 }
 
-/** Anti-corruption adapter from the protected-state parser into the canonical status contract. */
+/** The unavailable status a live registration's Run Directory observation forces, or null when it is healthy. */
+function runDirectoryUnavailableStatus(
+  graph: TaskGraph,
+  runDirectory: ActiveRunDirectoryObservation,
+): LoomStatus | null {
+  const active = graph.active_wave_gate;
+  if (active?.terminalOutcome !== null || runDirectory.kind === "unverified") return null;
+  if (runDirectory.runId !== active.runId) {
+    return unavailableStatus(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`);
+  }
+  if (runDirectory.kind === "abandoned") return unavailableStatus(unstampedAbandonmentMessage(runDirectory));
+  if (runDirectory.kind === "absent") {
+    return unavailableStatus(
+      `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
+      `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
+    );
+  }
+  if (runDirectory.kind === "invalid") {
+    return unavailableStatus(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`);
+  }
+  if (runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "unavailable") {
+    return unavailableStatus(
+      `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
+    );
+  }
+  return null;
+}
+
+/**
+ * The one owner-verification status of what status read as the latest
+ * persisted completion result (AD-10). The status document's report and the
+ * next action's remedies both come from this value, so "unavailable" versus
+ * "absent" is decided here once: a persisted result status could not read is
+ * not observed, with the read failure as its reason, so it never passes for
+ * "no result", and neither it nor an absent result owes a remedy.
+ */
+export const ownerVerificationStatusOf = (
+  result: WaveCompletionResultObservation | undefined,
+): OwnerVerificationStatus =>
+  match(result)
+    .with(P.nullish, { kind: "absent" }, () => ownerVerificationNotObserved("no persisted completion result"))
+    .with({ kind: "unavailable" }, ({ reason }) =>
+      ownerVerificationNotObserved(`the persisted completion result is unavailable: ${reason}`))
+    .with({ kind: "observed" }, ({ result: { ownerVerification } }) => ownerVerification === undefined
+      ? ownerVerificationNotObserved("the persisted completion result carries no owner verification")
+      : observedOwnerVerificationStatus(ownerVerification))
+    .exhaustive();
+
+/** Why an owner-verification rejection carries no remedy: the not-observed reason, or an observation naming no blocker. */
+const unreadRemedyCause = (owner: OwnerVerificationStatus): string =>
+  match(owner.report)
+    .with({ kind: "not-observed" }, ({ reason }) => reason)
+    .with({ kind: "unavailable" }, { kind: "verified" }, () => "the persisted owner verification names no blocking Invariant")
+    .exhaustive();
+
+/**
+ * When the completion suite rejected the Wave for owner verification, the
+ * next action names each blocking Invariant and its remedy. Readiness judged
+ * the very result the remedies are read from, so they should not disagree;
+ * when they do (the owner report yields no remedy), the next action says so
+ * and names why instead of showing a remedy-free rejection. A rejection for
+ * any other failure kind adds none.
+ */
+export function withOwnerVerificationRemedies(status: LoomStatus, owner: OwnerVerificationStatus): LoomStatus {
+  const suite = status.facts.waveCompletionSuiteReadiness;
+  const rejectedForOwner = suite.kind === "known" && suite.value.kind === "rejected" &&
+    suite.value.failureKinds.includes("owner-verification-rejected");
+  if (!rejectedForOwner) return status;
+  const reasons = owner.remedies.length === 0
+    ? [statusReason("completion-prerequisite-failed",
+      `owner verification rejected the Wave but no per-Invariant remedy could be read (${unreadRemedyCause(owner)})`)]
+    : owner.remedies.map((remedy) =>
+      statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
+  return canonicalRecord({
+    ...status,
+    next: canonicalRecord({
+      ...status.next,
+      reasons: Object.freeze([...status.next.reasons, ...reasons]) as NonEmpty<StatusReason>,
+    }),
+  });
+}
+
+/**
+ * Anti-corruption adapter from the protected-state parser into the canonical
+ * status document: the routed `LoomStatus`, its next action carrying any
+ * owner-verification remedies, and the owner-verification report beside it,
+ * all from one `ownerVerificationStatusOf` value.
+ */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
   deps: StatusDeps,
   lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
+): LoomStatusDocument {
+  const owner = ownerVerificationStatusOf(deps.currentWaveCompletionResult);
+  const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory), owner);
+  return canonicalRecord({ ...status, ownerVerification: owner.report });
+}
+
+/** Route a parsed graph to exactly one status branch. */
+function routeLoomStatus(
+  parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
+  deps: StatusDeps,
+  lifecycleProof: WaveLifecycleProof | null,
+  runDirectory: ActiveRunDirectoryObservation,
 ): LoomStatus {
   if (!parsed.ok) {
     return unavailableStatus(`protected authority is malformed: ${parsed.error}`);
@@ -608,27 +714,8 @@ export function deriveLoomStatusFromParsedGraph(
       deps.currentWaveCompletionResult,
     );
   }
-  const active = parsed.value.active_wave_gate;
-  if (active?.terminalOutcome === null && runDirectory.kind !== "unverified") {
-    if (runDirectory.runId !== active.runId) {
-      return unavailableStatus(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`);
-    }
-    if (runDirectory.kind === "abandoned") return unavailableStatus(unstampedAbandonmentMessage(runDirectory));
-    if (runDirectory.kind === "absent") {
-      return unavailableStatus(
-        `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
-        `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
-      );
-    }
-    if (runDirectory.kind === "invalid") {
-      return unavailableStatus(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`);
-    }
-    if (runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "unavailable") {
-      return unavailableStatus(
-        `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
-      );
-    }
-  }
+  const directoryUnavailable = runDirectoryUnavailableStatus(parsed.value, runDirectory);
+  if (directoryUnavailable !== null) return directoryUnavailable;
   const persistedBlocked = persistedTerminalBlockedStatus(
     parsed.value,
     deps.currentWaveWorkspace,
@@ -655,10 +742,11 @@ export function deriveLoomStatusFromParsedGraph(
     : deriveUnavailableLoomStatus(readiness.error.reasons);
 }
 
-/** Versioned machine renderer. It serializes the canonical read model and
- * contains no readiness or action policy. */
-export function renderLoomStatusJson(status: LoomStatus): string {
-  return JSON.stringify(status, null, 2);
+/** Versioned machine renderer. It serializes the status document exactly: the
+ * canonical read model and the owner-verification report; it contains no
+ * readiness or action policy. */
+export function renderLoomStatusJson(document: LoomStatusDocument): string {
+  return JSON.stringify(document, null, 2);
 }
 
 function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
@@ -667,8 +755,9 @@ function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
   return [`- ${renderProjectVerificationCoverage(fact.value.projectVerificationCoverage)}`];
 }
 
-/** Versioned human renderer over the same value used by the JSON renderer. */
-export function renderLoomStatusHuman(status: LoomStatus): string {
+/** Versioned human renderer over the same values used by the JSON renderer. */
+export function renderLoomStatusHuman(document: LoomStatusDocument): string {
+  const { ownerVerification, ...status } = document;
   const fact = (name: keyof CanonicalStatusFacts): string => {
     const value = status.facts[name];
     return value.kind === "known"
@@ -690,6 +779,7 @@ export function renderLoomStatusHuman(status: LoomStatus): string {
     `Loom Status v${status.schemaVersion}`,
     ...categories.map(fact),
     ...projectCoverageDiagnostic(status),
+    ...renderOwnerVerificationStatus(ownerVerification),
     `- nextAction: ${status.next.action.kind}`,
     `- nextActionPayload: ${JSON.stringify(status.next.action)}`,
     "- reasons:",

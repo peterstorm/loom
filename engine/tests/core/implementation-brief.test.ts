@@ -36,6 +36,7 @@ import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
+import { invariantId, UNSTAMPED_SCOPE } from "../fixtures/owner-obligation";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
@@ -119,6 +120,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   rules: RULES,
   roster: ROSTER,
   invariants: [],
+  ownerScope: UNSTAMPED_SCOPE,
   contracts: [],
   repositoryRoot: "/repo",
   operatorNotes: [],
@@ -126,7 +128,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
 });
 
 const PROBE_FAMILY: PlanInvariant = {
-  id: "INV-3",
+  id: invariantId("INV-3"),
   title: "Path probes fail closed",
   tier: { status: "ok", tier: "advisory" },
   ruleFile: null,
@@ -136,6 +138,7 @@ const PROBE_FAMILY: PlanInvariant = {
     owner: "engine/src/utils/path-presence.ts",
     siblings: [{ path: "engine/src/utils/route-endpoint.ts", note: "models.json" }, { path: "engine/src/config.ts", note: null }],
     matrixTest: "engine/tests/utils/path-presence.matrix.test.ts",
+    mutation: { kind: "verify" },
   },
 };
 
@@ -350,8 +353,8 @@ describe("renderImplementationBrief", () => {
     });
 
     it("renders nothing for unowned or malformed invariants", () => {
-      const unowned: PlanInvariant = { ...PROBE_FAMILY, id: "INV-4", ownership: { kind: "unowned", reason: "a prohibition" } };
-      const malformed: PlanInvariant = { ...PROBE_FAMILY, id: "INV-5", ownership: { kind: "malformed", problems: [{ kind: "missing-owner" }] } };
+      const unowned: PlanInvariant = { ...PROBE_FAMILY, id: invariantId("INV-4"), ownership: { kind: "unowned", reason: "a prohibition" } };
+      const malformed: PlanInvariant = { ...PROBE_FAMILY, id: invariantId("INV-5"), ownership: { kind: "malformed", problems: [{ kind: "missing-owner" }] } };
       expect(render(["engine/src/utils/path-presence.ts"], [unowned, malformed])).toBe(NO_INVARIANT_OWNERSHIP);
     });
   });

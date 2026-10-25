@@ -40,6 +40,7 @@ import type {
   ActiveWaveGateRegistration,
   CompletedWaveGateRegistration,
   OrphanedWaveGateRetirement,
+  OwnerObligation,
   WaveReopeningAudit,
   SpecCheck,
   SpecTraceAmendment,
@@ -126,6 +127,12 @@ import {
   type AcceptanceContract,
   type ContractWriterProblem,
 } from "./core/acceptance-contract";
+import {
+  ownerCheckAuthority,
+  ownerScopeOf,
+  parseOwnerObligations,
+  type OwnerCheckAuthority,
+} from "./core/owner-verification/obligations";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2041,12 +2048,16 @@ function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerific
     : parseErr(`verification_manifest: ${parsed.error.errors.join("; ")}`);
 }
 
+/** The graph fields the owner check's authority derives from. */
+type OwnerStampedGraph = Pick<TaskGraph, "tasks" | "owner_obligations">;
+
 function completionRosterConflict(
   receipt: AcceptedWaveCompletionReceipt,
   manifest: FrozenVerificationManifest,
   active: ActiveWaveGateRegistration,
+  owner: OwnerCheckAuthority | null,
 ): string | null {
-  const authorized = authorizeWaveCompletionSuite(manifest, active, receipt.workspaceDigest);
+  const authorized = authorizeWaveCompletionSuite(manifest, active, receipt.workspaceDigest, owner);
   if (!authorized.ok) {
     return `active_wave_completion_suite authority cannot be reconstructed: ${authorized.error.errors.join("; ")}`;
   }
@@ -2079,6 +2090,7 @@ function parseActiveWaveCompletionSuiteField(
   raw: unknown,
   activeWaveGate: ActiveWaveGateRegistration | undefined,
   verificationManifest: FrozenVerificationManifest | undefined,
+  stamped: OwnerStampedGraph,
 ): ParseResult<AcceptedWaveCompletionReceipt | undefined> {
   if (raw === undefined) return parseOk(undefined);
   const parsed = parseAcceptedWaveCompletionReceipt(raw);
@@ -2104,13 +2116,17 @@ function parseActiveWaveCompletionSuiteField(
   if (receipt.manifestDigest !== manifest.manifestDigest) {
     return parseErr("active_wave_completion_suite.manifestDigest must match verification_manifest authority");
   }
-  const rosterConflict = completionRosterConflict(receipt, manifest, activeWaveGate);
+  // The owner check joins the roster exactly as the gate authorized it: from the
+  // graph's own stamp, for the active Wave (AD-1).
+  const owner = ownerCheckAuthority(ownerScopeOf(stamped), activeWaveGate.wave);
+  const rosterConflict = completionRosterConflict(receipt, manifest, activeWaveGate, owner);
   return rosterConflict === null ? parseOk(receipt) : parseErr(rosterConflict);
 }
 
 function parseTaskGraphAuthorityFields(
   obj: Record<string, unknown>,
   verificationManifest: FrozenVerificationManifest | undefined,
+  stamped: OwnerStampedGraph,
 ): ParseResult<ParsedTaskGraphAuthorityFields> {
   const registrations = parseWaveGateRegistrations(obj);
   if (!registrations.ok) return parseErr(registrations.error);
@@ -2133,6 +2149,7 @@ function parseTaskGraphAuthorityFields(
     obj.active_wave_completion_suite,
     activeWaveGate,
     verificationManifest,
+    stamped,
   );
   if (!activeWaveCompletionSuite.ok) return parseErr(activeWaveCompletionSuite.error);
   return parseOk({
@@ -2261,6 +2278,17 @@ function parseAcceptanceContractsShape(raw: unknown): ParseResult<readonly Accep
 }
 
 /**
+ * The population stamp (AD-2). Absent stays absent: a graph populated before
+ * owner verification owes nothing (FR-004). Present, `[]` included, it is
+ * parsed by the owner-verification core beside the obligation's constructor.
+ */
+function parseOwnerObligationsField(raw: unknown): ParseResult<readonly OwnerObligation[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  const parsed = parseOwnerObligations(raw);
+  return parsed.ok ? parseOk(parsed.value) : parseErr(parsed.error);
+}
+
+/**
  * The shape-parsed contracts bound to the roster: each names a Task that
  * exists and is, by the one writer rule, the only Task listing every path the
  * contract freezes; and a freeze names a Wave no earlier than that Task's. A
@@ -2304,6 +2332,7 @@ type ParsedTaskGraphParts = Readonly<{
   specIndexObservation: SpecIndexObservation | undefined;
   proofBoundaryObservation: ProofBoundaryObservation | undefined;
   acceptanceContracts: readonly AcceptanceContract[] | undefined;
+  ownerObligations: readonly OwnerObligation[] | undefined;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
 }>;
@@ -2359,6 +2388,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
     ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
+    ...(parts.ownerObligations === undefined ? {} : { owner_obligations: parts.ownerObligations }),
   } as unknown as ParsedTaskGraph;
 }
 
@@ -2433,6 +2463,19 @@ function parseTaskGraphGating(
   return parseOk({ waveGates: migratedWaveGates, specCheck: specCheck.value });
 }
 
+/** What the graph owes: its bound Acceptance Contracts and its stamped Owner Obligations. */
+function parseTaskGraphObligationFields(
+  obj: Record<string, unknown>,
+  contractShapes: readonly AcceptanceContract[] | undefined,
+  tasks: readonly unknown[],
+): ParseResult<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }> {
+  const acceptanceContracts = bindAcceptanceContracts(contractShapes, tasks as Record<string, unknown>[]);
+  if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
+  const ownerObligations = parseOwnerObligationsField(obj.owner_obligations);
+  if (!ownerObligations.ok) return parseErr(ownerObligations.error);
+  return parseOk({ acceptanceContracts: acceptanceContracts.value, ownerObligations: ownerObligations.value });
+}
+
 /**
  * Parse raw disk JSON into a TaskGraph, mirroring parseMachine: every
  * union-typed field (current_phase, task status / review_status /
@@ -2468,7 +2511,10 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!tasks.ok) return parseErr(tasks.error);
   const gating = parseTaskGraphGating(obj, tasks.value);
   if (!gating.ok) return parseErr(gating.error);
-  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value);
+  const obligations = parseTaskGraphObligationFields(obj, contractShapes.value, tasks.value);
+  if (!obligations.ok) return parseErr(obligations.error);
+  const stamped = { tasks: tasks.value as TaskGraph["tasks"], owner_obligations: obligations.value.ownerObligations };
+  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value, stamped);
   if (!authority.ok) return parseErr(authority.error);
   const history = parseTaskGraphHistoryFields(
     obj,
@@ -2477,11 +2523,6 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     tasks.value as Record<string, unknown>[],
   );
   if (!history.ok) return parseErr(history.error);
-  const acceptanceContracts = bindAcceptanceContracts(
-    contractShapes.value,
-    tasks.value as Record<string, unknown>[],
-  );
-  if (!acceptanceContracts.ok) return parseErr(acceptanceContracts.error);
 
   return parseOk(taskGraphFromParsedParts(obj, {
     ...documents.value,
@@ -2489,7 +2530,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     executingTasks: executingTasks.value,
     waveGates: gating.value.waveGates,
     specCheck: gating.value.specCheck,
-    acceptanceContracts: acceptanceContracts.value,
+    ...obligations.value,
     authority: authority.value,
     history: history.value,
   }));

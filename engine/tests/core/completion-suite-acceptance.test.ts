@@ -52,7 +52,7 @@ const registration: ActiveWaveGateRegistration = {
   revision: 0,
   terminalOutcome: null,
 };
-const authority: AuthorizedWaveCompletionSuite = value(authorizeWaveCompletionSuite(manifest, registration, digest("b")));
+const authority: AuthorizedWaveCompletionSuite = value(authorizeWaveCompletionSuite(manifest, registration, digest("b"), null));
 
 const PLAN: PlanContract = {
   id: "CT-1",

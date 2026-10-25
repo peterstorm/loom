@@ -6,6 +6,11 @@
  * this one derivation, so they cannot disagree about suite state. Core
  * performs no I/O: the current workspace and persisted result arrive as shell
  * observations.
+ *
+ * INV-3: the roster a receipt or persisted result must match is authorized
+ * by `authorizeGraphCompletionSuite`, the one function the gate also calls,
+ * so readiness and the gate cannot disagree about which owned Invariants the
+ * Wave owes.
  */
 
 import type {
@@ -19,18 +24,16 @@ import type {
 import {
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
+  rejectionDisposition,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
-import {
-  authorizeWaveCompletionSuite,
-  legacyDefaultVerificationManifest,
-  deriveProjectVerificationCoverage,
-} from "./verification-manifest";
+import { legacyDefaultVerificationManifest, deriveProjectVerificationCoverage } from "./verification-manifest";
 import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
+import { authorizeGraphCompletionSuite } from "./owner-verification/suite-authority";
 
 
 function exactCompletionSuiteError(
@@ -51,7 +54,7 @@ function exactCompletionSuiteError(
   if (parsed.value.manifestDigest !== manifest.manifestDigest) {
     return "accepted suite manifest digest does not match protected verification_manifest";
   }
-  const authorized = authorizeWaveCompletionSuite(manifest, registration, parsed.value.workspaceDigest);
+  const authorized = authorizeGraphCompletionSuite(graph, parsed.value.workspaceDigest);
   if (!authorized.ok) return authorized.error.errors.join("; ");
   if (parsed.value.manifestDigest !== authorized.value.manifestDigest ||
       parsed.value.suiteDigest !== authorized.value.suiteDigest ||
@@ -205,113 +208,104 @@ function deriveCompletionSuiteOutcome(
         manifestDigest,
       );
     }
-    const authorized = authorizeWaveCompletionSuite(
-      manifest,
-      source.registration,
-      workspace.value.workspaceDigest,
-    );
-    if (!authorized.ok) {
-      return requiredWaveCompletionSuite(
-        "completion-result-invalid",
-        authorized.error.errors.join("; "),
-        manifestDigest,
-      );
-    }
-    const evaluation = evaluateWaveCompletionSuite(
-      authorized.value,
-      currentResult.result,
-      graphAcceptanceExpectation(graph, source.registration.wave),
-    );
-    if (evaluation.kind === "accepted") {
-      return requiredWaveCompletionSuite(
-        "accepted-suite-missing",
-        "persisted completion result is accepted; protected receipt recovery required",
-        manifestDigest,
-      );
-    }
-    const firstSemanticFailure = evaluation.semanticFailures[0];
-    if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0 ||
-        firstSemanticFailure === undefined) {
-      return requiredWaveCompletionSuite(
-        "completion-result-invalid",
-        completionEvaluationFailureDetail(
-          evaluation.authorityFailures,
-          evaluation.infrastructureFailures,
-        ),
-        manifestDigest,
-      );
-    }
-    const remainingSemanticFailures = evaluation.semanticFailures.slice(1);
-    const failureKinds = sortedUniqueNonEmpty(
-      firstSemanticFailure.kind,
-      remainingSemanticFailures.map((failure) => failure.kind),
-    );
-    const checkIds = sortedUniqueNonEmpty(
-      firstSemanticFailure.checkId,
-      remainingSemanticFailures.map((failure) => failure.checkId),
-    );
-    return canonicalRecord({
-      kind: "rejected",
-      verificationManifestDigest: manifest.manifestDigest,
-      suiteDigest: authorized.value.suiteDigest,
-      workspaceDigest: authorized.value.workspaceDigest,
-      failureKinds,
-      checkIds,
-    });
+    return persistedResultOutcome(graph, source.registration, manifest, workspace.value.workspaceDigest, currentResult.result);
   }
-  if (source.registration === undefined) {
+  return receiptOutcome(graph, source, source.receipt, currentWorkspace);
+}
+
+/**
+ * Judge the persisted result of an active Wave without a receipt against the
+ * roster the graph's Wave owes (`authorizeGraphCompletionSuite`, INV-3). A
+ * semantic rejection stays a rejection when the owner check beside it could
+ * not decide, exactly as the gate replays it (`rejectionDisposition`).
+ */
+function persistedResultOutcome(
+  graph: TaskGraph,
+  registration: ActiveWaveGateRegistration,
+  manifest: NonNullable<TaskGraph["verification_manifest"]>,
+  workspaceDigest: Extract<WaveWorkspaceObservation, { kind: "observed" }>["workspaceDigest"],
+  result: Extract<WaveCompletionResultObservation, { kind: "observed" }>["result"],
+) {
+  const manifestDigest = manifest.manifestDigest;
+  const authorized = authorizeGraphCompletionSuite(graph, workspaceDigest);
+  if (!authorized.ok) {
+    return requiredWaveCompletionSuite("completion-result-invalid", authorized.error.errors.join("; "), manifestDigest);
+  }
+  const evaluation = evaluateWaveCompletionSuite(authorized.value, result, graphAcceptanceExpectation(graph, registration.wave));
+  if (evaluation.kind === "accepted") {
     return requiredWaveCompletionSuite(
-      "accepted-suite-invalid",
-      "accepted Wave completion suite has no active or terminal registration authority",
+      "accepted-suite-missing",
+      "persisted completion result is accepted; protected receipt recovery required",
       manifestDigest,
-      source.receipt.resultDigest,
     );
+  }
+  const disposition = rejectionDisposition(evaluation);
+  if (disposition.kind !== "semantic") {
+    return requiredWaveCompletionSuite(
+      "completion-result-invalid",
+      completionEvaluationFailureDetail(evaluation.authorityFailures, evaluation.infrastructureFailures),
+      manifestDigest,
+    );
+  }
+  const [firstSemanticFailure, ...remainingSemanticFailures] = disposition.failures;
+  return canonicalRecord({
+    kind: "rejected",
+    verificationManifestDigest: manifestDigest,
+    suiteDigest: authorized.value.suiteDigest,
+    workspaceDigest: authorized.value.workspaceDigest,
+    failureKinds: sortedUniqueNonEmpty(firstSemanticFailure.kind, remainingSemanticFailures.map((failure) => failure.kind)),
+    checkIds: sortedUniqueNonEmpty(firstSemanticFailure.checkId, remainingSemanticFailures.map((failure) => failure.checkId)),
+  });
+}
+
+/** The outcome of a Wave whose receipt protected authority already holds. */
+function receiptOutcome(
+  graph: TaskGraph,
+  source: CompletionSuiteReadinessSource,
+  receipt: AcceptedWaveCompletionReceipt,
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+) {
+  const manifestDigest = graph.verification_manifest?.manifestDigest ?? null;
+  if (source.registration === undefined) {
+    const detail = "accepted Wave completion suite has no active or terminal registration authority";
+    return requiredWaveCompletionSuite("accepted-suite-invalid", detail, manifestDigest, receipt.resultDigest);
   }
   if (source.registration.kind === "active-wave-gate") {
-    const exactError = exactCompletionSuiteError(source.registration, source.receipt, graph);
+    const exactError = exactCompletionSuiteError(source.registration, receipt, graph);
     if (exactError !== null) {
-      return requiredWaveCompletionSuite(
-        "accepted-suite-invalid",
-        exactError,
-        manifestDigest,
-        source.receipt.resultDigest,
-      );
+      return requiredWaveCompletionSuite("accepted-suite-invalid", exactError, manifestDigest, receipt.resultDigest);
     }
   }
   if (source.terminal) {
     return canonicalRecord({
       kind: "accepted",
-      verificationManifestDigest: source.receipt.manifestDigest,
-      suiteDigest: source.receipt.suiteDigest,
-      resultDigest: source.receipt.resultDigest,
-      workspaceDigest: source.receipt.workspaceDigest,
-      checkCount: source.receipt.checks.length,
+      verificationManifestDigest: receipt.manifestDigest,
+      suiteDigest: receipt.suiteDigest,
+      resultDigest: receipt.resultDigest,
+      workspaceDigest: receipt.workspaceDigest,
+      checkCount: receipt.checks.length,
     });
   }
-  const workspace = parseWorkspaceObservation(
-    currentWorkspace,
-    manifestDigest,
-    source.receipt.resultDigest,
-  );
+  const workspace = parseWorkspaceObservation(currentWorkspace, manifestDigest, receipt.resultDigest);
   if (!workspace.ok) return workspace.error;
-  if (workspace.value.workspaceDigest !== source.receipt.workspaceDigest) {
+  if (workspace.value.workspaceDigest !== receipt.workspaceDigest) {
     return canonicalRecord({
       kind: "stale",
       verificationManifestDigest: manifestDigest,
-      suiteDigest: source.receipt.suiteDigest,
-      resultDigest: source.receipt.resultDigest,
-      acceptedWorkspaceDigest: source.receipt.workspaceDigest,
+      suiteDigest: receipt.suiteDigest,
+      resultDigest: receipt.resultDigest,
+      acceptedWorkspaceDigest: receipt.workspaceDigest,
       currentWorkspaceDigest: workspace.value.workspaceDigest,
-      checkCount: source.receipt.checks.length,
+      checkCount: receipt.checks.length,
     });
   }
   return canonicalRecord({
     kind: "accepted",
     verificationManifestDigest: manifestDigest,
-    suiteDigest: source.receipt.suiteDigest,
-    resultDigest: source.receipt.resultDigest,
-    workspaceDigest: source.receipt.workspaceDigest,
-    checkCount: source.receipt.checks.length,
+    suiteDigest: receipt.suiteDigest,
+    resultDigest: receipt.resultDigest,
+    workspaceDigest: receipt.workspaceDigest,
+    checkCount: receipt.checks.length,
   });
 }
 

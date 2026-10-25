@@ -175,6 +175,19 @@ export function unifiedDiff(path: string, base: string | null, head: string | nu
 }
 
 /**
+ * The 1-based lines of `head` that the edit script `base` → `head` inserts:
+ * exactly the `+` lines of `unifiedDiff(path, base, head)`. A null base (a new
+ * file) marks every head line changed; a deletion changes no head line, and a
+ * final line that gains or loses its newline is changed.
+ */
+export function changedHeadLines(base: string | null, head: string): ReadonlySet<number> {
+  const right = splitLines(head);
+  if (base === null) return new Set(right.lines.map((_, index) => index + 1));
+  const edits = editScript(comparableLines(splitLines(base)), comparableLines(right));
+  return new Set(edits.flatMap((edit) => edit.kind === "insert" ? [edit.head + 1] : []));
+}
+
+/**
  * Edit-index ranges of the hunks: each run of changes padded by the context
  * lines, with runs separated by at most twice the context merged into one.
  */

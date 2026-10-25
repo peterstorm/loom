@@ -45,7 +45,7 @@ function populated(contracts: readonly PlanContract[] = [CONTRACT]): TaskGraph {
     planTitle: "load", validatedPlanFile: "plan.md", tasks: roster.value,
     verificationManifest: defaultVerificationManifest(),
     specIndex: indexedSpec("spec.md"), observedSpecFile: "spec.md",
-    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts,
+    force: false, proofBoundary: { kind: "absent", cause: "fixture" }, contracts, invariants: [],
   });
   if (!result.ok) throw new Error(result.error.message);
   return result.value.state;

@@ -12,7 +12,8 @@
  *                        (bound to a lint-rule file, enforced fail-closed) or
  *                        `advisory` (prose, never enforced), each declaring its
  *                        owner module, sibling entry points and matrix test —
- *                        or `**Owner module:** none` with a reason
+ *                        or `**Owner module:** none` with a reason — and, when
+ *                        owned, optionally a reasoned `**Mutation exemption:**`
  *   - `## Contracts`   — `### CT-N: {title}` blocks, each naming a
  *                        declarations-only types file (or `none` with a
  *                        reason), the dedicated acceptance test files and the
@@ -38,6 +39,7 @@ import type {
   BlockSection,
   InvariantOwnership,
   ModelSection,
+  MutationPolicy,
   OwnershipProblem,
   PlanInvariant,
   PlanInvariantTier,
@@ -53,6 +55,7 @@ import type {
   ContractTypes,
   PlanContract,
 } from "../types";
+import { parseInvariantId } from "./invariant-id";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
 
@@ -170,15 +173,25 @@ function idBlocks(body: string, prefix: string): { id: string; title: string; bl
   });
 }
 
-/** Value of a `**{label}:** value` line inside a block, backticks stripped;
- *  null if the line is absent or its value is empty. The value never crosses
- *  the line break: an empty label must not capture the next line. */
-function fieldValue(block: string, label: string): string | null {
+/** A `**{label}:** value` line of one block: absent, or present with its
+ *  value, backticks stripped — null when that value is empty. */
+type FieldLine = Readonly<{ kind: "absent" }> | Readonly<{ kind: "present"; value: string | null }>;
+
+/** The first `**{label}:**` line inside a block. The value never crosses the
+ *  line break: an empty label must not capture the next line. */
+function fieldLine(block: string, label: string): FieldLine {
   const re = new RegExp(`^\\*\\*${label}:\\*\\*[ \\t]*(.*)$`, "im");
   const m = re.exec(block);
-  if (!m) return null;
+  if (!m) return { kind: "absent" };
   const value = m[1].trim().replace(/^`(.*)`$/, "$1").trim();
-  return value.length > 0 ? value : null;
+  return { kind: "present", value: value.length > 0 ? value : null };
+}
+
+/** Value of a `**{label}:** value` line inside a block, backticks stripped;
+ *  null if the line is absent or its value is empty. */
+function fieldValue(block: string, label: string): string | null {
+  const line = fieldLine(block, label);
+  return line.kind === "absent" ? null : line.value;
 }
 
 /** Node names from the first column of a `| Node | Kind | … |` markdown table
@@ -263,17 +276,52 @@ function siblingDeclaration(block: string): SiblingDeclaration {
 }
 
 /**
+ * Exemption reasons that state no reason, compared trimmed, case-insensitive
+ * and without trailing punctuation: `**Mutation exemption:** none` mirrors
+ * `**Owner module:** none` but would otherwise opt the owner out of mutation
+ * verification with the "reason" `none`. The plan grammar and the State File
+ * stamp parser both refuse through `isPlaceholderExemptionReason`.
+ */
+const PLACEHOLDER_EXEMPTION_REASONS: ReadonlySet<string> = new Set([
+  "none", "n/a", "na", "tbd", "todo", "-", "—", "null", "nil", "no", "nothing",
+]);
+
+export const isPlaceholderExemptionReason = (reason: string): boolean =>
+  PLACEHOLDER_EXEMPTION_REASONS.has(reason.trim().replace(/[.!?,;:]+$/, "").trim().toLowerCase());
+
+/** An owned invariant's mutation policy, or the problem that refuses its exemption line. */
+type MutationPolicyReading =
+  | Readonly<{ kind: "policy"; policy: MutationPolicy }>
+  | Readonly<{ kind: "refused"; problem: Extract<OwnershipProblem, { kind: "exemption-without-reason" | "exemption-placeholder-reason" }> }>;
+
+/** No line verifies; a stated reason exempts; a blank or placeholder reason is refused, never an opt-out. */
+function mutationPolicyOf(exemption: FieldLine): MutationPolicyReading {
+  if (exemption.kind === "absent") return { kind: "policy", policy: { kind: "verify" } };
+  if (exemption.value === null) return { kind: "refused", problem: { kind: "exemption-without-reason" } };
+  return isPlaceholderExemptionReason(exemption.value)
+    ? { kind: "refused", problem: { kind: "exemption-placeholder-reason", reason: exemption.value } }
+    : { kind: "policy", policy: { kind: "exempt", reason: exemption.value } };
+}
+
+/**
  * The block's ownership declaration as its three real states. Every problem
  * decidable from the text is collected, so one validation run names all of
  * them — without an owner line, only a malformed sibling line is decidable,
  * since whether siblings and a matrix test are owed depends on the owner. An
  * owned or unowned value exists only when the declaration is complete and
  * consistent.
+ *
+ * `**Mutation exemption:**` is meaningful only on an owned invariant: there a
+ * reason makes it `exempt`, a blank one is `exemption-without-reason` and a
+ * placeholder one is `exemption-placeholder-reason`; on an unowned one any
+ * exemption line is `exemption-on-unowned`. Without an owner line whether it
+ * is owed cannot be decided, like siblings.
  */
 function parseOwnership(block: string): InvariantOwnership {
   const owner = fieldValue(block, "Owner module");
   const reason = fieldValue(block, "Unowned reason");
   const matrixTest = fieldValue(block, "Matrix test");
+  const exemption = fieldLine(block, "Mutation exemption");
   const siblings = siblingDeclaration(block);
   const malformedSibling: readonly OwnershipProblem[] =
     siblings.status === "malformed" ? [{ kind: "malformed-sibling", line: siblings.line }] : [];
@@ -284,17 +332,20 @@ function parseOwnership(block: string): InvariantOwnership {
       ...(siblings.status === "absent" ? [] : ["Sibling entry points"]),
       ...(matrixTest === null ? [] : ["Matrix test"]),
     ];
-    const labelProblems: readonly OwnershipProblem[] =
-      ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels }] : [];
+    const labelProblems: readonly OwnershipProblem[] = [
+      ...(ownerLabels.length > 0 ? [{ kind: "owner-fields-on-unowned", labels: ownerLabels } as const] : []),
+      ...(exemption.kind === "absent" ? [] : [{ kind: "exemption-on-unowned" } as const]),
+    ];
     if (reason === null) return { kind: "malformed", problems: [{ kind: "unowned-without-reason" }, ...labelProblems] };
     const [first, ...rest] = labelProblems;
     return first === undefined ? { kind: "unowned", reason } : { kind: "malformed", problems: [first, ...rest] };
   }
 
-  if (reason === null && siblings.status === "declared" && matrixTest !== null) {
-    return { kind: "owned", owner, siblings: siblings.entries, matrixTest };
+  const mutation = mutationPolicyOf(exemption);
+  if (reason === null && siblings.status === "declared" && matrixTest !== null && mutation.kind === "policy") {
+    return { kind: "owned", owner, siblings: siblings.entries, matrixTest, mutation: mutation.policy };
   }
-  // Not owned, so at least one of these three is present.
+  // Not owned, so at least one of these four is present.
   const [first, ...rest]: readonly OwnershipProblem[] = [
     ...(reason === null ? [] : [{ kind: "reason-on-owned" } as const]),
     ...match(siblings)
@@ -303,6 +354,7 @@ function parseOwnership(block: string): InvariantOwnership {
       .with({ status: "absent" }, { status: "empty" }, () => [{ kind: "missing-siblings" } as const])
       .exhaustive(),
     ...(matrixTest === null ? [{ kind: "missing-matrix-test" } as const] : []),
+    ...(mutation.kind === "refused" ? [mutation.problem] : []),
   ];
   return { kind: "malformed", problems: [first!, ...rest] };
 }
@@ -468,6 +520,7 @@ function collectStrays(
     { label: "Unowned reason", s: invariants, home: "Invariants" },
     { label: "Sibling entry points", s: invariants, home: "Invariants" },
     { label: "Matrix test", s: invariants, home: "Invariants" },
+    { label: "Mutation exemption", s: invariants, home: "Invariants" },
     { label: "Types file", s: contracts, home: "Contracts" },
     { label: "No types reason", s: contracts, home: "Contracts" },
     { label: "Acceptance tests", s: contracts, home: "Contracts" },
@@ -492,6 +545,27 @@ function emptySectionStray(s: Section | null, section: BlockSection): Stray[] {
   return [{ kind: "empty-section", section }];
 }
 
+/**
+ * The `## Invariants` blocks. The heading grammar admits exactly `INV-N`, the
+ * Invariant id's own rule, so every id parses; this is the plan's one minting
+ * point for an `InvariantId`.
+ */
+function invariantBlocks(body: string): PlanInvariant[] {
+  return idBlocks(body, "INV").flatMap(({ id, title, block }) => {
+    const invariant = parseInvariantId(id);
+    return invariant.ok
+      ? [{
+          id: invariant.value,
+          title,
+          tier: parseTier(fieldValue(block, "Tier")),
+          ruleFile: fieldValue(block, "Rule file"),
+          statement: fieldValue(block, "Statement"),
+          ownership: parseOwnership(block),
+        }]
+      : [];
+  });
+}
+
 export function parsePlanModels(markdown: string): PlanModels {
   const { text, unterminated } = stripFences(markdown);
 
@@ -513,16 +587,7 @@ export function parsePlanModels(markdown: string): PlanModels {
       };
 
   const invariantsSection = section(text, "Invariants");
-  const invariants: PlanInvariant[] = invariantsSection === null
-    ? []
-    : idBlocks(invariantsSection.body, "INV").map(({ id, title, block }) => ({
-        id,
-        title,
-        tier: parseTier(fieldValue(block, "Tier")),
-        ruleFile: fieldValue(block, "Rule file"),
-        statement: fieldValue(block, "Statement"),
-        ownership: parseOwnership(block),
-      }));
+  const invariants: PlanInvariant[] = invariantsSection === null ? [] : invariantBlocks(invariantsSection.body);
 
   const contractsSection = section(text, "Contracts");
   const contracts: PlanContract[] = contractsSection === null

@@ -42,10 +42,16 @@ import {
   toElementResult,
   type UnknownRecord,
 } from "./plain-record";
+import type { InvariantId } from "./invariant-id";
+import { parseOwedInvariantIds, parseOwnerVerificationObservation, type OwnerVerificationParseError } from "./owner-verification/parse";
+import { ownerVerificationFailures } from "./owner-verification/verdict";
+import type { OwnerVerificationFailure, OwnerVerificationObservation } from "./owner-verification/types";
 
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const RESERVED_CHECK_PREFIX = "loom:";
 export const FULL_TIER_LINT_CHECK_ID_TEXT = "loom:full-tier-lint" as const;
+/** The engine-reserved owner-verification check (G5b AD-1). */
+export const OWNER_VERIFICATION_CHECK_ID_TEXT = "loom:owner-verification" as const;
 export const COMPLETION_REPORT_ROOT = ".loom/completion-reports" as const;
 const OPERATOR_VERIFICATION_MANIFEST_PATH = ".loom/verification-manifest.json" as const;
 
@@ -124,13 +130,28 @@ export type CompletionReportOutcome =
   | Readonly<{ kind: "unreadable"; path: ReviewPath; message: FailureMessage }>;
 export type CompletionScope = "task" | "wave";
 
-/** The reserved check is engine authority; project checks come from frozen manifest authority. */
+/**
+ * The reserved checks are engine authority; project checks come from frozen
+ * manifest authority. The owner-verification check exists only when suite
+ * authorization was handed an owner check authority (a graph carrying the
+ * `owner_obligations` stamp): it binds the stamp's digest and the ids of the
+ * owned Invariants the Wave owes coverage and mutation for, in plan order,
+ * possibly none.
+ */
 export type AuthorizedWaveCompletionCheck =
   | Readonly<{
       kind: "engine-full-tier-lint";
       checkId: CompletionCheckId;
       scope: "wave";
       reportPolicy: Readonly<{ kind: "not-required" }>;
+    }>
+  | Readonly<{
+      kind: "engine-owner-verification";
+      checkId: CompletionCheckId;
+      scope: "wave";
+      reportPolicy: Readonly<{ kind: "not-required" }>;
+      obligationsDigest: ArtifactDigest;
+      owed: readonly InvariantId[];
     }>
   | Readonly<{
       kind: "project-command";
@@ -183,6 +204,8 @@ export type WaveCompletionSuiteResult = Readonly<{
   workspaceDigest: ArtifactDigest;
   checks: readonly CompletionCheckResult[];
   acceptance?: AcceptanceObservation;
+  /** Present exactly when the suite authorizes the owner-verification check. */
+  ownerVerification?: OwnerVerificationObservation;
 }>;
 
 export type CompletionSuiteParseError = Readonly<{
@@ -207,7 +230,16 @@ export type CompletionAuthorityFailure =
    *  protected graph now derives for this gate. */
   | Readonly<{ kind: "acceptance-expectation-mismatch" }>
   /** Acceptance facts name a check whose produced report has another digest. */
-  | Readonly<{ kind: "unbound-acceptance-facts"; checkIds: NonEmpty<string> }>;
+  | Readonly<{ kind: "unbound-acceptance-facts"; checkIds: NonEmpty<string> }>
+  /** The owner-verification observation is not the one the authorized owner
+   *  check binds: absent, unauthorized, verified against other obligations or
+   *  other Invariants, or contradicted by the check's own exit. */
+  | Readonly<{ kind: "owner-verification-mismatch"; checkId: CompletionCheckId; reason: string }>;
+
+/** An owner-verification finding that could not decide: never a kill, never a pass. */
+export type OwnerInfrastructureFinding = Extract<OwnerVerificationFailure, { readonly kind: "infrastructure" }>;
+/** An owner-verification finding the matrix test decided: missing siblings, a red baseline, a survivor. */
+export type OwnerSemanticFinding = Exclude<OwnerVerificationFailure, { readonly kind: "infrastructure" }>;
 
 export type CompletionAuthorityField =
   | "runId"
@@ -226,14 +258,16 @@ export type CompletionInfrastructureFailure =
       checkId: CompletionCheckId;
       path: ReviewPath;
       message: FailureMessage;
-    }>;
+    }>
+  | Readonly<{ kind: "owner-verification-infrastructure"; checkId: CompletionCheckId; failures: NonEmpty<OwnerInfrastructureFinding> }>;
 
 export type CompletionSemanticFailure =
   | Readonly<{ kind: "timed-out"; checkId: CompletionCheckId }>
   | Readonly<{ kind: "signal-termination"; checkId: CompletionCheckId; signal: CompletionSignal }>
   | Readonly<{ kind: "non-zero-exit"; checkId: CompletionCheckId; exitCode: number }>
   | Readonly<{ kind: "missing-report"; checkId: CompletionCheckId; path: ReviewPath }>
-  | Readonly<{ kind: "acceptance-rejected"; checkId: CompletionCheckId; failures: NonEmpty<AcceptanceFailure> }>;
+  | Readonly<{ kind: "acceptance-rejected"; checkId: CompletionCheckId; failures: NonEmpty<AcceptanceFailure> }>
+  | Readonly<{ kind: "owner-verification-rejected"; checkId: CompletionCheckId; failures: NonEmpty<OwnerSemanticFinding> }>;
 
 export type AcceptedWaveCompletionReceipt = Readonly<{
   kind: "accepted-wave-completion-suite";
@@ -246,6 +280,8 @@ export type AcceptedWaveCompletionReceipt = Readonly<{
   workspaceDigest: ArtifactDigest;
   checks: NonEmpty<CompletionCheckResult>;
   acceptance?: AcceptanceObservation;
+  /** The passing owner-verification observation, when the suite authorizes the check. */
+  ownerVerification?: OwnerVerificationObservation;
   resultDigest: ArtifactDigest;
 }>;
 
@@ -257,6 +293,61 @@ export type CompletionSuiteEvaluation =
       infrastructureFailures: readonly CompletionInfrastructureFailure[];
       semanticFailures: readonly CompletionSemanticFailure[];
     }>;
+
+export type RejectedCompletionSuite = Extract<CompletionSuiteEvaluation, { readonly kind: "rejected" }>;
+
+/**
+ * What a rejection means for the gate, decided once from its failures:
+ * - `authority`: the result is not the one the suite authorizes;
+ * - `infrastructure`: a check other than the owner check could not run;
+ * - `owner-undecided`: only the owner check could not decide, and nothing
+ *   else failed, so a retry at the same workspace may still decide;
+ * - `semantic`: some check decided against the Wave; an undecided owner check
+ *   beside it cannot rescue it, so the rejection is final at this workspace;
+ * - `inexact`: a rejection carrying no failure at all.
+ */
+export type RejectionDisposition =
+  | Readonly<{ kind: "authority" }>
+  | Readonly<{ kind: "infrastructure" }>
+  | Readonly<{ kind: "owner-undecided" }>
+  | Readonly<{ kind: "semantic"; failures: NonEmpty<CompletionSemanticFailure> }>
+  | Readonly<{ kind: "inexact" }>;
+
+type InfrastructureCase = "none" | "owner-only" | "other";
+
+function infrastructureCase(failures: readonly CompletionInfrastructureFailure[]): InfrastructureCase {
+  if (failures.length === 0) return "none";
+  return failures.every((failure) => failure.kind === "owner-verification-infrastructure") ? "owner-only" : "other";
+}
+
+export function rejectionDisposition(rejection: RejectedCompletionSuite): RejectionDisposition {
+  if (rejection.authorityFailures.length > 0) return freeze({ kind: "authority" });
+  const infrastructure = infrastructureCase(rejection.infrastructureFailures);
+  if (infrastructure === "other") return freeze({ kind: "infrastructure" });
+  if (rejection.semanticFailures.length > 0) {
+    return freeze({ kind: "semantic", failures: asNonEmpty(freezeArray(rejection.semanticFailures)) });
+  }
+  return freeze({ kind: infrastructure === "owner-only" ? "owner-undecided" : "inexact" });
+}
+
+/**
+ * Where a rejected result is published, decided once from its disposition:
+ * - `result-slot`: a terminal rejection (`semantic`) fills the workspace's
+ *   result slot and is replayed there;
+ * - `owner-attempt`: an `owner-undecided` rejection is recorded beside the
+ *   slot, which stays free so a retry at the same workspace runs the owner
+ *   check again; the slot therefore never holds one;
+ * - `none`: an `authority`, `infrastructure` or `inexact` rejection is not
+ *   the authorized result and is never published.
+ */
+export type PublicationSlot = "result-slot" | "owner-attempt" | "none";
+
+export const publicationSlotOf = (disposition: RejectionDisposition): PublicationSlot =>
+  match(disposition)
+    .with({ kind: "semantic" }, (): PublicationSlot => "result-slot")
+    .with({ kind: "owner-undecided" }, (): PublicationSlot => "owner-attempt")
+    .with({ kind: "authority" }, { kind: "infrastructure" }, { kind: "inexact" }, (): PublicationSlot => "none")
+    .exhaustive();
 
 type Parsed<T> = DomainResult<T, CompletionSuiteParseError>;
 
@@ -279,6 +370,10 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
     return failure([`completion suite input could not be inspected: ${message.slice(0, 256)}`]);
   }
 }
+
+/** An owner-verification wire parse as this module's parse result: the same diagnostics, under the suite's error kind. */
+const fromOwnerVerification = <T>(parsed: DomainResult<T, OwnerVerificationParseError>): Parsed<T> =>
+  parsed.ok ? success(parsed.value) : failure(parsed.error.errors);
 
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
   const record = parseExactRecord(raw, fields, path);
@@ -323,6 +418,16 @@ export function parseCompletionCheckId(raw: unknown, path = "checkId"): Parsed<C
     ? success(raw as CompletionCheckId)
     : failure([`${path} must be a non-empty canonical check id`]));
 }
+
+/** A reserved check id, parsed once at module load: a reserved id the parser refuses is a broken engine, never data. */
+function reservedCheckId(text: string): CompletionCheckId {
+  const parsed = parseCompletionCheckId(text);
+  if (!parsed.ok) throw new Error(`reserved check id ${text} is not canonical`);
+  return parsed.value;
+}
+
+/** The engine-reserved owner-verification check id, parsed (G5b AD-1). */
+export const OWNER_VERIFICATION_CHECK_ID: CompletionCheckId = reservedCheckId(OWNER_VERIFICATION_CHECK_ID_TEXT);
 
 /** Parse one signal from the completion domain's closed portable allowlist. */
 export function parseCompletionSignal(raw: unknown, path = "signal"): Parsed<CompletionSignal> {
@@ -484,19 +589,36 @@ function parseReportPolicy(raw: unknown, path: string): Parsed<ReportPolicy> {
     : reportPath;
 }
 
+type ReservedCheckEnvelope = Readonly<{ id: Parsed<CompletionCheckId>; errors: readonly string[] }>;
+
+/**
+ * The envelope every engine-reserved check shares: its id parses and equals
+ * the reserved `idText`, its scope is the Wave, and it requires no report.
+ * `fields` are the variant's own parsed fields; their errors follow the id's
+ * and the report policy's, before the envelope's own rules, in that order.
+ */
+function reservedCheckEnvelope(
+  record: UnknownRecord,
+  path: string,
+  idText: string,
+  label: string,
+  fields: readonly Parsed<unknown>[] = [],
+): ReservedCheckEnvelope {
+  const id = parseCompletionCheckId(record.checkId, `${path}.checkId`);
+  const reportPolicy = parseReportPolicy(record.reportPolicy, `${path}.reportPolicy`);
+  const errors = [id, reportPolicy, ...fields].flatMap((result) => result.ok ? [] : result.error.errors);
+  if (record.scope !== "wave") errors.push(`${path}.scope must equal wave`);
+  if (record.checkId !== idText) errors.push(`${path}.checkId must equal ${idText} for the ${label}`);
+  if (reportPolicy.ok && reportPolicy.value.kind !== "not-required") {
+    errors.push(`${path}.reportPolicy.kind must equal not-required for the ${label}`);
+  }
+  return { id, errors };
+}
+
 function parseEngineAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<AuthorizedWaveCompletionCheck> {
   const record = exactRecord(raw, ["kind", "checkId", "scope", "reportPolicy"], path);
   if (!record.ok) return record;
-  const id = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
-  const reportPolicy = parseReportPolicy(record.value.reportPolicy, `${path}.reportPolicy`);
-  const errors = [id, reportPolicy].flatMap((result) => result.ok ? [] : result.error.errors);
-  if (record.value.scope !== "wave") errors.push(`${path}.scope must equal wave`);
-  if (record.value.checkId !== FULL_TIER_LINT_CHECK_ID_TEXT) {
-    errors.push(`${path}.checkId must equal ${FULL_TIER_LINT_CHECK_ID_TEXT} for the engine check`);
-  }
-  if (reportPolicy.ok && reportPolicy.value.kind !== "not-required") {
-    errors.push(`${path}.reportPolicy.kind must equal not-required for the engine check`);
-  }
+  const { id, errors } = reservedCheckEnvelope(record.value, path, FULL_TIER_LINT_CHECK_ID_TEXT, "engine check");
   return errors.length === 0 && id.ok
     ? success(freeze({
         kind: "engine-full-tier-lint",
@@ -542,12 +664,31 @@ function parseProjectAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<A
     : failure(errors);
 }
 
+function parseOwnerAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<AuthorizedWaveCompletionCheck> {
+  const record = exactRecord(raw, ["kind", "checkId", "scope", "reportPolicy", "obligationsDigest", "owed"], path);
+  if (!record.ok) return record;
+  const obligations = parseDigest(record.value.obligationsDigest, `${path}.obligationsDigest`);
+  const owed = fromOwnerVerification(parseOwedInvariantIds(record.value.owed, `${path}.owed`));
+  const { id, errors } = reservedCheckEnvelope(record.value, path, OWNER_VERIFICATION_CHECK_ID_TEXT, "owner check", [obligations, owed]);
+  return errors.length === 0 && id.ok && obligations.ok && owed.ok
+    ? success(freeze({
+        kind: "engine-owner-verification",
+        checkId: id.value,
+        scope: "wave",
+        reportPolicy: freeze({ kind: "not-required" }),
+        obligationsDigest: obligations.value,
+        owed: owed.value,
+      }))
+    : failure(errors);
+}
+
 function parseAuthorizedCheck(raw: unknown, path: string): Parsed<AuthorizedWaveCompletionCheck> {
   if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
   if (raw.kind === "engine-full-tier-lint") return parseEngineAuthorizedCheck(raw, path);
+  if (raw.kind === "engine-owner-verification") return parseOwnerAuthorizedCheck(raw, path);
   return raw.kind === "project-command"
     ? parseProjectAuthorizedCheck(raw, path)
-    : failure([`${path}.kind must be engine-full-tier-lint or project-command`]);
+    : failure([`${path}.kind must be engine-full-tier-lint, engine-owner-verification or project-command`]);
 }
 
 export function parseAuthorizedWaveCompletionCheck(
@@ -790,6 +931,12 @@ function parseCheckResults(raw: unknown, path: string): Parsed<readonly Completi
     : failure(results.errors);
 }
 
+/** The optional `ownerVerification` field of a result or receipt envelope. */
+function parseOptionalOwnerVerification(raw: unknown, path: string): Parsed<OwnerVerificationObservation | undefined> {
+  if (!isPlainRecord(raw) || !Object.hasOwn(raw, "ownerVerification")) return success(undefined);
+  return fromOwnerVerification(parseOwnerVerificationObservation(raw.ownerVerification, `${path}.ownerVerification`));
+}
+
 /** Parse the persisted acceptance observation: an exact expectation and one
  *  facts record per check, at most. */
 function parseAcceptanceObservation(raw: unknown, path: string): Parsed<AcceptanceObservation> {
@@ -888,10 +1035,20 @@ type WaveCompletionEnvelopeContract<Checks extends readonly CompletionCheckResul
     parseExtra: (record: UnknownRecord, path: string) => Parsed<Extra>;
   }>;
 
-/** `acceptance` joins the exact field set only when present: results and
- *  receipts written before contracts existed carry no such field. */
+/** `acceptance` and `ownerVerification` join the exact field set only when
+ *  present: results and receipts written before contracts or owner
+ *  verification existed carry no such field. */
 const optionalEnvelopeFields = (raw: unknown): readonly string[] =>
-  isPlainRecord(raw) && Object.hasOwn(raw, "acceptance") ? ["acceptance"] : [];
+  isPlainRecord(raw) ? ["acceptance", "ownerVerification"].filter((field) => Object.hasOwn(raw, field)) : [];
+
+/** The observed optional observations, spread only when present. */
+const optionalObservations = (
+  acceptance: AcceptanceObservation | undefined,
+  ownerVerification: OwnerVerificationObservation | undefined,
+) => ({
+  ...(acceptance === undefined ? {} : { acceptance }),
+  ...(ownerVerification === undefined ? {} : { ownerVerification }),
+});
 
 /** Parse the exact authority envelope shared by accepted receipts and observed results. */
 function parseExactWaveCompletionEnvelope<
@@ -948,6 +1105,11 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
   return total(() => {
     const acceptance = parseOptionalAcceptance(raw, "acceptedReceipt");
     if (!acceptance.ok) return acceptance;
+    const ownerVerification = parseOptionalOwnerVerification(raw, "acceptedReceipt");
+    if (!ownerVerification.ok) return ownerVerification;
+    if (ownerVerification.value !== undefined && ownerVerificationFailures(ownerVerification.value).length > 0) {
+      return failure(["acceptedReceipt.ownerVerification records findings an accepted receipt cannot carry"]);
+    }
     // The receipt proves itself: its own recorded observation decides which
     // non-zero exits are excused and whether it carries failures it could
     // never have been accepted with.
@@ -962,7 +1124,7 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
         return resultDigest.ok
           ? success(freeze({
               resultDigest: resultDigest.value,
-              ...(acceptance.value === undefined ? {} : { acceptance: acceptance.value }),
+              ...optionalObservations(acceptance.value, ownerVerification.value),
             }))
           : resultDigest;
       },
@@ -995,7 +1157,9 @@ export function parseWaveCompletionSuiteResult(raw: unknown): Parsed<WaveComplet
       parseExtra: () => {
         const acceptance = parseOptionalAcceptance(raw, "suiteResult");
         if (!acceptance.ok) return acceptance;
-        return success(freeze(acceptance.value === undefined ? {} : { acceptance: acceptance.value }));
+        const ownerVerification = parseOptionalOwnerVerification(raw, "suiteResult");
+        if (!ownerVerification.ok) return ownerVerification;
+        return success(freeze(optionalObservations(acceptance.value, ownerVerification.value)));
       },
     });
     return envelope.ok
@@ -1033,8 +1197,7 @@ function staleFields(
 
 function acceptedReceipt(
   authority: AuthorizedWaveCompletionSuite,
-  checks: NonEmpty<CompletionCheckResult>,
-  acceptance: AcceptanceObservation | undefined,
+  result: WaveCompletionSuiteResult,
 ): AcceptedWaveCompletionReceipt {
   const body = freeze({
     kind: "accepted-wave-completion-suite" as const,
@@ -1045,10 +1208,66 @@ function acceptedReceipt(
     manifestDigest: authority.manifestDigest,
     suiteDigest: authority.suiteDigest,
     workspaceDigest: authority.workspaceDigest,
-    checks,
-    ...(acceptance === undefined ? {} : { acceptance }),
+    checks: asNonEmpty(result.checks),
+    ...optionalObservations(result.acceptance, result.ownerVerification),
   });
   return freeze({ ...body, resultDigest: digest(body) });
+}
+
+export type OwnerVerificationCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kind: "engine-owner-verification" }>;
+
+/** The suite's owner-verification check, when its authorization was handed an owner check authority. */
+export const ownerCheckOf = (authority: AuthorizedWaveCompletionSuite): OwnerVerificationCheck | undefined =>
+  authority.checks.find((check): check is OwnerVerificationCheck => check.kind === "engine-owner-verification");
+
+/** The owner check exits 1 exactly when its observation carries a blocking finding, as the reserved lint check does. */
+export const ownerVerificationExitCode = (observation: OwnerVerificationObservation): 0 | 1 =>
+  ownerVerificationFailures(observation).length > 0 ? 1 : 0;
+
+/** Why the observation is not the one the authorized owner check binds, or null when it is. */
+function ownerVerificationMismatch(check: OwnerVerificationCheck | undefined, result: WaveCompletionSuiteResult): string | null {
+  const observation = result.ownerVerification;
+  if (check === undefined) {
+    return observation === undefined ? null : "the result carries an owner-verification observation its suite does not authorize";
+  }
+  if (observation === undefined) return "the authorized owner check has no owner-verification observation";
+  const outcome = result.checks.find(({ checkId }) => checkId === check.checkId)?.outcome;
+  const exit = ownerVerificationExitCode(observation);
+  if (outcome?.kind === "observed" && (outcome.exitCode !== exit || outcome.timedOut || outcome.signal !== null)) {
+    return `the owner check's observed exit ${String(outcome.exitCode)} contradicts its findings, which require exit ${exit}`;
+  }
+  if (observation.kind === "unavailable") return null;
+  if (observation.obligationsDigest !== check.obligationsDigest) {
+    return `owner verification ran against obligations ${observation.obligationsDigest}, but the suite authorizes ${check.obligationsDigest}`;
+  }
+  const verdictIds = observation.verdicts.map(({ invariant }) => invariant);
+  return canonicalStructuralEquals(verdictIds, check.owed)
+    ? null
+    : `owner verification judged [${verdictIds.join(", ")}], but the suite owes [${check.owed.join(", ")}]`;
+}
+
+type ProcessFailures = Readonly<{
+  infrastructure: readonly CompletionInfrastructureFailure[];
+  semantic: readonly CompletionSemanticFailure[];
+}>;
+
+/** The owner check's findings, split into what the matrix test decided and what could not decide. */
+function ownerVerificationProcessFailures(
+  check: OwnerVerificationCheck | undefined,
+  observation: OwnerVerificationObservation | undefined,
+): ProcessFailures {
+  if (check === undefined || observation === undefined) return { infrastructure: [], semantic: [] };
+  const findings = ownerVerificationFailures(observation);
+  const undecided = findings.filter((finding): finding is OwnerInfrastructureFinding => finding.kind === "infrastructure");
+  const decided = findings.filter((finding): finding is OwnerSemanticFinding => finding.kind !== "infrastructure");
+  return {
+    infrastructure: undecided.length === 0 ? [] : [freeze({
+      kind: "owner-verification-infrastructure", checkId: check.checkId, failures: asNonEmpty(freezeArray(undecided)),
+    })],
+    semantic: decided.length === 0 ? [] : [freeze({
+      kind: "owner-verification-rejected", checkId: check.checkId, failures: asNonEmpty(freezeArray(decided)),
+    })],
+  };
 }
 
 /** The check an acceptance rejection is reported against: the first whose
@@ -1092,109 +1311,113 @@ export function evaluateWaveCompletionSuite(
     return rejected([freeze({ kind: "stale-result", mismatchedFields: asNonEmpty(freezeArray(stale)) })]);
   }
 
-  const expectedById = new Map(authority.value.checks.map((check) => [check.checkId, check]));
+  const authorityFailures = [
+    ...rosterAuthorityFailures(authority.value, result.value),
+    ...observationAuthorityFailures(authority.value, result.value, expectation),
+  ];
+  if (authorityFailures.length > 0) return rejected(authorityFailures);
+
+  const verdict = recordedAcceptanceVerdict(result.value.acceptance);
+  const checks = checkProcessFailures(authority.value, result.value, verdict.excused);
+  const owner = ownerVerificationProcessFailures(ownerCheckOf(authority.value), result.value.ownerVerification);
+  const acceptance: readonly CompletionSemanticFailure[] = verdict.failures.length === 0 ? [] : [freeze({
+    kind: "acceptance-rejected",
+    checkId: acceptanceCheckId(authority.value, result.value.acceptance?.facts ?? []),
+    failures: asNonEmpty(freezeArray(verdict.failures)),
+  })];
+  const infrastructureFailures = [...checks.infrastructure, ...owner.infrastructure];
+  const semanticFailures = [...checks.semantic, ...acceptance, ...owner.semantic];
+  if (infrastructureFailures.length > 0 || semanticFailures.length > 0) {
+    return rejected([], infrastructureFailures, semanticFailures);
+  }
+  return freeze({ kind: "accepted", receipt: acceptedReceipt(authority.value, result.value) });
+}
+
+/** The result's roster against the authorized roster: missing, surplus, duplicate, wrong-scope or mispoliced checks. */
+function rosterAuthorityFailures(
+  authority: AuthorizedWaveCompletionSuite,
+  result: WaveCompletionSuiteResult,
+): readonly CompletionAuthorityFailure[] {
+  const expectedById = new Map(authority.checks.map((check) => [check.checkId, check]));
   const resultCounts = new Map<CompletionCheckId, number>();
-  for (const check of result.value.checks) {
-    resultCounts.set(check.checkId, (resultCounts.get(check.checkId) ?? 0) + 1);
-  }
-  const missing = authority.value.checks
-    .filter((check) => !resultCounts.has(check.checkId))
-    .map((check) => check.checkId);
-  const surplus = [...resultCounts.keys()]
-    .filter((checkId) => !expectedById.has(checkId))
-    .sort(compareStrings);
-  const duplicates = [...resultCounts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([checkId]) => checkId)
-    .sort(compareStrings);
-  const authorityFailures: CompletionAuthorityFailure[] = [];
-  if (missing.length > 0) authorityFailures.push(freeze({ kind: "missing-check-results", checkIds: asNonEmpty(freezeArray(missing)) }));
-  if (surplus.length > 0) authorityFailures.push(freeze({ kind: "surplus-check-results", checkIds: asNonEmpty(freezeArray(surplus)) }));
-  if (duplicates.length > 0) authorityFailures.push(freeze({ kind: "duplicate-check-results", checkIds: asNonEmpty(freezeArray(duplicates)) }));
-  for (const check of result.value.checks) {
+  for (const check of result.checks) resultCounts.set(check.checkId, (resultCounts.get(check.checkId) ?? 0) + 1);
+  const missing = authority.checks.filter((check) => !resultCounts.has(check.checkId)).map((check) => check.checkId);
+  const surplus = [...resultCounts.keys()].filter((checkId) => !expectedById.has(checkId)).sort(compareStrings);
+  const duplicates = [...resultCounts.entries()].filter(([, count]) => count > 1).map(([checkId]) => checkId).sort(compareStrings);
+  const failures: CompletionAuthorityFailure[] = [];
+  if (missing.length > 0) failures.push(freeze({ kind: "missing-check-results", checkIds: asNonEmpty(freezeArray(missing)) }));
+  if (surplus.length > 0) failures.push(freeze({ kind: "surplus-check-results", checkIds: asNonEmpty(freezeArray(surplus)) }));
+  if (duplicates.length > 0) failures.push(freeze({ kind: "duplicate-check-results", checkIds: asNonEmpty(freezeArray(duplicates)) }));
+  for (const check of result.checks) {
     const expected = expectedById.get(check.checkId);
-    if (expected !== undefined && check.scope !== "wave") {
-      authorityFailures.push(freeze({ kind: "wrong-check-scope", checkId: check.checkId, actualScope: check.scope }));
-    }
-    if (expected !== undefined && check.outcome.kind === "observed") {
-      const expectedReport = expected.reportPolicy;
-      const actualReport = check.outcome.report;
-      const matchesPolicy = expectedReport.kind === "not-required"
-        ? actualReport.kind === "not-required"
-        : actualReport.kind !== "not-required" && actualReport.path === expectedReport.path;
-      if (!matchesPolicy) {
-        authorityFailures.push(freeze({
-          kind: "report-policy-mismatch",
-          checkId: check.checkId,
-          expected: expectedReport,
-          actual: actualReport,
-        }));
-      }
+    if (expected === undefined) continue;
+    if (check.scope !== "wave") failures.push(freeze({ kind: "wrong-check-scope", checkId: check.checkId, actualScope: check.scope }));
+    if (check.outcome.kind !== "observed") continue;
+    const expectedReport = expected.reportPolicy;
+    const actualReport = check.outcome.report;
+    const matchesPolicy = expectedReport.kind === "not-required"
+      ? actualReport.kind === "not-required"
+      : actualReport.kind !== "not-required" && actualReport.path === expectedReport.path;
+    if (!matchesPolicy) {
+      failures.push(freeze({ kind: "report-policy-mismatch", checkId: check.checkId, expected: expectedReport, actual: actualReport }));
     }
   }
-  const recorded = result.value.acceptance;
-  const recordedExpectation = recorded?.expectation ?? emptyAcceptanceExpectation(result.value.wave);
-  if (!canonicalStructuralEquals(expectation, recordedExpectation)) {
-    authorityFailures.push(freeze({ kind: "acceptance-expectation-mismatch" }));
-  }
-  const unbound = unboundFactChecks(result.value.checks, recorded?.facts ?? []);
-  if (unbound.length > 0) {
-    authorityFailures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: asNonEmpty(freezeArray(unbound)) }));
-  }
+  return failures;
+}
 
-  const infrastructureFailures: CompletionInfrastructureFailure[] = [];
-  const semanticFailures: CompletionSemanticFailure[] = [];
-  const verdict = recordedAcceptanceVerdict(recorded);
-  if (authorityFailures.length === 0) {
-    for (const resultCheck of result.value.checks) {
-      const expected = expectedById.get(resultCheck.checkId)!;
-      match(resultCheck.outcome)
-        .with({ kind: "spawn-failed" }, ({ message }) => {
-          infrastructureFailures.push(freeze({ kind: "spawn-failed", checkId: resultCheck.checkId, message }));
-        })
-        .with({ kind: "observed" }, (outcome) => {
-          if (outcome.timedOut) semanticFailures.push(freeze({ kind: "timed-out", checkId: resultCheck.checkId }));
-          if (outcome.signal !== null) {
-            semanticFailures.push(freeze({ kind: "signal-termination", checkId: resultCheck.checkId, signal: outcome.signal }));
-          }
-          if (outcome.exitCode !== null && outcome.exitCode !== 0 && !verdict.excused.has(resultCheck.checkId)) {
-            semanticFailures.push(freeze({ kind: "non-zero-exit", checkId: resultCheck.checkId, exitCode: outcome.exitCode }));
-          }
-          if (outcome.exitCode === null && !outcome.timedOut && outcome.signal === null) {
-            infrastructureFailures.push(freeze({ kind: "incomplete-process-observation", checkId: resultCheck.checkId }));
-          }
-          if (expected.reportPolicy.kind === "required-file" && outcome.report.kind === "missing") {
-            semanticFailures.push(freeze({
-              kind: "missing-report",
-              checkId: resultCheck.checkId,
-              path: expected.reportPolicy.path,
-            }));
-          }
-          if (expected.reportPolicy.kind === "required-file" && outcome.report.kind === "unreadable") {
-            infrastructureFailures.push(freeze({
-              kind: "report-unreadable",
-              checkId: resultCheck.checkId,
-              path: expected.reportPolicy.path,
-              message: outcome.report.message,
-            }));
-          }
-        })
-        .exhaustive();
-    }
-    if (verdict.failures.length > 0) {
-      semanticFailures.push(freeze({
-        kind: "acceptance-rejected",
-        checkId: acceptanceCheckId(authority.value, recorded?.facts ?? []),
-        failures: asNonEmpty(freezeArray(verdict.failures)),
-      }));
-    }
+/** The recorded observations against the authority that judges them: the acceptance expectation and facts, and the owner check. */
+function observationAuthorityFailures(
+  authority: AuthorizedWaveCompletionSuite,
+  result: WaveCompletionSuiteResult,
+  expectation: AcceptanceExpectation,
+): readonly CompletionAuthorityFailure[] {
+  const recorded = result.acceptance;
+  const failures: CompletionAuthorityFailure[] = [];
+  if (!canonicalStructuralEquals(expectation, recorded?.expectation ?? emptyAcceptanceExpectation(result.wave))) {
+    failures.push(freeze({ kind: "acceptance-expectation-mismatch" }));
   }
+  const unbound = unboundFactChecks(result.checks, recorded?.facts ?? []);
+  if (unbound.length > 0) failures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: asNonEmpty(freezeArray(unbound)) }));
+  const mismatch = ownerVerificationMismatch(ownerCheckOf(authority), result);
+  if (mismatch !== null) failures.push(freeze({ kind: "owner-verification-mismatch", checkId: OWNER_VERIFICATION_CHECK_ID, reason: mismatch }));
+  return failures;
+}
 
-  if (authorityFailures.length > 0 || infrastructureFailures.length > 0 || semanticFailures.length > 0) {
-    return rejected(authorityFailures, infrastructureFailures, semanticFailures);
+/**
+ * Every process fact of every check, each its own typed failure. A non-zero
+ * exit the acceptance verdict excuses is no failure, and the owner check's
+ * non-zero exit is explained by its own findings, which
+ * `ownerVerificationProcessFailures` reports in its place.
+ */
+function checkProcessFailures(
+  authority: AuthorizedWaveCompletionSuite,
+  result: WaveCompletionSuiteResult,
+  excused: ReadonlySet<string>,
+): ProcessFailures {
+  const expectedById = new Map(authority.checks.map((check) => [check.checkId, check]));
+  const infrastructure: CompletionInfrastructureFailure[] = [];
+  const semantic: CompletionSemanticFailure[] = [];
+  for (const { checkId, outcome } of result.checks) {
+    const expected = expectedById.get(checkId)!;
+    if (outcome.kind === "spawn-failed") {
+      infrastructure.push(freeze({ kind: "spawn-failed", checkId, message: outcome.message }));
+      continue;
+    }
+    const exitExplained = excused.has(checkId) || expected.kind === "engine-owner-verification";
+    if (outcome.timedOut) semantic.push(freeze({ kind: "timed-out", checkId }));
+    if (outcome.signal !== null) semantic.push(freeze({ kind: "signal-termination", checkId, signal: outcome.signal }));
+    if (outcome.exitCode !== null && outcome.exitCode !== 0 && !exitExplained) {
+      semantic.push(freeze({ kind: "non-zero-exit", checkId, exitCode: outcome.exitCode }));
+    }
+    if (outcome.exitCode === null && !outcome.timedOut && outcome.signal === null) {
+      infrastructure.push(freeze({ kind: "incomplete-process-observation", checkId }));
+    }
+    if (expected.reportPolicy.kind === "required-file" && outcome.report.kind === "missing") {
+      semantic.push(freeze({ kind: "missing-report", checkId, path: expected.reportPolicy.path }));
+    }
+    if (expected.reportPolicy.kind === "required-file" && outcome.report.kind === "unreadable") {
+      infrastructure.push(freeze({ kind: "report-unreadable", checkId, path: expected.reportPolicy.path, message: outcome.report.message }));
+    }
   }
-  return freeze({
-    kind: "accepted",
-    receipt: acceptedReceipt(authority.value, asNonEmpty(result.value.checks), recorded),
-  });
+  return { infrastructure, semantic };
 }

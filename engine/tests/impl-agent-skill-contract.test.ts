@@ -7,6 +7,7 @@ import { IMPL_AGENTS } from "../src/core/agent-catalog-projections";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../src/core/implementation-brief";
 import { deriveTaskImplementationDispatch } from "../src/core/task-implementation-dispatch";
 import { taskFixture } from "./fixtures/task-lifecycle";
+import { UNSTAMPED_SCOPE } from "./fixtures/owner-obligation";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), "utf-8");
@@ -39,7 +40,7 @@ describe("implementation prompt required-skill contract", () => {
       if (derivation.kind !== "dispatch") throw new Error(`fixture must be owed a dispatch, got ${derivation.kind}`);
       const rendered = renderImplementationBrief({
         template, task, dispatch: derivation.dispatch, planFile: "plan.md",
-        spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task], invariants: [], contracts: [],
+        spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules, roster: [task], invariants: [], ownerScope: UNSTAMPED_SCOPE, contracts: [],
         verificationManifest: undefined, repositoryRoot: "/repo", operatorNotes: [],
       });
       if (!rendered.ok) throw new Error(rendered.error.message);

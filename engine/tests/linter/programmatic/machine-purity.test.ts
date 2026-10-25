@@ -2,16 +2,18 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import ts from "typescript";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { resolve, posix } from "node:path";
+import { join, resolve, posix } from "node:path";
 import {
   handler as noIoHandler,
   isPureModule,
   DEFAULT_PURE_MODULES,
 } from "../../../src/linter/programmatic/no-io-in-pure-modules";
+import { TYPESCRIPT_COMPILER_API_SEAMS } from "../../../src/linter/programmatic/no-cross-boundary-imports";
 
 const REPO_ROOT = resolve(__dirname, "../../../..");
 const requireFromEngine = createRequire(resolve(REPO_ROOT, "engine/package.json"));
@@ -147,6 +149,27 @@ const REVIEWER_ENTRIES = new Map([
   ["zod/v4", "zod/v4/index.js"], ["jsonc-parser", "jsonc-parser/lib/umd/main.js"],
 ]);
 
+/** Every `.ts` file beneath a directory entry, at any depth, as root-relative paths in sorted order. */
+function filesBeneath(root: string, entry: string): readonly string[] {
+  return readdirSync(resolve(root, entry), { withFileTypes: true })
+    .flatMap((child): readonly string[] => {
+      if (child.isDirectory()) return filesBeneath(root, `${entry}${child.name}/`);
+      return child.isFile() && child.name.endsWith(".ts") ? [`${entry}${child.name}`] : [];
+    })
+    .sort();
+}
+
+/**
+ * Every pure source file a pure-module list declares: a directory entry
+ * (`isPureModule` treats a trailing `/` as a package prefix, so it covers
+ * every depth) expands to every `.ts` file beneath it, subfolders included,
+ * so the audit reads files, never directories, and misses none of a package.
+ */
+const pureFilesOf = (root: string, entries: readonly string[]): readonly string[] =>
+  [...new Set(entries.flatMap((entry) => entry.endsWith("/") ? filesBeneath(root, entry) : [entry]))];
+
+const PURE_FILES: readonly string[] = pureFilesOf(REPO_ROOT, DEFAULT_PURE_MODULES);
+
 /** Include type edges, re-exports, side effects, CJS and dynamic imports. No regex over prose. */
 function dependencies(content: string): readonly Readonly<{ specifier: string | null; text: string }>[] {
   const source = ts.createSourceFile("module.ts", content, ts.ScriptTarget.Latest, true);
@@ -190,7 +213,7 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
     if (mod === undefined || visited.has(mod)) continue;
     visited.add(mod);
     const runtime = AUDITED_RUNTIME.get(mod);
-    if (runtime === undefined && !DEFAULT_PURE_MODULES.includes(mod)) {
+    if (runtime === undefined && !PURE_FILES.includes(mod)) {
       errors.push(`${mod}: dependency leaves the declared pure closure`);
       continue;
     }
@@ -220,12 +243,14 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
         const base = posix.normalize(posix.join(posix.dirname(mod), specifier));
         const candidates = runtime === undefined ? [base, `${base}.ts`, `${base}/index.ts`] : [base, `${base}.js`];
         const target = candidates.find((candidate) => runtime === undefined
-          ? DEFAULT_PURE_MODULES.includes(candidate) : runtime.dependencies.includes(specifier) && AUDITED_RUNTIME.has(candidate));
+          ? PURE_FILES.includes(candidate) : runtime.dependencies.includes(specifier) && AUDITED_RUNTIME.has(candidate));
         if (target === undefined) errors.push(`${mod}: ${specifier} leaves the declared pure closure`);
         else queue.push(target);
       } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY, EMISSION_TOOL].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
         const entry = REVIEWER_ENTRIES.get(specifier);
         if (entry !== undefined) queue.push(entry);
+      } else if (TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && specifier === "typescript") {
+        // The granted compiler API (ADR-0042), per seam like the zod/jsonc grants: a capability, not a walked closure.
       } else if ((mod === PARSER && specifier === "saxes") || runtime?.dependencies.includes(specifier)) {
         queue.push(specifier);
       } else if (runtime !== undefined) {
@@ -287,7 +312,7 @@ describe("functional core — executable purity closure", () => {
   it("ships accounting and every transitive source dependency as declared pure", () => {
     expect(DEFAULT_PURE_MODULES).toContain(ACCOUNTING);
     expect(isPureModule(ACCOUNTING)).toBe(true);
-    expect(auditClosure(DEFAULT_PURE_MODULES).errors).toEqual([]);
+    expect(auditClosure(PURE_FILES).errors).toEqual([]);
     const audit = auditClosure([ACCOUNTING]);
     expect(audit.errors).toEqual([]);
     for (const required of [SOURCE_AUTHORITY, PARSER,
@@ -297,8 +322,34 @@ describe("functional core — executable purity closure", () => {
     }
   });
 
-  it.each(DEFAULT_PURE_MODULES)("%s passes the shipped default rule", (mod) => {
+  it.each(PURE_FILES)("%s passes the shipped default rule", (mod) => {
     expect(noIoHandler(readSource(mod), mod)).toEqual([]);
+  });
+
+  it("expands a package entry recursively, so a future subfolder of a pure package is audited too", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-pure-expansion-"));
+    try {
+      mkdirSync(join(root, "pkg", "nested", "deeper"), { recursive: true });
+      for (const path of ["pkg/a.ts", "pkg/notes.md", "pkg/nested/b.ts", "pkg/nested/deeper/c.ts"]) writeFileSync(join(root, path), "");
+      expect(pureFilesOf(root, ["pkg/", "single.ts"])).toEqual(["pkg/a.ts", "pkg/nested/b.ts", "pkg/nested/deeper/c.ts", "single.ts"]);
+      expect(isPureModule("pkg/nested/deeper/c.ts", ["pkg/"])).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("expands the owner-verification package entry to every file and grants typescript only to its two seams", () => {
+    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/owner-verification/");
+    for (const seam of TYPESCRIPT_COMPILER_API_SEAMS) {
+      expect(PURE_FILES).toContain(seam);
+      expect(auditClosure([seam]).errors, seam).toEqual([]);
+    }
+    const nonSeam = "engine/src/core/owner-verification/verdict.ts";
+    const audit = auditClosure([nonSeam], new Map([[nonSeam, `${readSource(nonSeam)}\nimport ts from "typescript";`]]));
+    expect(audit.errors).toContain(`${nonSeam}: unaudited package typescript`);
+    const seam = TYPESCRIPT_COMPILER_API_SEAMS[0]!;
+    const widened = auditClosure([seam], new Map([[seam, `${readSource(seam)}\nimport "typescript/lib/tsserverlibrary";`]]));
+    expect(widened.errors).toContain(`${seam}: unaudited package typescript/lib/tsserverlibrary`);
   });
 
   it.each([

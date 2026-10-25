@@ -1171,12 +1171,30 @@ function validatedRepositoryRoot(
   return failed({ kind: "invalid-runner-authority", message });
 }
 
-/** Existing Wave wrapper. Its public result and report projection remain unchanged. */
-export async function runCompletionCheck(
+/** One parser-proven project command's execution, beside the check the
+ *  runner parsed and ran: a spawn failure, or the observed process with the
+ *  report it left, a produced report carrying the exact bytes of its one
+ *  stable no-follow read. A refused authority or an unconfirmed containment
+ *  is the runner failure, never an execution. */
+export type CommandExecutionResult =
+  | Readonly<{ ok: true; value: Readonly<{ check: ProjectCommandCheck; execution: CommandExecution }> }>
+  | Readonly<{ ok: false; error: CompletionCheckRunnerFailure }>;
+
+/**
+ * Execute one project command under an explicit repository root: the root is
+ * where its `cwd` and report path resolve, so the same frozen command runs in
+ * the real workspace or in an isolated worktree of it (owner verification).
+ * The process-group containment and report observation are exactly the Wave
+ * check's; the result keeps the report's bytes instead of projecting them
+ * away, so the caller classifies the very bytes the runner observed, and it
+ * carries the parsed check, so no caller reads the unparsed input after this
+ * parse.
+ */
+export async function runProjectCommandAt(
   rawCheck: ProjectCommandCheck,
   repositoryRoot: CanonicalRepositoryRoot,
   options: CompletionCheckRunnerOptions = {},
-): Promise<CompletionCheckRunnerResult> {
+): Promise<CommandExecutionResult> {
   const parsedCheck = parseAuthorizedWaveCompletionCheck(rawCheck);
   if (!parsedCheck.ok || parsedCheck.value.kind !== "project-command") {
     return failed({
@@ -1186,20 +1204,32 @@ export async function runCompletionCheck(
   }
   const root = validatedRepositoryRoot(repositoryRoot);
   if (!root.ok) return root;
-  const execution = await runProjectCommand(parsedCheck.value, root.value, options);
-  if (!execution.ok) return execution;
-  const outcome: CompletionProcessOutcome = execution.value.kind === "spawn-failed"
-    ? execution.value.process
+  const check = parsedCheck.value;
+  const execution = await runProjectCommand(check, root.value, options);
+  return execution.ok ? Object.freeze({ ok: true, value: Object.freeze({ check, execution: execution.value }) }) : execution;
+}
+
+/** Existing Wave wrapper. Its public result and report projection remain unchanged. */
+export async function runCompletionCheck(
+  rawCheck: ProjectCommandCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+  options: CompletionCheckRunnerOptions = {},
+): Promise<CompletionCheckRunnerResult> {
+  const ran = await runProjectCommandAt(rawCheck, repositoryRoot, options);
+  if (!ran.ok) return ran;
+  const { check, execution } = ran.value;
+  const outcome: CompletionProcessOutcome = execution.kind === "spawn-failed"
+    ? execution.process
     : Object.freeze({
-        ...execution.value.process,
-        report: completionReportOutcome(execution.value.report),
+        ...execution.process,
+        report: completionReportOutcome(execution.report),
       });
   const checkResult: CompletionCheckResult = Object.freeze({
-    checkId: parsedCheck.value.checkId,
+    checkId: check.checkId,
     scope: "wave",
     outcome,
   });
-  return completionSucceeded({ checkResult, diagnostics: execution.value.diagnostics });
+  return completionSucceeded({ checkResult, diagnostics: execution.diagnostics });
 }
 
 function remediationReportObservation(
