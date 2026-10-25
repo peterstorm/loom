@@ -81,16 +81,35 @@ JSON
 
 The decision must be exactly `{"kind":"approve"}`; any other object is refused
 and nothing is recorded. Approval lets the gate continue past its advisories to
-lint and completion. To act on an advisory instead, do not decide: `abandon` the
-run with a reason, re-dispatch the affected Task to fix it, and start a fresh
-Wave Gate.
+lint and completion. To act on an advisory (or a surviving critical) instead, do
+not decide:
+
+1. `abandon` the run with a reason, naming no successor.
+2. Reopen each affected `implemented` Task. This returns it to revalidation so
+   status owes it a fresh dispatch. Its Findings stay as prior Findings, and the
+   Wave's other Tasks stay `implemented`:
+
+   ```bash
+   bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration reopen-task \
+     --wave <N> --task <task-id> [--task <task-id>]... \
+     --reason "<the Finding to fix>"
+   ```
+
+   The operation refuses while a Wave Gate run is live, when the abandoned run
+   names a successor, while any implementation or subagent is active, and for
+   any Task that is not `implemented` in the active Wave. Repeating the same
+   command after it succeeds changes nothing.
+3. Dispatch each reopened Task with
+   `helper orchestration brief --task <task-id> --note "<the Finding>"`.
+4. Once those Tasks settle, start a fresh Wave Gate.
 
 At a contract Wave's pause, read `helper orchestration status` before deciding.
 An `acceptance-freeze-pending` reason names every advisory on a file this
-gate's Acceptance Freeze stamps when it completes. Approving freezes those files
-as they are, and changing them afterwards needs a Contract Revision. So present
-those advisories first, and fix the relevant ones by re-dispatching the contract
-Task before approving.
+gate's Acceptance Freeze stamps when it completes. Receipt installation does not
+freeze anything, and neither does abandoning the run. Approving freezes those
+files as they are, and changing them afterwards needs a Contract Revision. So
+present those advisories first, and fix the relevant ones before approving by
+reopening the contract Task as above.
 
 Resume is idempotent. Pi and Claude persist exact native-id/request bindings and
 raw final bytes directly into engine-declared slots. Never write transcripts,

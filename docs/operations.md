@@ -727,13 +727,34 @@ history-discarding last resort, not normal recovery.
 
 ### Wave Gate reports critical Findings
 
-Fix surviving criticals through implementation Agents, which increments Review Generation, then open a new Wave Gate run. Do not remove Findings from the graph. The next Review Run verifies every prior id against a new Review Packet.
+Fix surviving criticals through implementation Agents, then open a new Wave Gate run. Each affected Task is `implemented`, so it is owed no dispatch until it is reopened (see [Reopening an implemented Task to fix a Wave Gate Finding](#reopening-an-implemented-task-to-fix-a-wave-gate-finding)). Reopening increments its Review Generation. Do not remove Findings from the graph. The next Review Run verifies every prior id against a new Review Packet.
 
 ### Wave Gate awaits advisory disposition
 
-Present the advisories the engine's request references. The only decision a Wave Gate records is exactly `{"kind":"approve"}` through `decide`; any other object is refused without writing. To fix an advisory first, `abandon` the run with a reason, re-dispatch the Task, and start a fresh Wave Gate. Do not classify advisories silently in parent reasoning.
+Present the advisories the engine's request references. The only decision a Wave Gate records is exactly `{"kind":"approve"}` through `decide`; any other object is refused without writing. To fix an advisory first, `abandon` the run with a reason, reopen the Task, re-dispatch it, and start a fresh Wave Gate (see [Reopening an implemented Task to fix a Wave Gate Finding](#reopening-an-implemented-task-to-fix-a-wave-gate-finding)). Do not classify advisories silently in parent reasoning.
 
-In a contract Wave, `helper orchestration status` adds an `acceptance-freeze-pending` reason at this pause. It lists every advisory whose file is a frozen path of a contract still `awaiting-red` there. Approval lets the gate complete and stamp the Acceptance Freeze over those bytes, so after it each fix needs a Contract Revision. Fix a relevant advisory before approving: abandon the run, re-dispatch the contract Task, and start a fresh Wave Gate. The reason is a status projection only; the decision request and its identity are unchanged.
+In a contract Wave, `helper orchestration status` adds an `acceptance-freeze-pending` reason at this pause. It lists every advisory whose file is a frozen path of a contract still `awaiting-red` there. When the completion suite accepts, only its receipt is installed. The Acceptance Freeze is stamped by the locked completion commit, so the contract is still `awaiting-red` at the pause, and abandoning the run freezes nothing ([ADR-0044](adr/ADR-0044-the-acceptance-freeze-is-stamped-by-the-completion-commit.md)). Approval lets the gate complete and stamp the Acceptance Freeze over those bytes, so after it each fix needs a Contract Revision. Fix a relevant advisory before approving: abandon the run, reopen the contract Task, re-dispatch it, and start a fresh Wave Gate. The fresh gate reports no frozen-path drift for the fixed files. The reason is a status projection only; the decision request and its identity are unchanged.
+
+### Reopening an implemented Task to fix a Wave Gate Finding
+
+```bash
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
+  --runs-root ".claude/reviews/wave-gate-runs" --run "<run-id>" --reason "fix comment-analyzer-1 first"
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration reopen-task \
+  --wave 2 --task T4 --reason "comment-analyzer-1: the comment contradicts the code"
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration brief --task T4 --note "fix comment-analyzer-1"
+```
+
+`reopen-task` is the engine operation that makes an `implemented` Task of the active Wave dispatchable again ([ADR-0045](adr/ADR-0045-an-implemented-task-is-reopened-through-one-engine-operation.md)). Under the TaskGraph lock it requires all of the following:
+
+- the execute Phase, with `--wave` equal to `current_wave`;
+- no completed history for that Wave;
+- `active_wave_gate` absent, or an abandoned tombstone for that Wave that names no successor (abandoning with `--superseded-by` authorizes exactly that successor, so start it instead);
+- no executing Task, no active implementation attempt, and no active subagent (checked before and under the lock);
+- every `--task` (one or more, distinct) is `implemented` in that Wave, with an implementation lineage that can derive a dispatch (an escalated lineage is remediated first, with `helper orchestration remediate`);
+- a non-blank `--reason` of at most 512 characters.
+
+It then applies the transition a Contract Revision uses. The abandoned run's review epoch, spec-check, suite receipt and tombstone are retired, and review evidence that run accepted is kept as Findings. Each named Task returns to protected `pending` revalidation at a new Review Generation, and its Findings stay as prior Findings for the next Review Run. The Wave's gate bits reset (`impl_complete: false`, `tests_passed: null`, `reviews_complete: false`), and the Wave's other Tasks stay `implemented`. One `implemented-tasks-reopened` audit is appended to `task_reopening_history`, recording the Wave, the Task ids, the reason, and the abandoned run id (or `null`). Status then owes each reopened Task an `initial-implementation` dispatch, `brief` renders it, and the Wave Gate cannot start until each settles afresh. Re-running the same command while those Tasks still await re-implementation changes nothing. The same request after they are `pending` but with a different reason, or for a Task that is no longer `implemented`, is refused. `populate-task-graph --force` is never the recovery: it resets every Task and discards all settled evidence.
 
 ### Pi reports runtime version skew
 

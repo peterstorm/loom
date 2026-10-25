@@ -117,6 +117,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Spawn validation | `validate-phase-order.ts`, `validate-task-execution.ts`, `validate-template-substitution.ts` | Enforce lifecycle and prompt prerequisites |
 | Protected Bash policy | `guard-state-file.ts`, `shell-normalize.ts`, `shell-ansi-c.ts`, `shell-substitution.ts` (the one substitution-span scanner, shared with test-run classification in `machine/extract-evidence.ts`) | Detect guarded-path writes through shell syntax and fail closed |
 | Completion evidence | `proof-obligations.ts`, `wave-gate-model.ts` | Derive whether a Task earned `implemented` |
+| Operator reopening | `task-revalidation.ts` (`returnToRevalidation`; `returnWaveTasksToRevalidation`, the active-Wave transition Contract Revision and Task Reopening share), `task-reopening.ts` (`helper orchestration reopen-task`: preconditions, audit, idempotent replay) | Make settled Tasks dispatchable again without discarding evidence |
 | Finding lifecycle | `findings.ts`, `review-output.ts`, `review-packet.ts` | Stable identity, generations, packet-bound remediation verification |
 | Architecture panel | `panel-kernel.ts`, `panel-contract.ts`, `panel-program.ts` | Lenses, exact candidates/criteria, verdict validation, ranking, retries |
 | Refutation panel | `panel-kernel.ts`, `review-panel.ts`, `panel-program.ts` | Exact critical set, verifier lenses, majority tally, retained audit |

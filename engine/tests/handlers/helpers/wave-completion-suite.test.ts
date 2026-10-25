@@ -36,6 +36,7 @@ import { commitWaveGateCompletion, deriveWaveReadiness } from "../../../src/core
 import { installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
 import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
 import { findingId } from "../../fixtures/finding-id";
+import { parseTaskReopeningArgs, reopenImplementedTasks } from "../../../src/core/task-reopening";
 import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { StateManager } from "../../../src/state-manager";
@@ -395,17 +396,21 @@ function commitCompletion(f: Fixture, frozenPaths?: FrozenPathObservations): Tas
   return committed.value.graph;
 }
 
-/** Abandon the fixture's run and install a fresh successor registration over
- *  its tombstone, exactly as `start wave-gate` does. */
-async function abandonAndRegisterSuccessor(f: Fixture): Promise<Fixture> {
-  const runsRoot = f.manager.load().active_wave_gate!.runsRoot!;
+/** Abandon the fixture's run naming no successor, as `orchestration abandon` does. */
+async function abandonRun(f: Fixture): Promise<void> {
   const abandoned = await f.manager.abandonActiveWaveGateRegistration({
-    runsRoot,
+    runsRoot: f.manager.load().active_wave_gate!.runsRoot!,
     runId: f.handle.runId as ActiveWaveGateRegistration["runId"],
     reason: "fix the advisory first",
     supersededBy: null,
   });
   if (abandoned.kind !== "stamped") throw new Error(`fixture run not abandoned: ${abandoned.kind}`);
+}
+
+/** Install a fresh run's registration for the fixture's Wave, over an abandoned
+ *  tombstone or none, exactly as `start wave-gate` does. */
+async function registerSuccessor(f: Fixture): Promise<Fixture> {
+  const runsRoot = join(f.root, ".claude/reviews/wave-gate-runs");
   const wave = f.registration.input.wave!;
   const runId = "run.wave-suite-successor" as ActiveWaveGateRegistration["runId"];
   const created = createRunDirectory(runsRoot, runId);
@@ -930,14 +935,34 @@ describe("modern Wave completion suite shell", () => {
       }));
     });
 
-    it("leaves an abandoned contract Wave unfrozen, so a fresh gate over the fixed acceptance file reports no drift", async () => {
+    it("leaves an abandoned contract Wave unfrozen, so the reopened contract Task's fix gates and freezes with no drift", async () => {
       const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
       expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
-      const successor = await abandonAndRegisterSuccessor(f);
-      write(f.root, ACCEPTANCE_FILE, `${ACCEPTANCE_SOURCE}// fixed after the advisory\n`);
+      await abandonRun(f);
+      const settled = f.manager.load().tasks.find(({ id }) => id === "T1")!;
+      const reopen = parseTaskReopeningArgs(["--wave", "1", "--task", "T1", "--reason", "comment-analyzer-1: fix the assertion"]);
+      if (!reopen.ok) throw new Error(reopen.error);
+      await f.manager.update((locked) => {
+        const reopened = reopenImplementedTasks(locked, reopen.value);
+        if (!reopened.ok || reopened.value.kind !== "reopened") throw new Error(`T1 not reopened: ${JSON.stringify(reopened)}`);
+        return reopened.value.graph;
+      });
+      const reopenedGraph = f.manager.load();
+      expect(reopenedGraph.tasks.find(({ id }) => id === "T1")).toMatchObject({ status: "pending", revalidation_required: true });
+      expect(reopenedGraph.acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+
+      // The re-dispatched contract Task fixes the acceptance file and settles again.
+      const fixedSource = `${ACCEPTANCE_SOURCE}// fixed after the advisory\n`;
+      write(f.root, ACCEPTANCE_FILE, fixedSource);
+      await f.manager.update((locked) => ({ ...locked, tasks: locked.tasks.map((entry) => entry.id === "T1" ? settled : entry) }));
+      const successor = await registerSuccessor(f);
       const result = await ensure(successor);
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
       expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+      expect(commitCompletion(successor).acceptance_contracts?.[0]?.freeze).toEqual({
+        ...contractFreeze("claimant-wave"),
+        paths: [{ path: ACCEPTANCE_FILE, sha256: contentDigest(fixedSource) }],
+      });
     });
 
     it("blocks a contract Wave whose acceptance already passes, naming the testcase", async () => {

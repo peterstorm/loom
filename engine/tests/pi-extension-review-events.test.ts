@@ -2987,7 +2987,8 @@ describe("Pi extension review tool_result integration", () => {
 
     expect(call).toEqual([{
       block: true,
-      reason: "BLOCKED: spawn item 1 cannot expand its implementation brief: Task T1 is implemented; it is owed no implementation dispatch",
+      reason: "BLOCKED: spawn item 1 cannot expand its implementation brief: Task T1 is implemented; it is owed no implementation dispatch until it is reopened " +
+        "(abandon the Wave Gate run, then helper orchestration reopen-task --wave 1 --task T1 --reason \"<why>\")",
     }]);
     expect(input.task).toBe("LOOM_IMPLEMENTATION_BRIEF: T1");
     expect(readFileSync(statePath, "utf8")).toBe(before);

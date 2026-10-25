@@ -160,6 +160,7 @@ export function specCheckAuthorityProblem(
       state.active_wave_completion_suite !== undefined ||
       (state.wave_gate_history?.length ?? 0) > 0 ||
       (state.wave_reopening_history?.length ?? 0) > 0 ||
+      (state.task_reopening_history?.length ?? 0) > 0 ||
       (state.orphaned_wave_gate_history?.length ?? 0) > 0 ||
       (state.spec_trace_wave_gate_retirements?.length ?? 0) > 0;
     if (authority !== undefined) {

@@ -89,7 +89,7 @@ and same roster, from the same receipt facts) and leaves it unchanged. A contrac
 **Positive:**
 - `acceptance-freeze-pending` appears at a contract Wave's advisory pause, as the docs describe.
 - Abandoning a contract Wave's gate leaves the contract `awaiting-red`. The contract Task can be
-  re-dispatched, the files fixed, and a fresh gate runs with no drift.
+  reopened (`helper orchestration reopen-task`, ADR-0045), the files fixed, and a fresh gate runs with no drift.
 - A freeze exists only alongside a completed-Wave history entry written in the same update.
 
 **Negative:**

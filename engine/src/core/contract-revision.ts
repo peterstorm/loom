@@ -24,9 +24,7 @@ import {
   type FrozenPathObservations,
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
-import { returnToRevalidation } from "./task-revalidation";
-import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
-import { retireWaveReviewAuthority } from "./wave-gate-registration";
+import { returnWaveTasksToRevalidation } from "./task-revalidation";
 import type { TaskGraph } from "../types";
 
 /** The longest reason a revision records; it is an audit line, not a document. */
@@ -151,23 +149,10 @@ export function reviseAcceptanceContract(
     freeze: freeze({ state: "revised", paths: observed.value }),
     revisions: Object.freeze([...contract.revisions, revision]),
   });
-  const candidate: TaskGraph = {
-    ...graph,
-    tasks: graph.tasks.map((task) => revalidatedIds.includes(task.id) ? returnToRevalidation(task, graph.verification_manifest) : task),
-    acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
-  };
   // The current Wave's suite receipt and reviews judged the old bytes.
-  const retired = retireWaveReviewAuthority(candidate, wave);
-  const existing = retired.wave_gates[String(wave)] ?? newWaveGate();
-  const gate = {
-    ...existing,
-    impl_complete: revalidatedIds.length > 0 ? false : existing.impl_complete,
-    tests_passed: null,
-    reviews_complete: false,
-  };
-  const revisedGraph: TaskGraph = {
-    ...retired,
-    wave_gates: reconcileWaveBlock({ ...retired.wave_gates, [String(wave)]: gate }, retired.tasks, retired.spec_check, wave),
-  };
+  const revisedGraph = returnWaveTasksToRevalidation({
+    ...graph,
+    acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
+  }, wave, revalidatedIds);
   return freeze({ ok: true as const, value: freeze({ graph: revisedGraph, contract: contract.id, revision }) });
 }

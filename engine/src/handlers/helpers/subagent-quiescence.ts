@@ -11,13 +11,14 @@
 export type SubagentActivity = (statePath: string) => boolean;
 
 /** The helpers that follow the protocol. */
-export type QuiescentOperation = "Contract Revision" | "spec trace amendment" | "spec trace upgrade";
+export type QuiescentOperation = "Contract Revision" | "spec trace amendment" | "spec trace upgrade" | "task reopening";
 
 /** What each operation tells the operator to wait for before retrying. */
 const SETTLE: Readonly<Record<QuiescentOperation, string>> = Object.freeze({
   "Contract Revision": "wait for it to settle and retry",
   "spec trace amendment": "wait for it to settle and retry",
   "spec trace upgrade": "wait for the exact roster to settle and retry",
+  "task reopening": "wait for it to settle and retry",
 });
 
 /** The pre-lock refusal for `operation`, or null when no subagent is active. */
