@@ -230,23 +230,39 @@ export function resetWaveGateReviewAuthority(
  *   is never cleared.
  *
  * A live or legacy-terminal gate is the caller's precondition to refuse; it is
- * an invariant violation here, never silently reset.
+ * an invariant violation here, never silently reset. A caller that has already
+ * proven that precondition as a value retires through
+ * `retireUnownedWaveReviewAuthority` instead, which cannot throw.
  */
 export function retireWaveReviewAuthority(graph: TaskGraph, wave: number): TaskGraph {
-  const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
   const active = graph.active_wave_gate;
   if (active !== undefined && active.terminalOutcome?.kind !== "terminal-abandoned") {
     throw new Error(`Wave ${wave} review authority belongs to unretired Wave Gate run ${active.runId}`);
   }
-  const residue = active !== undefined ||
+  return retireUnownedWaveReviewAuthority(graph, wave, active?.runId ?? null);
+}
+
+/**
+ * `retireWaveReviewAuthority` for a graph whose `active_wave_gate` is already
+ * known to be absent (`abandonedRunId` null) or the terminal-abandoned
+ * tombstone of run `abandonedRunId`: the caller proved it (see
+ * `reopenableWave`), so nothing is left here to refuse.
+ */
+export function retireUnownedWaveReviewAuthority(
+  graph: TaskGraph,
+  wave: number,
+  abandonedRunId: string | null,
+): TaskGraph {
+  const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
+  const residue = abandonedRunId !== null ||
     graph.wave_review_epoch !== undefined ||
     graph.active_wave_completion_suite !== undefined ||
     graph.spec_check?.wave === wave ||
     graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
   if (!residue) return graph;
-  return withOtherWaveSpecCheckHeld(graph, wave, (scoped) => active === undefined
+  return withOtherWaveSpecCheckHeld(graph, wave, (scoped) => abandonedRunId === null
     ? resetWaveGateReviewAuthority(scoped, waveTaskIds)
-    : supersedeAbandonedWaveGateReview(scoped, active.runId, waveTaskIds));
+    : supersedeAbandonedWaveGateReview(scoped, abandonedRunId, waveTaskIds));
 }
 
 /**

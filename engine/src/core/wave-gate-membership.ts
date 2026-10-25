@@ -21,9 +21,13 @@ import { buildFindingBrief } from "./review-panel";
 import { parseWaveRetryDiagnosticSection } from "./reviewer-retry";
 import { settleSpecCheck } from "./spec-check";
 import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
-import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
-import { taskReviewScope, waveSpecCheckDocumentsMatch, type WaveReviewContextAuthority } from "./wave-review-authority";
+import {
+  taskReviewScope,
+  waveRunRosterProblem,
+  waveSpecCheckDocumentsMatch,
+  type WaveReviewContextAuthority,
+} from "./wave-review-authority";
 
 /**
  * Which dimension of a Wave Gate decision's authority failed to match, or `null`
@@ -176,7 +180,7 @@ export function waveReviewerSlotProblem(
     return "request does not belong to the exact current Wave Review Packet slot";
   }
   if (protocol.protocolVersion === 2) {
-    if (!canonicalStructuralEquals(run.expected_agents, WAVE_REVIEW_AGENTS) ||
+    if (waveRunRosterProblem(graph, 2, task, run) !== null ||
         !canonicalStructuralEquals(run.reviewer_protocol, protocol.reviewerProtocol) ||
         run.wave_gate_run_id !== request.runId || run.wave_gate_authority_digest !== context.authorityDigest ||
         run.workspace_head_sha !== taskRun.workspaceHeadSha ||

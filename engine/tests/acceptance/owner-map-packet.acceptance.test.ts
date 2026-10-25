@@ -10,9 +10,10 @@
  * the imported `OWNER_MAP_SECTION` (plan AD-9).
  *
  * Roles: FR-022 names code-reviewer and architecture-tech-lead. Wave issuance
- * builds a packet for every role in `WAVE_REVIEW_AGENTS`; each testcase checks
- * every issued packet whose role is one of the two, and requires at least the
- * code-reviewer packet to be issued.
+ * builds a packet for every role of the Task's own roster; a Task touching an
+ * owned family is issued `OWNER_MAPPED_WAVE_REVIEW_AGENTS`, so both roles are
+ * issued (ADR-0047). Each testcase checks every issued packet whose role is one
+ * of the two, and AS-022 requires both packets to be issued.
  */
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -102,12 +103,11 @@ function issue(root: string, graph: TaskGraph): WaveRequestBatch {
   return batch.value;
 }
 
-/** The issued packets of the owner-map roles, at least the code-reviewer's. */
+/** The issued packets of the owner-map roles: one per role, both issued for a Task touching an owned family. */
 function ownerMapRolePackets(batch: WaveRequestBatch): readonly ContextPacket[] {
   const packets = batch.subjects.flatMap((subject, index) =>
     OWNER_MAP_ROLES.includes(subject.role) && subject.taskId === "T1" ? [batch.packets[index]!] : []);
-  expect(batch.subjects.some(({ role, taskId }) => role === "code-reviewer" && taskId === "T1")).toBe(true);
-  expect(packets.length).toBeGreaterThan(0);
+  expect(packets.map(({ role }) => role)).toEqual(OWNER_MAP_ROLES);
   return packets;
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REVIEW_SUB_AGENTS, WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/core/agent-catalog-projections";
+import { REVIEW_SUB_AGENTS, BASE_WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/core/agent-catalog-projections";
 import { carriedOverCount, resolveReviewFindings, resolveTaskReviewFindings } from "../src/core/review-output";
 import type { ReviewRun } from "../src/types";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../src/core/context-packets";
@@ -56,7 +56,7 @@ describe("every archived v1 REVIEW_SUB_AGENT retains the Machine Summary contrac
     expect(isReviewAgent(agent)).toBe(true);
   });
 
-  it.each(WAVE_REVIEW_AGENTS)("%s declares remediation lifecycle evidence", (agent) => {
+  it.each(BASE_WAVE_REVIEW_AGENTS)("%s declares remediation lifecycle evidence", (agent) => {
     const md = agentFile(agent);
     expect(md).toContain("REVIEW_GENERATION:");
     expect(md).toContain("REVIEW_PACKET_ID:");
@@ -73,7 +73,7 @@ describe("every archived v1 REVIEW_SUB_AGENT retains the Machine Summary contrac
    * Prose is not a schema; these tests require the wire keys to appear
    * literally in every current reviewer file.
    */
-  it.each(WAVE_REVIEW_AGENTS)("%s shows the EXACT lifecycle key names, not synonyms", (agent) => {
+  it.each(BASE_WAVE_REVIEW_AGENTS)("%s shows the EXACT lifecycle key names, not synonyms", (agent) => {
     const md = agentFile(agent);
     expect(md, "must show the literal finding_id key").toContain('"finding_id"');
     expect(md, "must show the literal verdict key").toContain('"verdict"');
@@ -89,7 +89,7 @@ describe("every archived v1 REVIEW_SUB_AGENT retains the Machine Summary contrac
    * unparseable example is precisely the failure that blocked the wave, and no
    * amount of prose review catches it. This executes the documentation.
    */
-  it.each(WAVE_REVIEW_AGENTS)("the lifecycle example %s documents actually parses", (agent) => {
+  it.each(BASE_WAVE_REVIEW_AGENTS)("the lifecycle example %s documents actually parses", (agent) => {
     const md = agentFile(agent);
     const fence = /```review_lifecycle\s*\r?\n([\s\S]*?)\r?\n```/.exec(md);
     expect(fence, "agent file must contain a concrete review_lifecycle example").not.toBeNull();

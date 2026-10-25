@@ -42,6 +42,7 @@ import type {
   OrphanedWaveGateRetirement,
   OwnerObligation,
   WaveReopeningAudit,
+  TaskReopeningAudit,
   SpecCheck,
   SpecTraceAmendment,
   SpecTraceAmendmentChange,
@@ -59,6 +60,7 @@ import {
   parseEffectId,
   parseOrchestrationRunId,
   parseSlotId,
+  type NonEmpty,
 } from "./core/orchestration-contract";
 import {
   derivePendingTaskProof,
@@ -90,6 +92,7 @@ import {
   type TraceFields,
 } from "./core/spec-trace";
 import { parseTaskVerificationPolicy } from "./core/verification-policy";
+import { MAX_TASK_REOPENING_REASON_LENGTH } from "./core/task-reopening";
 import {
   isProtectedVerificationPath,
   parseAcceptedWaveCompletionReceipt,
@@ -889,6 +892,80 @@ function parseSpecTraceAmendments(raw: unknown): ParseResult<readonly SpecTraceA
     amendments.push(parsed.value);
   }
   return parseOk(Object.freeze(amendments));
+}
+
+const TASK_REOPENING_AUDIT_FIELDS = [
+  "schemaVersion", "kind", "wave", "reopenedTaskIds", "reason", "abandonedRunId",
+] as const;
+
+/** Parse one immutable audit of implemented active-Wave Tasks reopened for
+ *  re-implementation. Every reopened id must name a Task of the audited Wave. */
+function parseTaskReopeningAudit(
+  raw: unknown,
+  label: string,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<TaskReopeningAudit> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, TASK_REOPENING_AUDIT_FIELDS, [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.schemaVersion !== 1 || record.kind !== "implemented-tasks-reopened") {
+    return parseErr(`${label} has invalid schema or kind`);
+  }
+  const wave = parseIntegerBound(record.wave, `${label}.wave`, 1, "an integer >= 1 within the safe-integer range");
+  if (!wave.ok) return parseErr(wave.error);
+  const ids = record.reopenedTaskIds;
+  if (!Array.isArray(ids) || ids.length === 0) return parseErr(`${label}.reopenedTaskIds must be a non-empty array`);
+  const idError = ids.map((id) => taskIdError(id, `${label}.reopenedTaskIds`)).find((error) => error !== null);
+  if (idError !== undefined) return parseErr(idError);
+  const [first, ...rest] = ids.flatMap((id) => {
+    const parsed = parseTaskId(id);
+    return parsed.ok ? [parsed.value] : [];
+  });
+  if (first === undefined) return parseErr(`${label}.reopenedTaskIds must be a non-empty array`);
+  const reopenedTaskIds: NonEmpty<TaskId> = Object.freeze([first, ...rest] as const);
+  if (new Set(reopenedTaskIds).size !== reopenedTaskIds.length) {
+    return parseErr(`${label}.reopenedTaskIds names a Task more than once`);
+  }
+  const foreign = reopenedTaskIds.find((id) => !tasks.some((task) => task.id === id && task.wave === wave.value));
+  if (foreign !== undefined) return parseErr(`${label}.reopenedTaskIds: ${foreign} is not a Task of Wave ${wave.value}`);
+  const reason = record.reason;
+  if (typeof reason !== "string" || reason.trim() !== reason || reason.length === 0 ||
+      reason.length > MAX_TASK_REOPENING_REASON_LENGTH) {
+    return parseErr(`${label}.reason must be a trimmed non-blank string of at most ${MAX_TASK_REOPENING_REASON_LENGTH} characters`);
+  }
+  const abandonedRunId = record.abandonedRunId === null ? null : parseOrchestrationRunId(record.abandonedRunId);
+  if (abandonedRunId !== null && !abandonedRunId.ok) {
+    return parseErr(`${label}.abandonedRunId: ${abandonedRunId.error.message}`);
+  }
+  return parseOk(Object.freeze({
+    schemaVersion: 1,
+    kind: "implemented-tasks-reopened",
+    wave: wave.value,
+    reopenedTaskIds,
+    reason,
+    abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
+  }));
+}
+
+/** An abandoned run's authority is retired by the one reopening that names it,
+ *  so no two audits may name the same run. */
+function parseTaskReopeningHistory(
+  raw: unknown,
+  tasks: readonly Record<string, unknown>[],
+): ParseResult<readonly TaskReopeningAudit[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("task_reopening_history must be an array when present");
+  const audits: TaskReopeningAudit[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const parsed = parseTaskReopeningAudit(entry, `task_reopening_history[${index}]`, tasks);
+    if (!parsed.ok) return parsed;
+    audits.push(parsed.value);
+  }
+  const runs = audits.flatMap(({ abandonedRunId }) => abandonedRunId === null ? [] : [abandonedRunId]);
+  return new Set(runs).size === runs.length
+    ? parseOk(Object.freeze(audits))
+    : parseErr("task_reopening_history names one abandoned Wave Gate run in two audits");
 }
 
 /** One task-identity grammar shared by load and operator-validation boundaries. */
@@ -2163,6 +2240,7 @@ function parseTaskGraphAuthorityFields(
 
 type ParsedTaskGraphHistoryFields = Readonly<{
   reopeningHistory: readonly WaveReopeningAudit[] | undefined;
+  taskReopeningHistory: readonly TaskReopeningAudit[] | undefined;
   orphanedHistory: readonly OrphanedWaveGateRetirement[] | undefined;
   specTraceRetirements: readonly SpecTraceWaveGateRetirement[] | undefined;
   specTraceAmendments: readonly SpecTraceAmendment[] | undefined;
@@ -2224,6 +2302,8 @@ function parseTaskGraphHistoryFields(
 ): ParseResult<ParsedTaskGraphHistoryFields> {
   const reopeningHistory = parseWaveReopeningHistory(obj.wave_reopening_history);
   if (!reopeningHistory.ok) return parseErr(reopeningHistory.error);
+  const taskReopeningHistory = parseTaskReopeningHistory(obj.task_reopening_history, tasks);
+  if (!taskReopeningHistory.ok) return parseErr(taskReopeningHistory.error);
   const orphanedHistory = parseOrphanedWaveGateHistory(obj.orphaned_wave_gate_history);
   if (!orphanedHistory.ok) return parseErr(orphanedHistory.error);
   const specTraceRetirements = parseSpecTraceWaveGateRetirements(obj.spec_trace_wave_gate_retirements);
@@ -2250,6 +2330,7 @@ function parseTaskGraphHistoryFields(
   if (amendmentTraceError !== null) return parseErr(amendmentTraceError);
   return parseOk({
     reopeningHistory: reopeningHistory.value,
+    taskReopeningHistory: taskReopeningHistory.value,
     orphanedHistory: orphanedHistory.value,
     specTraceRetirements: specTraceRetirements.value,
     specTraceAmendments: specTraceAmendments.value,
@@ -2358,7 +2439,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     verificationManifest,
     activeWaveCompletionSuite,
   } = parts.authority;
-  const { reopeningHistory, orphanedHistory, specTraceRetirements, specTraceAmendments } = parts.history;
+  const { reopeningHistory, taskReopeningHistory, orphanedHistory, specTraceRetirements, specTraceAmendments } = parts.history;
   // The single blessed cast: every union field above is proven in place.
   return {
     ...obj,
@@ -2384,6 +2465,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(activeWaveGate === undefined ? {} : { active_wave_gate: activeWaveGate }),
     ...(waveGateHistory === undefined ? {} : { wave_gate_history: waveGateHistory }),
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
+    ...(taskReopeningHistory === undefined ? {} : { task_reopening_history: taskReopeningHistory }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),

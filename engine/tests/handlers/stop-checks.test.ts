@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ACCEPTANCE_BLOCK_HEADING,
   AFFECTED_BLOCK_HEADING,
+  AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
   AFFECTED_OFF_REASON_TEXT,
   AFFECTED_STOP_CHECK_OFF,
@@ -95,6 +96,17 @@ function graph(frozen: FrozenVerificationManifest): TaskGraph {
       freeze: { state: "frozen", wave: 1, paths: frozenPaths(SURFACE, "a"), roster: [{ file: SURFACE.acceptance, name: OWED, anchors: ["AS-001"] }] as never },
     })],
     verification_manifest: frozen,
+  };
+}
+
+/** Wave 1 in progress: CT-1's contract Task T1 and its sibling T4, which claims
+ *  nothing, both run while CT-1's acceptance testcases are meant to fail. */
+function wave1Graph(frozen: FrozenVerificationManifest): TaskGraph {
+  const built = graph(frozen);
+  return {
+    ...built,
+    tasks: [...built.tasks, task("T4", 1, ["src/ledger.ts", "src/ledger.test.ts"])],
+    acceptance_contracts: [contract({ id: "CT-1", surface: SURFACE, anchors: ["AS-001"], freeze: { state: "awaiting-red" } })],
   };
 }
 
@@ -229,9 +241,10 @@ function input(
   taskId: string,
   observation: ChangedFilesObservation,
   startedAtMs = 1_000_000,
+  build: (frozen: FrozenVerificationManifest) => TaskGraph = graph,
 ): StopChecksInput {
   return {
-    loadGraph: () => graph(frozen),
+    loadGraph: () => build(frozen),
     stateFilePath: "/repo/.loom/active_task_graph.json",
     taskId,
     agentKey: "session.agent",
@@ -294,6 +307,55 @@ describe("runStopChecks: the affected check blocks on failing affected tests", (
     expect(await runStopChecks(input(manifest({}), "T3", observed(changed(root, "src/ledger.ts"))), fake.ports)).toEqual({ kind: "skip" });
     expect(fake.launches).toEqual([]);
     expect(fake.locks.acquired).toBe(0);
+  });
+});
+
+describe("runStopChecks: expected-RED acceptance failures do not block (the Wave Gate's rule)", () => {
+  const OTHER_RED = "AS-001: a second call is refused";
+
+  it.each([
+    ["the contract Task", "T1", SURFACE.acceptance],
+    ["a sibling that claims nothing", "T4", "src/ledger.ts"],
+  ])("a Wave 1 stop by %s whose only failures are CT-1's acceptance testcases passes with a note naming them, and its counter never counts a block", async (_label, taskId, file) => {
+    const root = repositoryRoot();
+    const fake = fakePorts(root, {
+      affected: { kind: "report", cases: [failing(SURFACE.acceptance, OWED), failing(SURFACE.acceptance, OTHER_RED), passing("src/ledger.test.ts", LEDGER_TEST)] },
+      blocks: { affected: { kind: "count", blocks: 1 } },
+    });
+
+    const outcome = await runStopChecks(input(manifest({ affected: true }), taskId, observed(changed(root, file)), undefined, wave1Graph), fake.ports);
+
+    expect(outcome.kind).toBe("note");
+    expect(textOf(outcome)).toContain(`affected stop check for ${taskId}: ${AFFECTED_NOTE_TEXT["acceptance-red-excused"]}`);
+    expect(textOf(outcome)).toContain(`'${OWED}' (${SURFACE.acceptance}); '${OTHER_RED}' (${SURFACE.acceptance})`);
+    expect(fake.launches.map(({ check }) => check)).toEqual(["affected"]);
+    expect(fake.counters.affected.has("session.agent")).toBe(false);
+  });
+
+  it("a Wave 1 stop still blocks for a failure outside the acceptance files, listing the acceptance failures as not blocking", async () => {
+    const root = repositoryRoot();
+    const fake = fakePorts(root, { affected: { kind: "report", cases: [failing(SURFACE.acceptance, OWED), failing("src/ledger.test.ts", LEDGER_TEST)] } });
+
+    const outcome = await runStopChecks(input(manifest({ affected: true }), "T4", observed(changed(root, "src/ledger.ts")), undefined, wave1Graph), fake.ports);
+
+    expect(outcome.kind).toBe("block");
+    const message = textOf(outcome);
+    expect(message).toContain(`- '${LEDGER_TEST}' (src/ledger.test.ts) — failed`);
+    expect(message).toContain(`${AFFECTED_EXCUSED_HEADING}\n- '${OWED}' (${SURFACE.acceptance})`);
+    expect(message).not.toContain(`- '${OWED}' (${SURFACE.acceptance}) — failed`);
+    expect(fake.counters.affected.get("session.agent")).toBe(1);
+  });
+
+  it("a Wave 2 claimant whose due acceptance testcase fails is still blocked", async () => {
+    const root = repositoryRoot();
+    const fake = fakePorts(root, { affected: { kind: "report", cases: [failing(SURFACE.acceptance, OWED)] } });
+
+    const outcome = await runStopChecks(input(manifest({ affected: true }), "T2", observed(changed(root, "src/payload.ts"))), fake.ports);
+
+    expect(outcome.kind).toBe("block");
+    expect(textOf(outcome)).toContain(`- '${OWED}' (${SURFACE.acceptance}) — failed`);
+    expect(textOf(outcome)).not.toContain(AFFECTED_EXCUSED_HEADING);
+    expect(fake.counters.affected.get("session.agent")).toBe(1);
   });
 });
 

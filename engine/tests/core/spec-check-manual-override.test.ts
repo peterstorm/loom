@@ -82,6 +82,17 @@ describe("specCheckAuthorityProblem", () => {
     );
   });
 
+  it("refuses authority-free evidence on a graph whose only Wave authority history is a Task reopening", () => {
+    const reopenedOnly = graph({
+      task_reopening_history: [{
+        schemaVersion: 1, kind: "implemented-tasks-reopened", wave: 1, reopenedTaskIds: ["T1"],
+        reason: "fix the advisory", abandonedRunId: null,
+      }],
+    });
+    expect(specCheckAuthorityProblem(reopenedOnly, undefined)).toContain("no current capture-correlated request authority");
+    expect(specCheckAuthorityProblem(graph({ task_reopening_history: [] }), undefined)).toBeNull();
+  });
+
   it("refuses a captured request that matches no current Wave authority", () => {
     expect(specCheckAuthorityProblem(modernGraph, authority)).toContain("has no current Wave authority");
   });

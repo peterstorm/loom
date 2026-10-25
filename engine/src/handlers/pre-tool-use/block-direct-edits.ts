@@ -13,19 +13,28 @@
  * decision needs: the roster read, the calling implementation Agent's exact
  * attempt binding (an implementation role writes only once BOUND), and
  * canonicalizing the target path and project root (realpath) so the core
- * compares symlink-free absolute paths.
+ * compares symlink-free absolute paths, and resolving the orchestrated
+ * repository (the canonical root of the repository owning the live TaskGraph,
+ * plus Loom's canonical protected directories) so core can let writes outside
+ * all of them through. Pi reuses the same resolvers.
  */
 
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
+  editPlacement,
   shouldBlockDirectEdit,
+  UNRESOLVED,
   type ActiveRosterProbe,
   type ArtifactWriteRequest,
+  type EditPlacement,
+  type EditTargets,
   type ImplementationBindingProbe,
+  type OrchestratedRepository,
 } from "../../core/block-direct-edits";
-import { subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
+import { nonEmpty } from "../../core/acceptance-contract/kernel";
+import { observeTaskGraphProjectBoundary, protectedDirs, subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles, type ActiveAgent } from "../../machine/ledger";
 import { parseReportedAgentId, parseSessionId, type SessionId } from "../../machine/evidence";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
@@ -104,6 +113,97 @@ const isDanglingSymlink = (path: string): boolean => {
 const FILE_PATH_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
 
 /**
+ * The orchestrated repository for core's `editPlacement`: the canonical root of
+ * the repository owning each armed TaskGraph, by the engine's ONE boundary rule
+ * (`observeTaskGraphProjectBoundary` — the Git working tree holding the State
+ * File, else its documented `.claude/state` / `.pi/state` layout), so a
+ * `LOOM_STATE_PATH` override is judged exactly like a discovered graph.
+ *
+ * It carries the canonical `protectedDirectories` too (the caller passes
+ * config's `protectedDirs()`): each is canonicalised like a write target, through its
+ * nearest existing ancestor, so a symlinked or not-yet-created subagent dir is
+ * still compared by its real location.
+ *
+ * No armed graph answers `unresolved` silently — nothing failed. Every failure
+ * that has a cause — a Git probe that cannot answer, a non-canonical layout, an
+ * uncanonicalisable repository root or protected directory — answers
+ * `unresolved` and is announced. Either way the guard stays on for every
+ * target.
+ */
+export function orchestratedRepositoryOf(
+  graphPaths: readonly string[],
+  protectedDirectories: readonly [string, ...string[]],
+): OrchestratedRepository {
+  const roots: string[] = [];
+  for (const graphPath of graphPaths) {
+    let boundaryRoot: string;
+    try {
+      boundaryRoot = observeTaskGraphProjectBoundary(graphPath).root;
+    } catch (e) {
+      process.stderr.write(
+        `block-direct-edits: cannot resolve the repository owning ${graphPath}: ${e instanceof Error ? e.message : String(e)} — guarding every target\n`,
+      );
+      return UNRESOLVED;
+    }
+    const root = canonicalWritePath(boundaryRoot);
+    if (root === null) {
+      process.stderr.write(`block-direct-edits: cannot canonicalize repository root ${boundaryRoot} — guarding every target\n`);
+      return UNRESOLVED;
+    }
+    if (!roots.includes(root)) roots.push(root);
+  }
+  const resolved = nonEmpty(roots);
+  if (resolved === null) return UNRESOLVED;
+  const protectedRoots = canonicalProtectedRoots(protectedDirectories);
+  return protectedRoots === null ? UNRESOLVED : Object.freeze({ kind: "resolved", roots: resolved, protectedRoots });
+}
+
+/** The canonical protected directories, or `null` (announced) when any cannot be canonicalised. */
+function canonicalProtectedRoots(dirs: readonly [string, ...string[]]): readonly [string, ...string[]] | null {
+  const canonical: string[] = [];
+  for (const dir of dirs) {
+    const root = canonicalWritePath(resolve(dir));
+    if (root === null) {
+      process.stderr.write(`block-direct-edits: cannot canonicalize protected directory ${dir} — guarding every target\n`);
+      return null;
+    }
+    if (!canonical.includes(root)) canonical.push(root);
+  }
+  return nonEmpty(canonical);
+}
+
+/** Canonical write targets resolved against `cwd`; one failure leaves all unresolved. */
+export function canonicalEditTargets(paths: readonly string[], cwd: string): EditTargets {
+  const canonical: string[] = [];
+  for (const path of paths) {
+    const target = canonicalWritePath(resolve(cwd, path));
+    if (target === null) return UNRESOLVED;
+    canonical.push(target);
+  }
+  const resolved = nonEmpty(canonical);
+  return resolved === null ? UNRESOLVED : Object.freeze({ kind: "resolved", paths: resolved });
+}
+
+/** The raw `file_path` a Claude Code file tool names, or `null`. */
+const claudeFilePath = (input: PreToolUseInput): string | null => {
+  const filePath = input.tool_input["file_path"];
+  return FILE_PATH_TOOLS.has(input.tool_name) && typeof filePath === "string" && filePath !== "" ? filePath : null;
+};
+
+/**
+ * Lazy placement of one Claude Code write: the target against the repository
+ * owning the graph this hook armed on (`taskGraphPath()`, the same path
+ * `graphActiveProbe` probed) and Loom's protected directories.
+ */
+const claudeEditPlacement = (input: PreToolUseInput) => (): EditPlacement => {
+  const filePath = claudeFilePath(input);
+  return editPlacement(
+    orchestratedRepositoryOf([taskGraphPath()], protectedDirs()),
+    filePath === null ? UNRESOLVED : canonicalEditTargets([filePath], input.cwd ?? process.cwd()),
+  );
+};
+
+/**
  * The artifact-writer request for core, or `undefined` when the project root
  * itself cannot be canonicalized (the request then never admits anything).
  * That failure is announced: a writer blocked for an unresolvable root would
@@ -122,10 +222,8 @@ export function artifactWriteRequest(
     );
     return undefined;
   }
-  const filePath = input.tool_input["file_path"];
-  const targetPath = FILE_PATH_TOOLS.has(input.tool_name) && typeof filePath === "string" && filePath !== ""
-    ? canonicalWritePath(resolve(cwd, filePath))
-    : null;
+  const filePath = claudeFilePath(input);
+  const targetPath = filePath === null ? null : canonicalWritePath(resolve(cwd, filePath));
   return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
 }
 
@@ -167,8 +265,11 @@ const handler: HookHandler = async (stdin) => {
     parsed.session_id,
     graphActiveProbe,
     () => roster,
-    artifactWriteRequest(parsed),
-    sessionId === null ? undefined : callerBindingProbe(parsed, sessionId, roster),
+    {
+      artifactWrite: artifactWriteRequest(parsed),
+      implementationBinding: sessionId === null ? undefined : callerBindingProbe(parsed, sessionId, roster),
+      placeEdit: claudeEditPlacement(parsed),
+    },
   );
 };
 

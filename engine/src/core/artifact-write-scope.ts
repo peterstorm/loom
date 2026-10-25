@@ -69,7 +69,7 @@ const PHASE_ARTIFACT_ROOTS: Readonly<Partial<Record<Phase, readonly string[]>>> 
 });
 
 /** The panel agents whose run contract includes writing an artifact — the
- *  WAVE_REVIEW_AGENTS pattern: a literal roster typed against the catalog, so a
+ *  BASE_WAVE_REVIEW_AGENTS pattern: a literal roster typed against the catalog, so a
  *  renamed or typo'd agent name fails compilation instead of silently emptying
  *  both harnesses' panel admission. Judges are deliberately absent: their
  *  prompts name candidate paths to READ, and write capability would let a

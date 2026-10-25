@@ -152,8 +152,10 @@ describe("shouldBlockDirectEdit with a binding probe (Claude Code)", () => {
       const result = shouldBlockDirectEdit(
         "Edit", SESSION, () => true,
         () => ids.map((id) => entry(id, "code-implementer-agent")),
-        { callerAgentId: caller, targetPath: `${PROJECT}/src/a.ts`, projectRoot: PROJECT },
-        (agentId) => stateOf.get(agentId)!,
+        {
+          artifactWrite: { callerAgentId: caller, targetPath: `${PROJECT}/src/a.ts`, projectRoot: PROJECT },
+          implementationBinding: (agentId) => stateOf.get(agentId)!,
+        },
       );
       expect(result.kind).toBe(stateOf.get(caller)!.kind === "bound" ? "allow" : "block");
     }));
@@ -166,8 +168,10 @@ describe("shouldBlockDirectEdit with a binding probe (Claude Code)", () => {
       const result = shouldBlockDirectEdit(
         "Write", SESSION, () => true,
         () => ids.map((id) => entry(id, "code-implementer-agent")),
-        { callerAgentId: null, targetPath: `${PROJECT}/src/a.ts`, projectRoot: PROJECT },
-        (agentId) => stateOf.get(agentId)!,
+        {
+          artifactWrite: { callerAgentId: null, targetPath: `${PROJECT}/src/a.ts`, projectRoot: PROJECT },
+          implementationBinding: (agentId) => stateOf.get(agentId)!,
+        },
       );
       expect(result.kind).toBe(states.some((state) => state.kind === "bound") ? "allow" : "block");
     }));
@@ -185,11 +189,13 @@ describe("shouldBlockDirectEdit with a binding probe (Claude Code)", () => {
     expect(shouldBlockDirectEdit(
       "Write", SESSION, () => true,
       () => [entry("w-1", "specify-agent")],
-      { callerAgentId: "w-1", targetPath: `${PROJECT}/.claude/specs/x/spec.md`, projectRoot: PROJECT },
-      refusedEverywhere,
+      {
+        artifactWrite: { callerAgentId: "w-1", targetPath: `${PROJECT}/.claude/specs/x/spec.md`, projectRoot: PROJECT },
+        implementationBinding: refusedEverywhere,
+      },
     ).kind).toBe("allow");
     expect(shouldBlockDirectEdit(
-      "Edit", SESSION, () => true, () => [entry("pi-grant-abcdef0123456789", null)], undefined, refusedEverywhere,
+      "Edit", SESSION, () => true, () => [entry("pi-grant-abcdef0123456789", null)], { implementationBinding: refusedEverywhere },
     ).kind).toBe("allow");
   });
 });

@@ -3,9 +3,11 @@
  * stamps them.
  *
  * A contract freezes when its contract Wave's gate completes, after the
- * advisory decision. Until then a reviewer's advisory on a types or acceptance
- * file can still be fixed by re-dispatching the contract Task; once the gate
- * is approved it needs a Contract Revision. In the G1 live pilot the Wave 1
+ * advisory decision (the completion commit stamps it, ADR-0044). Until then a
+ * reviewer's advisory on a types or acceptance file can still be fixed by
+ * abandoning the run and reopening the contract Task
+ * (`helper orchestration reopen-task`); once the gate is approved it needs a
+ * Contract Revision. In the G1 live pilot the Wave 1
  * advisories on the contract's files were approved without anyone noticing
  * that approval froze them. This projection names exactly those advisories so
  * the operator sees the choice before making it.
@@ -60,5 +62,6 @@ export function renderPendingFreezeAdvisories(advisories: NonEmpty<PendingFreeze
   const listed = advisories.map(({ contractId, taskId, findingId, path }) => `${findingId} (${taskId}, ${contractId}: ${path})`);
   return `${advisories.length} advisory finding(s) touch files the Acceptance Freeze stamps when this Wave Gate completes: ` +
     `${listed.join("; ")}. Approving freezes them as they are, and changing them later needs a Contract Revision. ` +
-    "To fix one first, abandon this run, re-dispatch the contract Task, and start a fresh Wave Gate.";
+    "To fix one first, abandon this run, reopen the contract Task (helper orchestration reopen-task), " +
+    "re-dispatch it, and start a fresh Wave Gate.";
 }

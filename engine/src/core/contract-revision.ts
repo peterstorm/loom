@@ -10,9 +10,14 @@
  * return to revalidation. A claimant in a completed Wave is verified scope —
  * that Wave must be reopened first, never silently re-judged.
  *
+ * Its Wave precondition (execute Phase, no live gate, no implementation
+ * reservation or active attempt) is the one Task Reopening shares,
+ * `reopenableWave`; the contract checks are its own.
+ *
  * Pure: the shell supplies its observations of the frozen paths.
  */
 
+import { match } from "ts-pattern";
 import {
   CONTRACT_ID,
   contractClaimants,
@@ -24,9 +29,7 @@ import {
   type FrozenPathObservations,
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
-import { returnToRevalidation } from "./task-revalidation";
-import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
-import { retireWaveReviewAuthority } from "./wave-gate-registration";
+import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
 import type { TaskGraph } from "../types";
 
 /** The longest reason a revision records; it is an audit line, not a document. */
@@ -55,6 +58,18 @@ const USAGE = 'Usage: helper revise-contract --contract CT-<n> --reason "<why th
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const refuse = (kind: ContractRevisionRefusalKind, message: string): DomainResult<never, ContractRevisionRefusal> =>
   freeze({ ok: false as const, error: freeze({ kind, message }) });
+
+/** The shared Wave-reopening refusal, in this operation's words. */
+const waveReopeningRefusal = (refusal: WaveReopeningRefusal): DomainResult<never, ContractRevisionRefusal> =>
+  match(refusal)
+    .with({ kind: "not-executing" }, ({ phase }) =>
+      refuse("not-executing", `Contract Revision requires the execute Phase (current: ${phase})`))
+    .with({ kind: "live-wave-gate" }, ({ runId, wave }) =>
+      refuse("live-wave-gate", `Contract Revision refused: Wave Gate run ${runId} owns Wave ${wave}'s ` +
+        "verification; abandon it with helper orchestration abandon, then retry"))
+    .with({ kind: "implementation-active" }, ({ holders }) =>
+      refuse("implementation-active", `Contract Revision refused while implementation reservations are active: ${holders.join(", ")}`))
+    .exhaustive();
 
 /** Exactly `--contract CT-<n>` and a non-blank `--reason`, each once, in either order. */
 export function parseContractRevisionArgs(args: readonly string[]): DomainResult<ContractRevisionRequest, string> {
@@ -93,19 +108,9 @@ export function reviseAcceptanceContract(
     const known = contracts.map(({ id }) => id).join(", ") || "none";
     return refuse("unknown-contract", `${request.contract} is not an Acceptance Contract of this TaskGraph (contracts: ${known})`);
   }
-  const wave = graph.current_wave;
-  if (graph.current_phase !== "execute" || wave === undefined) {
-    return refuse("not-executing", `Contract Revision requires the execute Phase (current: ${graph.current_phase})`);
-  }
-  const executing = graph.executing_tasks ?? [];
-  if (executing.length > 0) {
-    return refuse("implementation-active", `Contract Revision refused while implementation reservations are active: ${executing.join(", ")}`);
-  }
-  const active = graph.active_wave_gate;
-  if (active !== undefined && active.terminalOutcome?.kind !== "terminal-abandoned") {
-    return refuse("live-wave-gate", `Contract Revision refused: Wave Gate run ${active.runId} owns Wave ${active.wave}'s ` +
-      "verification; abandon it with helper orchestration abandon, then retry");
-  }
+  const reopenable = reopenableWave(graph);
+  if (!reopenable.ok) return waveReopeningRefusal(reopenable.error);
+  const { wave } = reopenable.value;
   if (contract.freeze.state === "awaiting-red") {
     return refuse("not-frozen", `${contract.id} is not frozen yet: its contract Task ${contract.contractTask} still owns ` +
       "those files until its Wave Gate observes them red");
@@ -151,23 +156,11 @@ export function reviseAcceptanceContract(
     freeze: freeze({ state: "revised", paths: observed.value }),
     revisions: Object.freeze([...contract.revisions, revision]),
   });
-  const candidate: TaskGraph = {
-    ...graph,
-    tasks: graph.tasks.map((task) => revalidatedIds.includes(task.id) ? returnToRevalidation(task, graph.verification_manifest) : task),
-    acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
-  };
-  // The current Wave's suite receipt and reviews judged the old bytes.
-  const retired = retireWaveReviewAuthority(candidate, wave);
-  const existing = retired.wave_gates[String(wave)] ?? newWaveGate();
-  const gate = {
-    ...existing,
-    impl_complete: revalidatedIds.length > 0 ? false : existing.impl_complete,
-    tests_passed: null,
-    reviews_complete: false,
-  };
+  // The current Wave's suite receipt and reviews judged the old bytes. The
+  // transition reads no contract, so the revised one is written over its result.
   const revisedGraph: TaskGraph = {
-    ...retired,
-    wave_gates: reconcileWaveBlock({ ...retired.wave_gates, [String(wave)]: gate }, retired.tasks, retired.spec_check, wave),
+    ...returnWaveTasksToRevalidation(reopenable.value, revalidatedIds),
+    acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
   };
   return freeze({ ok: true as const, value: freeze({ graph: revisedGraph, contract: contract.id, revision }) });
 }

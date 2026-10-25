@@ -56,8 +56,17 @@ export function renderTaskImplementationBrief(
     const graph = new StateManager(graphPath).load();
     const task = graph.tasks.find(({ id }) => id === taskId);
     if (task === undefined) return { ok: false, error: `Task ${taskId} is not in the TaskGraph at ${graphPath}` };
-    if (task.status === "implemented" || task.status === "completed") {
-      return { ok: false, error: `Task ${taskId} is ${task.status}; it is owed no implementation dispatch` };
+    // A reopened Task (helper orchestration reopen-task) is `pending` again and
+    // renders like any other owed dispatch.
+    if (task.status === "implemented") {
+      return {
+        ok: false,
+        error: `Task ${taskId} is implemented; it is owed no implementation dispatch until it is reopened ` +
+          `(abandon the Wave Gate run, then helper orchestration reopen-task --wave ${task.wave} --task ${taskId} --reason "<why>")`,
+      };
+    }
+    if (task.status === "completed") {
+      return { ok: false, error: `Task ${taskId} is completed; it is owed no implementation dispatch` };
     }
     const derivation = deriveTaskImplementationDispatch(task);
     if (derivation.kind === "escalated") {

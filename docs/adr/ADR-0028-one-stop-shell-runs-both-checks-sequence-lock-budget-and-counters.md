@@ -132,6 +132,23 @@ keeps an independent block counter per check. Every decision it acts on is a pur
   - zero testcases is `passed` with a note (AS-023).
 
   `renderStopChecksBlock` renders one combined block message with a heading per check (AS-028).
+
+  *(Amended 2026-10-25, CT-2 amendment A1.)* `judgeAffectedRun(projection, expectation)` now also takes
+  the `AcceptanceExpectation` the Task's own Wave Gate will owe (`graphAcceptanceExpectation(graph,
+  task.wave)`, wired by the stop shell; no new port). Each failed testcase is classified by
+  `classifyFailedTestcase` (`acceptance-contract/gate.ts`), the gate's own observation step: attribution
+  to an owed acceptance file, collection-error detection, and the one expected-RED rule
+  `isExpectedRedAcceptanceFailure` (the contract's RED Wave, or a pending anchor after it). A testcase the
+  rule excuses no longer blocks. The gate's report facts are built by that same observation step, and its
+  exit excuse (`excused`) applies the same predicate to them, so the two cannot drift. Both of I7's lists
+  name a testcase by one file identity: the declared acceptance path when attributed, otherwise the
+  reported classname. Before this, a contract Wave's frozen acceptance tests, deliberately RED, blocked
+  every Wave 1 Task whose affected run selected them (the two contract writers and a sibling in one run)
+  up to the cap, then failed open. Collection errors, due or unanchored testcases, unattributed files and
+  unobservable (`awaiting-red` after its Wave) contracts still block: the rule fails closed. The verdict
+  gains `excused` (every failure expected RED; the stop proceeds with the `acceptance-red-excused` note
+  naming them, and no counter moves), and `failing` carries the excused testcases, which the block message
+  lists under `AFFECTED_EXCUSED_HEADING` as not blocking.
 - **Outcome and isolation.** `StopChecksOutcome` is `skip | passed | block | note` and carries text only,
   with no completion data. Dispatch maps it to a block decision or a system message, as it mapped slice 1's
   outcome, so nothing reaches settlement, proof, receipts or gate evidence (INV-3, FR-026). Pi runs the

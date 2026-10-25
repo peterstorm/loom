@@ -12,14 +12,17 @@
  * (INV-3's owner); this module only renders the ones it is given.
  */
 
+import type { WaveReviewRole } from "../agent-catalog-projections";
 import type { NonEmpty } from "../orchestration-contract";
 import type { OwnerObligation } from "./types";
 
 /** The byte-section label of the owner map in a Wave review packet. */
 export const OWNER_MAP_SECTION = "owner-map";
 
-/** The reviewer roles whose packets carry the owner map (FR-022); every other role's packet is unchanged. */
-export const OWNER_MAP_ROLES = Object.freeze(["code-reviewer", "architecture-tech-lead"] as const);
+/** The reviewer roles whose packets carry the owner map (FR-022); every other role's packet is unchanged.
+ *  Both are Wave review roles: `code-reviewer` is on every roster, and an owner-mapped Task's roster
+ *  appends `architecture-tech-lead` (ADR-0047), so each role named here is actually issued. */
+export const OWNER_MAP_ROLES = Object.freeze(["code-reviewer", "architecture-tech-lead"] as const satisfies readonly WaveReviewRole[]);
 
 /** Whether `role` is owed the owner map. */
 export const isOwnerMapRole = (role: string): boolean => (OWNER_MAP_ROLES as readonly string[]).includes(role);

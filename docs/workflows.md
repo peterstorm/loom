@@ -266,7 +266,8 @@ For every Wave Task, Loom creates an immutable Review Packet and issues the exac
 - `silent-failure-hunter`;
 - `pr-test-analyzer`;
 - `type-design-analyzer`;
-- `comment-analyzer`.
+- `comment-analyzer`;
+- `architecture-tech-lead`, appended last, only for a Task whose packets carry the owner map (it touches an owned Invariant's family; ADR-0047).
 
 `spec-check-invoker` runs once for the Wave; its grammar, identity and Requirement Coverage floor are unchanged. Fresh reviewer registrations use Reviewer Protocol v2: exactly one JSON final payload under the issued packet's frozen schema/rubric, with engine-derived counts/IDs. Wave payloads echo packetId/generation and assess every prior ID once in packet order. Criticals require full Finding Basis; advisories require reason. Structure is not proof of truth or impact. Exact final bytes are captured into engine-reserved slots, then registered resume admits/settles them without legacy polling/concatenation. Malformed current output creates failed evidence, not a synthetic Finding. See [protocol operations](operations.md#reviewer-protocol-v2).
 
