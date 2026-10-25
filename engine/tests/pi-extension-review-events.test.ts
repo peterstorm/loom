@@ -1144,6 +1144,51 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
+  it("scopes the direct-edit guard to the orchestrated repository, by Claude Code's placement rule", async () => {
+    // The shared State File sits under ROOT, so ROOT's Git working tree is the
+    // orchestrated repository; a canonical temp dir is outside it.
+    writeState(initialGraph());
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a0";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const outside = canonicalTempDir("loom-pi-edit-scope-");
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const blocked = expect.objectContaining({ block: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "write", input: { path: join(outside, "scratch", "notes.md"), content: "x" },
+      }, context)).toEqual([undefined]);
+      expect(await pi.emit("tool_call", {
+        toolName: "edit", input: { path: "README.md", edits: [] },
+      }, context)).toContainEqual(blocked);
+      // One in-repository target guards the whole batch.
+      expect(await pi.emit("tool_call", {
+        toolName: "multi_edit", input: { edits: [{ path: join(outside, "a.md") }, { path: "README.md" }] },
+      }, context)).toContainEqual(blocked);
+      // Malformed input cannot be placed: it stays guarded.
+      expect(await pi.emit("tool_call", {
+        toolName: "write", input: { path: 7 },
+      }, context)).toContainEqual(blocked);
+
+      // A session TaskGraph pointer that cannot be parsed leaves the
+      // repository unresolved: even an outside target stays guarded.
+      mkdirSync(subagentDir, { recursive: true });
+      writeFileSync(pointer, "relative/graph.json");
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        expect(await pi.emit("tool_call", {
+          toolName: "write", input: { path: join(outside, "notes.md"), content: "x" },
+        }, context)).toContainEqual(blocked);
+        expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain("guarding every target");
+      } finally {
+        stderr.mockRestore();
+      }
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("retains malformed completion checkpoint parser diagnostics", async () => {
     const extensionSpecifier = "../../pi/review-run-authority.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
@@ -3091,6 +3136,18 @@ describe("Pi extension review tool_result integration", () => {
       input: { path: ".claude/state/active_task_graph.json", content: "{}" },
     }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
     expect(stateHit).toContainEqual(expect.objectContaining({ block: true }));
+    // The grant's scope, like Claude Code's artifact-writer roots, governs only
+    // writes into the orchestrated repository: a scratch file outside it passes.
+    const scratch = canonicalTempDir("loom-pi-scoped-scratch-");
+    try {
+      const outsideHit = await pi.emit("tool_call", {
+        toolName: "write",
+        input: { path: join(scratch, "notes.md"), content: "x" },
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+      expect(outsideHit).toEqual([undefined]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
 
     await pi.emit("session_shutdown", {}, {
       cwd: ROOT, sessionManager: { getSessionId: () => childSession },

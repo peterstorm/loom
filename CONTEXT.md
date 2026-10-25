@@ -180,6 +180,10 @@ _Avoid_: Proven closed, Resolved Finding, semantic proof
 The single source of truth for orchestration progress (`active_task_graph.json`). Write-protected; Hooks and explicitly whitelisted StateManager-backed CLI helpers are its only mutation paths.
 _Avoid_: Config, manifest, plan file
 
+**Orchestrated Repository**:
+The repository that owns a live State File: the symlink-canonical root of the Git working tree holding it, or, outside Git, the root implied by its documented `.claude/state/` / `.pi/state/` layout (`observeTaskGraphProjectBoundary`). The direct-edit guard protects only this repository. A write whose every canonical target lies outside it — another worktree, a sibling directory, a session scratchpad — is allowed. Containment is decided on path-segment boundaries, so `/repo-foo` is not inside `/repo`. Worktrees nested under the root count as inside. A root or target that cannot be resolved keeps the write guarded ([ADR-0044](docs/adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md)).
+_Avoid_: Project dir, cwd, checkout (when the guard's scope is meant)
+
 **Session TaskGraph Pointer Lease Registry**:
 The exact parsed immutable generation record beside one session's `.task_graph` pointer. Every same-target binder owns one lease; only the final lease may restore the generation's previous target, and a different target or contradictory/malformed crash state fails closed under the same no-follow lock.
 _Avoid_: Pointer owner flag, shared pointer, best-effort rollback

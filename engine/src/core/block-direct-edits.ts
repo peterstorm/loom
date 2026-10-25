@@ -17,6 +17,13 @@
  * each write to the grant's `deriveArtifactWriteScope` dirs). Both paths
  * classify writers through the same `artifact-write-scope` role policy.
  *
+ * The guard protects ONE thing: the orchestrated repository — the repository
+ * that owns the live TaskGraph. A write whose every canonical target lies
+ * outside that repository's canonical root (another worktree, a sibling
+ * directory, a session scratchpad) cannot touch the orchestration and is
+ * allowed before any admission runs (`editPlacement`). The shell resolves both
+ * sides; anything it cannot resolve stays guarded.
+ *
  * On Claude Code an implementation role is not by itself a write grant: the
  * Agent's exact Implementation Attempt is bound lazily (`core/implementation-
  * binding`), and only a `bound` Agent admits. The harness supplies that state
@@ -143,6 +150,61 @@ type ArtifactWriteVerdict =
   /** The caller is unknown, the main agent, or a role that writes no artifacts. */
   | Readonly<{ kind: "not-a-writer" }>;
 
+/**
+ * The repository the guard protects: the symlink-canonical root of every
+ * repository owning a live TaskGraph that armed this session (Claude Code arms
+ * on one graph; Pi may also be armed by its session's TaskGraph pointer), or
+ * `unresolved` when the shell could not prove one — then every target stays
+ * guarded. The shell derives each root from the resolved graph path
+ * (`observeTaskGraphProjectBoundary`), never from the caller's cwd.
+ */
+export type OrchestratedRepository =
+  | Readonly<{ kind: "resolved"; roots: readonly [string, ...string[]] }>
+  | Readonly<{ kind: "unresolved" }>;
+
+/**
+ * Every path one write call targets, absolute and symlink-canonical (a missing
+ * file is canonicalised through its nearest existing ancestor), or
+ * `unresolved` when any target is absent, malformed, or uncanonicalisable.
+ */
+export type EditTargets =
+  | Readonly<{ kind: "resolved"; paths: readonly [string, ...string[]] }>
+  | Readonly<{ kind: "unresolved" }>;
+
+/** Where one write call lands relative to the orchestrated repository. */
+export type EditPlacement = Readonly<{ kind: "inside" }> | Readonly<{ kind: "outside" }>;
+
+/** The one `unresolved` answer for both `OrchestratedRepository` and `EditTargets`. */
+export const UNRESOLVED = Object.freeze({ kind: "unresolved" as const });
+
+const INSIDE: EditPlacement = Object.freeze({ kind: "inside" });
+const OUTSIDE: EditPlacement = Object.freeze({ kind: "outside" });
+
+/**
+ * True when `target` is `root` itself or lies below it, on a path-SEGMENT
+ * boundary (`/repo-foo` is not inside `/repo`). A non-absolute input cannot be
+ * placed and answers true: the guard fails closed.
+ */
+export function guardedByRoot(root: string, target: string): boolean {
+  if (!isAbsolute(root) || !isAbsolute(target)) return true;
+  const rel = relative(root, target);
+  return rel === "" || !(isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`));
+}
+
+/**
+ * Pure placement of one write call: `outside` only when the repository and
+ * every target are resolved and no root guards any target. One target inside —
+ * or anything unresolved — places the whole call `inside`.
+ */
+export function editPlacement(repository: OrchestratedRepository, targets: EditTargets): EditPlacement {
+  if (repository.kind === "unresolved" || targets.kind === "unresolved") return INSIDE;
+  const guarded = targets.paths.some((target) => repository.roots.some((root) => guardedByRoot(root, target)));
+  return guarded ? INSIDE : OUTSIDE;
+}
+
+/** No placement supplied — the call is judged as inside the repository. */
+const placedInside = (): EditPlacement => INSIDE;
+
 /** True when `target` lies strictly below `root`; both must be absolute. */
 function strictlyInside(root: string, target: string): boolean {
   if (!isAbsolute(root) || !isAbsolute(target)) return false;
@@ -174,6 +236,10 @@ function artifactWriteVerdict(
  * callers inject `pathExistsFailClosed(taskGraphPath())`, tests inject their
  * own. Fail-closed semantics stay the caller's (`pathExistsFailClosed` — ENOENT
  * is the only absent answer).
+ *
+ * `placeEdit` is consulted lazily — only for an armed file tool with a
+ * parseable session id — because resolving the orchestrated repository costs
+ * the shell a Git probe. Omitted, every write is placed inside.
  */
 export function shouldBlockDirectEdit(
   toolName: string,
@@ -182,6 +248,7 @@ export function shouldBlockDirectEdit(
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
   artifactWrite?: ArtifactWriteRequest,
   implementationBinding?: ImplementationBindingProbe,
+  placeEdit: () => EditPlacement = placedInside,
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -197,6 +264,10 @@ export function shouldBlockDirectEdit(
       message: `BLOCKED: invalid session id ${JSON.stringify(sessionId)} — cannot verify an active subagent; direct edits stay blocked during loom orchestration.`,
     };
   }
+
+  // A write that cannot reach the orchestrated repository is not this guard's
+  // concern; every admission below governs writes INSIDE it, unchanged.
+  if (placeEdit().kind === "outside") return { kind: "allow" };
 
   // Allow if an IMPLEMENTATION subagent is active. Review agents and verifiers
   // are read-only and must never receive write capability, even when active.
