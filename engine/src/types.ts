@@ -32,6 +32,7 @@ import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/
 import type { OwnerVerificationStatusReport } from "./core/owner-verification/status";
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
 import type { InvariantId } from "./core/invariant-id";
+import type { TaskId } from "./core/task-id";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 // The sibling entry point is owned by its dependency-free leaf, which both
@@ -746,12 +747,13 @@ export type TaskReopeningAudit = Readonly<{
   schemaVersion: 1;
   kind: "implemented-tasks-reopened";
   wave: number;
-  /** Distinct Tasks of `wave`, in TaskGraph order. */
-  reopenedTaskIds: readonly string[];
+  /** Distinct Tasks of `wave`, in TaskGraph order; a reopening names at least one. */
+  reopenedTaskIds: OrchestrationNonEmpty<TaskId>;
   /** The operator's non-blank reason, at most 512 characters. */
   reason: string;
   /** The abandoned Wave Gate run whose review authority the reopening
-   *  retired; null when no gate had registered for the Wave. */
+   *  retired; null when no abandoned run was still on the graph (none had
+   *  registered, or an earlier reopening already retired it). */
   abandonedRunId: OrchestrationRunId | null;
 }>;
 

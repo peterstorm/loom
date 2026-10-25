@@ -25,6 +25,7 @@ import {
   prepareWaveReviewBatch,
   readWaveReviewContext,
   taskReviewScope,
+  waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
   waveTaskReviewRoster,
   type WaveRequestBatch,
@@ -169,9 +170,8 @@ export function installWaveReviewRunsTransition(
           canonicalStructuralEquals(run.slot_authority, currentSlots)
         : run.reviewer_protocol === undefined;
       const same = sameProtocol && run.packet_id === taskRun.packetId && run.generation === taskRun.generation &&
-        run.head_sha === taskRun.headSha && canonicalStructuralEquals(run.expected_agents, expectedAgents) &&
-        run.slot_authority?.length === slotAuthority.length && slotAuthority.every((slot, index) =>
-          run.slot_authority?.[index]?.agent === slot.agent && run.slot_authority[index]?.slot_id === slot.slot_id) &&
+        run.head_sha === taskRun.headSha && waveRunRosterProblem(locked, registration.schemaVersion, task, run) === null &&
+        slotAuthority.every((slot, index) => run.slot_authority?.[index]?.slot_id === slot.slot_id) &&
         canonicalStructuralEquals(run.workspace_scope, currentWorkspace.scope) &&
         run.workspace_head_sha === (taskRun.workspaceHeadSha ?? taskRun.headSha) &&
         run.wave_gate_run_id === specCheckAuthority.runId &&

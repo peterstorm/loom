@@ -146,7 +146,9 @@ export type PlanStopChecksFn = (graph: TaskGraph, taskId: string, changed: Chang
 
 // --- Judging an affected run ---
 
-/** One affected testcase the report shows not passing, with the file as reported. */
+/** One affected testcase the report shows not passing. `file` is the declared
+ *  acceptance path when the Wave Gate's attribution places the testcase in an
+ *  owed acceptance file, otherwise the file as reported (CT-2 amendment A1). */
 export type FailingAffectedTestcase = Readonly<{
   file: string;
   name: string;

@@ -24,8 +24,8 @@ import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
   taskReviewScope,
+  waveRunRosterProblem,
   waveSpecCheckDocumentsMatch,
-  waveTaskReviewRoster,
   type WaveReviewContextAuthority,
 } from "./wave-review-authority";
 
@@ -180,7 +180,7 @@ export function waveReviewerSlotProblem(
     return "request does not belong to the exact current Wave Review Packet slot";
   }
   if (protocol.protocolVersion === 2) {
-    if (!canonicalStructuralEquals(run.expected_agents, waveTaskReviewRoster(graph, 2, task)) ||
+    if (waveRunRosterProblem(graph, 2, task, run) !== null ||
         !canonicalStructuralEquals(run.reviewer_protocol, protocol.reviewerProtocol) ||
         run.wave_gate_run_id !== request.runId || run.wave_gate_authority_digest !== context.authorityDigest ||
         run.workspace_head_sha !== taskRun.workspaceHeadSha ||

@@ -60,6 +60,7 @@ import {
   parseEffectId,
   parseOrchestrationRunId,
   parseSlotId,
+  type NonEmpty,
 } from "./core/orchestration-contract";
 import {
   derivePendingTaskProof,
@@ -917,7 +918,12 @@ function parseTaskReopeningAudit(
   if (!Array.isArray(ids) || ids.length === 0) return parseErr(`${label}.reopenedTaskIds must be a non-empty array`);
   const idError = ids.map((id) => taskIdError(id, `${label}.reopenedTaskIds`)).find((error) => error !== null);
   if (idError !== undefined) return parseErr(idError);
-  const reopenedTaskIds = ids as string[];
+  const [first, ...rest] = ids.flatMap((id) => {
+    const parsed = parseTaskId(id);
+    return parsed.ok ? [parsed.value] : [];
+  });
+  if (first === undefined) return parseErr(`${label}.reopenedTaskIds must be a non-empty array`);
+  const reopenedTaskIds: NonEmpty<TaskId> = Object.freeze([first, ...rest] as const);
   if (new Set(reopenedTaskIds).size !== reopenedTaskIds.length) {
     return parseErr(`${label}.reopenedTaskIds names a Task more than once`);
   }
@@ -936,7 +942,7 @@ function parseTaskReopeningAudit(
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
     wave: wave.value,
-    reopenedTaskIds: Object.freeze([...reopenedTaskIds]),
+    reopenedTaskIds,
     reason,
     abandonedRunId: abandonedRunId === null ? null : abandonedRunId.value,
   }));

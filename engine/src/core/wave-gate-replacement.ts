@@ -12,7 +12,7 @@ import { canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId
 import { CURRENT_REVIEWER_PROTOCOL } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
-import { waveGateAuthorityDigest, waveTaskReviewRoster } from "./wave-review-authority";
+import { waveGateAuthorityDigest, waveRunRosterProblem } from "./wave-review-authority";
 
 type ReplacementRefusal = Readonly<{ ok: false; message: string }>;
 
@@ -92,11 +92,7 @@ export function prepareExhaustedWaveGateRestart(
   for (const task of waveTasks) {
     const run = task.review_run;
     if (run === undefined) continue;
-    const roster = waveTaskReviewRoster(graph, previous.schemaVersion, task);
-    if (run.head_sha !== epoch.batchEpoch ||
-        !canonicalStructuralEquals(run.expected_agents, roster) ||
-        run.slot_authority === undefined || run.slot_authority.length !== roster.length ||
-        roster.some((agent, index) => run.slot_authority?.[index]?.agent !== agent)) {
+    if (run.head_sha !== epoch.batchEpoch || waveRunRosterProblem(graph, previous.schemaVersion, task, run) !== null) {
       return { ok: false, message: `task ${task.id} Review Packet is not bound to the active epoch and exact reviewer roster` };
     }
   }

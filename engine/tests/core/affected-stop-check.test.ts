@@ -165,6 +165,15 @@ describe("judgeAffectedRun: expected-RED acceptance failures (the Wave Gate's ru
     expect(judgeAffectedRun(junit([acceptanceCase(AS_002, "failed")]), green(3)).kind).toBe("failing");
   });
 
+  it("names blocking and excused acceptance failures by the same declared path, not the runner-relative classname", () => {
+    const cwdRelative = (name: string): Case => ({ file: "payload.acceptance.test.ts", name, outcome: "failed" });
+    expect(judgeAffectedRun(junit([cwdRelative(AS_001), cwdRelative(AS_002)]), green(2))).toEqual({
+      kind: "failing",
+      testcases: [{ file: SURFACE.acceptance, name: AS_001, outcome: "failed" }],
+      excused: [{ file: SURFACE.acceptance, name: AS_002 }],
+    });
+  });
+
   it("blocks an acceptance file that failed to collect, even in the contract Wave", () => {
     expect(judgeAffectedRun(junit([acceptanceCase(SURFACE.acceptance, "failed")]), red(1))).toEqual({
       kind: "failing",

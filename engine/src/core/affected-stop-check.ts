@@ -1,8 +1,9 @@
 /**
  * The affected-test stop check's pure core (I7, AD-10).
  * - `judgeAffectedRun` turns one affected run's parsed JUnit report into a
- *   verdict. A failure the Wave Gate would excuse as expected RED
- *   (`isExpectedRedAcceptanceFailure`, the one rule) never blocks.
+ *   verdict. Each failure is classified by the Wave Gate's own
+ *   `classifyFailedTestcase`, so one it would excuse as expected RED never
+ *   blocks.
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
  *   both stop checks, applying `blockAdmission`, the per-check cap gate.
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
@@ -30,46 +31,30 @@ import {
   type StopCheckBlockCount,
   type StopCheckName,
 } from "./affected-stop-check-types";
-import { isExpectedRedAcceptanceFailure, testcaseAcceptanceFile, type AcceptanceExpectation } from "./acceptance-contract/gate";
+import { classifyFailedTestcase, isFailedReportTestcase } from "./acceptance-contract/gate";
 import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import type { NonEmpty } from "./orchestration-contract";
 import { attributeReportedFile } from "./report-file-attribution";
-import { isCollectionErrorTestcase, type ReportTestcase } from "./structured-test-report";
 
 // --- Judging an affected run ---
 
-/** One failed testcase, judged: it blocks, or the Wave Gate's expected-RED rule excuses it. */
-type JudgedFailure =
-  | Readonly<{ kind: "blocking"; testcase: FailingAffectedTestcase }>
-  | Readonly<{ kind: "excused"; testcase: ExcusedAcceptanceTestcase }>;
-
 /**
- * Judge one failed testcase. It is excused only when the Wave Gate's own
- * attribution names an acceptance file of an owed contract and the gate's
- * expected-RED rule holds for it; anything else blocks, a collection error in
- * an acceptance file included.
+ * Judge one affected run. Each failed testcase goes through the Wave Gate's
+ * own classification (`classifyFailedTestcase`): an expected-RED failure is
+ * excused, and anything else blocks, including a collection error in an
+ * acceptance file. Both lists name a testcase by the same file identity.
  */
-function judgeFailure(expectation: AcceptanceExpectation, acceptanceFiles: readonly string[], testcase: ReportTestcase): JudgedFailure {
-  const collectionError = isCollectionErrorTestcase(testcase);
-  const file = testcaseAcceptanceFile(acceptanceFiles, testcase.classname);
-  if (file !== null && isExpectedRedAcceptanceFailure(expectation, { file, name: testcase.name, outcome: testcase.outcome, collectionError })) {
-    return freeze({ kind: "excused", testcase: freeze({ file, name: testcase.name }) });
-  }
-  return freeze({
-    kind: "blocking",
-    testcase: freeze({ file: testcase.classname, name: testcase.name, outcome: collectionError ? "collection-error" : "failed" }),
-  });
-}
-
 export const judgeAffectedRun: JudgeAffectedRunFn = (projection, expectation): AffectedRunVerdict => {
   if (!projection.ok) return freeze({ kind: "unobservable", reason: `the affected runner's report could not be read: ${projection.error.message}` });
   if (projection.value.length === 0) return freeze({ kind: "passed", observed: "zero-tests" });
-  const acceptanceFiles = expectation.contracts.flatMap(({ files }) => files.map(({ path }) => path));
-  const judged = projection.value
-    .filter(({ outcome }) => outcome === "failed")
-    .map((testcase) => judgeFailure(expectation, acceptanceFiles, testcase));
-  const failing = nonEmpty(judged.flatMap((failure) => failure.kind === "blocking" ? [failure.testcase] : []));
-  const excused = judged.flatMap((failure) => failure.kind === "excused" ? [failure.testcase] : []);
+  const blocking: FailingAffectedTestcase[] = [];
+  const excused: ExcusedAcceptanceTestcase[] = [];
+  for (const testcase of projection.value.filter(isFailedReportTestcase)) {
+    const judged = classifyFailedTestcase(expectation, testcase);
+    if (judged.kind === "expected-red") excused.push(freeze({ file: judged.file, name: judged.name }));
+    else blocking.push(freeze({ file: judged.file, name: judged.name, outcome: judged.collectionError ? "collection-error" : "failed" }));
+  }
+  const failing = nonEmpty(blocking);
   if (failing !== null) return freeze({ kind: "failing", testcases: failing, excused: freeze(excused) });
   const allExcused = nonEmpty(excused);
   return allExcused === null ? freeze({ kind: "passed", observed: "some-tests" }) : freeze({ kind: "excused", excused: allExcused });

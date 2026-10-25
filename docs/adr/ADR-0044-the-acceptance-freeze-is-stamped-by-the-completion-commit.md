@@ -42,29 +42,39 @@ So the freeze was already `frozen` by the time the gate reached the advisory pau
      run freezes nothing, so a fresh gate over fixed files sees no drift. The stamp joins the one atomic
      completion write that already archives the receipt into history, so it can never exist without a
      completed Wave.
-   - Cons: `commitWaveGateCompletion` gains a parameter: the shell's observation of the frozen paths.
-     Every caller has to supply it (the legacy `complete-wave-gate` passes an empty map, since a legacy
-     graph has no suite receipt).
+   - Cons: the completion commit needs the shell's observation of the frozen paths, and that observation is
+     only sound when made before the workspace observation readiness re-proves. Where that observation
+     enters the core is a seam of its own (below).
 
 ## Decision
 **When the completion suite accepts, `installAcceptedReceipt` writes only `active_wave_completion_suite`.
-The pure `commitWaveGateCompletion(snapshot, frozenPaths)` stamps the Acceptance Freeze from the archived
-receipt's acceptance expectation and facts, in the same locked update that writes the completed-Wave
-history entry.**
+The pure `commitWaveGateCompletion(snapshot)` stamps the Acceptance Freeze from the archived receipt's
+acceptance expectation and facts, in the same locked update that writes the completed-Wave history entry.
+The frozen-path observation it stamps from travels inside the readiness snapshot, beside the workspace
+observation, never as a separate caller-built argument.**
 
 Concretely:
 
+- `engine/src/core/wave-gate-checks.ts`: `GateDeps.currentFrozenPaths` is the shell's observation of every
+  frozen path, next to `currentWaveWorkspace`. `deriveWaveReadiness` copies it into the snapshot as
+  `currentFrozenPathObservations` (an empty map when the dependency is absent). It is not readiness
+  authority, so the readiness digest does not cover it, and status-only callers never supply it.
 - `engine/src/core/wave-gate-machine.ts`: `completionAcceptanceFreezes` runs `stampAcceptanceFreezes` over
-  the locked graph's contracts using the active receipt's `acceptance` (when there is one). A stamp it cannot
-  make, such as an unreadable or unobserved frozen path, refuses the completion as
-  `Acceptance Freeze refused: …`.
+  the locked graph's contracts using the active receipt's `acceptance` (when there is one) and the
+  snapshot's `currentFrozenPathObservations`. A stamp it cannot make, such as an unreadable or unobserved
+  frozen path, refuses the completion as `Acceptance Freeze refused: …`.
 - `engine/src/handlers/helpers/wave-completion-suite.ts`: `observeCompletionFrozenPaths(graph, start)`
   digests every frozen path in the Run Directory's repository. When the repository cannot be resolved, every
-  path comes back unreadable, so a stamp that needs one is refused.
-- `engine/src/handlers/helpers/programs/wave-gate.ts`: inside `commitActiveWaveGateCompletion` the shell
-  observes the frozen paths first and then derives readiness. Readiness re-observes the workspace and
-  requires it to equal the receipt's `workspaceDigest`. Since that digest covers the frozen paths, a byte
-  that changed between the two reads fails readiness instead of being frozen.
+  path comes back unreadable, so a stamp that needs one is refused. `observeWaveCompletionWorkspace(graph,
+  start)` is the one shell function that makes both readiness observations, frozen paths first and then the
+  workspace. Readiness requires the workspace to equal the receipt's `workspaceDigest`. Since that digest
+  covers the frozen paths, a byte that changed between the two reads fails readiness instead of being
+  frozen. The ordering lives in that one function, not at each commit site.
+- `engine/src/handlers/helpers/programs/wave-gate.ts`: `currentWaveGateDeps` spreads
+  `observeWaveCompletionWorkspace` into the deps of a manifest-bearing graph. Inside
+  `commitActiveWaveGateCompletion` the shell derives readiness from those deps and commits the snapshot.
+  A legacy graph (no Verification Manifest) observes neither; `complete-wave-gate.ts` likewise supplies
+  no frozen paths, because a legacy graph has no suite receipt to stamp from.
 
 Nothing read the freeze between receipt installation and completion in a way this changes:
 
@@ -94,8 +104,10 @@ and same roster, from the same receipt facts) and leaves it unchanged. A contrac
 
 **Negative:**
 - Completion now reads files under the TaskGraph lock: the frozen paths, a handful of small files beside the
-  workspace observation readiness already makes there.
-- `commitWaveGateCompletion` has one more required argument, so tests that call it pass an observation (an
-  empty map where no contract is owed).
+  workspace observation readiness already makes there. The Wave Gate program's earlier, unlocked readiness
+  (refutation and advisory phases) reads them too, since it shares `currentWaveGateDeps`.
+- The readiness snapshot carries one more field that only the completion commit reads.
 - `engine/tests/handlers/helpers/wave-completion-suite.test.ts` now pins `awaiting-red` after `ensure()` and
-  `frozen` only after the completion commit. Its drift test uses a contract that is already frozen.
+  `frozen` only after the completion commit. Its drift test uses a contract that is already frozen. It also
+  pins the refusal for an unresolvable repository, the stale-readiness failure for a byte changed between
+  the frozen-path and workspace observations, and the receipt-judged stamp for a byte changed after both.

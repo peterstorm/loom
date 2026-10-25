@@ -1189,6 +1189,71 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("keeps Loom's protected directories guarded for the parent even outside the orchestrated repository", async () => {
+    // This file's fixture subagent dir lives under ROOT; re-point both
+    // protected dirs OUTSIDE it — the default layout's shape — for this case.
+    writeState(initialGraph());
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a1";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const protectedSubagents = canonicalTempDir("loom-pi-protected-subagents-");
+    const protectedMachines = canonicalTempDir("loom-pi-protected-machines-");
+    const scratch = canonicalTempDir("loom-pi-protected-scratch-");
+    const previousMachines = process.env.LOOM_MACHINES_DIR;
+    process.env.LOOM_SUBAGENT_DIR = protectedSubagents;
+    process.env.LOOM_MACHINES_DIR = protectedMachines;
+    const blocked = expect.objectContaining({ block: true });
+    try {
+      for (const target of [
+        join(protectedSubagents, `${session}.evidence.jsonl`),
+        join(protectedSubagents, `${session}.active`),
+        join(protectedSubagents, `${session}.task_graph`),
+        join(protectedMachines, "code-implementer-agent.json"),
+      ]) {
+        expect(await pi.emit("tool_call", {
+          toolName: "write", input: { path: target, content: "x" },
+        }, context), target).toContainEqual(blocked);
+      }
+      expect(await pi.emit("tool_call", {
+        toolName: "write", input: { path: join(scratch, "notes.md"), content: "x" },
+      }, context)).toEqual([undefined]);
+    } finally {
+      process.env.LOOM_SUBAGENT_DIR = subagentDir;
+      restoreEnv("LOOM_MACHINES_DIR", previousMachines);
+      for (const dir of [protectedSubagents, protectedMachines, scratch]) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("guards a second repository named by a valid session TaskGraph pointer", async () => {
+    // The cwd graph is ROOT's; the pointer names a graph in ANOTHER Git
+    // repository. Both repositories are orchestrated; a path in neither is not.
+    writeState(initialGraph());
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a2";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const second = canonicalTempDir("loom-pi-second-repo-");
+    const scratch = canonicalTempDir("loom-pi-second-scratch-");
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const secondGraph = join(second, ".claude", "state", "active_task_graph.json");
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: second });
+      mkdirSync(dirname(secondGraph), { recursive: true });
+      writeFileSync(secondGraph, "{}");
+      mkdirSync(subagentDir, { recursive: true });
+      writeFileSync(pointer, secondGraph);
+
+      expect(await pi.emit("tool_call", {
+        toolName: "write", input: { path: join(second, "src", "x.ts"), content: "x" },
+      }, context)).toContainEqual(expect.objectContaining({ block: true }));
+      expect(await pi.emit("tool_call", {
+        toolName: "write", input: { path: join(scratch, "notes.md"), content: "x" },
+      }, context)).toEqual([undefined]);
+    } finally {
+      rmSync(pointer, { force: true });
+      for (const dir of [second, scratch]) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("retains malformed completion checkpoint parser diagnostics", async () => {
     const extensionSpecifier = "../../pi/review-run-authority.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
@@ -3145,6 +3210,25 @@ describe("Pi extension review tool_result integration", () => {
         input: { path: join(scratch, "notes.md"), content: "x" },
       }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
       expect(outsideHit).toEqual([undefined]);
+      // ...but a protected Loom directory is never "outside": the scoped
+      // grant's confinement still applies to the machine-definitions dir,
+      // even when it lies outside the orchestrated repository.
+      const previousMachines = process.env.LOOM_MACHINES_DIR;
+      const machines = join(scratch, "machines");
+      mkdirSync(machines, { recursive: true });
+      process.env.LOOM_MACHINES_DIR = machines;
+      try {
+        const machinesHit = await pi.emit("tool_call", {
+          toolName: "write",
+          input: { path: join(machines, "specify-agent.json"), content: "{}" },
+        }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+        expect(machinesHit).toContainEqual(expect.objectContaining({
+          block: true,
+          reason: expect.stringContaining("outside the granted artifact scope"),
+        }));
+      } finally {
+        restoreEnv("LOOM_MACHINES_DIR", previousMachines);
+      }
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

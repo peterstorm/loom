@@ -62,9 +62,11 @@ export {
 export {
   acceptanceExpectation,
   acceptanceObservation,
+  classifyFailedTestcase,
   emptyAcceptanceExpectation,
   graphAcceptanceExpectation,
   isExpectedRedAcceptanceFailure,
+  isFailedReportTestcase,
   judgeAcceptance,
   observeAcceptanceFacts,
   owesAcceptance,
@@ -78,6 +80,7 @@ export {
   type AcceptanceObservation,
   type AcceptanceReportFacts,
   type ContractGateExpectation,
+  type FailedReportTestcase,
   type ObservedAcceptanceTestcase,
   type RecordedAcceptanceVerdict,
 } from "./gate";

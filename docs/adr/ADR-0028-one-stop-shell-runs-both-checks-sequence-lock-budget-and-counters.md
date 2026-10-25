@@ -135,11 +135,14 @@ keeps an independent block counter per check. Every decision it acts on is a pur
 
   *(Amended 2026-10-25, CT-2 amendment A1.)* `judgeAffectedRun(projection, expectation)` now also takes
   the `AcceptanceExpectation` the Task's own Wave Gate will owe (`graphAcceptanceExpectation(graph,
-  task.wave)`, wired by the stop shell; no new port). A failed testcase that the Wave Gate's attribution
-  (`testcaseAcceptanceFile`) places in an owed contract's acceptance file, and for which the gate's one
-  expected-RED rule `isExpectedRedAcceptanceFailure` holds (the contract's RED Wave, or a pending anchor
-  after it), no longer blocks. The gate's own exit excuse (`excused`) is built from the same predicate, so
-  the two cannot drift. Before this, a contract Wave's frozen acceptance tests, deliberately RED, blocked
+  task.wave)`, wired by the stop shell; no new port). Each failed testcase is classified by
+  `classifyFailedTestcase` (`acceptance-contract/gate.ts`), the gate's own observation step: attribution
+  to an owed acceptance file, collection-error detection, and the one expected-RED rule
+  `isExpectedRedAcceptanceFailure` (the contract's RED Wave, or a pending anchor after it). A testcase the
+  rule excuses no longer blocks. The gate's report facts are built by that same observation step, and its
+  exit excuse (`excused`) applies the same predicate to them, so the two cannot drift. Both of I7's lists
+  name a testcase by one file identity: the declared acceptance path when attributed, otherwise the
+  reported classname. Before this, a contract Wave's frozen acceptance tests, deliberately RED, blocked
   every Wave 1 Task whose affected run selected them (the two contract writers and a sibling in one run)
   up to the cap, then failed open. Collection errors, due or unanchored testcases, unattributed files and
   unobservable (`awaiting-red` after its Wave) contracts still block: the rule fails closed. The verdict

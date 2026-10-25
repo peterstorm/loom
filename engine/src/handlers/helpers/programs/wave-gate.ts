@@ -17,7 +17,7 @@ import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
-import { ensureWaveCompletionSuite, observeCompletionFrozenPaths, observeCurrentWaveWorkspace } from '../wave-completion-suite';
+import { ensureWaveCompletionSuite, observeWaveCompletionWorkspace } from '../wave-completion-suite';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import type { TaskGraph } from '../../../types';
@@ -46,13 +46,12 @@ const waveGateDeps = Object.freeze({
   reviewedWorkspace: observeReviewedWorkspace,
 });
 
+/** A legacy graph has no suite receipt, so it observes neither the workspace
+ *  nor the frozen paths a receipt would stamp from. */
 function currentWaveGateDeps(graph: TaskGraph, authorityStartPath: string) {
   return graph.verification_manifest === undefined
     ? waveGateDeps
-    : Object.freeze({
-        ...waveGateDeps,
-        currentWaveWorkspace: observeCurrentWaveWorkspace(graph, authorityStartPath),
-      });
+    : Object.freeze({ ...waveGateDeps, ...observeWaveCompletionWorkspace(graph, authorityStartPath) });
 }
 
 /** Canonical structural equality to a typed witness proves the raw value carries the witness's type. */
@@ -241,9 +240,6 @@ async function resumeWaveGateAfter(
           },
         };
       }
-      // Frozen bytes first, then the workspace readiness pins against the
-      // receipt: a byte changed between the two reads fails readiness.
-      const frozenPaths = observeCompletionFrozenPaths(locked, handle.runDirectory);
       const lockedReadiness = deriveWaveReadiness(locked, currentWaveGateDeps(locked, handle.runDirectory));
       if (!lockedReadiness.ok) {
         return {
@@ -251,7 +247,7 @@ async function resumeWaveGateAfter(
           error: { kind: "wave-completion-commit-rejected" as const, message: lockedReadiness.error.reasons.map(({ message }) => message).join("; ") },
         };
       }
-      const commit = commitWaveGateCompletion(lockedReadiness.value, frozenPaths);
+      const commit = commitWaveGateCompletion(lockedReadiness.value);
       // The completed Wave's claims now name the text spec-check verified, so a
       // later Wave's projection can report a Requirement rewritten since.
       return commit.ok

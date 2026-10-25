@@ -17,12 +17,14 @@
  * each write to the grant's `deriveArtifactWriteScope` dirs). Both paths
  * classify writers through the same `artifact-write-scope` role policy.
  *
- * The guard protects ONE thing: the orchestrated repository — the repository
- * that owns the live TaskGraph. A write whose every canonical target lies
- * outside that repository's canonical root (another worktree, a sibling
- * directory, a session scratchpad) cannot touch the orchestration and is
- * allowed before any admission runs (`editPlacement`). The shell resolves both
- * sides; anything it cannot resolve stays guarded.
+ * The guard protects the orchestrated repository — the repository that owns
+ * the live TaskGraph — and Loom's protected directories (the subagent dir with
+ * its evidence ledger, roster and pointers; the machine-definitions dir),
+ * wherever those lie. A write whose every canonical target lies outside both
+ * (another worktree, a sibling directory, a session scratchpad) cannot touch
+ * the orchestration and is allowed before any admission runs
+ * (`editPlacement`). The shell resolves every side; anything it cannot
+ * resolve stays guarded.
  *
  * On Claude Code an implementation role is not by itself a write grant: the
  * Agent's exact Implementation Attempt is bound lazily (`core/implementation-
@@ -157,9 +159,21 @@ type ArtifactWriteVerdict =
  * `unresolved` when the shell could not prove one — then every target stays
  * guarded. The shell derives each root from the resolved graph path
  * (`observeTaskGraphProjectBoundary`), never from the caller's cwd.
+ *
+ * A resolved repository also carries `protectedRoots`: the symlink-canonical
+ * protected Loom directories (`protectedDirs()` — the subagent dir and the
+ * machine-definitions dir). They usually lie OUTSIDE every repository root,
+ * yet a write into them forges evidence, fakes attribution or rewrites the
+ * gate's rules, so they are guarded wherever they lie. Requiring them on the
+ * only variant that can place a write `outside` makes "forgot the protected
+ * directories" unrepresentable.
  */
 export type OrchestratedRepository =
-  | Readonly<{ kind: "resolved"; roots: readonly [string, ...string[]] }>
+  | Readonly<{
+    kind: "resolved";
+    roots: readonly [string, ...string[]];
+    protectedRoots: readonly [string, ...string[]];
+  }>
   | Readonly<{ kind: "unresolved" }>;
 
 /**
@@ -171,7 +185,8 @@ export type EditTargets =
   | Readonly<{ kind: "resolved"; paths: readonly [string, ...string[]] }>
   | Readonly<{ kind: "unresolved" }>;
 
-/** Where one write call lands relative to the orchestrated repository. */
+/** Where one write call lands relative to the orchestrated repository and
+ *  Loom's protected directories: `inside` means guarded by either. */
 export type EditPlacement = Readonly<{ kind: "inside" }> | Readonly<{ kind: "outside" }>;
 
 /** The one `unresolved` answer for both `OrchestratedRepository` and `EditTargets`. */
@@ -193,12 +208,14 @@ export function guardedByRoot(root: string, target: string): boolean {
 
 /**
  * Pure placement of one write call: `outside` only when the repository and
- * every target are resolved and no root guards any target. One target inside —
- * or anything unresolved — places the whole call `inside`.
+ * every target are resolved and no root — repository or protected — guards any
+ * target. One target inside — or anything unresolved — places the whole call
+ * `inside`.
  */
 export function editPlacement(repository: OrchestratedRepository, targets: EditTargets): EditPlacement {
   if (repository.kind === "unresolved" || targets.kind === "unresolved") return INSIDE;
-  const guarded = targets.paths.some((target) => repository.roots.some((root) => guardedByRoot(root, target)));
+  const roots = [...repository.roots, ...repository.protectedRoots];
+  const guarded = targets.paths.some((target) => roots.some((root) => guardedByRoot(root, target)));
   return guarded ? INSIDE : OUTSIDE;
 }
 
@@ -229,6 +246,25 @@ function artifactWriteVerdict(
 }
 
 /**
+ * The harness-specific inputs of one decision; each is optional because only
+ * some harnesses can supply it.
+ *
+ * - `artifactWrite` — who is writing what, for the artifact-writer admission
+ *   (Claude Code only; Pi cannot name the calling agent).
+ * - `implementationBinding` — the lazy exact-authority binding (Claude Code
+ *   only; Pi binds authority at spawn).
+ * - `placeEdit` — the write's placement. Consulted lazily — only for an armed
+ *   file tool with a parseable session id — because resolving the orchestrated
+ *   repository costs the shell a Git probe. Omitted, every write is placed
+ *   inside.
+ */
+export type DirectEditPorts = Readonly<{
+  artifactWrite?: ArtifactWriteRequest | undefined;
+  implementationBinding?: ImplementationBindingProbe | undefined;
+  placeEdit?: (() => EditPlacement) | undefined;
+}>;
+
+/**
  * REQUIRED arming port: the task-graph existence probe, named at every call
  * site — no import-frozen default stands in for it. The lazy-arming doctrine
  * (commit 6f4a1452): a default frozen at module load made the gate's arming
@@ -236,19 +272,13 @@ function artifactWriteVerdict(
  * callers inject `pathExistsFailClosed(taskGraphPath())`, tests inject their
  * own. Fail-closed semantics stay the caller's (`pathExistsFailClosed` — ENOENT
  * is the only absent answer).
- *
- * `placeEdit` is consulted lazily — only for an armed file tool with a
- * parseable session id — because resolving the orchestrated repository costs
- * the shell a Git probe. Omitted, every write is placed inside.
  */
 export function shouldBlockDirectEdit(
   toolName: string,
   sessionId: string,
   taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
-  artifactWrite?: ArtifactWriteRequest,
-  implementationBinding?: ImplementationBindingProbe,
-  placeEdit: () => EditPlacement = placedInside,
+  { artifactWrite, implementationBinding, placeEdit = placedInside }: DirectEditPorts = {},
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -265,8 +295,9 @@ export function shouldBlockDirectEdit(
     };
   }
 
-  // A write that cannot reach the orchestrated repository is not this guard's
-  // concern; every admission below governs writes INSIDE it, unchanged.
+  // A write that reaches neither the orchestrated repository nor a protected
+  // Loom directory is not this guard's concern; every admission below governs
+  // writes INSIDE them, unchanged.
   if (placeEdit().kind === "outside") return { kind: "allow" };
 
   // Allow if an IMPLEMENTATION subagent is active. Review agents and verifiers

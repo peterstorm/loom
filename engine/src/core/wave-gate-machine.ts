@@ -472,8 +472,15 @@ export type WaveReadinessSnapshot = Readonly<{
   lifecycleCheckpointDigest: ArtifactDigest | null;
   currentWaveWorkspaceObservation: WaveWorkspaceObservation | null;
   currentWaveCompletionResultObservation: WaveCompletionResultObservation | null;
+  /** The frozen paths as the shell observed them before the workspace
+   * (`GateDeps.currentFrozenPaths`, empty when not supplied). Only the
+   * completion commit reads them, to stamp the Acceptance Freeze; they are
+   * not readiness authority, so the readiness digest does not cover them. */
+  currentFrozenPathObservations: FrozenPathObservations;
   reasons: NonEmpty<StatusReason>;
 }>;
+
+const NO_FROZEN_PATH_OBSERVATIONS: FrozenPathObservations = new Map();
 
 const waveNextActionProofs = new WeakSet<object>();
 
@@ -741,6 +748,7 @@ export function deriveWaveReadiness(
     lifecycleCheckpointDigest: lifecycleProof?.lifecycleCheckpoint.checkpointDigest ?? null,
     currentWaveWorkspaceObservation: workspaceObservation,
     currentWaveCompletionResultObservation: completionResultObservation,
+    currentFrozenPathObservations: deps.currentFrozenPaths ?? NO_FROZEN_PATH_OBSERVATIONS,
     reasons: readinessReasons(graph, wave, decision, reviews, panel, tests, eligibility),
   });
   waveReadinessProofs.add(snapshot);
@@ -780,14 +788,14 @@ function completionAcceptanceFreezes(
  * one StateManager transaction. No task/wave mutation is exposed separately.
  *
  * The Acceptance Freeze is stamped here, from the archived suite receipt and
- * the shell's observation of the frozen paths under the completion lock
- * (`frozenPaths`), so it lands only once the advisory decision is made and the
- * Wave completes: an abandoned run freezes nothing. The receipt's workspace
- * digest, re-proven by readiness, pins those bytes to the ones it judged.
+ * the frozen paths the readiness snapshot carries (observed by the shell under
+ * the completion lock, before the workspace), so it lands only once the
+ * advisory decision is made and the Wave completes: an abandoned run freezes
+ * nothing. The receipt's workspace digest, re-proven by readiness, pins those
+ * bytes to the ones it judged.
  */
 export function commitWaveGateCompletion(
   snapshot: WaveReadinessSnapshot,
-  frozenPaths: FrozenPathObservations,
 ): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> {
   if (!waveReadinessProofs.has(snapshot)) {
     return commitFailure("completion requires a parser-derived canonical readiness proof");
@@ -855,7 +863,11 @@ export function commitWaveGateCompletion(
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
     return commitFailure(`Wave Gate run ${completedRegistration.runId} is already terminal in history`);
   }
-  const contracts = completionAcceptanceFreezes(advanced.acceptance_contracts, activeCompletionSuite, frozenPaths);
+  const contracts = completionAcceptanceFreezes(
+    advanced.acceptance_contracts,
+    activeCompletionSuite,
+    snapshot.currentFrozenPathObservations,
+  );
   if (!contracts.ok) return commitFailure(`Acceptance Freeze refused: ${contracts.error}`);
   const {
     active_wave_gate: _retired,

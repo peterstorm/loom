@@ -568,8 +568,8 @@ For each wave:
 3. Wait for all dispatched Tasks to settle. Infrastructure-blocked attempts reuse the initial/retry dispatch arm for their preserved current semantic attempt; they never consume the budget or introduce another semantic dispatch kind. Semantic attempt 1 failure produces exactly one retry dispatch.
 4. Re-read canonical status and loop through steps 1–4 for every subsequent `spawn-wave-implementation` or `await-wave-implementation` recovery. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget. Exit this loop only on `start-wave-gate` or `start-successor-wave-gate`; `escalate-wave-implementation` is terminal and stops execution.
 5. **Only after `start-wave-gate` (or `start-successor-wave-gate`, with its exact run id), RUN `/wave-gate` — MANDATORY, via subagents** (see below)
-6. If blocked (critical findings): abandon the run, reopen each affected Task with `helper orchestration reopen-task` (below), dispatch it through its brief with the findings as `--note`s, then re-run `/wave-gate`
-7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`. The engine records only approval (`{"kind":"approve"}` through `decide`), so triage first. To fix a relevant advisory: abandon the run, reopen the Task with `helper orchestration reopen-task --wave <N> --task <id> --reason "<finding>"`, dispatch it through `helper orchestration brief --task <id> --note "<finding>"`, and start a fresh `/wave-gate` once it settles. Approve once every advisory is fixed, deferred or dismissed with a reason. In a contract Wave, check status for an `acceptance-freeze-pending` reason first. Approval is what freezes the contract's files (receipt installation and abandonment do not), so reopen the contract Task and fix their relevant advisories before approving.
+6. If blocked (critical findings): fix them through [Acting on a Finding](wave-gate.md#acting-on-a-finding) (abandon, `reopen-task`, `brief --note`, fresh `/wave-gate`)
+7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`. The engine records only approval (`{"kind":"approve"}` through `decide`), so triage first, and fix each relevant advisory through [Acting on a Finding](wave-gate.md#acting-on-a-finding). Approve once every advisory is fixed, deferred or dismissed with a reason. In a contract Wave, check status for an `acceptance-freeze-pending` reason first. Approval is what freezes the contract's files (receipt installation and abandonment do not), so reopen the contract Task and fix their relevant advisories before approving.
 8. **Let the registered `/wave-gate` façade run the frozen quiescent completion suite automatically.** It starts only after all current-Wave Agents stop and Task proof/test checks pass, before review publication. Project commands come only from the protected Verification Manifest and run without a shell. The reserved `loom:full-tier-lint` check runs programmatic rules; the existing terminal lint invocation remains a migration canary. Semantic and infrastructure failures return distinct blocked diagnostics. Never run an alternative model-authored command or silence a failure by editing the authority that caught it.
 9. Once the suite, reviews, relevant advisory disposition, spec alignment, and protected completion commit pass: advance to the next Wave.
 
@@ -845,12 +845,7 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 ### Fixing Blocked Waves
 
 When blocked (critical findings), Edit/Write blocked too. To fix:
-1. **Re-spawn via Task/subagent**: abandon the run, then reopen each affected `implemented` Task so status owes it a dispatch (`implemented` Tasks get no brief and the spawn gate refuses them):
-   ```bash
-   bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration reopen-task --wave <N> --task <id> [--task <id>]... --reason "<finding>"
-   bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief --task <id> --note "<finding>"
-   ```
-   The fix agent spawns from that brief (a subagent CAN Edit/Write). Reopening keeps the Task's Findings as prior Findings and leaves the Wave's other Tasks `implemented`. Never use `populate-task-graph --force`, which resets every Task.
+1. **Re-spawn via Task/subagent** through [Acting on a Finding](wave-gate.md#acting-on-a-finding): the fix agent spawns from the reopened Task's brief, with the findings as its `--note`s (a subagent CAN Edit/Write). Never use `populate-task-graph --force`, which resets every Task.
 2. **Run `/wave-gate`** — re-reviews only blocked tasks
 3. **Override false positives** — pipe corrected findings through whitelisted helpers (guard hook allows these):
    ```bash
@@ -874,7 +869,7 @@ Critical findings **block** the gate. Advisory findings do **not** — but loom 
 - **Relevant** — in scope for the task, actionable, and consistent with project standards (the repo's `CLAUDE.md` / conventions). These get **fixed**.
 - **Not relevant** — out-of-scope refactor, nitpick that contradicts an established project convention, false positive, or work deliberately deferred to a later wave. These are **recorded** with a one-line reason, not fixed.
 
-**Fix relevant advisories** the same way as criticals. Abandon the paused run, reopen the Task (`helper orchestration reopen-task`), and spawn its fix subagent from `helper orchestration brief --task <id> --note "<advisory>"` (Edit/Write are blocked for the orchestrator). Give it the advisory text and file context, and have it make the minimal change. Then start a fresh `/wave-gate` so the fix is re-reviewed.
+**Fix relevant advisories** the same way as criticals, through [Acting on a Finding](wave-gate.md#acting-on-a-finding): the fix subagent spawns from the reopened Task's brief (Edit/Write are blocked for the orchestrator), carrying the advisory text as its `--note`, and makes the minimal change. The fresh `/wave-gate` that follows re-reviews the fix.
 
 **Best-effort, non-blocking:** if a relevant advisory can't be fixed cleanly (breaks tests, needs an upstream change), defer it with a reason rather than blocking the wave. Never silently drop an advisory — every advisory ends as *fixed*, *deferred (reason)*, or *dismissed (reason)*.
 

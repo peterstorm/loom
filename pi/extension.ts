@@ -65,7 +65,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, protectedDirs, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -157,8 +157,9 @@ function pathExistsFailClosed(path: string): boolean {
  * owning each graph that armed this session — the cwd-resolved TaskGraph and
  * the graph the session's `<session>.task_graph` pointer names — through the
  * shared Claude resolver (`orchestratedRepositoryOf`), so both harnesses scope
- * the guard by one rule. A pointer that cannot be read or parsed leaves the
- * repository `unresolved`: the guard stays on for every target.
+ * the guard by one rule — including Loom's protected directories, which stay
+ * guarded wherever they lie. A pointer that cannot be read or parsed leaves
+ * the repository `unresolved`: the guard stays on for every target.
  */
 function piOrchestratedRepository(sessionId: SessionId | null): OrchestratedRepository {
   const graphPaths: string[] = [];
@@ -177,7 +178,7 @@ function piOrchestratedRepository(sessionId: SessionId | null): OrchestratedRepo
       return UNRESOLVED;
     }
   }
-  return orchestratedRepositoryOf(graphPaths);
+  return orchestratedRepositoryOf(graphPaths, protectedDirs());
 }
 
 /** Every target one Pi write call names, canonical against `cwd`; malformed input stays unresolved. */
@@ -356,9 +357,10 @@ export default function (
         currentGuard = "block-direct-edits";
         const rejectedGrant = rejectedChildWriteGrantBlock(childWriteGrants.rejectedSessions.has(sessionId));
         if (rejectedGrant !== null) return rejectedGrant;
-        // Only writes into the orchestrated repository are guarded, by the same
-        // placement rule Claude Code's handler applies. Resolved at most once:
-        // it costs a Git probe, and both checks below read it.
+        // Only writes into the orchestrated repository or a protected Loom
+        // directory are guarded, by the same placement rule Claude Code's
+        // handler applies. Resolved at most once: it costs a Git probe, and
+        // both checks below read it.
         let placement: EditPlacement | undefined;
         const placeEdit = (): EditPlacement =>
           placement ??= editPlacement(piOrchestratedRepository(safeSessionId), piEditTargets(event.input, ctx.cwd));
@@ -366,13 +368,12 @@ export default function (
           event.toolName,
           sessionId,
           () => graphIsActive,
+          activeRosterProbe,
           // No ArtifactWriteRequest: Pi cannot name the calling agent here.
           // Phase/panel writers are admitted as scoped write-grant holders and
-          // confined to their grant's scope dirs just below.
-          activeRosterProbe,
-          undefined,
-          undefined,
-          placeEdit,
+          // confined to their grant's scope dirs just below. No binding probe:
+          // Pi binds implementation authority at spawn.
+          { placeEdit },
         );
         if (result.kind === "block") {
           return { block: true, reason: result.message };

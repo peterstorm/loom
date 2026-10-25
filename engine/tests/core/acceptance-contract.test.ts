@@ -3,6 +3,7 @@ import fc from "fast-check";
 import {
   acceptanceContractsFromPlan,
   acceptanceExpectation,
+  classifyFailedTestcase,
   contractBindingErrors,
   contractClaimants,
   contractRole,
@@ -10,6 +11,7 @@ import {
   frozenPathDrift,
   frozenPaths,
   isExpectedRedAcceptanceFailure,
+  isFailedReportTestcase,
   renderFrozenPathDrift,
   judgeAcceptance,
   observeAcceptanceFacts,
@@ -23,6 +25,7 @@ import {
   type AcceptanceExpectation,
   type AcceptanceReportFacts,
   type ContractBindingTask,
+  type FailedReportTestcase,
   type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
 import type { ReportTestcase } from "../../src/core/structured-test-report";
@@ -364,6 +367,57 @@ describe("isExpectedRedAcceptanceFailure — the one expected-RED rule the gate 
         const ruleHolds = fact.kind === "projected" && fact.otherFailures === 0 && failing.length > 0 &&
           fact.testcases.filter(({ outcome }) => outcome === "failed").every((observedCase) => isExpectedRedAcceptanceFailure(expectation, observedCase));
         expect(judgeAcceptance(expectation, [fact]).excusedCheckIds).toEqual(ruleHolds ? ["verify"] : []);
+      },
+    ));
+  });
+});
+
+describe("classifyFailedTestcase — the one classification the gate and I7 share", () => {
+  const failed = (name: string, classname?: string): FailedReportTestcase => {
+    const report = testcase(name, "failed", undefined, classname);
+    if (!isFailedReportTestcase(report)) throw new Error("fixture is not failed");
+    return report;
+  };
+
+  it("names an attributed testcase by its declared acceptance path, whether excused or blocking", () => {
+    const red = acceptanceExpectation([contract()], TASKS, 1);
+    expect(classifyFailedTestcase(red, failed(ROSTER[0].name)))
+      .toEqual({ kind: "expected-red", file: ACCEPTANCE, name: ROSTER[0].name });
+    const wave2 = acceptanceExpectation([contract(FROZEN)], TASKS, 2);
+    expect(classifyFailedTestcase(wave2, failed(ROSTER[0].name)))
+      .toEqual({ kind: "blocking", file: ACCEPTANCE, name: ROSTER[0].name, collectionError: false });
+    expect(classifyFailedTestcase(red, failed("tests/acceptance/payload.acceptance.test.ts")))
+      .toEqual({ kind: "blocking", file: ACCEPTANCE, name: "tests/acceptance/payload.acceptance.test.ts", collectionError: true });
+  });
+
+  it("names an unattributed testcase by its reported classname, and it always blocks", () => {
+    const red = acceptanceExpectation([contract()], TASKS, 1);
+    expect(classifyFailedTestcase(red, failed("plain", "tests/core/other.test.ts")))
+      .toEqual({ kind: "blocking", file: "tests/core/other.test.ts", name: "plain", collectionError: false });
+    expect(classifyFailedTestcase(red, failed("tests/core/other.test.ts", "tests/core/other.test.ts")))
+      .toEqual({ kind: "blocking", file: "tests/core/other.test.ts", name: "tests/core/other.test.ts", collectionError: true });
+  });
+
+  it("narrows only failed testcases", () => {
+    expect(isFailedReportTestcase(testcase(ROSTER[0].name, "passed"))).toBe(false);
+    expect(isFailedReportTestcase(testcase(ROSTER[0].name, "skipped"))).toBe(false);
+  });
+
+  it("property: it agrees with the gate's facts and excuse for a check failing that testcase alone", () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 4 }),
+      fc.boolean(),
+      fc.constantFrom(ROSTER[0].name, ROSTER[1].name, "payload > unanchored", "tests/acceptance/payload.acceptance.test.ts"),
+      fc.boolean(),
+      (wave, frozen, name, outside) => {
+        const expectation = acceptanceExpectation([contract(frozen ? FROZEN : { state: "awaiting-red" })], TASKS, wave);
+        const classname = outside ? "tests/core/other.test.ts" : undefined;
+        const report = failed(name, classname);
+        const fact = facts(expectation, [report]);
+        const observed = fact.kind === "projected" ? fact.testcases[0] : undefined;
+        const classified = classifyFailedTestcase(expectation, report);
+        expect(classified.file).toBe(observed?.file ?? report.classname);
+        expect(classified.kind === "expected-red").toBe(judgeAcceptance(expectation, [fact]).excusedCheckIds.length > 0);
       },
     ));
   });

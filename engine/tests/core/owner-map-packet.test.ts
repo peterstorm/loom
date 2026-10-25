@@ -26,6 +26,7 @@ import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import {
   prepareWaveReviewBatch,
+  waveRunRosterProblem,
   waveTaskReviewRoster,
   waveTaskReviewRosters,
   type WaveRequestBatch,
@@ -318,6 +319,18 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
     expect(batch.requests.map(({ authority }) => authority.role)).toEqual(batch.subjects.map(({ role }) => role));
   });
 
+  it("issuance derives every Task's roster exactly as waveTaskReviewRosters does, for a mixed Wave", () => {
+    const graph = twoTaskGraph(["src/rules/sibling-a.ts"], STAMP);
+    const rosters = waveTaskReviewRosters(graph, 2, ["T1", "T2"]);
+    if (!rosters.ok) throw new Error(rosters.error);
+    expect(rosters.value.map(({ roster }) => roster)).toEqual([OWNER_MAPPED_WAVE_REVIEW_AGENTS, BASE_WAVE_REVIEW_AGENTS]);
+    const issued = issueTwo(projectWithPlan(), graph).subjects
+      .flatMap((subject) => subject.taskId === null ? [] : [subject]);
+    expect(rosters.value.map(({ taskId }) => ({
+      taskId, roster: issued.filter((subject) => subject.taskId === taskId).map(({ role }) => role),
+    }))).toEqual(rosters.value);
+  });
+
   it("issuance: the architecture-tech-lead packet carries the same owner map as code-reviewer's", () => {
     const batch = issueTwo(projectWithPlan(), twoTaskGraph(["src/rules/sibling-a.ts"], STAMP));
     const packetOf = (role: string, taskId: string) =>
@@ -338,6 +351,41 @@ describe("the per-Task Wave review roster (FR-022, ADR-0047)", () => {
       .filter(({ authority }) => authority.role !== "architecture-tech-lead")
       .map(({ authority }) => [authority.role, authority.slotId, authority.requestId]);
     expect(identities(owned)).toEqual(identities(unowned));
+  });
+});
+
+describe("waveRunRosterProblem: the one roster-versus-persisted-run check (ADR-0047)", () => {
+  const owned = graphOf(["src/rules/sibling-a.ts"], STAMP);
+  const plain = graphOf(["src/other.ts"], STAMP);
+  const slotsOf = (agents: readonly string[]) => agents.map((agent, index) =>
+    ({ agent, slot_id: `slot-${index}`, attempted: 1 as const }));
+  const runOf = (expected: readonly [string, ...string[]], slots: ReturnType<typeof slotsOf> | undefined) => {
+    if (slots === undefined) return { expected_agents: expected };
+    const [first, ...rest] = slots;
+    if (first === undefined) throw new Error("fixture slots must be non-empty");
+    return { expected_agents: expected, slot_authority: [first, ...rest] as const };
+  };
+  const problem = (graph: TaskGraph, run: ReturnType<typeof runOf>) =>
+    waveRunRosterProblem(graph, 2, graph.tasks[0]!, run)?.kind ?? null;
+
+  it("admits a run carrying the Task's derived roster in slot order: six for owner-mapped, five for a plain Task", () => {
+    expect(problem(owned, runOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS, slotsOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS)))).toBeNull();
+    expect(problem(plain, runOf(BASE_WAVE_REVIEW_AGENTS, slotsOf(BASE_WAVE_REVIEW_AGENTS)))).toBeNull();
+  });
+
+  it("refuses expected_agents that differ from the derived roster, in either direction", () => {
+    expect(waveRunRosterProblem(owned, 2, owned.tasks[0]!, runOf(BASE_WAVE_REVIEW_AGENTS, slotsOf(BASE_WAVE_REVIEW_AGENTS))))
+      .toEqual({ kind: "expected-agents-differ", taskId: "T1", roster: OWNER_MAPPED_WAVE_REVIEW_AGENTS });
+    expect(problem(plain, runOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS, slotsOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS))))
+      .toBe("expected-agents-differ");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["short", slotsOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS.slice(0, 5))],
+    ["reordered", slotsOf([...OWNER_MAPPED_WAVE_REVIEW_AGENTS].reverse())],
+  ] as const)("refuses %s slot authority under exact expected_agents", (_name, slots) => {
+    expect(problem(owned, runOf(OWNER_MAPPED_WAVE_REVIEW_AGENTS, slots))).toBe("slot-authority-differs");
   });
 });
 

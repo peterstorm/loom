@@ -217,6 +217,7 @@ function prepareTaskReviewPacket(root: string, task: Task, baseSha: BaseSha, hea
         reviewGeneration: finding.review_generation ?? null,
         reviewPacketId: finding.review_packet_id ?? null,
       })),
+      // Legacy CLI Review Packet: no owner map, so always the base roster (ADR-0047).
       expectedReviewers: BASE_WAVE_REVIEW_AGENTS,
     },
     baseSha,
@@ -346,6 +347,7 @@ const handler: HookHandler = async (_stdin, args) => {
           // binding carries the HeadSha brand so a base/head transposition
           // here is a compile error rather than an inverted review run.
           headSha: parsedHeadSha.value,
+          // Legacy CLI Review Packet: no owner map, so always the base roster (ADR-0047).
           expectedAgents: BASE_WAVE_REVIEW_AGENTS,
         });
         if (!transition.ok) throw new Error(transition.error);

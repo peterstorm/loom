@@ -4,7 +4,7 @@
  * persisted retry), record issuance under the state lock, and the resume
  * phases that drive reviewer-slot and spec-check retries to exhaustion.
  */
-import { canonicalStructuralEquals, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import type { AgentRequestAuthority, InitialSpawnRequestInput, SpawnRequest } from '../../../core/orchestration-contract';
 import { encodeByteSection, parseContextPacket, contextPacketDigest, type ContextPacket } from '../../../core/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
@@ -18,7 +18,7 @@ import {
 } from '../../../core/wave-gate-membership';
 import { reviewerRejectionReason } from '../../../core/wave-reviewer-transcript';
 import { markWaveSpecCheckRetryIssuedTransition, markWaveTaskReviewRetriesIssuedTransition, type WaveTaskReviewRetry } from '../../../core/wave-review-issuance';
-import { waveTaskReviewRoster } from '../../../core/wave-review-authority';
+import { waveRunRosterProblem } from '../../../core/wave-review-authority';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { durableCaptureRejection, durableRefutationRequests, isCaptureRejectionOf, publicationResolver } from './durable-requests';
 import { failed, type FacadeDriveResult } from './program-result';
@@ -117,9 +117,11 @@ export async function currentWaveTaskReviewRetries(
   return graph.tasks.filter((task) => registration.taskIds.includes(task.id) && task.review_run !== undefined)
     .flatMap((task) => {
       const run = task.review_run!;
-      if (run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length ||
-          (run.reviewer_protocol !== undefined &&
-            !canonicalStructuralEquals(run.expected_agents, waveTaskReviewRoster(graph, registration.schemaVersion, task)))) {
+      // A current-protocol run must carry the Task's derived roster; a legacy run keeps its structural check.
+      const inexactSlots = run.reviewer_protocol === undefined
+        ? run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length
+        : waveRunRosterProblem(graph, registration.schemaVersion, task, run) !== null;
+      if (inexactSlots) {
         throw new Error(`Task ${task.id} active Review Run lacks engine-issued exact slot authority`);
       }
       return run.expected_agents.flatMap((agent, index) => {

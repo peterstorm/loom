@@ -549,11 +549,10 @@ function observeAcceptance(
 
 /**
  * The bytes of every frozen path, for the completion commit to stamp the
- * Acceptance Freeze from. Observed under the completion lock, before readiness
- * re-observes the workspace the receipt pinned, so a byte that changes between
- * the two reads fails readiness rather than being frozen. A repository that
+ * Acceptance Freeze from (`GateDeps.currentFrozenPaths`). A repository that
  * cannot be resolved leaves every path unreadable, which refuses a stamp that
- * needs one.
+ * needs one. Readiness callers take it through `observeWaveCompletionWorkspace`,
+ * which orders it before the workspace observation.
  */
 export function observeCompletionFrozenPaths(graph: TaskGraph, authorityStartPath: string): FrozenPathObservations {
   const paths = frozenPathsToObserve(graph.acceptance_contracts ?? []);
@@ -562,6 +561,22 @@ export function observeCompletionFrozenPaths(graph: TaskGraph, authorityStartPat
   if (repository.ok) return observeFrozenDigests(repository.value, paths);
   const reason = `repository authority is unavailable: ${workspaceFailureMessage(repository.error)}`;
   return new Map(paths.map((path) => [path, freeze({ kind: "unreadable" as const, reason })]));
+}
+
+/**
+ * The modern Wave's readiness observations, in the one safe order: the frozen
+ * paths first, then the workspace readiness compares with the suite receipt's
+ * workspace digest. That digest covers the frozen paths, so a byte changed
+ * between the two reads makes the workspace stale and fails readiness rather
+ * than being frozen; the reverse order could freeze bytes no receipt judged.
+ */
+export function observeWaveCompletionWorkspace(
+  graph: TaskGraph,
+  authorityStartPath: string,
+): Readonly<{ currentFrozenPaths: FrozenPathObservations; currentWaveWorkspace: WaveWorkspaceObservation }> {
+  const currentFrozenPaths = observeCompletionFrozenPaths(graph, authorityStartPath);
+  const currentWaveWorkspace = observeCurrentWaveWorkspace(graph, authorityStartPath);
+  return freeze({ currentFrozenPaths, currentWaveWorkspace });
 }
 
 function reusableReceipt(

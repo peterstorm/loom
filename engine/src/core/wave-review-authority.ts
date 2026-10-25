@@ -1,6 +1,7 @@
 import { sha256Hex } from "./digest";
 import type {
   Finding,
+  ReviewRun,
   Task,
   TaskGraph,
   WaveSpecCheckDocumentAuthority,
@@ -133,15 +134,27 @@ function ownerMapObligations(graph: TaskGraph, schemaVersion: 1 | 2, task: Task)
   return schemaVersion === 2 ? obligationsTouchedBy(ownerScopeOf(graph), task.file_list ?? []) : [];
 }
 
+/** One Task's roster together with the owner-map obligations whose presence picked it. */
+type WaveTaskReviewDerivation = WaveTaskReviewRoster & Readonly<{ ownerMap: readonly OwnerObligation[] }>;
+
 /**
- * A Wave Task's ordered reviewer roster (FR-022, ADR-0047): the base five, plus
- * `architecture-tech-lead` appended last when its packets carry the owner map.
- * Issuance, the locked install and every later roster comparison (slot
- * membership, retries, restart, completed-protocol verification) derive it
- * here from protected state, never from a persisted copy.
+ * The one presence-to-roster derivation (FR-022, ADR-0047): the base five, plus
+ * `architecture-tech-lead` appended last when the Task's packets carry the
+ * owner map. Issuance renders the owner map from this same result, so the
+ * section and the roster cannot disagree.
+ */
+function waveTaskReviewDerivation(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveTaskReviewDerivation {
+  const ownerMap = ownerMapObligations(graph, schemaVersion, task);
+  return Object.freeze({ taskId: task.id, roster: waveReviewRoster(isNonEmpty(ownerMap)), ownerMap });
+}
+
+/**
+ * A Wave Task's ordered reviewer roster. Issuance, the locked install and
+ * every later roster comparison (`waveRunRosterProblem`, completed-protocol
+ * verification) derive it here from protected state, never from a persisted copy.
  */
 export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveReviewRoster {
-  return waveReviewRoster(isNonEmpty(ownerMapObligations(graph, schemaVersion, task)));
+  return waveTaskReviewDerivation(graph, schemaVersion, task).roster;
 }
 
 /** Every registered Task's roster, in registration order; refuses a Task the graph no longer holds. */
@@ -157,6 +170,40 @@ export function waveTaskReviewRosters(
     rosters.push(Object.freeze({ taskId, roster: waveTaskReviewRoster(graph, schemaVersion, task) }));
   }
   return { ok: true, value: Object.freeze(rosters) };
+}
+
+/**
+ * Why a persisted Review Run does not carry its Task's exact derived roster:
+ * its `expected_agents` differ, or its slot authority is missing or does not
+ * bind that roster's agents in order, one slot per agent.
+ */
+export type WaveRunRosterProblem = Readonly<{
+  kind: "expected-agents-differ" | "slot-authority-differs";
+  taskId: string;
+  roster: WaveReviewRoster;
+}>;
+
+/**
+ * The one roster-versus-persisted-run check. Slot membership, exhausted-run
+ * restart, the locked install's replay and reviewer retries all ask this, so
+ * a run settles only with the roster the engine derives now.
+ */
+export function waveRunRosterProblem(
+  graph: TaskGraph,
+  schemaVersion: 1 | 2,
+  task: Task,
+  run: Pick<ReviewRun, "expected_agents" | "slot_authority">,
+): WaveRunRosterProblem | null {
+  const roster = waveTaskReviewRoster(graph, schemaVersion, task);
+  if (!canonicalStructuralEquals(run.expected_agents, roster)) {
+    return Object.freeze({ kind: "expected-agents-differ", taskId: task.id, roster });
+  }
+  const slots = run.slot_authority;
+  if (slots === undefined || slots.length !== roster.length ||
+      roster.some((agent, index) => slots[index]?.agent !== agent)) {
+    return Object.freeze({ kind: "slot-authority-differs", taskId: task.id, roster });
+  }
+  return null;
 }
 
 /**
@@ -907,21 +954,20 @@ export function prepareWaveReviewBatch(
   // stamped graph, and only for a Task touching some owned family. Every other
   // packet keeps its exact pre-feature bytes (SC-005). The same presence picks
   // the Task's roster, so an owner-mapped Task also issues architecture-tech-lead.
+  const derivations = tasks.map((task) => waveTaskReviewDerivation(graph, registration.schemaVersion, task));
   const ownerMapByTask = new Map<string, ByteSection>();
-  for (const task of tasks) {
-    const touched = ownerMapObligations(graph, registration.schemaVersion, task);
+  for (const { taskId, ownerMap: touched } of derivations) {
     if (!isNonEmpty(touched)) continue;
     const planFile = graph.plan_file;
     if (planFile === null || planFile === undefined) {
-      return failure(`Task ${task.id} touches owned Invariants but the stamped TaskGraph records no plan_file to cite`);
+      return failure(`Task ${taskId} touches owned Invariants but the stamped TaskGraph records no plan_file to cite`);
     }
     const ownerMap = encodeByteSection(OWNER_MAP_SECTION, renderOwnerMapSection(planFile, touched));
     if (!ownerMap.ok) return failure(ownerMap.error.message);
-    ownerMapByTask.set(task.id, ownerMap.value);
+    ownerMapByTask.set(taskId, ownerMap.value);
   }
 
-  const subjects = waveReviewSubjects(tasks.map((task) =>
-    Object.freeze({ taskId: task.id, roster: waveReviewRoster(ownerMapByTask.has(task.id)) })));
+  const subjects = waveReviewSubjects(derivations);
   const requests: IssuedWaveReviewRequest[] = [];
   const packets: ContextPacket[] = [];
   for (const subject of subjects) {

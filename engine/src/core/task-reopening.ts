@@ -12,14 +12,24 @@
  * authority is retired, and only a fresh implementation settlement lets the
  * next gate start. The other Tasks of the Wave stay `implemented`.
  *
+ * It shares its Wave precondition with Contract Revision (`reopenableWave`)
+ * and adds only its own: the named Wave is the active one, it has not
+ * completed, and an abandoned run names no successor.
+ *
  * Pure: the shell supplies the locked graph and proves quiescence.
  */
 
+import { match } from "ts-pattern";
 import { isFlagToken } from "./cli-flag-token";
 import type { DomainResult, NonEmpty } from "./orchestration-contract";
 import { parseTaskId, type TaskId } from "./task-id";
 import { deriveTaskImplementationDispatch } from "./task-implementation-dispatch";
-import { returnWaveTasksToRevalidation } from "./task-revalidation";
+import {
+  reopenableWave,
+  returnWaveTasksToRevalidation,
+  type ReopenableWave,
+  type WaveReopeningRefusal,
+} from "./task-revalidation";
 import type { Task, TaskGraph, TaskReopeningAudit } from "../types";
 
 /** The longest reason a reopening records; it is an audit line, not a document. */
@@ -78,11 +88,13 @@ export function parseTaskReopeningArgs(args: readonly string[]): DomainResult<Ta
     if (value === undefined || isFlagToken(value)) return fail(`${flag} needs a value`);
     if (flag === "--task") {
       tasks.push(value);
-      continue;
+    } else if (flag === "--wave") {
+      if (wave !== undefined) return fail("--wave is given twice");
+      wave = value;
+    } else {
+      if (reason !== undefined) return fail("--reason is given twice");
+      reason = value.trim();
     }
-    if ((flag === "--wave" ? wave : reason) !== undefined) return fail(`${flag} is given twice`);
-    if (flag === "--wave") wave = value;
-    else reason = value.trim();
   }
   if (wave === undefined || !WAVE_NUMBER.test(wave) || !Number.isSafeInteger(Number(wave))) {
     return fail("--wave must name the active Wave as a positive integer");
@@ -121,26 +133,30 @@ function replayedAudit(graph: TaskGraph, request: TaskReopeningRequest): TaskReo
     : undefined;
 }
 
-/** The first precondition on the Wave itself that refuses the reopening, or null. */
-function waveRefusal(graph: TaskGraph, wave: number): DomainResult<never, TaskReopeningRefusal> | null {
+/** The shared Wave-reopening refusal, in this operation's words. */
+const waveReopeningRefusal = (refusal: WaveReopeningRefusal): DomainResult<never, TaskReopeningRefusal> =>
+  match(refusal)
+    .with({ kind: "not-executing" }, ({ phase }) =>
+      refuse("not-executing", `reopening a Task requires the execute Phase (current: ${phase})`))
+    .with({ kind: "live-wave-gate" }, ({ runId, wave }) =>
+      refuse("live-wave-gate", `Wave Gate run ${runId} owns Wave ${wave}'s verification; ` +
+        "abandon it with helper orchestration abandon, then retry"))
+    .with({ kind: "implementation-active" }, ({ holders }) =>
+      refuse("implementation-active", `implementation reservations are active: ${holders.join(", ")}`))
+    .exhaustive();
+
+/** Task Reopening's own refusals over the reopenable Wave, after the shared precondition, or null. */
+function waveRefusal(reopenable: ReopenableWave, request: TaskReopeningRequest): DomainResult<never, TaskReopeningRefusal> | null {
+  const { graph, wave } = reopenable;
+  if (wave !== request.wave) return refuse("wrong-wave", `Wave ${request.wave} is not the active Wave ${wave}`);
   if ((graph.wave_gate_history ?? []).some((entry) => entry.wave === wave)) {
     return refuse("wave-completed", `Wave ${wave} has completed; reopen the completed Wave instead (helper reopen-completed-wave)`);
   }
-  const active = graph.active_wave_gate;
-  if (active !== undefined && (active.wave !== wave || active.terminalOutcome?.kind !== "terminal-abandoned")) {
-    return refuse("live-wave-gate", `Wave Gate run ${active.runId} owns Wave ${active.wave}'s verification; ` +
-      "abandon it with helper orchestration abandon, then retry");
-  }
-  if (active?.terminalOutcome?.kind === "terminal-abandoned" && active.terminalOutcome.supersededBy !== null) {
-    return refuse("successor-named", `abandoned Wave Gate run ${active.runId} names successor ` +
-      `${active.terminalOutcome.supersededBy}; reopening would orphan that successor's authority, so start it ` +
+  const outcome = graph.active_wave_gate?.terminalOutcome;
+  if (outcome?.kind === "terminal-abandoned" && outcome.supersededBy !== null) {
+    return refuse("successor-named", `abandoned Wave Gate run ${reopenable.abandonedRunId} names successor ` +
+      `${outcome.supersededBy}; reopening would orphan that successor's authority, so start it ` +
       "(or abandon it naming no successor) first");
-  }
-  const executing = graph.executing_tasks ?? [];
-  const attempting = graph.tasks.filter((task) => task.wave === wave && task.active_implementation_attempt !== undefined);
-  if (executing.length > 0 || attempting.length > 0) {
-    const holders = [...new Set([...executing, ...attempting.map(({ id }) => id)])];
-    return refuse("implementation-active", `implementation reservations are active: ${holders.join(", ")}`);
   }
   return null;
 }
@@ -169,37 +185,44 @@ function targetRefusal(graph: TaskGraph, request: TaskReopeningRequest): DomainR
 }
 
 /**
+ * `ids` in TaskGraph order, so one reopening has one canonical audit whatever
+ * order the operator named. Every id names a graph Task once `targetRefusal`
+ * passed; were none to, the operator's order is kept rather than an empty list.
+ */
+function inGraphOrder(graph: TaskGraph, ids: NonEmpty<TaskId>): NonEmpty<TaskId> {
+  const [first, ...rest] = graph.tasks.flatMap(({ id }) => ids.filter((requested) => requested === id));
+  return first === undefined ? ids : Object.freeze([first, ...rest] as const);
+}
+
+/**
  * Reopen implemented Tasks of the active Wave for re-implementation, or
- * refuse with the exact precondition that failed. Replaying a committed
- * reopening whose Tasks still await re-implementation changes nothing.
+ * refuse with the exact precondition that failed: the shared Wave-reopening
+ * precondition (`reopenableWave`), then this operation's own Wave and target
+ * checks. Replaying a committed reopening whose Tasks still await
+ * re-implementation changes nothing, and is answered first: a re-dispatched
+ * reopened Task holds a reservation the precondition would refuse.
  */
 export function reopenImplementedTasks(
   graph: TaskGraph,
   request: TaskReopeningRequest,
 ): DomainResult<TaskReopening, TaskReopeningRefusal> {
-  if (graph.current_phase !== "execute" || graph.current_wave === undefined) {
-    return refuse("not-executing", `reopening a Task requires the execute Phase (current: ${graph.current_phase})`);
-  }
-  if (graph.current_wave !== request.wave) {
-    return refuse("wrong-wave", `Wave ${request.wave} is not the active Wave ${graph.current_wave}`);
-  }
   const replay = replayedAudit(graph, request);
   if (replay !== undefined) return freeze({ ok: true as const, value: freeze({ kind: "already-reopened" as const, audit: replay }) });
-  const refusal = waveRefusal(graph, request.wave) ?? targetRefusal(graph, request);
+  const reopenable = reopenableWave(graph);
+  if (!reopenable.ok) return waveReopeningRefusal(reopenable.error);
+  const refusal = waveRefusal(reopenable.value, request) ?? targetRefusal(graph, request);
   if (refusal !== null) return refusal;
 
-  // Graph order, so one reopening has one canonical audit whatever order the operator named.
-  const requested: readonly string[] = request.taskIds;
-  const reopenedTaskIds = graph.tasks.filter(({ id }) => requested.includes(id)).map(({ id }) => id);
+  const reopenedTaskIds = inGraphOrder(graph, request.taskIds);
   const audit: TaskReopeningAudit = freeze({
     schemaVersion: 1,
     kind: "implemented-tasks-reopened",
     wave: request.wave,
-    reopenedTaskIds: Object.freeze(reopenedTaskIds),
+    reopenedTaskIds,
     reason: request.reason,
-    abandonedRunId: graph.active_wave_gate?.runId ?? null,
+    abandonedRunId: reopenable.value.abandonedRunId,
   });
-  const reopened = returnWaveTasksToRevalidation(graph, request.wave, reopenedTaskIds);
+  const reopened = returnWaveTasksToRevalidation(reopenable.value, reopenedTaskIds);
   return freeze({
     ok: true as const,
     value: freeze({

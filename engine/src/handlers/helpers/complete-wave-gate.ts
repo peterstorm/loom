@@ -512,9 +512,10 @@ async function runCompleteWaveGate(
       }
       const readiness = deriveWaveReadiness(state, liveDeps);
       // A legacy graph (refused above when it has a verification manifest)
-      // carries no suite receipt, so its completion stamps no Acceptance Freeze.
+      // carries no suite receipt, so it observes no frozen paths and its
+      // completion stamps no Acceptance Freeze.
       return readiness.ok
-        ? commitWaveGateCompletion(readiness.value, new Map())
+        ? commitWaveGateCompletion(readiness.value)
         : {
             ok: false,
             error: {

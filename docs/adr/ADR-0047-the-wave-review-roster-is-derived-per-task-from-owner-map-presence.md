@@ -65,19 +65,31 @@ Constraints:
   `waveReviewRoster(ownerMapped)`.
 - `engine/src/core/wave-review-authority.ts` holds the one home of owner-map presence,
   `ownerMapObligations(graph, schemaVersion, task)`: schema 2 only, and exactly
-  `obligationsTouchedBy(ownerScopeOf(graph), task.file_list)`. No second selection rule. Packet issuance
-  renders those obligations, and `waveTaskReviewRoster(graph, schemaVersion, task)` reads their presence.
-  `waveTaskReviewRosters` derives every registered Task's roster, and `waveReviewSubjects(rosters)` orders a
-  batch: spec-check first, then each Task in registration order with its own roster.
+  `obligationsTouchedBy(ownerScopeOf(graph), task.file_list)`. No second selection rule.
+- There is exactly one presence-to-roster derivation, the private `waveTaskReviewDerivation`, which returns
+  a Task's obligations together with the roster their presence picks. Packet issuance
+  (`prepareWaveReviewBatch`) renders the owner map from that same result and orders its subjects from that
+  same roster, so the section and the roster cannot disagree. `waveTaskReviewRoster(graph, schemaVersion,
+  task)` and `waveTaskReviewRosters` (every registered Task, in registration order) project the roster from
+  it for every other site. `waveReviewSubjects(rosters)` orders a batch: spec-check first, then each Task in
+  registration order with its own roster.
 - `OWNER_MAP_ROLES` is typed `satisfies readonly WaveReviewRole[]`, and a test asserts every owner-map role is
   on the owner-mapped roster, so neither role can silently go unissued again.
 - Every roster comparison derives the Task's roster from protected state:
   - the locked install (`installWaveReviewRunsTransition`), which writes it as `expected_agents`;
-  - protocol-v2 slot membership (`waveReviewerSlotProblem`);
   - persisted-batch recovery (`classifyPersistedWaveBatch`);
-  - reviewer retries (`currentWaveTaskReviewRetries`);
-  - exhausted-run restart (`prepareExhaustedWaveGateRestart`);
   - completed-protocol verification (`verifyCompletedWaveProtocols`).
+- A persisted Review Run is checked against that roster by one pure function,
+  `waveRunRosterProblem(graph, schemaVersion, task, run)`. It returns a typed refusal: `expected-agents-differ`
+  when `expected_agents` is not the derived roster, or `slot-authority-differs` when `slot_authority` is
+  missing or does not bind that roster's agents in order, one slot per agent. Every site that compares a
+  persisted run uses it, at the same strictness, and keeps its own refusal text:
+  - protocol-v2 slot membership (`waveReviewerSlotProblem`);
+  - exhausted-run restart (`prepareExhaustedWaveGateRestart`);
+  - the locked install's replay of an existing run (`installWaveReviewRunsTransition`), which also compares
+    slot ids;
+  - reviewer retries of a current-protocol run (`currentWaveTaskReviewRetries`). A legacy run without
+    `reviewer_protocol` keeps its structural slot check only.
 - The legacy, CLI-created Review Packet path (`handlers/helpers/review-packet.ts`) has no owner map and keeps
   the base five.
 
@@ -111,10 +123,14 @@ frozen Wave source and the owner-map section.
   on the roster.
 - `engine/tests/core/owner-map-packet.test.ts`: roster derivation with and without an owner map (unstamped,
   empty stamp, untouched, schema 1), six versus five requests in one batch, the architecture packet's owner
-  map, and unchanged base-reviewer slot and request identity.
+  map, unchanged base-reviewer slot and request identity, issuance rosters equal to `waveTaskReviewRosters`
+  for a mixed Wave, and each `waveRunRosterProblem` refusal (differing `expected_agents`; missing, short or
+  reordered slot authority) beside an admitted six-agent owner-mapped run and five-agent plain run.
 - `engine/tests/core/wave-review-authority.test.ts`: subject order and persisted-batch classification over
   mixed rosters (property).
 - `engine/tests/handlers/helpers/programs/reviewer-protocol-wave.integration.test.ts`: end-to-end from a
   stamped graph through the CLI. It issues six reviewers, both owner-map packets carry the section, and the
   Wave completes only after architecture-tech-lead settles. A pre-fix five-agent run for an owner-mapped Task
-  is refused.
+  is refused by reviewer retries and by slot membership (`waveReviewerSlotProblem`), while a plain Task's
+  five-agent run is admitted. Exhausted-run restart over an owner-mapped Task binds all six slots and refuses
+  the five-agent run.

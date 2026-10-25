@@ -17,8 +17,13 @@ import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
 import { findingId } from "../fixtures/finding-id";
-import { value } from "../fixtures/parse-result";
-import { parseImplementationSettlementReceiptId } from "../../src/core/implementation-completion";
+import { labelledValue, value } from "../fixtures/parse-result";
+import {
+  createImplementationAttemptAuthority,
+  parseImplementationSettlementReceiptId,
+} from "../../src/core/implementation-completion";
+import { parseOrchestrationRunId } from "../../src/core/orchestration-contract";
+import { reopenableWave, type WaveReopeningRefusal } from "../../src/core/task-revalidation";
 import {
   activeWaveGateFixture,
   completedWaveGateFixture,
@@ -45,6 +50,18 @@ const task = (id: string, wave: number, status: "pending" | "implemented", extra
   review_generation: 2,
   ...extra,
 });
+
+/** A genuine active implementation attempt for `taskId` in Wave 1. */
+const attempt = (taskId: string) => labelledValue("implementation attempt", createImplementationAttemptAuthority({
+  taskId,
+  wave: 1,
+  semanticAttempt: 1,
+  reservationId: `reopening-${taskId}`,
+  headSha: "a".repeat(40),
+  reservedAt: "2026-10-25T00:00:00.000Z",
+  taskScopeBaseline: [],
+  dirtySetBaseline: [],
+}));
 
 /** A settlement receipt id seeded with no settlement history: an invalid lineage. */
 const RECEIPT_ID = value(parseImplementationSettlementReceiptId("c".repeat(64)));
@@ -198,6 +215,13 @@ describe("reopenImplementedTasks", () => {
     expect(refusal(graph, request({ reason: "a different reason" })).kind).toBe("not-implemented");
   });
 
+  it("stays idempotent once the reopened Task is re-dispatched and holds a reservation", () => {
+    const graph = committed(paused());
+    const redispatched: TaskGraph = { ...graph, executing_tasks: ["T1"] };
+    expect(reopened(redispatched)).toEqual({ kind: "already-reopened", audit: graph.task_reopening_history![0] });
+    expect(refusal(redispatched, request({ taskIds: ["T2"] }))).toMatchObject({ kind: "implementation-active" });
+  });
+
   it("reopens again, with a fresh audit, once the reopened Task was re-implemented", () => {
     const first = committed(paused());
     const reimplemented: TaskGraph = {
@@ -226,6 +250,13 @@ describe("reopenImplementedTasks", () => {
       }),
     }), REQUEST, "successor-named", "run.successor"],
     ["an executing Task", () => ({ ...paused(), executing_tasks: ["T2"] }), REQUEST, "implementation-active", "T2"],
+    ["a Task holding an active implementation attempt", () => ({
+      ...paused(),
+      tasks: paused().tasks.map((entry) => entry.id === "T2" ? { ...entry, active_implementation_attempt: attempt("T2") } : entry),
+    }), REQUEST, "implementation-active", "T2"],
+    ["an abandoned run of another Wave", () => paused({
+      active_wave_gate: { ...ABANDONED, runId: value(parseOrchestrationRunId("run.wave-0-abandoned")), wave: 2 },
+    }), REQUEST, "live-wave-gate", "run.wave-0-abandoned owns Wave 2"],
     ["an unknown Task", () => paused(), request({ taskIds: ["T9"] }), "unknown-task", "T9"],
     ["a Task of another Wave", () => paused(), request({ taskIds: ["T3"] }), "foreign-task", "Wave 2"],
     ["a pending Task", () => ({
@@ -260,6 +291,44 @@ describe("reopenImplementedTasks", () => {
       expect(outcome.audit.reopenedTaskIds).toEqual(ids.filter((id) => chosen.includes(id)));
       expect(reopened(outcome.graph, request({ taskIds: chosen })).kind).toBe("already-reopened");
     }));
+  });
+});
+
+describe("reopenableWave: the one Wave precondition Contract Revision and Task Reopening share", () => {
+  const refused = (graph: TaskGraph): WaveReopeningRefusal => {
+    const result = reopenableWave(graph);
+    if (result.ok) throw new Error("expected a refusal");
+    return result.error;
+  };
+
+  it("proves the current Wave, naming the abandoned tombstone the transition retires, or none", () => {
+    expect(reopenableWave(paused())).toMatchObject({ ok: true, value: { wave: 1, abandonedRunId: ABANDONED.runId } });
+    expect(reopenableWave(paused({ active_wave_gate: undefined }))).toMatchObject({ ok: true, value: { wave: 1, abandonedRunId: null } });
+  });
+
+  it("refuses outside the execute Phase before anything else", () => {
+    expect(refused({ ...paused({ executing_tasks: ["T2"] }), current_phase: "decompose" }))
+      .toEqual({ kind: "not-executing", phase: "decompose" });
+    expect(refused({ ...paused(), current_wave: undefined })).toMatchObject({ kind: "not-executing" });
+  });
+
+  it("refuses a live gate, or an abandoned tombstone of another Wave, before reservations", () => {
+    const live = activeWaveGateFixture({ runId: "run.live", wave: 1, authorityDigest: "b".repeat(64) });
+    expect(refused(paused({ active_wave_gate: live, executing_tasks: ["T2"] })))
+      .toEqual({ kind: "live-wave-gate", runId: "run.live", wave: 1 });
+    expect(refused(paused({ active_wave_gate: { ...ABANDONED, wave: 2 } })))
+      .toEqual({ kind: "live-wave-gate", runId: ABANDONED.runId, wave: 2 });
+  });
+
+  it("refuses executing Tasks, then current-Wave active attempts, each holder once; another Wave's attempt is not its concern", () => {
+    // Built unparsed: a parsed graph names every attempting Task in executing_tasks too.
+    const withAttempts = (ids: readonly string[], executing: readonly string[] = []): TaskGraph => ({
+      ...paused(),
+      executing_tasks: [...executing],
+      tasks: paused().tasks.map((entry) => ids.includes(entry.id) ? { ...entry, active_implementation_attempt: attempt(entry.id) } : entry),
+    });
+    expect(refused(withAttempts(["T1", "T2"], ["T2"]))).toEqual({ kind: "implementation-active", holders: ["T2", "T1"] });
+    expect(reopenableWave(withAttempts(["T3"])).ok).toBe(true);
   });
 });
 

@@ -26,9 +26,9 @@ import {
   ensureWaveCompletionSuite,
   observeCompletionFrozenPaths,
   observeCurrentWaveWorkspace,
+  observeWaveCompletionWorkspace,
   type RunCompletionCheck,
 } from "../../../src/handlers/helpers/wave-completion-suite";
-import type { FrozenPathObservations } from "../../../src/core/acceptance-contract";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
 import { deriveLoomStatusFromParsedGraph } from "../../../src/core/loom-status";
 import type { GateDeps } from "../../../src/core/wave-gate-checks";
@@ -381,17 +381,23 @@ function atAdvisoryPause(graph: TaskGraph, findings: readonly ReturnType<typeof 
   };
 }
 
+type CompletionObservations = Pick<GateDeps, "currentFrozenPaths" | "currentWaveWorkspace">;
+
 /**
  * Commit the installed gate's completion as the Wave Gate program does under
- * its lock: observe the frozen paths, derive readiness against the current
- * workspace, then commit. Returns the committed graph; throws on refusal.
+ * its lock: derive readiness from the ordered observations (frozen paths, then
+ * workspace) — the program's own unless `observed` replaces some — then
+ * commit. Returns the committed graph; throws on refusal.
  */
-function commitCompletion(f: Fixture, frozenPaths?: FrozenPathObservations): TaskGraph {
+function commitCompletion(f: Fixture, observed: Partial<CompletionObservations> = {}): TaskGraph {
   const paused = atAdvisoryPause(f.manager.load(), []);
-  const observed = frozenPaths ?? observeCompletionFrozenPaths(paused, f.handle.runDirectory);
-  const readiness = deriveWaveReadiness(paused, { ...GATE_DEPS, currentWaveWorkspace: observeCurrentWaveWorkspace(paused, f.root) });
+  const readiness = deriveWaveReadiness(paused, {
+    ...GATE_DEPS,
+    ...observeWaveCompletionWorkspace(paused, f.handle.runDirectory),
+    ...observed,
+  });
   if (!readiness.ok) throw new Error(readiness.error.reasons.map(({ message }) => message).join("; "));
-  const committed = commitWaveGateCompletion(readiness.value, observed);
+  const committed = commitWaveGateCompletion(readiness.value);
   if (!committed.ok) throw new Error(committed.error.message);
   return committed.value.graph;
 }
@@ -912,9 +918,45 @@ describe("modern Wave completion suite shell", () => {
     it("refuses completion when the frozen paths cannot be observed to stamp", async () => {
       const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
       expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
-      expect(() => commitCompletion(f, new Map())).toThrow(
+      expect(() => commitCompletion(f, { currentFrozenPaths: new Map() })).toThrow(
         `Acceptance Freeze refused: CT-1: frozen paths could not be read to stamp the freeze: '${ACCEPTANCE_FILE}' (not observed)`,
       );
+    });
+
+    it("refuses completion when the frozen paths' repository cannot be resolved", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const outside = canonicalTempDir("loom-wave-suite-freeze-no-git-");
+      roots.push(outside);
+      const unresolved = observeCompletionFrozenPaths(f.manager.load(), outside);
+      expect([...unresolved.entries()]).toEqual([[ACCEPTANCE_FILE, {
+        kind: "unreadable",
+        reason: expect.stringContaining("repository authority is unavailable: Git resolve-root failed"),
+      }]]);
+      expect(() => commitCompletion(f, { currentFrozenPaths: unresolved })).toThrow(
+        `Acceptance Freeze refused: CT-1: frozen paths could not be read to stamp the freeze: '${ACCEPTANCE_FILE}' ` +
+        "(repository authority is unavailable: Git resolve-root failed",
+      );
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("fails readiness, freezing nothing, when a frozen file changes after its observation and before the workspace's", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const frozenFirst = observeCompletionFrozenPaths(f.manager.load(), f.handle.runDirectory);
+      write(f.root, ACCEPTANCE_FILE, `${ACCEPTANCE_SOURCE}// changed between the two reads\n`);
+      const workspaceAfter = observeCurrentWaveWorkspace(f.manager.load(), f.handle.runDirectory);
+      expect(() => commitCompletion(f, { currentFrozenPaths: frozenFirst, currentWaveWorkspace: workspaceAfter }))
+        .toThrow("accepted Wave completion suite is stale");
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("stamps the bytes the receipt judged when a frozen file changes after both ordered observations", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const observed = observeWaveCompletionWorkspace(f.manager.load(), f.handle.runDirectory);
+      write(f.root, ACCEPTANCE_FILE, `${ACCEPTANCE_SOURCE}// changed after both reads\n`);
+      expect(commitCompletion(f, observed).acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
     });
 
     it("names an advisory on the contract's acceptance file at the advisory pause, because nothing is frozen yet", async () => {

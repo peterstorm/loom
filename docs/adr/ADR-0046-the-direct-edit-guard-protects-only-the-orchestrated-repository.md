@@ -1,7 +1,8 @@
 # ADR-0046: The direct-edit guard protects only the Orchestrated Repository
 
 ## Status
-Accepted (2026-10-25). Fixes the guard-scope defect on branch `fix/direct-edit-guard-scope`.
+Accepted (2026-10-25). Fixes the guard-scope defect on branch `fix/direct-edit-guard-scope`. Amended
+(2026-10-25, PR 137 remediation): Loom's protected directories stay guarded wherever they lie.
 
 ## Context
 `block-direct-edits` refuses the parent session's Edit/Write/MultiEdit while a TaskGraph is live, so
@@ -38,21 +39,41 @@ its documented `.claude/state/` / `.pi/state/` layout. Other cases fail.
 
 ## Decision
 **The guard applies only when a write's canonical target lies inside the canonical root of the Orchestrated
-Repository. A write whose every target lies outside it is allowed before any admission runs.**
+Repository or inside one of Loom's protected directories. A write whose every target lies outside all of
+them is allowed before any admission runs.**
+
+- **Protected directories are always guarded.** `protectedDirs()` in `engine/src/config.ts` names the
+  subagent directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`) and the machine-definitions
+  directory (`LOOM_MACHINES_DIR`). By default both lie outside the Orchestrated Repository, yet both belong
+  to the orchestration. The subagent directory holds the evidence ledger (`.evidence.jsonl`), the `.active`
+  roster, the `.machine` bindings and the `.task_graph` pointers. The machine directory holds the gate's
+  rules. A parent write there forges trusted evidence, fakes attribution, re-points the session's graph or
+  rewrites the gate. The state-file guard covers these directories for Bash only, on both harnesses, so for
+  file tools the "outside" allow would have been an open door. The first version of this decision reasoned
+  that a write outside the repository cannot reach the orchestration. These directories are exactly such
+  writes that can. So a target inside one is never placed `outside`: it is judged like an in-repository
+  target, by the same admissions.
 
 - **Pure core** (`engine/src/core/block-direct-edits.ts`). `OrchestratedRepository` (`resolved` with a
-  non-empty list of roots, or `unresolved`) and `EditTargets` (`resolved` with a non-empty list of paths, or
-  `unresolved`) are values the shell parses. `editPlacement` returns `outside` only when both are resolved
-  and no root guards any target. `guardedByRoot` decides containment on path-segment boundaries:
+  non-empty list of roots and a non-empty list of canonical protected roots, or `unresolved`) and
+  `EditTargets` (`resolved` with a non-empty list of paths, or `unresolved`) are values the shell parses.
+  `editPlacement` returns `outside` only when both are resolved and no root, repository or protected, guards
+  any target. The protected roots are required on the `resolved` variant, so no caller can place a write
+  `outside` without them. `guardedByRoot` decides containment on path-segment boundaries:
   `/repo-foo` is not inside `/repo`, and the root itself is inside. A non-absolute input counts as guarded.
-  `shouldBlockDirectEdit` takes the placement as a lazy port, after arming, the file-tool filter and the
-  session-id parse. An omitted port means `inside`.
+  `shouldBlockDirectEdit` takes the placement as a lazy port (`placeEdit` in its options object of
+  harness-specific ports), consulted after arming, the file-tool filter and the session-id parse. An
+  omitted port means `inside`.
 - **Shell** (`engine/src/handlers/pre-tool-use/block-direct-edits.ts`). `orchestratedRepositoryOf` maps each
-  armed graph path through `observeTaskGraphProjectBoundary`, then realpaths the root.
-  `canonicalEditTargets` canonicalises each target against the call's cwd. Any failure answers `unresolved`
-  and is announced on stderr. The failures are a Git probe that cannot answer, a State File at no documented
-  layout outside Git, an uncanonicalisable root or target (for example a dangling symlink), and a missing
-  or malformed target. On Claude Code the graph path is `taskGraphPath()`, the same path the arming probe
+  armed graph path through `observeTaskGraphProjectBoundary`, then realpaths the root. It also takes
+  `protectedDirs()` from the caller and canonicalises each directory the way it canonicalises a target,
+  through the nearest existing ancestor, so a symlinked or not-yet-created directory is compared by its real
+  location. `canonicalEditTargets` canonicalises each target against the call's cwd. Every resolver failure
+  that has a cause answers `unresolved` and is announced on stderr: a Git probe that cannot answer, a State
+  File at no documented layout outside Git, or an uncanonicalisable repository root or protected directory
+  (for example a dangling symlink). A missing, malformed or uncanonicalisable target answers `unresolved`
+  too. No armed graph also answers `unresolved`, silently, because nothing failed. Either way every target
+  stays guarded. On Claude Code the graph path is `taskGraphPath()`, the same path the arming probe
   checked.
 - **`LOOM_STATE_PATH`**. The override is judged by the same boundary rule as a discovered graph, probed from
   the State File's own directory, never from the caller's cwd. Inside a Git working tree, that working tree
@@ -61,10 +82,12 @@ Repository. A write whose every target lies outside it is allowed before any adm
   directory has no derivable boundary and leaves the repository `unresolved`, so every write stays guarded.
 - **Pi** (`pi/extension.ts`). Pointer-based arming is unchanged. The repository is the union of roots of the
   cwd-resolved graph (when present) and the graph the session's `<session>.task_graph` pointer names. A
-  pointer that cannot be read or parsed leaves the repository `unresolved`. Targets are every path
+  pointer that cannot be read or parsed leaves the repository `unresolved`. The protected directories come
+  from the same `protectedDirs()`. Targets are every path
   `piWriteTargetPaths` reads, resolved against `ctx.cwd`. Malformed input stays `unresolved`. A
   rejected-grant session is still refused unconditionally, before placement. For parity with Claude Code's
-  artifact-writer roots, a scoped write grant's scope is checked only for writes placed inside.
+  artifact-writer roots, a scoped write grant's scope is checked only for writes placed inside. A write into a
+  protected directory is placed inside, so the grant's scope confines it too.
 - **Unchanged inside the repository**: roster admission, the implementation binding, artifact-writer roots,
   the invalid-session-id block and malformed-input fail-closed behavior. The State File always lies inside
   its own Orchestrated Repository, and Bash writes to it remain the separate state-file guard's concern.
@@ -79,11 +102,15 @@ Repository. A write whose every target lies outside it is allowed before any adm
   workaround.
 - Scope follows the graph itself, so overrides, linked worktrees and Pi pointers scope correctly.
 - Both harnesses decide placement through one pure function and one pair of resolvers.
+- Loom's own evidence, roster, pointers and machine definitions keep file-tool protection wherever
+  `LOOM_SUBAGENT_DIR` and `LOOM_MACHINES_DIR` point.
 
 **Negative:**
 - A Git subprocess runs per guarded file write (lazily). A Git probe that fails keeps the guard on
   everywhere for that call, which matches the old behavior.
 - Writer roles may now write outside the repository as well (scratch files). Their artifact roots and grant
   scopes no longer confine writes the orchestration cannot see.
+- Inside a protected directory the ordinary admissions still apply. This guard does not refuse an admitted
+  implementation agent or write-grant holder there, just as it does not inside the repository.
 - A nested worktree under the orchestrated root stays guarded even when it is an independent branch. Place
   independent worktrees outside the root (for example as siblings) to edit them during orchestration.
