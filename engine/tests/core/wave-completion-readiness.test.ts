@@ -264,7 +264,7 @@ describe("Wave completion suite gate readiness", () => {
     }
     const ready = value(deriveWaveReadiness(modernGraph(receipt, manifest), deps(workspace("b"))));
     expect(ready.gateDecision.verdict.kind).toBe("pass");
-    const committed = value(commitWaveGateCompletion(ready));
+    const committed = value(commitWaveGateCompletion(ready, new Map()));
     const changedManifest = manifest.projectChecks.length === 0 ? manifestWithReport() : defaultVerificationManifest();
     const historical = { ...committed.graph, verification_manifest: changedManifest };
     const expectedHistoricalCoverage = coverage.kind === "configured" ? coverage : {
@@ -278,7 +278,7 @@ describe("Wave completion suite gate readiness", () => {
   });
 
   it("does not borrow current configuration for schema-v1 history", () => {
-    const committed = value(commitWaveGateCompletion(value(deriveWaveReadiness(graph(), deps()))));
+    const committed = value(commitWaveGateCompletion(value(deriveWaveReadiness(graph(), deps())), new Map()));
     expect(deriveWaveCompletionSuiteReadiness({ ...committed.graph, verification_manifest: manifestWithReport() }, 1, workspace("d")))
       .toEqual({ kind: "legacy-unavailable", verificationManifestDigest: null });
   });
@@ -445,7 +445,7 @@ describe("Wave completion suite gate readiness", () => {
       passed: false,
       reason: expect.stringContaining("accepted-suite-invalid"),
     });
-    expect(commitWaveGateCompletion(value(deriveWaveReadiness(mismatched, deps(workspace("b")))))).toMatchObject({
+    expect(commitWaveGateCompletion(value(deriveWaveReadiness(mismatched, deps(workspace("b")))), new Map())).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("completion readiness is ineligible") },
     });
@@ -546,7 +546,7 @@ describe("Wave completion authority and atomic commit", () => {
 
   it("refuses modern completion without a current accepted suite", () => {
     const readiness = value(deriveWaveReadiness(modernGraph(undefined), deps(workspace("b"))));
-    expect(commitWaveGateCompletion(readiness)).toMatchObject({
+    expect(commitWaveGateCompletion(readiness, new Map())).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("completion readiness is ineligible") },
     });
@@ -557,7 +557,7 @@ describe("Wave completion authority and atomic commit", () => {
     const receipt = acceptedReceipt(manifest);
     const state = modernGraph(receipt, manifest);
     const committed = value(commitWaveGateCompletion(
-      value(deriveWaveReadiness(state, deps(workspace("b")))),
+      value(deriveWaveReadiness(state, deps(workspace("b")))), new Map(),
     ));
 
     expect(committed.completedRegistration).toEqual({
@@ -590,7 +590,7 @@ describe("Wave completion authority and atomic commit", () => {
 
   it("writes schema v1 only for field-absent legacy compatibility", () => {
     const committed = value(commitWaveGateCompletion(
-      value(deriveWaveReadiness(graph(), deps())),
+      value(deriveWaveReadiness(graph(), deps())), new Map(),
     ));
 
     expect(committed.completedRegistration.schemaVersion).toBe(1);
@@ -734,7 +734,7 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
         wave: 1,
         authorityDigest: registration.authorityDigest,
         revision: 1,
-        completionReceipt: value(commitWaveGateCompletion(value(deriveWaveReadiness(stampedGraph([OWNER], receipt), deps(workspace("b")))))).receipt,
+        completionReceipt: value(commitWaveGateCompletion(value(deriveWaveReadiness(stampedGraph([OWNER], receipt), deps(workspace("b")))), new Map())).receipt,
         completionSuite: receipt,
       }],
     };

@@ -1032,7 +1032,7 @@ function lifecycleCompletionReadiness() {
 
 function lifecycleCompletionEvent(): Extract<WaveGateEvent, { kind: "completion-committed" }> {
   const readiness = lifecycleCompletionReadiness();
-  const committed = value(commitWaveGateCompletion(readiness));
+  const committed = value(commitWaveGateCompletion(readiness, new Map()));
   return { kind: "completion-committed", readiness, receipt: committed.receipt };
 }
 
@@ -2608,7 +2608,7 @@ describe("protected active Wave Gate registration", () => {
       const committed = await manager.commitActiveWaveGateCompletion((locked) => {
         const readiness = deriveWaveReadiness(locked, statusDeps);
         return readiness.ok
-          ? commitWaveGateCompletion(readiness.value)
+          ? commitWaveGateCompletion(readiness.value, new Map())
           : { ok: false, error: { kind: "wave-completion-commit-rejected" as const, message: "unavailable" } };
       });
       const replay = value(findRegisteredWaveGateCompletionReplay(manager.load(), {
@@ -2680,7 +2680,7 @@ describe("protected active Wave Gate registration", () => {
         lockedFailure = liveDecision.verdict.kind === "fail" ? liveDecision.verdict.reason : "";
         const readiness = deriveWaveReadiness(locked, live);
         return readiness.ok
-          ? commitWaveGateCompletion(readiness.value)
+          ? commitWaveGateCompletion(readiness.value, new Map())
           : { ok: false, error: { kind: "wave-completion-commit-rejected", message: "unavailable" } };
       })).rejects.toThrow("completion readiness is ineligible");
       expect(lockedFailure).toContain("lifecycle machine files");
@@ -2696,7 +2696,7 @@ describe("protected active Wave Gate registration", () => {
     const graph = registeredGraph();
     const readiness = value(deriveWaveReadiness(graph, statusDeps));
     Object.assign(graph, { active_wave_gate: { ...graph.active_wave_gate! } });
-    expect(commitWaveGateCompletion(readiness)).toMatchObject({
+    expect(commitWaveGateCompletion(readiness, new Map())).toMatchObject({
       ok: false,
       error: { message: "snapshot graph active_wave_gate is not the exact readiness registration" },
     });
@@ -2705,7 +2705,7 @@ describe("protected active Wave Gate registration", () => {
   it("rejects completion when the active run is already terminal in history", () => {
     const graph = registeredGraph();
     const readiness = value(deriveWaveReadiness(graph, statusDeps));
-    const committed = value(commitWaveGateCompletion(readiness));
+    const committed = value(commitWaveGateCompletion(readiness, new Map()));
 
     // The same run re-enters the graph as the active gate with its own
     // completed registration already archived — the duplicate-terminal shape
@@ -2713,7 +2713,7 @@ describe("protected active Wave Gate registration", () => {
     // refuse in memory.
     const rerun = registeredGraph({ wave_gate_history: [committed.completedRegistration] });
     const rerunReadiness = value(deriveWaveReadiness(rerun, statusDeps));
-    expect(commitWaveGateCompletion(rerunReadiness)).toMatchObject({
+    expect(commitWaveGateCompletion(rerunReadiness, new Map())).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("already terminal in history") },
     });
@@ -2755,7 +2755,7 @@ describe("protected active Wave Gate registration", () => {
       const committed = await manager.commitActiveWaveGateCompletion((locked) => {
         const readiness = deriveWaveReadiness(locked, statusDeps);
         if (!readiness.ok) return { ok: false, error: { kind: "wave-completion-commit-rejected", message: "unavailable" } };
-        return commitWaveGateCompletion(readiness.value);
+        return commitWaveGateCompletion(readiness.value, new Map());
       });
       const stored = manager.load();
       expect(stored.active_wave_gate).toBeUndefined();

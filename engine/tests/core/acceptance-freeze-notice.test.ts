@@ -73,6 +73,10 @@ describe("pendingFreezeAdvisories", () => {
   });
 });
 
+// These fixtures carry no suite receipt. The same pause with a receipt installed
+// by the real completion suite is pinned in
+// tests/handlers/helpers/wave-completion-suite.test.ts: installing the receipt
+// does not freeze the contract (ADR-0044), so the notice still fires.
 describe("status at the contract Wave's advisory pause", () => {
   const evaluated = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: [] },

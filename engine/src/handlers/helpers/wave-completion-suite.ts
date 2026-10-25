@@ -22,11 +22,10 @@ import {
   owesAcceptance,
   renderAcceptanceFailure,
   renderFrozenPathDrift,
-  stampAcceptanceFreezes,
   unprojectableFacts,
-  type AcceptanceContract,
   type AcceptanceExpectation,
   type AcceptanceObservation,
+  type FrozenPathObservations,
 } from "../../core/acceptance-contract";
 import { parseJunitTestcases } from "../../core/structured-test-report";
 import { sha256Bytes } from "../../core/digest";
@@ -548,21 +547,21 @@ function observeAcceptance(
   return acceptanceObservation(expectation, facts);
 }
 
-/** The graph's contracts with what an accepted receipt observed stamped in:
- *  the contract Wave's Acceptance Freeze, or a revised roster re-recorded. */
-function stampedContracts(
-  graph: TaskGraph,
-  receipt: AcceptedWaveCompletionReceipt,
-  root: CanonicalRepositoryRoot,
-): DomainResult<readonly AcceptanceContract[] | undefined, string> {
-  const contracts = graph.acceptance_contracts;
-  if (contracts === undefined || receipt.acceptance === undefined) return freeze({ ok: true as const, value: contracts });
-  return stampAcceptanceFreezes(
-    contracts,
-    receipt.acceptance.expectation,
-    receipt.acceptance.facts,
-    observeFrozenDigests(root, frozenPathsToObserve(contracts)),
-  );
+/**
+ * The bytes of every frozen path, for the completion commit to stamp the
+ * Acceptance Freeze from. Observed under the completion lock, before readiness
+ * re-observes the workspace the receipt pinned, so a byte that changes between
+ * the two reads fails readiness rather than being frozen. A repository that
+ * cannot be resolved leaves every path unreadable, which refuses a stamp that
+ * needs one.
+ */
+export function observeCompletionFrozenPaths(graph: TaskGraph, authorityStartPath: string): FrozenPathObservations {
+  const paths = frozenPathsToObserve(graph.acceptance_contracts ?? []);
+  if (paths.length === 0) return new Map();
+  const repository = resolveCanonicalGitRepositoryRoot(authorityStartPath);
+  if (repository.ok) return observeFrozenDigests(repository.value, paths);
+  const reason = `repository authority is unavailable: ${workspaceFailureMessage(repository.error)}`;
+  return new Map(paths.map((path) => [path, freeze({ kind: "unreadable" as const, reason })]));
 }
 
 function reusableReceipt(
@@ -753,13 +752,17 @@ function canonicalResultBytes(result: WaveCompletionSuiteResult): readonly numbe
   return freezeArray([...new TextEncoder().encode(canonicalJson(json))]);
 }
 
-/** Install the receipt and, in the same locked write, the Acceptance Freeze it
- *  observed: the frozen bytes are exactly the bytes the receipt judged. */
+/**
+ * Install the receipt, and only the receipt. The Acceptance Freeze it observed
+ * is stamped by the completion commit (`commitWaveGateCompletion`), after the
+ * advisory decision: until then the contract Task can still be reopened and the
+ * frozen paths fixed. The contracts must be the ones the receipt was judged
+ * under, or its acceptance expectation no longer describes them.
+ */
 async function installAcceptedReceipt(
   manager: StateManager,
   graph: TaskGraph,
   receipt: AcceptedWaveCompletionReceipt,
-  contracts: readonly AcceptanceContract[] | undefined,
 ): Promise<void> {
   const expectedActive = graph.active_wave_gate;
   const expectedManifest = graph.verification_manifest;
@@ -776,11 +779,7 @@ async function installAcceptedReceipt(
       if (canonicalStructuralEquals(locked.active_wave_completion_suite, receipt)) return locked;
       throw new Error("a conflicting completion receipt already occupies the active Wave authority");
     }
-    return {
-      ...locked,
-      active_wave_completion_suite: receipt,
-      ...(contracts === undefined ? {} : { acceptance_contracts: contracts }),
-    };
+    return { ...locked, active_wave_completion_suite: receipt };
   });
 }
 
@@ -791,10 +790,8 @@ async function installAcceptedReceiptAndVerifyWorkspace(
   repositoryRoot: CanonicalRepositoryRoot,
   currentWorkspace: Extract<WaveWorkspaceObservation, { readonly kind: "observed" }>,
 ): Promise<EnsureWaveCompletionSuiteResult> {
-  const contracts = stampedContracts(graph, receipt, repositoryRoot);
-  if (!contracts.ok) return blocked(currentWorkspace, ["state"], [], `Acceptance Freeze refused: ${contracts.error}`);
   try {
-    await installAcceptedReceipt(manager, graph, receipt, contracts.value);
+    await installAcceptedReceipt(manager, graph, receipt);
   } catch (cause) {
     return blocked(currentWorkspace, ["state"], [], describeCause(cause));
   }

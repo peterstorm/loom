@@ -439,8 +439,10 @@ pending failures — into its brief.
    architecture phase) is the check skipped, and it says so.
 6. **The Wave Gate's completion suite** judges every Acceptance Contract the
    Wave owes something (RED in the contract Wave, GREEN by Requirement after),
-   stamps the Acceptance Freeze from the accepted receipt in the same locked
-   write, and blocks on frozen-path drift before reusing any receipt.
+   installs only the accepted receipt, and blocks on frozen-path drift before
+   reusing any receipt. The Acceptance Freeze is stamped from that receipt by
+   the locked completion commit, in the same write as the completed-Wave
+   history entry, so an abandoned run freezes nothing (ADR-0044).
    Whenever the TaskGraph carries `owner_obligations`, the same suite runs
    `loom:owner-verification`: the plan re-read, then sibling coverage and
    mutation verification for each owned invariant whose family the Wave
