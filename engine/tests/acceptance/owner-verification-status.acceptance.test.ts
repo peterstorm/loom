@@ -20,8 +20,8 @@
  * as the shell would observe it.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   authorizeWaveCompletionSuite,
@@ -39,6 +39,7 @@ import type {
   SurvivorDiagnostic,
   VerifiedMutationFields,
 } from "../../src/core/owner-verification/types";
+import { ownerCheckAuthority, ownerScopeOf } from "../../src/core/owner-verification/obligations";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
@@ -49,6 +50,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import type { ActiveWaveGateRegistration, TaskGraph, WaveCompletionResultObservation } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { CLOCK, CLOCK_EXEMPTION, FEES, FEES_CLOCK_PLAN_FILE, FEES_CLOCK_PLAN_TEXT, someParagraph } from "../fixtures/owner-families";
 import { labelledValue, value } from "../fixtures/parse-result";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
@@ -57,64 +59,10 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-// ---------------------------------------------------------------------------
-// Shared plan fixture: one verified owned Invariant and one exempt one.
-// ---------------------------------------------------------------------------
-
-const PLAN_FILE = ".claude/plans/2026-10-21-fees.md";
-
-const FEES = Object.freeze({
-  invariant: "INV-1",
-  title: "Fees are computed only by the fee calculator",
-  statement: "Every fee is computed by computeFee; no entry point rounds or discounts a fee inline.",
-  owner: "src/core/fees.ts",
-  siblings: Object.freeze([
-    Object.freeze({ path: "src/api/quote.ts", note: "quote endpoint" }),
-    Object.freeze({ path: "src/jobs/invoice.ts", note: "nightly invoicing" }),
-  ]),
-  matrixTest: "tests/fees.matrix.test.ts",
-  mutation: Object.freeze({ kind: "verify" }),
-});
-
-const CLOCK = Object.freeze({
-  invariant: "INV-2",
-  title: "Time is read only through the clock port",
-  statement: "No module reads Date.now outside the clock port.",
-  owner: "src/core/clock.ts",
-  siblings: Object.freeze([Object.freeze({ path: "src/jobs/schedule.ts", note: null })]),
-  matrixTest: "tests/clock.matrix.test.ts",
-  mutation: Object.freeze({ kind: "exempt", reason: "timing-only code; every mutant only changes a sleep" }),
-});
-
+/** The shared FEES / CLOCK plan: one verified owned Invariant and one exempt one. */
+const PLAN_FILE = FEES_CLOCK_PLAN_FILE;
 /** The population stamp, typed by CT-1 so the fixture is the shape the wire admits. */
-const OBLIGATIONS: readonly OwnerObligation[] = Object.freeze([FEES, CLOCK]);
-
-const PLAN_TEXT = [
-  "# Plan: fees", "",
-  "## Invariants", "",
-  `### ${FEES.invariant}: ${FEES.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${FEES.owner}\``,
-  "**Sibling entry points:**",
-  ...FEES.siblings.map(({ path, note }) => `- \`${path}\` — ${note}`),
-  `**Matrix test:** \`${FEES.matrixTest}\``,
-  `**Statement:** ${FEES.statement}`, "",
-  `### ${CLOCK.invariant}: ${CLOCK.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${CLOCK.owner}\``,
-  "**Sibling entry points:**",
-  ...CLOCK.siblings.map(({ path }) => `- \`${path}\``),
-  `**Matrix test:** \`${CLOCK.matrixTest}\``,
-  `**Mutation exemption:** ${CLOCK.mutation.reason}`,
-  `**Statement:** ${CLOCK.statement}`, "",
-].join("\n");
-
-/** True when some blank-line-separated paragraph of `text` matches every pattern. */
-const someParagraph = (text: string, ...patterns: readonly RegExp[]): boolean =>
-  text.split(/\n\s*\n/).some((paragraph) => patterns.every((pattern) => pattern.test(paragraph)));
-
-const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const literal = (text: string): RegExp => new RegExp(escaped(text));
+const OBLIGATIONS: readonly OwnerObligation[] = [FEES, CLOCK];
 
 // ---------------------------------------------------------------------------
 // Brief
@@ -126,7 +74,7 @@ function briefGraph(fileList: readonly string[]): string {
   cleanup.push(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   mkdirSync(join(root, ".claude", "plans"), { recursive: true });
-  writeFileSync(join(root, PLAN_FILE), PLAN_TEXT);
+  writeFileSync(join(root, PLAN_FILE), FEES_CLOCK_PLAN_TEXT);
   const path = join(root, ".claude", "state", "active_task_graph.json");
   writeFileSync(path, JSON.stringify({
     current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
@@ -159,12 +107,12 @@ describe("owner duties in the implementation brief (CT-2)", () => {
     expect(someParagraph(
       section,
       /must import/i,
-      literal(FEES.matrixTest),
-      literal(FEES.owner),
-      ...FEES.siblings.map(({ path }) => literal(path)),
+      FEES.matrixTest,
+      FEES.owner,
+      ...FEES.siblings.map(({ path }) => path),
     )).toBe(true);
     // Mutation duty: the owner's lines changed in the Wave are mutation-verified.
-    expect(someParagraph(section, /mutation[- ]verif/i, /changed/i, literal(FEES.owner))).toBe(true);
+    expect(someParagraph(section, /mutation[- ]verif/i, /changed/i, FEES.owner)).toBe(true);
   });
 
   it("AS-028: FR-027: the matrix-test author's brief for an exempt Invariant states the import duty and names the declared mutation exemption and its reason", () => {
@@ -173,11 +121,11 @@ describe("owner duties in the implementation brief (CT-2)", () => {
     expect(someParagraph(
       section,
       /must import/i,
-      literal(CLOCK.matrixTest),
-      literal(CLOCK.owner),
-      ...CLOCK.siblings.map(({ path }) => literal(path)),
+      CLOCK.matrixTest,
+      CLOCK.owner,
+      ...CLOCK.siblings.map(({ path }) => path),
     )).toBe(true);
-    expect(someParagraph(section, /exempt/i, literal(CLOCK.mutation.reason))).toBe(true);
+    expect(someParagraph(section, /exempt/i, CLOCK_EXEMPTION)).toBe(true);
   });
 });
 
@@ -253,37 +201,6 @@ const parsedStatusGraph = (): TaskGraph => {
   return parsed.value;
 };
 
-/** The owner check authority the plan gives obligations.ts (AD-4): null iff the graph carries no stamp. */
-type OwnerCheckAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly string[] }>;
-type OwnerCheckAuthorityFn = (graph: TaskGraph, wave: number) => OwnerCheckAuthority | null;
-
-/** `authorizeWaveCompletionSuite` with the owner parameter the plan adds (AD-1); its callers obtain it from `ownerCheckAuthority`. */
-type AuthorizeWithOwner = (
-  manifest: FrozenVerificationManifest,
-  active: ActiveWaveGateRegistration,
-  workspaceDigest: ArtifactDigest,
-  owner: OwnerCheckAuthority | null,
-) => ReturnType<typeof authorizeWaveCompletionSuite>;
-const authorizeWithOwner = authorizeWaveCompletionSuite as unknown as AuthorizeWithOwner;
-
-const OBLIGATIONS_MODULE = resolve(__dirname, "../../src/core/owner-verification/obligations.ts");
-
-/**
- * The owner check authority of the stamped graph, from INV-3's owner. Until
- * that module exists the suite is authorized without the owner check, so the
- * status read still runs and the testcase fails on what status reports. Once
- * it exists it must load and export the function: anything else fails here.
- */
-async function ownerCheckAuthorityOf(graph: TaskGraph): Promise<OwnerCheckAuthority | null> {
-  if (!existsSync(OBLIGATIONS_MODULE)) return null;
-  const loaded: unknown = await import(/* @vite-ignore */ OBLIGATIONS_MODULE);
-  const candidate = typeof loaded === "object" && loaded !== null && "ownerCheckAuthority" in loaded
-    ? loaded.ownerCheckAuthority
-    : undefined;
-  if (typeof candidate !== "function") throw new Error(`${OBLIGATIONS_MODULE} exports no ownerCheckAuthority`);
-  return (candidate as OwnerCheckAuthorityFn)(graph, registration.wave);
-}
-
 const OWNER_CHECK_ID = "loom:owner-verification";
 
 /** The tallies of a verified mutation run over a changed owner; `verifiedMutationOf` derives `generated`. */
@@ -306,7 +223,7 @@ const clockVerdict = (): InvariantVerdict => ({
   owner: CLOCK.owner,
   matrixTest: CLOCK.matrixTest,
   coverage: { kind: "covered" },
-  mutation: { kind: "exempt", reason: CLOCK.mutation.reason },
+  mutation: { kind: "exempt", reason: CLOCK_EXEMPTION },
 });
 
 /** INV-1's sibling the sibling-omitting matrix test never imports. */
@@ -319,19 +236,19 @@ const missingSibling: CoverageVerdict = { kind: "missing", paths: [MISSING_SIBLI
  * exits 1 exactly when owner verification blocks, as the reserved lint check
  * does), the owner-verification observation attached, then parsed.
  */
-async function persistedResult(
-  graph: TaskGraph,
+function persistedResult(
   verdicts: readonly InvariantVerdict[],
   blocked: boolean,
-): Promise<WaveCompletionResultObservation> {
-  const owner = await ownerCheckAuthorityOf(graph);
+): WaveCompletionResultObservation {
+  const owner = ownerCheckAuthority(ownerScopeOf(parsedStatusGraph()), registration.wave);
+  if (owner === null) throw new Error("the stamped status fixture graph owes no owner check");
   const ownerVerification: OwnerVerificationObservation = {
     kind: "verified",
-    obligationsDigest: owner?.obligationsDigest ?? digest("e"),
+    obligationsDigest: owner.obligationsDigest,
     boundMs: 1_500_000,
     verdicts,
   };
-  const authority = value(authorizeWithOwner(MANIFEST, registration, WORKSPACE, owner));
+  const authority = value(authorizeWaveCompletionSuite(MANIFEST, registration, WORKSPACE, owner));
   const raw = {
     kind: "wave-completion-suite-result",
     runId: authority.runId,
@@ -363,7 +280,7 @@ async function persistedResult(
 /** `helper orchestration status`, human and `--json`, from one graph and one persisted result. */
 function status(currentWaveCompletionResult: WaveCompletionResultObservation): Readonly<{ human: string; json: unknown }> {
   const deps: StatusDeps = {
-    loadPlanModels: () => ({ kind: "loaded", models: parsePlanModels(PLAN_TEXT) }),
+    loadPlanModels: () => ({ kind: "loaded", models: parsePlanModels(FEES_CLOCK_PLAN_TEXT) }),
     filePresence: () => ({ ok: true, exists: true }),
     currentWaveWorkspace: { kind: "observed", workspaceDigest: WORKSPACE },
     currentWaveCompletionResult,
@@ -439,10 +356,9 @@ const nextActionText = (json: unknown): string =>
   JSON.stringify(typeof json === "object" && json !== null ? (json as Record<string, unknown>).next : null);
 
 describe("owner verification in helper orchestration status (CT-2)", () => {
-  it("AS-029: FR-028: status --json reports per Invariant the coverage pass and the mutants generated, killed, timed out, invalid, survived and unmutated, or the exemption", async () => {
-    const graph = parsedStatusGraph();
+  it("AS-029: FR-028: status --json reports per Invariant the coverage pass and the mutants generated, killed, timed out, invalid, survived and unmutated, or the exemption", () => {
     const mutation = { killed: 5, timedOut: 2, invalid: 1, survivors: [], unmutated: 3 };
-    const { json } = status(await persistedResult(graph, [feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
+    const { json } = status(persistedResult([feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
 
     const fees = jsonEntry(json, FEES.invariant);
     expect(JSON.stringify(fees)).toMatch(/"(pass|covered)"/);
@@ -456,14 +372,13 @@ describe("owner verification in helper orchestration status (CT-2)", () => {
     const clock = jsonEntry(json, CLOCK.invariant);
     expect(JSON.stringify(clock)).toMatch(/"(pass|covered)"/);
     expect(JSON.stringify(clock)).toMatch(/exempt/i);
-    expect(JSON.stringify(clock)).toContain(CLOCK.mutation.reason);
+    expect(JSON.stringify(clock)).toContain(CLOCK_EXEMPTION);
     expect(numberAt(clock, "generated")).toBeUndefined();
   });
 
-  it("AS-029: FR-028: human status reports the same per-Invariant coverage, mutant counts and exemption as --json, from one projection", async () => {
-    const graph = parsedStatusGraph();
+  it("AS-029: FR-028: human status reports the same per-Invariant coverage, mutant counts and exemption as --json, from one projection", () => {
     const mutation = { killed: 5, timedOut: 2, invalid: 1, survivors: [], unmutated: 3 };
-    const { human, json } = status(await persistedResult(graph, [feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
+    const { human, json } = status(persistedResult([feesVerdict({ kind: "covered" }, mutation), clockVerdict()], false));
 
     const fees = humanBlock(human, FEES.invariant, [CLOCK.invariant]);
     expect(fees).toMatch(/pass|covered/i);
@@ -473,18 +388,16 @@ describe("owner verification in helper orchestration status (CT-2)", () => {
     }
     const clock = humanBlock(human, CLOCK.invariant, [FEES.invariant]);
     expect(clock).toMatch(/exempt/i);
-    expect(clock).toContain(CLOCK.mutation.reason);
+    expect(clock).toContain(CLOCK_EXEMPTION);
     // One projection: the JSON entry carries the very counts the human text shows.
     const feesJson = jsonEntry(json, FEES.invariant);
     expect(numberAt(feesJson, "generated")).toBe(expected.generated);
     expect(numberAt(feesJson, "unmutated")).toBe(expected.unmutated);
   });
 
-  it("AS-029: FR-028: status reports a missing sibling as the Invariant's coverage result", async () => {
-    const graph = parsedStatusGraph();
+  it("AS-029: FR-028: status reports a missing sibling as the Invariant's coverage result", () => {
     const mutation = { killed: 4, timedOut: 0, invalid: 0, survivors: [], unmutated: 0 };
-    const { human, json } = status(await persistedResult(
-      graph,
+    const { human, json } = status(persistedResult(
       [feesVerdict(missingSibling, mutation), clockVerdict()],
       true,
     ));
@@ -493,11 +406,9 @@ describe("owner verification in helper orchestration status (CT-2)", () => {
     expect(humanBlock(human, FEES.invariant, [CLOCK.invariant])).toContain(MISSING_SIBLING);
   });
 
-  it("AS-030: FR-028: a gate blocked by a missing sibling names the Invariant and the remedy in the next action: strengthen the matrix test to import it", async () => {
-    const graph = parsedStatusGraph();
+  it("AS-030: FR-028: a gate blocked by a missing sibling names the Invariant and the remedy in the next action: strengthen the matrix test to import it", () => {
     const mutation = { killed: 4, timedOut: 0, invalid: 0, survivors: [], unmutated: 0 };
-    const { human, json } = status(await persistedResult(
-      graph,
+    const { human, json } = status(persistedResult(
       [feesVerdict(missingSibling, mutation), clockVerdict()],
       true,
     ));
@@ -514,8 +425,7 @@ describe("owner verification in helper orchestration status (CT-2)", () => {
     expect(humanNext).toContain(MISSING_SIBLING);
   });
 
-  it("AS-030: FR-028: a gate blocked by a surviving mutant names the Invariant and the remedy: kill the survivor in the matrix test, or declare a mutation exemption with a reason", async () => {
-    const graph = parsedStatusGraph();
+  it("AS-030: FR-028: a gate blocked by a surviving mutant names the Invariant and the remedy: kill the survivor in the matrix test, or declare a mutation exemption with a reason", () => {
     const survivor: SurvivorDiagnostic = {
       mutantId: "f".repeat(64),
       operator: "comparison-flip",
@@ -525,8 +435,7 @@ describe("owner verification in helper orchestration status (CT-2)", () => {
       replacement: "<=",
     };
     const mutation = { killed: 5, timedOut: 0, invalid: 0, survivors: [survivor], unmutated: 0 };
-    const { human, json } = status(await persistedResult(
-      graph,
+    const { human, json } = status(persistedResult(
       [feesVerdict({ kind: "covered" }, mutation), clockVerdict()],
       true,
     ));

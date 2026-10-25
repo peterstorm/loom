@@ -17,62 +17,31 @@ import {
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
-import { obligationsFromPlan } from "../../src/core/owner-verification/obligations";
+import { obligationsFromPlan, ownerScopeOf } from "../../src/core/owner-verification/obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import type { PlanInvariant, Task } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { ownerObligation } from "../fixtures/owner-obligation";
+import {
+  ADMISSION,
+  ADMISSION_FEE_TABLE_PLAN_TEXT,
+  ADMISSION_FEE_TABLE_STAMP,
+  FEE_TABLE,
+  paragraphs,
+  someParagraph,
+} from "../fixtures/owner-families";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
   [name, readFileSync(join(LOOM_PACKAGE_ROOT, "rules", name), "utf8")] as const));
 
-const ADMISSION: OwnerObligation = {
-  invariant: "INV-1",
-  title: "Admission is decided only by the owner",
-  statement: "Every entry point admits through decide().",
-  owner: "src/rules/owner.ts",
-  siblings: [
-    { path: "src/rules/sibling-a.ts", note: "admits members" },
-    { path: "src/rules/sibling-b.ts", note: null },
-  ],
-  matrixTest: "tests/rules.matrix.test.ts",
-  mutation: { kind: "verify" },
-};
-
-const FEES: OwnerObligation = {
-  invariant: "INV-4",
-  title: "Fees are computed only by the fee table",
-  statement: null,
-  owner: "src/fees/table.ts",
-  siblings: [],
-  matrixTest: "tests/fees.matrix.test.ts",
-  mutation: { kind: "exempt", reason: "generated lookup table" },
-};
-
-const STAMP: readonly OwnerObligation[] = [ADMISSION, FEES];
+const STAMP = ADMISSION_FEE_TABLE_STAMP;
 
 /** The plan the stamp is derived from. */
-const PLAN_MODELS = parsePlanModels([
-  "# Plan: duties", "",
-  "## Invariants", "",
-  "### INV-1: Admission is decided only by the owner", "",
-  "**Tier:** advisory",
-  "**Owner module:** `src/rules/owner.ts`",
-  "**Sibling entry points:**",
-  "- `src/rules/sibling-a.ts` — admits members",
-  "- `src/rules/sibling-b.ts`",
-  "**Matrix test:** `tests/rules.matrix.test.ts`",
-  "**Statement:** Every entry point admits through decide().", "",
-  "### INV-4: Fees are computed only by the fee table", "",
-  "**Tier:** advisory",
-  "**Owner module:** src/fees/table.ts",
-  "**Sibling entry points:** none",
-  "**Matrix test:** tests/fees.matrix.test.ts",
-  "**Mutation exemption:** generated lookup table", "",
-].join("\n"));
+const PLAN_MODELS = parsePlanModels(ADMISSION_FEE_TABLE_PLAN_TEXT);
 const INVARIANTS: readonly PlanInvariant[] = PLAN_MODELS.invariants;
 
 const task = (fileList: readonly string[]): Task => taskFixture({
@@ -97,7 +66,7 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     contracts: [],
     repositoryRoot: "/repo",
     operatorNotes: [],
-    ...(stamp === undefined ? {} : { ownerObligations: stamp }),
+    ownerScope: ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }),
   };
   const rendered = renderImplementationBrief(input);
   if (!rendered.ok) throw new Error(rendered.error.message);
@@ -107,13 +76,9 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
   return prompt.slice(start, end < 0 ? undefined : end);
 }
 
-const paragraphs = (text: string): readonly string[] => text.split(/\n\s*\n/);
-const someParagraph = (text: string, ...needles: readonly string[]): boolean =>
-  paragraphs(text).some((paragraph) => needles.every((needle) => paragraph.includes(needle)));
-
 describe("owner duties in the brief (AD-10)", () => {
   it("the fixture stamp is the one population derives from the fixture plan", () => {
-    expect(obligationsFromPlan(PLAN_MODELS)).toEqual(STAMP);
+    expect(obligationsFromPlan(PLAN_MODELS)).toEqual({ ok: true, value: STAMP });
   });
 
   it("AS-028: the owner Task's brief names the import duty over owner and every sibling, and the mutation duty", () => {
@@ -121,12 +86,12 @@ describe("owner duties in the brief (AD-10)", () => {
     expect(someParagraph(section, "must import", ADMISSION.matrixTest, ADMISSION.owner, "src/rules/sibling-a.ts", "src/rules/sibling-b.ts"))
       .toBe(true);
     expect(someParagraph(section, "mutation-verified", "changed", ADMISSION.owner, ADMISSION.matrixTest)).toBe(true);
-    expect(section).not.toContain(FEES.invariant);
+    expect(section).not.toContain(FEE_TABLE.invariant);
   });
 
   it("AS-028: the matrix-test author's brief for an exempt Invariant names the exemption and its reason", () => {
-    const section = ownership([FEES.matrixTest], STAMP);
-    expect(someParagraph(section, "must import", FEES.matrixTest, FEES.owner)).toBe(true);
+    const section = ownership([FEE_TABLE.matrixTest], STAMP);
+    expect(someParagraph(section, "must import", FEE_TABLE.matrixTest, FEE_TABLE.owner)).toBe(true);
     expect(someParagraph(section, "exempt", "generated lookup table")).toBe(true);
     expect(section).not.toContain("mutation-verified");
   });
@@ -154,7 +119,7 @@ describe("owner duties in the brief (AD-10)", () => {
   });
 
   it("FR-027: a touched stamped obligation with no plan Invariant block still states its heading and duties", () => {
-    const drifted: OwnerObligation = {
+    const drifted: OwnerObligation = ownerObligation({
       invariant: "INV-9",
       title: "Ledgers are balanced only by the balancer",
       statement: "Every entry is balanced by balance().",
@@ -162,7 +127,7 @@ describe("owner duties in the brief (AD-10)", () => {
       siblings: [{ path: "src/api/post.ts", note: null }],
       matrixTest: "tests/balance.matrix.test.ts",
       mutation: { kind: "verify" },
-    };
+    });
     const section = ownership([drifted.owner], [...STAMP, drifted]);
     expect(INVARIANTS.map(({ id }) => id)).not.toContain("INV-9");
     expect(paragraphs(section)).toContain(`**INV-9: ${drifted.title}**`);
@@ -172,6 +137,6 @@ describe("owner duties in the brief (AD-10)", () => {
   });
 
   it("FR-027: the duty follows the stamp, not the plan: a stamp without that Invariant owes no duty", () => {
-    expect(ownership([ADMISSION.owner], [FEES])).not.toContain("Owner duties");
+    expect(ownership([ADMISSION.owner], [FEE_TABLE])).not.toContain("Owner duties");
   });
 });

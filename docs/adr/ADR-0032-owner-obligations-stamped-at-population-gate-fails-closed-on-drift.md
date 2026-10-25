@@ -59,32 +59,45 @@ infrastructure on any unreadable, malformed or drifted plan. Only a graph withou
 **The shape** (`engine/src/core/owner-verification/types.ts`, `engine/src/types.ts`):
 
 ```ts
-OwnerObligation = Readonly<{
-  invariant: string; title: string; statement: string | null; owner: string;
+OwnerObligation = OwnerObligationFields & Brand; // built only by ownerObligationOf
+OwnerObligationFields = Readonly<{
+  invariant: InvariantId; title: string; statement: string | null; owner: string;
   siblings: readonly SiblingEntryPoint[]; matrixTest: string;
-  mutation: MutationPolicy; // { kind: "verify" } | { kind: "exempt"; reason: NonEmptyText }
+  mutation: MutationPolicy; // { kind: "verify" } | { kind: "exempt"; reason: string }, never blank (see ADR-0033)
 }>
 TaskGraph.owner_obligations?: readonly OwnerObligation[]
 ```
 
 **The one derivation (INV-3 owner).** `engine/src/core/owner-verification/obligations.ts` owns the rule:
 
-- `obligationsFromPlan(models)` returns one obligation per `owned` Invariant, in plan order. Unowned and
-  malformed Invariants owe nothing.
-- `obligationsDigest` is sha256 over the canonical JSON.
+- `ownerObligationOf(fields)` is the one constructor of the branded `OwnerObligation`. It returns a
+  `DomainResult` and refuses a path that plays two roles under the one plan path rule: the owner listed as a
+  sibling, the matrix test equal to the owner or a sibling, a sibling listed twice. The `invariant` is a
+  branded `InvariantId` (`INV-N`), minted only by the plan grammar parser and the wire and receipt parsers.
+- `obligationsFromInvariants(invariants)` returns one obligation per `owned` Invariant, in plan order,
+  built through `ownerObligationOf`, and refuses an Invariant owned twice. Unowned and malformed Invariants
+  owe nothing. `obligationsFromPlan(models)` delegates to it.
+- `verifyOwed(obligations)` is the one home of the owes-mutation rule (policy `verify`); the population
+  refusal, the reported time bound and the runner all read it.
+- `obligationsDigest` is sha256 over the canonical JSON. The canonical form is derived from one
+  canonicaliser per field, in a record keyed by every field of `OwnerObligationFields`, so a field added to
+  the type without a canonicaliser fails to compile.
 - `obligationsAgree(stamped, fromPlan)` checks canonical structural equality, in the same order. Key order
   read back from the wire does not matter.
-- The selections every reader uses are `ownerVerificationOwed`, `waveChangedObligations`,
-  `obligationsTouchedBy` and `ownerCheckAuthority`.
+- Readers never hold the raw stamp: `ownerScopeOf(graph)` builds an opaque `OwnerScope`, and the selections
+  every reader uses (`ownerVerificationOwed`, `obligationsTouchedBy`, `ownerCheckAuthority` and the drift
+  check `stampAgreement`) take it.
 
-`ownerCheckAuthority(graph, wave)` returns `null` exactly when the stamp is absent. In that case the suite
+`ownerCheckAuthority(scope, wave)` returns `null` exactly when the stamp is absent. In that case the suite
 roster and digest stay unchanged (FR-004). Otherwise it returns the stamp digest and the owed Invariant ids,
 which may be none.
 
 **Population** (`engine/src/core/task-graph-population.ts`, shell
 `engine/src/handlers/helpers/populate-task-graph.ts`):
 
-- `ownerObligationsOf` calls `obligationsFromPlan` over the plan's Invariants.
+- `obligationsFromInvariants` derives the stamp from the command's Invariants. A refusal (a path in two
+  roles, an Invariant owned twice) refuses the population (`invalid-owner-obligations`), so no stamp the wire
+  would refuse is ever written.
 - The graph is always written with `owner_obligations: ownerObligations`.
 - The previous graph's `owner_obligations` is destructured away along with the other stale wave authority,
   so re-population replaces the stamp, as it does for `acceptance_contracts`.
@@ -93,8 +106,9 @@ which may be none.
   every later gate would block on a runner that cannot exist.
 
 **The wire** (`engine/src/state-file-wire.ts`, `parseOwnerObligations`): an absent field stays absent. A
-present field must be an array, every entry is parsed as an `OwnerObligation`, and an Invariant may appear at
-most once. The parsed stamp feeds the reconstruction of completion-suite authority (`OwnerStampedGraph`), so a
+present field must be an array, every entry is parsed field by field and built through `ownerObligationOf`
+(so a hand-edited stamp the plan grammar could never derive is refused at load), and an Invariant may appear
+at most once. The parsed stamp feeds the reconstruction of completion-suite authority (`OwnerStampedGraph`), so a
 persisted suite receipt is re-proven against the stamp's digest.
 
 **The gate** (`engine/src/handlers/helpers/wave-completion-suite.ts`, `ownerVerificationObservation`):
@@ -105,8 +119,10 @@ persisted suite receipt is re-proven against the stamp's digest.
    with `parsePlanModels`. This runs on every Wave, whether or not the Wave owes anything. Each of the
    following blocks as an infrastructure failure and never skips (FR-002):
    - **`plan-unreadable`:** the graph names no `plan_file`, or the file cannot be read.
-   - **`plan-malformed`:** the plan has model strays, or an Invariant whose ownership is `malformed`.
-   - **`plan-drift`:** `obligationsAgree(stamp, obligationsFromPlan(models))` is false.
+   - **`plan-malformed`:** the plan has model strays, an Invariant whose ownership is `malformed`, or owned
+     Invariants that derive no obligation (`stampAgreement` is `underivable`).
+   - **`plan-drift`:** `stampAgreement(scope, models)` is `drifted`: the stamp and the obligations the plan
+     derives now differ.
 3. When the plan agrees and the Wave owes nothing, the observation is
    `{ kind: "verified", obligationsDigest, boundMs: 0, verdicts: [] }`. Plan integrity is proven, and no
    coverage or mutation runs (AS-004, AS-005).
@@ -117,7 +133,7 @@ persisted suite receipt is re-proven against the stamp's digest.
 **The other readers use the stamp purely.**
 
 - **Implementation brief:** `engine/src/orchestration/implementation-brief.ts` passes
-  `graph.owner_obligations` to `engine/src/core/implementation-brief.ts`.
+  `ownerScopeOf(graph)` to `engine/src/core/implementation-brief.ts`.
 - **Reviewer packets:** `engine/src/core/owner-verification/owner-map.ts` and
   `engine/src/core/wave-review-authority.ts` build the owner map from it.
 - **Status:** `engine/src/core/owner-verification/status.ts` reads it.
@@ -153,7 +169,9 @@ None of these modules re-reads the plan.
   `pending`. `docs/operations.md` warns operators to decide exemptions in the architecture phase.
 - Every Wave Gate of a G5b graph re-reads and re-parses the plan, even when the Wave owes nothing. A plan file
   that is moved, deleted or broken blocks gates that have no owned Invariant in scope.
-- Comparing through the canonical form makes the stamp's field set part of the contract. A future field on
-  `OwnerObligation` must be added to `canonicalObligation`, or drift detection silently ignores it.
+- Comparing through the canonical form makes the stamp's field set part of the contract. As shipped in #127, a
+  field added to `OwnerObligation` but not to `canonicalObligation` was silently ignored by drift detection;
+  the PR #131 review remediation derives the canonical form from an exhaustive per-field record, so that
+  omission is now a compile error. A new field still needs a deliberate canonicaliser.
 - Graphs populated before G5b stay unchecked for their whole life. They gain owner verification only through
   re-population.

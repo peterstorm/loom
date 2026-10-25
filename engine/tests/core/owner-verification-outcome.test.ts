@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import { classifyBaseline, classifyMutantRun, verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type { MatrixTestRun } from "../../src/core/owner-verification/types";
 
@@ -119,6 +120,15 @@ describe("verifiedMutationOf", () => {
       .toEqual({ ok: false, error: { kind: "mutants-without-owner-change", generated: 1, unmutated: 0 } });
     expect(verifiedMutationOf({ killed: 0, timedOut: 0, invalid: 0, survivors: [], unmutated: 5, ownerChangedInWave: false }))
       .toEqual({ ok: false, error: { kind: "mutants-without-owner-change", generated: 0, unmutated: 5 } });
+  });
+
+  it("FR-016: refuses generated mutants that are all invalid: such a run carries no mutation evidence", () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 40 }), fc.integer({ min: 0, max: 40 }), (invalid, unmutated) => {
+      expect(verifiedMutationOf({ killed: 0, timedOut: 0, invalid, survivors: [], unmutated, ownerChangedInWave: true }))
+        .toEqual({ ok: false, error: { kind: "no-valid-mutants", generated: invalid } });
+    }), { numRuns: 50 });
+    expect(verifiedMutationOf({ killed: 0, timedOut: 1, invalid: 3, survivors: [], unmutated: 0, ownerChangedInWave: true }).ok).toBe(true);
+    expect(verifiedMutationOf({ killed: 0, timedOut: 0, invalid: 3, survivors: [SURVIVOR], unmutated: 0, ownerChangedInWave: true }).ok).toBe(true);
   });
 
   it("FR-012: refuses the first count that is not a non-negative integer, in field order", () => {

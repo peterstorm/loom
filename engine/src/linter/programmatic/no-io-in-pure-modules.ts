@@ -172,10 +172,16 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The Invariant role and family rules over a plan's ownership (G5a); the
   // owner-verification core reaches it through obligations.ts (INV-3).
   "engine/src/core/plan-paths.ts",
+  // The plan grammar (parsePlanModels): owner-verification/plan-integrity.ts
+  // renders its strays when the gate's re-read plan is malformed (PR #131).
+  "engine/src/core/parse-plan-models.ts",
   // The sibling entry point leaf types.ts and the owner-verification contract share.
   "engine/src/core/sibling-entry-point.ts",
   // The owner check authority leaf the suite authorization and the owner-verification core share.
   "engine/src/core/owner-check-authority.ts",
+  // The branded Invariant id leaf the plan model, the owner check authority and
+  // the owner-verification core share.
+  "engine/src/core/invariant-id.ts",
   "engine/src/core/task-revalidation.ts",
   "engine/src/core/contract-revision.ts",
   "engine/src/core/wave-gate-registration.ts",
@@ -213,10 +219,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // G5b owner-verification core (AD-13, INV-2): every file of the package is
   // pure — worktrees, runner processes and file reads live in
   // orchestration/owner-mutation-workspace.ts and owner-verification-runner.ts.
-  // The CT-1 types file is also named exactly: engine/src/types.ts imports it,
-  // so the executable purity closure reaches it by path.
   "engine/src/core/owner-verification/",
-  "engine/src/core/owner-verification/types.ts",
   // The harness tool-call adapters both harnesses normalize through (INV-4, T6).
   "engine/src/core/harness-tool-call.ts",
   // The frozen CT-3 surface the shared minting rule and both adapters import.

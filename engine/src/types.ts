@@ -30,8 +30,15 @@ import type { ProofBoundaryObservation } from "./core/proof-boundary-observation
 import type { AcceptanceContract, PlanContract } from "./core/acceptance-contract";
 import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/types";
 import type { OwnerVerificationStatusReport } from "./core/owner-verification/status";
+import type { SiblingEntryPoint } from "./core/sibling-entry-point";
+import type { InvariantId } from "./core/invariant-id";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
+// The sibling entry point is owned by its dependency-free leaf, which both
+// this file and the owner-verification contract import, so neither imports
+// the other through it.
+export type { SiblingEntryPoint } from "./core/sibling-entry-point";
+export type { InvariantId } from "./core/invariant-id";
 import type {
   ArtifactDigest,
   ArtifactRef,
@@ -1125,11 +1132,12 @@ export type LoomStatus = Readonly<{
 /**
  * The document `helper orchestration status` emits, as `--json` serializes
  * it and the human renderer reads it: the canonical `LoomStatus` with the
- * owner-verification projection (G5b AD-10) beside it. `helper orchestration
- * status` always carries `ownerVerification`; it is absent only where a bare
- * `LoomStatus` is rendered without the status deps it is projected from.
+ * owner-verification report (G5b AD-10) beside it. `ownerVerification` is
+ * required: `deriveLoomStatusFromParsedGraph` is the only producer and always
+ * reports it (`not-observed` when there is nothing to report), so no renderer
+ * handles an absent field. The routed `LoomStatus` stays a separate type.
  */
-export type LoomStatusDocument = LoomStatus & Readonly<{ ownerVerification?: OwnerVerificationStatusReport }>;
+export type LoomStatusDocument = LoomStatus & Readonly<{ ownerVerification: OwnerVerificationStatusReport }>;
 
 export type WaveSpecCheckSlotAuthority = Readonly<{
   readonly slot_id: string;
@@ -1308,12 +1316,6 @@ export interface PlanPipeline {
   readonly declaredNodes: readonly string[];
 }
 
-// The sibling entry point is owned by its dependency-free leaf, which both
-// this file and the owner-verification contract import, so neither imports
-// the other through it.
-import type { SiblingEntryPoint } from "./core/sibling-entry-point";
-export type { SiblingEntryPoint } from "./core/sibling-entry-point";
-
 /** Why an invariant's ownership declaration is malformed. Each names exactly
  *  one way the plan text failed the grammar, so validation can say which. */
 export type OwnershipProblem =
@@ -1350,8 +1352,8 @@ export type InvariantOwnership =
   | Readonly<{ kind: "malformed"; problems: OrchestrationNonEmpty<OwnershipProblem> }>;
 
 export interface PlanInvariant {
-  /** e.g. "INV-1" */
-  readonly id: string;
+  /** e.g. "INV-1": minted by the plan grammar parser, the one source of plan Invariant ids */
+  readonly id: InvariantId;
   readonly title: string;
   /** The `**Tier:**` line, three-state: absent, recognized, or unrecognized */
   readonly tier: PlanInvariantTier;

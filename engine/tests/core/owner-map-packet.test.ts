@@ -36,6 +36,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { ADMISSION, ADMISSION_FEE_TABLE_STAMP, FEE_TABLE, someParagraph } from "../fixtures/owner-families";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -44,48 +45,22 @@ afterEach(() => {
 
 const PLAN_FILE = ".claude/plans/2026-10-22-owner-map.md";
 
-const ADMISSION: OwnerObligation = {
-  invariant: "INV-1",
-  title: "Admission is decided only by the owner",
-  statement: "Every entry point admits through decide().",
-  owner: "src/rules/owner.ts",
-  siblings: [
-    { path: "src/rules/sibling-a.ts", note: "admits members" },
-    { path: "src/rules/sibling-b.ts", note: null },
-  ],
-  matrixTest: "tests/rules.matrix.test.ts",
-  mutation: { kind: "verify" },
-};
-
-const FEES: OwnerObligation = {
-  invariant: "INV-4",
-  title: "Fees are computed only by the fee table",
-  statement: null,
-  owner: "src/fees/table.ts",
-  siblings: [],
-  matrixTest: "tests/fees.matrix.test.ts",
-  mutation: { kind: "exempt", reason: "generated lookup table" },
-};
-
-const STAMP: readonly OwnerObligation[] = [ADMISSION, FEES];
-
-const someParagraph = (text: string, ...patterns: readonly RegExp[]): boolean =>
-  text.split(/\n\s*\n/).some((paragraph) => patterns.every((pattern) => pattern.test(paragraph)));
+const STAMP = ADMISSION_FEE_TABLE_STAMP;
 
 describe("renderOwnerMapSection — the pure owner map", () => {
   it("AS-022: lists every given Invariant's id, title, owner, siblings with notes, matrix test and statement, in order", () => {
-    const text = renderOwnerMapSection(PLAN_FILE, [ADMISSION, FEES]);
+    const text = renderOwnerMapSection(PLAN_FILE, [ADMISSION, FEE_TABLE]);
     for (const value of [
       ADMISSION.invariant, ADMISSION.title, ADMISSION.owner, ADMISSION.matrixTest, ADMISSION.statement!,
       "src/rules/sibling-a.ts", "admits members", "src/rules/sibling-b.ts",
-      FEES.invariant, FEES.title, FEES.owner, FEES.matrixTest,
+      FEE_TABLE.invariant, FEE_TABLE.title, FEE_TABLE.owner, FEE_TABLE.matrixTest,
     ]) expect(text).toContain(value);
-    expect(text.indexOf(ADMISSION.invariant)).toBeLessThan(text.indexOf(FEES.invariant));
+    expect(text.indexOf(ADMISSION.invariant)).toBeLessThan(text.indexOf(FEE_TABLE.invariant));
     expect(text).toContain("**Sibling entry points:** none");
   });
 
   it("AS-023: cites `<plan file>#INV-N` per Invariant as the violated contract and carries the second-copy rule verbatim", () => {
-    const text = renderOwnerMapSection(PLAN_FILE, [ADMISSION, FEES]);
+    const text = renderOwnerMapSection(PLAN_FILE, [ADMISSION, FEE_TABLE]);
     expect(text).toContain(`${PLAN_FILE}#INV-1`);
     expect(text).toContain(`${PLAN_FILE}#INV-4`);
     expect(text).toContain(SECOND_COPY_RULE);
@@ -103,7 +78,7 @@ describe("renderOwnerMapSection — the pure owner map", () => {
 
   it("is deterministic: the same obligations render the same bytes", () => {
     expect(renderOwnerMapSection(PLAN_FILE, [ADMISSION])).toBe(renderOwnerMapSection(PLAN_FILE, [ADMISSION]));
-    expect(renderOwnerMapSection(PLAN_FILE, [ADMISSION])).not.toBe(renderOwnerMapSection(PLAN_FILE, [FEES]));
+    expect(renderOwnerMapSection(PLAN_FILE, [ADMISSION])).not.toBe(renderOwnerMapSection(PLAN_FILE, [FEE_TABLE]));
   });
 
   it("names exactly the two owner-map reviewer roles", () => {
@@ -182,14 +157,14 @@ describe("Wave review issuance — the owner-map fixed section (AD-9)", () => {
   });
 
   it("AS-022: a Task that only writes the matrix test touches the family (any role), so the section is issued", () => {
-    const batch = issue(projectWithPlan(), graphOf([FEES.matrixTest], STAMP));
-    expect(ownerMapOf(packetsByRole(batch).get("code-reviewer")!)).toBe(renderOwnerMapSection(PLAN_FILE, [FEES]));
+    const batch = issue(projectWithPlan(), graphOf([FEE_TABLE.matrixTest], STAMP));
+    expect(ownerMapOf(packetsByRole(batch).get("code-reviewer")!)).toBe(renderOwnerMapSection(PLAN_FILE, [FEE_TABLE]));
   });
 
   it("AS-025: the section is inside the packet digest — a changed obligation changes the packet identity", () => {
     const root = projectWithPlan();
     const before = packetsByRole(issue(root, graphOf([ADMISSION.owner], STAMP))).get("code-reviewer")!;
-    const after = packetsByRole(issue(root, graphOf([ADMISSION.owner], [{ ...ADMISSION, title: "Renamed" }, FEES])))
+    const after = packetsByRole(issue(root, graphOf([ADMISSION.owner], [{ ...ADMISSION, title: "Renamed" }, FEE_TABLE])))
       .get("code-reviewer")!;
     expect(after.digest).not.toBe(before.digest);
   });

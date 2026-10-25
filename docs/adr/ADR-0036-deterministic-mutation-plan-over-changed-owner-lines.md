@@ -68,10 +68,14 @@ each mutant run with a time limit of at most 60 s.**
 
 ### The plan (pure core)
 `engine/src/core/owner-verification/mutation-plan.ts` exports
-`mutationPlan({ ownerPath, ownerText, changedLines, cap }): MutationPlan` and `applyMutant(ownerText, mutant)`.
-It is one of the two INV-1 seams allowed to import `typescript` (the other is `import-graph.ts`). It only calls
-`ts.createSourceFile(ownerPath, ownerText, ScriptTarget.Latest, true, ScriptKind.TS)` on text that has
-already been read: no `ts.sys`, no Program, no language service, no filesystem.
+`mutationPlan({ ownerPath, ownerText, changedLines, cap }): DomainResult<MutationPlan, OwnerUnparseable>` and
+`applyMutant(ownerText, mutant)`. It is one of the two INV-1 seams allowed to import `typescript` (the other is
+`import-graph.ts`). It parses already-read text through `parseModule(ownerPath, ownerText)`, exported by
+`import-graph.ts`: `ts.createSourceFile` with the script kind the owner path's extension names, so a `.tsx` or
+`.jsx` owner is parsed with JSX, the same rule the coverage import graph uses. No `ts.sys`, no Program, no
+language service, no filesystem. An owner the parser reports syntax errors for has no plan: the result is
+`owner-unparseable` with every diagnostic (`line:column message`), which the shell records as that
+infrastructure failure instead of mutating a recovered tree.
 
 - **Operators.** The fixed order is: 1. `condition-negation` (the condition of `if`, `while`, `do`, `for` and
   `?:` becomes `!(…)`); 2. `comparison-flip` (`<`↔`>=`, `>`↔`<=`, `===`↔`!==`, `==`↔`!=`); 3. `logical-swap`
@@ -108,8 +112,9 @@ head line changed. A deletion changes no head line. A final line that gains or l
 changed.
 
 ### The Wave base (execution shell)
-`engine/src/orchestration/owner-verification-runner.ts` (`planMutation`, `waveBase`, `ownerAtBase`) resolves the
-inputs:
+The decisions are pure: `waveBaseOf` and `ownerTasks` in `engine/src/core/owner-verification/wave-base.ts`
+choose the base and the owner Tasks. `engine/src/orchestration/owner-verification-runner.ts` (`planMutation`,
+`resolveWaveBase`, `ownerAtBase`) only runs the Git calls they ask for. Together they resolve the inputs:
 
 - The owner Tasks are the Wave's Tasks whose `file_list` names the owner. With none, the plan is `null`: zero
   mutants, and the verdict and status say `owner unchanged in Wave` (AS-014). **Shipped behavior:** the
@@ -165,8 +170,12 @@ cover the plan and the changed-line set, alongside the CT-1 acceptance tests
   code in a way that weakens older lines' behaviour without any of those lines counting as changed.
 - Over the cap, some changed sites are never mutated. Even spacing is fixed, so the same sites are skipped
   every time for the same bytes. A survivor among them stays hidden until the owner text shifts.
-- The plan parses every owner as `ScriptKind.TS`. Owners in other languages, and TSX-specific syntax, are out
-  of scope for this mechanism.
+- The plan parses an owner with the script kind its extension names (TypeScript, TSX, JavaScript, JSX). As
+  shipped in #127 every owner was parsed as `ScriptKind.TS`, so a `.tsx` owner's JSX was garbled; the PR #131
+  review remediation shares the import-graph seam's rule. Owners in other languages are out of scope, and an
+  owner with syntax errors blocks as `owner-unparseable`. The parser's diagnostics are read from a property
+  outside TypeScript's public typings, so a TypeScript that stopped exposing them would fail every owner
+  closed, and the mutation-plan tests would show it.
 - The worst-case cost is real: 25 minutes per Invariant at the default limit, summed over every owed Invariant
   in the Wave. The clamp to the runner's own `timeoutMs` keeps it within the operator's limit but can make
   slow mutants count as timed-out kills.

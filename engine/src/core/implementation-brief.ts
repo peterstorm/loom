@@ -27,7 +27,7 @@ import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { match } from "ts-pattern";
 import { invariantRoles } from "./plan-paths";
-import { obligationsTouchedBy } from "./owner-verification/obligations";
+import { obligationsTouchedBy, type OwnerScope } from "./owner-verification/obligations";
 import type { OwnerObligation } from "./owner-verification/types";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
@@ -120,10 +120,10 @@ export type ImplementationBriefInput = Readonly<{
   rules: ReadonlyMap<RuleDocument, string>;
   /** The invariants the protected plan declares; empty when there is no plan. */
   invariants: readonly PlanInvariant[];
-  /** The TaskGraph's population stamp (`graph.owner_obligations`), absent
-   *  exactly when the graph was populated before owner verification: such a
-   *  graph is owed no owner duty, so the brief states none. */
-  ownerObligations?: readonly OwnerObligation[];
+  /** The TaskGraph's Owner Obligations (`ownerScopeOf(graph)`). A graph
+   *  populated before owner verification carries no stamp and is owed no
+   *  owner duty, so the brief states none. */
+  ownerScope: OwnerScope;
   /** The TaskGraph's Acceptance Contracts, with their freeze; empty when none. */
   contracts: readonly AcceptanceContract[];
   /** The TaskGraph's frozen verification manifest (`graph.verification_manifest`),
@@ -587,7 +587,7 @@ export function renderImplementationBrief(
     invariant_ownership: invariantOwnership(
       task.file_list ?? [],
       input.invariants,
-      input.ownerObligations === undefined ? [] : obligationsTouchedBy(task.file_list ?? [], input.ownerObligations),
+      obligationsTouchedBy(input.ownerScope, task.file_list ?? []),
     ),
     acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
     file_list: bulleted(task.file_list ?? [], "None declared."),

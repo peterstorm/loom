@@ -1,7 +1,7 @@
 import type { OwnerObligation, Phase, PlanContract, PlanInvariant, Task, TaskGraph } from "../types";
 import { acceptanceContractsFromPlan, redWindowTaskIds } from "./acceptance-contract";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
-import { obligationsFromPlan } from "./owner-verification/obligations";
+import { obligationsFromInvariants, renderObligationsError, verifyOwed } from "./owner-verification/obligations";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
@@ -134,6 +134,7 @@ export type TaskGraphPopulationError = Readonly<{
     | "spec-index-unavailable"
     | "unknown-requirement"
     | "invalid-contracts"
+    | "invalid-owner-obligations"
     | "owner-verification-runner-missing";
   message: string;
 }>;
@@ -203,15 +204,6 @@ function specIndexRefusal(
 }
 
 /**
- * The Owner Obligations the plan's Invariants stamp: `obligationsFromPlan`
- * is the one derivation (INV-3) and reads only the Invariants of the models
- * it is given, so the other model sections are supplied empty.
- */
-function ownerObligationsOf(invariants: readonly PlanInvariant[]): readonly OwnerObligation[] {
-  return obligationsFromPlan({ lifecycles: [], pipeline: null, invariants, contracts: [], strays: [] });
-}
-
-/**
  * Mutation verification runs each mutant through the frozen `affectedRunner`
  * (AD-8), so a plan owing it to some owned Invariant cannot be honoured by a
  * manifest without one: refuse it now rather than block every Wave Gate that
@@ -223,7 +215,7 @@ function ownerRunnerRefusal(
   manifest: FrozenVerificationManifest,
 ): TaskGraphPopulationResult | null {
   if (manifest.affectedRunner !== undefined) return null;
-  const verified = obligations.filter(({ mutation }) => mutation.kind === "verify").map(({ invariant }) => invariant);
+  const verified = verifyOwed(obligations).map(({ invariant }) => invariant);
   return verified.length === 0
     ? null
     : reject(
@@ -342,7 +334,14 @@ export function populateTaskGraph(
 
   const contracts = acceptanceContractsFromPlan(command.contracts, command.tasks);
   if (!contracts.ok) return reject("invalid-contracts", contracts.error.join("; "));
-  const ownerObligations = ownerObligationsOf(command.invariants);
+  // The one derivation (INV-3): an owned Invariant whose paths play two roles,
+  // or one owned twice, derives no stamp, so the graph is never stamped with
+  // obligations the State File parser would refuse to load.
+  const derived = obligationsFromInvariants(command.invariants);
+  if (!derived.ok) {
+    return reject("invalid-owner-obligations", `TaskGraph population refused: ${renderObligationsError(derived.error)}; fix the plan's owned Invariants, then re-run populate-task-graph.`);
+  }
+  const ownerObligations = derived.value;
   const runnerRefusal = ownerRunnerRefusal(ownerObligations, command.verificationManifest);
   if (runnerRefusal !== null) return runnerRefusal;
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);

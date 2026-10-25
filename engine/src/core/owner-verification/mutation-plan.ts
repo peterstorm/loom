@@ -1,8 +1,12 @@
 /**
  * The deterministic mutation plan of one owner module (AD-6; FR-009..FR-012,
  * FR-017). One of the two INV-1 seams allowed to import `typescript`: it
- * parses already-read owner text with `ts.createSourceFile` only — no
- * `ts.sys`, no Program, no language service, no filesystem.
+ * parses already-read owner text through `parseModule`, the parse it shares
+ * with the import-graph seam (one path-to-script-kind rule, so a `.tsx` or
+ * `.jsx` owner is parsed with JSX) — no `ts.sys`, no Program, no language
+ * service, no filesystem. An owner with syntax errors has no plan: its sites
+ * would come from a recovered tree, so it is `owner-unparseable`, which the
+ * shell reports as an infrastructure failure, never a pass.
  *
  * The engine fixes the operator set, in this order:
  * 1. `condition-negation`: the condition of `if`, `while`, `do`, `for` and
@@ -25,7 +29,8 @@
 
 import ts from "typescript";
 import { sha256Hex } from "../digest";
-import { failure, success } from "../orchestration-contract/identity";
+import { failure, isNonEmpty, success, type DomainResult } from "../orchestration-contract/identity";
+import { parseModule, syntaxErrorsOf } from "./import-graph";
 import type {
   ApplyMutantFn,
   Mutant,
@@ -34,6 +39,7 @@ import type {
   MutationPlan,
   MutationPlanFn,
   MutationPlanOfFn,
+  OwnerUnparseable,
   ParseMutantCapFn,
 } from "./types";
 
@@ -163,8 +169,17 @@ function select<T>(candidates: readonly T[], cap: number): readonly T[] {
   return Array.from({ length: cap }, (_, i) => candidates[Math.floor((i * n) / cap)]!);
 }
 
+/** The parser's verdict on the owner: its tree, or every syntax error it reported (failing closed when it reports none at all). */
+function parsedOwner(ownerPath: string, ownerText: string): DomainResult<ts.SourceFile, OwnerUnparseable> {
+  const source = parseModule(ownerPath, ownerText);
+  const errors = syntaxErrorsOf(source) ?? ["the TypeScript parser exposes no parse diagnostics, so the owner cannot be proven well-formed"];
+  return isNonEmpty(errors) ? failure({ kind: "owner-unparseable", diagnostics: errors }) : success(source);
+}
+
 export const mutationPlan: MutationPlanFn = ({ ownerPath, ownerText, changedLines, cap }) => {
-  const source = ts.createSourceFile(ownerPath, ownerText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const parsed = parsedOwner(ownerPath, ownerText);
+  if (!parsed.ok) return parsed;
+  const source = parsed.value;
   const candidates = allSites(source)
     .map((site): Candidate => {
       const start = site.node.getStart(source);
@@ -181,7 +196,7 @@ export const mutationPlan: MutationPlanFn = ({ ownerPath, ownerText, changedLine
   }));
   const plan = mutationPlanOf({ mutants, candidates: candidates.length, cap });
   if (!plan.ok) throw new Error(`invariant: the evenly spaced selection broke the plan's bounds (${plan.error.kind})`);
-  return plan.value;
+  return success(plan.value);
 };
 
 export const applyMutant: ApplyMutantFn = (ownerText, mutant) =>

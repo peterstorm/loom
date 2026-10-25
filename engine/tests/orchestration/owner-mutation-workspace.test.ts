@@ -11,36 +11,26 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSy
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { withMutationWorkspace, type MutationWorkspaceSpec } from "../../src/orchestration/owner-mutation-workspace";
-import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import {
+  buildOwnerVerificationRepo as build,
+  canonicalRoot,
   cleanupOwnerVerificationRepos,
-  ownerVerificationRepo,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
-  type OwnerVerificationRepoOptions,
 } from "../fixtures/owner-verification-repo";
 
 afterEach(cleanupOwnerVerificationRepos);
 
 const TIMEOUT_MS = 30_000;
 
-function canonical(root: string): CanonicalRepositoryRoot {
-  const parsed = parseCanonicalRepositoryRoot(root);
-  if (!parsed.ok) throw new Error(`fixture root is not canonical: ${root}`);
-  return parsed.value;
-}
-
 function specOf(repo: OwnerVerificationRepo): MutationWorkspaceSpec {
   return {
-    repositoryRoot: canonical(repo.root),
+    repositoryRoot: canonicalRoot(repo.root),
     ownerPath: OWNER_FIXTURE.owner,
     reportPath: OWNER_FIXTURE.report,
     runnerCwd: ".",
   };
 }
-
-const build = (options: Partial<OwnerVerificationRepoOptions> = {}): OwnerVerificationRepo =>
-  ownerVerificationRepo({ waveChanges: "owner", matrixTest: "discriminating", ...options });
 
 const read = (root: string, path: string): string => readFileSync(join(root, ...path.split("/")), "utf8");
 
@@ -135,6 +125,29 @@ describe("withMutationWorkspace", () => {
       return read(workspace.root, OWNER_FIXTURE.owner);
     });
     expect(result).toEqual({ ok: true, value: original });
+  }, TIMEOUT_MS);
+
+  it("a run that throws over an owner that cannot be restored rethrows naming both, with the run's throw as the cause", async () => {
+    const repo = build();
+    const exploded = new Error("run exploded");
+    const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
+      const thrown = await workspace.runWithOwner("broken();\n", async (root) => {
+        const owner = join(root, ...OWNER_FIXTURE.owner.split("/"));
+        rmSync(owner);
+        mkdirSync(owner);
+        throw exploded;
+      }).then(() => null, (error: unknown) => error);
+      return thrown;
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBeInstanceOf(Error);
+    const error = result.value as Error;
+    expect(error).not.toBe(exploded);
+    expect(error.message).toContain("run exploded");
+    expect(error.message).toMatch(/could not be restored/);
+    expect(error.cause).toBe(exploded);
+    expect(repo.worktrees()).toEqual([repo.root]);
   }, TIMEOUT_MS);
 
   it("removes the worktree even when the use of it throws, and rethrows", async () => {

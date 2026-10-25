@@ -77,7 +77,8 @@ plan check refuses.**
     ```ts
     type MutationPolicy = { kind: "verify" } | { kind: "exempt"; reason: string }
     ```
-  - `exempt` exists only with a non-blank reason. The type has no third state.
+  - `exempt` exists only with a non-blank reason. `reason` is a plain `string`: the plan grammar and the
+    State File wire parse (below), the only producers, refuse a blank one. The type has no third state.
   - `engine/src/types.ts` adds `mutation: MutationPolicy` to the `owned` arm of `InvariantOwnership`. It also
     extends `OwnershipProblem` with `{ kind: "exemption-without-reason" }` and
     `{ kind: "exemption-on-unowned" }`.

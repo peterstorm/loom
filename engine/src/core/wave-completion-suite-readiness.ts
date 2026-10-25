@@ -7,9 +7,9 @@
  * performs no I/O: the current workspace and persisted result arrive as shell
  * observations.
  *
- * INV-3 sibling: the roster a receipt must match is re-authorized with the
- * owner check authority `ownerCheckAuthority` derives from the same graph, so
- * readiness and the gate cannot disagree about which owned Invariants the
+ * INV-3: the roster a receipt or persisted result must match is authorized
+ * by `authorizeGraphCompletionSuite`, the one function the gate also calls,
+ * so readiness and the gate cannot disagree about which owned Invariants the
  * Wave owes.
  */
 
@@ -24,19 +24,16 @@ import type {
 import {
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
+  rejectionDisposition,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
-import {
-  authorizeWaveCompletionSuite,
-  legacyDefaultVerificationManifest,
-  deriveProjectVerificationCoverage,
-} from "./verification-manifest";
+import { legacyDefaultVerificationManifest, deriveProjectVerificationCoverage } from "./verification-manifest";
 import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
-import { ownerCheckAuthority } from "./owner-verification/obligations";
+import { authorizeGraphCompletionSuite } from "./owner-verification/suite-authority";
 
 
 function exactCompletionSuiteError(
@@ -57,12 +54,7 @@ function exactCompletionSuiteError(
   if (parsed.value.manifestDigest !== manifest.manifestDigest) {
     return "accepted suite manifest digest does not match protected verification_manifest";
   }
-  const authorized = authorizeWaveCompletionSuite(
-    manifest,
-    registration,
-    parsed.value.workspaceDigest,
-    ownerCheckAuthority(graph, registration.wave),
-  );
+  const authorized = authorizeGraphCompletionSuite(graph, parsed.value.workspaceDigest);
   if (!authorized.ok) return authorized.error.errors.join("; ");
   if (parsed.value.manifestDigest !== authorized.value.manifestDigest ||
       parsed.value.suiteDigest !== authorized.value.suiteDigest ||
@@ -223,8 +215,9 @@ function deriveCompletionSuiteOutcome(
 
 /**
  * Judge the persisted result of an active Wave without a receipt against the
- * roster the graph's Wave owes: re-authorized with the owner check authority
- * `ownerCheckAuthority` derives from the same graph (INV-3).
+ * roster the graph's Wave owes (`authorizeGraphCompletionSuite`, INV-3). A
+ * semantic rejection stays a rejection when the owner check beside it could
+ * not decide, exactly as the gate replays it (`rejectionDisposition`).
  */
 function persistedResultOutcome(
   graph: TaskGraph,
@@ -234,7 +227,7 @@ function persistedResultOutcome(
   result: Extract<WaveCompletionResultObservation, { kind: "observed" }>["result"],
 ) {
   const manifestDigest = manifest.manifestDigest;
-  const authorized = authorizeWaveCompletionSuite(manifest, registration, workspaceDigest, ownerCheckAuthority(graph, registration.wave));
+  const authorized = authorizeGraphCompletionSuite(graph, workspaceDigest);
   if (!authorized.ok) {
     return requiredWaveCompletionSuite("completion-result-invalid", authorized.error.errors.join("; "), manifestDigest);
   }
@@ -246,15 +239,15 @@ function persistedResultOutcome(
       manifestDigest,
     );
   }
-  const [firstSemanticFailure, ...remainingSemanticFailures] = evaluation.semanticFailures;
-  if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0 ||
-      firstSemanticFailure === undefined) {
+  const disposition = rejectionDisposition(evaluation);
+  if (disposition.kind !== "semantic") {
     return requiredWaveCompletionSuite(
       "completion-result-invalid",
       completionEvaluationFailureDetail(evaluation.authorityFailures, evaluation.infrastructureFailures),
       manifestDigest,
     );
   }
+  const [firstSemanticFailure, ...remainingSemanticFailures] = disposition.failures;
   return canonicalRecord({
     kind: "rejected",
     verificationManifestDigest: manifestDigest,

@@ -22,9 +22,11 @@ import {
 import {
   obligationsFromPlan,
   ownerCheckAuthority,
+  ownerScopeOf,
   ownerVerificationOwed,
 } from "../../src/core/owner-verification/obligations";
-import type { MutationPolicy, OwnerObligation, PlanInvariant, PlanModels, TaskGraph } from "../../src/types";
+import type { MutationPolicy, PlanInvariant, PlanModels, TaskGraph } from "../../src/types";
+import { invariantId } from "../fixtures/owner-obligation";
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 
 const authoredTask = (id: string, wave: number, fileList: readonly string[]): AuthoredTask =>
@@ -53,7 +55,7 @@ const ROSTER = (() => {
 })();
 
 const ownedInvariant = (id: string, mutation: MutationPolicy = { kind: "verify" }): PlanInvariant => ({
-  id,
+  id: invariantId(id),
   title: `Rule ${id}`,
   tier: { status: "ok", tier: "checkable" },
   ruleFile: null,
@@ -68,7 +70,7 @@ const ownedInvariant = (id: string, mutation: MutationPolicy = { kind: "verify" 
 });
 
 const unownedInvariant = (id: string): PlanInvariant => ({
-  id,
+  id: invariantId(id),
   title: `Advisory ${id}`,
   tier: { status: "ok", tier: "advisory" },
   ruleFile: null,
@@ -146,7 +148,7 @@ describe("population stamps owner_obligations (AD-2)", () => {
   it("stamps exactly obligationsFromPlan for owned Invariants, in plan order", () => {
     const invariants = [ownedInvariant("INV-2"), unownedInvariant("INV-1"), ownedInvariant("INV-3")];
     const state = populated(graph(), command({ invariants }));
-    expect(state.owner_obligations).toEqual(obligationsFromPlan(models(invariants)));
+    expect(obligationsFromPlan(models(invariants))).toEqual({ ok: true, value: state.owner_obligations });
     expect(state.owner_obligations?.map(({ invariant }) => invariant)).toEqual(["INV-2", "INV-3"]);
     expect(state.owner_obligations?.[0]).toEqual({
       invariant: "INV-2",
@@ -156,15 +158,15 @@ describe("population stamps owner_obligations (AD-2)", () => {
       siblings: [{ path: "src/rule-sibling.ts", note: "the second entry point" }],
       matrixTest: "tests/rule.matrix.test.ts",
       mutation: { kind: "verify" },
-    } satisfies OwnerObligation);
+    });
   });
 
   it("gives a stamped graph an owner check even for a Wave that owes nothing", () => {
     const state = populated(graph(), command({ invariants: [ownedInvariant("INV-1")] }));
-    expect(ownerCheckAuthority(state, 1)?.owed).toEqual(["INV-1"]);
-    expect(ownerCheckAuthority(state, 2)?.owed).toEqual([]);
+    expect(ownerCheckAuthority(ownerScopeOf(state), 1)?.owed).toEqual(["INV-1"]);
+    expect(ownerCheckAuthority(ownerScopeOf(state), 2)?.owed).toEqual([]);
     const empty = populated(graph(), command({ invariants: [] }));
-    expect(ownerCheckAuthority(empty, 1)).not.toBeNull();
+    expect(ownerCheckAuthority(ownerScopeOf(empty), 1)).not.toBeNull();
   });
 
   it("re-population replaces the stamp, never merging the old one", () => {
@@ -188,8 +190,8 @@ describe("FR-004: a graph without the stamp owes nothing", () => {
   it("has no owner check and owes no Invariant in any Wave", () => {
     const preFeature = withoutStamp(populated(graph(), command({ invariants: [ownedInvariant("INV-1")] })));
     for (const wave of [1, 2]) {
-      expect(ownerVerificationOwed(preFeature, wave)).toEqual([]);
-      expect(ownerCheckAuthority(preFeature, wave)).toBeNull();
+      expect(ownerVerificationOwed(ownerScopeOf(preFeature), wave)).toEqual([]);
+      expect(ownerCheckAuthority(ownerScopeOf(preFeature), wave)).toBeNull();
     }
   });
 });
@@ -230,6 +232,27 @@ describe("owner-verification-runner-missing refusal", () => {
       invariants: [unownedInvariant("INV-1")],
     }));
     expect(state.owner_obligations).toEqual([]);
+  });
+
+  it.each([
+    ["the owner is also a sibling", { siblings: [{ path: "./src/rule-owner.ts", note: null }] }, "INV-1: './src/rule-owner.ts' is both the owner module and a sibling entry point"],
+    ["the matrix test is the owner", { matrixTest: "src/rule-owner.ts" }, "INV-1: 'src/rule-owner.ts' is both the owner module and the matrix test"],
+    ["the matrix test is a sibling", { matrixTest: "src/rule-sibling.ts" }, "INV-1: 'src/rule-sibling.ts' is both a sibling entry point and the matrix test"],
+    ["a sibling is listed twice", { siblings: [{ path: "src/rule-sibling.ts", note: null }, { path: "src/rule-sibling.ts", note: "again" }] }, "INV-1: sibling entry point 'src/rule-sibling.ts' is listed twice"],
+  ] as const)("refuses an owned Invariant whose paths play two roles (%s), so no unloadable stamp is written", (_case, change, message) => {
+    const base = ownedInvariant("INV-1");
+    if (base.ownership.kind !== "owned") throw new Error("fixture is owned");
+    const invariant: PlanInvariant = { ...base, ownership: { ...base.ownership, ...change } };
+    const result = populateTaskGraph(graph(), command({ invariants: [invariant] }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid-owner-obligations");
+    expect(result.error.message).toContain(message);
+  });
+
+  it("refuses a plan that owns the same Invariant twice", () => {
+    const result = populateTaskGraph(graph(), command({ invariants: [ownedInvariant("INV-1"), ownedInvariant("INV-1")] }));
+    expect(!result.ok && result.error).toMatchObject({ kind: "invalid-owner-obligations", message: expect.stringContaining("INV-1 is declared more than once") });
   });
 
   it("populates a non-exempt owned Invariant when the frozen manifest carries an affectedRunner", () => {

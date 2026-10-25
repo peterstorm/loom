@@ -18,6 +18,7 @@ import {
   affectedRunnerCheck,
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
+  deriveProjectVerificationCoverage,
   freezeVerificationManifest,
   legacyDefaultVerificationManifest,
   parseFrozenVerificationManifest,
@@ -385,5 +386,58 @@ describe("affectedRunnerCheck", () => {
       ok: false,
       error: { kind: "invalid-verification-manifest", errors: ["affectedRunner.cwd engine does not contain pi/b.ts"] },
     });
+  });
+});
+
+describe("an accepted receipt's project coverage leaves out every reserved check", () => {
+  const registration: ActiveWaveGateRegistration = {
+    schemaVersion: 1,
+    kind: "active-wave-gate",
+    runId: "run.owner-coverage" as ActiveWaveGateRegistration["runId"],
+    wave: 1,
+    authorityDigest: "a".repeat(64) as ActiveWaveGateRegistration["authorityDigest"],
+    revision: 0,
+    terminalOutcome: null,
+  };
+  const workspaceDigest = "b".repeat(64) as ArtifactDigest;
+  const owner = { obligationsDigest: "c".repeat(64) as ArtifactDigest, owed: [] };
+
+  function ownerStampedReceipt(checks: readonly unknown[]): AcceptedWaveCompletionReceipt {
+    const manifest = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, kind: "loom-verification-manifest", checks })));
+    if (!manifest.ok) throw new Error(manifest.error.errors.join("; "));
+    const authority = authorizeWaveCompletionSuite(manifest.value, registration, workspaceDigest, owner);
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    const evaluated = evaluateAsRecorded(authority.value, {
+      kind: "wave-completion-suite-result",
+      runId: authority.value.runId,
+      wave: authority.value.wave,
+      revision: authority.value.revision,
+      authorityDigest: authority.value.authorityDigest,
+      manifestDigest: authority.value.manifestDigest,
+      suiteDigest: authority.value.suiteDigest,
+      workspaceDigest: authority.value.workspaceDigest,
+      checks: authority.value.checks.map((check) => ({
+        checkId: check.checkId,
+        scope: "wave" as const,
+        outcome: { kind: "observed" as const, exitCode: 0, timedOut: false, signal: null, report: { kind: "not-required" as const } },
+      })),
+      ownerVerification: { kind: "verified", obligationsDigest: owner.obligationsDigest, boundMs: 0, verdicts: [] },
+    });
+    if (evaluated.kind !== "accepted") throw new Error(`receipt fixture must be accepted: ${JSON.stringify(evaluated)}`);
+    return evaluated.receipt;
+  }
+
+  const projectCheck = { id: "project:test", scope: "wave", executable: "bun", args: ["test"], cwd: ".", timeoutMs: 60_000, report: { kind: "not-required" } };
+
+  it("names only the project checks of an owner-stamped receipt, never loom:owner-verification", () => {
+    const receipt = ownerStampedReceipt([projectCheck]);
+    expect(receipt.checks.map(({ checkId }) => checkId)).toEqual(["loom:full-tier-lint", "loom:owner-verification", "project:test"]);
+    expect(deriveProjectVerificationCoverage(receipt)).toEqual({ kind: "configured", checkIds: ["project:test"] });
+  });
+
+  it("an owner-stamped receipt with only reserved checks configures nothing", () => {
+    const receipt = ownerStampedReceipt([]);
+    expect(receipt.checks.map(({ checkId }) => checkId)).toEqual(["loom:full-tier-lint", "loom:owner-verification"]);
+    expect(deriveProjectVerificationCoverage(receipt)).toEqual({ kind: "not-configured", reason: "historical-unknown" });
   });
 });

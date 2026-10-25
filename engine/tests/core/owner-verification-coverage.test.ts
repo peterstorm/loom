@@ -17,13 +17,14 @@ import {
   type CoverageGraphState,
 } from "../../src/core/owner-verification/coverage";
 import type { OwnerObligation, PathAliases } from "../../src/core/owner-verification/types";
+import { ownerObligation } from "../fixtures/owner-obligation";
 
 const OWNER = "src/rules/owner.ts";
 const SIBLING_A = "src/rules/sibling-a.ts";
 const SIBLING_B = "src/rules/sibling-b.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
 
-const obligation = (siblings: readonly string[] = [SIBLING_A, SIBLING_B], owner: string = OWNER): OwnerObligation => ({
+const obligation = (siblings: readonly string[] = [SIBLING_A, SIBLING_B], owner: string = OWNER): OwnerObligation => ownerObligation({
   invariant: "INV-7",
   title: "Admission is decided only by the owner",
   statement: null,
@@ -138,6 +139,24 @@ describe("reachedFiles and decideCoverage", () => {
     expect(coverageOverFiles({ matrixTest: MATRIX, obligation: obligation([]), files: new Map(Object.entries(SOURCES)), aliases: [] }))
       .toEqual({ kind: "missing", paths: [OWNER] });
   });
+
+  it("FR-005: a type-only import reaches nothing, since it never loads the module", () => {
+    const matrix = 'import type { decide } from "../src/rules/owner";\nimport { type a } from "@rules/sibling-a";\nimport "../src/rules/sibling-b";\n';
+    expect(over(matrix)).toEqual({ kind: "missing", paths: [OWNER, SIBLING_A] });
+  });
+
+  it("FR-005: a type-only re-export is never followed, by the matrix test or along a re-export chain", () => {
+    const files = new Map(Object.entries({
+      ...SOURCES,
+      "src/rules/types.ts": 'export type * from "./owner";\nexport { type a } from "./sibling-a";\nexport * from "./sibling-b";\n',
+      [MATRIX]: 'export type { decide } from "../src/rules/owner";\nimport "../src/rules/types";\n',
+    }));
+    expect([...reachedFiles(MATRIX, files, ALIASES)].sort()).toEqual(["src/rules/types.ts", SIBLING_B].sort());
+  });
+
+  it("FR-005: a module imported both as types and at runtime is reached", () => {
+    expect(over('import type { decide } from "../src/rules/owner";\nimport { decide as run } from "../src/rules/owner";\n', [])).toEqual({ kind: "covered" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -220,6 +239,88 @@ const drive = (repo: Readonly<Record<string, string>>, aliases: PathAliases, max
   throw new Error("frontier did not settle");
 };
 
+// Random repositories over every resolution path the frontier must gather
+// ahead of the decision: single- and multi-target tsconfig aliases, `.tsx` and
+// `.mts` fallbacks, `.js`/`.mjs` specifiers naming TypeScript sources,
+// directory indexes, and layouts where an earlier ladder candidate (`m.ts`
+// before `m/index.ts`, `gen/*` before `src/*`) exists beside a later one.
+
+const SLOTS = ["m0", "m1", "m2"] as const;
+type Slot = (typeof SLOTS)[number];
+
+const LAYOUTS = ["ts", "tsx", "mts", "index", "ts-and-index", "tsx-and-index", "gen-and-src", "absent"] as const;
+type Layout = (typeof LAYOUTS)[number];
+
+/** The repository files a slot's layout holds, in ladder order. */
+const filesOf = (slot: Slot, layout: Layout): readonly string[] => ({
+  ts: [`src/${slot}.ts`],
+  tsx: [`src/${slot}.tsx`],
+  mts: [`src/${slot}.mts`],
+  index: [`src/${slot}/index.ts`],
+  "ts-and-index": [`src/${slot}.ts`, `src/${slot}/index.ts`],
+  "tsx-and-index": [`src/${slot}.tsx`, `src/${slot}/index.ts`],
+  "gen-and-src": [`gen/${slot}.ts`, `src/${slot}.ts`],
+  absent: [],
+})[layout];
+
+const STYLES = ["relative", "relative-js", "relative-mjs", "alias", "multi-alias"] as const;
+type Style = (typeof STYLES)[number];
+
+const LAYOUT_ALIASES: PathAliases = [
+  { pattern: "@a/*", targets: ["src/*"] },
+  { pattern: "@m/*", targets: ["gen/*", "src/*"] },
+];
+
+/** A relative specifier from a file's directory to `src/<slot>`. */
+const relativeTo = (from: string, slot: Slot): string => {
+  const fromDir = from.split("/").slice(0, -1);
+  const target = ["src", slot];
+  let common = 0;
+  while (common < fromDir.length && common < target.length && fromDir[common] === target[common]) common += 1;
+  const up = fromDir.length - common;
+  const down = target.slice(common).join("/");
+  return `${up === 0 ? "./" : "../".repeat(up)}${down === "" ? "." : down}`;
+};
+
+const specifierOf = (from: string, slot: Slot, style: Style): string =>
+  ({
+    relative: relativeTo(from, slot),
+    "relative-js": `${relativeTo(from, slot)}.js`,
+    "relative-mjs": `${relativeTo(from, slot)}.mjs`,
+    alias: `@a/${slot}`,
+    "multi-alias": `@m/${slot}`,
+  })[style];
+
+type LayoutEdge = Readonly<{ slot: Slot; style: Style; kind: "import" | "reexport"; typeOnly: boolean }>;
+
+const layoutEdge: fc.Arbitrary<LayoutEdge> = fc.record({
+  slot: fc.constantFrom(...SLOTS),
+  style: fc.constantFrom(...STYLES),
+  kind: fc.constantFrom<"import" | "reexport">("import", "reexport"),
+  typeOnly: fc.boolean(),
+});
+
+const textOf = (from: string, edges: readonly LayoutEdge[]): string =>
+  edges.map(({ slot, style, kind, typeOnly }, index) => {
+    const specifier = specifierOf(from, slot, style);
+    const type = typeOnly ? "type " : "";
+    return kind === "reexport" ? `export ${type}* from "${specifier}";` : `import ${type}* as e${index} from "${specifier}";`;
+  }).join("\n") + "\n";
+
+/** A repository of the slots plus the matrix test, and an obligation over them: m0 the owner, m1 and m2 its siblings. */
+const layoutRepository = fc.record({
+  layouts: fc.tuple(...SLOTS.map(() => fc.constantFrom(...LAYOUTS))),
+  edges: fc.tuple(...SLOTS.map(() => fc.array(layoutEdge, { maxLength: 3 }))),
+  matrix: fc.array(layoutEdge, { minLength: 1, maxLength: 4 }),
+}).map(({ layouts, edges, matrix }) => {
+  const repo: Record<string, string> = { [MATRIX]: textOf(MATRIX, matrix) };
+  SLOTS.forEach((slot, index) => {
+    for (const file of filesOf(slot, layouts[index]!)) repo[file] = textOf(file, edges[index]!);
+  });
+  const declaredPath = (index: number): string => filesOf(SLOTS[index]!, layouts[index]!)[0] ?? `src/${SLOTS[index]!}.ts`;
+  return { repo, obligation: obligation([declaredPath(1), declaredPath(2)], declaredPath(0)) };
+});
+
 describe("coverageFrontier", () => {
   it("first asks for the matrix test, then settles on exactly the files coverage needs", () => {
     const first = coverageFrontier(initialCoverageState(MATRIX, ALIASES), new Map());
@@ -247,6 +348,35 @@ describe("coverageFrontier", () => {
       const input = { matrixTest: MATRIX, obligation: targetObligation, aliases: [] };
       expect(coverageOverFiles({ ...input, files: done.state.files })).toEqual(coverageOverFiles({ ...input, files: new Map(Object.entries(repo)) }));
     }));
+  });
+
+  it("FR-007: the gathered files decide coverage exactly as the whole repository does, over aliases, fallbacks, indexes and ladder order", () => {
+    fc.assert(fc.property(layoutRepository, ({ repo, obligation: declared }) => {
+      const done = drive(repo, LAYOUT_ALIASES);
+      expect(done.kind).toBe("complete");
+      if (done.kind !== "complete") return;
+      const input = { matrixTest: MATRIX, obligation: declared, aliases: LAYOUT_ALIASES };
+      expect(coverageOverFiles({ ...input, files: done.state.files })).toEqual(coverageOverFiles({ ...input, files: new Map(Object.entries(repo)) }));
+      expect([...done.state.files.keys()].every((path) => path in repo)).toBe(true);
+    }), { numRuns: 1000 });
+  });
+
+  it("FR-007: an alias met only after its later target was gathered still gathers the earlier target first", () => {
+    // The matrix test reads src/m0.ts directly; src/m1.ts, read alongside it,
+    // re-exports `@m/m0`, whose earlier target gen/m0.ts nothing has requested.
+    const repo = {
+      [MATRIX]: 'import "../src/m0";\nimport "../src/m1";\n',
+      "src/m0.ts": "export const m0 = 0;\n",
+      "gen/m0.ts": "export const m0 = 0;\n",
+      "src/m1.ts": 'export * from "@m/m0";\n',
+    };
+    const done = drive(repo, LAYOUT_ALIASES);
+    expect(done.kind).toBe("complete");
+    if (done.kind !== "complete") return;
+    expect(done.state.files.has("gen/m0.ts")).toBe(true);
+    const input = { matrixTest: MATRIX, obligation: obligation(["src/m1.ts"], "gen/m0.ts"), aliases: LAYOUT_ALIASES };
+    expect(coverageOverFiles({ ...input, files: done.state.files })).toEqual({ kind: "covered" });
+    expect(coverageOverFiles({ ...input, files: new Map(Object.entries(repo)) })).toEqual({ kind: "covered" });
   });
 
   it("a missing matrix test settles with nothing gathered", () => {

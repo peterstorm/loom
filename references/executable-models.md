@@ -170,12 +170,17 @@ a hypothetical project, like the order domain of INV-1 and INV-2 above.
 **Tier:** advisory
 **Owner module:** `engine/src/core/owner-verification/obligations.ts`
 **Sibling entry points:**
-- `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave's owed obligations that the owner check runs for
-- `engine/src/core/wave-completion-suite-readiness.ts` — re-authorizing the suite roster with the same owed predicate
+- `engine/src/core/owner-verification/suite-authority.ts` — authorizing the Wave's suite from the TaskGraph with `ownerCheckAuthority`; the gate helper and readiness both call it
+- `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave's owed obligations (`ownerVerificationOwed`) that the owner check runs for
+- `engine/src/core/wave-completion-suite-readiness.ts` — re-authorizing the suite roster through `suite-authority.ts`
+- `engine/src/core/owner-verification/plan-integrity.ts` — the gate's drift check of plan against stamp (`stampAgreement`)
+- `engine/src/state-file-wire.ts` — re-deriving the owner check from the stamp when a persisted receipt loads
+- `engine/src/orchestration/owner-verification-runner.ts` — which owed obligations run mutants (`verifyOwed`)
+- `engine/src/core/task-graph-population.ts` — which obligations need the frozen `affectedRunner` (`verifyOwed`)
 - `engine/src/core/wave-review-authority.ts` — obligations a reviewed Task touches, which gate the owner-map section
 - `engine/src/core/implementation-brief.ts` — obligations a Task touches, which drive the duty paragraph
 **Matrix test:** `engine/tests/core/owner-obligations.matrix.test.ts`
-**Statement:** Every call site that decides which Owner Obligations apply calls the obligations.ts selections and never classifies roles inline.
+**Statement:** Every call site that decides which Owner Obligations apply calls the obligations.ts selections over the opaque `OwnerScope` and never classifies roles inline; the State File wire parse re-derives the check authority from the stamp on purpose, because a receipt must not certify its own roster.
 
 ### INV-4: No console output in the domain (illustrative)
 
@@ -448,7 +453,9 @@ pending failures — into its brief.
   forgotten entry point stays invisible to both.
 - **An import is not proof of exercise.** Sibling coverage is a static import
   check: a matrix test that imports a sibling but never calls it through the
-  rule passes coverage. Mutation verification mutates the owner only, never a
+  rule passes coverage. Only imports that load the module count: a type-only
+  import or re-export (`import type`, `export type … from`, every specifier
+  `type`) is erased at runtime and reaches nothing. Mutation verification mutates the owner only, never a
   sibling, so a sibling that bypasses the owner is caught only by a matrix
   test that really drives it — and by the second-copy lens in review.
 - **Mutation covers the owner's changed lines only.** Unchanged owner lines,
@@ -457,9 +464,10 @@ pending failures — into its brief.
   Wave`). Only constructs the six fixed operators can rewrite count; at most
   24 mutants run per invariant and the rest are reported as unmutated.
 - **Invalid mutants are neither killed nor survived.** A mutant whose run
-  shows only collection or import errors is counted `invalid`. A run whose
-  every mutant is invalid has no survivor, so it passes — and says so: the
-  verdict and status report the invalid count.
+  shows only collection or import errors is counted `invalid`, and the
+  verdict and status report the invalid count. A run whose every generated
+  mutant is invalid carries no mutation evidence, so it blocks as the
+  `no-valid-mutants` infrastructure failure rather than passing.
 - **A matrix-test-only change triggers nothing.** The checks run when the Wave
   changed the owner or a sibling; a Wave touching only the matrix test owes
   no coverage or mutation run (the plan is still re-read).

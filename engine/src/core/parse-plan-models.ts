@@ -55,6 +55,7 @@ import type {
   ContractTypes,
   PlanContract,
 } from "../types";
+import { parseInvariantId } from "./invariant-id";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
 
@@ -517,6 +518,27 @@ function emptySectionStray(s: Section | null, section: BlockSection): Stray[] {
   return [{ kind: "empty-section", section }];
 }
 
+/**
+ * The `## Invariants` blocks. The heading grammar admits exactly `INV-N`, the
+ * Invariant id's own rule, so every id parses; this is the plan's one minting
+ * point for an `InvariantId`.
+ */
+function invariantBlocks(body: string): PlanInvariant[] {
+  return idBlocks(body, "INV").flatMap(({ id, title, block }) => {
+    const invariant = parseInvariantId(id);
+    return invariant.ok
+      ? [{
+          id: invariant.value,
+          title,
+          tier: parseTier(fieldValue(block, "Tier")),
+          ruleFile: fieldValue(block, "Rule file"),
+          statement: fieldValue(block, "Statement"),
+          ownership: parseOwnership(block),
+        }]
+      : [];
+  });
+}
+
 export function parsePlanModels(markdown: string): PlanModels {
   const { text, unterminated } = stripFences(markdown);
 
@@ -538,16 +560,7 @@ export function parsePlanModels(markdown: string): PlanModels {
       };
 
   const invariantsSection = section(text, "Invariants");
-  const invariants: PlanInvariant[] = invariantsSection === null
-    ? []
-    : idBlocks(invariantsSection.body, "INV").map(({ id, title, block }) => ({
-        id,
-        title,
-        tier: parseTier(fieldValue(block, "Tier")),
-        ruleFile: fieldValue(block, "Rule file"),
-        statement: fieldValue(block, "Statement"),
-        ownership: parseOwnership(block),
-      }));
+  const invariants: PlanInvariant[] = invariantsSection === null ? [] : invariantBlocks(invariantsSection.body);
 
   const contractsSection = section(text, "Contracts");
   const contracts: PlanContract[] = contractsSection === null

@@ -43,6 +43,21 @@ export interface BoundaryRule {
 }
 
 /**
+ * ADR-0042 (G5b INV-1): the only modules through which the TypeScript compiler
+ * API enters engine code. Each parses text it is given and never touches
+ * `ts.sys`, a Program or a language service. This is the one list: the
+ * core boundary's per-file `typescript` grant below and machine-purity's
+ * closure audit both read it. The INV-1 regex rule
+ * (`{.claude,.pi}/linter/rules/inv-1-typescript-compiler-api-seam.json`)
+ * cannot import code, so its `excludePatterns` mirror this pair and a linter
+ * test fails when the mirror drifts.
+ */
+export const TYPESCRIPT_COMPILER_API_SEAMS: readonly string[] = Object.freeze([
+  "engine/src/core/owner-verification/import-graph.ts",
+  "engine/src/core/owner-verification/mutation-plan.ts",
+]);
+
+/**
  * Default boundary rules for the loom engine.
  * These encode the architectural constraint: dependency arrows point inward.
  */
@@ -145,10 +160,9 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/review-panel.ts": ["zod/v4"],
       "engine/src/core/emission-tool.ts": ["zod/v4"],
       // ADR-0042 (G5b INV-1): the TypeScript compiler API enters the pure core
-      // through exactly these two seams, each parsing text it is given; no
-      // other core module may import it. machine-purity pins the same pair.
-      "engine/src/core/owner-verification/import-graph.ts": ["typescript"],
-      "engine/src/core/owner-verification/mutation-plan.ts": ["typescript"],
+      // through exactly the seams TYPESCRIPT_COMPILER_API_SEAMS names; no
+      // other core module may import it.
+      ...Object.fromEntries(TYPESCRIPT_COMPILER_API_SEAMS.map((seam) => [seam, ["typescript"]])),
     },
     perFileAllow: {
       // The direct-edit guard normalizes panel/spec-artifact targets with pure

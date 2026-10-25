@@ -129,7 +129,14 @@ import {
   type AcceptanceContract,
   type ContractWriterProblem,
 } from "./core/acceptance-contract";
-import { ownerCheckAuthority, type OwnerCheckAuthority } from "./core/owner-verification/obligations";
+import { parseInvariantId, type InvariantId } from "./core/invariant-id";
+import {
+  ownerCheckAuthority,
+  ownerObligationOf,
+  ownerScopeOf,
+  renderOwnerObligationError,
+  type OwnerCheckAuthority,
+} from "./core/owner-verification/obligations";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2115,7 +2122,7 @@ function parseActiveWaveCompletionSuiteField(
   }
   // The owner check joins the roster exactly as the gate authorized it: from the
   // graph's own stamp, for the active Wave (AD-1).
-  const owner = ownerCheckAuthority(stamped, activeWaveGate.wave);
+  const owner = ownerCheckAuthority(ownerScopeOf(stamped), activeWaveGate.wave);
   const rosterConflict = completionRosterConflict(receipt, manifest, activeWaveGate, owner);
   return rosterConflict === null ? parseOk(receipt) : parseErr(rosterConflict);
 }
@@ -2282,6 +2289,12 @@ function nonBlankText(raw: unknown, label: string): ParseResult<string> {
   return typeof raw === "string" && raw.trim() !== "" ? parseOk(raw) : parseErr(`${label} must be non-blank text`);
 }
 
+/** An Invariant id, minted through its one parser. */
+function invariantIdText(raw: unknown, label: string): ParseResult<InvariantId> {
+  const id = typeof raw === "string" ? parseInvariantId(raw) : null;
+  return id !== null && id.ok ? parseOk(id.value) : parseErr(`${label} must be an Invariant id (INV-N)`);
+}
+
 function nullableText(raw: unknown, label: string): ParseResult<string | null> {
   return raw === null || typeof raw === "string" ? parseOk(raw) : parseErr(`${label} must be a string or null`);
 }
@@ -2324,12 +2337,16 @@ function parseSiblingEntryPoints(raw: unknown, label: string): ParseResult<reado
   return parseOk(Object.freeze(siblings));
 }
 
-/** One stamped Owner Obligation as an exact, fresh, frozen record. */
+/**
+ * One stamped Owner Obligation as an exact, fresh, frozen record, built
+ * through its one constructor: a stamp the plan grammar could never derive (a
+ * path playing two roles) is refused here, not first noticed at the gate.
+ */
 function parseOwnerObligation(raw: unknown, label: string): ParseResult<OwnerObligation> {
   if (!isRecord(raw)) return parseErr(`${label} must be an object`);
   const fieldsError = exactFieldsError(raw, OWNER_OBLIGATION_FIELDS, [], label);
   if (fieldsError !== null) return parseErr(fieldsError);
-  const invariant = nonBlankText(raw.invariant, `${label}.invariant`);
+  const invariant = invariantIdText(raw.invariant, `${label}.invariant`);
   if (!invariant.ok) return invariant;
   const title = nonBlankText(raw.title, `${label}.title`);
   if (!title.ok) return title;
@@ -2343,7 +2360,7 @@ function parseOwnerObligation(raw: unknown, label: string): ParseResult<OwnerObl
   if (!matrixTest.ok) return matrixTest;
   const mutation = parseMutationPolicy(raw.mutation, `${label}.mutation`);
   if (!mutation.ok) return mutation;
-  return parseOk(Object.freeze({
+  const obligation = ownerObligationOf({
     invariant: invariant.value,
     title: title.value,
     statement: statement.value,
@@ -2351,7 +2368,8 @@ function parseOwnerObligation(raw: unknown, label: string): ParseResult<OwnerObl
     siblings: siblings.value,
     matrixTest: matrixTest.value,
     mutation: mutation.value,
-  }));
+  });
+  return obligation.ok ? parseOk(obligation.value) : parseErr(`${label}: ${renderOwnerObligationError(obligation.error)}`);
 }
 
 /**

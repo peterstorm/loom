@@ -18,6 +18,7 @@ import {
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
+import { ownerScopeOf } from "../core/owner-verification/obligations";
 import { parsePlanModels } from "../core/parse-plan-models";
 import { StateManager } from "../state-manager";
 import type { PlanInvariant } from "../types";
@@ -86,9 +87,9 @@ export function renderTaskImplementationBrief(
       rules,
       roster: graph.tasks,
       invariants: invariants.value,
-      // The stamp is passed only when the graph carries it: a graph populated
-      // before owner verification is owed no owner duty (plan AD-10).
-      ...(graph.owner_obligations === undefined ? {} : { ownerObligations: graph.owner_obligations }),
+      // A graph populated before owner verification is owed no owner duty
+      // (plan AD-10); its scope says so.
+      ownerScope: ownerScopeOf(graph),
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,

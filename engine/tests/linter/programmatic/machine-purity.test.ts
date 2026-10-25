@@ -13,6 +13,7 @@ import {
   isPureModule,
   DEFAULT_PURE_MODULES,
 } from "../../../src/linter/programmatic/no-io-in-pure-modules";
+import { TYPESCRIPT_COMPILER_API_SEAMS } from "../../../src/linter/programmatic/no-cross-boundary-imports";
 
 const REPO_ROOT = resolve(__dirname, "../../../..");
 const requireFromEngine = createRequire(resolve(REPO_ROOT, "engine/package.json"));
@@ -147,14 +148,6 @@ const LEGACY_PANEL_DECISIONS = "engine/src/core/legacy-panel-decisions.ts";
 const REVIEWER_ENTRIES = new Map([
   ["zod/v4", "zod/v4/index.js"], ["jsonc-parser", "jsonc-parser/lib/umd/main.js"],
 ]);
-// ADR-0042 (G5b INV-1): the TypeScript compiler API enters the pure core
-// through exactly these two seams, each parsing text it is given. The grant is
-// per module, like the reviewer zod/jsonc grants: no other pure module may
-// import `typescript`, and the seams hold no other package capability.
-const TYPESCRIPT_SEAMS: readonly string[] = [
-  "engine/src/core/owner-verification/import-graph.ts",
-  "engine/src/core/owner-verification/mutation-plan.ts",
-];
 
 /** Every `.ts` file beneath a directory entry, at any depth, as root-relative paths in sorted order. */
 function filesBeneath(root: string, entry: string): readonly string[] {
@@ -256,8 +249,8 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
       } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY, EMISSION_TOOL].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
         const entry = REVIEWER_ENTRIES.get(specifier);
         if (entry !== undefined) queue.push(entry);
-      } else if (TYPESCRIPT_SEAMS.includes(mod) && specifier === "typescript") {
-        // The granted compiler API (ADR-0042): a capability, not a walked closure.
+      } else if (TYPESCRIPT_COMPILER_API_SEAMS.includes(mod) && specifier === "typescript") {
+        // The granted compiler API (ADR-0042), per seam like the zod/jsonc grants: a capability, not a walked closure.
       } else if ((mod === PARSER && specifier === "saxes") || runtime?.dependencies.includes(specifier)) {
         queue.push(specifier);
       } else if (runtime !== undefined) {
@@ -347,14 +340,14 @@ describe("functional core — executable purity closure", () => {
 
   it("expands the owner-verification package entry to every file and grants typescript only to its two seams", () => {
     expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/owner-verification/");
-    for (const seam of TYPESCRIPT_SEAMS) {
+    for (const seam of TYPESCRIPT_COMPILER_API_SEAMS) {
       expect(PURE_FILES).toContain(seam);
       expect(auditClosure([seam]).errors, seam).toEqual([]);
     }
     const nonSeam = "engine/src/core/owner-verification/verdict.ts";
     const audit = auditClosure([nonSeam], new Map([[nonSeam, `${readSource(nonSeam)}\nimport ts from "typescript";`]]));
     expect(audit.errors).toContain(`${nonSeam}: unaudited package typescript`);
-    const seam = TYPESCRIPT_SEAMS[0]!;
+    const seam = TYPESCRIPT_COMPILER_API_SEAMS[0]!;
     const widened = auditClosure([seam], new Map([[seam, `${readSource(seam)}\nimport "typescript/lib/tsserverlibrary";`]]));
     expect(widened.errors).toContain(`${seam}: unaudited package typescript/lib/tsserverlibrary`);
   });

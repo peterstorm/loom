@@ -6,6 +6,7 @@
  * through it, which keeps the top-level source domains acyclic.
  */
 
+import type { InvariantId } from "./invariant-id";
 import type { ArtifactDigest } from "./orchestration-contract/identity";
 
 /**
@@ -14,4 +15,4 @@ import type { ArtifactDigest } from "./orchestration-contract/identity";
  * coverage and mutation for, in plan order. `owed` may be empty: the check
  * still proves the plan agrees with the stamp.
  */
-export type OwnerCheckAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly string[] }>;
+export type OwnerCheckAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly InvariantId[] }>;

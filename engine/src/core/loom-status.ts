@@ -70,11 +70,10 @@ import {
   type ImplementationReservationStatusObservation,
 } from "./implementation-window";
 import {
+  observedOwnerVerificationStatus,
   ownerVerificationNotObserved,
-  ownerVerificationRemedies,
-  projectOwnerVerificationStatus,
   renderOwnerVerificationStatus,
-  type OwnerVerificationStatusReport,
+  type OwnerVerificationStatus,
 } from "./owner-verification/status";
 
 /** What status reads: the gate's own deps plus the one observation only the
@@ -627,32 +626,38 @@ function runDirectoryUnavailableStatus(
   return null;
 }
 
-/** The owner verification that status read from the latest persisted completion result, if it read one carrying it. */
-const persistedOwnerVerification = (deps: StatusDeps) =>
-  deps.currentWaveCompletionResult?.kind === "observed" ? deps.currentWaveCompletionResult.result.ownerVerification : undefined;
-
 /**
- * The one owner-verification projection both status renderers serialize
- * (AD-10). A persisted result status could not read is not observed, with
- * the read failure as its reason, so it never passes for "no result".
+ * The one owner-verification status of what status read as the latest
+ * persisted completion result (AD-10). The status document's report and the
+ * next action's remedies both come from this value, so "unavailable" versus
+ * "absent" is decided here once: a persisted result status could not read is
+ * not observed, with the read failure as its reason, so it never passes for
+ * "no result", and neither it nor an absent result owes a remedy.
  */
-export const ownerVerificationStatusOf = (deps: StatusDeps): OwnerVerificationStatusReport =>
-  deps.currentWaveCompletionResult?.kind === "unavailable"
-    ? ownerVerificationNotObserved(`the persisted completion result is unavailable: ${deps.currentWaveCompletionResult.reason}`)
-    : projectOwnerVerificationStatus(persistedOwnerVerification(deps));
+export const ownerVerificationStatusOf = (
+  result: WaveCompletionResultObservation | undefined,
+): OwnerVerificationStatus =>
+  match(result)
+    .with(P.nullish, { kind: "absent" }, () => ownerVerificationNotObserved("no persisted completion result"))
+    .with({ kind: "unavailable" }, ({ reason }) =>
+      ownerVerificationNotObserved(`the persisted completion result is unavailable: ${reason}`))
+    .with({ kind: "observed" }, ({ result: { ownerVerification } }) => ownerVerification === undefined
+      ? ownerVerificationNotObserved("the persisted completion result carries no owner verification")
+      : observedOwnerVerificationStatus(ownerVerification))
+    .exhaustive();
 
 /**
  * When the completion suite rejected the Wave for owner verification, the
  * next action names each blocking Invariant and its remedy. Readiness judged
- * the very result the remedies are read from, so they cannot disagree.
+ * the very result the remedies are read from, so they cannot disagree; a
+ * rejection for any other failure kind adds none.
  */
-function withOwnerVerificationRemedies(status: LoomStatus, deps: StatusDeps): LoomStatus {
+export function withOwnerVerificationRemedies(status: LoomStatus, owner: OwnerVerificationStatus): LoomStatus {
   const suite = status.facts.waveCompletionSuiteReadiness;
   const rejectedForOwner = suite.kind === "known" && suite.value.kind === "rejected" &&
     suite.value.failureKinds.includes("owner-verification-rejected");
-  const remedies = rejectedForOwner ? ownerVerificationRemedies(persistedOwnerVerification(deps)) : [];
-  if (remedies.length === 0) return status;
-  const reasons = remedies.map((remedy) =>
+  if (!rejectedForOwner || owner.remedies.length === 0) return status;
+  const reasons = owner.remedies.map((remedy) =>
     statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
   return canonicalRecord({
     ...status,
@@ -663,14 +668,21 @@ function withOwnerVerificationRemedies(status: LoomStatus, deps: StatusDeps): Lo
   });
 }
 
-/** Anti-corruption adapter from the protected-state parser into the canonical status contract. */
+/**
+ * Anti-corruption adapter from the protected-state parser into the canonical
+ * status document: the routed `LoomStatus`, its next action carrying any
+ * owner-verification remedies, and the owner-verification report beside it,
+ * all from one `ownerVerificationStatusOf` value.
+ */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
   deps: StatusDeps,
   lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
-): LoomStatus {
-  return withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory), deps);
+): LoomStatusDocument {
+  const owner = ownerVerificationStatusOf(deps.currentWaveCompletionResult);
+  const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory), owner);
+  return canonicalRecord({ ...status, ownerVerification: owner.report });
 }
 
 /** Route a parsed graph to exactly one status branch. */
@@ -719,8 +731,8 @@ function routeLoomStatus(
 }
 
 /** Versioned machine renderer. It serializes the status document exactly: the
- * canonical read model and, when present, the owner-verification projection;
- * it contains no readiness or action policy. */
+ * canonical read model and the owner-verification report; it contains no
+ * readiness or action policy. */
 export function renderLoomStatusJson(document: LoomStatusDocument): string {
   return JSON.stringify(document, null, 2);
 }
@@ -755,7 +767,7 @@ export function renderLoomStatusHuman(document: LoomStatusDocument): string {
     `Loom Status v${status.schemaVersion}`,
     ...categories.map(fact),
     ...projectCoverageDiagnostic(status),
-    ...(ownerVerification === undefined ? [] : renderOwnerVerificationStatus(ownerVerification)),
+    ...renderOwnerVerificationStatus(ownerVerification),
     `- nextAction: ${status.next.action.kind}`,
     `- nextActionPayload: ${JSON.stringify(status.next.action)}`,
     "- reasons:",

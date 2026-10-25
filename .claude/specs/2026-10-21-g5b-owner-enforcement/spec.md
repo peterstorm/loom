@@ -44,7 +44,7 @@ Nothing is model-chosen. Mutation sites come from the owner's changed lines, mut
 - AS-009: Given an owner module whose changed lines in the Wave contain mutable constructs, when the mutation check runs, then each mutant is produced by one operator from the fixed engine set (condition negation, comparison flip, logical operator swap, boolean literal flip, return-value replacement, removed statement) applied to one site on a changed line, and the mutant set is identical on every run for the same owner bytes and Wave base
 - AS-010: Given a mutant against which the matrix test's structured report shows at least one failing testcase, when the check runs, then that mutant is killed
 - AS-011: Given a mutant against which the matrix test passes, when the check runs, then that mutant survives, and the gate blocks with a diagnostic naming the Invariant, the owner file, the line, the operator and the original and mutated text
-- AS-012: Given a mutant that does not compile or load, so the report shows only collection or import errors, when the check runs, then that mutant is invalid: it is neither killed nor survived, and it is reported as invalid
+- AS-012: Given a mutant that does not compile or load, so the report shows only collection or import errors, when the check runs, then that mutant is invalid: it is neither killed nor survived, and it is reported as invalid. A run whose every generated mutant is invalid carries no mutation evidence: the gate blocks with the `no-valid-mutants` infrastructure diagnostic instead of passing
 - AS-013: Given a mutant whose matrix-test run exceeds its per-mutant time limit, when the check runs, then that mutant is killed by timeout and reported as such
 - AS-014: Given an owner module whose changed lines contain no mutable construct, when the check runs, then it passes and records that zero mutants were generated, and says so in the gate evidence and status
 - AS-015: Given more candidate sites than the per-Invariant mutant cap, when the check runs, then the engine selects mutants deterministically up to the cap and reports how many sites were not mutated
@@ -128,7 +128,7 @@ Nothing is model-chosen. Mutation sites come from the owner's changed lines, mut
 - FR-013: The matrix test MUST run through an operator-declared manifest runner whose structured report decides each outcome. Killed: at least one failing testcase. Survived: the report passes. Invalid: only collection or import errors. Timed out: the time limit was exceeded, which counts as killed
 - FR-014: Any survivor MUST block the gate unless the Invariant declares a mutation exemption
 - FR-015: Every mutant MUST run in an isolated copy of the workspace; the real workspace MUST be byte-identical before and after
-- FR-016: Infrastructure failures MUST block the gate with a named diagnostic and MUST NOT count as kills
+- FR-016: Infrastructure failures MUST block the gate with a named diagnostic and MUST NOT count as kills. They include an owner module the TypeScript parser reports syntax errors for (`owner-unparseable`) and a run that generated mutants of which every one was invalid (`no-valid-mutants`)
 - FR-017: The mutation plan (sites, operators, selection) MUST be a pure function; running mutants is the shell's effect
 
 ### Exemption grammar
@@ -202,7 +202,7 @@ Nothing is model-chosen. Mutation sites come from the owner's changed lines, mut
 | Mutant | A copy of the owner module with one fixed operator applied to one site on a line changed in the Wave |
 | Killed | The matrix test's report shows at least one failing testcase against the mutant, or the run timed out |
 | Survived | The matrix test passes against the mutant |
-| Invalid mutant | A mutant whose run shows only collection or import errors |
+| Invalid mutant | A mutant whose run shows only collection or import errors; a run of only invalid mutants blocks as `no-valid-mutants` |
 | Mutation exemption | An owned Invariant's explicit, reasoned declaration that the mutation check does not apply |
 | Second copy | An implementation of a declared-owned invariant's predicate outside its owner module |
 | Family-site metric | The count of raw sites per known family outside its owner modules |
@@ -211,3 +211,4 @@ Nothing is model-chosen. Mutation sites come from the owner's changed lines, mut
 
 - 2026-10-21: initial spec from the G5 proposal, the G5a D7 deferrals and the operator's decisions on mutation tooling, survivor policy and hygiene scope
 - 2026-10-23: glossary amendment (plan AD-4): "Family change" is the owner or a sibling entry point, matching G5a's `changesFamily`; the matrix test was wrongly included. No FR or AS changes
+- 2026-10-25: PR #131 review remediation (ADR-0036, ADR-0037): AS-012 and FR-016 amended. A run whose every generated mutant is invalid blocks as the `no-valid-mutants` infrastructure failure instead of passing, and an owner with syntax errors blocks as `owner-unparseable`. No FR or AS added or removed

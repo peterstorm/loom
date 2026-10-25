@@ -1,19 +1,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { canonicalJson, type JsonValue } from "../../core/review-packet";
-import { parsePlanModels, renderStray } from "../../core/parse-plan-models";
-import {
-  obligationsAgree,
-  obligationsFromPlan,
-  ownerCheckAuthority,
-  ownerVerificationOwed,
-} from "../../core/owner-verification/obligations";
+import { parsePlanModels } from "../../core/parse-plan-models";
+import { match } from "ts-pattern";
+import { ownerScopeOf, ownerVerificationOwed, type OwnerScope } from "../../core/owner-verification/obligations";
+import { planModelsIntegrityFailure } from "../../core/owner-verification/plan-integrity";
+import { authorizeGraphCompletionSuite } from "../../core/owner-verification/suite-authority";
 import { renderOwnerVerificationFailure } from "../../core/owner-verification/verdict";
-import type {
-  OwnerInfrastructureFailure,
-  OwnerObligation,
-  OwnerVerificationObservation,
-} from "../../core/owner-verification/types";
+import type { OwnerInfrastructureFailure, OwnerVerificationObservation } from "../../core/owner-verification/types";
 import {
   runOwnerVerification as productionRunOwnerVerification,
   type OwnerVerificationInput,
@@ -47,19 +41,17 @@ import {
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
   parseWaveCompletionSuiteResult,
+  rejectionDisposition,
   type AcceptedWaveCompletionReceipt,
   type AuthorizedWaveCompletionCheck,
   type AuthorizedWaveCompletionSuite,
   type CompletionCheckId,
   type CompletionCheckResult,
   type OwnerVerificationCheck,
+  type RejectedCompletionSuite,
   type WaveCompletionSuiteResult,
 } from "../../core/completion-suite";
-import {
-  authorizeWaveCompletionSuite,
-  parseFrozenVerificationManifest,
-  type FrozenVerificationManifest,
-} from "../../core/verification-manifest";
+import type { FrozenVerificationManifest } from "../../core/verification-manifest";
 import { canonicalStructuralEquals } from "../../core/orchestration-contract";
 import {
   runCompletionCheck as productionRunCompletionCheck,
@@ -68,9 +60,7 @@ import {
 import type { RunDirHandle } from "../../orchestration/run-directory-handle";
 import type { StateManager } from "../../state-manager";
 import type {
-  ActiveWaveGateRegistration,
   HookResult,
-  PlanModels,
   TaskGraph,
   WaveCompletionResultObservation,
   WaveWorkspaceObservation,
@@ -81,6 +71,7 @@ import {
   type CanonicalRepositoryRoot,
   type WorkspaceDigestFailure,
 } from "../../utils/workspace-digest";
+import { describeCause } from "../../utils/describe-cause";
 import { runFullTierWaveLint } from "./lint-wave-gate";
 
 export type WaveCompletionSuiteFailureCategory =
@@ -145,22 +136,6 @@ type ObservedWorkspace = Extract<WaveWorkspaceObservation, { readonly kind: "obs
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const freezeArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
-const describeCause = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
-
-/**
- * The completion suite the graph's active Wave owes (INV-3 sibling): the
- * owner check authority comes from `ownerCheckAuthority`, the one owner of
- * which owned Invariants a Wave owes, and is handed to suite authorization,
- * which injects the owner check exactly when it is non-null.
- */
-export function authorizeGraphCompletionSuite(
-  graph: TaskGraph,
-  manifest: FrozenVerificationManifest,
-  active: ActiveWaveGateRegistration,
-  workspaceDigest: ArtifactDigest,
-): ReturnType<typeof authorizeWaveCompletionSuite> {
-  return authorizeWaveCompletionSuite(manifest, active, workspaceDigest, ownerCheckAuthority(graph, active.wave));
-}
 
 function workspaceFailureMessage(error: WorkspaceDigestFailure): string {
   switch (error.kind) {
@@ -213,7 +188,7 @@ function parsePersistedCompletionResultBytes(
   } catch (cause) {
     return freeze({
       kind: "unavailable",
-      reason: `${subject} is not valid UTF-8 JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+      reason: `${subject} is not valid UTF-8 JSON: ${describeCause(cause)}`,
     });
   }
   const parsed = parseWaveCompletionSuiteResult(raw);
@@ -252,7 +227,7 @@ export function observeCurrentWaveCompletionResult(
       reason: `current workspace authority is unavailable: ${workspace.reason}`,
     });
   }
-  const authorized = authorizeGraphCompletionSuite(graph, manifest, active, workspace.workspaceDigest);
+  const authorized = authorizeGraphCompletionSuite(graph, workspace.workspaceDigest);
   if (!authorized.ok) {
     return freeze({ kind: "unavailable", reason: authorized.error.errors.join("; ") });
   }
@@ -408,39 +383,10 @@ type ObservedOwnerCheck = Readonly<{ result: CompletionCheckResult; observation:
 const ownerUnavailable = (failure: OwnerInfrastructureFailure): OwnerVerificationObservation =>
   freeze({ kind: "unavailable", failure: freeze(failure) });
 
-/**
- * Why the plan's models do not prove the stamp, or null when they re-derive
- * it exactly. Pure: strays and malformed ownership block (a typo is never an
- * opt-out), and any difference between the re-derived obligations and the
- * stamp is drift.
- */
-function planModelsIntegrityFailure(
-  planPath: string,
-  models: PlanModels,
-  stamp: readonly OwnerObligation[],
-): OwnerInfrastructureFailure | null {
-  const problems = [
-    ...models.strays.map(renderStray),
-    ...models.invariants.flatMap(({ id, ownership }) => ownership.kind === "malformed"
-      ? [`${id}: ${ownership.problems.map((problem) => problem.kind).join(", ")}`]
-      : []),
-  ];
-  if (problems.length > 0) {
-    return { kind: "plan-malformed", detail: `plan ${planPath} declares malformed models: ${problems.join("; ")}` };
-  }
-  return obligationsAgree(stamp, obligationsFromPlan(models))
-    ? null
-    : {
-        kind: "plan-drift",
-        detail: `plan ${planPath} no longer derives the owner_obligations stamped at population; ` +
-          "restore the plan's owned Invariants, or re-populate the TaskGraph from the plan",
-      };
-}
-
 /** Re-read the plan the graph names and prove it still derives the stamp (FR-002); null when it does. */
 function planIntegrityFailure(
   graph: TaskGraph,
-  stamp: readonly OwnerObligation[],
+  scope: OwnerScope,
   repositoryRoot: CanonicalRepositoryRoot,
 ): OwnerInfrastructureFailure | null {
   const planFile = graph.plan_file;
@@ -454,7 +400,7 @@ function planIntegrityFailure(
   } catch (cause) {
     return { kind: "plan-unreadable", detail: `plan ${planPath} cannot be read: ${describeCause(cause)}` };
   }
-  return planModelsIntegrityFailure(planPath, parsePlanModels(text), stamp);
+  return planModelsIntegrityFailure(planPath, parsePlanModels(text), scope);
 }
 
 /** The real workspace's digest, as the owner run observes it before and after it runs. */
@@ -484,13 +430,10 @@ async function ownerVerificationObservation(
   manifest: FrozenVerificationManifest,
 ): Promise<OwnerVerificationObservation> {
   const { graph, repositoryRoot } = context;
-  const stamp = graph.owner_obligations;
-  if (stamp === undefined) {
-    return ownerUnavailable({ kind: "plan-drift", detail: "the suite authorizes owner verification, but the TaskGraph carries no owner_obligations stamp" });
-  }
-  const integrity = planIntegrityFailure(graph, stamp, repositoryRoot);
+  const scope = ownerScopeOf(graph);
+  const integrity = planIntegrityFailure(graph, scope, repositoryRoot);
   if (integrity !== null) return ownerUnavailable(integrity);
-  const [first, ...rest] = ownerVerificationOwed(graph, wave);
+  const [first, ...rest] = ownerVerificationOwed(scope, wave);
   if (first === undefined) {
     return freeze({ kind: "verified", obligationsDigest: check.obligationsDigest, boundMs: 0, verdicts: freezeArray([]) });
   }
@@ -499,6 +442,7 @@ async function ownerVerificationObservation(
       root: repositoryRoot,
       graph,
       wave,
+      authority: check,
       owed: [first, ...rest],
       manifest,
       observeWorkspace: workspaceDigestOf(graph, repositoryRoot),
@@ -595,7 +539,7 @@ function observeAcceptance(
       bytes = Uint8Array.from(readRunBytesNoFollow(join(root, report.path)));
     } catch (cause) {
       return [unprojectableFacts(check.checkId, report.digest,
-        `report ${report.path} could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`)];
+        `report ${report.path} could not be read back: ${describeCause(cause)}`)];
     }
     if (sha256Bytes(bytes) !== report.digest) {
       return [unprojectableFacts(check.checkId, report.digest, `report ${report.path} changed after the check produced it`)];
@@ -631,10 +575,9 @@ function reusableReceipt(
   const manifest = graph.verification_manifest;
   const rawReceipt = graph.active_wave_completion_suite;
   if (active === undefined || manifest === undefined || rawReceipt === undefined) return null;
-  const parsedManifest = parseFrozenVerificationManifest(manifest);
   const receipt = parseAcceptedWaveCompletionReceipt(rawReceipt);
-  if (!parsedManifest.ok || !receipt.ok) return null;
-  const authority = authorizeGraphCompletionSuite(graph, parsedManifest.value, active, workspace.workspaceDigest);
+  if (!receipt.ok) return null;
+  const authority = authorizeGraphCompletionSuite(graph, workspace.workspaceDigest);
   if (!authority.ok) return null;
   const { kind: _acceptedKind, resultDigest: _resultDigest, ...resultAuthority } = receipt.value;
   const evaluation = evaluateWaveCompletionSuite(authority.value, {
@@ -695,7 +638,7 @@ type ReplayedCompletionResult =
   | Readonly<{ kind: "semantic-rejected"; diagnostic: WaveCompletionSuiteDiagnostic }>
   | Readonly<{ kind: "artifact-conflict"; checkIds: readonly CompletionCheckId[]; message: string }>;
 
-function evaluationDiagnostic(evaluation: RejectedEvaluation): WaveCompletionSuiteDiagnostic {
+function evaluationDiagnostic(evaluation: RejectedCompletionSuite): WaveCompletionSuiteDiagnostic {
   const categories: WaveCompletionSuiteFailureCategory[] = [];
   if (evaluation.authorityFailures.length > 0) categories.push("authority");
   if (evaluation.infrastructureFailures.length > 0) categories.push("infrastructure");
@@ -735,10 +678,8 @@ function evaluationDiagnostic(evaluation: RejectedEvaluation): WaveCompletionSui
   );
 }
 
-type RejectedEvaluation = Extract<ReturnType<typeof evaluateWaveCompletionSuite>, { readonly kind: "rejected" }>;
-
 /** The owner check's findings, one diagnostic line each: the Invariant, its evidence and the remedy. */
-function ownerFindingLines(evaluation: RejectedEvaluation): readonly string[] {
+function ownerFindingLines(evaluation: RejectedCompletionSuite): readonly string[] {
   return [...evaluation.infrastructureFailures, ...evaluation.semanticFailures].flatMap((failure) =>
     failure.kind === "owner-verification-infrastructure" || failure.kind === "owner-verification-rejected"
       ? failure.failures.map(renderOwnerVerificationFailure)
@@ -748,7 +689,7 @@ function ownerFindingLines(evaluation: RejectedEvaluation): readonly string[] {
 const detailLines = (lines: readonly string[]): string =>
   lines.length === 0 ? "" : `\n${lines.map((line) => `  - ${line}`).join("\n")}`;
 
-function infrastructureEvaluationDiagnostic(evaluation: RejectedEvaluation): WaveCompletionSuiteDiagnostic {
+function infrastructureEvaluationDiagnostic(evaluation: RejectedCompletionSuite): WaveCompletionSuiteDiagnostic {
   return diagnostic(
     ["infrastructure"],
     evaluation.infrastructureFailures.map((failure) => failure.checkId),
@@ -789,21 +730,21 @@ function replayCompletionResult(
     return freeze({ kind: "accepted", receipt: evaluation.receipt });
   }
   const rejectedDiagnostic = evaluationDiagnostic(evaluation);
-  if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0) {
-    return freeze({
-      kind: "artifact-conflict",
-      checkIds: rejectedDiagnostic.checkIds,
-      message: `persisted completion result conflicts with current authority: ${rejectedDiagnostic.message}`,
-    });
-  }
-  if (evaluation.semanticFailures.length > 0) {
-    return freeze({ kind: "semantic-rejected", diagnostic: rejectedDiagnostic });
-  }
-  return freeze({
+  const conflict = (): ReplayedCompletionResult => freeze({
     kind: "artifact-conflict",
-    checkIds: freezeArray([]),
-    message: "persisted completion result has no exact terminal evaluation",
+    checkIds: rejectedDiagnostic.checkIds,
+    message: `persisted completion result conflicts with current authority: ${rejectedDiagnostic.message}`,
   });
+  // The slot holds only terminal results: an owner-undecided one was never published there.
+  return match(rejectionDisposition(evaluation))
+    .with({ kind: "semantic" }, (): ReplayedCompletionResult => freeze({ kind: "semantic-rejected", diagnostic: rejectedDiagnostic }))
+    .with({ kind: "authority" }, { kind: "infrastructure" }, { kind: "owner-undecided" }, conflict)
+    .with({ kind: "inexact" }, (): ReplayedCompletionResult => freeze({
+      kind: "artifact-conflict",
+      checkIds: freezeArray([]),
+      message: "persisted completion result has no exact terminal evaluation",
+    }))
+    .exhaustive();
 }
 
 function canonicalResultBytes(result: WaveCompletionSuiteResult): readonly number[] {
@@ -854,7 +795,7 @@ async function installAcceptedReceiptAndVerifyWorkspace(
   try {
     await installAcceptedReceipt(manager, graph, receipt, contracts.value);
   } catch (cause) {
-    return blocked(currentWorkspace, ["state"], [], cause instanceof Error ? cause.message : String(cause));
+    return blocked(currentWorkspace, ["state"], [], describeCause(cause));
   }
 
   const installedWorkspace = observeCurrentWaveWorkspace(graph, repositoryRoot);
@@ -932,7 +873,7 @@ export async function ensureWaveCompletionSuite(
       await clearStaleReceipt(manager, graph);
       graph = manager.load();
     } catch (cause) {
-      return blocked(before, ["state"], [], cause instanceof Error ? cause.message : String(cause));
+      return blocked(before, ["state"], [], describeCause(cause));
     }
   }
 
@@ -951,7 +892,7 @@ async function runAuthorizedSuite(context: SuiteContext): Promise<EnsureWaveComp
   if (active === undefined || manifest === undefined) {
     return blocked(before, ["authority"], [], "modern completion authority disappeared before suite execution");
   }
-  const authorized = authorizeGraphCompletionSuite(graph, manifest, active, before.workspaceDigest);
+  const authorized = authorizeGraphCompletionSuite(graph, before.workspaceDigest);
   if (!authorized.ok) {
     return blocked(before, ["authority"], [], authorized.error.errors.join("; "));
   }
@@ -1043,10 +984,17 @@ function unchangedWorkspace(
       ) });
 }
 
+/** Publish the result bytes at `relativePath` in the Run Directory; null on success, else why publication failed. */
+async function publishResult(handle: RunDirHandle, relativePath: string, bytes: readonly number[]): Promise<string | null> {
+  const published = await handle.publishArtifactSet([{ relativePath, bytes }]);
+  return published.ok ? null : `completion result artifact publication failed: ${published.error.message}`;
+}
+
 /**
  * Execute, evaluate and publish the suite, then install an accepted receipt.
- * A result whose only infrastructure failures are the owner check's is
- * published as an attempt record beside, never in, the result slot: the
+ * The result slot holds every terminal result, accepted or rejected; only a
+ * rejection whose sole failures are the owner check's undecided findings
+ * (`owner-undecided`) is published as an attempt record beside the slot: the
  * evidence persists, and a retry at the same workspace runs the check again.
  */
 async function executeSuite(
@@ -1060,28 +1008,30 @@ async function executeSuite(
   if (!executed.ok) return executed.error;
   const { result, lintRefusal } = executed.value;
   const evaluation = evaluateWaveCompletionSuite(authorized, result, expectation);
-  if (evaluation.kind === "rejected" && evaluation.authorityFailures.length > 0) {
-    const rejection = evaluationDiagnostic(evaluation);
-    return blocked(before, rejection.categories, rejection.checkIds, rejection.message);
-  }
-  const ownerAttempt = evaluation.kind === "rejected" && evaluation.infrastructureFailures.length > 0 &&
-    evaluation.infrastructureFailures.every((failure) => failure.kind === "owner-verification-infrastructure");
-  if (evaluation.kind === "rejected" && evaluation.infrastructureFailures.length > 0 && !ownerAttempt) {
-    const rejection = infrastructureEvaluationDiagnostic(evaluation);
-    return blocked(before, rejection.categories, rejection.checkIds, rejection.message);
-  }
-  if (evaluation.kind === "rejected" && evaluation.infrastructureFailures.length === 0 && evaluation.semanticFailures.length === 0) {
-    return blocked(before, ["authority"], [], "Wave completion suite rejected without an exact terminal result");
-  }
-  const bytes = canonicalResultBytes(result);
-  const relativePath = ownerAttempt ? ownerAttemptArtifactPath(authorized, bytes) : completionResultArtifactPath(authorized);
-  const published = await handle.publishArtifactSet([{ relativePath, bytes }]);
-  if (!published.ok) {
-    return blocked(before, ["artifact"], [], `completion result artifact publication failed: ${published.error.message}`);
-  }
-  if (evaluation.kind === "rejected") {
-    const rejection = withLintRefusal(evaluationDiagnostic(evaluation), lintRefusal);
-    return blocked(before, rejection.categories, rejection.checkIds, rejection.message);
-  }
+  if (evaluation.kind === "rejected") return rejectSuite(context, authorized, evaluation, result, lintRefusal);
+  const failed = await publishResult(handle, completionResultArtifactPath(authorized), canonicalResultBytes(result));
+  if (failed !== null) return blocked(before, ["artifact"], [], failed);
   return installAcceptedReceiptAndVerifyWorkspace(manager, graph, evaluation.receipt, repositoryRoot, before);
+}
+
+/** Block on a rejected result, publishing it first where its disposition says it belongs. */
+async function rejectSuite(
+  context: SuiteContext,
+  authorized: AuthorizedWaveCompletionSuite,
+  rejection: RejectedCompletionSuite,
+  result: WaveCompletionSuiteResult,
+  lintRefusal: string | null,
+): Promise<EnsureWaveCompletionSuiteResult> {
+  const { handle, before } = context;
+  const blockedBy = (rejected: WaveCompletionSuiteDiagnostic): EnsureWaveCompletionSuiteResult =>
+    blocked(before, rejected.categories, rejected.checkIds, rejected.message);
+  const disposition = rejectionDisposition(rejection);
+  if (disposition.kind === "authority") return blockedBy(evaluationDiagnostic(rejection));
+  if (disposition.kind === "infrastructure") return blockedBy(infrastructureEvaluationDiagnostic(rejection));
+  if (disposition.kind === "inexact") return blocked(before, ["authority"], [], "Wave completion suite rejected without an exact terminal result");
+  const bytes = canonicalResultBytes(result);
+  const destination = disposition.kind === "owner-undecided" ? ownerAttemptArtifactPath(authorized, bytes) : completionResultArtifactPath(authorized);
+  const failed = await publishResult(handle, destination, bytes);
+  if (failed !== null) return blocked(before, ["artifact"], [], failed);
+  return blockedBy(withLintRefusal(evaluationDiagnostic(rejection), lintRefusal));
 }

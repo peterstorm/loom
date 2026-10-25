@@ -11,7 +11,9 @@
  * - Reach: the files the matrix test imports or re-exports directly, closed
  *   under re-export edges only. A plain import chain is never followed past
  *   its first hop: siblings import the owner, so a transitive closure would
- *   make the owner "reached" through any sibling and empty AS-003.
+ *   make the owner "reached" through any sibling and empty AS-003. A
+ *   type-only edge is erased at runtime and never loads its module, so it is
+ *   never followed: coverage means the module is loaded, not merely named.
  * - Decision: `covered`, or `missing` with every unreached declared path in
  *   declared order, the owner first.
  *
@@ -21,7 +23,7 @@
  */
 
 import type { NonEmpty } from "../orchestration-contract/identity";
-import { moduleEdges, type ModuleEdges } from "./import-graph";
+import { moduleEdges, type EdgeKind, type ModuleEdges } from "./import-graph";
 import type {
   CoverageOverFilesFn,
   CoverageVerdict,
@@ -131,6 +133,10 @@ export const resolveSpecifier = (
 
 type Walk = Readonly<{ reached: ReadonlySet<string>; undecided: readonly string[] }>;
 
+/** The specifiers of the edges, of the given kinds, that load their module at runtime. */
+const loadedSpecifiers = (edges: ModuleEdges, kinds: readonly EdgeKind[]): readonly string[] =>
+  edges.filter((edge) => !edge.typeOnly && kinds.includes(edge.kind)).map((edge) => edge.specifier);
+
 /**
  * The one reach traversal both the decision and the frontier use. `decided`
  * says whether a path's existence is known (present in `edges` or known
@@ -164,8 +170,8 @@ const walk = (
     }
   };
 
-  follow(matrixTest, [...matrixEdges.imports, ...matrixEdges.reexports]);
-  for (let next = queue.shift(); next !== undefined; next = queue.shift()) follow(next, edgesOf(next)!.reexports);
+  follow(matrixTest, loadedSpecifiers(matrixEdges, ["import", "reexport"]));
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) follow(next, loadedSpecifiers(edgesOf(next)!, ["reexport"]));
   return { reached, undecided: [...undecided].sort() };
 };
 

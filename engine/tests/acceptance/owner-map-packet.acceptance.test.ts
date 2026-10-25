@@ -32,6 +32,8 @@ import { observeWaveSpecCheckDocuments } from "../../src/orchestration/wave-spec
 import { parseTaskGraph } from "../../src/state-manager";
 import type { TaskGraph } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { ownerObligation } from "../fixtures/owner-obligation";
+import { CLOCK, FEES, FEES_CLOCK_PLAN_FILE, FEES_CLOCK_PLAN_TEXT, someParagraph } from "../fixtures/owner-families";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import { taskFixture } from "../fixtures/task-lifecycle";
 
@@ -46,62 +48,17 @@ const OWNER_MAP_LABEL = "owner-map";
 const OWNER_MAP_ROLES: readonly string[] = ["code-reviewer", "architecture-tech-lead"];
 
 /** The plan path exactly as the TaskGraph records it: the citation reviewers must use. */
-const PLAN_FILE = ".claude/plans/2026-10-21-fees.md";
+const PLAN_FILE = FEES_CLOCK_PLAN_FILE;
 
-const REVIEWED_FILE = "src/api/quote.ts";
-
-/** INV-1's family is touched by the reviewed Task (it changes a sibling). */
-const FEES = Object.freeze({
-  invariant: "INV-1",
-  title: "Fees are computed only by the fee calculator",
-  statement: "Every fee is computed by computeFee; no entry point rounds or discounts a fee inline.",
-  owner: "src/core/fees.ts",
-  siblings: Object.freeze([
-    Object.freeze({ path: REVIEWED_FILE, note: "quote endpoint" }),
-    Object.freeze({ path: "src/jobs/invoice.ts", note: "nightly invoicing" }),
-  ]),
-  matrixTest: "tests/fees.matrix.test.ts",
-  mutation: Object.freeze({ kind: "verify" }),
-});
-
-/** INV-2's family is not touched by the reviewed Task. */
-const CLOCK = Object.freeze({
-  invariant: "INV-2",
-  title: "Time is read only through the clock port",
-  statement: "No module reads Date.now outside the clock port.",
-  owner: "src/core/clock.ts",
-  siblings: Object.freeze([Object.freeze({ path: "src/jobs/schedule.ts", note: null })]),
-  matrixTest: "tests/clock.matrix.test.ts",
-  mutation: Object.freeze({ kind: "exempt", reason: "timing-only code; every mutant only changes a sleep" }),
-});
-
-
-const PLAN_TEXT = [
-  "# Plan: fees", "",
-  "## Invariants", "",
-  `### ${FEES.invariant}: ${FEES.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${FEES.owner}\``,
-  "**Sibling entry points:**",
-  ...FEES.siblings.map(({ path, note }) => `- \`${path}\` — ${note}`),
-  `**Matrix test:** \`${FEES.matrixTest}\``,
-  `**Statement:** ${FEES.statement}`, "",
-  `### ${CLOCK.invariant}: ${CLOCK.title}`, "",
-  "**Tier:** advisory",
-  `**Owner module:** \`${CLOCK.owner}\``,
-  "**Sibling entry points:**",
-  ...CLOCK.siblings.map(({ path }) => `- \`${path}\``),
-  `**Matrix test:** \`${CLOCK.matrixTest}\``,
-  `**Mutation exemption:** ${CLOCK.mutation.reason}`,
-  `**Statement:** ${CLOCK.statement}`, "",
-].join("\n");
+/** The reviewed Task changes INV-1's first sibling, so INV-1's family is touched and INV-2's is not. */
+const REVIEWED_FILE = FEES.siblings[0].path;
 
 /** A project holding the plan file the graph names; returns its root. */
 function projectWithPlan(): string {
   const root = canonicalTempDir("loom-owner-map-packet-");
   cleanup.push(root);
   mkdirSync(join(root, ".claude", "plans"), { recursive: true });
-  writeFileSync(join(root, PLAN_FILE), PLAN_TEXT);
+  writeFileSync(join(root, PLAN_FILE), FEES_CLOCK_PLAN_TEXT);
   return root;
 }
 
@@ -166,9 +123,6 @@ function ownerMapSection(packet: ContextPacket) {
 const ownerMapText = (packet: ContextPacket): string =>
   Buffer.from(ownerMapSection(packet).bytes).toString("utf8");
 
-/** True when some blank-line-separated paragraph of `text` matches every pattern. */
-const someParagraph = (text: string, ...patterns: readonly RegExp[]): boolean =>
-  text.split(/\n\s*\n/).some((paragraph) => patterns.every((pattern) => pattern.test(paragraph)));
 
 describe("owner-map section in Wave review packets (CT-2)", () => {
   it("AS-022: FR-022: the code-reviewer packet of a Task touching an owned family lists that Invariant's id, title, owner, siblings, matrix test and statement", () => {
@@ -219,7 +173,7 @@ describe("owner-map section in Wave review packets (CT-2)", () => {
   it("AS-025: FR-023: the owner map is inside the packet digest, so a changed owner map changes the packet's identity", () => {
     const root = projectWithPlan();
     const before = issue(root, stampedGraph([FEES]));
-    const after = issue(root, stampedGraph([{ ...FEES, statement: `${FEES.statement} Discounts included.` }]));
+    const after = issue(root, stampedGraph([ownerObligation({ ...FEES, statement: `${FEES.statement} Discounts included.` })]));
 
     const beforePackets = ownerMapRolePackets(before);
     const afterPackets = ownerMapRolePackets(after);

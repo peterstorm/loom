@@ -97,14 +97,18 @@ exactly when the TaskGraph carries the `owner_obligations` stamp.**
   the roster, and so the suite digest, is byte-identical to the pre-G5b roster (FR-004). A project check
   cannot claim the id: the project-check parser in `completion-suite.ts` refuses any `checkId` in the reserved
   `loom:` namespace.
-- `ownerCheckAuthority(graph, wave)` in `engine/src/core/owner-verification/obligations.ts` is the one place
+- `ownerCheckAuthority(ownerScopeOf(graph), wave)` in `engine/src/core/owner-verification/obligations.ts` is the one place
   that decides the authority (INV-3, AD-4). It returns `null` exactly when the graph has no stamp. Otherwise it
   returns the stamp's `obligationsDigest` and the ids `ownerVerificationOwed` selects, which is an empty list
-  when the Wave changed no owned family. Its callers are `engine/src/handlers/helpers/wave-completion-suite.ts`
-  (authorizing the suite it runs), `engine/src/core/wave-completion-suite-readiness.ts` (re-authorizing for
-  readiness and status), `engine/src/state-file-wire.ts` (re-authorizing an installed receipt when the State
-  File is loaded) and `engine/src/orchestration/owner-verification-runner.ts` (the obligations digest the
-  verified observation records). All of them call it on the same graph, so they cannot disagree; and
+  when the Wave changed no owned family. It has two callers. `authorizeGraphCompletionSuite` in
+  `engine/src/core/owner-verification/suite-authority.ts` is the one authorize-from-TaskGraph function: the
+  gate helper (`engine/src/handlers/helpers/wave-completion-suite.ts`, authorizing the suite it runs) and
+  readiness (`engine/src/core/wave-completion-suite-readiness.ts`, re-authorizing for readiness and status)
+  both call it. `engine/src/state-file-wire.ts` re-derives the authority from the stamp when an installed
+  receipt loads, on purpose: a receipt must not certify its own roster. The runner
+  (`engine/src/orchestration/owner-verification-runner.ts`) receives the authorized check from the gate and
+  records its digest, never re-deriving it (PR #131 review remediation). They all read the same graph, so they
+  cannot disagree; and
   `authorizeWaveCompletionSuite` takes the authority as a required parameter, so no caller can drop it by
   omission.
 - **Deviation from the plan:** the plan placed `OwnerCheckAuthority` in `obligations.ts`. It ships in its own
@@ -150,11 +154,14 @@ field joins the strict-field parse only when present.
   that could not decide can never be reported, or counted, as a kill or a semantic rejection.
 - An accepted receipt cannot carry an observation with findings. The receipt parser refuses one.
 
-**Fail-closed persistence.** A result whose only infrastructure failures come from the owner check is
-published as an attempt record beside the result slot
+**Fail-closed persistence.** A rejection whose only infrastructure failures come from the owner check, and
+which carries no semantic failure, is published as an attempt record beside the result slot
 (`completion-suites/<suite>/<workspace>.owner-infrastructure/<sha256>.json`) rather than in the slot itself.
 The evidence persists, and a retry at the same workspace runs the check again instead of replaying the
-failure. There is no automatic retry.
+failure. There is no automatic retry. A mixed rejection (a semantic failure beside an undecided owner check)
+is already decided by its semantic failure, so it goes to the result slot and replays as rejected; the pure
+`rejectionDisposition` in `engine/src/core/completion-suite.ts` makes that choice once for the gate, replay
+and readiness (PR #131 review remediation).
 
 **Status.** `engine/src/core/loom-status.ts` projects the latest persisted result's `ownerVerification` through
 `engine/src/core/owner-verification/status.ts` (AD-10), and adds remedy next actions when the suite was rejected

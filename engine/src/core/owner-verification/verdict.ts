@@ -1,17 +1,22 @@
 /**
  * The per-Invariant verdict and the gate's blocking findings (AD-7; FR-013,
- * FR-014, FR-016, AS-011, AS-014). Pure: the shell runs the baseline and the
- * mutants and hands the observed outcomes here; this module only tallies,
- * selects the blocking findings and renders them.
+ * FR-014, FR-016, AS-011, AS-014). Pure and total: the shell runs the
+ * baseline and the mutants and hands the observed outcomes here; this module
+ * only tallies, selects the blocking findings and renders them, and returns
+ * every failure as a verdict, never a throw.
  *
  * - `invariantVerdict` assembles one owed obligation's coverage and mutation
  *   halves. An exemption is the obligation's own declared policy; a red
  *   baseline, or any infrastructure failure of the baseline or a mutant, is
- *   the mutation verdict, never a kill.
+ *   the mutation verdict, never a kill. Results that are not the plan's
+ *   mutants in plan order are `plan-drift`; generated mutants that are all
+ *   invalid are `no-valid-mutants`: both infrastructure, never a pass.
  * - `ownerVerificationFailures` lists, per Invariant: missing siblings, a red
  *   baseline, every survivor, and every infrastructure failure. An exempt
  *   Invariant never has a survivor, since it runs no mutant.
- * - `mutationBoundMs` is the reported time bound (NFR-004).
+ * - `mutationBoundMs` is the reported time bound (NFR-004), over the
+ *   obligations `verifyOwed` selected (`MutationOwed`), so the owes-mutation
+ *   rule stays in `obligations.ts`.
  */
 
 import { match } from "ts-pattern";
@@ -19,8 +24,10 @@ import { verifiedMutationOf } from "./outcome";
 import type {
   BaselineOutcome,
   CoverageVerdict,
+  InvariantId,
   InvariantVerdict,
   Mutant,
+  MutationOwed,
   MutantOutcome,
   MutationPlan,
   MutationVerdict,
@@ -29,6 +36,7 @@ import type {
   OwnerVerificationFailure,
   OwnerVerificationObservation,
   SurvivorDiagnostic,
+  VerifiedMutationError,
   VerifiedMutationFields,
 } from "./types";
 
@@ -51,11 +59,25 @@ export type MutationEvidence =
   | Readonly<{ kind: "owner-changed"; baseline: BaselineOutcome; plan: MutationPlan; results: readonly MutantResult[] }>
   | Readonly<{ kind: "infrastructure"; failure: OwnerInfrastructureFailure }>;
 
-/** A verified run's tallies, minted through the one constructor. Every count here is a tally, so it never refuses. */
+const infrastructureVerdict = (failure: OwnerInfrastructureFailure): MutationVerdict => ({ kind: "infrastructure", failure });
+
+/** Why tallies make no verified run, as the infrastructure failure that blocks: no evidence, or counts the plan cannot explain. */
+const refusedTally = (error: VerifiedMutationError): OwnerInfrastructureFailure =>
+  match(error)
+    .with({ kind: "no-valid-mutants" }, ({ generated }): OwnerInfrastructureFailure => ({
+      kind: "no-valid-mutants",
+      detail: `all ${generated} generated mutants only failed to collect, so the matrix test gave no mutation evidence; fix the collection errors the mutants cause`,
+    }))
+    .with({ kind: "count-not-a-count" }, { kind: "mutants-without-owner-change" }, ({ kind }): OwnerInfrastructureFailure => ({
+      kind: "plan-drift",
+      detail: `the tallied mutant counts do not make a verified run (${kind})`,
+    }))
+    .exhaustive();
+
+/** A run's tallies, minted through the one constructor; a refusal is the infrastructure verdict that blocks. */
 function verified(fields: VerifiedMutationFields): MutationVerdict {
   const built = verifiedMutationOf(fields);
-  if (!built.ok) throw new Error(`invariant: tallied counts do not make a verified run (${built.error.kind})`);
-  return built.value;
+  return built.ok ? built.value : infrastructureVerdict(refusedTally(built.error));
 }
 
 const survivorOf = (mutant: Mutant): SurvivorDiagnostic => ({
@@ -71,10 +93,13 @@ const survivorOf = (mutant: Mutant): SurvivorDiagnostic => ({
 function tally(plan: MutationPlan, results: readonly MutantResult[]): MutationVerdict {
   const planned = plan.mutants.map((mutant) => mutant.id).join("\n");
   if (results.map((result) => result.mutant.id).join("\n") !== planned) {
-    throw new Error("invariant: the mutant results are not the plan's mutants, in plan order");
+    return infrastructureVerdict({
+      kind: "plan-drift",
+      detail: `the ${results.length} mutant results are not the plan's ${plan.mutants.length} mutants, in plan order`,
+    });
   }
   const [broken] = results.flatMap(({ outcome }) => outcome.kind === "infrastructure" ? [outcome.failure] : []);
-  if (broken !== undefined) return { kind: "infrastructure", failure: broken };
+  if (broken !== undefined) return infrastructureVerdict(broken);
   const count = (kind: MutantOutcome["kind"]): number => results.filter((result) => result.outcome.kind === kind).length;
   return verified({
     killed: count("killed"),
@@ -91,20 +116,20 @@ const afterBaseline = (baseline: BaselineOutcome, green: () => MutationVerdict):
   match(baseline)
     .with({ kind: "green" }, green)
     .with({ kind: "red" }, ({ failures }): MutationVerdict => ({ kind: "red-baseline", failures }))
-    .with({ kind: "infrastructure" }, ({ failure }): MutationVerdict => ({ kind: "infrastructure", failure }))
+    .with({ kind: "infrastructure" }, ({ failure }) => infrastructureVerdict(failure))
     .exhaustive();
 
 function mutationVerdictOf(obligation: OwnerObligation, evidence: MutationEvidence): MutationVerdict {
   if (obligation.mutation.kind === "exempt") return { kind: "exempt", reason: obligation.mutation.reason };
   return match(evidence)
-    .with({ kind: "exempt" }, (): MutationVerdict => ({
-      kind: "infrastructure",
-      failure: { kind: "plan-drift", detail: `${obligation.invariant} declares mutation verification, but its mutation run was skipped as exempt` },
+    .with({ kind: "exempt" }, () => infrastructureVerdict({
+      kind: "plan-drift",
+      detail: `${obligation.invariant} declares mutation verification, but its mutation run was skipped as exempt`,
     }))
     .with({ kind: "owner-unchanged" }, ({ baseline }) => afterBaseline(baseline, () =>
       verified({ killed: 0, timedOut: 0, invalid: 0, survivors: [], unmutated: 0, ownerChangedInWave: false })))
     .with({ kind: "owner-changed" }, ({ baseline, plan, results }) => afterBaseline(baseline, () => tally(plan, results)))
-    .with({ kind: "infrastructure" }, ({ failure }): MutationVerdict => ({ kind: "infrastructure", failure }))
+    .with({ kind: "infrastructure" }, ({ failure }) => infrastructureVerdict(failure))
     .exhaustive();
 }
 
@@ -144,12 +169,12 @@ export const ownerVerificationFailures = (observation: OwnerVerificationObservat
 
 /**
  * The reported time bound of the mutation runs (NFR-004):
- * Σ over owed non-exempt obligations of (1 baseline + selected mutants) × the
- * per-mutant limit. An obligation without a plan bounds its baseline only.
+ * Σ over the obligations owing mutation (`verifyOwed`: owed, non-exempt) of
+ * (1 baseline + selected mutants) × the per-mutant limit. An obligation
+ * without a plan bounds its baseline only.
  */
-export const mutationBoundMs = (owed: readonly OwnerObligation[], plans: ReadonlyMap<string, MutationPlan>, perMutantMs: number): number =>
-  owed
-    .filter((obligation) => obligation.mutation.kind === "verify")
+export const mutationBoundMs = (verifying: MutationOwed, plans: ReadonlyMap<InvariantId, MutationPlan>, perMutantMs: number): number =>
+  verifying
     .reduce((bound, obligation) => bound + (1 + (plans.get(obligation.invariant)?.mutants.length ?? 0)) * perMutantMs, 0);
 
 /** One finding as the gate's diagnostic line: the Invariant, its evidence and the remedy. */

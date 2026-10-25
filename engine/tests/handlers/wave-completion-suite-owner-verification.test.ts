@@ -7,7 +7,7 @@
  * conversion of a throwing owner run into a named infrastructure failure.
  */
 
-import { writeFileSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -16,12 +16,15 @@ import {
 } from "../../src/handlers/helpers/wave-completion-suite";
 import { authorizeWaveCompletionSuite } from "../../src/core/verification-manifest";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
+import { obligationsDigest } from "../../src/core/owner-verification/obligations";
+import type { OwnerVerificationObservation } from "../../src/core/owner-verification/types";
+import type { OwnerVerificationInput } from "../../src/orchestration/owner-verification-runner";
 import {
+  buildOwnerVerificationRepo as build,
   cleanupOwnerVerificationRepos,
-  ownerVerificationRepo,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
-  type OwnerVerificationRepoOptions,
+  type StampedGraph,
 } from "../fixtures/owner-verification-repo";
 
 const OWNER_CHECK = "loom:owner-verification";
@@ -47,8 +50,6 @@ async function blockedDiagnostic(repo: OwnerVerificationRepo, run?: RunOwnerVeri
 /** Every owner-verification observation the suite published, in any slot. */
 const observations = (repo: OwnerVerificationRepo): readonly unknown[] =>
   repo.publishedResults().map((result) => result.ownerVerification).filter((entry) => entry !== undefined);
-
-const build = (options: OwnerVerificationRepoOptions) => ownerVerificationRepo(options);
 
 /** A plan whose only Invariant is unowned, and a graph re-stamped with the empty stamp it derives. */
 async function onlyUnowned(repo: OwnerVerificationRepo): Promise<void> {
@@ -223,5 +224,84 @@ describe("the owner run's verdicts reach the gate", () => {
       verdicts: [{ invariant: "INV-1", coverage: { kind: "covered" }, mutation: { kind: "exempt", reason: "generated lookup table" } }],
     });
     expect(repo.runnerLaunches()).toEqual([]);
+  }, GATE_TIMEOUT_MS);
+});
+
+/** Every completion-suite artifact the gate published, relative to the Run Directory's completion-suites root. */
+function publishedPaths(repo: OwnerVerificationRepo): readonly string[] {
+  const root = join(repo.handle.runDirectory, "artifacts", "completion-suites");
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name).slice(root.length + 1))
+    .sort();
+}
+
+describe("where a rejected result is published (owner-attempt path versus result slot)", () => {
+  /** A verified observation whose one verdict is both decided (a missing sibling) and undecided (a failed isolated copy). */
+  const mixed = (input: OwnerVerificationInput): OwnerVerificationObservation => ({
+    kind: "verified",
+    obligationsDigest: input.authority.obligationsDigest,
+    boundMs: 0,
+    verdicts: input.owed.map((obligation) => ({
+      invariant: obligation.invariant,
+      title: obligation.title,
+      owner: obligation.owner,
+      matrixTest: obligation.matrixTest,
+      coverage: { kind: "missing", paths: [OWNER_FIXTURE.siblings[1]] },
+      mutation: { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "the isolated copy could not be made" } },
+    })),
+  });
+
+  it("the owner run receives the authority the gate authorized, never a re-derived one", async () => {
+    const repo = build({ waveChanges: "owner", matrixTest: "discriminating" });
+    const seen: OwnerVerificationInput[] = [];
+    await blockedDiagnostic(repo, async (input) => {
+      seen.push(input);
+      return mixed(input);
+    });
+    const graph = repo.manager.load() as StampedGraph;
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.authority).toMatchObject({ obligationsDigest: obligationsDigest(graph.owner_obligations), owed: ["INV-1"] });
+    expect(seen[0]!.owed.map(({ invariant }) => invariant)).toEqual(["INV-1"]);
+  }, GATE_TIMEOUT_MS);
+
+  it("a rejection mixing a decided owner finding with an undecided one is terminal: it fills the result slot and is replayed, not re-run", async () => {
+    const repo = build({ waveChanges: "owner", matrixTest: "discriminating" });
+    let runs = 0;
+    const run: RunOwnerVerification = async (input) => {
+      runs += 1;
+      return mixed(input);
+    };
+    const first = await blockedDiagnostic(repo, run);
+    expect(first.categories).toEqual(expect.arrayContaining(["infrastructure", "semantic"]));
+    expect(first.message).toContain("owner-verification-rejected");
+    const paths = publishedPaths(repo);
+    expect(paths).toHaveLength(1);
+    expect(paths[0]).toMatch(/^[0-9a-f]{64}\/[0-9a-f]{64}\.json$/);
+    expect(paths[0]).not.toContain("owner-infrastructure");
+
+    const replayed = await blockedDiagnostic(repo, run);
+    expect(runs).toBe(1);
+    expect(replayed.categories).not.toContain("artifact");
+    expect(replayed.message).toContain("owner-verification-rejected");
+    expect(publishedPaths(repo)).toEqual(paths);
+    expect(repo.manager.load().active_wave_completion_suite).toBeUndefined();
+  }, GATE_TIMEOUT_MS);
+
+  it("a rejection whose only failure is the owner check's undecided one is an attempt record beside the slot, and a retry runs again", async () => {
+    const repo = build({ waveChanges: "owner", matrixTest: "discriminating" });
+    let runs = 0;
+    const undecided: RunOwnerVerification = async () => {
+      runs += 1;
+      return { kind: "unavailable", failure: { kind: "worktree-failed", detail: "the isolated copy could not be made" } };
+    };
+    await blockedDiagnostic(repo, undecided);
+    const retried = await blockedDiagnostic(repo, undecided);
+    expect(runs).toBe(2);
+    expect(retried.categories).toEqual(["infrastructure"]);
+    const paths = publishedPaths(repo);
+    expect(paths).toHaveLength(1);
+    expect(paths[0]).toMatch(/\.owner-infrastructure\/[0-9a-f]{64}\.json$/);
   }, GATE_TIMEOUT_MS);
 });

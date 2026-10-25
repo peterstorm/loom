@@ -5,7 +5,6 @@
  * performs no process, filesystem, clock, or network I/O.
  */
 
-import { match } from "ts-pattern";
 import { compareStrings } from "./ordering";
 import {
   parseArtifactDigest,
@@ -42,19 +41,10 @@ import {
   toElementResult,
   type UnknownRecord,
 } from "./plain-record";
-import { verifiedMutationOf } from "./owner-verification/outcome";
+import type { InvariantId } from "./invariant-id";
+import { parseOwedInvariantIds, parseOwnerVerificationObservation, type OwnerVerificationParseError } from "./owner-verification/parse";
 import { ownerVerificationFailures } from "./owner-verification/verdict";
-import type {
-  CoverageVerdict,
-  InvariantVerdict,
-  MutationOperator,
-  MutationVerdict,
-  OwnerInfrastructureFailure,
-  OwnerInfrastructureFailureKind,
-  OwnerVerificationFailure,
-  OwnerVerificationObservation,
-  SurvivorDiagnostic,
-} from "./owner-verification/types";
+import type { OwnerVerificationFailure, OwnerVerificationObservation } from "./owner-verification/types";
 
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const RESERVED_CHECK_PREFIX = "loom:";
@@ -160,7 +150,7 @@ export type AuthorizedWaveCompletionCheck =
       scope: "wave";
       reportPolicy: Readonly<{ kind: "not-required" }>;
       obligationsDigest: ArtifactDigest;
-      owed: readonly string[];
+      owed: readonly InvariantId[];
     }>
   | Readonly<{
       kind: "project-command";
@@ -303,6 +293,41 @@ export type CompletionSuiteEvaluation =
       semanticFailures: readonly CompletionSemanticFailure[];
     }>;
 
+export type RejectedCompletionSuite = Extract<CompletionSuiteEvaluation, { readonly kind: "rejected" }>;
+
+/**
+ * What a rejection means for the gate, decided once from its failures:
+ * - `authority`: the result is not the one the suite authorizes;
+ * - `infrastructure`: a check other than the owner check could not run;
+ * - `owner-undecided`: only the owner check could not decide, and nothing
+ *   else failed, so a retry at the same workspace may still decide;
+ * - `semantic`: some check decided against the Wave; an undecided owner check
+ *   beside it cannot rescue it, so the rejection is final at this workspace;
+ * - `inexact`: a rejection carrying no failure at all.
+ */
+export type RejectionDisposition =
+  | Readonly<{ kind: "authority" }>
+  | Readonly<{ kind: "infrastructure" }>
+  | Readonly<{ kind: "owner-undecided" }>
+  | Readonly<{ kind: "semantic"; failures: NonEmpty<CompletionSemanticFailure> }>
+  | Readonly<{ kind: "inexact" }>;
+
+type InfrastructureCase = "none" | "owner-only" | "other";
+
+function infrastructureCase(failures: readonly CompletionInfrastructureFailure[]): InfrastructureCase {
+  if (failures.length === 0) return "none";
+  return failures.every((failure) => failure.kind === "owner-verification-infrastructure") ? "owner-only" : "other";
+}
+
+export function rejectionDisposition(rejection: RejectedCompletionSuite): RejectionDisposition {
+  if (rejection.authorityFailures.length > 0) return freeze({ kind: "authority" });
+  const infrastructure = infrastructureCase(rejection.infrastructureFailures);
+  if (infrastructure === "other") return freeze({ kind: "infrastructure" });
+  const [first, ...rest] = rejection.semanticFailures;
+  if (first !== undefined) return freeze({ kind: "semantic", failures: freezeArray([first, ...rest]) as NonEmpty<CompletionSemanticFailure> });
+  return freeze({ kind: infrastructure === "owner-only" ? "owner-undecided" : "inexact" });
+}
+
 type Parsed<T> = DomainResult<T, CompletionSuiteParseError>;
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
@@ -324,6 +349,10 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
     return failure([`completion suite input could not be inspected: ${message.slice(0, 256)}`]);
   }
 }
+
+/** An owner-verification wire parse as this module's parse result: the same diagnostics, under the suite's error kind. */
+const fromOwnerVerification = <T>(parsed: DomainResult<T, OwnerVerificationParseError>): Parsed<T> =>
+  parsed.ok ? success(parsed.value) : failure(parsed.error.errors);
 
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
   const record = parseExactRecord(raw, fields, path);
@@ -368,6 +397,16 @@ export function parseCompletionCheckId(raw: unknown, path = "checkId"): Parsed<C
     ? success(raw as CompletionCheckId)
     : failure([`${path} must be a non-empty canonical check id`]));
 }
+
+/** A reserved check id, parsed once at module load: a reserved id the parser refuses is a broken engine, never data. */
+function reservedCheckId(text: string): CompletionCheckId {
+  const parsed = parseCompletionCheckId(text);
+  if (!parsed.ok) throw new Error(`reserved check id ${text} is not canonical`);
+  return parsed.value;
+}
+
+/** The engine-reserved owner-verification check id, parsed (G5b AD-1). */
+export const OWNER_VERIFICATION_CHECK_ID: CompletionCheckId = reservedCheckId(OWNER_VERIFICATION_CHECK_ID_TEXT);
 
 /** Parse one signal from the completion domain's closed portable allowlist. */
 export function parseCompletionSignal(raw: unknown, path = "signal"): Parsed<CompletionSignal> {
@@ -587,21 +626,13 @@ function parseProjectAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<A
     : failure(errors);
 }
 
-/** Owed Invariant ids: non-blank, each once, in the authorized (plan) order. */
-function parseOwedIds(raw: unknown, path: string): Parsed<readonly string[]> {
-  if (!Array.isArray(raw)) return failure([`${path} must be an array`]);
-  const ids = collect(raw.map((id, index) => parseText(id, `${path}[${index}]`)));
-  if (!ids.ok) return ids;
-  return new Set(ids.value).size === ids.value.length ? ids : failure([`${path} names an Invariant more than once`]);
-}
-
 function parseOwnerAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<AuthorizedWaveCompletionCheck> {
   const record = exactRecord(raw, ["kind", "checkId", "scope", "reportPolicy", "obligationsDigest", "owed"], path);
   if (!record.ok) return record;
   const id = parseCompletionCheckId(record.value.checkId, `${path}.checkId`);
   const reportPolicy = parseReportPolicy(record.value.reportPolicy, `${path}.reportPolicy`);
   const obligations = parseDigest(record.value.obligationsDigest, `${path}.obligationsDigest`);
-  const owed = parseOwedIds(record.value.owed, `${path}.owed`);
+  const owed = fromOwnerVerification(parseOwedInvariantIds(record.value.owed, `${path}.owed`));
   const errors = [id, reportPolicy, obligations, owed].flatMap((result) => result.ok ? [] : result.error.errors);
   if (record.value.scope !== "wave") errors.push(`${path}.scope must equal wave`);
   if (record.value.checkId !== OWNER_VERIFICATION_CHECK_ID_TEXT) {
@@ -871,184 +902,10 @@ function parseCheckResults(raw: unknown, path: string): Parsed<readonly Completi
     : failure(results.errors);
 }
 
-// ---------------------------------------------------------------------------
-// The owner-verification observation (G5b AD-1), as results and receipts
-// carry it. Each parser rebuilds the value in its canonical shape; a verified
-// mutation run is minted only through `verifiedMutationOf`, so its counts
-// agree wherever it is read back.
-// ---------------------------------------------------------------------------
-
-/** Every infrastructure kind the owner check names; the record keeps the set exhaustive. */
-const OWNER_INFRASTRUCTURE_KINDS = {
-  "plan-unreadable": true, "plan-malformed": true, "plan-drift": true, "runner-missing": true,
-  "worktree-failed": true, "spawn-failed": true, "report-missing": true, "report-unreadable": true,
-  "matrix-test-not-collected": true, "exit-unexplained-by-report": true, "baseline-timed-out": true,
-  "missing-wave-base": true, "coverage-bound-exceeded": true, "real-workspace-changed": true,
-  "repository-file-unreadable": true, "unexpected-error": true,
-} as const satisfies Record<OwnerInfrastructureFailureKind, true>;
-
-/** The fixed mutation operators; the record keeps the set exhaustive. */
-const MUTATION_OPERATORS = {
-  "condition-negation": true, "comparison-flip": true, "logical-swap": true,
-  "boolean-literal-flip": true, "return-value-replacement": true, "statement-removal": true,
-} as const satisfies Record<MutationOperator, true>;
-
-const isKey = <K extends string>(keys: Readonly<Record<K, true>>, raw: unknown): raw is K =>
-  typeof raw === "string" && Object.hasOwn(keys, raw);
-
-function parseText(raw: unknown, path: string): Parsed<string> {
-  return typeof raw === "string" && raw.trim().length > 0 ? success(raw) : failure([`${path} must be a non-blank string`]);
-}
-
-function parseTexts(raw: unknown, path: string): Parsed<NonEmpty<string>> {
-  if (!Array.isArray(raw) || raw.length === 0) return failure([`${path} must be a non-empty array`]);
-  const texts = collect(raw.map((entry, index) => parseText(entry, `${path}[${index}]`)));
-  return texts.ok ? success(texts.value as NonEmpty<string>) : texts;
-}
-
-function parseCount(raw: unknown, path: string): Parsed<number> {
-  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0
-    ? success(raw)
-    : failure([`${path} must be a non-negative safe integer`]);
-}
-
-function parseOwnerInfrastructureFailure(raw: unknown, path: string): Parsed<OwnerInfrastructureFailure> {
-  const record = exactRecord(raw, ["kind", "detail"], path);
-  if (!record.ok) return record;
-  const detail = parseText(record.value.detail, `${path}.detail`);
-  if (!isKey(OWNER_INFRASTRUCTURE_KINDS, record.value.kind)) {
-    return failure([`${path}.kind must be an owner-verification infrastructure kind`, ...(detail.ok ? [] : detail.error.errors)]);
-  }
-  return detail.ok ? success(freeze({ kind: record.value.kind, detail: detail.value })) : detail;
-}
-
-/** A `{ kind, <field> }` variant whose one field the given parser reads. */
-function parseTagged<T, V extends object>(
-  raw: UnknownRecord,
-  path: string,
-  field: string,
-  parse: (raw: unknown, path: string) => Parsed<T>,
-  build: (value: T) => V,
-): Parsed<V> {
-  const record = exactRecord(raw, ["kind", field], path);
-  if (!record.ok) return record;
-  const parsed = parse(record.value[field], `${path}.${field}`);
-  return parsed.ok ? success(freeze(build(parsed.value))) : parsed;
-}
-
-function parseCoverageVerdict(raw: unknown, path: string): Parsed<CoverageVerdict> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
-  if (raw.kind === "covered") {
-    const record = exactRecord(raw, ["kind"], path);
-    return record.ok ? success(freeze({ kind: "covered" })) : record;
-  }
-  if (raw.kind === "missing") return parseTagged(raw, path, "paths", parseTexts, (paths): CoverageVerdict => ({ kind: "missing", paths }));
-  return raw.kind === "infrastructure"
-    ? parseTagged(raw, path, "failure", parseOwnerInfrastructureFailure, (failure): CoverageVerdict => ({ kind: "infrastructure", failure }))
-    : failure([`${path}.kind must be covered, missing or infrastructure`]);
-}
-
-function parseSurvivor(raw: unknown, path: string): Parsed<SurvivorDiagnostic> {
-  const record = exactRecord(raw, ["mutantId", "operator", "line", "column", "original", "replacement"], path);
-  if (!record.ok) return record;
-  const { mutantId, operator, line, column, original, replacement } = record.value;
-  const id = parseText(mutantId, `${path}.mutantId`);
-  const errors = id.ok ? [] : [...id.error.errors];
-  if (!isKey(MUTATION_OPERATORS, operator)) errors.push(`${path}.operator must be one of the fixed mutation operators`);
-  for (const [name, position] of [["line", line], ["column", column]] as const) {
-    if (!(typeof position === "number" && Number.isSafeInteger(position) && position >= 1)) errors.push(`${path}.${name} must be a positive integer`);
-  }
-  if (typeof original !== "string" || typeof replacement !== "string") errors.push(`${path}.original and .replacement must be strings`);
-  return errors.length === 0 && id.ok && isKey(MUTATION_OPERATORS, operator)
-    ? success(freeze({
-        mutantId: id.value, operator, line: line as number, column: column as number,
-        original: original as string, replacement: replacement as string,
-      }))
-    : failure(errors);
-}
-
-const VERIFIED_MUTATION_FIELDS = ["kind", "generated", "killed", "timedOut", "invalid", "survivors", "unmutated", "ownerChangedInWave"] as const;
-
-/** A verified run, re-minted through its one constructor: `generated` must be the count its tallies derive. */
-function parseVerifiedMutation(raw: unknown, path: string): Parsed<MutationVerdict> {
-  const record = exactRecord(raw, VERIFIED_MUTATION_FIELDS, path);
-  if (!record.ok) return record;
-  const counts = collect((["generated", "killed", "timedOut", "invalid", "unmutated"] as const)
-    .map((field) => parseCount(record.value[field], `${path}.${field}`)));
-  const survivors = collectDenseArray(record.value.survivors, `${path}.survivors`, (entry, entryPath) =>
-    toElementResult(parseSurvivor(entry, entryPath)));
-  const errors = counts.ok ? [] : [...counts.error.errors];
-  if (survivors.kind === "not-array") errors.push(`${path}.survivors must be an array`);
-  else errors.push(...survivors.errors);
-  if (typeof record.value.ownerChangedInWave !== "boolean") errors.push(`${path}.ownerChangedInWave must be a boolean`);
-  if (errors.length > 0 || !counts.ok || survivors.kind === "not-array") return failure(errors);
-  const [generated, killed, timedOut, invalid, unmutated] = counts.value as readonly number[];
-  const built = verifiedMutationOf({
-    killed: killed!, timedOut: timedOut!, invalid: invalid!, survivors: freezeArray(survivors.values),
-    unmutated: unmutated!, ownerChangedInWave: record.value.ownerChangedInWave as boolean,
-  });
-  if (!built.ok) return failure([`${path} is not a verified mutation run: ${built.error.kind}`]);
-  return built.value.generated === generated ? success(built.value) : failure([`${path}.generated must equal the mutants its tallies count`]);
-}
-
-function parseMutationVerdict(raw: unknown, path: string): Parsed<MutationVerdict> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
-  return match(raw.kind)
-    .with("exempt", () => parseTagged(raw, path, "reason", parseText, (reason): MutationVerdict => ({ kind: "exempt", reason })))
-    .with("red-baseline", () => parseTagged(raw, path, "failures", parseTexts, (failures): MutationVerdict => ({ kind: "red-baseline", failures })))
-    .with("infrastructure", () => parseTagged(raw, path, "failure", parseOwnerInfrastructureFailure, (failure): MutationVerdict => ({ kind: "infrastructure", failure })))
-    .with("verified", () => parseVerifiedMutation(raw, path))
-    .otherwise(() => failure([`${path}.kind must be exempt, red-baseline, verified or infrastructure`]));
-}
-
-function parseInvariantVerdict(raw: unknown, path: string): Parsed<InvariantVerdict> {
-  const record = exactRecord(raw, ["invariant", "title", "owner", "matrixTest", "coverage", "mutation"], path);
-  if (!record.ok) return record;
-  const [invariant, title, owner, matrixTest] = (["invariant", "title", "owner", "matrixTest"] as const)
-    .map((field) => parseText(record.value[field], `${path}.${field}`));
-  const coverage = parseCoverageVerdict(record.value.coverage, `${path}.coverage`);
-  const mutation = parseMutationVerdict(record.value.mutation, `${path}.mutation`);
-  const parsed = [invariant!, title!, owner!, matrixTest!, coverage, mutation];
-  const errors = parsed.flatMap((result) => result.ok ? [] : result.error.errors);
-  return errors.length === 0 && invariant!.ok && title!.ok && owner!.ok && matrixTest!.ok && coverage.ok && mutation.ok
-    ? success(freeze({
-        invariant: invariant!.value, title: title!.value, owner: owner!.value, matrixTest: matrixTest!.value,
-        coverage: coverage.value, mutation: mutation.value,
-      }))
-    : failure(errors);
-}
-
-function parseVerifiedObservation(raw: UnknownRecord, path: string): Parsed<OwnerVerificationObservation> {
-  const record = exactRecord(raw, ["kind", "obligationsDigest", "boundMs", "verdicts"], path);
-  if (!record.ok) return record;
-  const obligations = parseDigest(record.value.obligationsDigest, `${path}.obligationsDigest`);
-  const boundMs = parseCount(record.value.boundMs, `${path}.boundMs`);
-  const verdicts = collectDenseArray(record.value.verdicts, `${path}.verdicts`, (entry, entryPath) =>
-    toElementResult(parseInvariantVerdict(entry, entryPath)));
-  const errors = [obligations, boundMs].flatMap((result) => result.ok ? [] : result.error.errors);
-  if (verdicts.kind === "not-array") errors.push(`${path}.verdicts must be an array`);
-  else errors.push(...verdicts.errors);
-  if (errors.length > 0 || !obligations.ok || !boundMs.ok || verdicts.kind === "not-array") return failure(errors);
-  const ids = verdicts.values.map(({ invariant }) => invariant);
-  if (new Set(ids).size !== ids.length) return failure([`${path}.verdicts names an Invariant more than once`]);
-  return success(freeze({
-    kind: "verified", obligationsDigest: obligations.value, boundMs: boundMs.value, verdicts: freezeArray(verdicts.values),
-  }));
-}
-
-function parseOwnerVerificationObservation(raw: unknown, path: string): Parsed<OwnerVerificationObservation> {
-  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
-  if (raw.kind === "verified") return parseVerifiedObservation(raw, path);
-  return raw.kind === "unavailable"
-    ? parseTagged(raw, path, "failure", parseOwnerInfrastructureFailure, (failure): OwnerVerificationObservation => ({ kind: "unavailable", failure }))
-    : failure([`${path}.kind must be verified or unavailable`]);
-}
-
 /** The optional `ownerVerification` field of a result or receipt envelope. */
 function parseOptionalOwnerVerification(raw: unknown, path: string): Parsed<OwnerVerificationObservation | undefined> {
-  return isPlainRecord(raw) && Object.hasOwn(raw, "ownerVerification")
-    ? parseOwnerVerificationObservation(raw.ownerVerification, `${path}.ownerVerification`)
-    : success(undefined);
+  if (!isPlainRecord(raw) || !Object.hasOwn(raw, "ownerVerification")) return success(undefined);
+  return fromOwnerVerification(parseOwnerVerificationObservation(raw.ownerVerification, `${path}.ownerVerification`));
 }
 
 /** Parse the persisted acceptance observation: an exact expectation and one
@@ -1492,15 +1349,8 @@ function observationAuthorityFailures(
   }
   const unbound = unboundFactChecks(result.checks, recorded?.facts ?? []);
   if (unbound.length > 0) failures.push(freeze({ kind: "unbound-acceptance-facts", checkIds: asNonEmpty(freezeArray(unbound)) }));
-  const ownerCheck = ownerCheckOf(authority);
-  const mismatch = ownerVerificationMismatch(ownerCheck, result);
-  if (mismatch !== null) {
-    failures.push(freeze({
-      kind: "owner-verification-mismatch",
-      checkId: ownerCheck?.checkId ?? (OWNER_VERIFICATION_CHECK_ID_TEXT as CompletionCheckId),
-      reason: mismatch,
-    }));
-  }
+  const mismatch = ownerVerificationMismatch(ownerCheckOf(authority), result);
+  if (mismatch !== null) failures.push(freeze({ kind: "owner-verification-mismatch", checkId: OWNER_VERIFICATION_CHECK_ID, reason: mismatch }));
   return failures;
 }
 

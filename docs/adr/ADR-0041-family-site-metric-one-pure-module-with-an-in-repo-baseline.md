@@ -92,12 +92,15 @@ its read-only file-system shell, and `docs/family-sites.baseline.json` is its ba
   and only those, so an owner of one family is still scanned for the others. Comment lines are skipped. This
   was added during calibration and was not in the plan. Paths are normalized to `/`. Files are sorted by path
   in code-unit order (independent of locale), so the output depends only on the bytes and never on read order
-  or host. Each `FamilySites` entry is `{ family, owners, patterns, count, sites }`, where `sites` is sorted
-  `path:line` and `count === sites.length`. Unlike the plan's seed, the entry also carries the patterns'
-  `source` strings. The report is `{ schema: 1, families }`.
+  or host. Each `FamilySites` entry is `{ family, owners, patterns, sites }`, where `sites` is sorted
+  `path:line`. The count is derived as `sites.length` wherever it is shown, never stored beside the sites
+  (PR #131 review remediation), so the two cannot disagree; the `--json` output still writes it as
+  `count` between `patterns` and `sites`, byte-identical to the recorded baseline. Unlike the plan's seed,
+  the entry also carries the patterns' `source` strings. The report is `{ schema: 1, families }`.
 - `parseFamilySiteBaseline(unknown) → DomainResult<FamilySiteBaseline, string>` parses rather than validates.
   It refuses a non-object input, a schema other than 1, a family named twice, and a count that is not
-  `sites.length`. A baseline may name a family that `FAMILIES` no longer defines.
+  `sites.length`; once checked, the count is dropped like the live report's. A baseline may name a family that
+  `FAMILIES` no longer defines.
 - `familySiteDelta(report, baseline)` returns a closed union per family:
   - `compared { baseline, current, delta, patternsChanged }`;
   - `unrecorded { current }` for a family that is new since the baseline;

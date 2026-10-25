@@ -76,28 +76,35 @@ imports.
 `engine/src/core/owner-verification/import-graph.ts`. Each one parses only text it has been given.**
 
 - **Seams and their interfaces.**
-  - `import-graph.ts` exports `moduleEdges(path, text): ModuleEdges`, which returns
-    `{ imports, reexports }`. Each list keeps a specifier once, in first-seen source order. The script kind
-    comes from the file extension. The only caller is `coverage.ts`, which resolves the edges against the
-    shell-supplied file set.
+  - `import-graph.ts` exports `moduleEdges(path, text): ModuleEdges`, a list of `Edge`
+    (`{ kind: "import" | "reexport"; specifier; typeOnly }`), each (kind, specifier) once in first-seen
+    source order. Its only caller is `coverage.ts`, which resolves the runtime edges against the
+    shell-supplied file set. It also exports the one parse both seams share, `parseModule(path, text)`
+    (the script kind from the file extension, parent pointers set), and `syntaxErrorsOf(source)`.
   - `mutation-plan.ts` exports `mutationPlan({ ownerPath, ownerText, changedLines, cap })` and
-    `applyMutant`. It parses with `ts.createSourceFile(…, ScriptTarget.Latest, true, ScriptKind.TS)`. The
-    shell `engine/src/orchestration/owner-verification-runner.ts` reads the owner text and calls it.
+    `applyMutant`. It parses through `import-graph.ts`'s `parseModule`, so the path-to-script-kind rule has
+    one home and no third module imports `typescript`; an owner with syntax errors is `owner-unparseable`.
+    The shell `engine/src/orchestration/owner-verification-runner.ts` reads the owner text and calls it.
 - **Parse-only contract.** Both seams call only `ts.createSourceFile` and node visitors on text they are
   given. They never use `ts.sys`, a Program, module resolution or a language service. Both module headers
   state this. The purity linter enforces it: the package directory is in `DEFAULT_PURE_MODULES` (INV-2).
-- **Three enforcement points that name the same pair.**
-  - `.claude/linter/rules/inv-1-typescript-compiler-api-seam.json`, mirrored at
+- **One seam list, three enforcement points.** `TYPESCRIPT_COMPILER_API_SEAMS` in
+  `engine/src/linter/programmatic/no-cross-boundary-imports.ts` is the one list of the pair (PR #131 review
+  remediation). The programmatic grant and the purity audit read it; the regex rule, which cannot import code,
+  mirrors it and is pinned to it by a test.
+  - `.claude/linter/rules/inv-1-typescript-compiler-api-seam.json`, mirrored byte for byte at
     `.pi/linter/rules/inv-1-typescript-compiler-api-seam.json`. This is a checkable regex rule. It refuses
-    `from "typescript…"`, `require("typescript…")` and `import("typescript…")` everywhere except the two
-    seams and `.test.ts` files. Its fix hint sends authors to `mutationPlan` or `moduleEdges`, or tells them
+    `from "typescript…"`, `require("typescript…")`, `import("typescript…")` and the bare side-effect
+    `import "typescript…"` everywhere except the two seams and `.test.ts` files. Its `excludePatterns` are
+    `.test.ts` plus exactly `TYPESCRIPT_COMPILER_API_SEAMS`: `engine/tests/linter/project-lint-rules.test.ts`
+    reads both copies and fails when they drift from the constant, and runs every refused spelling through
+    the production loader and executor. Its fix hint sends authors to `mutationPlan` or `moduleEdges`, or tells them
     to extend one of the seams.
-  - `engine/src/linter/programmatic/no-cross-boundary-imports.ts` has two `perFileExactAllow` entries,
-    `"engine/src/core/owner-verification/import-graph.ts": ["typescript"]` and
-    `"engine/src/core/owner-verification/mutation-plan.ts": ["typescript"]`. These are exact-specifier
-    grants, never a prefix. A `typescript/…` subpath therefore fails until it is re-audited.
-  - `engine/tests/linter/programmatic/machine-purity.test.ts` has a `TYPESCRIPT_SEAMS` list holding the
-    same two paths. `auditClosure` treats `typescript` as a granted capability only for those modules. It
+  - The core boundary in `no-cross-boundary-imports.ts` grants `["typescript"]` in `perFileExactAllow` to
+    each path of `TYPESCRIPT_COMPILER_API_SEAMS`. These are exact-specifier grants, never a prefix. A
+    `typescript/…` subpath therefore fails until it is re-audited.
+  - `engine/tests/linter/programmatic/machine-purity.test.ts` imports `TYPESCRIPT_COMPILER_API_SEAMS`.
+    `auditClosure` treats `typescript` as a granted capability only for those modules. It
     reports a `typescript` import from any other pure file, and any widened specifier such as
     `typescript/lib/tsserverlibrary` from a seam, as `unaudited package`. The test
     "expands the owner-verification package entry to every file and grants typescript only to its two
@@ -128,9 +135,9 @@ imports.
 **Negative:**
 - This deviates from interview answer Q4d. Two files hold the compiler-API grant instead of one, and a
   reader has to come to this ADR to learn why.
-- Three artifacts encode the same seam list: the rule JSON (with its `.pi` mirror), the linter grant map,
-  and `TYPESCRIPT_SEAMS`. Moving or renaming a seam means updating all of them. The machine-purity test
-  catches drift on the audit side.
+- The regex rule cannot import the seam constant, so its JSON (with its `.pi` copy) restates the pair.
+  Moving or renaming a seam is one edit to `TYPESCRIPT_COMPILER_API_SEAMS` plus the two rule copies, and the
+  mirror test fails until the copies follow.
 - `typescript` is now a runtime requirement of the Wave Gate, even though it is declared as a
   `devDependency`. An install that skips dev dependencies would break owner verification. The operations
   docs record this, but `package.json` does not express it.

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { parsePlanModels, hasModels, renderStray, type PlanModels, type PlanInvariant, type Stray } from "../../src/core/parse-plan-models";
 import { validateModelBindings, type ModelBindingDeps } from "../../src/handlers/helpers/validate-model-bindings";
+import { invariantId } from "../fixtures/owner-obligation";
 
 const NO_FILES: ModelBindingDeps = {
   readFile: (path) => ({ ok: false, error: `ENOENT: ${path}` }),
@@ -187,7 +188,7 @@ describe("parsePlanModels — properties", () => {
 describe("validateModelBindings — properties", () => {
   it("advisory invariants without rule files never contribute errors", () => {
     const arbAdvisory = fc.record({
-      id: fc.integer({ min: 1, max: 99 }).map((n) => `INV-${n}`),
+      id: fc.integer({ min: 1, max: 99 }).map((n) => invariantId(`INV-${n}`)),
       title: fc.string({ maxLength: 30 }),
       tier: fc.constant({ status: "ok" as const, tier: "advisory" as const }),
       ruleFile: fc.constant(null),

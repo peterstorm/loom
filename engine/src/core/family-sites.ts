@@ -85,22 +85,22 @@ export type SourceFile = Readonly<{ path: string; text: string }>;
 export type FamilySites = Readonly<{
   family: FamilyId;
   owners: readonly string[];
-  /** The `source` of each pattern the count was taken with. */
+  /** The `source` of each pattern the sites were found with. */
   patterns: readonly string[];
-  /** Always `sites.length`. */
-  count: number;
-  /** `path:line`, sorted by path and then by line. */
+  /** `path:line`, sorted by path and then by line. The family's count is `sites.length`, never stored beside it. */
   sites: readonly string[];
 }>;
 
 export type FamilySiteReport = Readonly<{ schema: 1; families: readonly FamilySites[] }>;
 
-/** One family as a recorded baseline holds it. A baseline may name a family `FAMILIES` no longer defines. */
+/**
+ * One family as a recorded baseline holds it. A baseline may name a family `FAMILIES` no longer defines.
+ * The persisted `count` is checked against `sites.length` at parse time and then dropped, as in the live report.
+ */
 export type RecordedFamilySites = Readonly<{
   family: string;
   owners: readonly string[];
   patterns: readonly string[];
-  count: number;
   sites: readonly string[];
 }>;
 
@@ -143,7 +143,6 @@ export function scanFamilySites(files: readonly SourceFile[]): FamilySiteReport 
       family: family.id,
       owners: family.owners,
       patterns: Object.freeze(family.patterns.map(({ source }) => source)),
-      count: sites.length,
       sites: Object.freeze(sites),
     });
   });
@@ -168,7 +167,6 @@ function parseRecordedFamily(value: unknown, at: string): DomainResult<RecordedF
     family,
     owners: Object.freeze([...owners]),
     patterns: Object.freeze([...patterns]),
-    count,
     sites: Object.freeze([...sites]),
   }));
 }
@@ -199,13 +197,13 @@ export function familySiteDelta(report: FamilySiteReport, baseline: FamilySiteBa
   const current = report.families.map((family): FamilySiteDelta => {
     const before = recorded.get(family.family);
     return before === undefined
-      ? Object.freeze({ kind: "unrecorded", family: family.family, current: family.count })
+      ? Object.freeze({ kind: "unrecorded", family: family.family, current: family.sites.length })
       : Object.freeze({
         kind: "compared",
         family: family.family,
-        baseline: before.count,
-        current: family.count,
-        delta: family.count - before.count,
+        baseline: before.sites.length,
+        current: family.sites.length,
+        delta: family.sites.length - before.sites.length,
         patternsChanged: !samePatterns(before.patterns, family.patterns),
       });
   });
@@ -213,13 +211,19 @@ export function familySiteDelta(report: FamilySiteReport, baseline: FamilySiteBa
   const retired = baseline.families
     .filter(({ family }) => !live.has(family))
     .sort((a, b) => compareText(a.family, b.family))
-    .map(({ family, count }): FamilySiteDelta => Object.freeze({ kind: "retired", family, baseline: count }));
+    .map((before): FamilySiteDelta => Object.freeze({ kind: "retired", family: before.family, baseline: before.sites.length }));
   return Object.freeze([...current, ...retired]);
 }
 
-/** The `--json` output: the report, plus the delta when a baseline was given. One trailing newline. */
+/**
+ * The `--json` output: the report, plus the delta when a baseline was given. One trailing newline.
+ * Each family carries its derived `count` between `patterns` and `sites`, the key order the recorded
+ * baseline `docs/family-sites.baseline.json` holds; `parseFamilySiteBaseline` checks it against the sites.
+ */
 export function serializeFamilySites(report: FamilySiteReport, delta: readonly FamilySiteDelta[] | null): string {
-  const document = delta === null ? report : { ...report, delta };
+  const families = report.families.map(({ family, owners, patterns, sites }) =>
+    ({ family, owners, patterns, count: sites.length, sites }));
+  const document = { schema: report.schema, families, ...(delta === null ? {} : { delta }) };
   return `${JSON.stringify(document, null, 2)}\n`;
 }
 
@@ -239,8 +243,8 @@ function deltaLine(entry: FamilySiteDelta): string {
 
 /** The human output: each family's header and sites, then the delta when a baseline was given. */
 export function renderFamilySites(report: FamilySiteReport, delta: readonly FamilySiteDelta[] | null): string {
-  const lines = report.families.flatMap(({ family, owners, count, sites }) => [
-    `${family}: ${count} raw site${count === 1 ? "" : "s"} outside ${owners.join(", ")}`,
+  const lines = report.families.flatMap(({ family, owners, sites }) => [
+    `${family}: ${sites.length} raw site${sites.length === 1 ? "" : "s"} outside ${owners.join(", ")}`,
     ...sites.map((site) => `  ${site}`),
   ]);
   const comparison = delta === null ? [] : ["", "Delta against the baseline:", ...delta.map((entry) => `  ${deltaLine(entry)}`)];

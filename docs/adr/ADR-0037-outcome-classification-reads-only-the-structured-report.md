@@ -71,8 +71,10 @@ ambiguous observation is infrastructure, never a kill.**
   `classifyBaseline(run, matrixTest)`. Both go through one private `readRun`, which reads the report first
   and consults the exit code only for a passing report, so the two classifiers cannot disagree about what
   a run says. The module also exports `verifiedMutationOf`, the only constructor of the branded
-  `VerifiedMutation`. It refuses a negative or non-integer count, and it refuses generated or unmutated
-  mutants when the owner did not change in the Wave.
+  `VerifiedMutation`. It refuses a negative or non-integer count, it refuses generated or unmutated
+  mutants when the owner did not change in the Wave, and it refuses generated mutants that are all
+  invalid (`no-valid-mutants`): such a run carries no mutation evidence, so it can never be a verified
+  run, whether the gate tallied it or a persisted result is read back.
 - Report parsing goes through `parseJunitTestcases` in `engine/src/core/structured-test-report.ts`. A
   report must first pass the strict structured-report parser. A Vitest JSON report is refused by name,
   because it carries no per-testcase file attribution, and a testcase without a name or classname is also
@@ -115,10 +117,12 @@ therefore read as `killed` or `red` whatever the exit code, and the exit code ne
 - `engine/src/core/owner-verification/verdict.ts` (pure) assembles one `InvariantVerdict` per owed
   obligation (`invariantVerdict`). A baseline that is not green decides the mutation verdict before any
   mutant counts (`red-baseline` or `infrastructure`). With a green baseline, `tally` checks that the
-  results are the plan's mutants in plan order. If any mutant outcome is infrastructure, the whole
-  Invariant's mutation verdict becomes infrastructure, and it is never tallied as a kill. The other
-  outcomes are counted through `verifiedMutationOf`. An obligation declared `verify` whose run was skipped
-  as exempt is `plan-drift`.
+  results are the plan's mutants in plan order; results that are not are the `plan-drift` infrastructure
+  verdict, returned as data rather than thrown, so the core stays total. If any mutant outcome is
+  infrastructure, the whole Invariant's mutation verdict becomes infrastructure, and it is never tallied
+  as a kill. The other outcomes are counted through `verifiedMutationOf`; its refusal is an infrastructure
+  verdict too: `no-valid-mutants` when every generated mutant is invalid, `plan-drift` for counts the plan
+  cannot explain. An obligation declared `verify` whose run was skipped as exempt is `plan-drift`.
 - `ownerVerificationFailures(observation)` lists the blocking findings in verdict order, coverage before
   mutation for each Invariant: missing siblings, a red baseline, every survivor (an exempt Invariant runs
   no mutant), and every infrastructure failure, including an `unavailable` observation with no Invariant.
@@ -159,6 +163,14 @@ timeout and infrastructure runs against a git fixture.
   runner, and the shell stays a thin translation of process facts into `MatrixTestRun`.
 - The exit-code rule catches runners that report green but exit non-zero (a teardown crash, a threshold
   step), instead of reading them as survivors.
+- AS-012 keeps an invalid mutant neither killed nor survived. As shipped in #127, a run whose every
+  generated mutant was invalid verified as a pass with zero kills. The PR #131 review remediation makes
+  it the blocking `no-valid-mutants` infrastructure failure: generated > 0 with no kill, timeout or
+  survivor means the matrix test proved nothing about the owner. A run with invalid mutants beside a kill
+  or a survivor still verifies, and its survivors still block as survivors.
+- An owner the TypeScript parser reports syntax errors for has no mutation plan: `mutationPlan` returns
+  `owner-unparseable` with every diagnostic, and the shell records it as that infrastructure failure, so a
+  garbled tree never yields a silent or vacuous plan (ADR-0035 records the shared parse).
 
 **Negative:**
 - Owner verification needs a JUnit-writing `affectedRunner`. A project whose runner only emits Vitest JSON,
@@ -166,7 +178,9 @@ timeout and infrastructure runs against a git fixture.
   refuses a plan with no runner (`owner-verification-runner-missing`), but an incompatible report
   format is found only at the first gate.
 - A single infrastructure mutant turns the whole Invariant's mutation verdict into infrastructure, which
-  discards the counts of the other mutants. One flaky run costs a full gate re-run, and there is no
+  discards the counts of the other mutants. A run whose every mutant only fails to collect blocks as
+  `no-valid-mutants` until the matrix test can load the mutated owner, or the Invariant declares an
+  exemption. One flaky run costs a full gate re-run, and there is no
   automatic retry.
 - A timeout counts as a kill (FR-013), so a mutant that only makes the matrix test hang is credited as
   detected. This is accepted because an infinite loop is an observable behavior change. The baseline's

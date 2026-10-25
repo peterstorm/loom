@@ -44,7 +44,7 @@
  * stored evidence and re-emits the run's current action, which is the expected
  * outcome on a harness that captures transcripts itself.
  *
- * `status` is a pure read: it derives ONE `LoomStatus` value and hands it to
+ * `status` is a pure read: it derives ONE `LoomStatusDocument` and hands it to
  * a renderer. Both renderers project that same value, so the human and JSON
  * forms cannot disagree — neither contains readiness or action policy, and
  * neither re-runs a gate check. If authority cannot be parsed, every fact
@@ -108,7 +108,6 @@ import type {
   ActiveWaveGateRegistration,
   HookHandler,
   HookResult,
-  LoomStatus,
   LoomStatusDocument,
   Task,
   WaveCompletionResultObservation,
@@ -118,7 +117,6 @@ import type { GateDeps } from "../../core/wave-gate-checks";
 import type { ImplementationReservationStatusObservation } from "../../core/implementation-window";
 import {
   deriveLoomStatusFromParsedGraph,
-  ownerVerificationStatusOf,
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
@@ -301,18 +299,11 @@ function renderParsedStatus(
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation,
 ): string {
-  return renderStatusRead(Object.freeze({
-    status: deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory),
-    deps,
-  }), asJson);
+  return renderStatusDocument(deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory), asJson);
 }
 
-/** A derived status and the observations it was derived from. */
-type StatusRead = Readonly<{ status: LoomStatus; deps: StatusDeps }>;
-
-/** Human or `--json` output: the canonical status plus the one owner-verification projection. */
-function renderStatusRead({ status, deps }: StatusRead, asJson: boolean): string {
-  const document: LoomStatusDocument = { ...status, ownerVerification: ownerVerificationStatusOf(deps) };
+/** Human or `--json` output of the one status document. */
+function renderStatusDocument(document: LoomStatusDocument, asJson: boolean): string {
   return asJson ? renderLoomStatusJson(document) : renderLoomStatusHuman(document);
 }
 
@@ -574,15 +565,16 @@ export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<string> {
-  return renderStatusRead(await deriveCurrentOrchestrationStatus(args, statePath), hasFlag(args, "--json"));
+  return renderStatusDocument(await deriveCurrentOrchestrationStatus(args, statePath), hasFlag(args, "--json"));
 }
 
-/** The canonical status of the protected graph, with every shell observation
- *  status depends on. Renderers and the dispatch helpers project this value. */
+/** The canonical status document of the protected graph, derived from every
+ *  shell observation status depends on. Renderers and the dispatch helpers
+ *  project this value. */
 async function deriveCurrentOrchestrationStatus(
   args: readonly string[],
   statePath: string,
-): Promise<StatusRead> {
+): Promise<LoomStatusDocument> {
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
@@ -602,10 +594,7 @@ async function deriveCurrentOrchestrationStatus(
         advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, gateDeps, workspace, binding.handle),
       })
     : base;
-  return Object.freeze({
-    status: deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation),
-    deps: statusDeps,
-  });
+  return deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation);
 }
 
 async function statusOperation(args: readonly string[]): Promise<HookResult> {
@@ -695,7 +684,7 @@ async function briefOperation(args: readonly string[]): Promise<HookResult> {
   const requested = argumentValue(args, "--task");
   const operatorNotes = briefOperatorNotes(args, requested);
   if (!operatorNotes.ok) return { kind: "error", message: operatorNotes.error };
-  const { status } = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
+  const status = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
   const action = status.next.action;
   const recovery = action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started"
     ? action.diagnostic.recovery

@@ -74,16 +74,13 @@ describe("family-site metric (pure core)", () => {
 
     expect(report.families.map(({ family }) => family)).toEqual(FAMILIES.map(({ id }) => id));
     expect(familyOf(report, "fail-closed-path-probes")).toMatchObject({
-      count: 2,
       sites: ["engine/src/handlers/a.ts:2", "engine/src/handlers/a.ts:4"],
       owners: ["engine/src/utils/path-presence.ts"],
     });
     expect(familyOf(report, "shell-tokenizing")).toMatchObject({
-      count: 3,
       sites: ["engine/src/core/b.ts:1", "engine/src/core/b.ts:2", "engine/src/core/b.ts:3"],
     });
     expect(familyOf(report, "claim-conservation")).toMatchObject({
-      count: 3,
       sites: ["engine/src/core/c.ts:2", "engine/src/core/c.ts:3", "engine/src/core/c.ts:5"],
     });
     // The patterns reported are the table's patterns: one definition, echoed.
@@ -174,8 +171,20 @@ describe("family-site metric (pure core)", () => {
       const second = serializeFamilySites(scanFamilySites(shuffled), null);
       expect(second).toBe(first);
       expect(renderFamilySites(scanFamilySites(shuffled), null)).toBe(renderFamilySites(scanFamilySites(files), null));
-      for (const family of scanFamilySites(files).families) expect(family.count).toBe(family.sites.length);
+      for (const family of JSON.parse(first).families) expect(family.count).toBe(family.sites.length);
     }));
+  });
+
+  it("derives each family's count from its sites: the report stores no count, the JSON writes it in baseline key order", () => {
+    const report = scanFamilySites(RAW_SITES);
+    for (const family of report.families) expect(Object.keys(family)).toEqual(["family", "owners", "patterns", "sites"]);
+
+    const written = JSON.parse(serializeFamilySites(report, null));
+    expect(Object.keys(written)).toEqual(["schema", "families"]);
+    for (const [index, family] of written.families.entries()) {
+      expect(Object.keys(family)).toEqual(["family", "owners", "patterns", "count", "sites"]);
+      expect(family.count).toBe(report.families[index]!.sites.length);
+    }
   });
 
   it("AS-032: JSON output parses back to the same report (round trip through the baseline parser)", () => {

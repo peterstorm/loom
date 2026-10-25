@@ -35,7 +35,9 @@ import { observeCurrentWaveWorkspace } from "../../src/handlers/helpers/wave-com
 import { createRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { StateManager } from "../../src/state-manager";
 import { parseNewTestEvidence, type ActiveWaveGateRegistration, type Task, type TaskGraph } from "../../src/types";
+import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import { canonicalTempDir } from "./canonical-temp-dir";
+import { ownerObligation } from "./owner-obligation";
 import { satisfiedProof } from "./task-lifecycle";
 
 export type MatrixTestKind = "discriminating" | "vacuous" | "sibling-omitting";
@@ -118,6 +120,16 @@ export type OwnerVerificationRepo = Readonly<{
   /** The repository's worktree paths, the main one first. */
   worktrees: () => readonly string[];
 }>;
+
+/** A TaskGraph carrying the `owner_obligations` stamp, as every fixture graph does. */
+export type StampedGraph = TaskGraph & Readonly<{ owner_obligations: readonly OwnerObligation[] }>;
+
+/** A fixture root as the canonical repository root the shells take; throws when it is not canonical. */
+export function canonicalRoot(root: string): CanonicalRepositoryRoot {
+  const parsed = parseCanonicalRepositoryRoot(root);
+  if (!parsed.ok) throw new Error(`fixture root is not canonical: ${root}`);
+  return parsed.value;
+}
 
 const created: string[] = [];
 
@@ -274,7 +286,7 @@ function mutationPolicyOf(options: OwnerVerificationRepoOptions): MutationPolicy
 }
 
 function obligationOf(options: OwnerVerificationRepoOptions): OwnerObligation {
-  return {
+  return ownerObligation({
     invariant: OWNER_FIXTURE.invariant,
     title: OWNER_FIXTURE.title,
     statement: OWNER_FIXTURE.statement,
@@ -285,7 +297,7 @@ function obligationOf(options: OwnerVerificationRepoOptions): OwnerObligation {
     ],
     matrixTest: OWNER_FIXTURE.matrixTests[options.matrixTest],
     mutation: mutationPolicyOf(options),
-  };
+  });
 }
 
 /** The file the Wave's Task lists and the bytes the Wave leaves in it. */
@@ -334,7 +346,6 @@ const PROTECTED = [".git", ".claude/state", ".claude/reviews", ".pi/state", ".pi
 
 type WaveChange = ReturnType<typeof waveChange>;
 type RunnerMode = NonNullable<OwnerVerificationRepoOptions["runner"]>;
-type StampedGraph = TaskGraph & Readonly<{ owner_obligations: readonly OwnerObligation[] }>;
 
 const AUTHORITY_DIGEST = "a".repeat(64) as ActiveWaveGateRegistration["authorityDigest"];
 type Layout = NonNullable<OwnerVerificationRepoOptions["layout"]>;
@@ -494,6 +505,10 @@ function readWorktrees(root: string): readonly string[] {
     .filter((line) => line.startsWith("worktree "))
     .map((line) => line.slice("worktree ".length));
 }
+
+/** A fixture repository whose Wave changed the owner under the discriminating matrix test, unless `options` says otherwise. */
+export const buildOwnerVerificationRepo = (options: Partial<OwnerVerificationRepoOptions> = {}): OwnerVerificationRepo =>
+  ownerVerificationRepo({ waveChanges: "owner", matrixTest: "discriminating", ...options });
 
 /** Build one fixture repository; `cleanupOwnerVerificationRepos` removes it. */
 export function ownerVerificationRepo(options: OwnerVerificationRepoOptions): OwnerVerificationRepo {

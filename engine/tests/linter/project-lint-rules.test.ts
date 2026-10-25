@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { executeRules } from "../../src/linter/executor";
 import { loadRules } from "../../src/linter/loader";
+import { TYPESCRIPT_COMPILER_API_SEAMS } from "../../src/linter/programmatic/no-cross-boundary-imports";
 
 /**
  * This repository's own project lint rules (INV-1: strict sampling is only ever preferred, never required;
@@ -95,6 +96,24 @@ const OWNERSHIP_RULES: readonly OwnershipRow[] = [
     allowed: "return parseReportSummary(total, failed, source, files);\nreturn parseReportCounts(total, failed, source);",
     owners: ["engine/src/core/structured-test-report.ts"],
   },
+  {
+    // G5b INV-1 (ADR-0042): a prohibition with exempt seams rather than an owner;
+    // the seams play the owner's part here. Every spelling of the edge is refused,
+    // the bare side-effect import included, and a package merely prefixed
+    // `typescript` is not.
+    rule: "inv-1-typescript-compiler-api-seam",
+    refused: [
+      "import ts from \"typescript\";",
+      "import type { SourceFile } from 'typescript';",
+      "export * from \"typescript/lib/tsserverlibrary\";",
+      "import \"typescript\";",
+      "import 'typescript/lib/tsserverlibrary';",
+      "const ts = require(\"typescript\");",
+      "const ts = await import(\"typescript\");",
+    ].join("\n"),
+    allowed: "import { mutationPlan } from \"../core/owner-verification/mutation-plan\";\nimport \"typescript-eslint\";",
+    owners: TYPESCRIPT_COMPILER_API_SEAMS,
+  },
 ];
 
 const noDeadline = (): void => undefined;
@@ -114,6 +133,17 @@ describe("project lint rules: the G4 slice 2 ownership rules refuse a second own
       expect(lint("engine/src/handlers/elsewhere.ts", row.allowed)).toEqual([]);
       expect(lint("engine/tests/handlers/elsewhere.test.ts", row.refused)).toEqual([]);
       for (const owner of row.owners) expect(lint(owner, row.refused), owner).toEqual([]);
+    }
+  });
+});
+
+describe("project lint rules: the INV-1 TypeScript seam rule mirrors the one seam list", () => {
+  it("each harness copy exempts exactly TYPESCRIPT_COMPILER_API_SEAMS, plus test files", () => {
+    for (const dir of [CANONICAL, PI]) {
+      const rule = JSON.parse(readFileSync(join(dir, "inv-1-typescript-compiler-api-seam.json"), "utf-8")) as { excludePatterns: readonly string[] };
+      const seams = rule.excludePatterns.filter((pattern) => pattern !== ".test.ts");
+      expect(rule.excludePatterns, dir).toContain(".test.ts");
+      expect([...seams].sort(), dir).toEqual([...TYPESCRIPT_COMPILER_API_SEAMS].sort());
     }
   });
 });

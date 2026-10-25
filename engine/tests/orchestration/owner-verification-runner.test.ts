@@ -9,11 +9,12 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { rmSync, symlinkSync } from "node:fs";
+import { rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArtifactDigest, DomainResult } from "../../src/core/orchestration-contract";
 import { parseArtifactDigest, success } from "../../src/core/orchestration-contract/identity";
+import { obligationsDigest } from "../../src/core/owner-verification/obligations";
 import type {
   InvariantVerdict,
   MatrixTestRun,
@@ -25,31 +26,22 @@ import { freezeVerificationManifest } from "../../src/core/verification-manifest
 import type { CommandExecutionResult } from "../../src/orchestration/completion-check-runner";
 import {
   matrixTestRunOf,
-  pathAliasesOf,
   runOwnerVerification,
   type OwnerVerificationInput,
 } from "../../src/orchestration/owner-verification-runner";
-import type { TaskGraph } from "../../src/types";
-import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
+import { ownerObligation } from "../fixtures/owner-obligation";
 import {
+  buildOwnerVerificationRepo as build,
+  canonicalRoot,
   cleanupOwnerVerificationRepos,
-  ownerVerificationRepo,
   OWNER_FIXTURE,
   type OwnerVerificationRepo,
-  type OwnerVerificationRepoOptions,
+  type StampedGraph,
 } from "../fixtures/owner-verification-repo";
 
 afterEach(cleanupOwnerVerificationRepos);
 
 const TIMEOUT_MS = 60_000;
-
-type StampedGraph = TaskGraph & Readonly<{ owner_obligations: readonly OwnerObligation[] }>;
-
-function canonical(root: string): CanonicalRepositoryRoot {
-  const parsed = parseCanonicalRepositoryRoot(root);
-  if (!parsed.ok) throw new Error(`fixture root is not canonical: ${root}`);
-  return parsed.value;
-}
 
 const digestOf = (raw: string): ArtifactDigest => {
   const parsed = parseArtifactDigest(raw);
@@ -57,17 +49,21 @@ const digestOf = (raw: string): ArtifactDigest => {
   return parsed.value;
 };
 
-const build = (options: Partial<OwnerVerificationRepoOptions> = {}): OwnerVerificationRepo =>
-  ownerVerificationRepo({ waveChanges: "owner", matrixTest: "discriminating", ...options });
+/** The owner check authority the gate hands the runner for `owed` under `stamp`. */
+const authorityOf = (stamp: readonly OwnerObligation[], owed: readonly OwnerObligation[]): OwnerVerificationInput["authority"] => ({
+  obligationsDigest: obligationsDigest(stamp),
+  owed: owed.map(({ invariant }) => invariant),
+});
 
 function inputOf(repo: OwnerVerificationRepo, overrides: Partial<OwnerVerificationInput> = {}): OwnerVerificationInput {
   const graph = repo.manager.load() as StampedGraph;
   const [first, ...rest] = graph.owner_obligations;
   if (first === undefined) throw new Error("the fixture stamps one obligation");
   return {
-    root: canonical(repo.root),
+    root: canonicalRoot(repo.root),
     graph,
     wave: 1,
+    authority: authorityOf(graph.owner_obligations, graph.owner_obligations),
     owed: [first, ...rest],
     manifest: graph.verification_manifest!,
     observeWorkspace: (): DomainResult<ArtifactDigest, string> => success(digestOf(repo.workspaceDigest())),
@@ -194,6 +190,17 @@ describe("runOwnerVerification", () => {
     expect(repo.runnerLaunches()).toEqual([]);
   }, TIMEOUT_MS);
 
+  it("FR-016: an owner with syntax errors is the owner-unparseable infrastructure failure, and no matrix test runs", async () => {
+    const repo = build();
+    writeFileSync(join(repo.root, OWNER_FIXTURE.owner), "export function decide(age: number {\n  return age >= 18;\n}\n");
+    const verdict = onlyVerdict(await verify(repo));
+    expect(verdict.mutation).toMatchObject({
+      kind: "infrastructure",
+      failure: { kind: "owner-unparseable", detail: expect.stringContaining(OWNER_FIXTURE.owner) },
+    });
+    expect(repo.runnerLaunches()).toEqual([]);
+  }, TIMEOUT_MS);
+
   it("several owner Tasks diff the owner against their octopus merge-base", async () => {
     const repo = build();
     const graph = repo.manager.load() as StampedGraph;
@@ -292,6 +299,40 @@ describe("runOwnerVerification", () => {
     expect(changing).toBe(2);
   }, TIMEOUT_MS);
 
+  it("two owed obligations: verdicts follow the stamp order, and one obligation's infrastructure failure never reaches the other", async () => {
+    const repo = build();
+    const graph = repo.manager.load() as StampedGraph;
+    const admission = graph.owner_obligations[0]!;
+    // Owed first, and broken: its owner is not in the workspace, so its mutation cannot be planned.
+    const absent = ownerObligation({
+      invariant: "INV-2",
+      title: "Absence is decided only by absent.ts",
+      statement: null,
+      owner: "src/absent.ts",
+      siblings: [],
+      matrixTest: OWNER_FIXTURE.matrixTests.vacuous,
+      mutation: { kind: "verify" },
+    });
+    const owed = [absent, admission] as const;
+    const observation = await verify(repo, { owed, authority: authorityOf([...graph.owner_obligations, absent], owed) });
+    expect(observation.kind, JSON.stringify(observation)).toBe("verified");
+    if (observation.kind !== "verified") return;
+    expect(observation.obligationsDigest).toBe(obligationsDigest([...graph.owner_obligations, absent]));
+    expect(observation.verdicts.map(({ invariant }) => invariant)).toEqual(["INV-2", "INV-1"]);
+    expect(observation.verdicts[0]).toMatchObject({
+      coverage: { kind: "missing", paths: ["src/absent.ts"] },
+      mutation: { kind: "infrastructure", failure: { kind: "plan-drift", detail: expect.stringContaining("src/absent.ts") } },
+    });
+    expect(observation.verdicts[1]).toMatchObject({
+      coverage: { kind: "covered" },
+      mutation: { kind: "verified", generated: 5, killed: 5, survivors: [] },
+    });
+    // Only INV-1 ran its matrix test: the baseline and five mutants, never the vacuous test of INV-2.
+    const launches = repo.runnerLaunches();
+    expect(launches).toHaveLength(6);
+    expect(launches.every((launch) => launch.files[0] === OWNER_FIXTURE.matrixTests.discriminating)).toBe(true);
+  }, TIMEOUT_MS);
+
   it("never throws: a matrix test absent from the workspace reaches nothing, so every declared path is missing", async () => {
     const repo = build();
     const graph = repo.manager.load() as StampedGraph;
@@ -299,35 +340,6 @@ describe("runOwnerVerification", () => {
     const verdict = onlyVerdict(await verify(repo, { owed: [obligation] }));
     expect(verdict.coverage).toEqual({ kind: "missing", paths: [OWNER_FIXTURE.owner, ...OWNER_FIXTURE.siblings] });
   }, TIMEOUT_MS);
-});
-
-describe("pathAliasesOf", () => {
-  it("makes the nearest tsconfig's paths repository-relative through baseUrl, reading JSONC and following a relative extends", () => {
-    const files = new Map<string, string>([
-      ["packages/app/tsconfig.json", '// app\n{ "extends": "../../tsconfig.base.json", "compilerOptions": { "baseUrl": "src", } }\n'],
-      ["tsconfig.base.json", '{ /* base */ "compilerOptions": { "paths": { "@lib/*": ["lib/*", "vendor/*"], "exact": ["one.ts"] } } }'],
-    ]);
-    const aliases = pathAliasesOf("packages/app/tests/x.matrix.test.ts", (path) => files.get(path) ?? null);
-    expect(aliases).toEqual({
-      ok: true,
-      value: [
-        { pattern: "@lib/*", targets: ["packages/app/src/lib/*", "packages/app/src/vendor/*"] },
-        { pattern: "exact", targets: ["packages/app/src/one.ts"] },
-      ],
-    });
-  });
-
-  it("resolves paths against the declaring tsconfig's directory when no baseUrl is set", () => {
-    const files = new Map([["tsconfig.json", '{ "compilerOptions": { "paths": { "@rules/*": ["./src/rules/*"] } } }']]);
-    expect(pathAliasesOf("tests/rules.matrix.test.ts", (path) => files.get(path) ?? null))
-      .toEqual({ ok: true, value: [{ pattern: "@rules/*", targets: ["src/rules/*"] }] });
-  });
-
-  it("is empty without a tsconfig, and refuses a tsconfig that does not parse", () => {
-    expect(pathAliasesOf("tests/x.test.ts", () => null)).toEqual({ ok: true, value: [] });
-    const broken = pathAliasesOf("tests/x.test.ts", (path) => path === "tsconfig.json" ? "{ \"compilerOptions\": " : null);
-    expect(broken.ok).toBe(false);
-  });
 });
 
 describe("matrixTestRunOf", () => {

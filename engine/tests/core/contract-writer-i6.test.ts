@@ -40,6 +40,7 @@ import type { PlanContract, Task, TaskGraph } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
+import { ownerScopeOf } from "../../src/core/owner-verification/obligations";
 
 // --- Fixtures ---
 
@@ -267,6 +268,7 @@ describe("the brief states no I6 duty to a contract writer", () => {
       rules: RULES,
       roster: graph.tasks,
       invariants: [],
+      ownerScope: ownerScopeOf(graph),
       contracts: graph.acceptance_contracts ?? [],
       repositoryRoot: "/repo",
       operatorNotes: [],

@@ -31,8 +31,10 @@ import type {
   MutationPlan,
   OwnerObligation,
   PathAliases,
+  MutationPlanInput,
   SurvivorDiagnostic,
 } from "../../src/core/owner-verification/types";
+import { ownerObligation } from "../fixtures/owner-obligation";
 
 // ---------------------------------------------------------------------------
 // Sibling coverage
@@ -44,7 +46,7 @@ const SIBLING_B = "src/rules/sibling-b.ts";
 const BARREL = "src/rules/index.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
 
-const obligation = (siblings: readonly string[] = [SIBLING_A, SIBLING_B]): OwnerObligation => ({
+const obligation = (siblings: readonly string[] = [SIBLING_A, SIBLING_B]): OwnerObligation => ownerObligation({
   invariant: "INV-1",
   title: "Admission is decided only by the owner",
   statement: "Every entry point admits through decide().",
@@ -205,8 +207,15 @@ const capOf = (raw: number): MutantCap => {
   return parsed.value;
 };
 
+/** The plan of a well-formed owner; every owner this file plans parses. */
+const planned = (input: MutationPlanInput): MutationPlan => {
+  const plan = mutationPlan(input);
+  if (!plan.ok) throw new Error(`owner does not parse: ${plan.error.diagnostics.join("; ")}`);
+  return plan.value;
+};
+
 const planOf = (ownerText: string, changedLines: ReadonlySet<number>, cap = 24): MutationPlan =>
-  mutationPlan({ ownerPath: OWNER, ownerText, changedLines, cap: capOf(cap) });
+  planned({ ownerPath: OWNER, ownerText, changedLines, cap: capOf(cap) });
 
 /** The sites the cap left unmutated, derived from the plan. */
 const unmutatedOf = (plan: MutationPlan): number => plan.candidates - plan.mutants.length;
@@ -279,10 +288,10 @@ describe("the mutation plan (CT-1)", () => {
   });
 
   it("FR-017: the plan is a pure function of its input, never of the filesystem", () => {
-    const absent = mutationPlan({ ownerPath: "no/such/dir/owner.ts", ownerText: OWNER_TEXT, changedLines: new Set([5]), cap: capOf(24) });
+    const absent = planned({ ownerPath: "no/such/dir/owner.ts", ownerText: OWNER_TEXT, changedLines: new Set([5]), cap: capOf(24) });
     expect(absent.mutants.map((mutant) => [mutant.operator, mutant.line])).toEqual([["statement-removal", 5]]);
     // The owner path enters only the mutant identity, never the site choice.
-    const elsewhere = mutationPlan({ ownerPath: "src/elsewhere.ts", ownerText: OWNER_TEXT, changedLines: new Set([5]), cap: capOf(24) });
+    const elsewhere = planned({ ownerPath: "src/elsewhere.ts", ownerText: OWNER_TEXT, changedLines: new Set([5]), cap: capOf(24) });
     expect(elsewhere.mutants.map(({ id: _id, ...site }) => site)).toEqual(absent.mutants.map(({ id: _id, ...site }) => site));
     expect(elsewhere.mutants[0]!.id).not.toBe(absent.mutants[0]!.id);
   });
@@ -386,8 +395,8 @@ describe("the mutation plan (CT-1)", () => {
   it("FR-011: FR-012: FR-017: laws — deterministic, confined to changed lines, capped, and each mutant changes one site", () => {
     fc.assert(fc.property(ownerInput, ({ ownerText, changedLines, cap: raw }) => {
       const cap = capOf(raw);
-      const plan = mutationPlan({ ownerPath: OWNER, ownerText, changedLines, cap });
-      expect(mutationPlan({ ownerPath: OWNER, ownerText, changedLines: new Set(changedLines), cap })).toEqual(plan);
+      const plan = planned({ ownerPath: OWNER, ownerText, changedLines, cap });
+      expect(planned({ ownerPath: OWNER, ownerText, changedLines: new Set(changedLines), cap })).toEqual(plan);
       expect(plan.cap).toBe(raw);
       expect(plan.mutants.length).toBeLessThanOrEqual(raw);
       expect(plan.mutants.length).toBeLessThanOrEqual(plan.candidates);

@@ -11,6 +11,7 @@ No gaps found.
 Re-run checks on the two earlier gaps:
 - FR-002 is closed. AD-2 and T10 make the gate re-read `graph.plan_file` whenever the `owner_obligations` stamp is present, including an empty stamp and Waves that owe nothing. It blocks as infrastructure on a missing plan file, an unreadable plan, strays, malformed ownership, or drift against the stamp. The CT-1 statement and the T10 tests cover these cases.
 - OWN-1 is closed. INV-3's Statement says `verification-manifest.ts` is deliberately not a sibling. `authorizeWaveCompletionSuite` receives `OwnerCheckAuthority | null` from `ownerCheckAuthority` and makes no ownership decision. The two real call sites, `wave-completion-suite.ts` and `wave-completion-suite-readiness.ts`, are listed as siblings.
+  - Revised for the PR #131 review remediation (2026-10-25): that list was incomplete once implemented. `state-file-wire.ts` and `owner-verification-runner.ts` also called `ownerCheckAuthority`, and population and the runner call `verifyOwed`. The gate side now authorizes through one function, `core/owner-verification/suite-authority.ts`, the runner receives the authority instead of re-deriving it, and INV-3's sibling list names every caller of the selection owner (suite authority, the gate helper, readiness, plan integrity, the State File wire, the runner, population, review authority and the brief), each with a row in the matrix test. The State File wire's re-derivation is deliberate: a receipt must not certify its own roster.
 
 ## Gaps
 
@@ -23,7 +24,7 @@ None in /home/peterstorm/dev/claude-plugins/loom/.claude/specs/2026-10-21-g5b-ow
 ## Executable-Models and Ownership Checks
 
 - MODEL: No lifecycle or pipeline prose lacking a binding. INV-1 is checkable and is an import-confinement rule that a regex lint can check. CT-1's types file is new. CT-2 declares `none` with a reason. Every Requirement in the acceptance-test lists is decidable by a test.
-- OWN: INV-3 owns the single rule of which obligations apply. Its sibling list covers every site its Statement names: gate, readiness, review authority and brief. The one excluded file, `verification-manifest.ts`, is explained. INV-3 bundles a single rule. INV-1 and INV-2 are `none` with reasons that explain why no module can own them. No other rule is applied at two or more sites without an owner.
+- OWN: INV-3 owns the single rule of which obligations apply. Its sibling list covers every site its Statement names (revised for PR #131: suite authority, gate helper, readiness, plan integrity, State File wire, runner, population, review authority and brief). The one excluded file, `verification-manifest.ts`, is explained. INV-3 bundles a single rule. INV-1 and INV-2 are `none` with reasons that explain why no module can own them. No other rule is applied at two or more sites without an owner.
 
 ## Coverage
 

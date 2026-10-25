@@ -17,8 +17,11 @@
  *   mutation verification only; coverage still runs.
  */
 
+import type { InvariantId } from "../invariant-id";
 import type { ArtifactDigest, DomainResult, NonEmpty } from "../orchestration-contract";
 import type { SiblingEntryPoint } from "../sibling-entry-point";
+
+export type { InvariantId } from "../invariant-id";
 
 // ---------------------------------------------------------------------------
 // Owner Obligations
@@ -35,13 +38,12 @@ export type MutationPolicy =
   | Readonly<{ kind: "exempt"; reason: string }>;
 
 /**
- * One owned Invariant as population stamps it into the TaskGraph
- * (`owner_obligations`), derived purely from the plan. Paths are
- * repository-relative, exactly as the plan declares them.
+ * One owned Invariant's fields, before the relations between them are
+ * checked. Paths are repository-relative, exactly as the plan declares them.
  */
-export type OwnerObligation = Readonly<{
+export type OwnerObligationFields = Readonly<{
   /** The Invariant id, e.g. "INV-3". */
-  invariant: string;
+  invariant: InvariantId;
   title: string;
   /** The `**Statement:**` line; null when the plan declares none. */
   statement: string | null;
@@ -53,6 +55,39 @@ export type OwnerObligation = Readonly<{
   matrixTest: string;
   mutation: MutationPolicy;
 }>;
+
+declare const OWNER_OBLIGATION: unique symbol;
+
+/**
+ * One owned Invariant as population stamps it into the TaskGraph
+ * (`owner_obligations`), derived purely from the plan. Branded: only
+ * `OwnerObligationOfFn` builds one, so under the one plan path rule every
+ * path plays one role: the owner is no sibling, the matrix test is neither
+ * the owner nor a sibling, and no sibling is listed twice. The plan grammar's
+ * derivation and the State File parser both build through it, so a stamp the
+ * plan could never produce cannot be loaded either.
+ */
+export type OwnerObligation = OwnerObligationFields & { readonly [OWNER_OBLIGATION]: true };
+
+/** Why an owned Invariant's fields do not make an Owner Obligation: a path playing two roles. */
+export type OwnerObligationError =
+  | Readonly<{ kind: "owner-is-sibling"; invariant: InvariantId; path: string }>
+  | Readonly<{ kind: "matrix-test-is-owner"; invariant: InvariantId; path: string }>
+  | Readonly<{ kind: "matrix-test-is-sibling"; invariant: InvariantId; path: string }>
+  | Readonly<{ kind: "duplicate-sibling"; invariant: InvariantId; path: string }>;
+
+/** The only constructor of an `OwnerObligation`: refuses any path that plays two roles. */
+export type OwnerObligationOfFn = (fields: OwnerObligationFields) => DomainResult<OwnerObligation, OwnerObligationError>;
+
+declare const MUTATION_OWED: unique symbol;
+
+/**
+ * The obligations that owe mutation verification, in order, as
+ * `obligations.ts`'s `verifyOwed` selects them (policy `verify`). Branded:
+ * only that selector builds one, so whatever takes it (the reported time
+ * bound, the runner refusal) reads the one owes-mutation rule.
+ */
+export type MutationOwed = readonly OwnerObligation[] & { readonly [MUTATION_OWED]: true };
 
 // ---------------------------------------------------------------------------
 // Sibling coverage
@@ -178,8 +213,15 @@ export type MutationPlanInput = Readonly<{
   cap: MutantCap;
 }>;
 
+/**
+ * Why the owner's text yields no trustworthy mutation plan: the TypeScript
+ * parser reported syntax errors (`line:column message`), so the sites it
+ * would offer come from a recovered, possibly garbled tree.
+ */
+export type OwnerUnparseable = Readonly<{ kind: "owner-unparseable"; diagnostics: NonEmpty<string> }>;
+
 /** `mutation-plan.ts`'s entry point: a pure function of owner bytes, changed lines and cap. */
-export type MutationPlanFn = (input: MutationPlanInput) => MutationPlan;
+export type MutationPlanFn = (input: MutationPlanInput) => DomainResult<MutationPlan, OwnerUnparseable>;
 
 /** The owner text with one mutant applied: `[start, end)` replaced by `replacement`. */
 export type ApplyMutantFn = (ownerText: string, mutant: Mutant) => string;
@@ -215,6 +257,10 @@ export type MatrixTestRun =
  * - `unexpected-error`: a step built to return its failure as data threw
  *   anyway, an engine defect or an unanticipated exception; the detail
  *   names the step and the error.
+ * - `owner-unparseable`: the owner module has syntax errors, so its
+ *   mutation sites cannot be trusted.
+ * - `no-valid-mutants`: mutants were generated, but every one only failed to
+ *   collect, so the run carries no mutation evidence.
  */
 export type OwnerInfrastructureFailureKind =
   | "plan-unreadable"
@@ -232,7 +278,9 @@ export type OwnerInfrastructureFailureKind =
   | "coverage-bound-exceeded"
   | "real-workspace-changed"
   | "repository-file-unreadable"
-  | "unexpected-error";
+  | "unexpected-error"
+  | "owner-unparseable"
+  | "no-valid-mutants";
 
 export type OwnerInfrastructureFailure = Readonly<{ kind: OwnerInfrastructureFailureKind; detail: string }>;
 
@@ -302,6 +350,9 @@ declare const VERIFIED_MUTATION: unique symbol;
  * - `unmutated` counts the candidate sites the cap left out.
  * - `ownerChangedInWave` is false only when no Wave Task changed the owner;
  *   then zero mutants were generated or left unmutated, and the verdict says so.
+ * - when mutants were generated, at least one was killed, timed out or
+ *   survived: a run whose every mutant is invalid carries no evidence and is
+ *   the `no-valid-mutants` infrastructure failure, never a verified run.
  */
 export type VerifiedMutation = VerifiedMutationFields &
   Readonly<{ kind: "verified"; generated: number }> & { readonly [VERIFIED_MUTATION]: true };
@@ -309,13 +360,14 @@ export type VerifiedMutation = VerifiedMutationFields &
 /** Why tallies do not make a verified mutation run. */
 export type VerifiedMutationError =
   | Readonly<{ kind: "count-not-a-count"; field: "killed" | "timedOut" | "invalid" | "unmutated"; value: number }>
-  | Readonly<{ kind: "mutants-without-owner-change"; generated: number; unmutated: number }>;
+  | Readonly<{ kind: "mutants-without-owner-change"; generated: number; unmutated: number }>
+  | Readonly<{ kind: "no-valid-mutants"; generated: number }>;
 
 /**
  * The only constructor of a `VerifiedMutation`, for the gate's tally and the
  * persisted result's parser alike: derives `generated`, and refuses a count
- * that is not a non-negative integer and any generated or unmutated mutant
- * when the owner was unchanged.
+ * that is not a non-negative integer, any generated or unmutated mutant
+ * when the owner was unchanged, and generated mutants that are all invalid.
  */
 export type VerifiedMutationOfFn = (fields: VerifiedMutationFields) => DomainResult<VerifiedMutation, VerifiedMutationError>;
 
@@ -328,7 +380,7 @@ export type MutationVerdict =
 
 /** One owed Invariant's verdict: its coverage and its mutation halves. */
 export type InvariantVerdict = Readonly<{
-  invariant: string;
+  invariant: InvariantId;
   title: string;
   owner: string;
   matrixTest: string;
@@ -358,7 +410,7 @@ export type OwnerVerificationObservation =
  * (`invariant` is null only for a failure of the whole check).
  */
 export type OwnerVerificationFailure =
-  | Readonly<{ kind: "missing-siblings"; invariant: string; matrixTest: string; paths: NonEmpty<string> }>
-  | Readonly<{ kind: "red-baseline"; invariant: string; matrixTest: string; failures: NonEmpty<string> }>
-  | Readonly<{ kind: "survivor"; invariant: string; owner: string; matrixTest: string; survivor: SurvivorDiagnostic }>
-  | Readonly<{ kind: "infrastructure"; invariant: string | null; failure: OwnerInfrastructureFailure }>;
+  | Readonly<{ kind: "missing-siblings"; invariant: InvariantId; matrixTest: string; paths: NonEmpty<string> }>
+  | Readonly<{ kind: "red-baseline"; invariant: InvariantId; matrixTest: string; failures: NonEmpty<string> }>
+  | Readonly<{ kind: "survivor"; invariant: InvariantId; owner: string; matrixTest: string; survivor: SurvivorDiagnostic }>
+  | Readonly<{ kind: "infrastructure"; invariant: InvariantId | null; failure: OwnerInfrastructureFailure }>;

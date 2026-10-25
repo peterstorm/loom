@@ -21,14 +21,15 @@ meet the test that is meant to pin the rule.
   aliases, and through barrel files that `export … from` the real modules. A rule that rejects these would push
   authors to rewrite working tests just to satisfy the gate.
 - **Parsing must be faithful.** A specifier inside a comment, a string or a template is not an import. A
-  specifier in `import()`, `require()` or `import x = require(...)` is one.
+  specifier in `import()`, `require()` or `import x = require(...)` is one. A type-only import or re-export
+  is erased at runtime and never loads its module, so it is not one either (FR-005).
 - **The core stays pure.** `engine/src/core/` may not do I/O (`no-io-in-pure-modules`). Module resolution is
   filesystem work, so it must either move to the shell or be expressed over text the shell already read.
 - **The check is bounded.** It runs at every Wave Gate that owes the invariant, so a pathological import graph
   must fail with a clear message and must not hang the gate.
 
-The check also has a limit that no static analysis can remove: an import proves reach, not exercise. A matrix
-test that imports a sibling but never drives the rule through it still passes coverage.
+The check also has a limit that no static analysis can remove: a runtime import proves the module is loaded, not
+exercised. A matrix test that imports a sibling but never drives the rule through it still passes coverage.
 
 ## Options Considered
 
@@ -63,21 +64,30 @@ test that imports a sibling but never drives the rule through it still passes co
      `moduleResolution` settings that matrix tests do not need.
 
 ## Decision
-**A matrix test reaches the files it imports or re-exports directly, closed under `export … from` edges only.
-Specifiers are parsed with the TypeScript compiler API and resolved purely against shell-gathered files.**
+**A matrix test reaches the files it imports or re-exports directly, closed under `export … from` edges only,
+counting only edges that load their module at runtime. Specifiers are parsed with the TypeScript compiler API and
+resolved purely against shell-gathered files.**
 
 **Edge extraction: `engine/src/core/owner-verification/import-graph.ts`.** This is one of the two INV-1 seams
 allowed to import `typescript`. `engine/src/linter/programmatic/no-cross-boundary-imports.ts` grants it, alongside
-`mutation-plan.ts`. It exports `moduleEdges(path, text): ModuleEdges`, which parses with `ts.createSourceFile`
-using a script kind chosen by extension. It never builds a Program, a language service or `ts.sys`. Edges are:
+`mutation-plan.ts`. It exports `moduleEdges(path, text): ModuleEdges`, a list of `Edge`
+(`{ kind: "import" | "reexport"; specifier; typeOnly }`). It parses through `parseModule(path, text)`, the one
+parse both INV-1 seams share: `ts.createSourceFile` with the script kind the path's extension names (`.tsx` and
+`.jsx` with JSX, `.js`/`.mjs`/`.cjs` as JavaScript, TypeScript otherwise). `mutation-plan.ts` parses owners
+through the same function, so the two seams cannot disagree on the script-kind rule. It never builds a Program, a
+language service or `ts.sys`. Edges are:
 
-- `imports`: static `import … from`, side-effect `import "…"`, `import x = require("…")`, and calls to
+- `import`: static `import … from`, side-effect `import "…"`, `import x = require("…")`, and calls to
   `import(...)` or a bare `require(...)` whose first argument is a string literal or a template with no
   substitutions, found anywhere in the file;
-- `reexports`: every `export … from "…"` form.
+- `reexport`: every `export … from "…"` form.
 
-Computed specifiers, templates with substitutions and member calls such as `module.require(...)` are never
-edges. Each list keeps a specifier once, in first-seen source order.
+An edge is `typeOnly` when it is erased at runtime: `import type …`, `import type x = require(…)`,
+`export type … from` (`export type *` included), and an import or re-export whose every named specifier is
+`type` with no default or namespace binding. FR-005 counts only edges that load their module, so the coverage walk
+ignores type-only edges: a matrix test that only type-imports the owner or a sibling does not reach it. A
+specifier imported both ways is a runtime edge. Computed specifiers, templates with substitutions and member calls
+such as `module.require(...)` are never edges. Each (kind, specifier) appears once, in first-seen source order.
 
 **Resolution and reach: `engine/src/core/owner-verification/coverage.ts`.** This module is pure, and its path
 arithmetic is hand-rolled so it needs no `node:path`.
@@ -91,8 +101,8 @@ arithmetic is hand-rolled so it needs no `node:path`.
   holds at most one `*`. Each target of the matched alias, with the captured text substituted, runs the same
   ladder in order. A bare package specifier with no alias, an absolute specifier, or a path that escapes the
   repository root is external and reaches nothing.
-- `reachedFiles(matrixTest, files, aliases)` starts from the matrix test's imports and re-exports, then follows
-  only the `reexports` of each reached file. Edges are parsed lazily and memoized.
+- `reachedFiles(matrixTest, files, aliases)` starts from the matrix test's runtime imports and re-exports, then
+  follows only the runtime re-exports of each reached file. Edges are parsed lazily and memoized.
 - `decideCoverage(reached, obligation)` returns `{ kind: "covered" }` or
   `{ kind: "missing"; paths: NonEmpty<string> }`. The missing paths come in declared order with the owner first.
   `coverageOverFiles` composes the two and implements `CoverageOverFilesFn` from `types.ts`.
@@ -120,8 +130,11 @@ failure, and coverage stops there: an unreadable file is never reported as a mis
 `paths` chain that the filesystem refuses is the same failure. The shell then calls `coverageOverFiles` over
 the gathered files.
 
-**tsconfig `paths` stay in the shell.** `pathAliasesOf(matrixTest, read)` in the runner finds the nearest
-`tsconfig.json` from the matrix test's directory up to the repository root and parses it with `jsonc-parser`.
+**tsconfig `paths` resolution is pure; only the reads and the JSONC parse are injected.** Since the PR #131
+review remediation, `pathAliasesOf(matrixTest, read, parseJsonc)` lives in
+`engine/src/core/owner-verification/tsconfig-paths.ts`; the runner supplies the file read and a `jsonc-parser`
+adapter (the only `jsonc-parser` import, under its existing grant). It finds the nearest
+`tsconfig.json` from the matrix test's directory up to the repository root and parses it through that adapter.
 It follows `extends` chains, both relative and under `node_modules`, and rejects cycles. It resolves `paths`
 targets against `baseUrl` when the chain declares one, and otherwise against the directory of the config that
 declared `paths`. The result is a repository-relative `PathAliases` list, which is empty when no tsconfig governs
@@ -147,6 +160,9 @@ scenarios live in `engine/tests/acceptance/owner-verification-core.acceptance.te
 - The shell's reads are typed as `coverageFrontier(state, read)` steps over a `CoverageGraphState`, not a single
   `readFiles` callback. A missing candidate counts as known absent; an unreadable one is an infrastructure
   failure. The infrastructure arm covers an unreadable file, an exceeded bound and unresolvable aliases.
+- Type-only edges were first counted as reach (the edge test pinned `import type` as an edge). The PR #131
+  review remediation tags them `typeOnly` and the walk ignores them, so coverage means the module is loaded at
+  runtime. This closes a gap for an exempt Invariant, whose owner no mutation run guards.
 
 ## Consequences
 
@@ -164,18 +180,19 @@ scenarios live in `engine/tests/acceptance/owner-verification-core.acceptance.te
   `docs/operations.md`.
 
 **Negative:**
-- An import is not proof of exercise. A matrix test that imports a sibling but never drives the rule through it
-  passes coverage. Mutation verification mutates only the owner, so a sibling that bypasses the owner is caught
-  only by a test that really drives it, or by the second-copy lens in review. This limit is accepted and
-  documented in `references/executable-models.md`.
+- A runtime import is not proof of exercise. A matrix test that imports a sibling but never drives the rule
+  through it passes coverage. (A type-only import is not even proof of load and does not count.) Mutation
+  verification mutates only the owner, so a sibling that bypasses the owner is caught only by a test that
+  really drives it, or by the second-copy lens in review. This limit is accepted and documented in
+  `references/executable-models.md`.
 - A helper module that imports a sibling without re-exporting it does not credit that sibling, even if the test
   calls the sibling through it. Authors must import siblings directly or through `export … from` barrels.
 - The engine now carries its own partial module resolver. It ignores `node_modules`, package `exports`,
   `rootDirs`, `moduleSuffixes` and non-TypeScript sources. If a project's resolution diverges from this subset,
   coverage reports a false miss. It never reports a false pass, because an unresolved specifier reaches nothing.
 - An unreadable candidate blocks as infrastructure (`repository-file-unreadable`) rather than counting as absent.
-  This was first shipped the other way (`EACCES` and `ELOOP` read as absent, so a permission problem showed up
-  as a coverage miss) and corrected in the G5b cleanup pass, so the behavior now matches the `CoverageVerdict`
+  A draft in #127 read `EACCES` and `ELOOP` as absent, so a permission problem showed up
+  as a coverage miss; it was corrected before merge, so the behavior matches the `CoverageVerdict`
   contract. The cost: a candidate path the frontier only probes (an extension or `/index` variant) that the
   filesystem refuses, for example under a directory without search permission, blocks the gate until the
   permission is fixed, even when another candidate would have resolved the specifier.

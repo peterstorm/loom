@@ -140,10 +140,10 @@ Behavior is covered by `engine/tests/orchestration/owner-mutation-workspace.test
   can be mistaken for a kill.
 
 **Negative:**
-- The first shipped runner kept "never throws" only as a doc comment: `readRepositoryText` rethrew unexpected
+- A draft of the runner in #127 kept "never throws" only as a doc comment: `readRepositoryText` rethrew unexpected
   fs errors from `coverage` and `planMutation`, the suite helper recorded the throw as `worktree-failed` (a
   misnomer outside the worktree), and on that path the runner's after-digest check never ran; a cleanup
-  leftover after a throwing `use` was discarded. The G5b cleanup pass closed all three (see the runner shell
+  leftover after a throwing `use` was discarded. #127 closed all three before merge (see the runner shell
   above). What remains: `unexpected-error` is deliberately coarse. It names the step and the error but does
   not tell an engine defect from an unanticipated exception; the detail carries the difference.
 - Isolation covers only Git-visible state. Ignored files other than `node_modules` (generated sources, local

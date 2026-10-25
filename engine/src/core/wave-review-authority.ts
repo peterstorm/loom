@@ -38,7 +38,7 @@ import {
 } from "./orchestration-contract";
 import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
-import { obligationsTouchedBy } from "./owner-verification/obligations";
+import { obligationsTouchedBy, ownerScopeOf } from "./owner-verification/obligations";
 import { isOwnerMapRole, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
 import {
   projectRequirementCoverage,
@@ -867,12 +867,12 @@ export function prepareWaveReviewBatch(
   // stamped graph, and only for a Task touching some owned family. Every other
   // packet keeps its exact pre-feature bytes (SC-005).
   const ownerMapByTask = new Map<string, ByteSection>();
-  const stamp = graph.owner_obligations;
-  if (registration.schemaVersion === 2 && stamp !== undefined) {
+  if (registration.schemaVersion === 2) {
+    const scope = ownerScopeOf(graph);
+    const planFile = graph.plan_file;
     for (const task of tasks) {
-      const touched = obligationsTouchedBy(task.file_list ?? [], stamp);
+      const touched = obligationsTouchedBy(scope, task.file_list ?? []);
       if (!isNonEmpty(touched)) continue;
-      const planFile = graph.plan_file;
       if (planFile === null || planFile === undefined) {
         return failure(`Task ${task.id} touches owned Invariants but the stamped TaskGraph records no plan_file to cite`);
       }

@@ -18,7 +18,9 @@
  * Testcases are attributed to the matrix test through the one reported-file
  * rule (`attributeReportedFile`) and collection errors are recognized by the
  * one shared rule (`isCollectionErrorTestcase`). The tallied outcomes become a
- * verdict only through `verifiedMutationOf`.
+ * verdict only through `verifiedMutationOf`, which refuses a run whose every
+ * generated mutant is invalid (`no-valid-mutants`): such a run carries no
+ * mutation evidence, so it is never a verified pass.
  */
 
 import { match } from "ts-pattern";
@@ -30,6 +32,7 @@ import type {
   ClassifyBaselineFn,
   ClassifyMutantRunFn,
   MatrixTestRun,
+  MutantOutcome,
   OwnerInfrastructureFailure,
   OwnerInfrastructureFailureKind,
   VerifiedMutation,
@@ -80,11 +83,11 @@ function readReport(bytes: Uint8Array, exitCode: number | null, signal: string |
 
 export const classifyMutantRun: ClassifyMutantRunFn = (run, matrixTest) =>
   match(readRun(run, matrixTest))
-    .with({ kind: "timed-out" }, () => ({ kind: "timed-out" }) as const)
-    .with({ kind: "infrastructure" }, ({ failure: cause }) => ({ kind: "infrastructure", failure: cause }) as const)
-    .with({ kind: "failing" }, ({ failures, nonCollection }) =>
-      nonCollection.length > 0 ? ({ kind: "killed" }) as const : ({ kind: "invalid", collectionErrors: failures }) as const)
-    .with({ kind: "passing" }, () => ({ kind: "survived" }) as const)
+    .with({ kind: "timed-out" }, (): MutantOutcome => ({ kind: "timed-out" }))
+    .with({ kind: "infrastructure" }, ({ failure: cause }): MutantOutcome => ({ kind: "infrastructure", failure: cause }))
+    .with({ kind: "failing" }, ({ failures, nonCollection }): MutantOutcome =>
+      nonCollection.length > 0 ? { kind: "killed" } : { kind: "invalid", collectionErrors: failures })
+    .with({ kind: "passing" }, (): MutantOutcome => ({ kind: "survived" }))
     .exhaustive();
 
 export const classifyBaseline: ClassifyBaselineFn = (run, matrixTest) =>
@@ -107,6 +110,8 @@ export const verifiedMutationOf: VerifiedMutationOfFn = (fields: VerifiedMutatio
   if (!fields.ownerChangedInWave && (generated > 0 || fields.unmutated > 0)) {
     return failure({ kind: "mutants-without-owner-change", generated, unmutated: fields.unmutated });
   }
+  // Generated mutants that all failed only to collect carry no evidence either way.
+  if (generated > 0 && fields.invalid === generated) return failure({ kind: "no-valid-mutants", generated });
   // The brand's one minting point: the counts were just checked to agree.
   return success(Object.freeze({
     kind: "verified" as const,

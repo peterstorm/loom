@@ -8,15 +8,19 @@
  * 2. Per owed obligation, in stamp order:
  *    - coverage: the matrix test's import frontier is read from the real
  *      workspace (`coverageFrontier` names each next read), its tsconfig
- *      `paths` are read through `jsonc-parser`, and `coverageOverFiles`
- *      decides;
- *    - mutation, unless the obligation is exempt: the owner's Wave base is
- *      the `start_sha` of the Wave Tasks listing it (their octopus merge-base
- *      when several), `changedHeadLines` and `mutationPlan` fix the mutants,
+ *      `paths` are resolved by `pathAliasesOf` over this shell's reads and
+ *      `jsonc-parser`, and `coverageOverFiles` decides;
+ *    - mutation, unless the obligation is exempt: `waveBaseOf` chooses the
+ *      owner's Wave base, this shell resolves it with Git and reads the
+ *      owner there, `changedHeadLines` and `mutationPlan` fix the mutants,
  *      and one isolated worktree runs the baseline first and, only when it is
  *      green, every mutant, each through the frozen `affectedRunner` with the
  *      matrix test as its only file;
  *    - `invariantVerdict` assembles the verdict.
+ * The owner check authority (the stamp's digest and the owed ids) arrives
+ * from the gate, which took it from the authorized suite: this shell never
+ * re-derives it.
+ *
  * 3. The real workspace's digest is observed again: any difference is the
  *    blocking `real-workspace-changed` failure (SC-004).
  *
@@ -38,10 +42,14 @@ import { failure, success, type DomainResult, type NonEmpty } from "../core/orch
 import type { ArtifactDigest } from "../core/orchestration-contract";
 import { coverageFrontier, coverageOverFiles, initialCoverageState } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
-import { ownerCheckAuthority } from "../core/owner-verification/obligations";
+import { verifyOwed } from "../core/owner-verification/obligations";
+import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
+import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
+import type { OwnerCheckAuthority } from "../core/owner-check-authority";
 import { classifyBaseline, classifyMutantRun } from "../core/owner-verification/outcome";
 import type {
   CoverageVerdict,
+  InvariantId,
   InvariantVerdict,
   MatrixTestRun,
   MutationPlan,
@@ -49,16 +57,15 @@ import type {
   OwnerInfrastructureFailureKind,
   OwnerObligation,
   OwnerVerificationObservation,
-  PathAlias,
   PathAliases,
 } from "../core/owner-verification/types";
 import { invariantVerdict, mutationBoundMs, type MutantResult, type MutationEvidence } from "../core/owner-verification/verdict";
 import { parseAuthorizedWaveCompletionCheck, type AuthorizedWaveCompletionCheck } from "../core/completion-suite";
-import { pathsMatch } from "../core/plan-path-match";
 import { changedHeadLines } from "../core/unified-diff";
 import { affectedRunnerCheck, type AffectedRunner, type FrozenVerificationManifest } from "../core/verification-manifest";
-import type { Task, TaskGraph } from "../types";
+import type { TaskGraph } from "../types";
 import { runGit } from "../utils/git-execution-policy";
+import { describeCause } from "../utils/describe-cause";
 import type { CanonicalRepositoryRoot } from "../utils/workspace-digest";
 import { runProjectCommandAt, type CommandExecutionResult } from "./completion-check-runner";
 import { withMutationWorkspace, type MutationWorkspace } from "./owner-mutation-workspace";
@@ -68,6 +75,8 @@ export type OwnerVerificationInput = Readonly<{
   root: CanonicalRepositoryRoot;
   graph: TaskGraph;
   wave: number;
+  /** The owner check the gate authorized: the stamp's digest the observation is bound to. */
+  authority: OwnerCheckAuthority;
   /** The obligations the Wave owes (`ownerVerificationOwed`), in stamp order. */
   owed: NonEmpty<OwnerObligation>;
   manifest: FrozenVerificationManifest;
@@ -75,7 +84,6 @@ export type OwnerVerificationInput = Readonly<{
   observeWorkspace: () => DomainResult<ArtifactDigest, string>;
 }>;
 
-const describe = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
 
 const infrastructure = (kind: OwnerInfrastructureFailureKind, detail: string): OwnerInfrastructureFailure => ({ kind, detail });
 
@@ -113,7 +121,7 @@ function readRepositoryText(root: CanonicalRepositoryRoot, path: string): Reposi
   } catch (cause) {
     const code = (cause as NodeJS.ErrnoException | null)?.code;
     if (typeof code === "string" && ABSENCE_CODES.has(code)) return ABSENT;
-    return { kind: "unreadable", failure: infrastructure("repository-file-unreadable", `${path} cannot be read: ${describe(cause)}`) };
+    return { kind: "unreadable", failure: infrastructure("repository-file-unreadable", `${path} cannot be read: ${describeCause(cause)}`) };
   }
 }
 
@@ -121,127 +129,14 @@ function readRepositoryText(root: CanonicalRepositoryRoot, path: string): Reposi
 // tsconfig `paths`
 // ---------------------------------------------------------------------------
 
-type CompilerPaths = Readonly<{
-  /** The repository-relative directory `baseUrl` names, when a config in the chain declares one. */
-  baseUrl: string | null;
-  /** The declared `paths` and the directory of the config that declared them. */
-  paths: Readonly<{ entries: readonly (readonly [string, readonly string[]])[]; declaredIn: string }> | null;
-}>;
-
-const directoryOf = (path: string): string => {
-  const directory = posix.dirname(path);
-  return directory === "." ? "" : directory;
-};
-
-/** A repository-relative join that collapses `.` and `..`; null when it escapes the repository. */
-function within(directory: string, relative: string): string | null {
-  const joined = posix.normalize(posix.join(directory === "" ? "." : directory, relative));
-  if (joined === ".." || joined.startsWith("../") || posix.isAbsolute(joined)) return null;
-  return joined === "." ? "" : joined;
-}
-
-/** The nearest `tsconfig.json` from the matrix test's directory up to the repository root. */
-function nearestTsconfig(matrixTest: string, read: (path: string) => string | null): string | null {
-  for (let directory = directoryOf(matrixTest); ; directory = directoryOf(directory)) {
-    const candidate = directory === "" ? "tsconfig.json" : `${directory}/tsconfig.json`;
-    if (read(candidate) !== null) return candidate;
-    if (directory === "") return null;
-  }
-}
-
-/** The config file an `extends` entry names: relative to the extending config, or a package beneath a `node_modules`. */
-function extendedConfig(from: string, specifier: string, read: (path: string) => string | null): string | null {
-  const withJson = (path: string): readonly string[] => path.endsWith(".json") ? [path] : [path, `${path}.json`, `${path}/tsconfig.json`];
-  if (specifier.startsWith("./") || specifier.startsWith("../")) {
-    const base = within(directoryOf(from), specifier);
-    return base === null ? null : withJson(base).find((candidate) => read(candidate) !== null) ?? null;
-  }
-  for (let directory = directoryOf(from); ; directory = directoryOf(directory)) {
-    const base = within(directory, `node_modules/${specifier}`);
-    const found = base === null ? undefined : withJson(base).find((candidate) => read(candidate) !== null);
-    if (found !== undefined) return found;
-    if (directory === "") return null;
-  }
-}
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** One config's `baseUrl` and `paths` over the configs it extends, the later overriding the earlier. */
-function compilerPaths(config: string, read: (path: string) => string | null, seen: ReadonlySet<string>): DomainResult<CompilerPaths, string> {
-  if (seen.has(config)) return failure(`tsconfig ${config} extends itself`);
-  const text = read(config);
-  if (text === null) return failure(`tsconfig ${config} cannot be read`);
+/** `jsonc-parser` as the core's JSONC port: the parsed value, or every parse error with its offset. */
+const parseJsoncText: ParseJsonc = (text) => {
   const errors: ParseError[] = [];
   const parsed: unknown = parseJsonc(text, errors, { allowTrailingComma: true, disallowComments: false });
-  if (errors.length > 0) return failure(`tsconfig ${config} does not parse: ${errors.map((error) => `${printParseErrorCode(error.error)} at ${error.offset}`).join(", ")}`);
-  if (!isRecord(parsed)) return failure(`tsconfig ${config} is not an object`);
-
-  const extendsField = parsed.extends;
-  const parents = extendsField === undefined ? [] : typeof extendsField === "string" ? [extendsField] : extendsField;
-  if (!Array.isArray(parents) || !parents.every((parent): parent is string => typeof parent === "string")) {
-    return failure(`tsconfig ${config} has an extends that is not a string or a string array`);
-  }
-  let inherited: CompilerPaths = { baseUrl: null, paths: null };
-  for (const parent of parents) {
-    const file = extendedConfig(config, parent, read);
-    if (file === null) return failure(`tsconfig ${config} extends ${parent}, which cannot be found`);
-    const parentPaths = compilerPaths(file, read, new Set([...seen, config]));
-    if (!parentPaths.ok) return parentPaths;
-    inherited = {
-      baseUrl: parentPaths.value.baseUrl ?? inherited.baseUrl,
-      paths: parentPaths.value.paths ?? inherited.paths,
-    };
-  }
-
-  const options = parsed.compilerOptions;
-  if (options === undefined) return success(inherited);
-  if (!isRecord(options)) return failure(`tsconfig ${config} compilerOptions is not an object`);
-  let baseUrl = inherited.baseUrl;
-  if (options.baseUrl !== undefined) {
-    if (typeof options.baseUrl !== "string") return failure(`tsconfig ${config} baseUrl is not a string`);
-    const resolved = within(directoryOf(config), options.baseUrl);
-    if (resolved === null) return failure(`tsconfig ${config} baseUrl ${options.baseUrl} escapes the repository`);
-    baseUrl = resolved;
-  }
-  let paths = inherited.paths;
-  if (options.paths !== undefined) {
-    if (!isRecord(options.paths)) return failure(`tsconfig ${config} paths is not an object`);
-    const entries: (readonly [string, readonly string[]])[] = [];
-    for (const [pattern, targets] of Object.entries(options.paths)) {
-      if (!Array.isArray(targets) || !targets.every((target): target is string => typeof target === "string")) {
-        return failure(`tsconfig ${config} paths.${pattern} is not a string array`);
-      }
-      entries.push([pattern, targets]);
-    }
-    paths = { entries, declaredIn: directoryOf(config) };
-  }
-  return success({ baseUrl, paths });
-}
-
-/**
- * The matrix test's tsconfig `paths`, made repository-relative: targets resolve
- * against `baseUrl` when the chain declares one, otherwise against the
- * directory of the config that declared `paths`, as TypeScript resolves them.
- * Empty when no tsconfig governs the matrix test; refused when one does not
- * parse, since its aliases would then be unknown.
- */
-export function pathAliasesOf(matrixTest: string, read: (path: string) => string | null): DomainResult<PathAliases, string> {
-  const config = nearestTsconfig(matrixTest, read);
-  if (config === null) return success([]);
-  const resolved = compilerPaths(config, read, new Set());
-  if (!resolved.ok) return resolved;
-  const { baseUrl, paths } = resolved.value;
-  if (paths === null) return success([]);
-  const base = baseUrl ?? paths.declaredIn;
-  return success(paths.entries.map(([pattern, targets]): PathAlias => ({
-    pattern,
-    targets: targets.flatMap((target) => {
-      const joined = within(base, target);
-      return joined === null ? [] : [joined];
-    }),
-  })));
-}
+  return errors.length === 0
+    ? success(parsed)
+    : failure(errors.map((error) => `${printParseErrorCode(error.error)} at ${error.offset}`).join(", "));
+};
 
 // ---------------------------------------------------------------------------
 // Coverage
@@ -256,7 +151,7 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
     const file = readRepositoryText(root, path);
     if (file.kind === "unreadable") refused.push(file.failure);
     return file.kind === "text" ? file.text : null;
-  });
+  }, parseJsoncText);
   const [first] = refused;
   if (first !== undefined) return failure(first);
   return aliases.ok
@@ -289,23 +184,21 @@ function gitText(root: CanonicalRepositoryRoot, args: readonly string[]): Domain
   try {
     return success(runGit(["-C", root, ...args], { output: "text" }));
   } catch (cause) {
-    return failure(`git ${args[0] ?? ""} failed: ${describe(cause)}`);
+    return failure(`git ${args[0] ?? ""} failed: ${describeCause(cause)}`);
   }
 }
 
-/** The commit the Wave's owner Tasks started from: their one `start_sha`, or the octopus merge-base of several. */
-function waveBase(root: CanonicalRepositoryRoot, owner: string, tasks: NonEmpty<Task>): DomainResult<string, OwnerInfrastructureFailure> {
-  const missing = tasks.filter((task) => task.start_sha === undefined || task.start_sha === "").map((task) => task.id);
-  if (missing.length > 0) {
-    return failure(infrastructure("missing-wave-base", `Task ${missing.join(", ")} changed ${owner} but records no start_sha, so the owner's Wave base is unknown`));
-  }
-  const shas = [...new Set(tasks.map((task) => task.start_sha!))];
-  const base = shas.length === 1
-    ? gitText(root, ["rev-parse", "--verify", "--quiet", `${shas[0]!}^{commit}`])
-    : gitText(root, ["merge-base", "--octopus", ...shas]);
-  return base.ok && base.value.trim() !== ""
-    ? success(base.value.trim())
-    : failure(infrastructure("missing-wave-base", `the Wave base of ${owner} (${shas.join(", ")}) cannot be resolved${base.ok ? "" : `: ${base.error}`}`));
+type ResolvableBase = Exclude<WaveBase, { readonly kind: "owner-unchanged" }>;
+
+/** The commit `waveBaseOf` chose, resolved in the real repository: the one start, or the octopus merge-base of several. */
+function resolveWaveBase(root: CanonicalRepositoryRoot, owner: string, base: ResolvableBase): DomainResult<string, OwnerInfrastructureFailure> {
+  const shas = base.kind === "commit" ? [base.sha] : base.shas;
+  const resolved = base.kind === "commit"
+    ? gitText(root, ["rev-parse", "--verify", "--quiet", `${base.sha}^{commit}`])
+    : gitText(root, ["merge-base", "--octopus", ...base.shas]);
+  return resolved.ok && resolved.value.trim() !== ""
+    ? success(resolved.value.trim())
+    : failure(infrastructure("missing-wave-base", `the Wave base of ${owner} (${shas.join(", ")}) cannot be resolved${resolved.ok ? "" : `: ${resolved.error}`}`));
 }
 
 /** The owner's text at the Wave base, or null when the owner did not exist there (a new file: every line changed). */
@@ -398,23 +291,23 @@ function planMutation(input: OwnerVerificationInput, obligation: OwnerObligation
     return failure(infrastructure("plan-drift", `${obligation.invariant} names the owner ${obligation.owner}, which is not a file in the workspace`));
   }
   const ownerText = owner.text;
-  const ownerTasks = input.graph.tasks.filter((task) =>
-    task.wave === input.wave && (task.file_list ?? []).some((file) => pathsMatch(file, obligation.owner)));
-  const [first, ...rest] = ownerTasks;
-  if (first === undefined) return success({ ownerText, plan: null });
-  const base = waveBase(input.root, obligation.owner, [first, ...rest]);
+  const chosen = waveBaseOf(input.graph.tasks, input.wave, obligation.owner);
+  if (!chosen.ok) return chosen;
+  if (chosen.value.kind === "owner-unchanged") return success({ ownerText, plan: null });
+  const base = resolveWaveBase(input.root, obligation.owner, chosen.value);
   if (!base.ok) return base;
   const before = ownerAtBase(input.root, base.value, obligation.owner);
   if (!before.ok) return before;
-  return success({
+  const plan = mutationPlan({
+    ownerPath: obligation.owner,
     ownerText,
-    plan: mutationPlan({
-      ownerPath: obligation.owner,
-      ownerText,
-      changedLines: changedHeadLines(before.value, ownerText),
-      cap: MUTANT_CAP_PER_INVARIANT,
-    }),
+    changedLines: changedHeadLines(before.value, ownerText),
+    cap: MUTANT_CAP_PER_INVARIANT,
   });
+  if (!plan.ok) {
+    return failure(infrastructure("owner-unparseable", `the owner ${obligation.owner} does not parse, so its mutation sites cannot be trusted: ${plan.error.diagnostics.join("; ")}`));
+  }
+  return success({ ownerText, plan: plan.value });
 }
 
 async function mutationEvidence(input: OwnerVerificationInput, obligation: OwnerObligation, runner: AffectedRunner): Promise<MutationEvidence> {
@@ -431,7 +324,7 @@ async function mutationEvidence(input: OwnerVerificationInput, obligation: Owner
     );
     return ran.ok ? ran.value : { kind: "infrastructure", failure: ran.error };
   } catch (cause) {
-    return { kind: "infrastructure", failure: infrastructure("worktree-failed", `the isolated copy failed during a run: ${describe(cause)}`) };
+    return { kind: "infrastructure", failure: infrastructure("worktree-failed", `the isolated copy failed during a run: ${describeCause(cause)}`) };
   }
 }
 
@@ -444,7 +337,7 @@ async function guarded<T>(step: string, run: () => T | Promise<T>): Promise<Doma
   try {
     return success(await run());
   } catch (cause) {
-    return failure(infrastructure("unexpected-error", `${step} threw: ${describe(cause)}`));
+    return failure(infrastructure("unexpected-error", `${step} threw: ${describeCause(cause)}`));
   }
 }
 
@@ -457,15 +350,16 @@ async function workspaceDigest(input: OwnerVerificationInput, when: "before" | "
   return observed.value.ok ? success(observed.value.value) : unobserved(observed.value.error);
 }
 
-type ObligationRuns = Readonly<{ verdicts: readonly InvariantVerdict[]; plans: ReadonlyMap<string, MutationPlan> }>;
+type ObligationRuns = Readonly<{ verdicts: readonly InvariantVerdict[]; plans: ReadonlyMap<InvariantId, MutationPlan> }>;
 
-/** Coverage then mutation per owed obligation, in stamp order. */
+/** Coverage then mutation per owed obligation, in stamp order; only the obligations `verifyOwed` selects run mutants. */
 async function verifyObligations(input: OwnerVerificationInput, runner: AffectedRunner | undefined): Promise<ObligationRuns> {
   const verdicts: InvariantVerdict[] = [];
-  const plans = new Map<string, MutationPlan>();
+  const plans = new Map<InvariantId, MutationPlan>();
+  const verifying = verifyOwed(input.owed);
   for (const obligation of input.owed) {
     const covered = coverage(input.root, obligation);
-    const evidence: MutationEvidence = obligation.mutation.kind === "exempt" || runner === undefined
+    const evidence: MutationEvidence = !verifying.includes(obligation) || runner === undefined
       ? { kind: "exempt" }
       : await mutationEvidence(input, obligation, runner);
     if (evidence.kind === "owner-changed") plans.set(obligation.invariant, evidence.plan);
@@ -481,10 +375,8 @@ async function verifyObligations(input: OwnerVerificationInput, runner: Affected
  * workspace outranks the thrown failure.
  */
 async function verifyWave(input: OwnerVerificationInput): Promise<OwnerVerificationObservation> {
-  const authority = ownerCheckAuthority(input.graph, input.wave);
-  if (authority === null) return unavailable("plan-drift", "the TaskGraph carries no owner_obligations stamp, so it owes no owner verification");
   const runner = input.manifest.affectedRunner;
-  const verifying = input.owed.filter((obligation) => obligation.mutation.kind === "verify");
+  const verifying = verifyOwed(input.owed);
   if (verifying.length > 0 && runner === undefined) {
     return unavailable("runner-missing", `${verifying.map((obligation) => obligation.invariant).join(", ")} owe mutation verification, but the frozen verification manifest declares no affectedRunner`);
   }
@@ -500,8 +392,8 @@ async function verifyWave(input: OwnerVerificationInput): Promise<OwnerVerificat
   if (!runs.ok) return unavailableBecause(runs.error);
   return {
     kind: "verified",
-    obligationsDigest: authority.obligationsDigest,
-    boundMs: mutationBoundMs(input.owed, runs.value.plans, runner === undefined ? 0 : mutantTimeoutMs(runner.timeoutMs)),
+    obligationsDigest: input.authority.obligationsDigest,
+    boundMs: mutationBoundMs(verifying, runs.value.plans, runner === undefined ? 0 : mutantTimeoutMs(runner.timeoutMs)),
     verdicts: runs.value.verdicts,
   };
 }

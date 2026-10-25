@@ -66,7 +66,7 @@ const errorsOf = (text: string): readonly string[] => {
 
 const mutationOf = (text: string): MutationPolicy | "not-owned" => {
   const ownership = parsePlanModels(text).invariants[0]!.ownership;
-  return ownership.kind === "owned" && "mutation" in ownership ? (ownership as { mutation: MutationPolicy }).mutation : "not-owned";
+  return ownership.kind === "owned" ? ownership.mutation : "not-owned";
 };
 
 describe("mutation exemption grammar (CT-1)", () => {

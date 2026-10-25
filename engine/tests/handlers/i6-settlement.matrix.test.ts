@@ -87,6 +87,7 @@ import { guardStateFileDecision } from "../../src/core/guard-state-file";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
+import { ownerScopeOf } from "../../src/core/owner-verification/obligations";
 import { piGrantedAgentId } from "../../../pi/write-grant";
 import { piImplementationLedger } from "../../../pi/subagent-settlement";
 
@@ -756,6 +757,7 @@ function briefInput(graph: TaskGraph, task: Task, overrides: Partial<Implementat
     rules: RULES,
     roster: graph.tasks,
     invariants: [],
+    ownerScope: ownerScopeOf(graph),
     contracts: [],
     verificationManifest: graph.verification_manifest,
     repositoryRoot: ROOT,

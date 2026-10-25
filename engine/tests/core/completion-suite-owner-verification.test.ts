@@ -12,8 +12,12 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  OWNER_VERIFICATION_CHECK_ID,
+  OWNER_VERIFICATION_CHECK_ID_TEXT,
   completionSuiteDigest,
   evaluateWaveCompletionSuite,
+  parseCompletionCheckId,
+  rejectionDisposition,
   parseAcceptedWaveCompletionReceipt,
   parseAuthorizedWaveCompletionCheck,
   parseWaveCompletionSuiteResult,
@@ -34,6 +38,7 @@ import { canonicalJson } from "../../src/core/review-packet";
 import { authorizeWaveCompletionSuite, freezeVerificationManifest } from "../../src/core/verification-manifest";
 import type { ActiveWaveGateRegistration } from "../../src/types";
 import { digest } from "../fixtures/acceptance-fixtures";
+import { invariantId } from "../fixtures/owner-obligation";
 import { labelledValue, value } from "../fixtures/parse-result";
 
 const OWNER_CHECK = "loom:owner-verification";
@@ -58,8 +63,9 @@ const registration: ActiveWaveGateRegistration = {
 
 type OwnerAuthority = Readonly<{ obligationsDigest: ArtifactDigest; owed: readonly string[] }>;
 
+/** Authorizes the suite; the test spells owed ids as text, minted here through the id parser. */
 const authorize = (owner: OwnerAuthority | null): AuthorizedWaveCompletionSuite =>
-  value(authorizeWaveCompletionSuite(manifest, registration, digest("b"), owner));
+  value(authorizeWaveCompletionSuite(manifest, registration, digest("b"), owner === null ? null : { ...owner, owed: owner.owed.map(invariantId) }));
 
 const EXPECTATION = emptyAcceptanceExpectation(1);
 
@@ -82,7 +88,7 @@ const verifiedRun = (survivors: number, killed = 3): MutationVerdict => labelled
 }));
 
 const verdict = (invariant: string, coverage: CoverageVerdict, mutation: MutationVerdict): InvariantVerdict => ({
-  invariant,
+  invariant: invariantId(invariant),
   title: `${invariant} title`,
   owner: "src/rules/owner.ts",
   matrixTest: "tests/rules.matrix.test.ts",
@@ -192,6 +198,7 @@ describe("parseAuthorizedWaveCompletionCheck — the engine owner check", () => 
     ["a malformed obligations digest", { obligationsDigest: "nope" }],
     ["owed that is not an array", { owed: "INV-1" }],
     ["a blank owed id", { owed: [" "] }],
+    ["an owed id that is not an Invariant id", { owed: ["LC-1"] }],
     ["a repeated owed id", { owed: ["INV-1", "INV-1"] }],
     ["an extra field", { extra: true }],
   ])("refuses %s", (_case, patch) => {
@@ -232,6 +239,9 @@ describe("the ownerVerification observation on results and receipts", () => {
       ...verifiedRun(1), survivors: [{ mutantId: "m", operator: "bit-flip", line: 1, column: 1, original: "a", replacement: "b" }],
     } as unknown as MutationVerdict)])],
     ["mutants over an unchanged owner", verified([verdict("INV-1", covered, { ...verifiedRun(0), ownerChangedInWave: false } as MutationVerdict)])],
+    ["a verdict Invariant that is not an Invariant id", verified([{ ...verdict("INV-1", covered, verifiedRun(0)), invariant: "lc-1" } as unknown as InvariantVerdict])],
+    ["a verified run whose every mutant is invalid", verified([verdict("INV-1", covered,
+      { ...verifiedRun(0, 0), timedOut: 0, invalid: 3, generated: 3 } as unknown as MutationVerdict)])],
   ])("refuses %s", (_case, raw) => {
     expect(parseWaveCompletionSuiteResult(resultOf(OWES_INV1, raw as OwnerVerificationObservation, 0)).ok).toBe(false);
   });
@@ -290,6 +300,19 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
       kind: "owner-verification-infrastructure",
       checkId: OWNER_CHECK,
       failures: [{ kind: "infrastructure", invariant: "INV-1", failure: { kind: "worktree-failed", detail: "git worktree add failed" } }],
+    }]);
+  });
+
+  it.each(["no-valid-mutants", "owner-unparseable"] as const)("FR-016: a %s verdict round-trips and is an infrastructure failure, never a pass or a kill", (kind) => {
+    const broken: MutationVerdict = { kind: "infrastructure", failure: { kind, detail: "no mutation evidence" } };
+    const observed = verified([verdict("INV-1", covered, broken)]);
+    expect(value(parseWaveCompletionSuiteResult(resultOf(OWES_INV1, observed, 1))).ownerVerification).toEqual(observed);
+    const evaluation = rejected(evaluate(observed, 1));
+    expect(evaluation.semanticFailures).toEqual([]);
+    expect(evaluation.infrastructureFailures).toEqual([{
+      kind: "owner-verification-infrastructure",
+      checkId: OWNER_CHECK,
+      failures: [{ kind: "infrastructure", invariant: "INV-1", failure: { kind, detail: "no mutation evidence" } }],
     }]);
   });
 
@@ -368,5 +391,53 @@ describe("parseAcceptedWaveCompletionReceipt — a receipt proves its owner veri
       ownerVerification: verified([verdict("INV-1", covered, verifiedRun(0, 4))]),
     };
     expect(parseAcceptedWaveCompletionReceipt(JSON.parse(JSON.stringify(tampered))).ok).toBe(false);
+  });
+});
+
+describe("the reserved owner check id", () => {
+  it("is parsed once, and is the id an unauthorized observation's mismatch is reported against", () => {
+    expect(OWNER_VERIFICATION_CHECK_ID).toBe(OWNER_VERIFICATION_CHECK_ID_TEXT);
+    expect(value(parseCompletionCheckId(OWNER_VERIFICATION_CHECK_ID_TEXT))).toBe(OWNER_VERIFICATION_CHECK_ID);
+    expect(rejected(evaluate(verified([]), 0, authorize(null))).authorityFailures).toEqual([{
+      kind: "owner-verification-mismatch",
+      checkId: OWNER_VERIFICATION_CHECK_ID,
+      reason: "the result carries an owner-verification observation its suite does not authorize",
+    }]);
+  });
+});
+
+describe("rejectionDisposition — one decision for what a rejection means to the gate", () => {
+  const broken: MutationVerdict = { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "git worktree add failed" } };
+  const missing: CoverageVerdict = { kind: "missing", paths: ["src/rules/sibling-b.ts"] };
+
+  /** The owner result with the lint check's process replaced by a spawn failure. */
+  const lintUnstartable = (observation: OwnerVerificationObservation, ownerExit: number): CompletionSuiteEvaluation => {
+    const result = resultOf(OWES_INV1, observation, ownerExit);
+    const checks = (result.checks as readonly Record<string, unknown>[]).map((check) => check.checkId === LINT_CHECK
+      ? { ...check, outcome: { kind: "spawn-failed", message: "lint could not start" } }
+      : check);
+    return evaluateWaveCompletionSuite(OWES_INV1, { ...result, checks }, EXPECTATION);
+  };
+
+  it.each([
+    ["authority: an owner observation the suite does not bind", () => evaluate(undefined, 0), "authority"],
+    ["infrastructure: another check could not run, even beside an owner finding", () => lintUnstartable(verified([verdict("INV-1", missing, broken)]), 1), "infrastructure"],
+    ["owner-undecided: only the owner check could not decide", () => evaluate(verified([verdict("INV-1", covered, broken)]), 1), "owner-undecided"],
+    ["owner-undecided: the whole owner check was unavailable", () => evaluate({ kind: "unavailable", failure: { kind: "plan-unreadable", detail: "ENOENT" } }, 1), "owner-undecided"],
+    ["semantic: a decided owner finding", () => evaluate(verified([verdict("INV-1", missing, verifiedRun(0))]), 1), "semantic"],
+    ["semantic: a decided finding beside an undecided one", () => evaluate(verified([verdict("INV-1", missing, broken)]), 1), "semantic"],
+  ] as const)("%s", (_case, evaluation, kind) => {
+    expect(rejectionDisposition(rejected(evaluation())).kind).toBe(kind);
+  });
+
+  it("a semantic disposition carries exactly the decided failures", () => {
+    const evaluation = rejected(evaluate(verified([verdict("INV-1", missing, broken)]), 1));
+    expect(rejectionDisposition(evaluation)).toEqual({ kind: "semantic", failures: evaluation.semanticFailures });
+    expect(evaluation.infrastructureFailures.map((failure) => failure.kind)).toEqual(["owner-verification-infrastructure"]);
+  });
+
+  it("inexact: a rejection carrying no failure at all", () => {
+    expect(rejectionDisposition({ kind: "rejected", authorityFailures: [], infrastructureFailures: [], semanticFailures: [] }))
+      .toEqual({ kind: "inexact" });
   });
 });

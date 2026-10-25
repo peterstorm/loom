@@ -12,7 +12,9 @@
  * - The repository root's and the runner cwd's `node_modules` are shared by
  *   symlink, never copied, and never written through.
  * - `runWithOwner` rewrites only the owner file, deletes the runner's stale
- *   report, runs, and restores the owner's original bytes in `finally`.
+ *   report, runs, and restores the owner's original bytes afterwards, even
+ *   when the run throws; a restore that fails after a throwing run keeps the
+ *   run's throw as the cause.
  * - The worktree is removed (`git worktree remove --force`, then the directory
  *   itself, then `git worktree prune`) in `finally`, whatever the use did.
  *
@@ -41,10 +43,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
+import { statusPaths } from "../core/owner-verification/status-paths";
 import type { OwnerInfrastructureFailure } from "../core/owner-verification/types";
 import { parseReviewPath } from "../core/review-packet";
 import { GIT_PROBE_OUTPUT_LIMIT, spawnGit } from "../utils/git-execution-policy";
 import { describeGitOutcome, gitExitedWith } from "../utils/git-spawn-outcome";
+import { describeCause } from "../utils/describe-cause";
 import { parseCanonicalRepositoryRoot, type CanonicalRepositoryRoot } from "../utils/workspace-digest";
 
 /** What one isolated workspace is for: the real workspace, the one file a mutant rewrites, and the runner's report and cwd. */
@@ -72,7 +76,6 @@ export type MutationWorkspace = Readonly<{
 
 type Step<T> = DomainResult<T, string>;
 
-const describe = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
 
 const worktreeFailed = (detail: string): OwnerInfrastructureFailure => ({ kind: "worktree-failed", detail });
 
@@ -95,38 +98,6 @@ const absolute = (root: string, path: string): string => (path === "." ? root : 
 // ---------------------------------------------------------------------------
 // The overlay: every path the reviewed workspace differs from HEAD in
 // ---------------------------------------------------------------------------
-
-/**
- * The paths `git status --porcelain=v2 -z` names: ordinary and unmerged
- * changes, renames and copies (both sides), and untracked paths. Paths are
- * repository-relative; a trailing `/` names an untracked directory.
- */
-function statusPaths(output: string): Step<readonly string[]> {
-  const records = output.split("\0");
-  const paths: string[] = [];
-  for (let index = 0; index < records.length; index += 1) {
-    const record = records[index]!;
-    if (record === "" || record.startsWith("# ")) continue;
-    const fields = (count: number): string | null => {
-      const parts = record.split(" ");
-      return parts.length > count ? parts.slice(count).join(" ") : null;
-    };
-    const path = record.startsWith("1 ") ? fields(8)
-      : record.startsWith("2 ") ? fields(9)
-      : record.startsWith("u ") ? fields(10)
-      : record.startsWith("? ") ? record.slice(2)
-      : null;
-    if (path === null) return failure(`git status printed an unrecognized record: ${JSON.stringify(record)}`);
-    paths.push(path);
-    if (record.startsWith("2 ")) {
-      index += 1;
-      const original = records[index];
-      if (original === undefined || original === "") return failure("git status printed a rename without its original path");
-      paths.push(original);
-    }
-  }
-  return success(paths);
-}
 
 /** Make the worktree's `path` exactly what the reviewed workspace holds there: its bytes, its link, or nothing. */
 function overlayPath(source: string, target: string, path: string): void {
@@ -157,7 +128,7 @@ function overlay(source: CanonicalRepositoryRoot, target: string): Step<void> {
     for (const path of paths.value) overlayPath(source, target, path);
     return success(undefined);
   } catch (cause) {
-    return failure(`overlaying the reviewed workspace failed: ${describe(cause)}`);
+    return failure(`overlaying the reviewed workspace failed: ${describeCause(cause)}`);
   }
 }
 
@@ -175,7 +146,7 @@ function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runne
     }
     return success(links);
   } catch (cause) {
-    return failure(`sharing node_modules failed: ${describe(cause)}`);
+    return failure(`sharing node_modules failed: ${describeCause(cause)}`);
   }
 }
 
@@ -192,18 +163,32 @@ function remove(repositoryRoot: CanonicalRepositoryRoot, directory: string, link
     try {
       unlinkSync(link);
     } catch (cause) {
-      problems.push(`unlinking ${link} failed: ${describe(cause)}`);
+      problems.push(`unlinking ${link} failed: ${describeCause(cause)}`);
     }
   }
   const removed = git(repositoryRoot, ["worktree", "remove", "--force", directory]);
   try {
     rmSync(directory, { recursive: true, force: true });
   } catch (cause) {
-    problems.push(`removing ${directory} failed: ${describe(cause)}`);
+    problems.push(`removing ${directory} failed: ${describeCause(cause)}`);
   }
   const pruned = git(repositoryRoot, ["worktree", "prune"]);
   if (!removed.ok && !pruned.ok) problems.push(`${removed.error}; ${pruned.error}`);
   return problems.length === 0 && !existsSync(directory) ? null : problems.join("; ") || `${directory} still exists`;
+}
+
+/**
+ * Rethrow `cause`, a run's own throw, after restoring the owner. When the
+ * restore throws too, the rethrown error names both and keeps `cause` as its
+ * cause, as `withMutationWorkspace` does for a failed removal.
+ */
+function restoreAndRethrow(restore: () => void, cause: unknown): never {
+  try {
+    restore();
+  } catch (restoreFailure) {
+    throw new Error(`${describeCause(cause)}; the owner's original bytes could not be restored afterwards: ${describeCause(restoreFailure)}`, { cause });
+  }
+  throw cause;
 }
 
 function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: string, reportPath: string): MutationWorkspace {
@@ -218,15 +203,18 @@ function workspaceAt(root: CanonicalRepositoryRoot, ownerPath: string, reportPat
     root,
     runWithOwner: async <R>(ownerText: string | null, execute: (at: CanonicalRepositoryRoot) => Promise<R>): Promise<R> => {
       rmSync(report, { force: true });
+      let value: R;
       try {
         if (ownerText !== null) {
           mkdirSync(dirname(owner), { recursive: true });
           writeFileSync(owner, ownerText);
         }
-        return await execute(root);
-      } finally {
-        restore();
+        value = await execute(root);
+      } catch (cause) {
+        return restoreAndRethrow(restore, cause);
       }
+      restore();
+      return value;
     },
   });
 }
@@ -243,7 +231,7 @@ function open(spec: MutationWorkspaceSpec): DomainResult<Opened, OwnerInfrastruc
   try {
     directory = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-owner-mutation-")));
   } catch (cause) {
-    return failure(worktreeFailed(`the isolated copy's directory could not be made: ${describe(cause)}`));
+    return failure(worktreeFailed(`the isolated copy's directory could not be made: ${describeCause(cause)}`));
   }
   const abandon = (detail: string, links: readonly string[] = []): DomainResult<Opened, OwnerInfrastructureFailure> => {
     const leftover = remove(spec.repositoryRoot, directory, links);
@@ -261,7 +249,7 @@ function open(spec: MutationWorkspaceSpec): DomainResult<Opened, OwnerInfrastruc
   try {
     return success({ directory, links: shared.value, workspace: workspaceAt(root.value, ownerPath.value, reportPath.value) });
   } catch (cause) {
-    return abandon(`the isolated copy's owner could not be read: ${describe(cause)}`, shared.value);
+    return abandon(`the isolated copy's owner could not be read: ${describeCause(cause)}`, shared.value);
   }
 }
 
@@ -285,7 +273,7 @@ export async function withMutationWorkspace<T>(
   } catch (cause) {
     const leftover = remove(spec.repositoryRoot, directory, links);
     if (leftover === null) throw cause;
-    throw new Error(`${describe(cause)}; the isolated copy could not be removed afterwards: ${leftover}`, { cause });
+    throw new Error(`${describeCause(cause)}; the isolated copy could not be removed afterwards: ${leftover}`, { cause });
   }
   const leftover = remove(spec.repositoryRoot, directory, links);
   return leftover === null ? success(value) : failure(worktreeFailed(`the isolated copy could not be removed: ${leftover}`));

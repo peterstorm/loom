@@ -22,8 +22,14 @@ const capOf = (raw: number): MutantCap => {
 const lines = (from: number, to: number): ReadonlySet<number> =>
   new Set(Array.from({ length: to - from + 1 }, (_, index) => from + index));
 
+const planAt = (ownerPath: string, ownerText: string, changedLines: ReadonlySet<number>, cap = 24): MutationPlan => {
+  const plan = mutationPlan({ ownerPath, ownerText, changedLines, cap: capOf(cap) });
+  if (!plan.ok) throw new Error(`owner does not parse: ${plan.error.diagnostics.join("; ")}`);
+  return plan.value;
+};
+
 const planOf = (ownerText: string, changedLines: ReadonlySet<number>, cap = 24): MutationPlan =>
-  mutationPlan({ ownerPath: OWNER, ownerText, changedLines, cap: capOf(cap) });
+  planAt(OWNER, ownerText, changedLines, cap);
 
 /** Each mutant as [operator, line, the owner line it produces], in plan order. */
 const rows = (ownerText: string, plan: MutationPlan): readonly (readonly [MutationOperator, number, string])[] =>
@@ -118,9 +124,32 @@ describe("mutationPlan", () => {
     expect(rows(text, planOf(text, lines(1, 2)))).toEqual([["return-value-replacement", 2, "const g = () => { return undefined; };"]]);
   });
 
-  it("FR-010: TSX-free TypeScript syntax parses: generics and type assertions do not confuse the comparison operator", () => {
+  it("FR-010: TypeScript syntax parses: generics and type assertions do not confuse the comparison operator", () => {
     const text = "const v = id<number>(x) < (y as number);\n";
     expect(rows(text, planOf(text, new Set([1])))).toEqual([["comparison-flip", 1, "const v = id<number>(x) >= (y as number);"]]);
+  });
+
+  it("FR-010: a .tsx or .jsx owner parses with JSX, through the script-kind rule the import-graph seam owns", () => {
+    const text = "export const View = (open) => <Door open={open && ready} />;\n";
+    for (const ownerPath of ["src/rules/view.tsx", "src/rules/view.jsx"]) {
+      expect(rows(text, planAt(ownerPath, text, new Set([1])))).toEqual([
+        ["logical-swap", 1, "export const View = (open) => <Door open={open || ready} />;"],
+      ]);
+    }
+  });
+
+  it("FR-010: an owner with syntax errors has no plan: it is owner-unparseable with every diagnostic, never a silent plan", () => {
+    const refused = mutationPlan({ ownerPath: OWNER, ownerText: "export function decide( {\n  return x >= 18;\n", changedLines: lines(1, 2), cap: capOf(24) });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.kind).toBe("owner-unparseable");
+    expect(refused.error.diagnostics.length).toBeGreaterThan(0);
+    expect(refused.error.diagnostics[0]).toMatch(/^\d+:\d+ \S/);
+  });
+
+  it("FR-010: JSX in a .ts owner is a syntax error, so the owner is owner-unparseable rather than mutated from a garbled tree", () => {
+    const refused = mutationPlan({ ownerPath: OWNER, ownerText: "export const v = <Door open={a && b} />;\n", changedLines: lines(1, 1), cap: capOf(24) });
+    expect(refused).toMatchObject({ ok: false, error: { kind: "owner-unparseable" } });
   });
 
   it("AS-014: an owner with no mutable construct on its changed lines yields zero mutants and zero candidates", () => {
@@ -209,7 +238,6 @@ describe("mutationPlan laws", () => {
       expect(plan.mutants.length).toBeLessThanOrEqual(cap);
       expect(plan.candidates).toBe(all.candidates);
       expect(all.mutants).toHaveLength(all.candidates);
-      expect(plan.mutants.length + (plan.candidates - plan.mutants.length)).toBe(plan.candidates);
       expect(plan.mutants.length).toBe(Math.min(cap, plan.candidates));
       // The selection is a subsequence of the full candidate list.
       const ids = all.mutants.map((mutant) => mutant.id);

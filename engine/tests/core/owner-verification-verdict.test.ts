@@ -10,13 +10,16 @@ import {
   type MutantResult,
 } from "../../src/core/owner-verification/verdict";
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
+import { verifyOwed } from "../../src/core/owner-verification/obligations";
 import type {
   CoverageVerdict,
+  InvariantId,
   MutantCap,
   MutantOutcome,
   MutationPlan,
   OwnerObligation,
 } from "../../src/core/owner-verification/types";
+import { invariantId, ownerObligation } from "../fixtures/owner-obligation";
 
 const OWNER = "src/rules/owner.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
@@ -38,10 +41,13 @@ const capOf = (raw: number): MutantCap => {
   return parsed.value;
 };
 
-const planOf = (changed: readonly number[], cap = 24): MutationPlan =>
-  mutationPlan({ ownerPath: OWNER, ownerText: OWNER_TEXT, changedLines: new Set(changed), cap: capOf(cap) });
+const planOf = (changed: readonly number[], cap = 24): MutationPlan => {
+  const plan = mutationPlan({ ownerPath: OWNER, ownerText: OWNER_TEXT, changedLines: new Set(changed), cap: capOf(cap) });
+  if (!plan.ok) throw new Error("the fixture owner parses");
+  return plan.value;
+};
 
-const obligation = (invariant = "INV-1", mutation: OwnerObligation["mutation"] = { kind: "verify" }): OwnerObligation => ({
+const obligation = (invariant = "INV-1", mutation: OwnerObligation["mutation"] = { kind: "verify" }): OwnerObligation => ownerObligation({
   invariant,
   title: `rule ${invariant}`,
   statement: null,
@@ -93,9 +99,9 @@ describe("invariantVerdict", () => {
     const plan = planOf([3]);
     const verdict = invariantVerdict(obligation(), COVERED, {
       kind: "owner-changed", baseline: { kind: "green" }, plan,
-      results: resultsOf(plan, () => ({ kind: "invalid", collectionErrors: [MATRIX] })),
+      results: resultsOf(plan, (index) => index === 0 ? { kind: "killed" } : { kind: "invalid", collectionErrors: [MATRIX] }),
     });
-    expect(verdict.mutation).toMatchObject({ kind: "verified", generated: 2, killed: 0, invalid: 2, survivors: [] });
+    expect(verdict.mutation).toMatchObject({ kind: "verified", generated: 2, killed: 1, invalid: 1, survivors: [] });
   });
 
   it("AS-015: the unmutated count is the sites the cap left out", () => {
@@ -153,9 +159,45 @@ describe("invariantVerdict", () => {
       .toEqual({ kind: "infrastructure", failure: { kind: "plan-drift", detail: expect.stringContaining("INV-1") } });
   });
 
-  it("FR-017: mutant results that are not the plan's mutants are refused", () => {
-    const plan = planOf([3]);
-    expect(() => invariantVerdict(obligation(), COVERED, { kind: "owner-changed", baseline: { kind: "green" }, plan, results: [] })).toThrow(/plan/);
+  it("FR-017: mutant results that are not the plan's mutants, in plan order, are plan-drift infrastructure, never a throw or a pass", () => {
+    const plan = planOf([1, 2, 3, 4, 5, 6, 7]);
+    const killed = resultsOf(plan, () => ({ kind: "killed" }));
+    for (const results of [[], killed.slice(1), [...killed].reverse(), [...killed, killed[0]!]]) {
+      const verdict = invariantVerdict(obligation(), COVERED, { kind: "owner-changed", baseline: { kind: "green" }, plan, results });
+      expect(verdict.mutation).toEqual({ kind: "infrastructure", failure: { kind: "plan-drift", detail: expect.stringContaining("plan order") } });
+      expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [verdict] }))
+        .toEqual([{ kind: "infrastructure", invariant: "INV-1", failure: verdict.mutation.kind === "infrastructure" ? verdict.mutation.failure : null }]);
+    }
+  });
+
+  it("FR-016: generated mutants that are all invalid are the blocking no-valid-mutants infrastructure failure, never a verified pass", () => {
+    const plan = planOf([2]);
+    const verdict = invariantVerdict(obligation(), COVERED, {
+      kind: "owner-changed", baseline: { kind: "green" }, plan,
+      results: resultsOf(plan, () => ({ kind: "invalid", collectionErrors: ["matrix > import failed"] })),
+    });
+    expect(verdict.mutation).toEqual({
+      kind: "infrastructure",
+      failure: { kind: "no-valid-mutants", detail: expect.stringContaining(`all ${plan.mutants.length} generated mutants`) },
+    });
+    const failures = ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [verdict] });
+    expect(failures.map(({ kind }) => kind)).toEqual(["infrastructure"]);
+  });
+
+  it("FR-016: invalid mutants beside a kill or a survivor still verify: only an all-invalid run lacks evidence", () => {
+    const plan = planOf([2]);
+    const withKill = invariantVerdict(obligation(), COVERED, {
+      kind: "owner-changed", baseline: { kind: "green" }, plan,
+      results: resultsOf(plan, (index) => index === 0 ? { kind: "killed" } : { kind: "invalid", collectionErrors: ["c"] }),
+    });
+    expect(withKill.mutation).toMatchObject({ kind: "verified", killed: 1, invalid: plan.mutants.length - 1, survivors: [] });
+    const withSurvivor = invariantVerdict(obligation(), COVERED, {
+      kind: "owner-changed", baseline: { kind: "green" }, plan,
+      results: resultsOf(plan, (index) => index === 0 ? { kind: "survived" } : { kind: "invalid", collectionErrors: ["c"] }),
+    });
+    expect(withSurvivor.mutation).toMatchObject({ kind: "verified", killed: 0, invalid: plan.mutants.length - 1 });
+    expect(ownerVerificationFailures({ kind: "verified", obligationsDigest: digest, boundMs: 1, verdicts: [withSurvivor] }).map(({ kind }) => kind))
+      .toEqual(["survivor"]);
   });
 });
 
@@ -237,16 +279,18 @@ describe("renderMutationVerdict", () => {
 describe("mutationBoundMs", () => {
   it("NFR-004: Σ owed non-exempt obligations × (1 baseline + selected) × per-mutant limit", () => {
     const owed = [obligation("INV-1"), obligation("INV-2"), obligation("INV-3", { kind: "exempt", reason: "r" }), obligation("INV-4")];
-    const plans = new Map<string, MutationPlan>([["INV-1", planOf([2])], ["INV-2", planOf([])], ["INV-3", planOf([1, 2, 3, 4, 5, 6, 7])]]);
+    const plans = new Map<InvariantId, MutationPlan>([
+      [invariantId("INV-1"), planOf([2])], [invariantId("INV-2"), planOf([])], [invariantId("INV-3"), planOf([1, 2, 3, 4, 5, 6, 7])],
+    ]);
     // INV-1: 1 + 3; INV-2: 1 + 0; INV-3 exempt; INV-4 has no plan: its baseline only.
-    expect(mutationBoundMs(owed, plans, 1_000)).toBe((4 + 1 + 1) * 1_000);
-    expect(mutationBoundMs([], plans, 1_000)).toBe(0);
+    expect(mutationBoundMs(verifyOwed(owed), plans, 1_000)).toBe((4 + 1 + 1) * 1_000);
+    expect(mutationBoundMs(verifyOwed([]), plans, 1_000)).toBe(0);
   });
 
   it("NFR-004: the bound grows with every selected mutant and never exceeds the cap's worth", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 30 }), fc.integer({ min: 1, max: 120_000 }), (cap, limit) => {
       const plan = planOf([1, 2, 3, 4, 5, 6, 7], cap);
-      const bound = mutationBoundMs([obligation()], new Map([["INV-1", plan]]), limit);
+      const bound = mutationBoundMs(verifyOwed([obligation()]), new Map([[invariantId("INV-1"), plan]]), limit);
       expect(bound).toBe((1 + plan.mutants.length) * limit);
       expect(bound).toBeLessThanOrEqual((1 + cap) * limit);
     }), { seed: 6_101, numRuns: 50 });
