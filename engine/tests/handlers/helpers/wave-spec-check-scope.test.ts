@@ -9,7 +9,7 @@ import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-prog
 import type { TaskGraph, WaveReviewEpochAuthority } from "../../../src/types";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import { taskFixture } from "../../fixtures/task-lifecycle";
-import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../src/core/reviewer-contract";
 import {
   decideWaveReviewEpochReplay,
@@ -228,7 +228,7 @@ describe("registered Wave spec-check scope", () => {
     const authorities = batch.requests.map(({ authority }) => authority as AgentRequestAuthority);
     expect(authorities.map(({ role }) => role)).toEqual([
       "spec-check-invoker",
-      ...WAVE_REVIEW_AGENTS,
+      ...BASE_WAVE_REVIEW_AGENTS,
     ]);
     expect(authorities.map(({ modelProfile }) => modelProfile)).toEqual([
       "spec-check-review",
@@ -292,8 +292,8 @@ describe("registered Wave spec-check scope", () => {
     });
     const run = installed.tasks[0]!.review_run!;
     expect(run.generation).toBe(3);
-    expect(run.expected_agents).toEqual(WAVE_REVIEW_AGENTS);
-    expect(run.slot_authority).toEqual(WAVE_REVIEW_AGENTS.map((agent) => ({
+    expect(run.expected_agents).toEqual(BASE_WAVE_REVIEW_AGENTS);
+    expect(run.slot_authority).toEqual(BASE_WAVE_REVIEW_AGENTS.map((agent) => ({
       agent,
       slot_id: authorities.find(({ role }) => role === agent)!.slotId,
       attempted: 1,
@@ -824,7 +824,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
       const hasCoverage = packet?.fixedContext.some(({ label }) => label === "requirement-coverage") ?? false;
       expect(hasCoverage).toBe(authority.role === "spec-check-invoker");
     }
-    expect(WAVE_REVIEW_AGENTS.length).toBeGreaterThan(0);
+    expect(BASE_WAVE_REVIEW_AGENTS.length).toBeGreaterThan(0);
   });
 
   it("states an unavailable projection rather than passing silently", () => {

@@ -13,7 +13,6 @@ import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { reanchorVerifiedClaims } from '../../../core/verified-claim-hashes';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
-import { WAVE_REVIEW_AGENTS } from '../../../core/agent-catalog-projections';
 import { CURRENT_PI_CATALOG, type PiCatalog } from '../../../core/model-profiles';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
@@ -22,7 +21,7 @@ import { ensureWaveCompletionSuite, observeCompletionFrozenPaths, observeCurrent
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import type { TaskGraph } from '../../../types';
-import { waveSpecCheckDocumentsMatch } from '../../../core/wave-review-authority';
+import { waveSpecCheckDocumentsMatch, waveTaskReviewRosters } from '../../../core/wave-review-authority';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
 import {
@@ -59,13 +58,15 @@ function currentWaveGateDeps(graph: TaskGraph, authorityStartPath: string) {
 /** Canonical structural equality to a typed witness proves the raw value carries the witness's type. */
 const provenEqualTo = <T>(witness: T, raw: unknown): raw is T => canonicalStructuralEquals(witness, raw);
 
-function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: RegisteredWaveGateProgram): void {
+function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: RegisteredWaveGateProgram, graph: TaskGraph): void {
   const requests = handle.readIssuedRequests();
   if (!requests.ok) throw new Error(requests.error.message);
   const protocols = requests.value.filter(({ program, role }) => program === "wave-gate" && role !== "spec-check-invoker")
     .map((request) => issuedWaveProtocol(handle, registration, request));
-  for (const taskId of registration.taskIds) {
-    if (WAVE_REVIEW_AGENTS.some((role) => !protocols.some((protocol) =>
+  const rosters = waveTaskReviewRosters(graph, registration.schemaVersion, registration.taskIds);
+  if (!rosters.ok) throw new Error(`completed Wave Gate roster cannot be derived: ${rosters.error}`);
+  for (const { taskId, roster } of rosters.value) {
+    if (roster.some((role) => !protocols.some((protocol) =>
       protocol.subject.taskId === taskId && protocol.request.role === role))) {
       throw new Error(`completed Wave Task ${taskId} lacks the complete published reviewer protocol roster`);
     }
@@ -118,7 +119,7 @@ async function resumeWaveGateAfter(
         return waveBlocked(handle, "Wave Gate checkpoint must be a typed object");
       }
       if (raw.kind === "wave-gate-done") {
-        verifyCompletedWaveProtocols(handle, registration);
+        verifyCompletedWaveProtocols(handle, registration, graph);
         if (!exactObject(raw, ["schemaVersion", "kind", "receipt"]) || raw.schemaVersion !== 1) {
           return waveBlocked(handle, "terminal Wave Gate checkpoint has invalid schema");
         }
@@ -142,7 +143,7 @@ async function resumeWaveGateAfter(
       entry.runId === handle.runId && entry.wave === registration.input.wave &&
       entry.authorityDigest === registration.authorityDigest);
     if (completed !== undefined) {
-      verifyCompletedWaveProtocols(handle, registration);
+      verifyCompletedWaveProtocols(handle, registration, graph);
       await handle.writeCheckpoint(JSON.stringify({
         schemaVersion: 1,
         kind: "wave-gate-done",

@@ -10,7 +10,6 @@ import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { StateManager } from '../../../state-manager';
 import type { IssuedWaveReviewerProtocol } from '../../../core/review-output';
-import { WAVE_REVIEW_AGENTS } from '../../../core/agent-catalog-projections';
 import { renderCurrentWaveRetryTask, specCheckRetryDiagnostic, waveRetryDiagnostic } from '../../../core/reviewer-retry';
 import {
   deriveWaveAttemptTwoAuthority,
@@ -19,6 +18,7 @@ import {
 } from '../../../core/wave-gate-membership';
 import { reviewerRejectionReason } from '../../../core/wave-reviewer-transcript';
 import { markWaveSpecCheckRetryIssuedTransition, markWaveTaskReviewRetriesIssuedTransition, type WaveTaskReviewRetry } from '../../../core/wave-review-issuance';
+import { waveTaskReviewRoster } from '../../../core/wave-review-authority';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { durableCaptureRejection, durableRefutationRequests, isCaptureRejectionOf, publicationResolver } from './durable-requests';
 import { failed, type FacadeDriveResult } from './program-result';
@@ -118,7 +118,8 @@ export async function currentWaveTaskReviewRetries(
     .flatMap((task) => {
       const run = task.review_run!;
       if (run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length ||
-          (run.reviewer_protocol !== undefined && !canonicalStructuralEquals(run.expected_agents, WAVE_REVIEW_AGENTS))) {
+          (run.reviewer_protocol !== undefined &&
+            !canonicalStructuralEquals(run.expected_agents, waveTaskReviewRoster(graph, registration.schemaVersion, task)))) {
         throw new Error(`Task ${task.id} active Review Run lacks engine-issued exact slot authority`);
       }
       return run.expected_agents.flatMap((agent, index) => {

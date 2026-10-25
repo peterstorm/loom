@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import type { HookHandler, Task } from "../../types";
 import { StateManager } from "../../state-manager";
 import { taskGraphPath } from "../../config";
-import { WAVE_REVIEW_AGENTS } from "../../core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS } from "../../core/agent-catalog-projections";
 import {
   createReviewPacket,
   parseBaseSha,
@@ -217,7 +217,7 @@ function prepareTaskReviewPacket(root: string, task: Task, baseSha: BaseSha, hea
         reviewGeneration: finding.review_generation ?? null,
         reviewPacketId: finding.review_packet_id ?? null,
       })),
-      expectedReviewers: WAVE_REVIEW_AGENTS,
+      expectedReviewers: BASE_WAVE_REVIEW_AGENTS,
     },
     baseSha,
     headSha,
@@ -346,7 +346,7 @@ const handler: HookHandler = async (_stdin, args) => {
           // binding carries the HeadSha brand so a base/head transposition
           // here is a compile error rather than an inverted review run.
           headSha: parsedHeadSha.value,
-          expectedAgents: WAVE_REVIEW_AGENTS,
+          expectedAgents: BASE_WAVE_REVIEW_AGENTS,
         });
         if (!transition.ok) throw new Error(transition.error);
         const existingRegistrations = currentTask.issued_review_packets ?? [];

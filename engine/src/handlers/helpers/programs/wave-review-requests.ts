@@ -20,6 +20,7 @@ import {
   type PersistedWaveBatchCandidate,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
+  waveTaskReviewRosters,
 } from '../../../core/wave-review-authority';
 import { durableRefutationRequests, publicationResolver } from './durable-requests';
 import { failed } from './program-result';
@@ -216,7 +217,9 @@ export async function reconcileWaveReviewIssuance(
         });
       }
     }
-    const persisted = classifyPersistedWaveBatch(registration.taskIds, candidates);
+    const rosters = waveTaskReviewRosters(refreshed, registration.schemaVersion, registration.taskIds);
+    if (!rosters.ok) return settled(waveBlocked(handle, rosters.error));
+    const persisted = classifyPersistedWaveBatch(rosters.value, candidates);
     if (persisted.kind === "incomplete") {
       const expectedBatch = batchFor(refreshed);
       if (expectedBatch.batchEpoch !== epoch.batchEpoch) {

@@ -27,7 +27,7 @@ import { captureKey } from "../../../src/core/harness-capture";
 import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
-import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
@@ -2293,7 +2293,7 @@ describe("orchestration CLI", () => {
     ]);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    for (const [index, request] of initial.requests.slice(1, 1 + WAVE_REVIEW_AGENTS.length).entries()) {
+    for (const [index, request] of initial.requests.slice(1, 1 + BASE_WAVE_REVIEW_AGENTS.length).entries()) {
       expect((await captureReviewedTranscript(opened.value, request.authority,
         [...Buffer.from(transcript(index === 0 ? "new finding from completed sibling packet" : null))])).ok).toBe(true);
     }
@@ -2838,7 +2838,7 @@ describe("orchestration CLI", () => {
     const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    const rejected = initial.requests.find(({ authority }) => authority.role === WAVE_REVIEW_AGENTS[0])!.authority;
+    const rejected = initial.requests.find(({ authority }) => authority.role === BASE_WAVE_REVIEW_AGENTS[0])!.authority;
     await opened.value.appendEvent({
       schemaVersion: 1,
       sequence: 0,
@@ -2919,7 +2919,7 @@ describe("orchestration CLI", () => {
       requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(retries.kind).toBe("spawn-batch");
-    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+    expect(retries.requests).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length);
 
     const [exhausted, ...pending] = retries.requests;
     expect((await captureReviewedTranscript(opened.value, 
@@ -3124,7 +3124,7 @@ describe("orchestration CLI", () => {
     };
     expect(batch.kind).toBe("spawn-batch");
     expect(batch.runId).toBe("run.wave-orphan-replacement");
-    expect(batch.requests).toHaveLength(1 + WAVE_REVIEW_AGENTS.length);
+    expect(batch.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(batch.requests.every(({ authority }) =>
       authority.runId === "run.wave-orphan-replacement" && authority.attempt === 1)).toBe(true);
 
@@ -3215,7 +3215,7 @@ describe("orchestration CLI", () => {
       requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(retries.kind).toBe("spawn-batch");
-    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+    expect(retries.requests).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length);
 
     // Simulate a pre-diagnostic-prompt run: attempt 2 persisted the exact
     // attempt-1 context under its new request identity. Restart compatibility
@@ -3353,7 +3353,7 @@ describe("orchestration CLI", () => {
     };
     expect(replacement.kind).toBe("spawn-batch");
     expect(replacement.runId).toBe("run.wave-replacement");
-    expect(replacement.requests).toHaveLength(1 + WAVE_REVIEW_AGENTS.length);
+    expect(replacement.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(replacement.requests.every(({ authority }) => authority.runId === "run.wave-replacement" && authority.attempt === 1)).toBe(true);
 
     const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
@@ -3382,7 +3382,7 @@ describe("orchestration CLI", () => {
       kind: "wave-gate-retired",
       previousRunId: "run.wave-exhausted",
       replacementRunId: "run.wave-replacement",
-      exhaustedSlots: expect.arrayContaining(WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`)),
+      exhaustedSlots: expect.arrayContaining(BASE_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`)),
     });
 
     // Simulate a crash after protected authority/review-run installation and a
@@ -3468,7 +3468,7 @@ describe("orchestration CLI", () => {
     }
     const resumed = await resumeWaveFixture(root, runsRoot, previousRun);
     const retries = resumed as { requests: readonly { authority: AgentRequestAuthority }[] };
-    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length - 1);
+    expect(retries.requests).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length - 1);
     for (const { authority } of retries.requests) {
       await opened.value.appendEvent({
         schemaVersion: 1,

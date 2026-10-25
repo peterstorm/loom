@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
-import { WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS, OWNER_MAPPED_WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
+import { OWNER_MAP_SECTION, renderOwnerMapSection } from "../../../../src/core/owner-verification/owner-map";
+import { ownerObligation } from "../../../fixtures/owner-obligation";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
@@ -71,6 +73,11 @@ const specText = `# Feature: Wave fixture
 | Wave evidence | Exact issued evidence |
 `;
 const specPass = "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\n";
+/** One owned Invariant whose owner module is the fixture Task's only file, so the Task touches its family. */
+const OWNED_X = ownerObligation({
+  invariant: "INV-1", title: "x is decided only by its owner", statement: "Every entry point reads x through src/x.ts.",
+  owner: "src/x.ts", siblings: [], matrixTest: "tests/x.matrix.test.ts", mutation: { kind: "verify" },
+});
 
 function project(priors: readonly Finding[] = []) {
   const root = canonicalTempDir("loom-p4-wave-");
@@ -189,7 +196,7 @@ describe("registered Wave reviewer protocol", () => {
     const p = project(priors);
     const { handle, action } = await start(p);
     const issued = action.requests!;
-    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...WAVE_REVIEW_AGENTS]);
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
     expect(registration(handle).reviewerProtocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
     const run = graph(p).tasks[0]!.review_run!;
     expect(run.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
@@ -225,6 +232,66 @@ describe("registered Wave reviewer protocol", () => {
     expect(await resume(p, handle)).toEqual(final);
     expect(readFileSync(p.statePath)).toEqual(before);
   }, 60_000);
+
+  it("FR-022: issues architecture-tech-lead last for a Task touching an owned family, carries the owner map to both owner-map roles, and completes only with all six reviewers", async () => {
+    const p = project();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...OWNER_MAPPED_WAVE_REVIEW_AGENTS]);
+    const run = graph(p).tasks[0]!.review_run!;
+    expect(run.expected_agents).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+    expect(run.slot_authority!.map(({ agent }) => agent)).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+    const architecture = issued.at(-1)!;
+    // A valid Reviewer Protocol v2 Wave request, minted from the catalog: the
+    // architecture reviewer's own profile and preloaded Skill.
+    expect(architecture.authority).toMatchObject({ role: "architecture-tech-lead", program: "wave-gate", attempt: 1,
+      modelProfile: "focused-review", requiredSkill: "deepen" });
+    expect(architecture.task).toContain("LOOM_REQUIRED_SKILL: deepen");
+    const ownerMapText = renderOwnerMapSection(join(p.root, "plan.md"), [OWNED_X]);
+    for (const { authority } of issued.slice(1)) {
+      const packet = value(handle.readContext(authority.contextDigest));
+      expect(packet.schemaVersion, authority.role).toBe(2);
+      expect(packet.fixedContext.some(({ label }) => label === "reviewer-payload-schema"), authority.role).toBe(true);
+      const section = packet.fixedContext.find(({ label }) => label === OWNER_MAP_SECTION);
+      const expected = authority.role === "code-reviewer" || authority.role === "architecture-tech-lead" ? ownerMapText : null;
+      expect(section === undefined ? null : Buffer.from(section.bytes).toString("utf8"), authority.role).toBe(expected);
+      expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
+    }
+    await capture(handle, issued[0]!.authority, specPass);
+    for (const { authority } of issued.slice(1, -1)) {
+      const step = await submit(p, handle, authority, payload(handle, authority));
+      expect(step.kind, `${authority.role}: ${JSON.stringify(step)}`).not.toBe("done");
+    }
+    const final = await submit(p, handle, architecture.authority, payload(handle, architecture.authority));
+    expect(final.kind, JSON.stringify(final)).toBe("done");
+    expect(graph(p).tasks[0]!.review_run).toBeUndefined();
+    const before = readFileSync(p.statePath);
+    expect(await resume(p, handle)).toEqual(final);
+    expect(readFileSync(p.statePath)).toEqual(before);
+  }, 60_000);
+
+  it("FR-022: an owner-mapped Task's Review Run bound to only the base five reviewers settles nothing: the roster is the Task's derived one", async () => {
+    const p = project();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle, action } = await start(p);
+    // The pre-fix shape: the five base reviewers bound, architecture-tech-lead absent.
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, tasks: locked.tasks.map((task) => {
+      const run = task.review_run;
+      if (run?.reviewer_protocol === undefined) throw new Error("fixture must have a genuine installed current run");
+      const [first, ...rest] = run.slot_authority;
+      return { ...task, review_run: { ...run, expected_agents: [...BASE_WAVE_REVIEW_AGENTS],
+        slot_authority: [first, ...rest.slice(0, BASE_WAVE_REVIEW_AGENTS.length - 1)] } };
+    }) }));
+    await capture(handle, action.requests![0]!.authority, specPass);
+    for (const { authority } of action.requests!.slice(1, 1 + BASE_WAVE_REVIEW_AGENTS.length)) {
+      await capture(handle, authority, payload(handle, authority));
+    }
+    const blocked = await resume(p, handle);
+    expect(blocked).toMatchObject({ kind: "blocked", diagnostic: { message: expect.stringContaining("Task T1 active Review Run lacks engine-issued exact slot authority") } });
+    expect(graph(p).tasks[0]!.review_run?.evidence).toEqual([]);
+    expect(graph(p).tasks[0]!.review_status).not.toBe("passed");
+  }, 30_000);
 
   it("re-anchors the completed Wave's claim hashes to the spec text its spec-check reviewed", async () => {
     const p = project();
@@ -476,7 +543,7 @@ describe("US1 scenario 1: a Wave Gate starts from the Wave number alone", () => 
     const { handle, action } = await start(p);
     const requests = action.requests!;
     // The roster is the engine's: the spec-check slot, then every Wave reviewer, in catalog order.
-    expect(requests.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...WAVE_REVIEW_AGENTS]);
+    expect(requests.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
     // Request, slot and output identities are distinct, first attempts, and bound to this run.
     for (const identity of [
       requests.map(({ authority }) => authority.requestId),

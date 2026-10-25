@@ -112,6 +112,10 @@ _Avoid_: Review round, retry count, packet version
 A packet-bound collection of evidence from the exact expected reviewer roster for one Task and Review Generation. It snapshots all active Finding IDs; every reviewer must assess each prior ID exactly once before atomic finalization can resolve old Findings or activate new ones.
 _Avoid_: Review Generation, Refutation Panel, reviewer batch (without the binding)
 
+**Wave Review Roster**:
+The ordered reviewers one Wave **Task** is issued, derived per Task from protected state (`waveTaskReviewRoster`): the base five (code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-analyzer, comment-analyzer), plus architecture-tech-lead appended last when the Task's packets carry the **Owner Map** (ADR-0047). Order is slot authority, so the base five keep their indices either way. Issuance, the locked install, slot membership, retries, restart and completed-protocol verification all compare against this derived roster, never against a persisted copy.
+_Avoid_: Reviewer list, "the five reviewers" (an owner-mapped Task has six)
+
 **Lens**:
 A single committed perspective an agent argues from, assigned rather than chosen, so a panel's diversity is structural instead of hoped for. Deliberately two disjoint vocabularies — see Flagged Ambiguities.
 _Avoid_: Angle, viewpoint, role, persona
@@ -181,7 +185,7 @@ The single source of truth for orchestration progress (`active_task_graph.json`)
 _Avoid_: Config, manifest, plan file
 
 **Orchestrated Repository**:
-The repository that owns a live State File: the symlink-canonical root of the Git working tree holding it, or, outside Git, the root implied by its documented `.claude/state/` / `.pi/state/` layout (`observeTaskGraphProjectBoundary`). The direct-edit guard protects only this repository. A write whose every canonical target lies outside it — another worktree, a sibling directory, a session scratchpad — is allowed. Containment is decided on path-segment boundaries, so `/repo-foo` is not inside `/repo`. Worktrees nested under the root count as inside. A root or target that cannot be resolved keeps the write guarded ([ADR-0044](docs/adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md)).
+The repository that owns a live State File: the symlink-canonical root of the Git working tree holding it, or, outside Git, the root implied by its documented `.claude/state/` / `.pi/state/` layout (`observeTaskGraphProjectBoundary`). The direct-edit guard protects only this repository. A write whose every canonical target lies outside it — another worktree, a sibling directory, a session scratchpad — is allowed. Containment is decided on path-segment boundaries, so `/repo-foo` is not inside `/repo`. Worktrees nested under the root count as inside. A root or target that cannot be resolved keeps the write guarded ([ADR-0046](docs/adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md)).
 _Avoid_: Project dir, cwd, checkout (when the guard's scope is meant)
 
 **Session TaskGraph Pointer Lease Registry**:
@@ -462,7 +466,7 @@ An owned invariant's declared, reasoned opt-out of mutation verification: `**Mut
 _Avoid_: Waiver (that is a **Verification Policy** arm), skip
 
 **Owner Map**:
-The engine-issued, digest-bound section of a Wave review **Context Packet** for a code-reviewer or architecture-tech-lead reviewing a Task that touches an owned family. It lists each touched invariant's id, title, statement, owner, siblings, matrix test and the `<plan file>#INV-N` contract, followed by the fixed **Second Copy** rule. Every other packet is byte-identical; standalone reviews never carry one.
+The engine-issued, digest-bound section of a Wave review **Context Packet** for a code-reviewer or architecture-tech-lead reviewing a Task that touches an owned family; such a Task's **Wave Review Roster** includes architecture-tech-lead, so both packets are issued. It lists each touched invariant's id, title, statement, owner, siblings, matrix test and the `<plan file>#INV-N` contract, followed by the fixed **Second Copy** rule. Every other packet is byte-identical; standalone reviews never carry one.
 _Avoid_: Owner registry (there is no repository-wide one), ownership section (that is the implementation brief's)
 
 **Second Copy**:
@@ -629,7 +633,7 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 - Every plan invariant names its **Invariant Owner** (or why it has none); an owned one lists its **Sibling Entry Points** and **Matrix Test**, and the engine renders each **Task**'s role among them into its implementation brief
 - Population stamps one **Owner Obligation** per owned invariant; a **Wave** that changed an obligation's owner or a sibling owes **Owner Verification** at its **Wave Gate**, unless a **Mutation Exemption** removes the mutation half
-- A Task touching an owned family gets its **Owner Verification** duties in its brief, and its code-reviewer and architecture-tech-lead packets carry the **Owner Map**, against which reviewers report each **Second Copy**
+- A Task touching an owned family gets its **Owner Verification** duties in its brief, architecture-tech-lead joins its **Wave Review Roster**, and its code-reviewer and architecture-tech-lead packets carry the **Owner Map**, against which reviewers report each **Second Copy**
 - The **Family-site Metric** measures how many raw second sites remain per known family; it blocks nothing
 - An **Acceptance Contract** has exactly one **Contract Task**; every **Task** claiming a covered Requirement depends on it, may not write a frozen path, and turns the frozen testcases green at its own Wave Gate
 - Only an accepted Wave Gate stamps an **Acceptance Freeze**, and only a **Contract Revision** changes one; a claimant in a completed **Wave** blocks the revision until that Wave is reopened

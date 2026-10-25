@@ -291,7 +291,8 @@ Declaring an owner makes it an obligation the Wave Gate checks.
 
 A Wave review packet for the code-reviewer and the architecture-tech-lead,
 for a Task that touches an owned family, carries an engine-issued **owner
-map**: each touched invariant's id, title, statement, owner, siblings, matrix
+map** (such a Task's Wave review roster appends the architecture-tech-lead to
+the base five reviewers, ADR-0047, so both packets are issued): each touched invariant's id, title, statement, owner, siblings, matrix
 test and `<plan file>#INV-N` contract, then the fixed second-copy rule. The
 section is inside the packet digest. The rule: a diff that implements a
 declared-owned invariant's predicate outside its owner is a finding citing

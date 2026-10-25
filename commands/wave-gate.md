@@ -53,7 +53,11 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   the semantic batch in one message. Pi's native subagent transport accepts at
   most eight requests per call, so partition larger batches into ordered
   chunks of at most eight without changing, dropping, or duplicating any
-  request; resume only after every chunk finishes.
+  request; resume only after every chunk finishes. The initial Wave review
+  batch is one spec-check request plus each Task's reviewer roster: five
+  reviewers, or six for a Task touching an owned Invariant's family
+  (`architecture-tech-lead` appended to carry the owner map, ADR-0047). Never
+  infer the count; spawn exactly the requests returned.
 - `await-user`: present the advisory findings the request references exactly as
   supplied, and ask the operator whether to approve them. The only decision a
   Wave Gate accepts is approval (below).

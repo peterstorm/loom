@@ -19,7 +19,7 @@ import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
 import { DECISION_RECORD_AGENT } from "./model-profiles";
-import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
+import { isWaveReviewRole, waveReviewRoster, type WaveReviewRole, type WaveReviewRoster } from "./agent-catalog-projections";
 import {
   AGENT_REQUIRED_SKILLS,
   canonicalRecord,
@@ -40,6 +40,7 @@ import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./rev
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
 import { obligationsTouchedBy, ownerScopeOf } from "./owner-verification/obligations";
 import { isOwnerMapRole, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
+import type { OwnerObligation } from "./owner-verification/types";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
@@ -116,18 +117,58 @@ export type WaveTaskRunAuthority = Readonly<{
  *  role on one registered Task. */
 export type WaveReviewSubject =
   | Readonly<{ role: "spec-check-invoker"; taskId: null }>
-  | Readonly<{ role: (typeof WAVE_REVIEW_AGENTS)[number]; taskId: string }>;
+  | Readonly<{ role: WaveReviewRole; taskId: string }>;
+
+/** One registered Task with its ordered Wave review roster. */
+export type WaveTaskReviewRoster = Readonly<{ taskId: string; roster: WaveReviewRoster }>;
+
+/**
+ * The owner obligations a Wave reviewer packet for `task` carries as its
+ * owner map (plan AD-9), and so the one home of owner-map presence: only a
+ * schema-2 Wave, and only the obligations INV-3's owner says the Task's file
+ * list touches (an unstamped graph touches nothing). Packet issuance renders
+ * exactly these; the roster derivation below reads their presence.
+ */
+function ownerMapObligations(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): readonly OwnerObligation[] {
+  return schemaVersion === 2 ? obligationsTouchedBy(ownerScopeOf(graph), task.file_list ?? []) : [];
+}
+
+/**
+ * A Wave Task's ordered reviewer roster (FR-022, ADR-0047): the base five, plus
+ * `architecture-tech-lead` appended last when its packets carry the owner map.
+ * Issuance, the locked install and every later roster comparison (slot
+ * membership, retries, restart, completed-protocol verification) derive it
+ * here from protected state, never from a persisted copy.
+ */
+export function waveTaskReviewRoster(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): WaveReviewRoster {
+  return waveReviewRoster(isNonEmpty(ownerMapObligations(graph, schemaVersion, task)));
+}
+
+/** Every registered Task's roster, in registration order; refuses a Task the graph no longer holds. */
+export function waveTaskReviewRosters(
+  graph: TaskGraph,
+  schemaVersion: 1 | 2,
+  taskIds: readonly string[],
+): DomainResult<readonly WaveTaskReviewRoster[], string> {
+  const rosters: WaveTaskReviewRoster[] = [];
+  for (const taskId of taskIds) {
+    const task = graph.tasks.find((candidate) => candidate.id === taskId);
+    if (task === undefined) return { ok: false, error: `registered Wave Task ${taskId} disappeared` };
+    rosters.push(Object.freeze({ taskId, roster: waveTaskReviewRoster(graph, schemaVersion, task) }));
+  }
+  return { ok: true, value: Object.freeze(rosters) };
+}
 
 /**
  * The canonical order of a Wave review batch, and its only definition:
- * spec-check first, then every registered Task in roster order, each with
- * every `WAVE_REVIEW_AGENTS` role in catalog order. Request issuance, persisted
- * batch recovery and spawn-task labelling all read this order.
+ * spec-check first, then every registered Task in registration order, each
+ * with every role of its own roster in roster order. Request issuance,
+ * persisted batch recovery and spawn-task labelling all read this order.
  */
-export function waveReviewSubjects(taskIds: readonly string[]): readonly WaveReviewSubject[] {
+export function waveReviewSubjects(rosters: readonly WaveTaskReviewRoster[]): readonly WaveReviewSubject[] {
   return Object.freeze([
     Object.freeze({ role: "spec-check-invoker" as const, taskId: null }),
-    ...taskIds.flatMap((taskId) => WAVE_REVIEW_AGENTS.map((role) => Object.freeze({ role, taskId }))),
+    ...rosters.flatMap(({ taskId, roster }) => roster.map((role) => Object.freeze({ role, taskId }))),
   ]);
 }
 
@@ -146,10 +187,10 @@ export type PersistedWaveBatchClassification<C> =
  *  canonical batch order. A spec-check request ranks first whatever Task its
  *  context names; a reviewer ranks by its (Task, role) subject. */
 export function classifyPersistedWaveBatch<C>(
-  taskIds: readonly string[],
+  rosters: readonly WaveTaskReviewRoster[],
   candidates: readonly PersistedWaveBatchCandidate<C>[],
 ): PersistedWaveBatchClassification<C> {
-  const subjects = waveReviewSubjects(taskIds);
+  const subjects = waveReviewSubjects(rosters);
   const rank = (candidate: PersistedWaveBatchCandidate<C>): number => {
     if (candidate.role === "spec-check-invoker") return 0;
     const index = subjects.findIndex((subject) =>
@@ -233,7 +274,7 @@ export type WaveReviewContextAuthority =
       packetId: null;
     }>
   | Readonly<WaveReviewContextBase & {
-      subject: Readonly<{ role: (typeof WAVE_REVIEW_AGENTS)[number]; taskId: string }>;
+      subject: Readonly<{ role: WaveReviewRole; taskId: string }>;
       taskRun: WaveTaskRunAuthority;
       task: WaveReviewTaskAuthority;
       specCheckScope: null;
@@ -579,7 +620,7 @@ function parseTaskReviewerContext(
   return { kind: "loaded", value: Object.freeze({
     ...common,
     subject: Object.freeze({
-      role: subject.role as (typeof WAVE_REVIEW_AGENTS)[number],
+      role: subject.role as WaveReviewRole,
       taskId: subject.taskId,
     }),
     taskRun,
@@ -605,8 +646,7 @@ function decodeWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
   }
   const subject = raw.subject;
   const isSpecCheck = subject.role === "spec-check-invoker";
-  const isTaskReviewer = typeof subject.role === "string" &&
-    (WAVE_REVIEW_AGENTS as readonly string[]).includes(subject.role);
+  const isTaskReviewer = typeof subject.role === "string" && isWaveReviewRole(subject.role);
   if ((!isSpecCheck && !isTaskReviewer) ||
       (subject.taskId !== null && (typeof subject.taskId !== "string" || subject.taskId.trim() === ""))) {
     return corruptWaveContext("wave-review-authority subject role/taskId is invalid");
@@ -865,24 +905,23 @@ export function prepareWaveReviewBatch(
 
   // The owner map (plan AD-9): only reviewer packets of a schema-2 Wave over a
   // stamped graph, and only for a Task touching some owned family. Every other
-  // packet keeps its exact pre-feature bytes (SC-005).
+  // packet keeps its exact pre-feature bytes (SC-005). The same presence picks
+  // the Task's roster, so an owner-mapped Task also issues architecture-tech-lead.
   const ownerMapByTask = new Map<string, ByteSection>();
-  if (registration.schemaVersion === 2) {
-    const scope = ownerScopeOf(graph);
+  for (const task of tasks) {
+    const touched = ownerMapObligations(graph, registration.schemaVersion, task);
+    if (!isNonEmpty(touched)) continue;
     const planFile = graph.plan_file;
-    for (const task of tasks) {
-      const touched = obligationsTouchedBy(scope, task.file_list ?? []);
-      if (!isNonEmpty(touched)) continue;
-      if (planFile === null || planFile === undefined) {
-        return failure(`Task ${task.id} touches owned Invariants but the stamped TaskGraph records no plan_file to cite`);
-      }
-      const ownerMap = encodeByteSection(OWNER_MAP_SECTION, renderOwnerMapSection(planFile, touched));
-      if (!ownerMap.ok) return failure(ownerMap.error.message);
-      ownerMapByTask.set(task.id, ownerMap.value);
+    if (planFile === null || planFile === undefined) {
+      return failure(`Task ${task.id} touches owned Invariants but the stamped TaskGraph records no plan_file to cite`);
     }
+    const ownerMap = encodeByteSection(OWNER_MAP_SECTION, renderOwnerMapSection(planFile, touched));
+    if (!ownerMap.ok) return failure(ownerMap.error.message);
+    ownerMapByTask.set(task.id, ownerMap.value);
   }
 
-  const subjects = waveReviewSubjects(registration.taskIds);
+  const subjects = waveReviewSubjects(tasks.map((task) =>
+    Object.freeze({ taskId: task.id, roster: waveReviewRoster(ownerMapByTask.has(task.id)) })));
   const requests: IssuedWaveReviewRequest[] = [];
   const packets: ContextPacket[] = [];
   for (const subject of subjects) {

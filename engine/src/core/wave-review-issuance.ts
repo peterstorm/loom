@@ -17,7 +17,7 @@ import {
 } from "./orchestration-contract";
 import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
-import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
+import type { WaveReviewRoster } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {
@@ -26,6 +26,7 @@ import {
   readWaveReviewContext,
   taskReviewScope,
   waveSpecCheckDocumentsMatch,
+  waveTaskReviewRoster,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
   type WaveSpecCheckObservation,
@@ -47,10 +48,11 @@ export type WaveReviewInstallObservation = Readonly<{
 }>;
 
 function reviewSlotAuthorityRoster(
+  roster: WaveReviewRoster,
   authorities: readonly AgentRequestAuthority[],
 ): DomainResult<readonly [LegacyReviewRunSlotAuthority, ...LegacyReviewRunSlotAuthority[]], IssuanceRefusal> {
   const slots: LegacyReviewRunSlotAuthority[] = [];
-  for (const agent of WAVE_REVIEW_AGENTS) {
+  for (const agent of roster) {
     const matches = authorities.filter((authority) => authority.role === agent);
     if (matches.length !== 1) {
       return refuse(`current Review Packet requires exactly one ${agent} slot, got ${matches.length}`);
@@ -144,10 +146,13 @@ export function installWaveReviewRunsTransition(
       }
       if (context.kind === "loaded" && context.value.taskRun?.taskId === task.id) authorities.push(authority);
     }
-    if (authorities.length !== WAVE_REVIEW_AGENTS.length) {
+    // The Task's own roster, derived from the locked graph the batch was just
+    // proven to have been prepared from (`lockedPreparation` above).
+    const expectedAgents = waveTaskReviewRoster(locked, registration.schemaVersion, task);
+    if (authorities.length !== expectedAgents.length) {
       return refuse(`Task ${task.id} current Review Packet lacks the exact reviewer roster`);
     }
-    const roster = reviewSlotAuthorityRoster(authorities);
+    const roster = reviewSlotAuthorityRoster(expectedAgents, authorities);
     if (!roster.ok) return roster;
     const slotAuthority = roster.value;
     const currentSlot = (slot: LegacyReviewRunSlotAuthority): CurrentReviewRunSlotAuthority => {
@@ -164,7 +169,7 @@ export function installWaveReviewRunsTransition(
           canonicalStructuralEquals(run.slot_authority, currentSlots)
         : run.reviewer_protocol === undefined;
       const same = sameProtocol && run.packet_id === taskRun.packetId && run.generation === taskRun.generation &&
-        run.head_sha === taskRun.headSha && canonicalStructuralEquals(run.expected_agents, WAVE_REVIEW_AGENTS) &&
+        run.head_sha === taskRun.headSha && canonicalStructuralEquals(run.expected_agents, expectedAgents) &&
         run.slot_authority?.length === slotAuthority.length && slotAuthority.every((slot, index) =>
           run.slot_authority?.[index]?.agent === slot.agent && run.slot_authority[index]?.slot_id === slot.slot_id) &&
         canonicalStructuralEquals(run.workspace_scope, currentWorkspace.scope) &&
@@ -184,7 +189,7 @@ export function installWaveReviewRunsTransition(
         generation: taskRun.generation,
         packet_id: taskRun.packetId,
         head_sha: taskRun.headSha,
-        expected_agents: WAVE_REVIEW_AGENTS,
+        expected_agents: expectedAgents,
         prior_finding_ids: (task.findings ?? []).map(({ id }) => id),
         evidence: [],
         ...(registration.schemaVersion === 2

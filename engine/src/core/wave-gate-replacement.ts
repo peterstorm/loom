@@ -11,9 +11,8 @@ import { captureKey } from "./harness-capture";
 import { canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId } from "./orchestration-contract";
 import { CURRENT_REVIEWER_PROTOCOL } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
-import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
-import { waveGateAuthorityDigest } from "./wave-review-authority";
+import { waveGateAuthorityDigest, waveTaskReviewRoster } from "./wave-review-authority";
 
 type ReplacementRefusal = Readonly<{ ok: false; message: string }>;
 
@@ -93,11 +92,11 @@ export function prepareExhaustedWaveGateRestart(
   for (const task of waveTasks) {
     const run = task.review_run;
     if (run === undefined) continue;
+    const roster = waveTaskReviewRoster(graph, previous.schemaVersion, task);
     if (run.head_sha !== epoch.batchEpoch ||
-        run.expected_agents.length !== WAVE_REVIEW_AGENTS.length ||
-        run.expected_agents.some((agent, index) => agent !== WAVE_REVIEW_AGENTS[index]) ||
-        run.slot_authority === undefined || run.slot_authority.length !== WAVE_REVIEW_AGENTS.length ||
-        WAVE_REVIEW_AGENTS.some((agent, index) => run.slot_authority?.[index]?.agent !== agent)) {
+        !canonicalStructuralEquals(run.expected_agents, roster) ||
+        run.slot_authority === undefined || run.slot_authority.length !== roster.length ||
+        roster.some((agent, index) => run.slot_authority?.[index]?.agent !== agent)) {
       return { ok: false, message: `task ${task.id} Review Packet is not bound to the active epoch and exact reviewer roster` };
     }
   }
