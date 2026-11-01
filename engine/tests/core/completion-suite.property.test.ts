@@ -509,9 +509,10 @@ describe("pure completion-suite evaluator properties", () => {
     const evaluated = evaluateAsRecorded(authority, result);
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
-      expect(rejectionFailures(evaluated).authority).toEqual([]);
-      expect(rejectionFailures(evaluated).infrastructure).toEqual([]);
-      expect(rejectionFailures(evaluated).semantic.map((failure) => failure.kind)).toContain("timed-out");
+      const failures = rejectionFailures(evaluated);
+      expect(failures.authority).toEqual([]);
+      expect(failures.infrastructure).toEqual([]);
+      expect(failures.semantic.map((failure) => failure.kind)).toContain("timed-out");
     }
   });
 
@@ -525,9 +526,10 @@ describe("pure completion-suite evaluator properties", () => {
     const evaluated = evaluateAsRecorded(authority, passingResult(authority, [spawnFailure]));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
-      expect(rejectionFailures(evaluated).authority).toEqual([]);
-      expect(rejectionFailures(evaluated).infrastructure.map((failure) => failure.kind)).toEqual(["spawn-failed"]);
-      expect(rejectionFailures(evaluated).semantic).toEqual([]);
+      const failures = rejectionFailures(evaluated);
+      expect(failures.authority).toEqual([]);
+      expect(failures.infrastructure.map((failure) => failure.kind)).toEqual(["spawn-failed"]);
+      expect(failures.semantic).toEqual([]);
     }
   });
 
@@ -543,9 +545,10 @@ describe("pure completion-suite evaluator properties", () => {
     const evaluated = evaluateAsRecorded(authority, passingResult(authority, checks));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
-      expect(rejectionFailures(evaluated).authority).toEqual([]);
-      expect(rejectionFailures(evaluated).infrastructure).toEqual([]);
-      expect(rejectionFailures(evaluated).semantic).toContainEqual({
+      const failures = rejectionFailures(evaluated);
+      expect(failures.authority).toEqual([]);
+      expect(failures.infrastructure).toEqual([]);
+      expect(failures.semantic).toContainEqual({
         kind: "missing-report", checkId: "project:test", path: ".loom/completion-reports/completion.json",
       });
     }
@@ -570,14 +573,15 @@ describe("pure completion-suite evaluator properties", () => {
     const evaluated = evaluateAsRecorded(authority, passingResult(authority, checks));
     expect(evaluated.kind).toBe("rejected");
     if (evaluated.kind === "rejected") {
-      expect(rejectionFailures(evaluated).authority).toEqual([]);
-      expect(rejectionFailures(evaluated).infrastructure).toContainEqual({
+      const failures = rejectionFailures(evaluated);
+      expect(failures.authority).toEqual([]);
+      expect(failures.infrastructure).toContainEqual({
         kind: "report-unreadable",
         checkId: "project:test",
         path: ".loom/completion-reports/completion.json",
         message: "EACCES",
       });
-      expect(rejectionFailures(evaluated).semantic).toEqual([]);
+      expect(failures.semantic).toEqual([]);
     }
   });
 

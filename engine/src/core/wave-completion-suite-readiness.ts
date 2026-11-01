@@ -32,7 +32,7 @@ import {
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
 import { legacyDefaultVerificationManifest, deriveProjectVerificationCoverage } from "./verification-manifest";
-import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
+import { canonicalRecord, canonicalStructuralEquals, isNonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
 import { authorizeGraphCompletionSuite } from "./owner-verification/suite-authority";
 
@@ -249,7 +249,7 @@ function persistedResultOutcome(
     );
   }
   const [firstSemanticFailure, ...remainingSemanticFailures] = evaluation.semanticFailures;
-  const [firstRemedy, ...otherRemedies] = ownerVerificationFindingLines(evaluation);
+  const remedies = ownerVerificationFindingLines(evaluation);
   return canonicalRecord({
     kind: "rejected",
     verificationManifestDigest: manifestDigest,
@@ -259,7 +259,7 @@ function persistedResultOutcome(
     checkIds: sortedUniqueNonEmpty(firstSemanticFailure.checkId, remainingSemanticFailures.map((failure) => failure.checkId)),
     // The remedies come from the rejection judged here, never re-derived from
     // the observation, so the next action cannot disagree with this fact.
-    ownerVerificationRemedies: firstRemedy === undefined ? null : Object.freeze<NonEmpty<string>>([firstRemedy, ...otherRemedies]),
+    ownerVerificationRemedies: isNonEmpty(remedies) ? Object.freeze(remedies) : null,
   });
 }
 

@@ -12,7 +12,8 @@
  * Sibling rows (T9): `wave-review-authority.ts` issues the owner map, and
  * `implementation-brief.ts` renders the duty paragraphs, for exactly the
  * obligations `taskOwnerDuty` touches, over the same file-list shapes,
- * and neither issues anything over an unstamped graph.
+ * and neither issues an owner map or owner duties over an unstamped graph;
+ * the brief still renders the plan's own ownership blocks there (#134).
  *
  * Sibling rows (T10, PR #131): `owner-verification/suite-authority.ts`, the
  * one authorize-from-TaskGraph function the gate helper and readiness share,
@@ -28,8 +29,8 @@
  * check, and skips it when none are owed; `owner-verification-runner.ts`
  * needs an `affectedRunner` exactly when `verifyOwed` selects some
  * obligation; `owner-verification/plan-integrity.ts` blocks on exactly the
- * stamps the Wave duty's `agreementWith` does not find in agreement, and on
- * every unstamped graph.
+ * duties `stampAgreement` does not find in agreement (an unstamped duty is
+ * drift).
  *
  * Sibling row (PR #131): `task-graph-population.ts` refuses a manifest
  * without an `affectedRunner` exactly when `verifyOwed` selects some
@@ -61,6 +62,7 @@ import {
   obligationsDigest,
   obligationsFromPlan,
   parseOwnerObligations,
+  stampAgreement,
   taskOwnerDuty,
   verifyOwed,
   waveOwnerDuty,
@@ -603,13 +605,9 @@ describe("obligationsDigest and obligationsAgree — the stamp's identity", () =
   });
 });
 
-describe("the Wave duty's drift check — agreementWith, only on a stamped duty", () => {
+describe("stampAgreement — the Wave duty's drift check, an absent stamp being drift", () => {
   const dutyOf = (stamp?: readonly OwnerObligation[]) => waveOwnerDuty(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }, 1);
-  const agreement = (stamp: readonly OwnerObligation[], models = OWNED_PLAN_MODELS) => {
-    const duty = dutyOf(stamp);
-    if (duty.kind !== "stamped") throw new Error("a present stamp is a stamped duty");
-    return duty.agreementWith(models);
-  };
+  const agreement = (stamp: readonly OwnerObligation[], models = OWNED_PLAN_MODELS) => stampAgreement(dutyOf(stamp), models);
 
   it("agrees with the stamp the plan derives, and drifts from any other, an empty one included", () => {
     expect(agreement(OBLIGATIONS)).toEqual({ kind: "agrees" });
@@ -619,8 +617,15 @@ describe("the Wave duty's drift check — agreementWith, only on a stamped duty"
     expect(agreement([], parsePlanModels("# Plan: none\n"))).toEqual({ kind: "agrees" });
   });
 
-  it("an absent stamp is an unstamped duty, with no check, nothing owed and no drift check", () => {
+  it("an absent stamp is an unstamped duty, with no check and nothing owed, and drifts from any plan", () => {
     expect(dutyOf()).toEqual({ kind: "unstamped", check: null, owed: [] });
+    expect(stampAgreement(dutyOf(), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
+    expect(stampAgreement(dutyOf(), parsePlanModels("# Plan: none\n"))).toEqual({ kind: "drifted" });
+  });
+
+  it("a duty is plain data: two duties of the same graph and Wave are structurally equal", () => {
+    expect(dutyOf(OBLIGATIONS)).toEqual(dutyOf(OBLIGATIONS));
+    expect(dutyOf(OBLIGATIONS)).not.toEqual(dutyOf([ADMISSION]));
   });
 
   it("a plan whose owned Invariant names a path in two roles derives no obligation: underivable", () => {
@@ -638,7 +643,7 @@ describe("the Wave duty's drift check — agreementWith, only on a stamped duty"
     });
   });
 
-  it("sibling row: plan-integrity blocks on exactly the stamps agreementWith does not find in agreement, and on an unstamped graph", () => {
+  it("sibling row: plan-integrity blocks on exactly the duties stampAgreement does not find in agreement", () => {
     const failureOf = (duty: ReturnType<typeof dutyOf>, models = OWNED_PLAN_MODELS) => planModelsIntegrityFailure("plan.md", models, duty)?.kind ?? null;
     expect(failureOf(dutyOf(OBLIGATIONS))).toBeNull();
     expect(failureOf(dutyOf([ADMISSION]))).toBe("plan-drift");

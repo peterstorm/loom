@@ -10,16 +10,16 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { observeTaskGraphProjectBoundary } from "../config";
 import {
+  invariantOwnershipSourceOf,
   renderImplementationBrief,
   ruleDocumentsFor,
   type ImplementationBrief,
   type ImplementationBriefRequest,
-  type InvariantOwnershipSource,
   type RuleDocument,
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
-import { taskOwnerDuty, type TaskOwnerDuty } from "../core/owner-verification/obligations";
+import { taskOwnerDuty } from "../core/owner-verification/obligations";
 import { parsePlanModels } from "../core/parse-plan-models";
 import { StateManager } from "../state-manager";
 import type { PlanInvariant } from "../types";
@@ -40,17 +40,6 @@ function planInvariants(planFile: string | null): DomainResult<readonly PlanInva
   } catch (error) {
     return { ok: false, error: `cannot read the plan ${planFile} for its invariant ownership: ${error instanceof Error ? error.message : String(error)}` };
   }
-}
-
-/**
- * Where the brief's invariant ownership comes from (#134): a stamped graph's
- * own obligations, which need no plan read; or, for a graph populated before
- * owner verification (plan AD-10: owed no owner duty), the plan's Invariants.
- */
-function invariantOwnershipSource(duty: TaskOwnerDuty, planFile: string | null): DomainResult<InvariantOwnershipSource, string> {
-  if (duty.kind === "stamped") return { ok: true, value: duty };
-  const invariants = planInvariants(planFile);
-  return invariants.ok ? { ok: true, value: { kind: "plan", invariants: invariants.value } } : invariants;
 }
 
 /**
@@ -95,7 +84,8 @@ export function renderTaskImplementationBrief(
       path === null || path === undefined ? null : isAbsolute(path) ? path : resolve(projectRoot, path);
     const specFile = inProject(graph.spec_file);
     const planFile = inProject(graph.plan_file);
-    const ownership = invariantOwnershipSource(taskOwnerDuty(graph, task.file_list ?? []), planFile);
+    // A stamped graph needs no plan read; a pre-feature one (plan AD-10: owed no owner duty) renders the plan's Invariants.
+    const ownership = invariantOwnershipSourceOf(taskOwnerDuty(graph, task.file_list ?? []), () => planInvariants(planFile));
     if (!ownership.ok) return { ok: false, error: `Task ${taskId}: ${ownership.error}` };
     const rules = new Map<RuleDocument, string>(ruleDocumentsFor(task.file_list ?? []).map((name) =>
       [name, readFileSync(join(packageRoot, "rules", name), "utf8")] as const));

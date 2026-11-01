@@ -441,6 +441,19 @@ describe("parseAcceptedWaveCompletionReceipt — a receipt proves its owner veri
     });
   });
 
+  it("#132: refuses a re-signed receipt whose owner check exits other than its clean observation derives", () => {
+    const flipped = resigned((body) => ({
+      ...body,
+      checks: (body.checks as readonly Record<string, unknown>[]).map((check) => check.checkId === OWNER_VERIFICATION_CHECK_ID_TEXT
+        ? { ...check, outcome: { ...(check.outcome as Record<string, unknown>), exitCode: 1 } }
+        : check),
+    }));
+    // The observation carries no finding, so it derives exit 0; the receipt's own successful-check proof refuses exit 1.
+    expect(parseAcceptedWaveCompletionReceipt(flipped)).toMatchObject({
+      ok: false, error: { errors: [`acceptedReceipt.checks check ${OWNER_VERIFICATION_CHECK_ID_TEXT} is not a successful completion result`] },
+    });
+  });
+
   it("#132: an untampered receipt passes the owner proof, re-signed or not", () => {
     expect(parseAcceptedWaveCompletionReceipt(resigned((body) => body)).ok).toBe(true);
   });
@@ -501,10 +514,18 @@ describe("the rejection's cause — one decision for what a rejection means to t
 
   it("a semantic rejection carries the decided failures, and the owner check's undecided findings beside them", () => {
     const evaluation = rejected(evaluate(verified([verdict("INV-1", missing, broken)]), 1));
-    if (evaluation.cause !== "semantic") throw new Error(`expected a semantic rejection, got `);
+    if (evaluation.cause !== "semantic") throw new Error(`expected a semantic rejection, got ${evaluation.cause}`);
     expect(evaluation.semanticFailures.map((failure) => failure.kind)).toEqual(["owner-verification-rejected"]);
     expect(evaluation.ownerUndecided?.kind).toBe("owner-verification-infrastructure");
     expect(rejectionFailures(evaluation).infrastructure).toEqual([evaluation.ownerUndecided]);
+  });
+
+  it("an infrastructure rejection holds only the other checks' failures, the owner check's undecided finding beside them", () => {
+    const evaluation = rejected(lintUnstartable(verified([verdict("INV-1", missing, broken)]), 1));
+    if (evaluation.cause !== "infrastructure") throw new Error(`expected an infrastructure rejection, got ${evaluation.cause}`);
+    expect(evaluation.infrastructureFailures.map((failure) => failure.kind)).toEqual(["spawn-failed"]);
+    expect(evaluation.ownerUndecided?.kind).toBe("owner-verification-infrastructure");
+    expect(rejectionFailures(evaluation).infrastructure.map((failure) => failure.kind)).toEqual(["spawn-failed", "owner-verification-infrastructure"]);
   });
 
   it("every rejection carries at least one failure: an empty rejection cannot be written", () => {

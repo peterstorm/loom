@@ -16,12 +16,13 @@ import { describe, expect, it } from "vitest";
 import {
   NO_INVARIANT_OWNERSHIP,
   RULE_DOCUMENTS,
+  invariantOwnershipSourceOf,
   renderImplementationBrief,
   type ImplementationBriefInput,
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
-import { obligationsFromPlan } from "../../src/core/owner-verification/obligations";
+import { obligationsFromPlan, taskOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
@@ -171,5 +172,30 @@ describe("owner duties in the brief (AD-10)", () => {
       const dutyAt = stamped.flatMap((paragraph, index) => paragraph.startsWith("**Owner duties (") ? [index, index + 1] : []);
       expect(stamped.filter((_, index) => !dutyAt.includes(index))).toEqual(fromPlan);
     }));
+  });
+});
+
+describe("invariantOwnershipSourceOf — the one stamped-or-plan choice (#134)", () => {
+  const files = [ADMISSION.owner];
+
+  it("a stamped duty is the source itself, and the plan is never read", () => {
+    const duty = taskOwnerDuty({ owner_obligations: STAMP }, files);
+    const read = () => { throw new Error("a stamped graph must not read the plan"); };
+    expect(invariantOwnershipSourceOf(duty, read)).toEqual({ ok: true, value: duty });
+  });
+
+  it("an unstamped duty reads the plan once, and renders its Invariants", () => {
+    let reads = 0;
+    const source = invariantOwnershipSourceOf(taskOwnerDuty({}, files), () => {
+      reads += 1;
+      return { ok: true as const, value: INVARIANTS };
+    });
+    expect(source).toEqual({ ok: true, value: { kind: "plan", invariants: INVARIANTS } });
+    expect(reads).toBe(1);
+  });
+
+  it("an unstamped duty whose plan cannot be read carries the read's refusal unchanged", () => {
+    const refusal = { ok: false as const, error: "cannot read the plan plan.md" };
+    expect(invariantOwnershipSourceOf(taskOwnerDuty({}, files), () => refusal)).toBe(refusal);
   });
 });

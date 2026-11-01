@@ -153,13 +153,14 @@ const walk = (
   return reached;
 };
 
+/** The one `absent` read, shared by every adapter of the coverage port. */
+export const MODULE_ABSENT: ModuleRead = Object.freeze({ kind: "absent" });
+
 /** A file map as the coverage port: a mapped path is its text, any other path is absent. */
 const readFromMap = (files: ReadonlyMap<string, string>): ReadModule => (path) => {
   const text = files.get(path);
-  return text === undefined ? ABSENT : { kind: "text", text };
+  return text === undefined ? MODULE_ABSENT : { kind: "text", text };
 };
-
-const ABSENT: ModuleRead = Object.freeze({ kind: "absent" });
 
 /**
  * The port as the walk reads it: each path is read at most once and parsed

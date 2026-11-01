@@ -17,10 +17,10 @@
  *   decides the absent-versus-empty distinction once, so no caller filters
  *   the stamp or re-encodes it:
  *   - `waveOwnerDuty` is the gate scope: the owner check (null exactly when
- *     the stamp is absent), the obligations whose family (owner or a sibling,
- *     G5a's `changesFamily`) some Wave Task changes, and the drift check of
- *     the stamp against the plan. A change to the matrix test alone does not
- *     trigger the checks.
+ *     the stamp is absent) and the obligations whose family (owner or a
+ *     sibling, G5a's `changesFamily`) some Wave Task changes. A change to the
+ *     matrix test alone does not trigger the checks. `stampAgreement` is its
+ *     drift check against the plan, an absent stamp being drift.
  *   - `taskOwnerDuty` is the review-packet and brief scope: the obligations
  *     in which a file list plays any role, matrix test included.
  *
@@ -319,27 +319,19 @@ const familyOf = (obligation: OwnerObligation): OwnedInvariant => ({
 const rolesIn = (fileList: readonly string[], obligation: OwnerObligation): InvariantRoles =>
   invariantRoles(fileList, familyOf(obligation));
 
-/**
- * A stamp against the obligations the plan derives now: `agrees`, `drifted`
- * (any difference, in content or order), or `underivable` when the plan no
- * longer derives obligations. Only a stamped Wave duty has one: an absent
- * stamp has nothing to agree with.
- */
-export type StampAgreement =
-  | Readonly<{ kind: "agrees" }>
-  | Readonly<{ kind: "drifted" }>
-  | Readonly<{ kind: "underivable"; error: ObligationsError }>;
+/** The key a stamped Wave duty holds its whole stamp under: private, so only `stampAgreement` reads it and no caller filters it. */
+const STAMP = Symbol("OwnerStamp");
 
 /**
- * What a Wave owes the owner gate (the gate scope).
+ * What a Wave owes the owner gate (the gate scope). Plain data: two duties
+ * of the same graph and Wave are structurally equal.
  *
  * - `unstamped`: the graph predates owner verification. Its suite carries no
  *   owner check (`check: null`) and it owes nothing (`owed: []`).
  * - `stamped`: the stamp, `[]` included, always carries the check, so plan
  *   integrity runs every Wave. `owed` is the obligations whose family (owner
  *   or a sibling, G5a's `changesFamily`) some Task of the Wave changes, in
- *   stamp order; `check.owed` is exactly their ids. `agreementWith` is the
- *   gate's drift check of this stamp against the plan's models.
+ *   stamp order; `check.owed` is exactly their ids.
  */
 export type WaveOwnerDuty =
   | Readonly<{ kind: "unstamped"; check: null; owed: readonly [] }>
@@ -347,16 +339,10 @@ export type WaveOwnerDuty =
     kind: "stamped";
     check: OwnerCheckAuthority;
     owed: readonly OwnerObligation[];
-    agreementWith: (models: Pick<PlanModels, "invariants">) => StampAgreement;
+    [STAMP]: readonly OwnerObligation[];
   }>;
 
 const UNSTAMPED_WAVE: WaveOwnerDuty = Object.freeze({ kind: "unstamped", check: null, owed: Object.freeze([]) as readonly [] });
-
-function agreementOf(stamp: readonly OwnerObligation[], models: Pick<PlanModels, "invariants">): StampAgreement {
-  const fromPlan = obligationsFromPlan(models);
-  if (!fromPlan.ok) return { kind: "underivable", error: fromPlan.error };
-  return obligationsAgree(stamp, fromPlan.value) ? { kind: "agrees" } : { kind: "drifted" };
-}
 
 export function waveOwnerDuty(graph: StampedGraph, wave: number): WaveOwnerDuty {
   const stamp = graph.owner_obligations;
@@ -368,8 +354,27 @@ export function waveOwnerDuty(graph: StampedGraph, wave: number): WaveOwnerDuty 
     kind: "stamped",
     check: Object.freeze({ obligationsDigest: obligationsDigest(stamp), owed: owed.map(({ invariant }) => invariant) }),
     owed,
-    agreementWith: (models: Pick<PlanModels, "invariants">) => agreementOf(stamp, models),
+    [STAMP]: stamp,
   });
+}
+
+/**
+ * The gate's drift check of a Wave duty against the obligations the plan
+ * derives now: `agrees`, `drifted` (any difference, in content or order), or
+ * `underivable` when the plan no longer derives obligations. An absent stamp
+ * has nothing the plan could prove, so it is `drifted`: decided here, once,
+ * beside the absent-versus-empty rule, and never by a caller.
+ */
+export type StampAgreement =
+  | Readonly<{ kind: "agrees" }>
+  | Readonly<{ kind: "drifted" }>
+  | Readonly<{ kind: "underivable"; error: ObligationsError }>;
+
+export function stampAgreement(duty: WaveOwnerDuty, models: Pick<PlanModels, "invariants">): StampAgreement {
+  if (duty.kind === "unstamped") return { kind: "drifted" };
+  const fromPlan = obligationsFromPlan(models);
+  if (!fromPlan.ok) return { kind: "underivable", error: fromPlan.error };
+  return obligationsAgree(duty[STAMP], fromPlan.value) ? { kind: "agrees" } : { kind: "drifted" };
 }
 
 /**

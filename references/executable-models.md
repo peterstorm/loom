@@ -173,7 +173,7 @@ a hypothetical project, like the order domain of INV-1 and INV-2 above.
 - `engine/src/core/owner-verification/suite-authority.ts` — authorizing the Wave's suite from the TaskGraph with the Wave duty's `check` (`waveOwnerDuty`); the gate helper and readiness both call it
 - `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave duty's owed obligations (`waveOwnerDuty`) that the owner check runs for
 - `engine/src/core/wave-completion-suite-readiness.ts` — re-authorizing the suite roster through `suite-authority.ts`
-- `engine/src/core/owner-verification/plan-integrity.ts` — the gate's drift check of plan against stamp (the Wave duty's `agreementWith`)
+- `engine/src/core/owner-verification/plan-integrity.ts` — the gate's drift check of plan against stamp (`stampAgreement` over the Wave duty)
 - `engine/src/state-file-wire.ts` — re-deriving the owner check from the stamp when a persisted receipt loads
 - `engine/src/orchestration/owner-verification-runner.ts` — which owed obligations run mutants (`verifyOwed`)
 - `engine/src/core/task-graph-population.ts` — which obligations need the frozen `affectedRunner` (`verifyOwed`)

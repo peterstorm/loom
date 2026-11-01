@@ -293,8 +293,9 @@ export type OwnerUndecidedFailure = Extract<CompletionInfrastructureFailure, { r
  * carries at least one failure, so a rejection with nothing to say cannot be
  * written:
  * - `authority`: the result is not the one the suite authorizes;
- * - `infrastructure`: a check other than the owner check could not run (the
- *   owner check's undecided findings and any decided failures may sit beside it);
+ * - `infrastructure`: a check other than the owner check could not run
+ *   (`infrastructureFailures` holds only those); the owner check's undecided
+ *   findings (`ownerUndecided`) and any decided failures may sit beside them;
  * - `owner-undecided`: only the owner check could not decide, and nothing else
  *   failed, so a retry at the same workspace may still decide;
  * - `semantic`: some check decided against the Wave; an undecided owner check
@@ -306,7 +307,8 @@ export type RejectedCompletionSuite =
   | Readonly<{
       kind: "rejected";
       cause: "infrastructure";
-      infrastructureFailures: NonEmpty<CompletionInfrastructureFailure>;
+      infrastructureFailures: NonEmpty<Exclude<CompletionInfrastructureFailure, OwnerUndecidedFailure>>;
+      ownerUndecided: OwnerUndecidedFailure | null;
       semanticFailures: readonly CompletionSemanticFailure[];
     }>
   | Readonly<{ kind: "rejected"; cause: "owner-undecided"; ownerUndecided: OwnerUndecidedFailure }>
@@ -331,8 +333,8 @@ export type RejectionFailures = Readonly<{
 export const rejectionFailures = (rejection: RejectedCompletionSuite): RejectionFailures =>
   match(rejection)
     .with({ cause: "authority" }, ({ authorityFailures }): RejectionFailures => ({ authority: authorityFailures, infrastructure: [], semantic: [] }))
-    .with({ cause: "infrastructure" }, ({ infrastructureFailures, semanticFailures }): RejectionFailures =>
-      ({ authority: [], infrastructure: infrastructureFailures, semantic: semanticFailures }))
+    .with({ cause: "infrastructure" }, ({ infrastructureFailures, ownerUndecided, semanticFailures }): RejectionFailures =>
+      ({ authority: [], infrastructure: ownerUndecided === null ? infrastructureFailures : [...infrastructureFailures, ownerUndecided], semantic: semanticFailures }))
     .with({ cause: "owner-undecided" }, ({ ownerUndecided }): RejectionFailures => ({ authority: [], infrastructure: [ownerUndecided], semantic: [] }))
     .with({ cause: "semantic" }, ({ semanticFailures, ownerUndecided }): RejectionFailures =>
       ({ authority: [], infrastructure: ownerUndecided === null ? [] : [ownerUndecided], semantic: semanticFailures }))
@@ -1172,22 +1174,22 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
 /**
  * Why a receipt's owner observation is not the one its own roster implies, or
  * null (#132): the observation is present exactly when the roster carries the
- * owner check, and that check exits as the observation derives. The receipt
- * proves this itself, as the evaluator proved it for the result it minted the
- * receipt from, so no reader trusts the writer.
+ * owner check. The receipt proves this itself, as the evaluator proved it for
+ * the result it minted the receipt from, so no reader trusts the writer. The
+ * owner check's exit needs no second proof here: the receipt refuses an
+ * observation with any finding, so the exit it derives is 0, and
+ * `parseAcceptedChecks` already refuses any other exit (only acceptance facts
+ * excuse one, and those must bind a produced report the owner check never has).
  */
 function receiptOwnerError(
   checks: readonly CompletionCheckResult[],
   observation: OwnerVerificationObservation | undefined,
 ): string | null {
-  const owner = checks.find(({ checkId }) => checkId === OWNER_VERIFICATION_CHECK_ID);
-  if (owner === undefined) {
-    return observation === undefined ? null : "acceptedReceipt.ownerVerification is present, but its roster carries no loom:owner-verification check";
-  }
-  if (observation === undefined) return "acceptedReceipt carries loom:owner-verification without its ownerVerification observation";
-  return owner.outcome.kind === "observed" && owner.outcome.exitCode === ownerVerificationExitCode(observation)
-    ? null
-    : "acceptedReceipt's loom:owner-verification exit is not the one its ownerVerification observation derives";
+  const rosterCarriesOwner = checks.some(({ checkId }) => checkId === OWNER_VERIFICATION_CHECK_ID);
+  if (rosterCarriesOwner === (observation !== undefined)) return null;
+  return rosterCarriesOwner
+    ? "acceptedReceipt carries loom:owner-verification without its ownerVerification observation"
+    : "acceptedReceipt.ownerVerification is present, but its roster carries no loom:owner-verification check";
 }
 
 /** Parse unknown observed suite data. Roster exactness is evaluated against authority, not guessed here. */
@@ -1228,8 +1230,9 @@ function processRejection(
   semantic: readonly CompletionSemanticFailure[],
 ): RejectedCompletionSuite | null {
   const ownerUndecided = infrastructure.find(isOwnerUndecided) ?? null;
-  if (isNonEmpty(infrastructure) && infrastructure.some((failure) => !isOwnerUndecided(failure))) {
-    return freeze({ kind: "rejected", cause: "infrastructure", infrastructureFailures: freeze(infrastructure), semanticFailures: freezeArray(semantic) });
+  const otherInfrastructure = infrastructure.filter((failure): failure is Exclude<CompletionInfrastructureFailure, OwnerUndecidedFailure> => !isOwnerUndecided(failure));
+  if (isNonEmpty(otherInfrastructure)) {
+    return freeze({ kind: "rejected", cause: "infrastructure", infrastructureFailures: freeze(otherInfrastructure), ownerUndecided, semanticFailures: freezeArray(semantic) });
   }
   if (isNonEmpty(semantic)) return freeze({ kind: "rejected", cause: "semantic", semanticFailures: freeze(semantic), ownerUndecided });
   return ownerUndecided === null ? null : freeze({ kind: "rejected", cause: "owner-undecided", ownerUndecided });
@@ -1282,7 +1285,8 @@ export const ownerVerificationExitCode = (observation: OwnerVerificationObservat
  * The owner check's result as the record stores it, and its one constructor
  * (#132): the exit is derived from the observation, never chosen, so a writer
  * cannot record an exit its findings contradict. The persisted record keeps
- * the exit field the lint check shares (FR-004); both readers re-derive it.
+ * the exit field the lint check shares (FR-004); the evaluator re-derives it,
+ * and the receipt parser holds it to 0 (its observation carries no finding).
  */
 export const ownerCheckResult = (check: OwnerVerificationCheck, observation: OwnerVerificationObservation): CompletionCheckResult =>
   freeze({

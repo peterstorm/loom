@@ -41,7 +41,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
-import { siblingCoverage } from "../core/owner-verification/coverage";
+import { MODULE_ABSENT, siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
@@ -106,20 +106,19 @@ const unavailable = (kind: OwnerInfrastructureFailureKind, detail: string): Owne
  * repository. A file the filesystem refuses (any other errno) is
  * `unreadable`, never absent, so it can never pass for a missing sibling.
  */
-const ABSENT: ModuleRead = Object.freeze({ kind: "absent" });
 const ABSENCE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
 
 /** A repository-relative path's text, its absence, or why the filesystem refused it. Never throws. */
 function readRepositoryText(root: CanonicalRepositoryRoot, path: string): ModuleRead {
   const absolute = posix.join(root, path);
   try {
-    if (!statSync(absolute).isFile()) return ABSENT;
+    if (!statSync(absolute).isFile()) return MODULE_ABSENT;
     const real = realpathSync.native(absolute);
-    if (!real.startsWith(`${root}/`)) return ABSENT;
+    if (!real.startsWith(`${root}/`)) return MODULE_ABSENT;
     return { kind: "text", text: readFileSync(real, "utf-8") };
   } catch (cause) {
     const code = (cause as NodeJS.ErrnoException | null)?.code;
-    if (typeof code === "string" && ABSENCE_CODES.has(code)) return ABSENT;
+    if (typeof code === "string" && ABSENCE_CODES.has(code)) return MODULE_ABSENT;
     return { kind: "unreadable", failure: infrastructure("repository-file-unreadable", `${path} cannot be read: ${describeCause(cause)}`) };
   }
 }

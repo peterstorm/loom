@@ -74,7 +74,9 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
 ### Brief half
 - The brief's ownership has one source, an `InvariantOwnershipSource` (#134, amended 2026-11-01).
   `engine/src/orchestration/implementation-brief.ts` asks `taskOwnerDuty(graph, task.file_list)` (ADR-0034,
-  #136) and never filters the raw `owner_obligations` stamp:
+  #136), never filters the raw `owner_obligations` stamp, and builds the source with the pure
+  `invariantOwnershipSourceOf(duty, readPlanInvariants)` in `engine/src/core/implementation-brief.ts`, the one
+  home of the choice (test fixtures call it too). The plan read is passed in and runs only for `plan`:
   - **`stamped`:** the stamped obligations the Task touches. The whole ownership section renders from them:
     each block's title, statement, role lines and family, then its duties. The plan is not read for ownership.
   - **`plan`:** a pre-feature graph carries no stamp, so the shell reads the plan and renders its owned

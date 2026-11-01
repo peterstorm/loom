@@ -653,8 +653,9 @@ export const ownerVerificationReportOf = (
  */
 export function withOwnerVerificationRemedies(status: LoomStatus): LoomStatus {
   const suite = status.facts.waveCompletionSuiteReadiness;
-  if (suite.kind !== "known" || suite.value.kind !== "rejected" || suite.value.ownerVerificationRemedies === null) return status;
-  const reasons = suite.value.ownerVerificationRemedies.map((remedy) =>
+  const readiness = suite.kind === "known" ? suite.value : null;
+  if (readiness?.kind !== "rejected" || readiness.ownerVerificationRemedies === null) return status;
+  const reasons = readiness.ownerVerificationRemedies.map((remedy) =>
     statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
   return canonicalRecord({
     ...status,

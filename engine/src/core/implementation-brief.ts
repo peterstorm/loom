@@ -226,6 +226,22 @@ export type InvariantOwnershipSource =
   | Extract<TaskOwnerDuty, { kind: "stamped" }>
   | Readonly<{ kind: "plan"; invariants: readonly PlanInvariant[] }>;
 
+/**
+ * The ownership source for a Task's owner duty, and the one home of the
+ * stamped-or-plan choice: a stamped duty is the source itself, and the plan
+ * is read, through `readPlanInvariants`, only for a graph populated before
+ * owner verification. The shell passes its plan-file read; test fixtures pass
+ * their own Invariants, so neither restates the choice.
+ */
+export function invariantOwnershipSourceOf<E>(
+  duty: TaskOwnerDuty,
+  readPlanInvariants: () => DomainResult<readonly PlanInvariant[], E>,
+): DomainResult<InvariantOwnershipSource, E> {
+  if (duty.kind === "stamped") return { ok: true, value: duty };
+  const invariants = readPlanInvariants();
+  return invariants.ok ? { ok: true, value: { kind: "plan", invariants: invariants.value } } : invariants;
+}
+
 /** One owned Invariant as a block renders it, whichever source it came from. */
 type OwnedFamily = Readonly<{ id: string; title: string; statement: string | null; ownership: OwnedInvariant }>;
 
