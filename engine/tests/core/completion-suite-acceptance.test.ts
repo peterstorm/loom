@@ -134,7 +134,7 @@ describe("evaluateWaveCompletionSuite — acceptance at the Wave Gate", () => {
     const evaluation = evaluateWaveCompletionSuite(authority, result(0, [testcase("payload > AS-003: one call wins", "passed")]), RED_EXPECTATION);
     expect(evaluation).toMatchObject({
       kind: "rejected",
-      authorityFailures: [],
+      cause: "semantic",
       semanticFailures: [{
         kind: "acceptance-rejected",
         checkId: "project:verify",
@@ -151,6 +151,7 @@ describe("evaluateWaveCompletionSuite — acceptance at the Wave Gate", () => {
   it("refuses a result judged under another expectation, and facts bound to another report", () => {
     expect(evaluateWaveCompletionSuite(authority, result(1, null), RED_EXPECTATION)).toMatchObject({
       kind: "rejected",
+      cause: "authority",
       authorityFailures: [{ kind: "acceptance-expectation-mismatch" }],
     });
     expect(evaluateWaveCompletionSuite(authority, result(1, RED, RED_EXPECTATION, digest("e")), RED_EXPECTATION)).toMatchObject({

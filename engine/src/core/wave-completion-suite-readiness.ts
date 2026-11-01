@@ -25,7 +25,7 @@ import {
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
   ownerVerificationFindingLines,
-  rejectionDisposition,
+  rejectionFailures,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
   type CompletionInfrastructureFailure,
@@ -218,7 +218,7 @@ function deriveCompletionSuiteOutcome(
  * Judge the persisted result of an active Wave without a receipt against the
  * roster the graph's Wave owes (`authorizeGraphCompletionSuite`, INV-3). A
  * semantic rejection stays a rejection when the owner check beside it could
- * not decide, exactly as the gate replays it (`rejectionDisposition`).
+ * not decide, exactly as the gate replays it (the rejection's `cause`).
  */
 function persistedResultOutcome(
   graph: TaskGraph,
@@ -240,15 +240,15 @@ function persistedResultOutcome(
       manifestDigest,
     );
   }
-  const disposition = rejectionDisposition(evaluation);
-  if (disposition.kind !== "semantic") {
+  if (evaluation.cause !== "semantic") {
+    const { authority, infrastructure } = rejectionFailures(evaluation);
     return requiredWaveCompletionSuite(
       "completion-result-invalid",
-      completionEvaluationFailureDetail(evaluation.authorityFailures, evaluation.infrastructureFailures),
+      completionEvaluationFailureDetail(authority, infrastructure),
       manifestDigest,
     );
   }
-  const [firstSemanticFailure, ...remainingSemanticFailures] = disposition.failures;
+  const [firstSemanticFailure, ...remainingSemanticFailures] = evaluation.semanticFailures;
   const [firstRemedy, ...otherRemedies] = ownerVerificationFindingLines(evaluation);
   return canonicalRecord({
     kind: "rejected",
