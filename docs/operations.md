@@ -802,7 +802,7 @@ In `--json`, `ownerVerification` is the persisted observation itself: `{ "kind":
 
 With no owner verification to report, status says `not observed` and why (`--json`: `{ "kind": "not-observed", "reason": … }`), with exactly one of these reasons: `no persisted completion result`, `the persisted completion result carries no owner verification`, or `the persisted completion result is unavailable: …`.
 
-When the suite rejected the Wave for owner verification, the next action names the invariant and the remedy. The gate's own diagnostic carries one line per finding with the same remedy.
+When the suite rejected the Wave and the owner check contributed findings, the next action names each invariant and its remedy. The rejection itself carries those lines (`ownerVerificationRemedies` on the completion-suite readiness fact), and the gate's own diagnostic prints the same lines, so the two always match.
 
 **Remedies:**
 

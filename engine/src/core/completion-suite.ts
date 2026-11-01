@@ -44,7 +44,7 @@ import {
 } from "./plain-record";
 import type { InvariantId } from "./invariant-id";
 import { parseOwedInvariantIds, parseOwnerVerificationObservation, type OwnerVerificationParseError } from "./owner-verification/parse";
-import { ownerVerificationFailures } from "./owner-verification/verdict";
+import { ownerVerificationFailures, renderOwnerVerificationFailure } from "./owner-verification/verdict";
 import type { OwnerVerificationFailure, OwnerVerificationObservation } from "./owner-verification/types";
 
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
@@ -295,6 +295,17 @@ export type CompletionSuiteEvaluation =
     }>;
 
 export type RejectedCompletionSuite = Extract<CompletionSuiteEvaluation, { readonly kind: "rejected" }>;
+
+/**
+ * The owner check's findings in a rejection, one line each (the Invariant,
+ * its evidence and the remedy), undecided findings before decided ones: the
+ * one wording the gate's diagnostic and status's next action share.
+ */
+export const ownerVerificationFindingLines = (rejection: RejectedCompletionSuite): readonly string[] =>
+  [...rejection.infrastructureFailures, ...rejection.semanticFailures].flatMap((failure) =>
+    failure.kind === "owner-verification-infrastructure" || failure.kind === "owner-verification-rejected"
+      ? failure.failures.map(renderOwnerVerificationFailure)
+      : []);
 
 /**
  * What a rejection means for the gate, decided once from its failures:

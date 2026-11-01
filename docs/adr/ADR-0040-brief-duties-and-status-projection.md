@@ -6,6 +6,8 @@ Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-10; interview Q3c).
 Amended 2026-11-01 (#134): on a stamped graph the brief renders its whole ownership section from the stamp; the
 plan is read for ownership only on a pre-feature graph.
+Amended 2026-11-01 (#135): the readiness rejection carries its own owner remedies, and status reads them only
+from there.
 
 ## Context
 G5b makes each owned Invariant a Wave Gate obligation. The engine-reserved completion check
@@ -101,7 +103,8 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
 
 ### Status half
 - `engine/src/core/owner-verification/status.ts` is pure. Status says one thing about owner verification:
-  an `OwnerVerificationStatus`, which is a `report` and the `remedies` read from it.
+  its `OwnerVerificationStatusReport`. The next action's remedies are not part of it: they travel on the
+  readiness rejection itself (#135, below).
 - The report is `OwnerVerificationStatusReport`, the persisted `OwnerVerificationObservation` itself plus
   one status-only case. **Deviation from the plan, recorded:** the plan described a bare
   `OwnerVerificationStatus[]` of per-Invariant status records. The shipped report is a three-case union, so
@@ -130,10 +133,10 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
   `renderOwnerVerificationStatus`: a header with the Invariant count and the bound, one line per Invariant
   (`coverage pass` for `covered`), and one line per survivor. The `--json` shape was unshipped when it
   changed, so there is no compatibility shim.
-- Remedies are not decided in `status.ts`. `observedOwnerVerificationStatus(observation)` maps
-  `ownerVerificationFailures(observation)` through `renderOwnerVerificationFailure`, both from
-  `engine/src/core/owner-verification/verdict.ts`, which is the source the gate's diagnostic also reads.
-  `ownerVerificationNotObserved(reason)` owes no remedy. The shipped wording:
+- Remedies are not decided in `status.ts`. Each is one line of `ownerVerificationFindingLines(rejection)` in
+  `engine/src/core/completion-suite.ts`: the rejection's owner findings, undecided before decided, through
+  `renderOwnerVerificationFailure` from `engine/src/core/owner-verification/verdict.ts`. The gate's
+  diagnostic and the readiness rejection both call it. The shipped wording:
   - missing siblings: `strengthen <matrixTest> to import the owner and every sibling entry point`, after
     the missing paths;
   - survivor: `mutant survived at <owner>:<line>:<column> (<operator>): original …, mutated …; strengthen
@@ -141,19 +144,22 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
     than the plan's template, because it adds the column and the original and mutated text;
   - red baseline and infrastructure failures name their cause.
 - `engine/src/core/loom-status.ts`:
-  - `ownerVerificationStatusOf(result)` derives the one `OwnerVerificationStatus` from what status read as
-    the latest persisted completion result, so "unavailable" versus "absent" is decided once. An `observed`
-    result carrying owner verification is reported as itself with its remedies. An absent result, one
-    without owner verification, and an `unavailable` read are each `not-observed` with their own reason and
-    owe no remedy.
-  - `withOwnerVerificationRemedies(status, owner)` consumes that value. It adds remedies only when
-    completion-suite readiness is `rejected` with failure kind `owner-verification-rejected`: one
-    `completion-prerequisite-failed` reason per remedy appended to `next.reasons`, prefixed `owner
-    verification blocks the Wave Gate:`. Readiness and remedies read the same persisted result, so they
-    cannot disagree; a rejection for any other failure kind adds none.
+  - `ownerVerificationReportOf(result)` derives the report from what status read as the latest persisted
+    completion result, so "unavailable" versus "absent" is decided once. An `observed` result carrying owner
+    verification is reported as itself. An absent result, one without owner verification, and an
+    `unavailable` read are each `not-observed` with their own reason.
+  - **One value for a rejection and its remedies (#135, amended 2026-11-01).** The completion-suite
+    readiness fact's `rejected` case carries `ownerVerificationRemedies`: the `ownerVerificationFindingLines`
+    of the very rejection readiness judged, non-null exactly when the owner check contributed a finding.
+    `withOwnerVerificationRemedies(status)` reads only that field: one `completion-prerequisite-failed`
+    reason per remedy appended to `next.reasons`, prefixed `owner verification blocks the Wave Gate:`. Any
+    other readiness adds none. As first shipped, status re-derived the remedies from the persisted
+    observation and joined them to readiness by the failure-kind string, with a fallback reason for when the
+    two disagreed ("no per-Invariant remedy could be read"). That fallback is gone with the second
+    derivation: the next action, the readiness fact and the gate's diagnostic now name the same lines.
   - `deriveLoomStatusFromParsedGraph` returns the `LoomStatusDocument` (`engine/src/types.ts`): the routed
-    `LoomStatus`, its next action merged with the remedies, and `owner.report` as its `ownerVerification`
-    key, all from one `ownerVerificationStatusOf` value. The document type requires `ownerVerification`;
+    `LoomStatus`, its next action merged with its readiness fact's remedies, and the report as its
+    `ownerVerification` key. The document type requires `ownerVerification`;
     the bare `LoomStatus` stays a separate type, so the compiler proves the status command always carries
     the report and neither renderer handles an absent field. `renderLoomStatusJson(document)` serializes it
     exactly; `renderLoomStatusHuman(document)` adds the lines from `renderOwnerVerificationStatus`.
@@ -170,9 +176,9 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
   the brief names the files involved, which avoids retries spent finding out at the gate.
 - Pre-feature graphs get unchanged briefs and no duties that would never be checked, because the stamp's
   absence is the one signal for that, and both owner duties and the suite read the same signal.
-- Human and `--json` status come from one document, and the report and the next-action remedies from one
-  `OwnerVerificationStatus`, so none of them can disagree. Remedy text has one source shared
-  with the gate's diagnostic.
+- Human and `--json` status come from one document, and the next-action remedies from the readiness rejection
+  that judged them, so none of them can disagree. Remedy text has one source shared with the gate's
+  diagnostic (`ownerVerificationFindingLines`).
 - The status value is pure and covered by tests (`engine/tests/core/owner-verification-status.test.ts`,
   `engine/tests/acceptance/owner-verification-status.acceptance.test.ts`), and its union types make illegal
   combinations unrepresentable. For example, a `missing` coverage always carries at least one path.
@@ -180,9 +186,9 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
 **Negative:**
 - Status shows only the latest persisted completion result. There is no progress view during a long
   mutation run and no history across runs. This was accepted under Q3c.
-- Remedies appear in the next action only when readiness classifies the rejection as
-  `owner-verification-rejected`. If a rejection is attributed to another failure kind, the owner findings
-  are still visible in the report lines, but the next action does not name them.
+- Remedies appear in the next action only when readiness classifies the result as a `rejected` suite. A
+  result whose owner check could not decide (only owner infrastructure findings) is `required`, not
+  `rejected`; its findings are visible in the report lines and the readiness detail, not as remedies.
 - `--json` serializes the persisted verdict types directly, so a change to `InvariantVerdict`,
   `CoverageVerdict` or `MutationVerdict` changes the status wire shape too. This is accepted: one
   representation across gate, completion result and status is what removed the hand-kept copy.

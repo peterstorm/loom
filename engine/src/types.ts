@@ -965,6 +965,11 @@ export type WaveCompletionSuiteReadiness =
       workspaceDigest: ArtifactDigest;
       failureKinds: OrchestrationNonEmpty<CompletionSemanticFailure["kind"]>;
       checkIds: OrchestrationNonEmpty<CompletionCheckId>;
+      /** The owner check's findings in this rejection, one remedy line each, in
+       *  the gate diagnostic's own wording (`ownerVerificationFindingLines`):
+       *  non-null exactly when the owner check contributed a finding, so the
+       *  next action names exactly what the gate blocked on. */
+      ownerVerificationRemedies: OrchestrationNonEmpty<string> | null;
     }>
   | Readonly<{
       kind: "stale";

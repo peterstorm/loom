@@ -43,7 +43,7 @@ import { waveOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
-import { ownerVerificationStatusOf, type StatusDeps } from "../../src/core/loom-status";
+import { ownerVerificationReportOf, type StatusDeps } from "../../src/core/loom-status";
 import { renderOwnerVerificationStatus, type OwnerVerificationStatusReport } from "../../src/core/owner-verification/status";
 import { renderStatus } from "../../src/handlers/helpers/orchestration";
 import { renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
@@ -285,7 +285,7 @@ type StatusOutput = Readonly<{ human: string; json: unknown; report: OwnerVerifi
  * `helper orchestration status`, human and `--json`, from one graph and one
  * persisted result. The `--json` document's `ownerVerification` is proven
  * equal to the typed `OwnerVerificationStatusReport` that
- * `ownerVerificationStatusOf` derives from the same result, so every
+ * `ownerVerificationReportOf` derives from the same result, so every
  * assertion below reads the report through its type, never by walking JSON.
  */
 function status(currentWaveCompletionResult: WaveCompletionResultObservation): StatusOutput {
@@ -297,7 +297,7 @@ function status(currentWaveCompletionResult: WaveCompletionResultObservation): S
   };
   const graph = JSON.parse(JSON.stringify(STATUS_GRAPH)) as unknown;
   const json = JSON.parse(renderStatus(graph, deps, true)) as unknown;
-  const { report } = ownerVerificationStatusOf(currentWaveCompletionResult);
+  const report = ownerVerificationReportOf(currentWaveCompletionResult);
   expect(json).toHaveProperty("ownerVerification", JSON.parse(JSON.stringify(report)));
   return { human: renderStatus(graph, deps, false), json, report };
 }

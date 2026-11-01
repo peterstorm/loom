@@ -7,7 +7,6 @@ import { waveOwnerDuty, type WaveOwnerDuty } from "../../core/owner-verification
 import { planModelsIntegrityFailure } from "../../core/owner-verification/plan-integrity";
 import { ownerObservationDecision } from "../../core/owner-verification/owed-verification";
 import { authorizeGraphCompletionSuite } from "../../core/owner-verification/suite-authority";
-import { renderOwnerVerificationFailure } from "../../core/owner-verification/verdict";
 import type { OwnerInfrastructureFailure, OwnerVerificationObservation } from "../../core/owner-verification/types";
 import {
   runOwnerVerification as productionRunOwnerVerification,
@@ -38,6 +37,7 @@ import {
   evaluateWaveCompletionSuite,
   ownerCheckOf,
   ownerVerificationExitCode,
+  ownerVerificationFindingLines,
   parseAcceptedWaveCompletionReceipt,
   parseCompletionCheckId,
   parseWaveCompletionSuiteResult,
@@ -687,16 +687,8 @@ function evaluationDiagnostic(evaluation: RejectedCompletionSuite): WaveCompleti
     categories,
     checkIds,
     `Wave completion suite rejected: ${failureKinds.join(", ")}` +
-      detailLines([...acceptance, ...mismatches, ...ownerFindingLines(evaluation)]),
+      detailLines([...acceptance, ...mismatches, ...ownerVerificationFindingLines(evaluation)]),
   );
-}
-
-/** The owner check's findings, one diagnostic line each: the Invariant, its evidence and the remedy. */
-function ownerFindingLines(evaluation: RejectedCompletionSuite): readonly string[] {
-  return [...evaluation.infrastructureFailures, ...evaluation.semanticFailures].flatMap((failure) =>
-    failure.kind === "owner-verification-infrastructure" || failure.kind === "owner-verification-rejected"
-      ? failure.failures.map(renderOwnerVerificationFailure)
-      : []);
 }
 
 const detailLines = (lines: readonly string[]): string =>
@@ -708,7 +700,7 @@ function infrastructureEvaluationDiagnostic(evaluation: RejectedCompletionSuite)
     evaluation.infrastructureFailures.map((failure) => failure.checkId),
     `Wave completion suite infrastructure failure: ${evaluation.infrastructureFailures
       .map((failure) => failure.kind)
-      .join(", ")}` + detailLines(ownerFindingLines(evaluation)),
+      .join(", ")}` + detailLines(ownerVerificationFindingLines(evaluation)),
   );
 }
 

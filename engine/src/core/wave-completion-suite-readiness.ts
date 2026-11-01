@@ -24,6 +24,7 @@ import type {
 import {
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
+  ownerVerificationFindingLines,
   rejectionDisposition,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
@@ -248,6 +249,7 @@ function persistedResultOutcome(
     );
   }
   const [firstSemanticFailure, ...remainingSemanticFailures] = disposition.failures;
+  const [firstRemedy, ...otherRemedies] = ownerVerificationFindingLines(evaluation);
   return canonicalRecord({
     kind: "rejected",
     verificationManifestDigest: manifestDigest,
@@ -255,6 +257,9 @@ function persistedResultOutcome(
     workspaceDigest: authorized.value.workspaceDigest,
     failureKinds: sortedUniqueNonEmpty(firstSemanticFailure.kind, remainingSemanticFailures.map((failure) => failure.kind)),
     checkIds: sortedUniqueNonEmpty(firstSemanticFailure.checkId, remainingSemanticFailures.map((failure) => failure.checkId)),
+    // The remedies come from the rejection judged here, never re-derived from
+    // the observation, so the next action cannot disagree with this fact.
+    ownerVerificationRemedies: firstRemedy === undefined ? null : Object.freeze<NonEmpty<string>>([firstRemedy, ...otherRemedies]),
   });
 }
 
