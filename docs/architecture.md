@@ -353,7 +353,7 @@ Wave Gate ─ ensureWaveCompletionSuite ─ authorizeGraphCompletionSuite(graph,
   re-read plan_file ─► planModelsIntegrityFailure (the duty's agreementWith) ─► blocked on unreadable / malformed / drifted plan
   owed = [] ─► verified, no verdicts
   owed ≠ [] ─► runOwnerVerification (shell, outside the StateManager lock)
-                 coverage: read the matrix test's import frontier ─► coverageOverFiles
+                 coverage: siblingCoverage walks the import frontier, reading through readRepositoryText
                  mutation: Wave base ─► changedHeadLines ─► mutationPlan ─► detached worktree:
                            baseline, then each mutant via the frozen affectedRunner ─► classify*
                  invariantVerdict per owed obligation; real-workspace digest before = after

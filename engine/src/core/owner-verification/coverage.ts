@@ -17,9 +17,10 @@
  * - Decision: `covered`, or `missing` with every unreached declared path in
  *   declared order, the owner first.
  *
- * The shell gathers the files with `coverageFrontier`, a bounded step it
- * drives until `complete`, then decides with `coverageOverFiles` over the
- * gathered files.
+ * `siblingCoverage` drives the traversal itself (#133): it pulls each file it
+ * needs through the `ReadModule` port the shell adapts the filesystem to, so
+ * no frontier state crosses the seam. `coverageOverFiles` is the same
+ * decision over a file map.
  */
 
 import type { NonEmpty } from "../orchestration-contract/identity";
@@ -28,13 +29,16 @@ import { directoryOf, normalizeRepoPath, within } from "./repo-path";
 import type {
   CoverageOverFilesFn,
   CoverageVerdict,
+  ModuleRead,
   OwnerInfrastructureFailure,
   OwnerObligation,
   PathAlias,
   PathAliases,
+  ReadModule,
+  SiblingCoverageFn,
 } from "./types";
 
-/** The most files the coverage frontier may gather before it is an infrastructure failure. */
+/** The most present files the coverage walk may read before it is an infrastructure failure. */
 export const COVERAGE_FRONTIER_BOUND = 512;
 
 // ---------------------------------------------------------------------------
@@ -113,39 +117,28 @@ export const resolveSpecifier = (
 // Reach
 // ---------------------------------------------------------------------------
 
-type Walk = Readonly<{ reached: ReadonlySet<string>; undecided: readonly string[] }>;
-
 /** The specifiers of the edges, of the given kinds, that load their module at runtime. */
 const loadedSpecifiers = (edges: ModuleEdges, kinds: readonly EdgeKind[]): readonly string[] =>
   edges.filter((edge) => !edge.typeOnly && kinds.includes(edge.kind)).map((edge) => edge.specifier);
 
 /**
- * The one reach traversal both the decision and the frontier use. `decided`
- * says whether a path's existence is known (present in `edges` or known
- * absent); a specifier with an undecided candidate ahead of its first present
- * one is not followed, and those candidates are reported as `undecided`.
+ * The one reach traversal. `edgesOf` is a path's parsed edges, or undefined
+ * when it is absent; each specifier follows its first present candidate, so
+ * a lazy `edgesOf` is asked only for the ladder candidates up to that one.
  */
 const walk = (
   matrixTest: string,
   edgesOf: (path: string) => ModuleEdges | undefined,
   aliases: PathAliases,
-  decided: (path: string) => boolean,
-): Walk => {
-  const matrixEdges = edgesOf(matrixTest);
-  if (matrixEdges === undefined) return { reached: new Set(), undecided: decided(matrixTest) ? [] : [matrixTest] };
-
+): ReadonlySet<string> => {
   const reached = new Set<string>();
-  const undecided = new Set<string>();
+  const matrixEdges = edgesOf(matrixTest);
+  if (matrixEdges === undefined) return reached;
   const queue: string[] = [];
   const follow = (from: string, specifiers: readonly string[]): void => {
     for (const specifier of specifiers) {
-      const candidates = resolutionCandidates(from, specifier, aliases);
-      const firstPresent = candidates.findIndex((candidate) => edgesOf(candidate) !== undefined);
-      const ahead = firstPresent < 0 ? candidates : candidates.slice(0, firstPresent);
-      const pending = ahead.filter((candidate) => !decided(candidate));
-      pending.forEach((candidate) => undecided.add(candidate));
-      const target = pending.length === 0 && firstPresent >= 0 ? candidates[firstPresent]! : null;
-      if (target !== null && !reached.has(target)) {
+      const target = resolutionCandidates(from, specifier, aliases).find((candidate) => edgesOf(candidate) !== undefined);
+      if (target !== undefined && !reached.has(target)) {
         reached.add(target);
         queue.push(target);
       }
@@ -153,25 +146,62 @@ const walk = (
   };
 
   follow(matrixTest, loadedSpecifiers(matrixEdges, ["import", "reexport"]));
-  for (let next = queue.shift(); next !== undefined; next = queue.shift()) follow(next, loadedSpecifiers(edgesOf(next)!, ["reexport"]));
-  return { reached, undecided: [...undecided].sort() };
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    const edges = edgesOf(next);
+    if (edges !== undefined) follow(next, loadedSpecifiers(edges, ["reexport"]));
+  }
+  return reached;
 };
 
-/** Memoized edges over a file map: a file is parsed only when the walk reaches it. */
-const edgesOver = (files: ReadonlyMap<string, string>): ((path: string) => ModuleEdges | undefined) => {
-  const parsed = new Map<string, ModuleEdges>();
-  return (path) => {
-    const text = files.get(path);
-    if (text === undefined) return undefined;
-    const known = parsed.get(path) ?? moduleEdges(path, text);
-    parsed.set(path, known);
-    return known;
-  };
+/** A file map as the coverage port: a mapped path is its text, any other path is absent. */
+const readFromMap = (files: ReadonlyMap<string, string>): ReadModule => (path) => {
+  const text = files.get(path);
+  return text === undefined ? ABSENT : { kind: "text", text };
 };
+
+const ABSENT: ModuleRead = Object.freeze({ kind: "absent" });
+
+/**
+ * The port as the walk reads it: each path is read at most once and parsed
+ * only when present. The first refused read, or the present file past
+ * `bound`, becomes the infrastructure failure, and from then on every path
+ * reads as absent so the walk winds down without reading further.
+ */
+function boundedEdges(matrixTest: string, read: ReadModule, bound: number) {
+  const known = new Map<string, ModuleEdges | null>();
+  let present = 0;
+  let failure: OwnerInfrastructureFailure | null = null;
+  const edgesOf = (path: string): ModuleEdges | undefined => {
+    if (failure !== null) return undefined;
+    const seen = known.get(path);
+    if (seen !== undefined) return seen ?? undefined;
+    const file = read(path);
+    if (file.kind === "unreadable") {
+      failure = file.failure;
+      return undefined;
+    }
+    if (file.kind === "absent") {
+      known.set(path, null);
+      return undefined;
+    }
+    present += 1;
+    if (present > bound) {
+      failure = {
+        kind: "coverage-bound-exceeded",
+        detail: `the import frontier of ${matrixTest} exceeded ${bound} files (${present} gathered)`,
+      };
+      return undefined;
+    }
+    const edges = moduleEdges(path, file.text);
+    known.set(path, edges);
+    return edges;
+  };
+  return { edgesOf, failure: (): OwnerInfrastructureFailure | null => failure };
+}
 
 /** The files the matrix test imports or re-exports directly, closed under re-export edges only. */
 export const reachedFiles = (matrixTest: string, files: ReadonlyMap<string, string>, aliases: PathAliases): ReadonlySet<string> =>
-  walk(matrixTest, edgesOver(files), aliases, () => true).reached;
+  walk(matrixTest, boundedEdges(matrixTest, readFromMap(files), Number.POSITIVE_INFINITY).edgesOf, aliases);
 
 // ---------------------------------------------------------------------------
 // The decision
@@ -189,66 +219,25 @@ export const decideCoverage = (
   return { kind: "missing", paths };
 };
 
+/** Coverage from `matrixTest` over the port, bounded at `COVERAGE_FRONTIER_BOUND` present files. */
+function coverageThrough(matrixTest: string, obligation: OwnerObligation, aliases: PathAliases, read: ReadModule): CoverageVerdict {
+  const reader = boundedEdges(matrixTest, read, COVERAGE_FRONTIER_BOUND);
+  const reached = walk(matrixTest, reader.edgesOf, aliases);
+  const failure = reader.failure();
+  return failure === null ? decideCoverage(reached, obligation) : { kind: "infrastructure", failure };
+}
+
+/**
+ * Sibling coverage, driving its own traversal (#133): it pulls each file it
+ * needs through `read`, at most once and in resolution order, so it reads
+ * exactly the matrix test, then for each specifier its ladder candidates up
+ * to the first present one, closed under re-exports. A refused read stops the
+ * walk as that read's infrastructure failure, never a missing path; more than
+ * `COVERAGE_FRONTIER_BOUND` present files is `coverage-bound-exceeded`.
+ */
+export const siblingCoverage: SiblingCoverageFn = ({ obligation, aliases, read }) =>
+  coverageThrough(obligation.matrixTest, obligation, aliases, read);
+
+/** The same decision over a file map that holds every file there is: the whole-repository oracle. */
 export const coverageOverFiles: CoverageOverFilesFn = ({ matrixTest, obligation, files, aliases }) =>
-  decideCoverage(reachedFiles(matrixTest, files, aliases), obligation);
-
-// ---------------------------------------------------------------------------
-// The bounded frontier the shell drives
-// ---------------------------------------------------------------------------
-
-/**
- * What the shell has gathered: every file read (`files`) with its parsed
- * edges, and every path requested so far. A requested path missing from
- * `files` is known absent; the shell reports a directory or an unreadable
- * candidate path as absent by leaving it out of the read.
- */
-export type CoverageGraphState = Readonly<{
-  matrixTest: string;
-  aliases: PathAliases;
-  files: ReadonlyMap<string, string>;
-  edges: ReadonlyMap<string, ModuleEdges>;
-  requested: ReadonlySet<string>;
-}>;
-
-/**
- * One frontier step: `read` names the paths the shell reads next (each
- * either present with its text, or absent); `complete` means `state.files`
- * now decides coverage exactly as the whole repository would;
- * `bound-exceeded` is the `coverage-bound-exceeded` infrastructure failure.
- */
-export type CoverageFrontierStep =
-  | Readonly<{ kind: "read"; next: NonEmpty<string>; state: CoverageGraphState }>
-  | Readonly<{ kind: "complete"; state: CoverageGraphState }>
-  | Readonly<{ kind: "bound-exceeded"; failure: OwnerInfrastructureFailure }>;
-
-export const initialCoverageState = (matrixTest: string, aliases: PathAliases): CoverageGraphState => ({
-  matrixTest,
-  aliases,
-  files: new Map(),
-  edges: new Map(),
-  requested: new Set(),
-});
-
-/**
- * Folds the files the shell just read (those of the last `next` that exist)
- * into the state and names what to read next, refusing to gather more than
- * `COVERAGE_FRONTIER_BOUND` files.
- */
-export const coverageFrontier = (state: CoverageGraphState, read: ReadonlyMap<string, string>): CoverageFrontierStep => {
-  const files = new Map([...state.files, ...read]);
-  if (files.size > COVERAGE_FRONTIER_BOUND) {
-    return {
-      kind: "bound-exceeded",
-      failure: {
-        kind: "coverage-bound-exceeded",
-        detail: `the import frontier of ${state.matrixTest} exceeded ${COVERAGE_FRONTIER_BOUND} files (${files.size} gathered)`,
-      },
-    };
-  }
-  const edges = new Map([...state.edges, ...[...read].map(([path, text]) => [path, moduleEdges(path, text)] as const)]);
-  const requested = new Set([...state.requested, ...read.keys()]);
-  const { undecided } = walk(state.matrixTest, (path) => edges.get(path), state.aliases, (path) => requested.has(path));
-  const next: CoverageGraphState = { ...state, files, edges, requested: new Set([...requested, ...undecided]) };
-  const [first, ...rest] = undecided;
-  return first === undefined ? { kind: "complete", state: next } : { kind: "read", next: [first, ...rest], state: next };
-};
+  coverageThrough(matrixTest, obligation, aliases, readFromMap(files));

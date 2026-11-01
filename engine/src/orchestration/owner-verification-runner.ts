@@ -6,10 +6,10 @@
  *
  * 1. The real workspace's digest is observed before anything runs.
  * 2. Per owed obligation, in stamp order:
- *    - coverage: the matrix test's import frontier is read from the real
- *      workspace (`coverageFrontier` names each next read), its tsconfig
- *      `paths` are resolved by `pathAliasesOf` over this shell's reads and
- *      `jsonc-parser`, and `coverageOverFiles` decides;
+ *    - coverage: the matrix test's tsconfig `paths` are resolved by
+ *      `pathAliasesOf` over this shell's reads and `jsonc-parser`, then
+ *      `siblingCoverage` walks the import frontier itself, pulling each file
+ *      it needs from the real workspace through `readRepositoryText`;
  *    - mutation, unless the obligation is exempt: `waveBaseOf` chooses the
  *      owner's Wave base, this shell resolves it with Git and reads the
  *      owner there, `changedHeadLines` and `mutationPlan` fix the mutants,
@@ -41,7 +41,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
-import { coverageFrontier, coverageOverFiles, initialCoverageState } from "../core/owner-verification/coverage";
+import { siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
@@ -53,6 +53,7 @@ import type {
   InvariantId,
   InvariantVerdict,
   MatrixTestRun,
+  ModuleRead,
   MutationPlan,
   OwnerInfrastructureFailure,
   OwnerInfrastructureFailureKind,
@@ -105,16 +106,11 @@ const unavailable = (kind: OwnerInfrastructureFailureKind, detail: string): Owne
  * repository. A file the filesystem refuses (any other errno) is
  * `unreadable`, never absent, so it can never pass for a missing sibling.
  */
-type RepositoryRead =
-  | Readonly<{ kind: "text"; text: string }>
-  | Readonly<{ kind: "absent" }>
-  | Readonly<{ kind: "unreadable"; failure: OwnerInfrastructureFailure }>;
-
-const ABSENT: RepositoryRead = Object.freeze({ kind: "absent" });
+const ABSENT: ModuleRead = Object.freeze({ kind: "absent" });
 const ABSENCE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
 
 /** A repository-relative path's text, its absence, or why the filesystem refused it. Never throws. */
-function readRepositoryText(root: CanonicalRepositoryRoot, path: string): RepositoryRead {
+function readRepositoryText(root: CanonicalRepositoryRoot, path: string): ModuleRead {
   const absolute = posix.join(root, path);
   try {
     if (!statSync(absolute).isFile()) return ABSENT;
@@ -165,18 +161,7 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
 function coverage(root: CanonicalRepositoryRoot, obligation: OwnerObligation): CoverageVerdict {
   const aliases = coverageAliases(root, obligation.matrixTest);
   if (!aliases.ok) return coverageInfrastructure(aliases.error);
-  let step = coverageFrontier(initialCoverageState(obligation.matrixTest, aliases.value), new Map());
-  while (step.kind === "read") {
-    const gathered = new Map<string, string>();
-    for (const path of step.next) {
-      const file = readRepositoryText(root, path);
-      if (file.kind === "unreadable") return coverageInfrastructure(file.failure);
-      if (file.kind === "text") gathered.set(path, file.text);
-    }
-    step = coverageFrontier(step.state, gathered);
-  }
-  if (step.kind === "bound-exceeded") return coverageInfrastructure(step.failure);
-  return coverageOverFiles({ matrixTest: obligation.matrixTest, obligation, files: step.state.files, aliases: aliases.value });
+  return siblingCoverage({ obligation, aliases: aliases.value, read: (path) => readRepositoryText(root, path) });
 }
 
 // ---------------------------------------------------------------------------

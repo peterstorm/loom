@@ -107,8 +107,8 @@ export type PathAliases = readonly PathAlias[];
 /**
  * Whether a matrix test reaches its owned Invariant's owner and every
  * declared sibling. `missing` names every unreached path in declared order,
- * the owner first. `infrastructure` is the shell's failure to gather the
- * import frontier: a frontier file that exists but cannot be read
+ * the owner first. `infrastructure` is a failure to read the import
+ * frontier: a frontier file that exists but cannot be read
  * (`repository-file-unreadable`), an unresolvable tsconfig
  * (`alias-config-unresolvable`), or the frontier bound exceeded
  * (`coverage-bound-exceeded`). An unreadable file is never reported as a missing path.
@@ -118,9 +118,9 @@ export type CoverageVerdict =
   | Readonly<{ kind: "missing"; paths: NonEmpty<string> }>
   | Readonly<{ kind: "infrastructure"; failure: OwnerInfrastructureFailure }>;
 
-/** The pure coverage decision's input: the matrix test, the obligation it
- *  must cover, the repository files gathered so far (repository-relative
- *  path → text), and the aliases specifiers resolve through. */
+/** The file-map coverage decision's input: the matrix test, the obligation
+ *  it must cover, every repository file (repository-relative path → text),
+ *  and the aliases specifiers resolve through. */
 export type CoverageInput = Readonly<{
   matrixTest: string;
   obligation: OwnerObligation;
@@ -128,8 +128,28 @@ export type CoverageInput = Readonly<{
   aliases: PathAliases;
 }>;
 
-/** `coverage.ts`'s entry point: a pure function of the import graph and the declared paths. */
+/** The same decision over a file map holding every file there is: the whole-repository form of `SiblingCoverageFn`. */
 export type CoverageOverFilesFn = (input: CoverageInput) => CoverageVerdict;
+
+/**
+ * One repository file as sibling coverage reads it (#133): its text;
+ * `absent` (no such path, not a regular file, or a path resolving outside
+ * the repository); or `unreadable`, a file the filesystem refused, which is
+ * an infrastructure failure and never a missing path.
+ */
+export type ModuleRead =
+  | Readonly<{ kind: "text"; text: string }>
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "unreadable"; failure: OwnerInfrastructureFailure }>;
+
+/** The port sibling coverage pulls repository files through, one path at a time. */
+export type ReadModule = (path: string) => ModuleRead;
+
+/** Sibling coverage's input: the obligation (whose matrix test the walk starts from), the aliases, and the port. */
+export type SiblingCoverageInput = Readonly<{ obligation: OwnerObligation; aliases: PathAliases; read: ReadModule }>;
+
+/** `coverage.ts`'s entry point: it drives its own traversal through the port and decides. */
+export type SiblingCoverageFn = (input: SiblingCoverageInput) => CoverageVerdict;
 
 // ---------------------------------------------------------------------------
 // The mutation plan

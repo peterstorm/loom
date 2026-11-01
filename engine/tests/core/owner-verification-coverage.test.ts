@@ -1,22 +1,20 @@
 /**
  * Sibling coverage (T5, AD-5): specifier resolution, reach, the coverage
- * decision and the shell's bounded frontier step — all pure.
+ * decision and the walk that drives its own reads through the `ReadModule`
+ * port (#133) — all pure.
  */
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   COVERAGE_FRONTIER_BOUND,
-  coverageFrontier,
   coverageOverFiles,
   decideCoverage,
-  initialCoverageState,
   reachedFiles,
   resolveSpecifier,
-  type CoverageFrontierStep,
-  type CoverageGraphState,
+  siblingCoverage,
 } from "../../src/core/owner-verification/coverage";
-import type { OwnerObligation, PathAliases } from "../../src/core/owner-verification/types";
+import type { OwnerObligation, PathAliases, ReadModule } from "../../src/core/owner-verification/types";
 import { ownerObligation } from "../fixtures/owner-obligation";
 
 const OWNER = "src/rules/owner.ts";
@@ -221,22 +219,18 @@ describe("coverage laws", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The bounded frontier the shell drives
+// The self-driving walk over the ReadModule port (#133)
 // ---------------------------------------------------------------------------
 
-/** Drives the frontier against an in-memory repository, as the shell does against the filesystem. */
-const drive = (repo: Readonly<Record<string, string>>, aliases: PathAliases, maxSteps = 100): CoverageFrontierStep & { reads: number } => {
-  let state: CoverageGraphState = initialCoverageState(MATRIX, aliases);
-  let read: ReadonlyMap<string, string> = new Map();
-  let reads = 0;
-  for (let step = 0; step < maxSteps; step += 1) {
-    const result = coverageFrontier(state, read);
-    if (result.kind !== "read") return { ...result, reads };
-    state = result.state;
-    read = new Map(result.next.flatMap((path) => (path in repo ? [[path, repo[path]!] as const] : [])));
-    reads += read.size;
-  }
-  throw new Error("frontier did not settle");
+/** An in-memory port over `repo` that records every read, refusing the paths in `refused`. */
+const recordingPort = (repo: Readonly<Record<string, string>>, refused: ReadonlySet<string> = new Set()) => {
+  const reads: string[] = [];
+  const read: ReadModule = (path) => {
+    reads.push(path);
+    if (refused.has(path)) return { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: `${path} cannot be read: EACCES` } };
+    return path in repo ? { kind: "text", text: repo[path]! } : { kind: "absent" };
+  };
+  return { read, reads };
 };
 
 // Random repositories over every resolution path the frontier must gather
@@ -321,76 +315,95 @@ const layoutRepository = fc.record({
   return { repo, obligation: obligation([declaredPath(1), declaredPath(2)], declaredPath(0)) };
 });
 
-describe("coverageFrontier", () => {
-  it("first asks for the matrix test, then settles on exactly the files coverage needs", () => {
-    const first = coverageFrontier(initialCoverageState(MATRIX, ALIASES), new Map());
-    expect(first).toMatchObject({ kind: "read", next: [MATRIX] });
-
+describe("siblingCoverage: the walk drives its own reads", () => {
+  it("reads the matrix test first, then only the files coverage needs, each once", () => {
     const repo = {
       ...SOURCES,
       [MATRIX]: importing("../src/rules/owner", "@rules/sibling-a", "../src/rules/index"),
       "src/unrelated.ts": "export {};\n",
     };
-    const done = drive(repo, ALIASES);
-    expect(done.kind).toBe("complete");
-    if (done.kind !== "complete") return;
-    expect([...done.state.files.keys()].sort()).toEqual([MATRIX, "src/rules/index.ts", OWNER, SIBLING_A, SIBLING_B].sort());
-    expect(coverageOverFiles({ matrixTest: MATRIX, obligation: obligation(), files: done.state.files, aliases: ALIASES }))
-      .toEqual({ kind: "covered" });
+    const port = recordingPort(repo);
+    expect(siblingCoverage({ obligation: obligation(), aliases: ALIASES, read: port.read })).toEqual({ kind: "covered" });
+    expect(port.reads[0]).toBe(MATRIX);
+    expect(new Set(port.reads).size).toBe(port.reads.length);
+    expect(port.reads.filter((path) => path in repo).sort()).toEqual([MATRIX, "src/rules/index.ts", OWNER, SIBLING_A, SIBLING_B].sort());
+    expect(port.reads).not.toContain("src/unrelated.ts");
   });
 
-  it("FR-007: the gathered files decide coverage exactly as the whole repository does", () => {
+  it("FR-007: the self-driven walk decides exactly as the whole repository does", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 12 }), fc.constantFrom<"reexport" | "import">("reexport", "import"), (hops, edge) => {
       const repo = chainFiles(hops, edge);
-      const done = drive(repo, []);
-      expect(done.kind).toBe("complete");
-      if (done.kind !== "complete") return;
-      const input = { matrixTest: MATRIX, obligation: targetObligation, aliases: [] };
-      expect(coverageOverFiles({ ...input, files: done.state.files })).toEqual(coverageOverFiles({ ...input, files: new Map(Object.entries(repo)) }));
+      const port = recordingPort(repo);
+      expect(siblingCoverage({ obligation: targetObligation, aliases: [], read: port.read }))
+        .toEqual(coverageOverFiles({ matrixTest: MATRIX, obligation: targetObligation, files: new Map(Object.entries(repo)), aliases: [] }));
+      expect(new Set(port.reads).size).toBe(port.reads.length);
     }));
   });
 
-  it("FR-007: the gathered files decide coverage exactly as the whole repository does, over aliases, fallbacks, indexes and ladder order", () => {
+  it("FR-007: the self-driven walk decides exactly as the whole repository does, over aliases, fallbacks, indexes and ladder order", () => {
     fc.assert(fc.property(layoutRepository, ({ repo, obligation: declared }) => {
-      const done = drive(repo, LAYOUT_ALIASES);
-      expect(done.kind).toBe("complete");
-      if (done.kind !== "complete") return;
-      const input = { matrixTest: MATRIX, obligation: declared, aliases: LAYOUT_ALIASES };
-      expect(coverageOverFiles({ ...input, files: done.state.files })).toEqual(coverageOverFiles({ ...input, files: new Map(Object.entries(repo)) }));
-      expect([...done.state.files.keys()].every((path) => path in repo)).toBe(true);
+      const port = recordingPort(repo);
+      expect(siblingCoverage({ obligation: declared, aliases: LAYOUT_ALIASES, read: port.read }))
+        .toEqual(coverageOverFiles({ matrixTest: MATRIX, obligation: declared, files: new Map(Object.entries(repo)), aliases: LAYOUT_ALIASES }));
+      expect(new Set(port.reads).size).toBe(port.reads.length);
+      expect(port.reads[0]).toBe(MATRIX);
     }), { numRuns: 1000 });
   });
 
-  it("FR-007: an alias met only after its later target was gathered still gathers the earlier target first", () => {
-    // The matrix test reads src/m0.ts directly; src/m1.ts, read alongside it,
-    // re-exports `@m/m0`, whose earlier target gen/m0.ts nothing has requested.
+  it("FR-007: a ladder stops at its first present candidate: a later candidate beside it is never read", () => {
+    const repo = {
+      [MATRIX]: 'import "../src/m0";\n',
+      "src/m0.ts": "export const m0 = 0;\n",
+      "src/m0/index.ts": "export const later = 0;\n",
+    };
+    const port = recordingPort(repo);
+    siblingCoverage({ obligation: obligation([], "src/m0.ts"), aliases: [], read: port.read });
+    expect(port.reads).toEqual([MATRIX, "src/m0", "src/m0.ts"]);
+  });
+
+  it("FR-007: an alias met only after its later target was read still resolves to the earlier target", () => {
     const repo = {
       [MATRIX]: 'import "../src/m0";\nimport "../src/m1";\n',
       "src/m0.ts": "export const m0 = 0;\n",
       "gen/m0.ts": "export const m0 = 0;\n",
       "src/m1.ts": 'export * from "@m/m0";\n',
     };
-    const done = drive(repo, LAYOUT_ALIASES);
-    expect(done.kind).toBe("complete");
-    if (done.kind !== "complete") return;
-    expect(done.state.files.has("gen/m0.ts")).toBe(true);
-    const input = { matrixTest: MATRIX, obligation: obligation(["src/m1.ts"], "gen/m0.ts"), aliases: LAYOUT_ALIASES };
-    expect(coverageOverFiles({ ...input, files: done.state.files })).toEqual({ kind: "covered" });
-    expect(coverageOverFiles({ ...input, files: new Map(Object.entries(repo)) })).toEqual({ kind: "covered" });
+    const port = recordingPort(repo);
+    expect(siblingCoverage({ obligation: obligation(["src/m1.ts"], "gen/m0.ts"), aliases: LAYOUT_ALIASES, read: port.read }))
+      .toEqual({ kind: "covered" });
+    expect(port.reads).toContain("gen/m0.ts");
   });
 
-  it("a missing matrix test settles with nothing gathered", () => {
-    const done = drive({}, []);
-    expect(done).toMatchObject({ kind: "complete" });
+  it("a missing matrix test reads only the matrix test and reaches nothing", () => {
+    const port = recordingPort({});
+    expect(siblingCoverage({ obligation: obligation([]), aliases: [], read: port.read })).toEqual({ kind: "missing", paths: [OWNER] });
+    expect(port.reads).toEqual([MATRIX]);
   });
 
-  it("exceeding the bound is a coverage-bound-exceeded infrastructure failure", () => {
+  it("a refused read in the frontier is that read's infrastructure failure, never a missing path, and stops the reads", () => {
+    const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b") };
+    const port = recordingPort(repo, new Set([SIBLING_A]));
+    expect(siblingCoverage({ obligation: obligation(), aliases: [], read: port.read })).toEqual({
+      kind: "infrastructure",
+      failure: { kind: "repository-file-unreadable", detail: `${SIBLING_A} cannot be read: EACCES` },
+    });
+    expect(port.reads.at(-1)).toBe(SIBLING_A);
+  });
+
+  it("a refused file outside the frontier is never read, so it never fails coverage", () => {
+    const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b"), "src/locked.ts": "" };
+    const port = recordingPort(repo, new Set(["src/locked.ts"]));
+    expect(siblingCoverage({ obligation: obligation(), aliases: [], read: port.read })).toEqual({ kind: "covered" });
+    expect(port.reads).not.toContain("src/locked.ts");
+  });
+
+  it("reading past the bound is a coverage-bound-exceeded infrastructure failure, and the walk reads no further", () => {
     const repo = chainFiles(COVERAGE_FRONTIER_BOUND + 5, "reexport");
-    const done = drive(repo, [], COVERAGE_FRONTIER_BOUND + 50);
-    expect(done.kind).toBe("bound-exceeded");
-    if (done.kind !== "bound-exceeded") return;
-    expect(done.failure.kind).toBe("coverage-bound-exceeded");
-    expect(done.failure.detail).toContain(String(COVERAGE_FRONTIER_BOUND));
+    const port = recordingPort(repo);
+    const verdict = siblingCoverage({ obligation: targetObligation, aliases: [], read: port.read });
+    expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "coverage-bound-exceeded" } });
+    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(String(COVERAGE_FRONTIER_BOUND));
+    expect(port.reads.filter((path) => path in repo)).toHaveLength(COVERAGE_FRONTIER_BOUND + 1);
     expect(COVERAGE_FRONTIER_BOUND).toBe(512);
   });
 });

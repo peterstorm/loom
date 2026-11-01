@@ -1,7 +1,6 @@
 /**
  * A matrix test's tsconfig `paths`, made repository-relative (ADR-0035):
- * the input `coverageFrontier` and `coverageOverFiles` resolve aliased
- * imports with. Pure: both effects are injected. `read` returns a
+ * the input `siblingCoverage` resolves aliased imports with. Pure: both effects are injected. `read` returns a
  * repository-relative file's text, or null when it is not there; `parseJsonc`
  * reads a config's JSONC text into a value, or says why it does not parse.
  * The shell (`orchestration/owner-verification-runner.ts`) adapts its total
