@@ -7,7 +7,7 @@
 
 import { parseInvariantId, type InvariantId } from "../../src/core/invariant-id";
 import { parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
-import { ownerObligationOf, ownerScopeOf, type OwnerScope } from "../../src/core/owner-verification/obligations";
+import { ownerObligationOf, taskOwnerDuty, type TaskOwnerDuty } from "../../src/core/owner-verification/obligations";
 import type { MutantCap, OwnerObligation, OwnerObligationFields } from "../../src/core/owner-verification/types";
 
 /** An Invariant id the test spells out; throws on anything but `INV-N`. */
@@ -34,5 +34,5 @@ export function capOf(raw: number): MutantCap {
   return parsed.value;
 }
 
-/** The scope of a graph populated before owner verification: no stamp, so nothing is owed. */
-export const UNSTAMPED_SCOPE: OwnerScope = ownerScopeOf({ tasks: [] });
+/** The owner duty of a Task in a graph populated before owner verification: no stamp, so nothing is owed. */
+export const UNSTAMPED_DUTY: TaskOwnerDuty = taskOwnerDuty({}, []);

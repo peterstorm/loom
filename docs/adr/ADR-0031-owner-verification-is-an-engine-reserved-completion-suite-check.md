@@ -97,9 +97,9 @@ exactly when the TaskGraph carries the `owner_obligations` stamp.**
   the roster, and so the suite digest, is byte-identical to the pre-G5b roster (FR-004). A project check
   cannot claim the id: the project-check parser in `completion-suite.ts` refuses any `checkId` in the reserved
   `loom:` namespace.
-- `ownerCheckAuthority(ownerScopeOf(graph), wave)` in `engine/src/core/owner-verification/obligations.ts` is the one place
-  that decides the authority (INV-3, AD-4). It returns `null` exactly when the graph has no stamp. Otherwise it
-  returns the stamp's `obligationsDigest` and the ids `ownerVerificationOwed` selects, which is an empty list
+- `waveOwnerDuty(graph, wave).check` in `engine/src/core/owner-verification/obligations.ts` is the one place
+  that decides the authority (INV-3, AD-4). It is `null` exactly when the graph has no stamp. Otherwise it
+  is the stamp's `obligationsDigest` and the ids of the duty's `owed` obligations, which is an empty list
   when the Wave changed no owned family. It has two callers. `authorizeGraphCompletionSuite` in
   `engine/src/core/owner-verification/suite-authority.ts` is the one authorize-from-TaskGraph function: the
   gate helper (`engine/src/handlers/helpers/wave-completion-suite.ts`, authorizing the suite it runs) and
@@ -132,7 +132,7 @@ field joins the strict-field parse only when present.
    the file; the pure `planModelsIntegrityFailure` (`engine/src/core/owner-verification/plan-integrity.ts`)
    decides.
 2. The pure `ownerObservationDecision` (`engine/src/core/owner-verification/owed-verification.ts`, PR #131
-   round 2) then decides from the integrity result, `ownerVerificationOwed(scope, wave)` and the authorized
+   round 2) then decides from the integrity result, the Wave duty's `owed` and the authorized
    check: `unavailable` (the plan failed, or the owed obligations are not the check's `owed` ids, which is
    `plan-drift`), `verified-empty` when nothing is owed (`verified` with no verdicts and `boundMs: 0`), or
    `must-run` over a branded `OwedVerification` that pairs the owed obligations with the stamp digest.

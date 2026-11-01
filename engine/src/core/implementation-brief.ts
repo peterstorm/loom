@@ -27,7 +27,7 @@ import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { match } from "ts-pattern";
 import { invariantRoles } from "./plan-paths";
-import { obligationsTouchedBy, type OwnerScope } from "./owner-verification/obligations";
+import type { TaskOwnerDuty } from "./owner-verification/obligations";
 import type { OwnerObligation } from "./owner-verification/types";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
@@ -120,10 +120,10 @@ export type ImplementationBriefInput = Readonly<{
   rules: ReadonlyMap<RuleDocument, string>;
   /** The invariants the protected plan declares; empty when there is no plan. */
   invariants: readonly PlanInvariant[];
-  /** The TaskGraph's Owner Obligations (`ownerScopeOf(graph)`). A graph
+  /** The Task's owner duty (`taskOwnerDuty(graph, task.file_list)`). A graph
    *  populated before owner verification carries no stamp and is owed no
    *  owner duty, so the brief states none. */
-  ownerScope: OwnerScope;
+  ownerDuty: TaskOwnerDuty;
   /** The TaskGraph's Acceptance Contracts, with their freeze; empty when none. */
   contracts: readonly AcceptanceContract[];
   /** The TaskGraph's frozen verification manifest (`graph.verification_manifest`),
@@ -250,7 +250,7 @@ function planBlock(fileList: readonly string[], invariant: PlanInvariant): strin
  * validation has already refused a malformed one).
  *
  * Each owned Invariant the Task touches by the population stamp (`touched`,
- * decided by INV-3's owner `obligationsTouchedBy`) also gets its owner duties
+ * decided by INV-3's owner `taskOwnerDuty`) also gets its owner duties
  * (`ownerDuties`). A touched obligation with no plan block of its own (a stamp
  * that drifted from the plan, which the Wave Gate blocks) still states its
  * duties, after the plan's blocks, rather than silently owing nothing.
@@ -592,7 +592,7 @@ export function renderImplementationBrief(
     invariant_ownership: invariantOwnership(
       task.file_list ?? [],
       input.invariants,
-      obligationsTouchedBy(input.ownerScope, task.file_list ?? []),
+      input.ownerDuty.touched,
     ),
     acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
     file_list: bulleted(task.file_list ?? [], "None declared."),

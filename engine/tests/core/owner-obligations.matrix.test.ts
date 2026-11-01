@@ -2,34 +2,34 @@
  * INV-3 matrix: which owned Invariants a Wave or Task owes is decided only by
  * `core/owner-verification/obligations.ts`.
  *
- * Owner rows (T4): the Wave scope (`ownerVerificationOwed`, owner or
- * sibling: G5a's `changesFamily`) against the touch scope
- * (`obligationsTouchedBy`, any role) over owner-only, sibling-only,
- * matrix-only and unrelated file lists; and an absent against an empty
- * `owner_obligations` stamp through `ownerVerificationOwed` and
- * `ownerCheckAuthority`. Every selection reads the opaque `OwnerScope`
- * `ownerScopeOf` builds, never the raw stamp.
+ * Owner rows (T4): the Wave scope (`waveOwnerDuty`, owner or sibling: G5a's
+ * `changesFamily`) against the touch scope (`taskOwnerDuty`, any role) over
+ * owner-only, sibling-only, matrix-only and unrelated file lists; and an
+ * absent against an empty `owner_obligations` stamp through both duties.
+ * The two duties are the only selections: each answers absent and empty
+ * with its own variant, so no caller filters the raw stamp.
  *
  * Sibling rows (T9): `wave-review-authority.ts` issues the owner map, and
  * `implementation-brief.ts` renders the duty paragraphs, for exactly the
- * obligations `obligationsTouchedBy` selects, over the same file-list shapes,
+ * obligations `taskOwnerDuty` touches, over the same file-list shapes,
  * and neither issues anything over an unstamped graph.
  *
  * Sibling rows (T10, PR #131): `owner-verification/suite-authority.ts`, the
  * one authorize-from-TaskGraph function the gate helper and readiness share,
  * authorizes the `loom:owner-verification` check with exactly the ids
- * `ownerVerificationOwed` selects (the gate scope);
+ * `waveOwnerDuty` owes (the gate scope);
  * `wave-completion-suite-readiness.ts` accepts, and the State File wire
  * (`state-file-wire.ts`) loads, exactly the receipt authorized under
- * `ownerCheckAuthority`, over the same file-list shapes; an unstamped graph
+ * the Wave duty's `check`, over the same file-list shapes; an unstamped graph
  * carries no owner check in any of them.
  *
  * Sibling rows (PR #131): `handlers/helpers/wave-completion-suite.ts` hands
- * the runner exactly the `ownerVerificationOwed` obligations and the authorized
+ * the runner exactly the Wave duty's owed obligations and the authorized
  * check, and skips it when none are owed; `owner-verification-runner.ts`
  * needs an `affectedRunner` exactly when `verifyOwed` selects some
  * obligation; `owner-verification/plan-integrity.ts` blocks on exactly the
- * stamps `stampAgreement` does not find in agreement.
+ * stamps the Wave duty's `agreementWith` does not find in agreement, and on
+ * every unstamped graph.
  *
  * Sibling row (PR #131): `task-graph-population.ts` refuses a manifest
  * without an `affectedRunner` exactly when `verifyOwed` selects some
@@ -60,13 +60,10 @@ import {
   obligationsAgree,
   obligationsDigest,
   obligationsFromPlan,
-  obligationsTouchedBy,
-  ownerCheckAuthority,
-  ownerScopeOf,
-  ownerVerificationOwed,
   parseOwnerObligations,
-  stampAgreement,
+  taskOwnerDuty,
   verifyOwed,
+  waveOwnerDuty,
   type OwnerCheckAuthority,
 } from "../../src/core/owner-verification/obligations";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
@@ -173,11 +170,11 @@ const ids = (obligations: readonly OwnerObligation[]): readonly string[] => obli
 
 /** The Wave scope of Wave-1 Tasks over the stamp. */
 const waveScope = (tasks: readonly Task[], stamp: readonly OwnerObligation[] = OBLIGATIONS): readonly OwnerObligation[] =>
-  ownerVerificationOwed(ownerScopeOf(graph(tasks, stamp)), 1);
+  waveOwnerDuty(graph(tasks, stamp), 1).owed;
 
 /** The touch scope of a file list over the stamp. */
 const touchScope = (files: readonly string[], stamp: readonly OwnerObligation[] = OBLIGATIONS): readonly OwnerObligation[] =>
-  obligationsTouchedBy(ownerScopeOf({ tasks: [], owner_obligations: stamp }), files);
+  taskOwnerDuty({ owner_obligations: stamp }, files).touched;
 
 describe("INV-3 owner rows — Wave scope against touch scope", () => {
   it.each(ROWS)("$name: the Wave scope is owner-or-sibling, the touch scope any role", ({ files, wave, touched }) => {
@@ -185,10 +182,10 @@ describe("INV-3 owner rows — Wave scope against touch scope", () => {
     expect(ids(touchScope(files))).toEqual(touched ? ["INV-1"] : []);
   });
 
-  it.each(ROWS)("$name: ownerVerificationOwed over a stamped graph is the Wave scope of that Wave's Tasks", ({ files, wave }) => {
+  it.each(ROWS)("$name: waveOwnerDuty over a stamped graph owes the Wave scope of that Wave's Tasks", ({ files, wave }) => {
     const stamped = graph([task("T1", 2, files), task("T2", 1, ["src/fees/table.ts"])], OBLIGATIONS);
-    expect(ids(ownerVerificationOwed(ownerScopeOf(stamped), 2))).toEqual(wave ? ["INV-1"] : []);
-    expect(ownerCheckAuthority(ownerScopeOf(stamped), 2)).toEqual({ obligationsDigest: obligationsDigest(OBLIGATIONS), owed: wave ? ["INV-1"] : [] });
+    expect(ids(waveOwnerDuty(stamped, 2).owed)).toEqual(wave ? ["INV-1"] : []);
+    expect(waveOwnerDuty(stamped, 2).check).toEqual({ obligationsDigest: obligationsDigest(OBLIGATIONS), owed: wave ? ["INV-1"] : [] });
   });
 
   it("a Wave's Tasks are unioned, in plan order, each obligation once", () => {
@@ -208,7 +205,7 @@ describe("INV-3 owner rows — Wave scope against touch scope", () => {
   });
 });
 
-describe("INV-3 sibling rows — review-packet owner map and brief duties follow obligationsTouchedBy", () => {
+describe("INV-3 sibling rows — review-packet owner map and brief duties follow taskOwnerDuty", () => {
   const cleanup: string[] = [];
   afterEach(() => {
     for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -261,7 +258,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,
       planFile: PLAN_FILE, spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules: RULES,
       roster: [], invariants: OWNED_PLAN_MODELS.invariants, contracts: [], repositoryRoot: "/repo", operatorNotes: [],
-      ownerScope: ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }),
+      ownerDuty: taskOwnerDuty(stamp === undefined ? {} : { owner_obligations: stamp }, files),
     });
     if (!rendered.ok) throw new Error(rendered.error.message);
     return [...rendered.value.prompt.matchAll(/\*\*Owner duties \((INV-\d+)\):\*\*/g)].map((match) => match[1]!);
@@ -290,7 +287,7 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
   });
 });
 
-describe("INV-3 sibling rows — suite authorization, readiness and the State File wire follow ownerCheckAuthority", () => {
+describe("INV-3 sibling rows — suite authorization, readiness and the State File wire follow the Wave duty's check", () => {
   const MANIFEST = frozenManifest({ schemaVersion: 1 });
   const WORKSPACE = "b".repeat(64) as ArtifactDigest;
   const ACTIVE: ActiveWaveGateRegistration = {
@@ -350,7 +347,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
     expect(gateOwnerCheck(stamped)).toMatchObject({
       checkId: "loom:owner-verification",
       obligationsDigest: obligationsDigest(OBLIGATIONS),
-      owed: ids(ownerVerificationOwed(ownerScopeOf(stamped), 1)),
+      owed: ids(waveOwnerDuty(stamped, 1).owed),
     });
   });
 
@@ -358,9 +355,9 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
     expect(gateOwnerCheck(suiteGraph(files, undefined))).toBeNull();
   });
 
-  it.each(ROWS)("$name: readiness accepts exactly the receipt authorized under ownerCheckAuthority", ({ files }) => {
+  it.each(ROWS)("$name: readiness accepts exactly the receipt authorized under the Wave duty's check", ({ files }) => {
     const stamped = suiteGraph(files, OBLIGATIONS);
-    const owner = ownerCheckAuthority(ownerScopeOf(stamped), 1);
+    const owner = waveOwnerDuty(stamped, 1).check;
     expect(readiness(stamped, owner)).toBe("accepted");
     expect(readiness(stamped, null)).toBe("required");
     const otherOwed = owner!.owed.length === 0 ? [FEES.invariant] : [];
@@ -386,9 +383,9 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
     return parseTaskGraph(JSON.parse(JSON.stringify(written))).ok;
   };
 
-  it.each(ROWS)("$name: the State File wire loads exactly the receipt authorized under ownerCheckAuthority", ({ files }) => {
+  it.each(ROWS)("$name: the State File wire loads exactly the receipt authorized under the Wave duty's check", ({ files }) => {
     const stamped = suiteGraph(files, OBLIGATIONS);
-    const owner = ownerCheckAuthority(ownerScopeOf(stamped), 1);
+    const owner = waveOwnerDuty(stamped, 1).check;
     expect(loads(stamped, owner)).toBe(true);
     expect(loads(stamped, null)).toBe(false);
     const otherOwed = owner!.owed.length === 0 ? [FEES.invariant] : [];
@@ -441,7 +438,7 @@ describe("INV-3 sibling row — population's runner requirement follows verifyOw
   });
 });
 
-describe("INV-3 sibling rows — the gate runs owner verification for ownerVerificationOwed, the runner mutates only verifyOwed", () => {
+describe("INV-3 sibling rows — the gate runs owner verification for the Wave duty's owed obligations, the runner mutates only verifyOwed", () => {
   afterEach(cleanupOwnerVerificationRepos);
   const GATE_TIMEOUT_MS = 60_000;
 
@@ -459,9 +456,9 @@ describe("INV-3 sibling rows — the gate runs owner verification for ownerVerif
       });
       const loaded = repo.manager.load();
       const wave = loaded.active_wave_gate!.wave;
-      const owed = ids(ownerVerificationOwed(ownerScopeOf(loaded), wave));
+      const owed = ids(waveOwnerDuty(loaded, wave).owed);
       expect(seen.map((input) => ids(input.owed.obligations))).toEqual(owed.length === 0 ? [] : [owed]);
-      for (const input of seen) expect(input.owed.obligationsDigest).toBe(ownerCheckAuthority(ownerScopeOf(loaded), wave)!.obligationsDigest);
+      for (const input of seen) expect(input.owed.obligationsDigest).toBe(waveOwnerDuty(loaded, wave).check!.obligationsDigest);
     },
     GATE_TIMEOUT_MS,
   );
@@ -504,19 +501,20 @@ describe("INV-3 owner rows — absent against empty owner_obligations", () => {
   const changing = [task("T1", 1, ["src/rules/owner.ts"])];
 
   it("absent: a pre-feature graph owes nothing and has no owner check authority", () => {
-    expect(ownerVerificationOwed(ownerScopeOf(graph(changing)), 1)).toEqual([]);
-    expect(ownerCheckAuthority(ownerScopeOf(graph(changing)), 1)).toBeNull();
+    expect(waveOwnerDuty(graph(changing), 1).owed).toEqual([]);
+    expect(waveOwnerDuty(graph(changing), 1).check).toBeNull();
     expect(touchScope(["src/rules/owner.ts"], [])).toEqual([]);
-    expect(obligationsTouchedBy(ownerScopeOf(graph(changing)), ["src/rules/owner.ts"])).toEqual([]);
+    expect(taskOwnerDuty(graph(changing), ["src/rules/owner.ts"])).toEqual({ kind: "unstamped", touched: [] });
   });
 
   it("empty: a stamped graph with no owned Invariant owes nothing but still carries the check", () => {
-    expect(ownerVerificationOwed(ownerScopeOf(graph(changing, [])), 1)).toEqual([]);
-    expect(ownerCheckAuthority(ownerScopeOf(graph(changing, [])), 1)).toEqual({ obligationsDigest: obligationsDigest([]), owed: [] });
+    expect(waveOwnerDuty(graph(changing, []), 1).owed).toEqual([]);
+    expect(taskOwnerDuty(graph(changing, []), ["src/rules/owner.ts"])).toEqual({ kind: "stamped", touched: [] });
+    expect(waveOwnerDuty(graph(changing, []), 1).check).toEqual({ obligationsDigest: obligationsDigest([]), owed: [] });
   });
 
   it("stamped, owing nothing this Wave: the authority is non-null with owed []", () => {
-    expect(ownerCheckAuthority(ownerScopeOf(graph([task("T1", 1, ["src/other.ts"])], OBLIGATIONS)), 1))
+    expect(waveOwnerDuty(graph([task("T1", 1, ["src/other.ts"])], OBLIGATIONS), 1).check)
       .toEqual({ obligationsDigest: obligationsDigest(OBLIGATIONS), owed: [] });
   });
 
@@ -605,20 +603,24 @@ describe("obligationsDigest and obligationsAgree — the stamp's identity", () =
   });
 });
 
-describe("stampAgreement — the gate's drift check reads the scope, never the raw stamp", () => {
-  const scopeOf = (stamp?: readonly OwnerObligation[]) => ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp });
+describe("the Wave duty's drift check — agreementWith, only on a stamped duty", () => {
+  const dutyOf = (stamp?: readonly OwnerObligation[]) => waveOwnerDuty(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }, 1);
+  const agreement = (stamp: readonly OwnerObligation[], models = OWNED_PLAN_MODELS) => {
+    const duty = dutyOf(stamp);
+    if (duty.kind !== "stamped") throw new Error("a present stamp is a stamped duty");
+    return duty.agreementWith(models);
+  };
 
   it("agrees with the stamp the plan derives, and drifts from any other, an empty one included", () => {
-    expect(stampAgreement(scopeOf(OBLIGATIONS), OWNED_PLAN_MODELS)).toEqual({ kind: "agrees" });
-    expect(stampAgreement(scopeOf([ADMISSION]), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
-    expect(stampAgreement(scopeOf([FEES, ADMISSION]), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
-    expect(stampAgreement(scopeOf([]), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
-    expect(stampAgreement(scopeOf([]), parsePlanModels("# Plan: none\n"))).toEqual({ kind: "agrees" });
+    expect(agreement(OBLIGATIONS)).toEqual({ kind: "agrees" });
+    expect(agreement([ADMISSION])).toEqual({ kind: "drifted" });
+    expect(agreement([FEES, ADMISSION])).toEqual({ kind: "drifted" });
+    expect(agreement([])).toEqual({ kind: "drifted" });
+    expect(agreement([], parsePlanModels("# Plan: none\n"))).toEqual({ kind: "agrees" });
   });
 
-  it("an absent stamp is unstamped, never agreement", () => {
-    expect(stampAgreement(scopeOf(), OWNED_PLAN_MODELS)).toEqual({ kind: "unstamped" });
-    expect(stampAgreement(scopeOf(), parsePlanModels("# Plan: none\n"))).toEqual({ kind: "unstamped" });
+  it("an absent stamp is an unstamped duty, with no check, nothing owed and no drift check", () => {
+    expect(dutyOf()).toEqual({ kind: "unstamped", check: null, owed: [] });
   });
 
   it("a plan whose owned Invariant names a path in two roles derives no obligation: underivable", () => {
@@ -631,23 +633,18 @@ describe("stampAgreement — the gate's drift check reads the scope, never the r
       "- `./src/rules/owner.ts` — the owner again",
       "**Matrix test:** tests/rules.matrix.test.ts", "",
     ].join("\n"));
-    expect(stampAgreement(scopeOf(OBLIGATIONS), conflicted)).toEqual({
+    expect(agreement(OBLIGATIONS, conflicted)).toEqual({
       kind: "underivable", error: { kind: "owner-is-sibling", invariant: "INV-1", path: "./src/rules/owner.ts" },
     });
   });
 
-  it("sibling row: plan-integrity blocks on exactly the stamps stampAgreement does not find in agreement", () => {
-    const failureOf = (scope: ReturnType<typeof scopeOf>, models = OWNED_PLAN_MODELS) => planModelsIntegrityFailure("plan.md", models, scope)?.kind ?? null;
-    expect(failureOf(scopeOf(OBLIGATIONS))).toBeNull();
-    expect(failureOf(scopeOf([ADMISSION]))).toBe("plan-drift");
-    expect(failureOf(scopeOf([]))).toBe("plan-drift");
-    expect(failureOf(scopeOf())).toBe("plan-drift");
-    expect(failureOf(scopeOf([]), parsePlanModels("# Plan: none\n"))).toBeNull();
-  });
-
-  it("the scope is opaque: it serializes to nothing a caller could filter", () => {
-    expect(JSON.stringify(scopeOf(OBLIGATIONS))).toBe("{}");
-    expect(Object.keys(scopeOf(OBLIGATIONS))).toEqual([]);
+  it("sibling row: plan-integrity blocks on exactly the stamps agreementWith does not find in agreement, and on an unstamped graph", () => {
+    const failureOf = (duty: ReturnType<typeof dutyOf>, models = OWNED_PLAN_MODELS) => planModelsIntegrityFailure("plan.md", models, duty)?.kind ?? null;
+    expect(failureOf(dutyOf(OBLIGATIONS))).toBeNull();
+    expect(failureOf(dutyOf([ADMISSION]))).toBe("plan-drift");
+    expect(failureOf(dutyOf([]))).toBe("plan-drift");
+    expect(failureOf(dutyOf())).toBe("plan-drift");
+    expect(failureOf(dutyOf([]), parsePlanModels("# Plan: none\n"))).toBeNull();
   });
 });
 
@@ -692,18 +689,18 @@ describe("INV-3 properties", () => {
   it("an absent stamp owes nothing and has no authority, whatever the Wave changed", () => {
     fc.assert(fc.property(fc.array(fileList, { maxLength: 4 }), fc.integer({ min: 1, max: 3 }), (lists, wave) => {
       const unstamped = graph(lists.map((files, i) => task(`T${i}`, 1 + (i % 3), files)));
-      expect(ownerVerificationOwed(ownerScopeOf(unstamped), wave)).toEqual([]);
-      expect(ownerCheckAuthority(ownerScopeOf(unstamped), wave)).toBeNull();
-      expect(obligationsTouchedBy(ownerScopeOf(unstamped), lists.flat())).toEqual([]);
+      expect(waveOwnerDuty(unstamped, wave).owed).toEqual([]);
+      expect(waveOwnerDuty(unstamped, wave).check).toBeNull();
+      expect(taskOwnerDuty(unstamped, lists.flat()).touched).toEqual([]);
     }));
   });
 
-  it("a stamped graph always has authority, and owed is exactly the ids of ownerVerificationOwed", () => {
+  it("a stamped graph always has a check, and its owed ids are exactly the ids of the owed obligations", () => {
     fc.assert(fc.property(fc.array(fileList, { maxLength: 4 }), fc.integer({ min: 1, max: 3 }), (lists, wave) => {
       const stamped = graph(lists.map((files, i) => task(`T${i}`, 1 + (i % 3), files)), OBLIGATIONS);
-      expect(ownerCheckAuthority(ownerScopeOf(stamped), wave)).toEqual({
+      expect(waveOwnerDuty(stamped, wave).check).toEqual({
         obligationsDigest: obligationsDigest(OBLIGATIONS),
-        owed: ids(ownerVerificationOwed(ownerScopeOf(stamped), wave)),
+        owed: ids(waveOwnerDuty(stamped, wave).owed),
       });
     }));
   });

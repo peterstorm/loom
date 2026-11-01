@@ -39,7 +39,7 @@ import {
 } from "./orchestration-contract";
 import { admitReviewedWorkspace, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
-import { obligationsTouchedBy, ownerScopeOf } from "./owner-verification/obligations";
+import { taskOwnerDuty } from "./owner-verification/obligations";
 import { isOwnerMapRole, OWNER_MAP_SECTION, renderOwnerMapSection } from "./owner-verification/owner-map";
 import type { OwnerObligation } from "./owner-verification/types";
 import {
@@ -131,7 +131,7 @@ export type WaveTaskReviewRoster = Readonly<{ taskId: string; roster: WaveReview
  * exactly these; the roster derivation below reads their presence.
  */
 function ownerMapObligations(graph: TaskGraph, schemaVersion: 1 | 2, task: Task): readonly OwnerObligation[] {
-  return schemaVersion === 2 ? obligationsTouchedBy(ownerScopeOf(graph), task.file_list ?? []) : [];
+  return schemaVersion === 2 ? taskOwnerDuty(graph, task.file_list ?? []).touched : [];
 }
 
 /** One Task's roster together with the owner-map obligations whose presence picked it. */

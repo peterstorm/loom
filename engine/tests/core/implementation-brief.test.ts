@@ -36,7 +36,7 @@ import { taskFixture } from "../fixtures/task-lifecycle";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-import { invariantId, UNSTAMPED_SCOPE } from "../fixtures/owner-obligation";
+import { invariantId, UNSTAMPED_DUTY } from "../fixtures/owner-obligation";
 
 const TEMPLATE = readFileSync(join(LOOM_PACKAGE_ROOT, IMPLEMENTATION_BRIEF_TEMPLATE), "utf8");
 const RULES: ReadonlyMap<RuleDocument, string> = new Map(RULE_DOCUMENTS.map((name) =>
@@ -120,7 +120,7 @@ const input = (value: Task, overrides: Partial<ImplementationBriefInput> = {}): 
   rules: RULES,
   roster: ROSTER,
   invariants: [],
-  ownerScope: UNSTAMPED_SCOPE,
+  ownerDuty: UNSTAMPED_DUTY,
   contracts: [],
   repositoryRoot: "/repo",
   operatorNotes: [],

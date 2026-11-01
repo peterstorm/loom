@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { canonicalJson, type JsonValue } from "../../core/review-packet";
 import { parsePlanModels } from "../../core/parse-plan-models";
 import { match } from "ts-pattern";
-import { ownerScopeOf, ownerVerificationOwed, type OwnerScope } from "../../core/owner-verification/obligations";
+import { waveOwnerDuty, type WaveOwnerDuty } from "../../core/owner-verification/obligations";
 import { planModelsIntegrityFailure } from "../../core/owner-verification/plan-integrity";
 import { ownerObservationDecision } from "../../core/owner-verification/owed-verification";
 import { authorizeGraphCompletionSuite } from "../../core/owner-verification/suite-authority";
@@ -387,7 +387,7 @@ const ownerUnavailable = (failure: OwnerInfrastructureFailure): OwnerVerificatio
 /** Re-read the plan the graph names and prove it still derives the stamp (FR-002); null when it does. */
 function planIntegrityFailure(
   graph: TaskGraph,
-  scope: OwnerScope,
+  duty: WaveOwnerDuty,
   repositoryRoot: CanonicalRepositoryRoot,
 ): OwnerInfrastructureFailure | null {
   const planFile = graph.plan_file;
@@ -401,7 +401,7 @@ function planIntegrityFailure(
   } catch (cause) {
     return { kind: "plan-unreadable", detail: `plan ${planPath} cannot be read: ${describeCause(cause)}` };
   }
-  return planModelsIntegrityFailure(planPath, parsePlanModels(text), scope);
+  return planModelsIntegrityFailure(planPath, parsePlanModels(text), duty);
 }
 
 /** The real workspace's digest, as the owner run observes it before and after it runs. */
@@ -430,10 +430,10 @@ async function ownerVerificationObservation(
   check: OwnerVerificationCheck,
 ): Promise<OwnerVerificationObservation> {
   const { graph, repositoryRoot, wave, manifest } = context;
-  const scope = ownerScopeOf(graph);
+  const duty = waveOwnerDuty(graph, wave);
   const decision = ownerObservationDecision({
-    integrity: planIntegrityFailure(graph, scope, repositoryRoot),
-    owed: ownerVerificationOwed(scope, wave),
+    integrity: planIntegrityFailure(graph, duty, repositoryRoot),
+    owed: duty.owed,
     authority: check,
   });
   if (decision.kind === "unavailable") return ownerUnavailable(decision.failure);

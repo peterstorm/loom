@@ -966,7 +966,7 @@ const engineOwnerCheck = (owner: OwnerCheckAuthority) => freeze({
  * Inject the engine-reserved checks and mint exact Wave suite authority.
  *
  * `owner` makes no ownership decision here (INV-3): callers obtain it from
- * `ownerCheckAuthority` in `owner-verification/obligations.ts`, and the
+ * `waveOwnerDuty(graph, wave).check` in `owner-verification/obligations.ts`, and the
  * owner-verification check is injected exactly when it is non-null, with its
  * obligations digest and owed ids copied verbatim. `null` (a graph without the
  * `owner_obligations` stamp) leaves the roster, and so the suite digest,

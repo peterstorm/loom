@@ -55,7 +55,7 @@ export type OwnerObservationDecision =
 export type OwnerObservationFacts = Readonly<{
   /** The plan integrity check's failure (`planModelsIntegrityFailure`), or null when the plan still derives the stamp. */
   integrity: OwnerInfrastructureFailure | null;
-  /** The obligations the Wave owes (`ownerVerificationOwed`), in stamp order. */
+  /** The obligations the Wave owes (`waveOwnerDuty(graph, wave).owed`), in stamp order. */
   owed: readonly OwnerObligation[];
   /** The owner check the suite authorized. */
   authority: OwnerCheckAuthority;

@@ -170,17 +170,17 @@ a hypothetical project, like the order domain of INV-1 and INV-2 above.
 **Tier:** advisory
 **Owner module:** `engine/src/core/owner-verification/obligations.ts`
 **Sibling entry points:**
-- `engine/src/core/owner-verification/suite-authority.ts` — authorizing the Wave's suite from the TaskGraph with `ownerCheckAuthority`; the gate helper and readiness both call it
-- `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave's owed obligations (`ownerVerificationOwed`) that the owner check runs for
+- `engine/src/core/owner-verification/suite-authority.ts` — authorizing the Wave's suite from the TaskGraph with the Wave duty's `check` (`waveOwnerDuty`); the gate helper and readiness both call it
+- `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave duty's owed obligations (`waveOwnerDuty`) that the owner check runs for
 - `engine/src/core/wave-completion-suite-readiness.ts` — re-authorizing the suite roster through `suite-authority.ts`
-- `engine/src/core/owner-verification/plan-integrity.ts` — the gate's drift check of plan against stamp (`stampAgreement`)
+- `engine/src/core/owner-verification/plan-integrity.ts` — the gate's drift check of plan against stamp (the Wave duty's `agreementWith`)
 - `engine/src/state-file-wire.ts` — re-deriving the owner check from the stamp when a persisted receipt loads
 - `engine/src/orchestration/owner-verification-runner.ts` — which owed obligations run mutants (`verifyOwed`)
 - `engine/src/core/task-graph-population.ts` — which obligations need the frozen `affectedRunner` (`verifyOwed`)
 - `engine/src/core/wave-review-authority.ts` — obligations a reviewed Task touches, which gate the owner-map section
 - `engine/src/core/implementation-brief.ts` — obligations a Task touches, which drive the duty paragraph
 **Matrix test:** `engine/tests/core/owner-obligations.matrix.test.ts`
-**Statement:** Every call site that decides which Owner Obligations apply calls the obligations.ts selections over the opaque `OwnerScope` and never classifies roles inline; the State File wire parse re-derives the check authority from the stamp on purpose, because a receipt must not certify its own roster.
+**Statement:** Every call site that decides which Owner Obligations apply asks one of the two obligations.ts duty entry points (`waveOwnerDuty`, `taskOwnerDuty`) and never classifies roles or filters the stamp inline; the State File wire parse re-derives the check authority from the stamp on purpose, because a receipt must not certify its own roster.
 
 ### INV-4: No console output in the domain (illustrative)
 

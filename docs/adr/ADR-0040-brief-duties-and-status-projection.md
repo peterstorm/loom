@@ -68,14 +68,14 @@ Several forces constrain both halves:
 result's `ownerVerification`, taking its remedies from the gate's own diagnostic source.**
 
 ### Brief half
-- `engine/src/orchestration/implementation-brief.ts` calls `ownerScopeOf(graph)` and hands the opaque
-  `OwnerScope` to the renderer as `ownerScope`; it never holds the raw `owner_obligations` stamp and decides
-  nothing (ADR-0034, PR #131 review remediation). A pre-feature graph yields an unstamped scope, which touches
+- `engine/src/orchestration/implementation-brief.ts` calls `taskOwnerDuty(graph, task.file_list)` and hands the
+  `TaskOwnerDuty` to the renderer as `ownerDuty`; it never filters the raw `owner_obligations` stamp and decides
+  nothing (ADR-0034, #136). A pre-feature graph yields an unstamped duty, which touches
   nothing, so no duty is rendered (the comment there cites AD-10).
 - `engine/src/core/implementation-brief.ts`: `invariantOwnership` receives the touched obligations that INV-3's
-  owner selects, `obligationsTouchedBy(input.ownerScope, task.file_list ?? [])` in
+  owner selects, `input.ownerDuty.touched` from `taskOwnerDuty` in
   `engine/src/core/owner-verification/obligations.ts`. This is the touch scope, in which any role counts,
-  including the matrix test. It is wider than the gate's `ownerVerificationOwed(scope, wave)` scope, because whoever
+  including the matrix test. It is wider than the gate's `waveOwnerDuty(graph, wave).owed` scope, because whoever
   writes the matrix test needs to know the duty.
 - For each touched obligation, `ownerDuties` appends a paragraph under that Invariant's ownership block,
   headed `**Owner duties (INV-N):**`:
@@ -161,7 +161,7 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
 - Agents know the coverage and mutation duties, or the exemption and its reason, before they write code, and
   the brief names the files involved, which avoids retries spent finding out at the gate.
 - Pre-feature graphs get unchanged briefs and no duties that would never be checked, because the stamp's
-  absence is the one signal for that, and `ownerVerificationOwed` and the suite read the same signal.
+  absence is the one signal for that, and both owner duties and the suite read the same signal.
 - Human and `--json` status come from one document, and the report and the next-action remedies from one
   `OwnerVerificationStatus`, so none of them can disagree. Remedy text has one source shared
   with the gate's diagnostic.

@@ -39,7 +39,7 @@ import type {
   SurvivorDiagnostic,
   VerifiedMutationFields,
 } from "../../src/core/owner-verification/types";
-import { ownerCheckAuthority, ownerScopeOf } from "../../src/core/owner-verification/obligations";
+import { waveOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
@@ -241,7 +241,7 @@ function persistedResult(
   verdicts: readonly InvariantVerdict[],
   blocked: boolean,
 ): WaveCompletionResultObservation {
-  const owner = ownerCheckAuthority(ownerScopeOf(parsedStatusGraph()), registration.wave);
+  const owner = waveOwnerDuty(parsedStatusGraph(), registration.wave).check;
   if (owner === null) throw new Error("the stamped status fixture graph owes no owner check");
   const ownerVerification: OwnerVerificationObservation = {
     kind: "verified",

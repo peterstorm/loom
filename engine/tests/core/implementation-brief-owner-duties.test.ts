@@ -1,6 +1,6 @@
 /**
  * The brief's owner duties (plan AD-10, FR-027, AS-028): a duty paragraph per
- * owned Invariant the Task touches (`obligationsTouchedBy`, any role), naming
+ * owned Invariant the Task touches (`taskOwnerDuty`, any role), naming
  * the coverage duty (the matrix test must import the owner and every sibling)
  * and the mutation duty (the owner's changed lines are mutation-verified) or
  * the declared exemption. Rendered only when the graph carries the
@@ -17,7 +17,7 @@ import {
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
-import { obligationsFromPlan, ownerScopeOf } from "../../src/core/owner-verification/obligations";
+import { obligationsFromPlan, taskOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
@@ -69,7 +69,7 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     contracts: [],
     repositoryRoot: "/repo",
     operatorNotes: [],
-    ownerScope: ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }),
+    ownerDuty: taskOwnerDuty(stamp === undefined ? {} : { owner_obligations: stamp }, value.file_list ?? []),
   };
   const rendered = renderImplementationBrief(input);
   if (!rendered.ok) throw new Error(rendered.error.message);
