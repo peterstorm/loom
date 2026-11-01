@@ -131,9 +131,9 @@ import {
   type ContractWriterProblem,
 } from "./core/acceptance-contract";
 import {
-  ownerCheckAuthority,
-  ownerScopeOf,
+  ownerCheckAuthorityOf,
   parseOwnerObligations,
+  waveOwnerDuty,
   type OwnerCheckAuthority,
 } from "./core/owner-verification/obligations";
 
@@ -2195,7 +2195,7 @@ function parseActiveWaveCompletionSuiteField(
   }
   // The owner check joins the roster exactly as the gate authorized it: from the
   // graph's own stamp, for the active Wave (AD-1).
-  const owner = ownerCheckAuthority(ownerScopeOf(stamped), activeWaveGate.wave);
+  const owner = ownerCheckAuthorityOf(waveOwnerDuty(stamped, activeWaveGate.wave));
   const rosterConflict = completionRosterConflict(receipt, manifest, activeWaveGate, owner);
   return rosterConflict === null ? parseOk(receipt) : parseErr(rosterConflict);
 }

@@ -84,12 +84,13 @@ TaskGraph.owner_obligations?: readonly OwnerObligation[]
   the type without a canonicaliser fails to compile.
 - `obligationsAgree(stamped, fromPlan)` checks canonical structural equality, in the same order. Key order
   read back from the wire does not matter.
-- Readers never hold the raw stamp: `ownerScopeOf(graph)` builds an opaque `OwnerScope`, and the selections
-  every reader uses (`ownerVerificationOwed`, `obligationsTouchedBy`, `ownerCheckAuthority` and the drift
-  check `stampAgreement`) take it.
+- Readers never filter the raw stamp: two duty entry points read it (ADR-0034, #136). `waveOwnerDuty(graph,
+  wave)` gives the Wave's owed obligations and stamp digest, `ownerCheckAuthorityOf` derives its owner check, and
+  `stampAgreement(duty, models)` is its drift check;
+  `taskOwnerDuty(graph, fileList)` gives the obligations one Task touches.
 
-`ownerCheckAuthority(scope, wave)` returns `null` exactly when the stamp is absent. In that case the suite
-roster and digest stay unchanged (FR-004). Otherwise it returns the stamp digest and the owed Invariant ids,
+`ownerCheckAuthorityOf(duty)` is `null` exactly when the stamp is absent. In that case the suite
+roster and digest stay unchanged (FR-004). Otherwise it is the stamp digest and the owed Invariant ids,
 which may be none.
 
 **Population** (`engine/src/core/task-graph-population.ts`, shell
@@ -116,17 +117,17 @@ persisted suite receipt is re-proven against the stamp's digest.
 1. Whenever the suite carries `loom:owner-verification`, the stamp is present. A suite that authorizes the
    check while the stamp is missing blocks as `plan-drift`.
 2. `planIntegrityFailure` re-reads `graph.plan_file`, resolving it against the repository root, and parses it
-   with `parsePlanModels`; the pure `planModelsIntegrityFailure(planPath, models, scope)` in
+   with `parsePlanModels`; the pure `planModelsIntegrityFailure(planPath, models, duty)` in
    `engine/src/core/owner-verification/plan-integrity.ts` then decides over the parsed models and
-   `ownerScopeOf(graph)`. This runs on every Wave, whether or not the Wave owes anything. Each of the
+   the Wave duty `waveOwnerDuty(graph, wave)` through `stampAgreement`, which answers an unstamped duty as drift. This runs on every Wave, whether or not the Wave owes anything. Each of the
    following blocks as an infrastructure failure and never skips (FR-002):
    - **`plan-unreadable`:** the graph names no `plan_file`, or the file cannot be read.
    - **`plan-malformed`:** the plan has model strays, an Invariant whose ownership is `malformed`, or owned
      Invariants that derive no obligation (`stampAgreement` is `underivable`).
-   - **`plan-drift`:** `stampAgreement(scope, models)` is `drifted`: the stamp and the obligations the plan
+   - **`plan-drift`:** `stampAgreement(duty, models)` is `drifted`: the stamp and the obligations the plan
      derives now differ.
 3. The pure `ownerObservationDecision` (`engine/src/core/owner-verification/owed-verification.ts`) takes the
-   integrity result, `ownerVerificationOwed(scope, wave)` and the authorized check. Owed ids that differ from
+   integrity result, the Wave duty's `owed` and the authorized check. Owed ids that differ from
    the check's `owed` are `plan-drift` too. When the plan agrees and the Wave owes nothing, the observation is
    `{ kind: "verified", obligationsDigest, boundMs: 0, verdicts: [] }`. Plan integrity is proven, and no
    coverage or mutation runs (AS-004, AS-005).
@@ -136,11 +137,12 @@ persisted suite receipt is re-proven against the stamp's digest.
 
 **The other readers use the stamp purely.**
 
-- **Implementation brief:** `engine/src/orchestration/implementation-brief.ts` passes
-  `ownerScopeOf(graph)` to `engine/src/core/implementation-brief.ts`.
+- **Implementation brief:** `engine/src/orchestration/implementation-brief.ts` passes the renderer in
+  `engine/src/core/implementation-brief.ts` an `InvariantOwnershipSource`: the stamped `taskOwnerDuty(graph,
+  task.file_list)`, or the plan's Invariants for an unstamped graph (`invariantOwnershipSourceOf`, ADR-0040).
 - **Reviewer packets:** `engine/src/core/owner-verification/owner-map.ts` and
-  `engine/src/core/wave-review-authority.ts` build the owner map from the obligations `obligationsTouchedBy` selects
-  over `ownerScopeOf(graph)`.
+  `engine/src/core/wave-review-authority.ts` build the owner map from the obligations
+  `taskOwnerDuty(graph, task.file_list).touched` selects.
 
 Status does not read the stamp at all. `engine/src/core/owner-verification/status.ts` projects only the latest
 persisted completion result's `ownerVerification` observation (ADR-0040), so what it reports is what the gate

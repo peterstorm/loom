@@ -20,7 +20,7 @@ Constraints:
 - **Slot authority is positional.** A Review Run binds `slot_authority[i].agent === expected_agents[i]`, and
   the state-file parser enforces that order. Slot and request ids hash the subject `{ role, taskId }`, the
   Task run and the batch epoch, never the roster.
-- **Selection has one owner.** Which Invariants a Task touches is decided by `obligationsTouchedBy` in
+- **Selection has one owner.** Which Invariants a Task touches is decided by `taskOwnerDuty` in
   `engine/src/core/owner-verification/obligations.ts` (INV-3's owner). A second selection rule is forbidden
   (ADR-0034, ADR-0039).
 - **Byte identity (SC-005).** Packets that need no owner map keep their exact bytes.
@@ -65,7 +65,7 @@ Constraints:
   `waveReviewRoster(ownerMapped)`.
 - `engine/src/core/wave-review-authority.ts` holds the one home of owner-map presence,
   `ownerMapObligations(graph, schemaVersion, task)`: schema 2 only, and exactly
-  `obligationsTouchedBy(ownerScopeOf(graph), task.file_list)`. No second selection rule.
+  `taskOwnerDuty(graph, task.file_list).touched`. No second selection rule.
 - There is exactly one presence-to-roster derivation, the private `waveTaskReviewDerivation`, which returns
   a Task's obligations together with the roster their presence picks. Packet issuance
   (`prepareWaveReviewBatch`) renders the owner map from that same result and orders its subjects from that

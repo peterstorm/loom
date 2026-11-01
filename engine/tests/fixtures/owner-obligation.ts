@@ -7,8 +7,10 @@
 
 import { parseInvariantId, type InvariantId } from "../../src/core/invariant-id";
 import { parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
-import { ownerObligationOf, ownerScopeOf, type OwnerScope } from "../../src/core/owner-verification/obligations";
+import { invariantOwnershipSourceOf, type InvariantOwnershipSource } from "../../src/core/implementation-brief";
+import { ownerObligationOf, taskOwnerDuty } from "../../src/core/owner-verification/obligations";
 import type { MutantCap, OwnerObligation, OwnerObligationFields } from "../../src/core/owner-verification/types";
+import type { PlanInvariant } from "../../src/types";
 
 /** An Invariant id the test spells out; throws on anything but `INV-N`. */
 export function invariantId(raw: string): InvariantId {
@@ -34,5 +36,22 @@ export function capOf(raw: number): MutantCap {
   return parsed.value;
 }
 
-/** The scope of a graph populated before owner verification: no stamp, so nothing is owed. */
-export const UNSTAMPED_SCOPE: OwnerScope = ownerScopeOf({ tasks: [] });
+/** A brief's ownership for a graph populated before owner verification: the plan's Invariants (none by default), no duty. */
+export const planOwnership = (invariants: readonly PlanInvariant[] = []): InvariantOwnershipSource => ({ kind: "plan", invariants });
+
+/**
+ * A brief's ownership through the production chooser
+ * (`invariantOwnershipSourceOf`), with `invariants` as the plan the shell would
+ * read: the stamped obligations `taskOwnerDuty` touches when `stamp` is
+ * present, the plan's Invariants when it is absent.
+ */
+export function briefOwnership(
+  stamp: readonly OwnerObligation[] | undefined,
+  invariants: readonly PlanInvariant[],
+  fileList: readonly string[],
+): InvariantOwnershipSource {
+  const duty = taskOwnerDuty(stamp === undefined ? {} : { owner_obligations: stamp }, fileList);
+  const source = invariantOwnershipSourceOf(duty, () => ({ ok: true as const, value: invariants }));
+  if (!source.ok) throw new Error("fixture: a plan supplied in memory cannot fail to read");
+  return source.value;
+}

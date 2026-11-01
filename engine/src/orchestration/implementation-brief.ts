@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { observeTaskGraphProjectBoundary } from "../config";
 import {
+  invariantOwnershipSourceOf,
   renderImplementationBrief,
   ruleDocumentsFor,
   type ImplementationBrief,
@@ -18,7 +19,7 @@ import {
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
-import { ownerScopeOf } from "../core/owner-verification/obligations";
+import { taskOwnerDuty } from "../core/owner-verification/obligations";
 import { parsePlanModels } from "../core/parse-plan-models";
 import { StateManager } from "../state-manager";
 import type { PlanInvariant } from "../types";
@@ -83,8 +84,9 @@ export function renderTaskImplementationBrief(
       path === null || path === undefined ? null : isAbsolute(path) ? path : resolve(projectRoot, path);
     const specFile = inProject(graph.spec_file);
     const planFile = inProject(graph.plan_file);
-    const invariants = planInvariants(planFile);
-    if (!invariants.ok) return { ok: false, error: `Task ${taskId}: ${invariants.error}` };
+    // A stamped graph needs no plan read; a pre-feature one (plan AD-10: owed no owner duty) renders the plan's Invariants.
+    const ownership = invariantOwnershipSourceOf(taskOwnerDuty(graph, task.file_list ?? []), () => planInvariants(planFile));
+    if (!ownership.ok) return { ok: false, error: `Task ${taskId}: ${ownership.error}` };
     const rules = new Map<RuleDocument, string>(ruleDocumentsFor(task.file_list ?? []).map((name) =>
       [name, readFileSync(join(packageRoot, "rules", name), "utf8")] as const));
     const rendered = renderImplementationBrief({
@@ -95,10 +97,7 @@ export function renderTaskImplementationBrief(
       spec: observeSpecIndex(specFile),
       rules,
       roster: graph.tasks,
-      invariants: invariants.value,
-      // A graph populated before owner verification is owed no owner duty
-      // (plan AD-10); its scope says so.
-      ownerScope: ownerScopeOf(graph),
+      ownership: ownership.value,
       contracts: graph.acceptance_contracts ?? [],
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,

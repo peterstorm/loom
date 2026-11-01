@@ -1,25 +1,24 @@
 /**
  * Owner verification as status reports it (AD-10 status half; FR-028,
- * AS-029, AS-030). Pure: one `OwnerVerificationStatus` value holds what
+ * AS-029). Pure: one `OwnerVerificationStatusReport` is what
  * `helper orchestration status` says about owner verification, the report
- * both renderers serialize and the remedies the next action names, so the
- * two can never disagree about whether there was anything to report.
+ * both renderers serialize.
  *
  * The report is the persisted observation itself: its verdicts are the very
  * `InvariantVerdict`s the gate judged and the completion result stores, with
  * no status-only copy to keep in step. The only status-specific case is
  * `not-observed`. The deep part here is the free-text renderer.
  *
- * Blocking findings and their remedy text are not decided here: they come
- * from `verdict.ts` (`ownerVerificationFailures`,
- * `renderOwnerVerificationFailure`), the same source the gate's diagnostics
- * read, so status names exactly the remedy the gate blocked on. Each
+ * The next action's remedies (AS-030) are not decided here: they travel on
+ * the completion-suite readiness fact that judged the rejection
+ * (`ownerVerificationRemedies`, in the gate diagnostic's own wording), so a
+ * rejection and its remedies are one value (#135). Each
  * Invariant's mutation summary is `verdict.ts`'s `renderMutationVerdict`,
  * the one wording of a `MutationVerdict`.
  */
 
 import { match } from "ts-pattern";
-import { ownerVerificationFailures, renderMutationVerdict, renderOwnerVerificationFailure } from "./verdict";
+import { renderMutationVerdict } from "./verdict";
 import type {
   CoverageVerdict,
   InvariantVerdict,
@@ -41,29 +40,9 @@ export type OwnerVerificationStatusReport =
   | Readonly<{ kind: "not-observed"; reason: string }>
   | OwnerVerificationObservation;
 
-/**
- * What status says about owner verification: the report, and every blocking
- * finding of it as its remedy line (empty when nothing blocks or nothing was
- * observed). Whether the remedies reach the next action is the completion
- * suite readiness's call, not this value's.
- */
-export type OwnerVerificationStatus = Readonly<{
-  report: OwnerVerificationStatusReport;
-  remedies: readonly string[];
-}>;
-
-/** The status when there is no observation to report, naming why. It owes no remedy. */
-export const ownerVerificationNotObserved = (reason: string): OwnerVerificationStatus =>
-  ({ report: { kind: "not-observed", reason }, remedies: [] });
-
-/**
- * The status of a persisted observation. Each remedy names the Invariant:
- * strengthen the matrix test to import what it misses, or to kill the
- * survivor at `<owner>:<line>` (`<operator>`), or declare a mutation
- * exemption with a reason.
- */
-export const observedOwnerVerificationStatus = (observation: OwnerVerificationObservation): OwnerVerificationStatus =>
-  ({ report: observation, remedies: ownerVerificationFailures(observation).map(renderOwnerVerificationFailure) });
+/** The report when there is no observation, naming why. */
+export const ownerVerificationNotObserved = (reason: string): OwnerVerificationStatusReport =>
+  ({ kind: "not-observed", reason });
 
 const renderCoverage = (coverage: CoverageVerdict): string =>
   match(coverage)

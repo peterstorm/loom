@@ -98,17 +98,16 @@ Task that touches an owned family. Every other packet is byte-identical.**
      replaced by a call to the owner module.
   4. The existing severity rules and the Refutation Panel apply unchanged.
 
-**Selection.** Selection is not re-derived here. `obligationsTouchedBy(scope, task.file_list ?? [])` in
+**Selection.** Selection is not re-derived here. `taskOwnerDuty(graph, task.file_list ?? []).touched` in
 `engine/src/core/owner-verification/obligations.ts` (INV-3's owner) returns the obligations in which the file
 list plays any role. That means the Task changes the owner or a sibling, or it writes the matrix test. The
-`scope` is the opaque `OwnerScope` that `ownerScopeOf(graph)` builds; the issuer never holds the raw
-`owner_obligations` stamp (ADR-0034, PR #131 review remediation).
+issuer never filters the raw `owner_obligations` stamp (ADR-0034; the duty entry point since #136).
 
 **Issuance.** `engine/src/core/wave-review-authority.ts` issues the section.
 
-- When `registration.schemaVersion === 2`, it builds `ownerScopeOf(graph)` once and renders one `owner-map`
+- When `registration.schemaVersion === 2`, it asks `taskOwnerDuty` for each Task and renders one `owner-map`
   byte section for each Task with a non-empty touched set. This happens once per Task, before the subject loop.
-  The stamp test is the scope's: an unstamped scope (a graph without `owner_obligations`) touches nothing, so no
+  The stamp test is the duty's: an unstamped duty (a graph without `owner_obligations`) touches nothing, so no
   Task gets a section.
 - In the subject loop, the section is added to `fixedContext` only when both of these hold:
   - `subject.taskId !== null`, which excludes the spec-check subject;
@@ -157,7 +156,7 @@ owner map (AS-027).
   `Task <id> touches owned Invariants but the stamped TaskGraph records no plan_file to cite`. It does not
   emit a section with no contract to cite.
 - **Matrix-test-only Tasks get the section.** "Touches" means any role, the matrix test included, because
-  that is `obligationsTouchedBy`'s documented scope for packets and briefs. A Task that only writes the matrix
+  that is `taskOwnerDuty`'s documented scope for packets and briefs. A Task that only writes the matrix
   test therefore gets the owner map. This differs from the narrower changed-family scope that triggers gate
   coverage and mutation.
 - **Longer advisory wording.** The rule's advisory paragraph adds remediation guidance (replace the copy with

@@ -24,14 +24,15 @@ import type {
 import {
   evaluateWaveCompletionSuite,
   parseAcceptedWaveCompletionReceipt,
-  rejectionDisposition,
+  ownerVerificationFindingLines,
+  rejectionFailures,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
 import { legacyDefaultVerificationManifest, deriveProjectVerificationCoverage } from "./verification-manifest";
-import { canonicalRecord, canonicalStructuralEquals, type DomainResult, type NonEmpty } from "./orchestration-contract";
+import { canonicalRecord, canonicalStructuralEquals, isNonEmpty, type DomainResult, type NonEmpty } from "./orchestration-contract";
 import { emptyAcceptanceExpectation, graphAcceptanceExpectation } from "./acceptance-contract";
 import { authorizeGraphCompletionSuite } from "./owner-verification/suite-authority";
 
@@ -217,7 +218,7 @@ function deriveCompletionSuiteOutcome(
  * Judge the persisted result of an active Wave without a receipt against the
  * roster the graph's Wave owes (`authorizeGraphCompletionSuite`, INV-3). A
  * semantic rejection stays a rejection when the owner check beside it could
- * not decide, exactly as the gate replays it (`rejectionDisposition`).
+ * not decide, exactly as the gate replays it (the rejection's `cause`).
  */
 function persistedResultOutcome(
   graph: TaskGraph,
@@ -239,15 +240,16 @@ function persistedResultOutcome(
       manifestDigest,
     );
   }
-  const disposition = rejectionDisposition(evaluation);
-  if (disposition.kind !== "semantic") {
+  if (evaluation.cause !== "semantic") {
+    const { authority, infrastructure } = rejectionFailures(evaluation);
     return requiredWaveCompletionSuite(
       "completion-result-invalid",
-      completionEvaluationFailureDetail(evaluation.authorityFailures, evaluation.infrastructureFailures),
+      completionEvaluationFailureDetail(authority, infrastructure),
       manifestDigest,
     );
   }
-  const [firstSemanticFailure, ...remainingSemanticFailures] = disposition.failures;
+  const [firstSemanticFailure, ...remainingSemanticFailures] = evaluation.semanticFailures;
+  const remedies = ownerVerificationFindingLines(evaluation);
   return canonicalRecord({
     kind: "rejected",
     verificationManifestDigest: manifestDigest,
@@ -255,6 +257,9 @@ function persistedResultOutcome(
     workspaceDigest: authorized.value.workspaceDigest,
     failureKinds: sortedUniqueNonEmpty(firstSemanticFailure.kind, remainingSemanticFailures.map((failure) => failure.kind)),
     checkIds: sortedUniqueNonEmpty(firstSemanticFailure.checkId, remainingSemanticFailures.map((failure) => failure.checkId)),
+    // The remedies come from the rejection judged here, never re-derived from
+    // the observation, so the next action cannot disagree with this fact.
+    ownerVerificationRemedies: isNonEmpty(remedies) ? Object.freeze(remedies) : null,
   });
 }
 

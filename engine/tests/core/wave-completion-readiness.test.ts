@@ -315,6 +315,7 @@ describe("Wave completion suite gate readiness", () => {
       workspaceDigest: digest("b"),
       failureKinds: [failureKind],
       checkIds: ["project:test"],
+      ownerVerificationRemedies: null,
     });
     expect(checkWaveCompletionSuite(state, 1, workspace("b"), observation)).toEqual({
       passed: false,
@@ -679,6 +680,7 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
       workspaceDigest: digest("b"),
       failureKinds: ["non-zero-exit"],
       checkIds: ["project:test"],
+      ownerVerificationRemedies: null,
     });
   });
 
@@ -697,7 +699,11 @@ describe("INV-3: readiness of a stamped graph re-authorizes the owner check from
     const state = stampedGraph([OWNER]);
     const undecided: OwnerMutation = { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "no isolated copy" } };
     expect(deriveWaveCompletionSuiteReadiness(state, 1, workspace("b"), observed(resultFor(state, 7, undecided))))
-      .toMatchObject({ kind: "rejected", failureKinds: ["non-zero-exit"], checkIds: ["project:test"] });
+      .toMatchObject({
+        kind: "rejected", failureKinds: ["non-zero-exit"], checkIds: ["project:test"],
+        // #135: the undecided owner finding beside the decided failure travels on the rejection as its remedy line.
+        ownerVerificationRemedies: [expect.stringContaining("infrastructure failure (worktree-failed): no isolated copy")],
+      });
     expect(deriveWaveCompletionSuiteReadiness(state, 1, workspace("b"), observed(resultFor(state, 0, undecided)))).toMatchObject({
       kind: "required",
       reason: "completion-result-invalid",

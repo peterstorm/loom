@@ -79,7 +79,7 @@ imports.
   - `import-graph.ts` exports `moduleEdges(path, text): ModuleEdges`, a list of `Edge`
     (`{ kind: "import" | "reexport"; specifier; typeOnly }`), each (kind, specifier) once in first-seen
     source order. Its only caller is `coverage.ts`, which resolves the runtime edges against the
-    shell-supplied file set. It also exports the one parse both seams share, `parseModule(path, text)`
+    files its walk reads through the injected `ReadModule` port (#133). It also exports the one parse both seams share, `parseModule(path, text)`
     (the script kind from the file extension, parent pointers set), and `syntaxErrorsOf(source)`.
   - `mutation-plan.ts` exports `mutationPlan({ ownerPath, ownerText, changedLines, cap })` and
     `applyMutant`. It parses through `import-graph.ts`'s `parseModule`, so the path-to-script-kind rule has

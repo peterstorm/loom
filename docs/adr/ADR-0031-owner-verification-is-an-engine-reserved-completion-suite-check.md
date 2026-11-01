@@ -4,6 +4,10 @@
 Accepted (2026-10-23). Shipped with G5b owner enforcement
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`, plan
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-1).
+Amended 2026-11-01 (#132): the rejection is a cause-classified non-empty union, the owner check's result has one
+constructor deriving its exit, and the receipt parser proves the owner observation against its own roster.
+The persisted bytes are unchanged (FR-004). Amended 2026-11-01 (#135): status's owner remedies travel on the
+readiness rejection (see Status).
 
 ## Context
 G5a taught the plan grammar to declare an owner module for an Invariant (`**Owner module:**`, siblings, a
@@ -97,9 +101,9 @@ exactly when the TaskGraph carries the `owner_obligations` stamp.**
   the roster, and so the suite digest, is byte-identical to the pre-G5b roster (FR-004). A project check
   cannot claim the id: the project-check parser in `completion-suite.ts` refuses any `checkId` in the reserved
   `loom:` namespace.
-- `ownerCheckAuthority(ownerScopeOf(graph), wave)` in `engine/src/core/owner-verification/obligations.ts` is the one place
-  that decides the authority (INV-3, AD-4). It returns `null` exactly when the graph has no stamp. Otherwise it
-  returns the stamp's `obligationsDigest` and the ids `ownerVerificationOwed` selects, which is an empty list
+- `ownerCheckAuthorityOf(waveOwnerDuty(graph, wave))` in `engine/src/core/owner-verification/obligations.ts` is the one place
+  that decides the authority (INV-3, AD-4). It is `null` exactly when the graph has no stamp. Otherwise it
+  is the stamp's `obligationsDigest` and the ids of the duty's `owed` obligations, which is an empty list
   when the Wave changed no owned family. It has two callers. `authorizeGraphCompletionSuite` in
   `engine/src/core/owner-verification/suite-authority.ts` is the one authorize-from-TaskGraph function: the
   gate helper (`engine/src/handlers/helpers/wave-completion-suite.ts`, authorizing the suite it runs) and
@@ -132,7 +136,7 @@ field joins the strict-field parse only when present.
    the file; the pure `planModelsIntegrityFailure` (`engine/src/core/owner-verification/plan-integrity.ts`)
    decides.
 2. The pure `ownerObservationDecision` (`engine/src/core/owner-verification/owed-verification.ts`, PR #131
-   round 2) then decides from the integrity result, `ownerVerificationOwed(scope, wave)` and the authorized
+   round 2) then decides from the integrity result, the Wave duty's `owed` and the authorized
    check: `unavailable` (the plan failed, or the owed obligations are not the check's `owed` ids, which is
    `plan-drift`), `verified-empty` when nothing is owed (`verified` with no verdicts and `boundMs: 0`), or
    `must-run` over a branded `OwedVerification` that pairs the owed obligations with the stamp digest.
@@ -146,7 +150,8 @@ field joins the strict-field parse only when present.
    that turns a throw from the injected port into the same blocking `unexpected-error` failure.
 4. The check's stored `CompletionCheckResult` is an engine-observed exit: `ownerVerificationExitCode` is 1
    exactly when `ownerVerificationFailures(observation)` is non-empty, the same way the reserved lint check
-   reports.
+   reports. Since #132 the result has one constructor, `ownerCheckResult(check, observation)` in
+   `engine/src/core/completion-suite.ts`, which derives the exit and is the only way the shell builds it.
 
 **How a result is judged** (`evaluateWaveCompletionSuite`, `engine/src/core/completion-suite.ts`):
 
@@ -160,19 +165,34 @@ field joins the strict-field parse only when present.
   `NonEmpty<OwnerVerificationFailure>`. The shipped types split it by the `infrastructure` kind, so a finding
   that could not decide can never be reported, or counted, as a kill or a semantic rejection.
 - An accepted receipt cannot carry an observation with findings. The receipt parser refuses one.
+- **A receipt proves its owner observation against its own roster (#132).** The receipt parser requires
+  `ownerVerification` exactly when the receipt's roster carries `loom:owner-verification`. The exit needs no second
+  proof there: the receipt refuses an observation with findings (so the derived exit is 0), and its successful-check
+  proof refuses any other exit. The evaluator proved this for the result it minted the receipt from;
+  now a reader of the protected receipt proves it again, instead of trusting the writer.
 
 **Fail-closed persistence.** A rejection whose only infrastructure failures come from the owner check, and
 which carries no semantic failure, is published as an attempt record beside the result slot
 (`completion-suites/<suite>/<workspace>.owner-infrastructure/<sha256>.json`) rather than in the slot itself.
 The evidence persists, and a retry at the same workspace runs the check again instead of replaying the
 failure. There is no automatic retry. A mixed rejection (a semantic failure beside an undecided owner check)
-is already decided by its semantic failure, so it goes to the result slot and replays as rejected; the pure
-`rejectionDisposition` in `engine/src/core/completion-suite.ts` makes that choice once for the gate, replay
-and readiness (PR #131 review remediation).
+is already decided by its semantic failure, so it goes to the result slot and replays as rejected.
 
-**Status.** `engine/src/core/loom-status.ts` projects the latest persisted result's `ownerVerification` through
-`engine/src/core/owner-verification/status.ts` (AD-10), and adds remedy next actions when the suite was rejected
-with `owner-verification-rejected`.
+**A rejection is a cause-classified, non-empty union (#132).** `RejectedCompletionSuite` in
+`engine/src/core/completion-suite.ts` is one of `authority`, `infrastructure` (a check other than the owner check
+could not run; it holds only those failures, with the owner check's undecided finding, if any, beside them), `owner-undecided` (only the owner check could not decide) or `semantic` (some check decided
+against the Wave, with the owner check's undecided findings, if any, beside it). Each case carries a `NonEmpty`
+list, so the rejection is classified once when the evaluator builds it, and gate, replay and readiness all read
+its `cause`. As first shipped (PR #131), the rejection was three possibly-empty arrays, and a separate
+`rejectionDisposition` derived the cause, including an `inexact` case for a rejection that carried no failure.
+That case and its handler branches are gone: an empty rejection cannot be written.
+`rejectionFailures(rejection)` lists every failure by category for the diagnostics that print them all.
+
+**Status.** `engine/src/core/loom-status.ts` reports the latest persisted result's `ownerVerification`, which
+`engine/src/core/owner-verification/status.ts` renders (AD-10). Since #135 the next action adds one reason per line of
+the readiness rejection's `ownerVerificationRemedies`: the `ownerVerificationFindingLines` of the very rejection,
+the same lines the gate diagnostic prints, present whenever the owner check contributed a finding. `status.ts`
+renders only the report.
 
 Operator-facing behavior and remedies: `docs/operations.md` ("Owner verification blocks a Wave Gate (G5b)").
 Structure: `docs/architecture.md` ("Owner verification in the completion suite (G5b)").
@@ -199,8 +219,11 @@ Structure: `docs/architecture.md` ("Owner verification in the completion suite (
   failure and two new failure kinds. Every consumer of `AuthorizedWaveCompletionCheck` must handle the new
   variant.
 - The owner check does not go through the generic project-command process path. Its "exit code" is
-  synthesized from the observation, so the evaluator must cross-check exit against findings
-  (`owner-verification-mismatch`) to keep the two from disagreeing.
+  synthesized from the observation. The persisted record keeps the exit field the lint and project checks share,
+  so results and receipts stay byte-compatible (FR-004), and no versioned migration was needed for #132. The
+  exit is derived in one constructor (`ownerCheckResult`); the evaluator re-derives it
+  (`owner-verification-mismatch`), and the receipt parser holds it to 0 through its finding-free observation and
+  its successful-check proof.
 - Owner-check infrastructure failures need special persistence (the `.owner-infrastructure/` attempt
   records), so they do not occupy the result slot and block a retry. That is one more artifact path for
   operators to understand.

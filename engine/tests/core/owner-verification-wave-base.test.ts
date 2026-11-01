@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { ownerScopeOf } from "../../src/core/owner-verification/obligations";
+import { waveOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { planModelsIntegrityFailure } from "../../src/core/owner-verification/plan-integrity";
 import { ownerTasks, waveBaseOf, type WaveBaseTask } from "../../src/core/owner-verification/wave-base";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
@@ -72,7 +72,7 @@ const invariant = (extra: readonly string[] = []): string => [
   ...extra, "",
 ].join("\n");
 
-const stamped = ownerScopeOf({ tasks: [], owner_obligations: [ADMISSION] });
+const stamped = waveOwnerDuty({ tasks: [], owner_obligations: [ADMISSION] }, 1);
 
 describe("planModelsIntegrityFailure", () => {
   it("is null when the plan re-derives the stamp exactly", () => {
@@ -90,7 +90,7 @@ describe("planModelsIntegrityFailure", () => {
   });
 
   it("a graph without a stamp has nothing the plan could agree with: drift", () => {
-    expect(planModelsIntegrityFailure("plan.md", parsePlanModels(invariant()), ownerScopeOf({ tasks: [] })))
+    expect(planModelsIntegrityFailure("plan.md", parsePlanModels(invariant()), waveOwnerDuty({ tasks: [] }, 1)))
       .toMatchObject({ kind: "plan-drift" });
   });
 

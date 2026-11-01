@@ -1,7 +1,7 @@
 /**
  * The `loom:owner-verification` check inside the completion suite (AD-1):
  * suite authorization injects the check only from the owner check authority
- * its callers obtained from `ownerCheckAuthority` (INV-3), the check and the
+ * its callers obtained from `ownerCheckAuthorityOf(waveOwnerDuty(graph, wave))` (INV-3), the check and the
  * result/receipt observation round-trip through the at-rest parsers, and
  * `evaluateWaveCompletionSuite` turns every owner-verification finding into a
  * blocking failure: semantic for missing siblings, a red baseline or a
@@ -17,13 +17,16 @@ import {
   completionSuiteDigest,
   evaluateWaveCompletionSuite,
   parseCompletionCheckId,
+  ownerCheckOf,
+  ownerCheckResult,
   publicationSlotOf,
-  rejectionDisposition,
+  rejectionFailures,
   parseAcceptedWaveCompletionReceipt,
   parseAuthorizedWaveCompletionCheck,
   parseWaveCompletionSuiteResult,
   type AuthorizedWaveCompletionSuite,
   type CompletionSuiteEvaluation,
+  type RejectedCompletionSuite,
 } from "../../src/core/completion-suite";
 import { emptyAcceptanceExpectation } from "../../src/core/acceptance-contract";
 import { sha256Hex } from "../../src/core/digest";
@@ -268,8 +271,8 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
   it("FR-014: a missing sibling is a semantic owner-verification rejection naming the Invariant and path", () => {
     const missing: CoverageVerdict = { kind: "missing", paths: ["src/rules/sibling-b.ts"] };
     const evaluation = rejected(evaluate(verified([verdict("INV-1", missing, verifiedRun(0))]), 1));
-    expect(evaluation.authorityFailures).toEqual([]);
-    expect(evaluation.semanticFailures).toEqual([{
+    expect(rejectionFailures(evaluation).authority).toEqual([]);
+    expect(rejectionFailures(evaluation).semantic).toEqual([{
       kind: "owner-verification-rejected",
       checkId: OWNER_CHECK,
       failures: [{ kind: "missing-siblings", invariant: "INV-1", matrixTest: "tests/rules.matrix.test.ts", paths: ["src/rules/sibling-b.ts"] }],
@@ -278,7 +281,7 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
 
   it("FR-014: every survivor of a non-exempt Invariant blocks", () => {
     const evaluation = rejected(evaluate(verified([verdict("INV-1", covered, verifiedRun(2))]), 1));
-    const [failure] = evaluation.semanticFailures;
+    const [failure] = rejectionFailures(evaluation).semantic;
     expect(failure).toMatchObject({ kind: "owner-verification-rejected", checkId: OWNER_CHECK });
     expect(failure?.kind === "owner-verification-rejected" ? failure.failures.map((entry) => entry.kind) : []).toEqual(["survivor", "survivor"]);
   });
@@ -286,7 +289,7 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
   it("AS-008: FR-008: a red baseline is a semantic rejection, never a mutation tally", () => {
     const red: MutationVerdict = { kind: "red-baseline", failures: ["matrix > decides admission"] };
     const evaluation = rejected(evaluate(verified([verdict("INV-1", covered, red)]), 1));
-    expect(evaluation.semanticFailures).toEqual([{
+    expect(rejectionFailures(evaluation).semantic).toEqual([{
       kind: "owner-verification-rejected",
       checkId: OWNER_CHECK,
       failures: [{ kind: "red-baseline", invariant: "INV-1", matrixTest: "tests/rules.matrix.test.ts", failures: ["matrix > decides admission"] }],
@@ -296,8 +299,8 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
   it("AS-017: FR-016: an infrastructure verdict is an infrastructure failure and never counts as a kill", () => {
     const broken: MutationVerdict = { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "git worktree add failed" } };
     const evaluation = rejected(evaluate(verified([verdict("INV-1", covered, broken)]), 1));
-    expect(evaluation.semanticFailures).toEqual([]);
-    expect(evaluation.infrastructureFailures).toEqual([{
+    expect(rejectionFailures(evaluation).semantic).toEqual([]);
+    expect(rejectionFailures(evaluation).infrastructure).toEqual([{
       kind: "owner-verification-infrastructure",
       checkId: OWNER_CHECK,
       failures: [{ kind: "infrastructure", invariant: "INV-1", failure: { kind: "worktree-failed", detail: "git worktree add failed" } }],
@@ -309,8 +312,8 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
     const observed = verified([verdict("INV-1", covered, broken)]);
     expect(value(parseWaveCompletionSuiteResult(resultOf(OWES_INV1, observed, 1))).ownerVerification).toEqual(observed);
     const evaluation = rejected(evaluate(observed, 1));
-    expect(evaluation.semanticFailures).toEqual([]);
-    expect(evaluation.infrastructureFailures).toEqual([{
+    expect(rejectionFailures(evaluation).semantic).toEqual([]);
+    expect(rejectionFailures(evaluation).infrastructure).toEqual([{
       kind: "owner-verification-infrastructure",
       checkId: OWNER_CHECK,
       failures: [{ kind: "infrastructure", invariant: "INV-1", failure: { kind, detail: "no mutation evidence" } }],
@@ -319,7 +322,7 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
 
   it("FR-002: an unavailable check (the plan could not be re-read) is an infrastructure failure of the whole check", () => {
     const evaluation = rejected(evaluate({ kind: "unavailable", failure: { kind: "plan-unreadable", detail: "ENOENT" } }, 1));
-    expect(evaluation.infrastructureFailures).toEqual([{
+    expect(rejectionFailures(evaluation).infrastructure).toEqual([{
       kind: "owner-verification-infrastructure",
       checkId: OWNER_CHECK,
       failures: [{ kind: "infrastructure", invariant: null, failure: { kind: "plan-unreadable", detail: "ENOENT" } }],
@@ -336,18 +339,18 @@ describe("evaluateWaveCompletionSuite — the owner check's verdict blocks the g
   it("FR-020: an exempt Invariant with a missing sibling still blocks", () => {
     const missing: CoverageVerdict = { kind: "missing", paths: ["src/rules/sibling-b.ts"] };
     const evaluation = rejected(evaluate(verified([verdict("INV-1", missing, { kind: "exempt", reason: "equivalent" })]), 1));
-    expect(evaluation.semanticFailures.map((failure) => failure.kind)).toEqual(["owner-verification-rejected"]);
+    expect(rejectionFailures(evaluation).semantic.map((failure) => failure.kind)).toEqual(["owner-verification-rejected"]);
   });
 
   it("the owner check's non-zero exit is explained by its findings, never reported as a separate non-zero exit", () => {
     const evaluation = rejected(evaluate(verified([verdict("INV-1", covered, verifiedRun(1))]), 1));
-    expect(evaluation.semanticFailures.map((failure) => failure.kind)).toEqual(["owner-verification-rejected"]);
+    expect(rejectionFailures(evaluation).semantic.map((failure) => failure.kind)).toEqual(["owner-verification-rejected"]);
   });
 });
 
 describe("evaluateWaveCompletionSuite — the observation is bound to the authorized owner check", () => {
   const mismatch = (evaluation: CompletionSuiteEvaluation) =>
-    rejected(evaluation).authorityFailures.map((failure) => failure.kind);
+    rejectionFailures(rejected(evaluation)).authority.map((failure) => failure.kind);
 
   it("an authorized owner check without an observation is an authority failure", () => {
     expect(mismatch(evaluate(undefined, 0))).toEqual(["owner-verification-mismatch"]);
@@ -411,13 +414,73 @@ describe("parseAcceptedWaveCompletionReceipt — a receipt proves its owner veri
     };
     expect(parseAcceptedWaveCompletionReceipt(JSON.parse(JSON.stringify(tampered))).ok).toBe(false);
   });
+
+  /** The receipt with `change` applied and its result digest re-minted, so only the owner proof can refuse it. */
+  const resigned = (change: (body: Record<string, unknown>) => Record<string, unknown>) => {
+    const evaluation = evaluate(verified([verdict("INV-1", covered, verifiedRun(0))]), 0);
+    if (evaluation.kind !== "accepted") throw new Error(JSON.stringify(evaluation));
+    const { resultDigest: _digest, ...body } = JSON.parse(JSON.stringify(evaluation.receipt)) as Record<string, unknown>;
+    const changed = change(body);
+    return { ...changed, resultDigest: sha256Hex(canonicalJson(changed as Parameters<typeof canonicalJson>[0])) };
+  };
+
+  it("#132: refuses a re-signed receipt whose roster carries the owner check without its observation", () => {
+    const stripped = resigned(({ ownerVerification: _owner, ...rest }) => rest);
+    expect(parseAcceptedWaveCompletionReceipt(stripped)).toMatchObject({
+      ok: false, error: { errors: ["acceptedReceipt carries loom:owner-verification without its ownerVerification observation"] },
+    });
+  });
+
+  it("#132: refuses a re-signed receipt carrying an observation its roster has no owner check for", () => {
+    const orphaned = resigned((body) => ({
+      ...body,
+      checks: (body.checks as readonly Record<string, unknown>[]).filter(({ checkId }) => checkId !== OWNER_VERIFICATION_CHECK_ID_TEXT),
+    }));
+    expect(parseAcceptedWaveCompletionReceipt(orphaned)).toMatchObject({
+      ok: false, error: { errors: ["acceptedReceipt.ownerVerification is present, but its roster carries no loom:owner-verification check"] },
+    });
+  });
+
+  it("#132: refuses a re-signed receipt whose owner check exits other than its clean observation derives", () => {
+    const flipped = resigned((body) => ({
+      ...body,
+      checks: (body.checks as readonly Record<string, unknown>[]).map((check) => check.checkId === OWNER_VERIFICATION_CHECK_ID_TEXT
+        ? { ...check, outcome: { ...(check.outcome as Record<string, unknown>), exitCode: 1 } }
+        : check),
+    }));
+    // The observation carries no finding, so it derives exit 0; the receipt's own successful-check proof refuses exit 1.
+    expect(parseAcceptedWaveCompletionReceipt(flipped)).toMatchObject({
+      ok: false, error: { errors: [`acceptedReceipt.checks check ${OWNER_VERIFICATION_CHECK_ID_TEXT} is not a successful completion result`] },
+    });
+  });
+
+  it("#132: an untampered receipt passes the owner proof, re-signed or not", () => {
+    expect(parseAcceptedWaveCompletionReceipt(resigned((body) => body)).ok).toBe(true);
+  });
+});
+
+describe("ownerCheckResult — the owner check's one result constructor (#132)", () => {
+  it("derives the exit from the observation: 0 with no blocking finding, 1 with one, never chosen", () => {
+    const check = ownerCheckOf(OWES_INV1)!;
+    const exitOf = (observation: OwnerVerificationObservation) => {
+      const { outcome } = ownerCheckResult(check, observation);
+      return outcome.kind === "observed" ? outcome.exitCode : null;
+    };
+    expect(exitOf(verified([verdict("INV-1", covered, verifiedRun(0))]))).toBe(0);
+    expect(exitOf(verified([verdict("INV-1", covered, verifiedRun(1))]))).toBe(1);
+    expect(exitOf({ kind: "unavailable", failure: { kind: "plan-unreadable", detail: "ENOENT" } })).toBe(1);
+    expect(ownerCheckResult(check, verified([]))).toMatchObject({
+      checkId: OWNER_VERIFICATION_CHECK_ID, scope: "wave",
+      outcome: { kind: "observed", timedOut: false, signal: null, report: { kind: "not-required" } },
+    });
+  });
 });
 
 describe("the reserved owner check id", () => {
   it("is parsed once, and is the id an unauthorized observation's mismatch is reported against", () => {
     expect(OWNER_VERIFICATION_CHECK_ID).toBe(OWNER_VERIFICATION_CHECK_ID_TEXT);
     expect(value(parseCompletionCheckId(OWNER_VERIFICATION_CHECK_ID_TEXT))).toBe(OWNER_VERIFICATION_CHECK_ID);
-    expect(rejected(evaluate(verified([]), 0, authorize(null))).authorityFailures).toEqual([{
+    expect(rejectionFailures(rejected(evaluate(verified([]), 0, authorize(null)))).authority).toEqual([{
       kind: "owner-verification-mismatch",
       checkId: OWNER_VERIFICATION_CHECK_ID,
       reason: "the result carries an owner-verification observation its suite does not authorize",
@@ -425,7 +488,7 @@ describe("the reserved owner check id", () => {
   });
 });
 
-describe("rejectionDisposition — one decision for what a rejection means to the gate", () => {
+describe("the rejection's cause — one decision for what a rejection means to the gate (#132)", () => {
   const broken: MutationVerdict = { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "git worktree add failed" } };
   const missing: CoverageVerdict = { kind: "missing", paths: ["src/rules/sibling-b.ts"] };
 
@@ -446,31 +509,51 @@ describe("rejectionDisposition — one decision for what a rejection means to th
     ["semantic: a decided owner finding", () => evaluate(verified([verdict("INV-1", missing, verifiedRun(0))]), 1), "semantic"],
     ["semantic: a decided finding beside an undecided one", () => evaluate(verified([verdict("INV-1", missing, broken)]), 1), "semantic"],
   ] as const)("%s", (_case, evaluation, kind) => {
-    expect(rejectionDisposition(rejected(evaluation())).kind).toBe(kind);
+    expect(rejected(evaluation()).cause).toBe(kind);
   });
 
-  it("a semantic disposition carries exactly the decided failures", () => {
+  it("a semantic rejection carries the decided failures, and the owner check's undecided findings beside them", () => {
     const evaluation = rejected(evaluate(verified([verdict("INV-1", missing, broken)]), 1));
-    expect(rejectionDisposition(evaluation)).toEqual({ kind: "semantic", failures: evaluation.semanticFailures });
-    expect(evaluation.infrastructureFailures.map((failure) => failure.kind)).toEqual(["owner-verification-infrastructure"]);
+    if (evaluation.cause !== "semantic") throw new Error(`expected a semantic rejection, got ${evaluation.cause}`);
+    expect(evaluation.semanticFailures.map((failure) => failure.kind)).toEqual(["owner-verification-rejected"]);
+    expect(evaluation.ownerUndecided?.kind).toBe("owner-verification-infrastructure");
+    expect(rejectionFailures(evaluation).infrastructure).toEqual([evaluation.ownerUndecided]);
   });
 
-  it("inexact: a rejection carrying no failure at all", () => {
-    expect(rejectionDisposition({ kind: "rejected", authorityFailures: [], infrastructureFailures: [], semanticFailures: [] }))
-      .toEqual({ kind: "inexact" });
+  it("an infrastructure rejection holds only the other checks' failures, the owner check's undecided finding beside them", () => {
+    const evaluation = rejected(lintUnstartable(verified([verdict("INV-1", missing, broken)]), 1));
+    if (evaluation.cause !== "infrastructure") throw new Error(`expected an infrastructure rejection, got ${evaluation.cause}`);
+    expect(evaluation.infrastructureFailures.map((failure) => failure.kind)).toEqual(["spawn-failed"]);
+    expect(evaluation.ownerUndecided?.kind).toBe("owner-verification-infrastructure");
+    expect(rejectionFailures(evaluation).infrastructure.map((failure) => failure.kind)).toEqual(["spawn-failed", "owner-verification-infrastructure"]);
+  });
+
+  it("every rejection carries at least one failure: an empty rejection cannot be written", () => {
+    const cases = [
+      evaluate(undefined, 0),
+      lintUnstartable(verified([verdict("INV-1", missing, broken)]), 1),
+      evaluate(verified([verdict("INV-1", covered, broken)]), 1),
+      evaluate(verified([verdict("INV-1", missing, verifiedRun(0))]), 1),
+    ];
+    for (const evaluation of cases) {
+      const { authority, infrastructure, semantic } = rejectionFailures(rejected(evaluation));
+      expect(authority.length + infrastructure.length + semantic.length).toBeGreaterThan(0);
+    }
+    // @ts-expect-error a rejection names its cause and carries that cause's non-empty failures
+    const empty: RejectedCompletionSuite = { kind: "rejected", cause: "authority", authorityFailures: [] };
+    void empty;
   });
 });
 
-describe("publicationSlotOf — where a rejected result is published, decided once", () => {
-  const semantic = rejectionDisposition(rejected(evaluate(verified([verdict("INV-1", { kind: "missing", paths: ["src/rules/sibling-b.ts"] }, verifiedRun(0))]), 1)));
+describe("publicationSlotOf — where a rejected result is published, decided once from its cause", () => {
+  const broken: MutationVerdict = { kind: "infrastructure", failure: { kind: "worktree-failed", detail: "git worktree add failed" } };
+  const missing: CoverageVerdict = { kind: "missing", paths: ["src/rules/sibling-b.ts"] };
 
   it.each([
-    ["semantic", semantic, "result-slot"],
-    ["owner-undecided", { kind: "owner-undecided" }, "owner-attempt"],
-    ["authority", { kind: "authority" }, "none"],
-    ["infrastructure", { kind: "infrastructure" }, "none"],
-    ["inexact", { kind: "inexact" }, "none"],
-  ] as const)("%s → %s", (_case, disposition, slot) => {
-    expect(publicationSlotOf(disposition)).toBe(slot);
+    ["semantic", () => evaluate(verified([verdict("INV-1", missing, verifiedRun(0))]), 1), "result-slot"],
+    ["owner-undecided", () => evaluate(verified([verdict("INV-1", covered, broken)]), 1), "owner-attempt"],
+    ["authority", () => evaluate(undefined, 0), "none"],
+  ] as const)("%s → %s", (_case, evaluation, slot) => {
+    expect(publicationSlotOf(rejected(evaluation()))).toBe(slot);
   });
 });

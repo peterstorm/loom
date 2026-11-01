@@ -1,8 +1,8 @@
 /**
  * INV-3 owner: which owned Invariants a Wave or Task owes is decided here, and
  * only here (AD-2, AD-4). Pure: every function is a function of the plan's
- * parsed Invariants or of an `OwnerScope`, the opaque view of a TaskGraph's
- * `owner_obligations` stamp and Task file lists that only this module builds.
+ * parsed Invariants or of a TaskGraph's `owner_obligations` stamp and Task
+ * file lists.
  *
  * - `ownerObligationOf` is the one constructor of an Owner Obligation: the
  *   plan derivation and the State File parser both build through it, so a
@@ -13,19 +13,17 @@
  * - `verifyOwed` is the one home of the owes-mutation rule: the obligations
  *   whose policy is `verify`. An exempt one owes coverage only.
  * - `obligationsDigest` / `obligationsAgree` are the stamp's identity.
- * - `ownerScopeOf` reads a graph into an `OwnerScope`. Callers never hold the
- *   raw stamp, so neither the absent-versus-empty distinction nor the
- *   gate/touch split can be re-encoded outside this module:
- *   - `ownerCheckAuthority` / `ownerVerificationOwed` are the gate scope: an
- *     obligation whose family (owner or a sibling, G5a's `changesFamily`) some
- *     Wave Task changes. A change to the matrix test alone does not trigger
- *     the checks. An absent stamp (a graph populated before owner
- *     verification) owes nothing and has no owner check; a present one, `[]`
- *     included, always has the check.
- *   - `obligationsTouchedBy` is the review-packet and brief scope: an
- *     obligation in which a file list plays any role, matrix test included.
- *   - `stampAgreement` is the gate's drift check: the stamp against the
- *     obligations re-derived from the plan.
+ * - Two duty entry points read a graph. Each answers with a union that
+ *   decides the absent-versus-empty distinction once, so no caller filters
+ *   the stamp or re-encodes it:
+ *   - `waveOwnerDuty` is the gate scope: the obligations whose family (owner
+ *     or a sibling, G5a's `changesFamily`) some Wave Task changes, and the
+ *     stamp's digest. `ownerCheckAuthorityOf` derives the owner check from
+ *     it (null exactly when the stamp is absent). A change to the
+ *     matrix test alone does not trigger the checks. `stampAgreement` is its
+ *     drift check against the plan, an absent stamp being drift.
+ *   - `taskOwnerDuty` is the review-packet and brief scope: the obligations
+ *     in which a file list plays any role, matrix test included.
  *
  * Roles are classified through `plan-paths.ts`, the one path rule plan
  * validation and the brief already share.
@@ -299,35 +297,17 @@ export function obligationsAgree(stamped: readonly OwnerObligation[], fromPlan: 
 }
 
 // ---------------------------------------------------------------------------
-// The Owner Scope: the stamp as callers see it
+// The two owner duties: what a Wave owes the gate, and what one Task touches
 // ---------------------------------------------------------------------------
 
-/** The Tasks a selection reads: only their Wave and file list matter. */
+/** The Tasks the Wave duty reads: only their Wave and file list matter. */
 type ScopedTask = Pick<Task, "wave" | "file_list">;
 
-/** The graph a scope reads: its Tasks and the stamp. */
-type StampedGraph = Readonly<{ tasks: readonly ScopedTask[]; owner_obligations?: TaskGraph["owner_obligations"] }>;
+/** The stamp a duty reads; absent on a graph populated before owner verification. */
+type OwnerStamp = Readonly<{ owner_obligations?: TaskGraph["owner_obligations"] }>;
 
-type ScopeState =
-  | Readonly<{ kind: "unstamped" }>
-  | Readonly<{ kind: "stamped"; obligations: readonly OwnerObligation[]; tasks: readonly ScopedTask[] }>;
-
-const OWNER_SCOPE = Symbol("OwnerScope");
-
-/**
- * A TaskGraph's Owner Obligations as every selection reads them. Opaque: its
- * one key is private to this module, so a caller can only hand it back to
- * the selections here, never filter the stamp itself.
- */
-export type OwnerScope = Readonly<{ [OWNER_SCOPE]: ScopeState }>;
-
-export function ownerScopeOf(graph: StampedGraph): OwnerScope {
-  const stamp = graph.owner_obligations;
-  const state: ScopeState = stamp === undefined
-    ? { kind: "unstamped" }
-    : { kind: "stamped", obligations: stamp, tasks: graph.tasks };
-  return Object.freeze({ [OWNER_SCOPE]: Object.freeze(state) });
-}
+/** The graph the Wave duty reads: its Tasks and the stamp. */
+type StampedGraph = OwnerStamp & Readonly<{ tasks: readonly ScopedTask[] }>;
 
 const familyOf = (obligation: OwnerObligation): OwnedInvariant => ({
   kind: "owned",
@@ -340,53 +320,83 @@ const familyOf = (obligation: OwnerObligation): OwnedInvariant => ({
 const rolesIn = (fileList: readonly string[], obligation: OwnerObligation): InvariantRoles =>
   invariantRoles(fileList, familyOf(obligation));
 
-/** The obligations the Wave owes coverage and mutation for, in stamp order; `[]` without a stamp. */
-export function ownerVerificationOwed(scope: OwnerScope, wave: number): readonly OwnerObligation[] {
-  const state = scope[OWNER_SCOPE];
-  if (state.kind === "unstamped") return [];
-  const waveTasks = state.tasks.filter((task) => task.wave === wave);
-  return state.obligations.filter((obligation) =>
-    waveTasks.some(({ file_list }) => changesFamily(rolesIn(file_list ?? [], obligation))));
-}
-
 /**
- * The owner check the Wave's suite carries: `null` exactly when the graph has
- * no stamp; otherwise the stamp's digest and the owed ids, possibly none.
+ * What a Wave owes the owner gate (the gate scope). Plain data, one field per
+ * fact: two duties of the same graph and Wave are structurally equal.
+ *
+ * - `unstamped`: the graph predates owner verification. It owes nothing
+ *   (`owed: []`) and its suite carries no owner check.
+ * - `stamped`: the stamp, `[]` included, always carries the check, so plan
+ *   integrity runs every Wave. `owed` is the obligations whose family (owner
+ *   or a sibling, G5a's `changesFamily`) some Task of the Wave changes, in
+ *   stamp order; `obligationsDigest` is the whole stamp's identity.
  */
-export function ownerCheckAuthority(scope: OwnerScope, wave: number): OwnerCheckAuthority | null {
-  const state = scope[OWNER_SCOPE];
-  if (state.kind === "unstamped") return null;
-  return {
-    obligationsDigest: obligationsDigest(state.obligations),
-    owed: ownerVerificationOwed(scope, wave).map(({ invariant }) => invariant),
-  };
-}
+export type WaveOwnerDuty =
+  | Readonly<{ kind: "unstamped"; owed: readonly [] }>
+  | Readonly<{ kind: "stamped"; obligationsDigest: ArtifactDigest; owed: readonly OwnerObligation[] }>;
 
-/** The touch scope: obligations in which the file list plays any role, matrix test included, in stamp order; `[]` without a stamp. */
-export function obligationsTouchedBy(scope: OwnerScope, fileList: readonly string[]): readonly OwnerObligation[] {
-  const state = scope[OWNER_SCOPE];
-  if (state.kind === "unstamped") return [];
-  return state.obligations.filter((obligation) => {
-    const roles = rolesIn(fileList, obligation);
-    return changesFamily(roles) || roles.matrixTest;
-  });
+const UNSTAMPED_WAVE: WaveOwnerDuty = Object.freeze({ kind: "unstamped", owed: Object.freeze([]) as readonly [] });
+
+export function waveOwnerDuty(graph: StampedGraph, wave: number): WaveOwnerDuty {
+  const stamp = graph.owner_obligations;
+  if (stamp === undefined) return UNSTAMPED_WAVE;
+  const waveTasks = graph.tasks.filter((task) => task.wave === wave);
+  const owed = Object.freeze(stamp.filter((obligation) =>
+    waveTasks.some(({ file_list }) => changesFamily(rolesIn(file_list ?? [], obligation)))));
+  return Object.freeze({ kind: "stamped", obligationsDigest: obligationsDigest(stamp), owed });
 }
 
 /**
- * The stamp against the obligations the plan derives now: `agrees`,
- * `drifted` (any difference, in content or order), `unstamped` (no stamp to
- * agree with), or `underivable` when the plan no longer derives obligations.
+ * The owner check a Wave's suite carries, derived from its duty at this one
+ * point: `null` exactly when the stamp is absent; otherwise the stamp's digest
+ * and the ids of the owed obligations, possibly none.
+ */
+export function ownerCheckAuthorityOf(duty: WaveOwnerDuty): OwnerCheckAuthority | null {
+  if (duty.kind === "unstamped") return null;
+  return Object.freeze({ obligationsDigest: duty.obligationsDigest, owed: duty.owed.map(({ invariant }) => invariant) });
+}
+
+/**
+ * The gate's drift check of a Wave duty against the obligations the plan
+ * derives now: `agrees`, `drifted` (any difference, in content or order), or
+ * `underivable` when the plan no longer derives obligations. An absent stamp
+ * has nothing the plan could prove, so it is `drifted`: decided here, once,
+ * beside the absent-versus-empty rule, and never by a caller.
  */
 export type StampAgreement =
   | Readonly<{ kind: "agrees" }>
   | Readonly<{ kind: "drifted" }>
-  | Readonly<{ kind: "unstamped" }>
   | Readonly<{ kind: "underivable"; error: ObligationsError }>;
 
-export function stampAgreement(scope: OwnerScope, models: Pick<PlanModels, "invariants">): StampAgreement {
-  const state = scope[OWNER_SCOPE];
-  if (state.kind === "unstamped") return { kind: "unstamped" };
+export function stampAgreement(duty: WaveOwnerDuty, models: Pick<PlanModels, "invariants">): StampAgreement {
+  if (duty.kind === "unstamped") return { kind: "drifted" };
   const fromPlan = obligationsFromPlan(models);
   if (!fromPlan.ok) return { kind: "underivable", error: fromPlan.error };
-  return obligationsAgree(state.obligations, fromPlan.value) ? { kind: "agrees" } : { kind: "drifted" };
+  // The canonical digest is the stamp's identity: equal exactly when the obligations agree, in content and order.
+  return obligationsDigest(fromPlan.value) === duty.obligationsDigest ? { kind: "agrees" } : { kind: "drifted" };
+}
+
+/**
+ * The obligations one Task's file list touches (the touch scope: any role,
+ * matrix test included), in stamp order. The review packet's owner map and
+ * the brief's owner duties read it. `unstamped` touches nothing; the brief
+ * tells it apart from a stamp the Task does not touch, since only an
+ * unstamped graph still renders the plan's own ownership blocks.
+ */
+export type TaskOwnerDuty =
+  | Readonly<{ kind: "unstamped"; touched: readonly [] }>
+  | Readonly<{ kind: "stamped"; touched: readonly OwnerObligation[] }>;
+
+const UNSTAMPED_TASK: TaskOwnerDuty = Object.freeze({ kind: "unstamped", touched: Object.freeze([]) as readonly [] });
+
+export function taskOwnerDuty(graph: OwnerStamp, fileList: readonly string[]): TaskOwnerDuty {
+  const stamp = graph.owner_obligations;
+  if (stamp === undefined) return UNSTAMPED_TASK;
+  return Object.freeze({
+    kind: "stamped",
+    touched: Object.freeze(stamp.filter((obligation) => {
+      const roles = rolesIn(fileList, obligation);
+      return changesFamily(roles) || roles.matrixTest;
+    })),
+  });
 }

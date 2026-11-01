@@ -6,10 +6,10 @@
  *
  * 1. The real workspace's digest is observed before anything runs.
  * 2. Per owed obligation, in stamp order:
- *    - coverage: the matrix test's import frontier is read from the real
- *      workspace (`coverageFrontier` names each next read), its tsconfig
- *      `paths` are resolved by `pathAliasesOf` over this shell's reads and
- *      `jsonc-parser`, and `coverageOverFiles` decides;
+ *    - coverage: the matrix test's tsconfig `paths` are resolved by
+ *      `pathAliasesOf` over this shell's reads and `jsonc-parser`, then
+ *      `siblingCoverage` walks the import graph itself, pulling each file
+ *      it needs from the real workspace through `readRepositoryText`;
  *    - mutation, unless the obligation is exempt: `waveBaseOf` chooses the
  *      owner's Wave base, this shell resolves it with Git and reads the
  *      owner there, `changedHeadLines` and `mutationPlan` fix the mutants,
@@ -41,7 +41,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { parse as parseJsonc, printParseErrorCode, type ParseError } from "jsonc-parser";
 import { failure, success, type DomainResult } from "../core/orchestration-contract/identity";
 import type { ArtifactDigest } from "../core/orchestration-contract";
-import { coverageFrontier, coverageOverFiles, initialCoverageState } from "../core/owner-verification/coverage";
+import { MODULE_ABSENT, siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
@@ -53,6 +53,7 @@ import type {
   InvariantId,
   InvariantVerdict,
   MatrixTestRun,
+  ModuleRead,
   MutationPlan,
   OwnerInfrastructureFailure,
   OwnerInfrastructureFailureKind,
@@ -105,25 +106,19 @@ const unavailable = (kind: OwnerInfrastructureFailureKind, detail: string): Owne
  * repository. A file the filesystem refuses (any other errno) is
  * `unreadable`, never absent, so it can never pass for a missing sibling.
  */
-type RepositoryRead =
-  | Readonly<{ kind: "text"; text: string }>
-  | Readonly<{ kind: "absent" }>
-  | Readonly<{ kind: "unreadable"; failure: OwnerInfrastructureFailure }>;
-
-const ABSENT: RepositoryRead = Object.freeze({ kind: "absent" });
 const ABSENCE_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
 
 /** A repository-relative path's text, its absence, or why the filesystem refused it. Never throws. */
-function readRepositoryText(root: CanonicalRepositoryRoot, path: string): RepositoryRead {
+function readRepositoryText(root: CanonicalRepositoryRoot, path: string): ModuleRead {
   const absolute = posix.join(root, path);
   try {
-    if (!statSync(absolute).isFile()) return ABSENT;
+    if (!statSync(absolute).isFile()) return MODULE_ABSENT;
     const real = realpathSync.native(absolute);
-    if (!real.startsWith(`${root}/`)) return ABSENT;
+    if (!real.startsWith(`${root}/`)) return MODULE_ABSENT;
     return { kind: "text", text: readFileSync(real, "utf-8") };
   } catch (cause) {
     const code = (cause as NodeJS.ErrnoException | null)?.code;
-    if (typeof code === "string" && ABSENCE_CODES.has(code)) return ABSENT;
+    if (typeof code === "string" && ABSENCE_CODES.has(code)) return MODULE_ABSENT;
     return { kind: "unreadable", failure: infrastructure("repository-file-unreadable", `${path} cannot be read: ${describeCause(cause)}`) };
   }
 }
@@ -147,36 +142,19 @@ const parseJsoncText: ParseJsonc = (text) => {
 
 const coverageInfrastructure = (failure: OwnerInfrastructureFailure): CoverageVerdict => ({ kind: "infrastructure", failure });
 
-/** The matrix test's tsconfig aliases. A refused config is an infrastructure failure, never a config that is not there. */
+/** The matrix test's tsconfig aliases. A refused config is that read's infrastructure failure, never a config that is not there. */
 function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): DomainResult<PathAliases, OwnerInfrastructureFailure> {
-  const refused: OwnerInfrastructureFailure[] = [];
-  const aliases = pathAliasesOf(matrixTest, (path) => {
-    const file = readRepositoryText(root, path);
-    if (file.kind === "unreadable") refused.push(file.failure);
-    return file.kind === "text" ? file.text : null;
-  }, parseJsoncText);
-  const [first] = refused;
-  if (first !== undefined) return failure(first);
-  return aliases.ok
-    ? aliases
-    : failure(infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error}`));
+  const aliases = pathAliasesOf(matrixTest, (path) => readRepositoryText(root, path), parseJsoncText);
+  if (aliases.ok) return aliases;
+  return failure(aliases.error.kind === "unreadable"
+    ? aliases.error.failure
+    : infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error.reason}`));
 }
 
 function coverage(root: CanonicalRepositoryRoot, obligation: OwnerObligation): CoverageVerdict {
   const aliases = coverageAliases(root, obligation.matrixTest);
   if (!aliases.ok) return coverageInfrastructure(aliases.error);
-  let step = coverageFrontier(initialCoverageState(obligation.matrixTest, aliases.value), new Map());
-  while (step.kind === "read") {
-    const gathered = new Map<string, string>();
-    for (const path of step.next) {
-      const file = readRepositoryText(root, path);
-      if (file.kind === "unreadable") return coverageInfrastructure(file.failure);
-      if (file.kind === "text") gathered.set(path, file.text);
-    }
-    step = coverageFrontier(step.state, gathered);
-  }
-  if (step.kind === "bound-exceeded") return coverageInfrastructure(step.failure);
-  return coverageOverFiles({ matrixTest: obligation.matrixTest, obligation, files: step.state.files, aliases: aliases.value });
+  return siblingCoverage({ obligation, aliases: aliases.value, read: (path) => readRepositoryText(root, path) });
 }
 
 // ---------------------------------------------------------------------------

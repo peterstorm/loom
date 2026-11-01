@@ -1,30 +1,35 @@
 /**
  * The brief's owner duties (plan AD-10, FR-027, AS-028): a duty paragraph per
- * owned Invariant the Task touches (`obligationsTouchedBy`, any role), naming
+ * owned Invariant the Task touches (`taskOwnerDuty`, any role), naming
  * the coverage duty (the matrix test must import the owner and every sibling)
  * and the mutation duty (the owner's changed lines are mutation-verified) or
  * the declared exemption. Rendered only when the graph carries the
- * `owner_obligations` stamp, so pre-feature graphs get no false duty.
+ * `owner_obligations` stamp, so pre-feature graphs get no false duty. On a
+ * stamped graph the stamp is the only source of the whole ownership section
+ * (#134); a pre-feature graph renders the plan's own blocks.
  */
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  NO_INVARIANT_OWNERSHIP,
   RULE_DOCUMENTS,
+  invariantOwnershipSourceOf,
   renderImplementationBrief,
   type ImplementationBriefInput,
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
-import { obligationsFromPlan, ownerScopeOf } from "../../src/core/owner-verification/obligations";
+import { obligationsFromPlan, taskOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
 import type { PlanInvariant, Task } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { taskFixture } from "../fixtures/task-lifecycle";
-import { ownerObligation } from "../fixtures/owner-obligation";
+import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 import {
   ADMISSION,
   ADMISSION_FEE_TABLE_PLAN_TEXT,
@@ -65,11 +70,10 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     spec: { kind: "unavailable", reason: { kind: "no-spec-file" } },
     rules: RULES,
     roster: [],
-    invariants: INVARIANTS,
     contracts: [],
     repositoryRoot: "/repo",
     operatorNotes: [],
-    ownerScope: ownerScopeOf(stamp === undefined ? { tasks: [] } : { tasks: [], owner_obligations: stamp }),
+    ownership: briefOwnership(stamp, INVARIANTS, value.file_list ?? []),
   };
   const rendered = renderImplementationBrief(input);
   if (!rendered.ok) throw new Error(rendered.error.message);
@@ -125,25 +129,73 @@ describe("owner duties in the brief (AD-10)", () => {
     expect(ownership(["src/other.ts"], STAMP)).not.toContain("Owner duties");
   });
 
-  it("FR-027: a touched stamped obligation with no plan Invariant block still states its heading and duties", () => {
+  it("#134: a touched stamped obligation the plan does not declare renders whole, from the stamp", () => {
     const drifted: OwnerObligation = ownerObligation({
       invariant: "INV-9",
       title: "Ledgers are balanced only by the balancer",
       statement: "Every entry is balanced by balance().",
       owner: "src/ledger/balance.ts",
-      siblings: [{ path: "src/api/post.ts", note: null }],
+      siblings: [{ path: "src/api/post.ts", note: "posts entries" }],
       matrixTest: "tests/balance.matrix.test.ts",
       mutation: { kind: "verify" },
     });
     const section = ownership([drifted.owner], [...STAMP, drifted]);
     expect(INVARIANTS.map(({ id }) => id)).not.toContain("INV-9");
-    expect(paragraphs(section)).toContain(`**INV-9: ${drifted.title}**`);
+    expect(paragraphs(section)).toContain(`**INV-9: ${drifted.title}**\n${drifted.statement}`);
+    expect(someParagraph(section, "**Your role:**", `- Owner: you change the owner module \`${drifted.owner}\``)).toBe(true);
+    expect(someParagraph(section, `**Owner module:** \`${drifted.owner}\``, "- `src/api/post.ts` — posts entries", `**Matrix test:** \`${drifted.matrixTest}\``))
+      .toBe(true);
     expect(someParagraph(section, "**Owner duties (INV-9):**", "must import", drifted.owner, "src/api/post.ts", drifted.matrixTest)).toBe(true);
     expect(someParagraph(section, "mutation-verified", drifted.owner, drifted.matrixTest)).toBe(true);
     expect(section).not.toContain(ADMISSION.invariant);
   });
 
-  it("FR-027: the duty follows the stamp, not the plan: a stamp without that Invariant owes no duty", () => {
-    expect(ownership([ADMISSION.owner], [FEE_TABLE])).not.toContain("Owner duties");
+  it("#134: on a stamped graph the stamp is the only source: a plan Invariant the stamp lacks renders nothing", () => {
+    expect(ownership([ADMISSION.owner], [FEE_TABLE])).toContain(NO_INVARIANT_OWNERSHIP);
+  });
+
+  it("#134: on a stamped graph the stamp's prose wins over the plan's when they differ", () => {
+    const restated = ownerObligation({ ...ADMISSION, statement: "Admission goes through decide() and nothing else." });
+    const section = ownership([ADMISSION.owner], [restated, FEE_TABLE]);
+    expect(section).toContain(restated.statement!);
+    expect(section).not.toContain(ADMISSION.statement!);
+  });
+
+  it("#134: a stamp that agrees with the plan renders the plan's blocks byte for byte, each followed by its two duty paragraphs", () => {
+    const universe = [
+      ADMISSION.owner, ...ADMISSION.siblings.map(({ path }) => path), ADMISSION.matrixTest,
+      FEE_TABLE.owner, FEE_TABLE.matrixTest, "src/other.ts",
+    ];
+    fc.assert(fc.property(fc.subarray(universe), (files) => {
+      const stamped = paragraphs(ownership(files, STAMP));
+      const fromPlan = paragraphs(ownership(files, undefined));
+      const dutyAt = stamped.flatMap((paragraph, index) => paragraph.startsWith("**Owner duties (") ? [index, index + 1] : []);
+      expect(stamped.filter((_, index) => !dutyAt.includes(index))).toEqual(fromPlan);
+    }));
+  });
+});
+
+describe("invariantOwnershipSourceOf — the one stamped-or-plan choice (#134)", () => {
+  const files = [ADMISSION.owner];
+
+  it("a stamped duty is the source itself, and the plan is never read", () => {
+    const duty = taskOwnerDuty({ owner_obligations: STAMP }, files);
+    const read = () => { throw new Error("a stamped graph must not read the plan"); };
+    expect(invariantOwnershipSourceOf(duty, read)).toEqual({ ok: true, value: duty });
+  });
+
+  it("an unstamped duty reads the plan once, and renders its Invariants", () => {
+    let reads = 0;
+    const source = invariantOwnershipSourceOf(taskOwnerDuty({}, files), () => {
+      reads += 1;
+      return { ok: true as const, value: INVARIANTS };
+    });
+    expect(source).toEqual({ ok: true, value: { kind: "plan", invariants: INVARIANTS } });
+    expect(reads).toBe(1);
+  });
+
+  it("an unstamped duty whose plan cannot be read carries the read's refusal unchanged", () => {
+    const refusal = { ok: false as const, error: "cannot read the plan plan.md" };
+    expect(invariantOwnershipSourceOf(taskOwnerDuty({}, files), () => refusal)).toBe(refusal);
   });
 });

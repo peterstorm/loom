@@ -5,21 +5,21 @@
  *
  * Strays and malformed ownership block (a typo is never an opt-out); any
  * difference between the obligations the plan re-derives and the stamp, an
- * absent stamp included, is drift.
+ * absent stamp included, is drift (`stampAgreement` decides that, once).
  */
 
 import { match } from "ts-pattern";
 
 import type { PlanModels } from "../../types";
 import { renderStray } from "../parse-plan-models";
-import { renderObligationsError, stampAgreement, type OwnerScope } from "./obligations";
+import { renderObligationsError, stampAgreement, type WaveOwnerDuty } from "./obligations";
 import type { OwnerInfrastructureFailure } from "./types";
 
 /** Why the plan's models do not prove the stamp, or null when they re-derive it exactly. */
 export function planModelsIntegrityFailure(
   planPath: string,
   models: PlanModels,
-  scope: OwnerScope,
+  duty: WaveOwnerDuty,
 ): OwnerInfrastructureFailure | null {
   const problems = [
     ...models.strays.map(renderStray),
@@ -35,9 +35,9 @@ export function planModelsIntegrityFailure(
     detail: `plan ${planPath} no longer derives the owner_obligations stamped at population; ` +
       "restore the plan's owned Invariants, or re-populate the TaskGraph from the plan",
   };
-  return match(stampAgreement(scope, models))
+  return match(stampAgreement(duty, models))
     .with({ kind: "agrees" }, () => null)
-    .with({ kind: "drifted" }, { kind: "unstamped" }, () => drift)
+    .with({ kind: "drifted" }, () => drift)
     .with({ kind: "underivable" }, ({ error }): OwnerInfrastructureFailure => ({
       kind: "plan-malformed",
       detail: `plan ${planPath} declares owned Invariants that derive no Owner Obligation: ${renderObligationsError(error)}`,

@@ -70,10 +70,9 @@ import {
   type ImplementationReservationStatusObservation,
 } from "./implementation-window";
 import {
-  observedOwnerVerificationStatus,
   ownerVerificationNotObserved,
   renderOwnerVerificationStatus,
-  type OwnerVerificationStatus,
+  type OwnerVerificationStatusReport,
 } from "./owner-verification/status";
 
 /** What status reads: the gate's own deps plus the one observation only the
@@ -627,50 +626,37 @@ function runDirectoryUnavailableStatus(
 }
 
 /**
- * The one owner-verification status of what status read as the latest
- * persisted completion result (AD-10). The status document's report and the
- * next action's remedies both come from this value, so "unavailable" versus
- * "absent" is decided here once: a persisted result status could not read is
- * not observed, with the read failure as its reason, so it never passes for
- * "no result", and neither it nor an absent result owes a remedy.
+ * The owner-verification report of what status read as the latest persisted
+ * completion result (AD-10): "unavailable" versus "absent" is decided here
+ * once. A persisted result status could not read is not observed, with the
+ * read failure as its reason, so it never passes for "no result".
  */
-export const ownerVerificationStatusOf = (
+export const ownerVerificationReportOf = (
   result: WaveCompletionResultObservation | undefined,
-): OwnerVerificationStatus =>
+): OwnerVerificationStatusReport =>
   match(result)
     .with(P.nullish, { kind: "absent" }, () => ownerVerificationNotObserved("no persisted completion result"))
     .with({ kind: "unavailable" }, ({ reason }) =>
       ownerVerificationNotObserved(`the persisted completion result is unavailable: ${reason}`))
     .with({ kind: "observed" }, ({ result: { ownerVerification } }) => ownerVerification === undefined
       ? ownerVerificationNotObserved("the persisted completion result carries no owner verification")
-      : observedOwnerVerificationStatus(ownerVerification))
-    .exhaustive();
-
-/** Why an owner-verification rejection carries no remedy: the not-observed reason, or an observation naming no blocker. */
-const unreadRemedyCause = (owner: OwnerVerificationStatus): string =>
-  match(owner.report)
-    .with({ kind: "not-observed" }, ({ reason }) => reason)
-    .with({ kind: "unavailable" }, { kind: "verified" }, () => "the persisted owner verification names no blocking Invariant")
+      : ownerVerification)
     .exhaustive();
 
 /**
- * When the completion suite rejected the Wave for owner verification, the
- * next action names each blocking Invariant and its remedy. Readiness judged
- * the very result the remedies are read from, so they should not disagree;
- * when they do (the owner report yields no remedy), the next action says so
- * and names why instead of showing a remedy-free rejection. A rejection for
- * any other failure kind adds none.
+ * When the completion suite rejected the Wave and the owner check contributed
+ * findings, the next action names each blocking Invariant and its remedy. The
+ * remedies travel on the rejection itself (`ownerVerificationRemedies`, #135):
+ * readiness rendered them from the very findings it judged, so the next action
+ * and the readiness fact are one value and cannot disagree. Any other
+ * readiness adds none.
  */
-export function withOwnerVerificationRemedies(status: LoomStatus, owner: OwnerVerificationStatus): LoomStatus {
+export function withOwnerVerificationRemedies(status: LoomStatus): LoomStatus {
   const suite = status.facts.waveCompletionSuiteReadiness;
-  const rejectedForOwner = suite.kind === "known" && suite.value.kind === "rejected" &&
-    suite.value.failureKinds.includes("owner-verification-rejected");
-  if (!rejectedForOwner) return status;
-  const reasons = owner.remedies.length === 0
-    ? [statusReason("completion-prerequisite-failed",
-      `owner verification rejected the Wave but no per-Invariant remedy could be read (${unreadRemedyCause(owner)})`)]
-    : owner.remedies.map((remedy) =>
-      statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
+  const readiness = suite.kind === "known" ? suite.value : null;
+  if (readiness?.kind !== "rejected" || readiness.ownerVerificationRemedies === null) return status;
+  const reasons = readiness.ownerVerificationRemedies.map((remedy) =>
+    statusReason("completion-prerequisite-failed", `owner verification blocks the Wave Gate: ${remedy}`));
   return canonicalRecord({
     ...status,
     next: canonicalRecord({
@@ -682,9 +668,9 @@ export function withOwnerVerificationRemedies(status: LoomStatus, owner: OwnerVe
 
 /**
  * Anti-corruption adapter from the protected-state parser into the canonical
- * status document: the routed `LoomStatus`, its next action carrying any
- * owner-verification remedies, and the owner-verification report beside it,
- * all from one `ownerVerificationStatusOf` value.
+ * status document: the routed `LoomStatus`, its next action carrying the
+ * owner-verification remedies its own readiness fact holds, and the
+ * owner-verification report beside it.
  */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
@@ -692,9 +678,8 @@ export function deriveLoomStatusFromParsedGraph(
   lifecycleProof: WaveLifecycleProof | null = null,
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatusDocument {
-  const owner = ownerVerificationStatusOf(deps.currentWaveCompletionResult);
-  const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory), owner);
-  return canonicalRecord({ ...status, ownerVerification: owner.report });
+  const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory));
+  return canonicalRecord({ ...status, ownerVerification: ownerVerificationReportOf(deps.currentWaveCompletionResult) });
 }
 
 /** Route a parsed graph to exactly one status branch. */

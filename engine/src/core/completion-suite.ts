@@ -33,7 +33,7 @@ import {
   type AcceptanceObservation,
   type AcceptanceReportFacts,
 } from "./acceptance-contract";
-import { canonicalStructuralEquals } from "./orchestration-contract";
+import { canonicalStructuralEquals, isNonEmpty } from "./orchestration-contract";
 import {
   collectDenseArray,
   exactRecordErrors,
@@ -44,7 +44,7 @@ import {
 } from "./plain-record";
 import type { InvariantId } from "./invariant-id";
 import { parseOwedInvariantIds, parseOwnerVerificationObservation, type OwnerVerificationParseError } from "./owner-verification/parse";
-import { ownerVerificationFailures } from "./owner-verification/verdict";
+import { ownerVerificationFailures, renderOwnerVerificationFailure } from "./owner-verification/verdict";
 import type { OwnerVerificationFailure, OwnerVerificationObservation } from "./owner-verification/types";
 
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
@@ -285,68 +285,91 @@ export type AcceptedWaveCompletionReceipt = Readonly<{
   resultDigest: ArtifactDigest;
 }>;
 
-export type CompletionSuiteEvaluation =
-  | Readonly<{ kind: "accepted"; receipt: AcceptedWaveCompletionReceipt }>
+/** The owner check's undecided findings: the one infrastructure failure a retry at the same workspace may still clear. */
+export type OwnerUndecidedFailure = Extract<CompletionInfrastructureFailure, { readonly kind: "owner-verification-infrastructure" }>;
+
+/**
+ * A rejected suite, classified once by what decided it (#132). Every case
+ * carries at least one failure, so a rejection with nothing to say cannot be
+ * written:
+ * - `authority`: the result is not the one the suite authorizes;
+ * - `infrastructure`: a check other than the owner check could not run
+ *   (`infrastructureFailures` holds only those); the owner check's undecided
+ *   findings (`ownerUndecided`) and any decided failures may sit beside them;
+ * - `owner-undecided`: only the owner check could not decide, and nothing else
+ *   failed, so a retry at the same workspace may still decide;
+ * - `semantic`: some check decided against the Wave; an undecided owner check
+ *   beside it (`ownerUndecided`) cannot rescue it, so the rejection is final
+ *   at this workspace.
+ */
+export type RejectedCompletionSuite =
+  | Readonly<{ kind: "rejected"; cause: "authority"; authorityFailures: NonEmpty<CompletionAuthorityFailure> }>
   | Readonly<{
       kind: "rejected";
-      authorityFailures: readonly CompletionAuthorityFailure[];
-      infrastructureFailures: readonly CompletionInfrastructureFailure[];
+      cause: "infrastructure";
+      infrastructureFailures: NonEmpty<Exclude<CompletionInfrastructureFailure, OwnerUndecidedFailure>>;
+      ownerUndecided: OwnerUndecidedFailure | null;
       semanticFailures: readonly CompletionSemanticFailure[];
+    }>
+  | Readonly<{ kind: "rejected"; cause: "owner-undecided"; ownerUndecided: OwnerUndecidedFailure }>
+  | Readonly<{
+      kind: "rejected";
+      cause: "semantic";
+      semanticFailures: NonEmpty<CompletionSemanticFailure>;
+      ownerUndecided: OwnerUndecidedFailure | null;
     }>;
 
-export type RejectedCompletionSuite = Extract<CompletionSuiteEvaluation, { readonly kind: "rejected" }>;
+export type CompletionSuiteEvaluation =
+  | Readonly<{ kind: "accepted"; receipt: AcceptedWaveCompletionReceipt }>
+  | RejectedCompletionSuite;
+
+/** Every failure of a rejection by category, for the diagnostics that list them all; the owner check's undecided findings count as infrastructure. */
+export type RejectionFailures = Readonly<{
+  authority: readonly CompletionAuthorityFailure[];
+  infrastructure: readonly CompletionInfrastructureFailure[];
+  semantic: readonly CompletionSemanticFailure[];
+}>;
+
+export const rejectionFailures = (rejection: RejectedCompletionSuite): RejectionFailures =>
+  match(rejection)
+    .with({ cause: "authority" }, ({ authorityFailures }): RejectionFailures => ({ authority: authorityFailures, infrastructure: [], semantic: [] }))
+    .with({ cause: "infrastructure" }, ({ infrastructureFailures, ownerUndecided, semanticFailures }): RejectionFailures =>
+      ({ authority: [], infrastructure: ownerUndecided === null ? infrastructureFailures : [...infrastructureFailures, ownerUndecided], semantic: semanticFailures }))
+    .with({ cause: "owner-undecided" }, ({ ownerUndecided }): RejectionFailures => ({ authority: [], infrastructure: [ownerUndecided], semantic: [] }))
+    .with({ cause: "semantic" }, ({ semanticFailures, ownerUndecided }): RejectionFailures =>
+      ({ authority: [], infrastructure: ownerUndecided === null ? [] : [ownerUndecided], semantic: semanticFailures }))
+    .exhaustive();
 
 /**
- * What a rejection means for the gate, decided once from its failures:
- * - `authority`: the result is not the one the suite authorizes;
- * - `infrastructure`: a check other than the owner check could not run;
- * - `owner-undecided`: only the owner check could not decide, and nothing
- *   else failed, so a retry at the same workspace may still decide;
- * - `semantic`: some check decided against the Wave; an undecided owner check
- *   beside it cannot rescue it, so the rejection is final at this workspace;
- * - `inexact`: a rejection carrying no failure at all.
+ * The owner check's findings in a rejection, one line each (the Invariant,
+ * its evidence and the remedy), undecided findings before decided ones: the
+ * one wording the gate's diagnostic and status's next action share.
  */
-export type RejectionDisposition =
-  | Readonly<{ kind: "authority" }>
-  | Readonly<{ kind: "infrastructure" }>
-  | Readonly<{ kind: "owner-undecided" }>
-  | Readonly<{ kind: "semantic"; failures: NonEmpty<CompletionSemanticFailure> }>
-  | Readonly<{ kind: "inexact" }>;
-
-type InfrastructureCase = "none" | "owner-only" | "other";
-
-function infrastructureCase(failures: readonly CompletionInfrastructureFailure[]): InfrastructureCase {
-  if (failures.length === 0) return "none";
-  return failures.every((failure) => failure.kind === "owner-verification-infrastructure") ? "owner-only" : "other";
-}
-
-export function rejectionDisposition(rejection: RejectedCompletionSuite): RejectionDisposition {
-  if (rejection.authorityFailures.length > 0) return freeze({ kind: "authority" });
-  const infrastructure = infrastructureCase(rejection.infrastructureFailures);
-  if (infrastructure === "other") return freeze({ kind: "infrastructure" });
-  if (rejection.semanticFailures.length > 0) {
-    return freeze({ kind: "semantic", failures: asNonEmpty(freezeArray(rejection.semanticFailures)) });
-  }
-  return freeze({ kind: infrastructure === "owner-only" ? "owner-undecided" : "inexact" });
-}
+export const ownerVerificationFindingLines = (rejection: RejectedCompletionSuite): readonly string[] => {
+  const { infrastructure, semantic } = rejectionFailures(rejection);
+  return [...infrastructure, ...semantic].flatMap((failure) =>
+    failure.kind === "owner-verification-infrastructure" || failure.kind === "owner-verification-rejected"
+      ? failure.failures.map(renderOwnerVerificationFailure)
+      : []);
+};
 
 /**
- * Where a rejected result is published, decided once from its disposition:
+ * Where a rejected result is published, decided once from its cause:
  * - `result-slot`: a terminal rejection (`semantic`) fills the workspace's
  *   result slot and is replayed there;
  * - `owner-attempt`: an `owner-undecided` rejection is recorded beside the
  *   slot, which stays free so a retry at the same workspace runs the owner
  *   check again; the slot therefore never holds one;
- * - `none`: an `authority`, `infrastructure` or `inexact` rejection is not
- *   the authorized result and is never published.
+ * - `none`: an `authority` or `infrastructure` rejection is not the
+ *   authorized result and is never published.
  */
 export type PublicationSlot = "result-slot" | "owner-attempt" | "none";
 
-export const publicationSlotOf = (disposition: RejectionDisposition): PublicationSlot =>
-  match(disposition)
-    .with({ kind: "semantic" }, (): PublicationSlot => "result-slot")
-    .with({ kind: "owner-undecided" }, (): PublicationSlot => "owner-attempt")
-    .with({ kind: "authority" }, { kind: "infrastructure" }, { kind: "inexact" }, (): PublicationSlot => "none")
+export const publicationSlotOf = (rejection: RejectedCompletionSuite): PublicationSlot =>
+  match(rejection.cause)
+    .with("semantic", (): PublicationSlot => "result-slot")
+    .with("owner-undecided", (): PublicationSlot => "owner-attempt")
+    .with("authority", "infrastructure", (): PublicationSlot => "none")
     .exhaustive();
 
 type Parsed<T> = DomainResult<T, CompletionSuiteParseError>;
@@ -1137,6 +1160,8 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
         return failure(["acceptedReceipt.acceptance records failures an accepted receipt cannot carry"]);
       }
     }
+    const ownerError = receiptOwnerError(envelope.value.checks, ownerVerification.value);
+    if (ownerError !== null) return failure([ownerError]);
     const { resultDigest, ...authority } = envelope.value;
     const body = freeze({ kind: "accepted-wave-completion-suite" as const, ...authority });
     const expectedDigest = digest(body);
@@ -1144,6 +1169,27 @@ export function parseAcceptedWaveCompletionReceipt(raw: unknown): Parsed<Accepte
       ? success(freeze({ ...body, resultDigest: expectedDigest }))
       : failure(["acceptedReceipt.resultDigest does not match its canonical receipt"]);
   });
+}
+
+/**
+ * Why a receipt's owner observation is not the one its own roster implies, or
+ * null (#132): the observation is present exactly when the roster carries the
+ * owner check. The receipt proves this itself, as the evaluator proved it for
+ * the result it minted the receipt from, so no reader trusts the writer. The
+ * owner check's exit needs no second proof here: the receipt refuses an
+ * observation with any finding, so the exit it derives is 0, and
+ * `parseAcceptedChecks` already refuses any other exit (only acceptance facts
+ * excuse one, and those must bind a produced report the owner check never has).
+ */
+function receiptOwnerError(
+  checks: readonly CompletionCheckResult[],
+  observation: OwnerVerificationObservation | undefined,
+): string | null {
+  const rosterCarriesOwner = checks.some(({ checkId }) => checkId === OWNER_VERIFICATION_CHECK_ID);
+  if (rosterCarriesOwner === (observation !== undefined)) return null;
+  return rosterCarriesOwner
+    ? "acceptedReceipt carries loom:owner-verification without its ownerVerification observation"
+    : "acceptedReceipt.ownerVerification is present, but its roster carries no loom:owner-verification check";
 }
 
 /** Parse unknown observed suite data. Roster exactness is evaluated against authority, not guessed here. */
@@ -1168,17 +1214,31 @@ export function parseWaveCompletionSuiteResult(raw: unknown): Parsed<WaveComplet
   });
 }
 
-function rejected(
-  authorityFailures: readonly CompletionAuthorityFailure[],
-  infrastructureFailures: readonly CompletionInfrastructureFailure[] = [],
-  semanticFailures: readonly CompletionSemanticFailure[] = [],
-): CompletionSuiteEvaluation {
-  return freeze({
-    kind: "rejected",
-    authorityFailures: freezeArray(authorityFailures),
-    infrastructureFailures: freezeArray(infrastructureFailures),
-    semanticFailures: freezeArray(semanticFailures),
-  });
+function authorityRejection(failures: NonEmpty<CompletionAuthorityFailure>): RejectedCompletionSuite {
+  return freeze({ kind: "rejected", cause: "authority", authorityFailures: freeze(failures) });
+}
+
+const isOwnerUndecided = (failure: CompletionInfrastructureFailure): failure is OwnerUndecidedFailure =>
+  failure.kind === "owner-verification-infrastructure";
+
+const isOtherInfrastructure = (failure: CompletionInfrastructureFailure): failure is Exclude<CompletionInfrastructureFailure, OwnerUndecidedFailure> =>
+  !isOwnerUndecided(failure);
+
+/**
+ * The rejection the process facts make, classified by cause, or null when no
+ * check failed. The owner check contributes at most one undecided failure.
+ */
+function processRejection(
+  infrastructure: readonly CompletionInfrastructureFailure[],
+  semantic: readonly CompletionSemanticFailure[],
+): RejectedCompletionSuite | null {
+  const ownerUndecided = infrastructure.find(isOwnerUndecided) ?? null;
+  const otherInfrastructure = infrastructure.filter(isOtherInfrastructure);
+  if (isNonEmpty(otherInfrastructure)) {
+    return freeze({ kind: "rejected", cause: "infrastructure", infrastructureFailures: freeze(otherInfrastructure), ownerUndecided, semanticFailures: freezeArray(semantic) });
+  }
+  if (isNonEmpty(semantic)) return freeze({ kind: "rejected", cause: "semantic", semanticFailures: freeze(semantic), ownerUndecided });
+  return ownerUndecided === null ? null : freeze({ kind: "rejected", cause: "owner-undecided", ownerUndecided });
 }
 
 function asNonEmpty<T>(values: readonly T[]): NonEmpty<T> {
@@ -1223,6 +1283,28 @@ export const ownerCheckOf = (authority: AuthorizedWaveCompletionSuite): OwnerVer
 /** The owner check exits 1 exactly when its observation carries a blocking finding, as the reserved lint check does. */
 export const ownerVerificationExitCode = (observation: OwnerVerificationObservation): 0 | 1 =>
   ownerVerificationFailures(observation).length > 0 ? 1 : 0;
+
+/**
+ * An engine-reserved check's observed result: its exit code and no report.
+ * The one record the reserved lint and owner checks persist (FR-004), so the
+ * two can never drift apart.
+ */
+export const engineCheckResult = (checkId: CompletionCheckId, exitCode: 0 | 1): CompletionCheckResult =>
+  freeze({
+    checkId,
+    scope: "wave",
+    outcome: freeze({ kind: "observed", exitCode, timedOut: false, signal: null, report: freeze({ kind: "not-required" }) }),
+  });
+
+/**
+ * The owner check's result as the record stores it, and its one constructor
+ * (#132): the exit is derived from the observation, never chosen, so a writer
+ * cannot record an exit its findings contradict. The persisted record keeps
+ * the exit field the lint check shares (FR-004); the evaluator re-derives it,
+ * and the receipt parser holds it to 0 (its observation carries no finding).
+ */
+export const ownerCheckResult = (check: OwnerVerificationCheck, observation: OwnerVerificationObservation): CompletionCheckResult =>
+  engineCheckResult(check.checkId, ownerVerificationExitCode(observation));
 
 /** Why the observation is not the one the authorized owner check binds, or null when it is. */
 function ownerVerificationMismatch(check: OwnerVerificationCheck | undefined, result: WaveCompletionSuiteResult): string | null {
@@ -1299,23 +1381,21 @@ export function evaluateWaveCompletionSuite(
 ): CompletionSuiteEvaluation {
   const authority = parseAuthorizedWaveCompletionSuite(rawAuthority);
   if (!authority.ok) {
-    return rejected([freeze({ kind: "invalid-result", errors: authority.error.errors })]);
+    return authorityRejection([freeze({ kind: "invalid-result", errors: authority.error.errors })]);
   }
   const result = parseWaveCompletionSuiteResult(rawResult);
   if (!result.ok) {
-    return rejected([freeze({ kind: "invalid-result", errors: result.error.errors })]);
+    return authorityRejection([freeze({ kind: "invalid-result", errors: result.error.errors })]);
   }
 
   const stale = staleFields(authority.value, result.value);
-  if (stale.length > 0) {
-    return rejected([freeze({ kind: "stale-result", mismatchedFields: asNonEmpty(freezeArray(stale)) })]);
-  }
+  if (isNonEmpty(stale)) return authorityRejection([freeze({ kind: "stale-result", mismatchedFields: freeze(stale) })]);
 
   const authorityFailures = [
     ...rosterAuthorityFailures(authority.value, result.value),
     ...observationAuthorityFailures(authority.value, result.value, expectation),
   ];
-  if (authorityFailures.length > 0) return rejected(authorityFailures);
+  if (isNonEmpty(authorityFailures)) return authorityRejection(authorityFailures);
 
   const verdict = recordedAcceptanceVerdict(result.value.acceptance);
   const checks = checkProcessFailures(authority.value, result.value, verdict.excused);
@@ -1325,11 +1405,8 @@ export function evaluateWaveCompletionSuite(
     checkId: acceptanceCheckId(authority.value, result.value.acceptance?.facts ?? []),
     failures: asNonEmpty(freezeArray(verdict.failures)),
   })];
-  const infrastructureFailures = [...checks.infrastructure, ...owner.infrastructure];
-  const semanticFailures = [...checks.semantic, ...acceptance, ...owner.semantic];
-  if (infrastructureFailures.length > 0 || semanticFailures.length > 0) {
-    return rejected([], infrastructureFailures, semanticFailures);
-  }
+  const rejection = processRejection([...checks.infrastructure, ...owner.infrastructure], [...checks.semantic, ...acceptance, ...owner.semantic]);
+  if (rejection !== null) return rejection;
   return freeze({ kind: "accepted", receipt: acceptedReceipt(authority.value, result.value) });
 }
 
