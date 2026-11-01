@@ -3150,6 +3150,21 @@ describe("Pi extension review tool_result integration", () => {
       input: { path: ".claude/specs/2026-08-12-foo/spec.md", content: "# Spec" },
     }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
     expect(inScope).toEqual([undefined]);
+    // The same in-scope target from a tool cwd that is not the grant's
+    // authorizing cwd: the grant scope cannot be proven, so it is refused.
+    const strayCwd = canonicalTempDir("loom-pi-scoped-stray-cwd-");
+    try {
+      const strayHit = await pi.emit("tool_call", {
+        toolName: "write",
+        input: { path: join(ROOT, ".claude", "specs", "2026-08-12-foo", "spec.md"), content: "# Spec" },
+      }, { cwd: strayCwd, sessionManager: { getSessionId: () => childSession } });
+      expect(strayHit).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("is not the grant's authorizing cwd"),
+      }));
+    } finally {
+      rmSync(strayCwd, { recursive: true, force: true });
+    }
     const malformedBatch = await pi.emit("tool_call", {
       toolName: "multi_edit",
       input: { edits: [

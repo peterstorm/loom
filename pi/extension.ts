@@ -52,8 +52,9 @@ import {
 import {
   activeRosterProbe,
   canonicalEditTargets,
+  liveSessionRepository,
   sessionGraphPointerFile,
-  sessionOrchestratedRepository,
+  type SessionGraphHarness,
 } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
 import type { SessionId } from "../engine/src/machine/evidence";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
@@ -64,7 +65,7 @@ import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch } from "../engine/src/core/spawn-admission";
 
-import { taskGraphPath, subagentDir, protectedDirs, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { taskGraphPath, subagentDir, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -161,16 +162,15 @@ function pathExistsFailClosed(path: string): boolean {
 function piEditSite(sessionId: SessionId | null, input: unknown, cwd: string): EditSite {
   const targets = piWriteTargetPaths(input);
   const editTargets: EditTargets = targets.ok ? canonicalEditTargets(targets.value, cwd) : unresolvedTargets(targets.error);
-  return {
-    repository: sessionOrchestratedRepository(sessionId, {
-      taskGraph: taskGraphPath(),
-      graphExists: pathExistsFailClosed,
-      sessionPointer: sessionGraphPointerFile,
-      protectedDirectories: protectedDirs(),
-    }),
-    targets: editTargets,
-  };
+  return { repository: liveSessionRepository(sessionId, PI_SESSION_GRAPHS), targets: editTargets };
 }
+
+/** Pi arms on the cwd-resolved graph and on the session's `.task_graph` pointer. */
+const PI_SESSION_GRAPHS: SessionGraphHarness = Object.freeze({
+  graphExists: pathExistsFailClosed,
+  sessionPointer: sessionGraphPointerFile,
+  announce: (line: string) => { process.stderr.write(`loom(pi): ${line}\n`); },
+});
 
 export type PiResumeTaskGraphObservation =
   | Readonly<{ kind: "absent" }>
@@ -357,7 +357,7 @@ export default function (
           // Pi binds implementation authority at spawn.
           {
             locateEdit: () => piEditSite(safeSessionId, event.input, ctx.cwd),
-            grantScope: grantWriteScope(granted?.scopeDirs, granted?.grantCwd, ctx.cwd),
+            grantScope: () => grantWriteScope(granted?.scopeDirs, granted?.grantCwd, ctx.cwd),
           },
         );
         if (result.kind === "block") {

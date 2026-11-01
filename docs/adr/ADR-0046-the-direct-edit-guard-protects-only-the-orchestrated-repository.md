@@ -67,8 +67,8 @@ them is allowed before any admission runs.**
   `shouldBlockDirectEdit` takes the write's `EditSite` (repository and targets) as a lazy port
   (`locateEdit` in its options object of harness-specific ports), consulted at most once, after arming, the
   file-tool filter and the session-id parse, and places it itself with `editPlacement`. An omitted port
-  means `inside`. A Pi scoped write grant arrives as a `WriteGrantScope` (`grantScope`): once an admission
-  allows a write placed inside, core confines every target to lie strictly below one of the grant's
+  means `inside`. A Pi scoped write grant arrives as a lazy `WriteGrantScope` port (`grantScope`), consulted
+  only once an admission allows a write placed inside; core then confines every target to lie strictly below one of the grant's
   canonical dirs. Unresolved targets or an unresolved scope refuse the write.
 - **Shell** (`engine/src/handlers/pre-tool-use/block-direct-edits.ts`). `orchestratedRepositoryOf` maps each
   armed graph path through `observeTaskGraphProjectBoundary`, then realpaths the root. It also takes
@@ -81,9 +81,11 @@ them is allowed before any admission runs.**
   too. No armed graph also answers `unresolved`, silently, because nothing failed. Either way every target
   stays guarded. `sessionOrchestratedRepository` is the one rule both harnesses use for which graphs armed
   the session: the cwd-resolved TaskGraph when it exists, plus the graph the session's pointer names,
-  read through a `SessionGraphPointerSource` port. Claude Code passes `noSessionGraphPointer` (it arms only
-  on `taskGraphPath()`, the same path the arming probe checked); Pi passes `sessionGraphPointerFile`. An
-  unreadable pointer answers `unresolved`, announced.
+  read through a `SessionGraphPointerSource` port. `liveSessionRepository` fills the live TaskGraph path and
+  protected directories, so each harness names only its `SessionGraphHarness`: Claude Code passes
+  `noSessionGraphPointer` (it arms only on `taskGraphPath()`, the same path the arming probe checked), Pi passes
+  `sessionGraphPointerFile`, and each passes its own announcement sink (`block-direct-edits:` or `loom(pi):`). An
+  unreadable pointer answers `unresolved`, announced through that sink.
 - **`LOOM_STATE_PATH`**. The override is judged by the same boundary rule as a discovered graph, probed from
   the State File's own directory, never from the caller's cwd. Inside a Git working tree, that working tree
   is the Orchestrated Repository. Outside Git, the documented layout names it: `<root>/.claude/state/`,
@@ -96,7 +98,8 @@ them is allowed before any admission runs.**
   `ctx.cwd`; malformed input stays `unresolved` with its reason. A rejected-grant session is still refused
   unconditionally, before placement. A scoped grant's dirs become a `WriteGrantScope` through
   `grantWriteScope` (`pi/write-grant.ts`), canonicalised like targets. Targets are resolved once against the
-  tool's cwd, so a tool cwd that is not the grant's authorizing cwd leaves the scope `unresolved`.
+  tool's cwd, so a scoped grant that recorded no authorizing cwd, or a tool cwd that is not it, leaves the
+  scope `unresolved`.
   Confinement is core's, so for parity with Claude Code's artifact-writer roots it governs only writes placed
   inside. A write into a protected directory is placed inside, so the grant's scope confines it too. A
   scoped target that cannot be canonicalised (a symlink loop, or a dangling symlink a write would follow

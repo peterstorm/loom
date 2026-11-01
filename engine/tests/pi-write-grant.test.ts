@@ -26,7 +26,7 @@ function confined(scopeDirs: readonly string[] | undefined, cwd: string, ...targ
   const grantHolder = [{ agentId: "pi-grant-abcdef0123456789", agentType: null } as ActiveRosterEntry];
   return shouldBlockDirectEdit("write", "scoped-session", () => true, () => grantHolder, {
     locateEdit: () => ({ repository: UNRESOLVED, targets: canonicalEditTargets(targets, cwd) }),
-    grantScope: grantWriteScope(scopeDirs, realpathSync(cwd), cwd),
+    grantScope: () => grantWriteScope(scopeDirs, realpathSync(cwd), cwd),
   }).kind;
 }
 
@@ -161,6 +161,14 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     const scope = grantWriteScope([join(cwd, ".claude", "specs", "x") + "/"], realpathSync(cwd), other);
     expect(scope).toMatchObject({ kind: "unresolved" });
     if (scope?.kind === "unresolved") expect(scope.reason).toContain("is not the grant's authorizing cwd");
+  });
+
+  it("grantWriteScope: a scoped grant that recorded no authorizing cwd fails closed", () => {
+    const { cwd } = fixture();
+    expect(grantWriteScope([join(cwd, ".claude", "specs", "x") + "/"], undefined, cwd))
+      .toEqual({ kind: "unresolved", reason: "the grant recorded no authorizing cwd" });
+    // An unscoped grant has nothing to confine, recorded cwd or not.
+    expect(grantWriteScope(undefined, undefined, cwd)).toBeUndefined();
   });
 
   it("grantWriteScope: an uncanonicalisable scope dir is unresolved", () => {

@@ -355,31 +355,41 @@ function consumedEvidenceLedger(grant: StoredWriteGrant): PiEvidenceLedgerAddres
  *
  * Targets are resolved once, against the tool's cwd, for placement and
  * confinement alike. The grant was authorized against `grantCwd`, so the two
- * must be the same directory (consumption already proved it); a mismatch, or
- * any uncanonicalisable dir, answers `unresolved` and the guard refuses every
- * write inside its area. `undefined` for a whole-session (unscoped) grant.
+ * must be the same directory (consumption already proved it). A grant that
+ * recorded no authorizing cwd, a mismatch, or any uncanonicalisable dir
+ * answers `unresolved` and the guard refuses every write inside its area.
+ * `undefined` for a whole-session (unscoped) grant.
  */
 export function grantWriteScope(
   scopeDirs: readonly string[] | undefined,
   grantCwd: string | undefined,
   toolCwd: string,
 ): WriteGrantScope | undefined {
-  if (scopeDirs === undefined || scopeDirs.length === 0) return undefined;
+  const declared = scopeDirs === undefined ? null : nonEmpty(scopeDirs);
+  if (declared === null) return undefined;
   const canonicalToolCwd = canonicalWritePath(resolve(toolCwd));
-  if (grantCwd !== undefined && canonicalToolCwd !== grantCwd) {
+  if (grantCwd === undefined || canonicalToolCwd !== grantCwd) {
     return Object.freeze({
       kind: "unresolved",
-      reason: `the tool cwd ${toolCwd} is not the grant's authorizing cwd ${grantCwd}`,
+      reason: grantCwd === undefined
+        ? "the grant recorded no authorizing cwd"
+        : `the tool cwd ${toolCwd} is not the grant's authorizing cwd ${grantCwd}`,
     });
   }
-  const dirs: string[] = [];
-  for (const dir of scopeDirs) {
+  const [first, ...rest] = declared;
+  const canonicalFirst = canonicalWritePath(resolve(toolCwd, first));
+  if (canonicalFirst === null) return unresolvableScopeDir(first);
+  const dirs: [string, ...string[]] = [canonicalFirst];
+  for (const dir of rest) {
     const canonical = canonicalWritePath(resolve(toolCwd, dir));
-    if (canonical === null) return Object.freeze({ kind: "unresolved", reason: `cannot canonicalize scope dir ${dir}` });
+    if (canonical === null) return unresolvableScopeDir(dir);
     dirs.push(canonical);
   }
-  const resolved = nonEmpty(dirs);
-  return resolved === null ? undefined : Object.freeze({ kind: "resolved", dirs: resolved });
+  return Object.freeze({ kind: "resolved", dirs });
+}
+
+function unresolvableScopeDir(dir: string): WriteGrantScope {
+  return Object.freeze({ kind: "unresolved", reason: `cannot canonicalize scope dir ${dir}` });
 }
 
 export function sweepExpiredPiWriteGrants(now: number = Date.now()): void {

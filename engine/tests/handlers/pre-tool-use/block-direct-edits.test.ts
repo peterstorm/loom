@@ -36,13 +36,15 @@ import blockDirectEdits, {
   artifactWriteRequest,
   canonicalEditTargets,
   canonicalWritePath,
+  liveSessionRepository,
   noSessionGraphPointer,
   orchestratedRepositoryOf,
   sessionGraphPointerFile,
   sessionOrchestratedRepository,
   type SessionGraphPointer,
+  type SessionGraphPorts,
 } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import { SUBAGENT_DIR, pathExistsFailClosed } from "../../../src/config";
+import { SUBAGENT_DIR, pathExistsFailClosed, taskGraphPath } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
 import { sessionIdOf } from "../../fixtures/machine-identities";
 
@@ -896,8 +898,8 @@ describe("shouldBlockDirectEdit — scoped write-grant confinement (Pi phase/pan
   const grantHolder = roster(entry("pi-grant-abcdef0123456789"));
   const scope: WriteGrantScope = { kind: "resolved", dirs: [SPECS] };
   const site = (targets: EditTargets): (() => EditSite) => () => ({ repository: resolvedRepository("/repo"), targets });
-  const decide = (targets: EditTargets, grantScope: WriteGrantScope | undefined = scope, rosterProbe = grantHolder) =>
-    shouldBlockDirectEdit("write", sNoActive, orchestrating, rosterProbe, { locateEdit: site(targets), grantScope });
+  const decide = (targets: EditTargets, grantScope: WriteGrantScope = scope, rosterProbe = grantHolder) =>
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, rosterProbe, { locateEdit: site(targets), grantScope: () => grantScope });
 
   it("admits targets strictly below a granted dir, nested ones included", () => {
     expect(decide(resolvedTargets(`${SPECS}/spec.md`)).kind).toBe("allow");
@@ -955,8 +957,22 @@ describe("shouldBlockDirectEdit — scoped write-grant confinement (Pi phase/pan
   });
 
   it("no scope (an unscoped grant or ungranted session) leaves the admission as decided", () => {
-    const unscoped = shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: site(resolvedTargets("/repo/src/x.ts")) });
-    expect(unscoped.kind).toBe("allow");
+    const target = site(resolvedTargets("/repo/src/x.ts"));
+    expect(shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: target }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: target, grantScope: () => undefined }).kind)
+      .toBe("allow");
+  });
+
+  it("the scope port is consulted only for an admitted write placed inside", () => {
+    const probe = vi.fn(() => scope);
+    const port = { grantScope: probe };
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: site(resolvedTargets("/scratch/x.md")), ...port });
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, noRoster, { locateEdit: site(resolvedTargets(`${SPECS}/spec.md`)), ...port });
+    shouldBlockDirectEdit("Bash", sNoActive, orchestrating, grantHolder, port);
+    shouldBlockDirectEdit("write", sNoActive, () => false, grantHolder, port);
+    expect(probe).not.toHaveBeenCalled();
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: site(resolvedTargets(`${SPECS}/spec.md`)), ...port });
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 
   const segment = fc.stringMatching(/^[A-Za-z0-9_-]{1,8}$/);
@@ -979,51 +995,49 @@ describe("shouldBlockDirectEdit — scoped write-grant confinement (Pi phase/pan
 describe("sessionOrchestratedRepository — which graphs armed this session (shared by both harnesses)", () => {
   const session = sessionIdOf(`armed-${process.pid}`);
   const protectedDirectories = ["/loom-protected"] as const;
-  const ports = (over: Partial<Parameters<typeof sessionOrchestratedRepository>[1]>) => ({
+  /** Every line the resolver announced through the harness's sink. */
+  let announced: string[] = [];
+  beforeEach(() => { announced = []; });
+  const ports = (over: Partial<SessionGraphPorts>): SessionGraphPorts => ({
     taskGraph: "/nowhere/.claude/state/active_task_graph.json",
     graphExists: () => false,
     sessionPointer: noSessionGraphPointer,
+    announce: (line) => { announced.push(line); },
     protectedDirectories,
     ...over,
   });
-  const quietly = <T>(run: (written: () => string) => T): T => {
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      return run(() => stderr.mock.calls.map(([text]) => String(text)).join(""));
-    } finally {
-      stderr.mockRestore();
-    }
-  };
 
-  it("an unreadable pointer guards every target, announced — before any graph is probed", () => {
+  it("an unreadable pointer guards every target, announced through the harness sink — before any graph is probed", () => {
     const graphExists = vi.fn(() => true);
     const unreadable = (): SessionGraphPointer => ({ kind: "unreadable", reason: "pointer.task_graph: not canonical" });
-    quietly((written) => {
-      expect(sessionOrchestratedRepository(session, ports({ graphExists, sessionPointer: unreadable }))).toBe(UNRESOLVED);
-      expect(written()).toContain("cannot read the session TaskGraph pointer: pointer.task_graph: not canonical");
-    });
+    expect(sessionOrchestratedRepository(session, ports({ graphExists, sessionPointer: unreadable }))).toBe(UNRESOLVED);
+    expect(announced).toEqual(["cannot read the session TaskGraph pointer: pointer.task_graph: not canonical — guarding every target"]);
     expect(graphExists).not.toHaveBeenCalled();
   });
 
   it("no existing graph and no pointer resolves nothing, silently", () => {
-    quietly((written) => {
-      expect(sessionOrchestratedRepository(session, ports({}))).toBe(UNRESOLVED);
-      expect(written()).toBe("");
-    });
+    expect(sessionOrchestratedRepository(session, ports({}))).toBe(UNRESOLVED);
+    expect(announced).toEqual([]);
   });
 
   it("a session without a parseable id consults no pointer", () => {
     const pointer = vi.fn((): SessionGraphPointer => ({ kind: "unreadable", reason: "x" }));
-    quietly(() => {
-      expect(sessionOrchestratedRepository(null, ports({ sessionPointer: pointer }))).toBe(UNRESOLVED);
-    });
+    expect(sessionOrchestratedRepository(null, ports({ sessionPointer: pointer }))).toBe(UNRESOLVED);
     expect(pointer).not.toHaveBeenCalled();
+    expect(announced).toEqual([]);
   });
 
   it("the pointer port receives the branded session id", () => {
     const pointer = vi.fn((): SessionGraphPointer => ({ kind: "absent" }));
-    quietly(() => sessionOrchestratedRepository(session, ports({ sessionPointer: pointer })));
+    sessionOrchestratedRepository(session, ports({ sessionPointer: pointer }));
     expect(pointer).toHaveBeenCalledWith(session);
+  });
+
+  it("liveSessionRepository fills the live TaskGraph path and protected dirs, leaving the harness its differences", () => {
+    const graphExists = vi.fn(() => false);
+    const repository = liveSessionRepository(session, { graphExists, sessionPointer: noSessionGraphPointer, announce: () => {} });
+    expect(repository).toBe(UNRESOLVED);
+    expect(graphExists).toHaveBeenCalledWith(taskGraphPath());
   });
 
   describe("against real Git working trees", () => {

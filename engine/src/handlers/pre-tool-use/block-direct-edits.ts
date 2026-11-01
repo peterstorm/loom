@@ -221,13 +221,19 @@ export const sessionGraphPointerFile: SessionGraphPointerSource = (sessionId) =>
     : Object.freeze({ kind: "unreadable", reason: `${pointerPath}: ${pointer.error}` });
 };
 
-/** How a harness observes the TaskGraphs that armed one session. */
-export type SessionGraphPorts = Readonly<{
-  /** The cwd-resolved TaskGraph path (`taskGraphPath()`). */
-  taskGraph: string;
+/** What differs between harnesses when observing the graphs that armed a session. */
+export type SessionGraphHarness = Readonly<{
   /** Fail-closed existence probe: only ENOENT answers false. */
   graphExists: (path: string) => boolean;
   sessionPointer: SessionGraphPointerSource;
+  /** The harness's operator sink for a refusal that has a cause. */
+  announce: (line: string) => void;
+}>;
+
+/** How a harness observes the TaskGraphs that armed one session. */
+export type SessionGraphPorts = SessionGraphHarness & Readonly<{
+  /** The cwd-resolved TaskGraph path (`taskGraphPath()`). */
+  taskGraph: string;
   protectedDirectories: readonly [string, ...string[]];
 }>;
 
@@ -236,7 +242,8 @@ export type SessionGraphPorts = Readonly<{
  * cwd-resolved TaskGraph when it exists, plus the graph the session's pointer
  * names. Their repository roots and Loom's protected directories then resolve
  * through `orchestratedRepositoryOf`. An unreadable pointer answers
- * `unresolved` (announced): the guard stays on for every target.
+ * `unresolved`, announced through the harness's sink: the guard stays on for
+ * every target.
  */
 export function sessionOrchestratedRepository(
   sessionId: SessionId | null,
@@ -244,7 +251,7 @@ export function sessionOrchestratedRepository(
 ): OrchestratedRepository {
   const pointer = sessionId === null ? NO_POINTER : ports.sessionPointer(sessionId);
   if (pointer.kind === "unreadable") {
-    process.stderr.write(`block-direct-edits: cannot read the session TaskGraph pointer: ${pointer.reason} — guarding every target\n`);
+    ports.announce(`cannot read the session TaskGraph pointer: ${pointer.reason} — guarding every target`);
     return UNRESOLVED;
   }
   const graphPaths = [
@@ -253,6 +260,21 @@ export function sessionOrchestratedRepository(
   ];
   return orchestratedRepositoryOf(graphPaths, ports.protectedDirectories);
 }
+
+/**
+ * `sessionOrchestratedRepository` over the live configuration — the
+ * cwd-resolved `taskGraphPath()` and `protectedDirs()` — so each harness
+ * names only what differs (`SessionGraphHarness`).
+ */
+export const liveSessionRepository = (sessionId: SessionId | null, harness: SessionGraphHarness): OrchestratedRepository =>
+  sessionOrchestratedRepository(sessionId, { ...harness, taskGraph: taskGraphPath(), protectedDirectories: protectedDirs() });
+
+/** Claude Code arms only on the cwd-resolved graph, the path `graphActiveProbe` checks. */
+const CLAUDE_SESSION_GRAPHS: SessionGraphHarness = Object.freeze({
+  graphExists: pathExistsFailClosed,
+  sessionPointer: noSessionGraphPointer,
+  announce: (line: string) => { process.stderr.write(`block-direct-edits: ${line}\n`); },
+});
 
 /** Canonical write targets resolved against `cwd`; one failure leaves all unresolved. */
 export function canonicalEditTargets(paths: readonly string[], cwd: string): EditTargets {
@@ -280,12 +302,7 @@ const claudeFilePath = (input: PreToolUseInput): string | null => {
 const claudeEditSite = (input: PreToolUseInput, sessionId: SessionId | null) => (): EditSite => {
   const filePath = claudeFilePath(input);
   return {
-    repository: sessionOrchestratedRepository(sessionId, {
-      taskGraph: taskGraphPath(),
-      graphExists: pathExistsFailClosed,
-      sessionPointer: noSessionGraphPointer,
-      protectedDirectories: protectedDirs(),
-    }),
+    repository: liveSessionRepository(sessionId, CLAUDE_SESSION_GRAPHS),
     targets: filePath === null
       ? unresolvedTargets("the call names no file_path")
       : canonicalEditTargets([filePath], input.cwd ?? process.cwd()),

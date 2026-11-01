@@ -194,8 +194,8 @@ export type EditSite = Readonly<{ repository: OrchestratedRepository; targets: E
  * The confinement of a Pi scoped write grant (a phase or panel writer): the
  * symlink-canonical artifact dirs its holder may write inside the guarded
  * area, or `unresolved` when the shell could not canonicalise them or prove
- * the grant's authorizing cwd is the tool's cwd — then nothing guarded is
- * writable. Absent for unscoped (implementation) grants and ungranted
+ * the grant recorded an authorizing cwd equal to the tool's cwd — then
+ * nothing guarded is writable. Absent for unscoped (implementation) grants and ungranted
  * sessions. The twin of Claude Code's artifact-writer roots.
  */
 export type WriteGrantScope =
@@ -307,14 +307,16 @@ function confineToGrantScope(scope: WriteGrantScope, targets: EditTargets): Hook
  *   Consulted lazily, at most once — only for an armed file tool with a
  *   parseable session id — because resolving the orchestrated repository
  *   costs the shell a Git probe. Omitted, every write is placed inside.
- * - `grantScope` — the caller's scoped write grant (Pi only). An admitted
- *   write inside the guarded area must also stay inside its dirs.
+ * - `grantScope` — the caller's scoped write grant (Pi only), `undefined` for
+ *   an unscoped grant or ungranted session. Consulted lazily, only once an
+ *   admission allows a write placed inside, because canonicalising its dirs
+ *   costs the shell filesystem probes; that write must then stay inside them.
  */
 export type DirectEditPorts = Readonly<{
   artifactWrite?: ArtifactWriteRequest | undefined;
   implementationBinding?: ImplementationBindingProbe | undefined;
   locateEdit?: (() => EditSite) | undefined;
-  grantScope?: WriteGrantScope | undefined;
+  grantScope?: (() => WriteGrantScope | undefined) | undefined;
 }>;
 
 /**
@@ -355,9 +357,9 @@ export function shouldBlockDirectEdit(
   if (editPlacement(site.repository, site.targets).kind === "outside") return { kind: "allow" };
 
   const admission = admitInsideWrite(parsed, readActiveRoster, artifactWrite, implementationBinding);
-  return admission.kind === "allow" && grantScope !== undefined
-    ? confineToGrantScope(grantScope, site.targets)
-    : admission;
+  if (admission.kind !== "allow") return admission;
+  const scope = grantScope?.();
+  return scope === undefined ? admission : confineToGrantScope(scope, site.targets);
 }
 
 /** The roster, binding and artifact-writer admissions for a write placed inside. */
