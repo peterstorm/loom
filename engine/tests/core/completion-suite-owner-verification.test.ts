@@ -1,7 +1,7 @@
 /**
  * The `loom:owner-verification` check inside the completion suite (AD-1):
  * suite authorization injects the check only from the owner check authority
- * its callers obtained from `waveOwnerDuty(graph, wave).check` (INV-3), the check and the
+ * its callers obtained from `ownerCheckAuthorityOf(waveOwnerDuty(graph, wave))` (INV-3), the check and the
  * result/receipt observation round-trip through the at-rest parsers, and
  * `evaluateWaveCompletionSuite` turns every owner-verification finding into a
  * blocking failure: semantic for missing siblings, a red baseline or a
@@ -541,7 +541,7 @@ describe("the rejection's cause — one decision for what a rejection means to t
     }
     // @ts-expect-error a rejection names its cause and carries that cause's non-empty failures
     const empty: RejectedCompletionSuite = { kind: "rejected", cause: "authority", authorityFailures: [] };
-    expect(empty.kind).toBe("rejected");
+    void empty;
   });
 });
 

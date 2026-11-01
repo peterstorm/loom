@@ -101,7 +101,7 @@ exactly when the TaskGraph carries the `owner_obligations` stamp.**
   the roster, and so the suite digest, is byte-identical to the pre-G5b roster (FR-004). A project check
   cannot claim the id: the project-check parser in `completion-suite.ts` refuses any `checkId` in the reserved
   `loom:` namespace.
-- `waveOwnerDuty(graph, wave).check` in `engine/src/core/owner-verification/obligations.ts` is the one place
+- `ownerCheckAuthorityOf(waveOwnerDuty(graph, wave))` in `engine/src/core/owner-verification/obligations.ts` is the one place
   that decides the authority (INV-3, AD-4). It is `null` exactly when the graph has no stamp. Otherwise it
   is the stamp's `obligationsDigest` and the ids of the duty's `owed` obligations, which is an empty list
   when the Wave changed no owned family. It has two callers. `authorizeGraphCompletionSuite` in

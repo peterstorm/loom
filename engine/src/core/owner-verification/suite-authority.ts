@@ -1,7 +1,7 @@
 /**
  * INV-3 sibling: the one place a Wave's completion suite is authorized from
  * a TaskGraph. The owner check authority is derived here, from the graph the
- * suite is authorized for (`waveOwnerDuty(graph, wave).check`),
+ * suite is authorized for (`ownerCheckAuthorityOf(waveOwnerDuty(graph, wave))`),
  * never handed in, so the gate (`handlers/helpers/wave-completion-suite.ts`)
  * and readiness (`core/wave-completion-suite-readiness.ts`) cannot disagree
  * about which owned Invariants the Wave owes: both call this function.
@@ -18,7 +18,7 @@ import {
   legacyDefaultVerificationManifest,
   type VerificationManifestResult,
 } from "../verification-manifest";
-import { waveOwnerDuty } from "./obligations";
+import { ownerCheckAuthorityOf, waveOwnerDuty } from "./obligations";
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 
@@ -41,5 +41,5 @@ export function authorizeGraphCompletionSuite(
     });
   }
   const manifest = graph.verification_manifest ?? legacyDefaultVerificationManifest();
-  return authorizeWaveCompletionSuite(manifest, active, workspaceDigest, waveOwnerDuty(graph, active.wave).check);
+  return authorizeWaveCompletionSuite(manifest, active, workspaceDigest, ownerCheckAuthorityOf(waveOwnerDuty(graph, active.wave)));
 }

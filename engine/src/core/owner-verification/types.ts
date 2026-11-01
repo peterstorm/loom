@@ -107,10 +107,10 @@ export type PathAliases = readonly PathAlias[];
 /**
  * Whether a matrix test reaches its owned Invariant's owner and every
  * declared sibling. `missing` names every unreached path in declared order,
- * the owner first. `infrastructure` is a failure to read the import
- * frontier: a frontier file that exists but cannot be read
+ * the owner first. `infrastructure` is a failure to read the files the walk
+ * needs: a reached file that exists but cannot be read
  * (`repository-file-unreadable`), an unresolvable tsconfig
- * (`alias-config-unresolvable`), or the frontier bound exceeded
+ * (`alias-config-unresolvable`), or the read bound exceeded
  * (`coverage-bound-exceeded`). An unreadable file is never reported as a missing path.
  */
 export type CoverageVerdict =
@@ -128,7 +128,7 @@ export type CoverageInput = Readonly<{
   aliases: PathAliases;
 }>;
 
-/** The same decision over a file map holding every file there is: the whole-repository form of `SiblingCoverageFn`. */
+/** The same decision over a file map holding every file there is (the production walk, read bound included): the file-map form of `SiblingCoverageFn`. */
 export type CoverageOverFilesFn = (input: CoverageInput) => CoverageVerdict;
 
 /**

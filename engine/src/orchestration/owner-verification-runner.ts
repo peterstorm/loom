@@ -8,7 +8,7 @@
  * 2. Per owed obligation, in stamp order:
  *    - coverage: the matrix test's tsconfig `paths` are resolved by
  *      `pathAliasesOf` over this shell's reads and `jsonc-parser`, then
- *      `siblingCoverage` walks the import frontier itself, pulling each file
+ *      `siblingCoverage` walks the import graph itself, pulling each file
  *      it needs from the real workspace through `readRepositoryText`;
  *    - mutation, unless the obligation is exempt: `waveBaseOf` chooses the
  *      owner's Wave base, this shell resolves it with Git and reads the
@@ -142,19 +142,13 @@ const parseJsoncText: ParseJsonc = (text) => {
 
 const coverageInfrastructure = (failure: OwnerInfrastructureFailure): CoverageVerdict => ({ kind: "infrastructure", failure });
 
-/** The matrix test's tsconfig aliases. A refused config is an infrastructure failure, never a config that is not there. */
+/** The matrix test's tsconfig aliases. A refused config is that read's infrastructure failure, never a config that is not there. */
 function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): DomainResult<PathAliases, OwnerInfrastructureFailure> {
-  const refused: OwnerInfrastructureFailure[] = [];
-  const aliases = pathAliasesOf(matrixTest, (path) => {
-    const file = readRepositoryText(root, path);
-    if (file.kind === "unreadable") refused.push(file.failure);
-    return file.kind === "text" ? file.text : null;
-  }, parseJsoncText);
-  const [first] = refused;
-  if (first !== undefined) return failure(first);
-  return aliases.ok
-    ? aliases
-    : failure(infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error}`));
+  const aliases = pathAliasesOf(matrixTest, (path) => readRepositoryText(root, path), parseJsoncText);
+  if (aliases.ok) return aliases;
+  return failure(aliases.error.kind === "unreadable"
+    ? aliases.error.failure
+    : infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error.reason}`));
 }
 
 function coverage(root: CanonicalRepositoryRoot, obligation: OwnerObligation): CoverageVerdict {

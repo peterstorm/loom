@@ -56,3 +56,46 @@ The advisory dispositions are `DECLARED` and published as each slice's initial P
   - One schema-v2 run against `pr140-a-6f18be39` with `defectFamily: not-required`.
   - Its `supportPaths` name this plan and every touched path outside slice a's frozen scope (the slice b files).
   - A separate run against `pr140-b-6f18be39` is not needed, because one installation covers the whole candidate (the PR #137 precedent).
+
+# Round 2 (reviewed head `7c7be87d`)
+
+The same two slices were reviewed again. The plan file joins slice b.
+
+| Slice | Review run | Emitted/admitted | After refutation | Policy run | Disposition digest |
+|---|---|---|---|---|---|
+| a | `pr140-r2-a-7c7be87d` | 0 critical, 5 advisory | 0 surviving, 0 refuted | `pr140-r2-a-policy-7c7be87d` | `78f1441a` |
+| b | `pr140-r2-b-7c7be87d` | 0 critical, 10 advisory | 0 surviving, 0 refuted | `pr140-r2-b-policy-7c7be87d` | `00428aba` |
+
+All 15 advisories were accepted, and the remediation is again `defectFamily: not-required`.
+
+## Slice a, round 2 (5: all accepted)
+
+- **architecture-tech-lead-1:** the symbol-keyed stamp was a hidden precondition, because a clone would drop it.
+  - Fix: the duty carries `obligationsDigest` as an ordinary field.
+  - `stampAgreement` compares the canonical digest of the plan-derived obligations with it, so the duty is truly plain data.
+- **architecture-tech-lead-2 and code-simplifier-1:** `owed` and `check.owed` were parallel fields.
+  - Fix: the stamped duty is `{ obligationsDigest, owed }`.
+  - `ownerCheckAuthorityOf(duty)` derives the check (null when unstamped) at one point. Every caller uses it.
+- **comment-analyzer-1:** ADR-0034 now frames #136 one way: the `OwnerScope` seam and its selections became two duties, and the check is derived.
+- **code-simplifier-2:** removed the first-cut narration from ADR-0034.
+
+## Slice b, round 2 (10: all accepted)
+
+- **architecture-tech-lead-1 and code-simplifier-1:** one exported `engineCheckResult(checkId, exitCode)` in `completion-suite.ts`.
+  - `ownerCheckResult` and the lint path both build through it.
+- **architecture-tech-lead-2:** `pathAliasesOf`, `nearestTsconfig` and `extendedConfig` read through `ReadModule`.
+  - They return a typed `AliasConfigError`: `unreadable` with that read's failure, or `unresolvable` with a reason.
+  - The runner's side array is gone. Tests cover a refused nearest config and a refused `extends` parent.
+- **architecture-tech-lead-3:** the 1000-run property now compares against an independent reference reach in the test, so it can fail. ADR-0035 says so.
+- **code-simplifier-2:** the `coverageOverFiles` (bounded) and `reachedFiles` (unbounded) declarations, plus the `CoverageOverFilesFn` doc, now state the bound semantics.
+- **comment-analyzer-1, comment-analyzer-2 and code-simplifier-5:** renamed the bound to `COVERAGE_READ_BOUND`.
+  - Reworded its detail message and replaced the removed-frontier wording in code, tests, ADR-0035, operations.md, architecture.md and the INV reference.
+- **code-simplifier-3:** the `@ts-expect-error` proof is followed by `void empty`, not a tautological assertion.
+- **code-simplifier-4:** named the `isOtherInfrastructure` guard.
+
+## Round 2 validation
+
+- Typecheck, full-tier lint (77, baseline) and root `npm run verify`.
+- Registered remediation `pr140-r2-remed-7c7be87d`:
+  - Run against `pr140-r2-a-7c7be87d` with `defectFamily: not-required`.
+  - `supportPaths` name every touched path outside slice a's scope.

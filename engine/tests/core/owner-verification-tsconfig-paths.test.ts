@@ -14,6 +14,8 @@ import {
   pathAliasesOf,
   type ParseJsonc,
 } from "../../src/core/owner-verification/tsconfig-paths";
+import { MODULE_ABSENT } from "../../src/core/owner-verification/coverage";
+import type { ReadModule } from "../../src/core/owner-verification/types";
 
 /** The runner's adapter shape, over the same package. */
 const jsonc: ParseJsonc = (text) => {
@@ -22,7 +24,12 @@ const jsonc: ParseJsonc = (text) => {
   return errors.length === 0 ? success(value) : failure(errors.map((error) => printParseErrorCode(error.error)).join(", "));
 };
 
-const readerOf = (files: Readonly<Record<string, string>>) => (path: string): string | null => files[path] ?? null;
+/** An in-memory port over `files`, refusing every path in `refused`. */
+const readerOf = (files: Readonly<Record<string, string>>, refused: ReadonlySet<string> = new Set()): ReadModule => (path) => {
+  if (refused.has(path)) return { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: `${path} cannot be read: EACCES` } };
+  const text = files[path];
+  return text === undefined ? MODULE_ABSENT : { kind: "text", text };
+};
 
 const aliasesOver = (matrixTest: string, files: Readonly<Record<string, string>>) =>
   pathAliasesOf(matrixTest, readerOf(files), jsonc);
@@ -81,21 +88,29 @@ describe("pathAliasesOf", () => {
     const aliases = aliasesOver("tests/x.test.ts", files);
     expect(aliases.ok).toBe(false);
     if (aliases.ok) return;
-    expect(aliases.error).toMatch(message);
+    expect(aliases.error).toMatchObject({ kind: "unresolvable", reason: expect.stringMatching(message) });
   });
 });
 
 describe("config discovery", () => {
   it("nearestTsconfig walks up from the matrix test to the repository root", () => {
-    expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "a/tsconfig.json": "{}", "tsconfig.json": "{}" }))).toBe("a/tsconfig.json");
-    expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "tsconfig.json": "{}" }))).toBe("tsconfig.json");
-    expect(nearestTsconfig("a/b/t.test.ts", readerOf({}))).toBeNull();
+    expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "a/tsconfig.json": "{}", "tsconfig.json": "{}" }))).toEqual({ ok: true, value: "a/tsconfig.json" });
+    expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "tsconfig.json": "{}" }))).toEqual({ ok: true, value: "tsconfig.json" });
+    expect(nearestTsconfig("a/b/t.test.ts", readerOf({}))).toEqual({ ok: true, value: null });
   });
 
   it("extendedConfig tries the specifier, its .json and its tsconfig.json, relative or beneath the nearest node_modules", () => {
-    expect(extendedConfig("a/tsconfig.json", "./base", readerOf({ "a/base.json": "{}" }))).toBe("a/base.json");
-    expect(extendedConfig("a/tsconfig.json", "pkg", readerOf({ "node_modules/pkg/tsconfig.json": "{}" }))).toBe("node_modules/pkg/tsconfig.json");
-    expect(extendedConfig("a/tsconfig.json", "pkg", readerOf({ "a/node_modules/pkg.json": "{}", "node_modules/pkg.json": "{}" }))).toBe("a/node_modules/pkg.json");
-    expect(extendedConfig("a/tsconfig.json", "../../x", readerOf({}))).toBeNull();
+    expect(extendedConfig("a/tsconfig.json", "./base", readerOf({ "a/base.json": "{}" }))).toEqual({ ok: true, value: "a/base.json" });
+    expect(extendedConfig("a/tsconfig.json", "pkg", readerOf({ "node_modules/pkg/tsconfig.json": "{}" }))).toEqual({ ok: true, value: "node_modules/pkg/tsconfig.json" });
+    expect(extendedConfig("a/tsconfig.json", "pkg", readerOf({ "a/node_modules/pkg.json": "{}", "node_modules/pkg.json": "{}" }))).toEqual({ ok: true, value: "a/node_modules/pkg.json" });
+    expect(extendedConfig("a/tsconfig.json", "../../x", readerOf({}))).toEqual({ ok: true, value: null });
+  });
+
+  it("a config the filesystem refuses is that read's infrastructure failure, never a config that is not there", () => {
+    const refusal = { kind: "unreadable", failure: { kind: "repository-file-unreadable", detail: "a/tsconfig.json cannot be read: EACCES" } };
+    expect(nearestTsconfig("a/b/t.test.ts", readerOf({ "tsconfig.json": "{}" }, new Set(["a/tsconfig.json"])))).toEqual({ ok: false, error: refusal });
+    expect(pathAliasesOf("a/b/t.test.ts", readerOf({ "tsconfig.json": "{}" }, new Set(["a/tsconfig.json"])), jsonc)).toEqual({ ok: false, error: refusal });
+    const parentRefused = pathAliasesOf("t.test.ts", readerOf({ "tsconfig.json": '{ "extends": "./base.json" }' }, new Set(["base.json"])), jsonc);
+    expect(parentRefused).toMatchObject({ ok: false, error: { kind: "unreadable", failure: { kind: "repository-file-unreadable" } } });
   });
 });

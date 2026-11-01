@@ -85,10 +85,11 @@ TaskGraph.owner_obligations?: readonly OwnerObligation[]
 - `obligationsAgree(stamped, fromPlan)` checks canonical structural equality, in the same order. Key order
   read back from the wire does not matter.
 - Readers never filter the raw stamp: two duty entry points read it (ADR-0034, #136). `waveOwnerDuty(graph,
-  wave)` gives the Wave's owner check and owed obligations, and `stampAgreement(duty, models)` is its drift check;
+  wave)` gives the Wave's owed obligations and stamp digest, `ownerCheckAuthorityOf` derives its owner check, and
+  `stampAgreement(duty, models)` is its drift check;
   `taskOwnerDuty(graph, fileList)` gives the obligations one Task touches.
 
-The Wave duty's `check` is `null` exactly when the stamp is absent. In that case the suite
+`ownerCheckAuthorityOf(duty)` is `null` exactly when the stamp is absent. In that case the suite
 roster and digest stay unchanged (FR-004). Otherwise it is the stamp digest and the owed Invariant ids,
 which may be none.
 

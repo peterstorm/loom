@@ -21,6 +21,7 @@ import {
 } from "../../src/core/verification-manifest";
 import {
   obligationsFromPlan,
+  ownerCheckAuthorityOf,
   waveOwnerDuty,
 } from "../../src/core/owner-verification/obligations";
 import type { MutationPolicy, PlanInvariant, PlanModels, TaskGraph } from "../../src/types";
@@ -161,10 +162,10 @@ describe("population stamps owner_obligations (AD-2)", () => {
 
   it("gives a stamped graph an owner check even for a Wave that owes nothing", () => {
     const state = populated(graph(), command({ invariants: [ownedInvariant("INV-1")] }));
-    expect(waveOwnerDuty(state, 1).check?.owed).toEqual(["INV-1"]);
-    expect(waveOwnerDuty(state, 2).check?.owed).toEqual([]);
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(state, 1))?.owed).toEqual(["INV-1"]);
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(state, 2))?.owed).toEqual([]);
     const empty = populated(graph(), command({ invariants: [] }));
-    expect(waveOwnerDuty(empty, 1).check).not.toBeNull();
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(empty, 1))).not.toBeNull();
   });
 
   it("re-population replaces the stamp, never merging the old one", () => {
@@ -189,7 +190,7 @@ describe("FR-004: a graph without the stamp owes nothing", () => {
     const preFeature = withoutStamp(populated(graph(), command({ invariants: [ownedInvariant("INV-1")] })));
     for (const wave of [1, 2]) {
       expect(waveOwnerDuty(preFeature, wave).owed).toEqual([]);
-      expect(waveOwnerDuty(preFeature, wave).check).toBeNull();
+      expect(ownerCheckAuthorityOf(waveOwnerDuty(preFeature, wave))).toBeNull();
     }
   });
 });

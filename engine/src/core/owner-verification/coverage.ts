@@ -19,7 +19,7 @@
  *
  * `siblingCoverage` drives the traversal itself (#133): it pulls each file it
  * needs through the `ReadModule` port the shell adapts the filesystem to, so
- * no frontier state crosses the seam. `coverageOverFiles` is the same
+ * no traversal state crosses the seam. `coverageOverFiles` is the same
  * decision over a file map.
  */
 
@@ -39,7 +39,7 @@ import type {
 } from "./types";
 
 /** The most present files the coverage walk may read before it is an infrastructure failure. */
-export const COVERAGE_FRONTIER_BOUND = 512;
+export const COVERAGE_READ_BOUND = 512;
 
 // ---------------------------------------------------------------------------
 // Specifier resolution
@@ -189,7 +189,7 @@ function boundedEdges(matrixTest: string, read: ReadModule, bound: number) {
     if (present > bound) {
       failure = {
         kind: "coverage-bound-exceeded",
-        detail: `the import frontier of ${matrixTest} exceeded ${bound} files (${present} gathered)`,
+        detail: `the import walk of ${matrixTest} read more than ${bound} files (${present} present)`,
       };
       return undefined;
     }
@@ -200,7 +200,12 @@ function boundedEdges(matrixTest: string, read: ReadModule, bound: number) {
   return { edgesOf, failure: (): OwnerInfrastructureFailure | null => failure };
 }
 
-/** The files the matrix test imports or re-exports directly, closed under re-export edges only. */
+/**
+ * The files the matrix test imports or re-exports directly, closed under
+ * re-export edges only: the reach itself, unbounded, as a diagnostic. The
+ * coverage decision (`siblingCoverage`, `coverageOverFiles`) adds the
+ * `COVERAGE_READ_BOUND`.
+ */
 export const reachedFiles = (matrixTest: string, files: ReadonlyMap<string, string>, aliases: PathAliases): ReadonlySet<string> =>
   walk(matrixTest, boundedEdges(matrixTest, readFromMap(files), Number.POSITIVE_INFINITY).edgesOf, aliases);
 
@@ -220,9 +225,9 @@ export const decideCoverage = (
   return { kind: "missing", paths };
 };
 
-/** Coverage from `matrixTest` over the port, bounded at `COVERAGE_FRONTIER_BOUND` present files. */
+/** Coverage from `matrixTest` over the port, bounded at `COVERAGE_READ_BOUND` present files. */
 function coverageThrough(matrixTest: string, obligation: OwnerObligation, aliases: PathAliases, read: ReadModule): CoverageVerdict {
-  const reader = boundedEdges(matrixTest, read, COVERAGE_FRONTIER_BOUND);
+  const reader = boundedEdges(matrixTest, read, COVERAGE_READ_BOUND);
   const reached = walk(matrixTest, reader.edgesOf, aliases);
   const failure = reader.failure();
   return failure === null ? decideCoverage(reached, obligation) : { kind: "infrastructure", failure };
@@ -234,11 +239,16 @@ function coverageThrough(matrixTest: string, obligation: OwnerObligation, aliase
  * exactly the matrix test, then for each specifier its ladder candidates up
  * to the first present one, closed under re-exports. A refused read stops the
  * walk as that read's infrastructure failure, never a missing path; more than
- * `COVERAGE_FRONTIER_BOUND` present files is `coverage-bound-exceeded`.
+ * `COVERAGE_READ_BOUND` present files is `coverage-bound-exceeded`.
  */
 export const siblingCoverage: SiblingCoverageFn = ({ obligation, aliases, read }) =>
   coverageThrough(obligation.matrixTest, obligation, aliases, read);
 
-/** The same decision over a file map that holds every file there is: the whole-repository oracle. */
+/**
+ * The production walk over a file map that holds every file there is, the
+ * `COVERAGE_READ_BOUND` included: a map with more present files in reach
+ * than the bound decides `coverage-bound-exceeded`, exactly as the gate
+ * would. `reachedFiles` is the unbounded reach.
+ */
 export const coverageOverFiles: CoverageOverFilesFn = ({ matrixTest, obligation, files, aliases }) =>
   coverageThrough(matrixTest, obligation, aliases, readFromMap(files));

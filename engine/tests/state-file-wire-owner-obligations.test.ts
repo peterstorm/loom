@@ -15,6 +15,7 @@ import { evaluateWaveCompletionSuite, type AcceptedWaveCompletionReceipt } from 
 import type { ArtifactDigest } from "../src/core/orchestration-contract";
 import {
   obligationsDigest,
+  ownerCheckAuthorityOf,
   waveOwnerDuty,
   type OwnerCheckAuthority,
 } from "../src/core/owner-verification/obligations";
@@ -71,14 +72,14 @@ describe("owner_obligations on the State File wire", () => {
     if (!parsed.ok) return;
     expect("owner_obligations" in parsed.value).toBe(false);
     expect(waveOwnerDuty(parsed.value, 1).owed).toEqual([]);
-    expect(waveOwnerDuty(parsed.value, 1).check).toBeNull();
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(parsed.value, 1))).toBeNull();
   });
 
   it("round-trips an empty stamp as present and empty", () => {
     const parsed = parseTaskGraph(viaDisk(graph({ owner_obligations: [] })));
     expect(parsed.ok && parsed.value.owner_obligations).toEqual([]);
     if (!parsed.ok) return;
-    expect(waveOwnerDuty(parsed.value, 1).check).not.toBeNull();
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(parsed.value, 1))).not.toBeNull();
   });
 
   it("round-trips verify and exempt obligations exactly, in order", () => {

@@ -16,7 +16,7 @@ import {
   type WaveCompletionSuiteResult,
 } from "../../src/core/completion-suite";
 import type { StatusDeps } from "../../src/core/loom-status";
-import { waveOwnerDuty } from "../../src/core/owner-verification/obligations";
+import { ownerCheckAuthorityOf, waveOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type {
   CoverageVerdict,
@@ -112,7 +112,7 @@ export function ledgerGraph(): TaskGraph {
 
 /** The suite authorized for the ledger graph's live gate: with its owner check, or without one (`null`). */
 export function ledgerAuthority(withOwnerCheck: boolean): AuthorizedWaveCompletionSuite {
-  const owner = withOwnerCheck ? waveOwnerDuty(ledgerGraph(), LEDGER_REGISTRATION.wave).check : null;
+  const owner = withOwnerCheck ? ownerCheckAuthorityOf(waveOwnerDuty(ledgerGraph(), LEDGER_REGISTRATION.wave)) : null;
   if (withOwnerCheck && owner === null) throw new Error("fixture graph owes no owner check");
   return value(authorizeWaveCompletionSuite(MANIFEST, LEDGER_REGISTRATION, LEDGER_WORKSPACE, owner));
 }

@@ -61,6 +61,7 @@ import {
   obligationsAgree,
   obligationsDigest,
   obligationsFromPlan,
+  ownerCheckAuthorityOf,
   parseOwnerObligations,
   stampAgreement,
   taskOwnerDuty,
@@ -187,7 +188,7 @@ describe("INV-3 owner rows — Wave scope against touch scope", () => {
   it.each(ROWS)("$name: waveOwnerDuty over a stamped graph owes the Wave scope of that Wave's Tasks", ({ files, wave }) => {
     const stamped = graph([task("T1", 2, files), task("T2", 1, ["src/fees/table.ts"])], OBLIGATIONS);
     expect(ids(waveOwnerDuty(stamped, 2).owed)).toEqual(wave ? ["INV-1"] : []);
-    expect(waveOwnerDuty(stamped, 2).check).toEqual({ obligationsDigest: obligationsDigest(OBLIGATIONS), owed: wave ? ["INV-1"] : [] });
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(stamped, 2))).toEqual({ obligationsDigest: obligationsDigest(OBLIGATIONS), owed: wave ? ["INV-1"] : [] });
   });
 
   it("a Wave's Tasks are unioned, in plan order, each obligation once", () => {
@@ -359,7 +360,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
 
   it.each(ROWS)("$name: readiness accepts exactly the receipt authorized under the Wave duty's check", ({ files }) => {
     const stamped = suiteGraph(files, OBLIGATIONS);
-    const owner = waveOwnerDuty(stamped, 1).check;
+    const owner = ownerCheckAuthorityOf(waveOwnerDuty(stamped, 1));
     expect(readiness(stamped, owner)).toBe("accepted");
     expect(readiness(stamped, null)).toBe("required");
     const otherOwed = owner!.owed.length === 0 ? [FEES.invariant] : [];
@@ -387,7 +388,7 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
 
   it.each(ROWS)("$name: the State File wire loads exactly the receipt authorized under the Wave duty's check", ({ files }) => {
     const stamped = suiteGraph(files, OBLIGATIONS);
-    const owner = waveOwnerDuty(stamped, 1).check;
+    const owner = ownerCheckAuthorityOf(waveOwnerDuty(stamped, 1));
     expect(loads(stamped, owner)).toBe(true);
     expect(loads(stamped, null)).toBe(false);
     const otherOwed = owner!.owed.length === 0 ? [FEES.invariant] : [];
@@ -460,7 +461,7 @@ describe("INV-3 sibling rows — the gate runs owner verification for the Wave d
       const wave = loaded.active_wave_gate!.wave;
       const owed = ids(waveOwnerDuty(loaded, wave).owed);
       expect(seen.map((input) => ids(input.owed.obligations))).toEqual(owed.length === 0 ? [] : [owed]);
-      for (const input of seen) expect(input.owed.obligationsDigest).toBe(waveOwnerDuty(loaded, wave).check!.obligationsDigest);
+      for (const input of seen) expect(input.owed.obligationsDigest).toBe(ownerCheckAuthorityOf(waveOwnerDuty(loaded, wave))!.obligationsDigest);
     },
     GATE_TIMEOUT_MS,
   );
@@ -504,7 +505,7 @@ describe("INV-3 owner rows — absent against empty owner_obligations", () => {
 
   it("absent: a pre-feature graph owes nothing and has no owner check authority", () => {
     expect(waveOwnerDuty(graph(changing), 1).owed).toEqual([]);
-    expect(waveOwnerDuty(graph(changing), 1).check).toBeNull();
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(graph(changing), 1))).toBeNull();
     expect(touchScope(["src/rules/owner.ts"], [])).toEqual([]);
     expect(taskOwnerDuty(graph(changing), ["src/rules/owner.ts"])).toEqual({ kind: "unstamped", touched: [] });
   });
@@ -512,11 +513,11 @@ describe("INV-3 owner rows — absent against empty owner_obligations", () => {
   it("empty: a stamped graph with no owned Invariant owes nothing but still carries the check", () => {
     expect(waveOwnerDuty(graph(changing, []), 1).owed).toEqual([]);
     expect(taskOwnerDuty(graph(changing, []), ["src/rules/owner.ts"])).toEqual({ kind: "stamped", touched: [] });
-    expect(waveOwnerDuty(graph(changing, []), 1).check).toEqual({ obligationsDigest: obligationsDigest([]), owed: [] });
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(graph(changing, []), 1))).toEqual({ obligationsDigest: obligationsDigest([]), owed: [] });
   });
 
   it("stamped, owing nothing this Wave: the authority is non-null with owed []", () => {
-    expect(waveOwnerDuty(graph([task("T1", 1, ["src/other.ts"])], OBLIGATIONS), 1).check)
+    expect(ownerCheckAuthorityOf(waveOwnerDuty(graph([task("T1", 1, ["src/other.ts"])], OBLIGATIONS), 1)))
       .toEqual({ obligationsDigest: obligationsDigest(OBLIGATIONS), owed: [] });
   });
 
@@ -618,7 +619,8 @@ describe("stampAgreement — the Wave duty's drift check, an absent stamp being 
   });
 
   it("an absent stamp is an unstamped duty, with no check and nothing owed, and drifts from any plan", () => {
-    expect(dutyOf()).toEqual({ kind: "unstamped", check: null, owed: [] });
+    expect(dutyOf()).toEqual({ kind: "unstamped", owed: [] });
+    expect(ownerCheckAuthorityOf(dutyOf())).toBeNull();
     expect(stampAgreement(dutyOf(), OWNED_PLAN_MODELS)).toEqual({ kind: "drifted" });
     expect(stampAgreement(dutyOf(), parsePlanModels("# Plan: none\n"))).toEqual({ kind: "drifted" });
   });
@@ -695,7 +697,7 @@ describe("INV-3 properties", () => {
     fc.assert(fc.property(fc.array(fileList, { maxLength: 4 }), fc.integer({ min: 1, max: 3 }), (lists, wave) => {
       const unstamped = graph(lists.map((files, i) => task(`T${i}`, 1 + (i % 3), files)));
       expect(waveOwnerDuty(unstamped, wave).owed).toEqual([]);
-      expect(waveOwnerDuty(unstamped, wave).check).toBeNull();
+      expect(ownerCheckAuthorityOf(waveOwnerDuty(unstamped, wave))).toBeNull();
       expect(taskOwnerDuty(unstamped, lists.flat()).touched).toEqual([]);
     }));
   });
@@ -703,7 +705,7 @@ describe("INV-3 properties", () => {
   it("a stamped graph always has a check, and its owed ids are exactly the ids of the owed obligations", () => {
     fc.assert(fc.property(fc.array(fileList, { maxLength: 4 }), fc.integer({ min: 1, max: 3 }), (lists, wave) => {
       const stamped = graph(lists.map((files, i) => task(`T${i}`, 1 + (i % 3), files)), OBLIGATIONS);
-      expect(waveOwnerDuty(stamped, wave).check).toEqual({
+      expect(ownerCheckAuthorityOf(waveOwnerDuty(stamped, wave))).toEqual({
         obligationsDigest: obligationsDigest(OBLIGATIONS),
         owed: ids(waveOwnerDuty(stamped, wave).owed),
       });

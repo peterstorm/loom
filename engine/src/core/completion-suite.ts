@@ -1221,6 +1221,9 @@ function authorityRejection(failures: NonEmpty<CompletionAuthorityFailure>): Rej
 const isOwnerUndecided = (failure: CompletionInfrastructureFailure): failure is OwnerUndecidedFailure =>
   failure.kind === "owner-verification-infrastructure";
 
+const isOtherInfrastructure = (failure: CompletionInfrastructureFailure): failure is Exclude<CompletionInfrastructureFailure, OwnerUndecidedFailure> =>
+  !isOwnerUndecided(failure);
+
 /**
  * The rejection the process facts make, classified by cause, or null when no
  * check failed. The owner check contributes at most one undecided failure.
@@ -1230,7 +1233,7 @@ function processRejection(
   semantic: readonly CompletionSemanticFailure[],
 ): RejectedCompletionSuite | null {
   const ownerUndecided = infrastructure.find(isOwnerUndecided) ?? null;
-  const otherInfrastructure = infrastructure.filter((failure): failure is Exclude<CompletionInfrastructureFailure, OwnerUndecidedFailure> => !isOwnerUndecided(failure));
+  const otherInfrastructure = infrastructure.filter(isOtherInfrastructure);
   if (isNonEmpty(otherInfrastructure)) {
     return freeze({ kind: "rejected", cause: "infrastructure", infrastructureFailures: freeze(otherInfrastructure), ownerUndecided, semanticFailures: freezeArray(semantic) });
   }
@@ -1282,6 +1285,18 @@ export const ownerVerificationExitCode = (observation: OwnerVerificationObservat
   ownerVerificationFailures(observation).length > 0 ? 1 : 0;
 
 /**
+ * An engine-reserved check's observed result: its exit code and no report.
+ * The one record the reserved lint and owner checks persist (FR-004), so the
+ * two can never drift apart.
+ */
+export const engineCheckResult = (checkId: CompletionCheckId, exitCode: 0 | 1): CompletionCheckResult =>
+  freeze({
+    checkId,
+    scope: "wave",
+    outcome: freeze({ kind: "observed", exitCode, timedOut: false, signal: null, report: freeze({ kind: "not-required" }) }),
+  });
+
+/**
  * The owner check's result as the record stores it, and its one constructor
  * (#132): the exit is derived from the observation, never chosen, so a writer
  * cannot record an exit its findings contradict. The persisted record keeps
@@ -1289,17 +1304,7 @@ export const ownerVerificationExitCode = (observation: OwnerVerificationObservat
  * and the receipt parser holds it to 0 (its observation carries no finding).
  */
 export const ownerCheckResult = (check: OwnerVerificationCheck, observation: OwnerVerificationObservation): CompletionCheckResult =>
-  freeze({
-    checkId: check.checkId,
-    scope: "wave",
-    outcome: freeze({
-      kind: "observed",
-      exitCode: ownerVerificationExitCode(observation),
-      timedOut: false,
-      signal: null,
-      report: freeze({ kind: "not-required" }),
-    }),
-  });
+  engineCheckResult(check.checkId, ownerVerificationExitCode(observation));
 
 /** Why the observation is not the one the authorized owner check binds, or null when it is. */
 function ownerVerificationMismatch(check: OwnerVerificationCheck | undefined, result: WaveCompletionSuiteResult): string | null {

@@ -16,9 +16,10 @@
  * - Two duty entry points read a graph. Each answers with a union that
  *   decides the absent-versus-empty distinction once, so no caller filters
  *   the stamp or re-encodes it:
- *   - `waveOwnerDuty` is the gate scope: the owner check (null exactly when
- *     the stamp is absent) and the obligations whose family (owner or a
- *     sibling, G5a's `changesFamily`) some Wave Task changes. A change to the
+ *   - `waveOwnerDuty` is the gate scope: the obligations whose family (owner
+ *     or a sibling, G5a's `changesFamily`) some Wave Task changes, and the
+ *     stamp's digest. `ownerCheckAuthorityOf` derives the owner check from
+ *     it (null exactly when the stamp is absent). A change to the
  *     matrix test alone does not trigger the checks. `stampAgreement` is its
  *     drift check against the plan, an absent stamp being drift.
  *   - `taskOwnerDuty` is the review-packet and brief scope: the obligations
@@ -319,30 +320,22 @@ const familyOf = (obligation: OwnerObligation): OwnedInvariant => ({
 const rolesIn = (fileList: readonly string[], obligation: OwnerObligation): InvariantRoles =>
   invariantRoles(fileList, familyOf(obligation));
 
-/** The key a stamped Wave duty holds its whole stamp under: private, so only `stampAgreement` reads it and no caller filters it. */
-const STAMP = Symbol("OwnerStamp");
-
 /**
- * What a Wave owes the owner gate (the gate scope). Plain data: two duties
- * of the same graph and Wave are structurally equal.
+ * What a Wave owes the owner gate (the gate scope). Plain data, one field per
+ * fact: two duties of the same graph and Wave are structurally equal.
  *
- * - `unstamped`: the graph predates owner verification. Its suite carries no
- *   owner check (`check: null`) and it owes nothing (`owed: []`).
+ * - `unstamped`: the graph predates owner verification. It owes nothing
+ *   (`owed: []`) and its suite carries no owner check.
  * - `stamped`: the stamp, `[]` included, always carries the check, so plan
  *   integrity runs every Wave. `owed` is the obligations whose family (owner
  *   or a sibling, G5a's `changesFamily`) some Task of the Wave changes, in
- *   stamp order; `check.owed` is exactly their ids.
+ *   stamp order; `obligationsDigest` is the whole stamp's identity.
  */
 export type WaveOwnerDuty =
-  | Readonly<{ kind: "unstamped"; check: null; owed: readonly [] }>
-  | Readonly<{
-    kind: "stamped";
-    check: OwnerCheckAuthority;
-    owed: readonly OwnerObligation[];
-    [STAMP]: readonly OwnerObligation[];
-  }>;
+  | Readonly<{ kind: "unstamped"; owed: readonly [] }>
+  | Readonly<{ kind: "stamped"; obligationsDigest: ArtifactDigest; owed: readonly OwnerObligation[] }>;
 
-const UNSTAMPED_WAVE: WaveOwnerDuty = Object.freeze({ kind: "unstamped", check: null, owed: Object.freeze([]) as readonly [] });
+const UNSTAMPED_WAVE: WaveOwnerDuty = Object.freeze({ kind: "unstamped", owed: Object.freeze([]) as readonly [] });
 
 export function waveOwnerDuty(graph: StampedGraph, wave: number): WaveOwnerDuty {
   const stamp = graph.owner_obligations;
@@ -350,12 +343,17 @@ export function waveOwnerDuty(graph: StampedGraph, wave: number): WaveOwnerDuty 
   const waveTasks = graph.tasks.filter((task) => task.wave === wave);
   const owed = Object.freeze(stamp.filter((obligation) =>
     waveTasks.some(({ file_list }) => changesFamily(rolesIn(file_list ?? [], obligation)))));
-  return Object.freeze({
-    kind: "stamped",
-    check: Object.freeze({ obligationsDigest: obligationsDigest(stamp), owed: owed.map(({ invariant }) => invariant) }),
-    owed,
-    [STAMP]: stamp,
-  });
+  return Object.freeze({ kind: "stamped", obligationsDigest: obligationsDigest(stamp), owed });
+}
+
+/**
+ * The owner check a Wave's suite carries, derived from its duty at this one
+ * point: `null` exactly when the stamp is absent; otherwise the stamp's digest
+ * and the ids of the owed obligations, possibly none.
+ */
+export function ownerCheckAuthorityOf(duty: WaveOwnerDuty): OwnerCheckAuthority | null {
+  if (duty.kind === "unstamped") return null;
+  return Object.freeze({ obligationsDigest: duty.obligationsDigest, owed: duty.owed.map(({ invariant }) => invariant) });
 }
 
 /**
@@ -374,7 +372,8 @@ export function stampAgreement(duty: WaveOwnerDuty, models: Pick<PlanModels, "in
   if (duty.kind === "unstamped") return { kind: "drifted" };
   const fromPlan = obligationsFromPlan(models);
   if (!fromPlan.ok) return { kind: "underivable", error: fromPlan.error };
-  return obligationsAgree(duty[STAMP], fromPlan.value) ? { kind: "agrees" } : { kind: "drifted" };
+  // The canonical digest is the stamp's identity: equal exactly when the obligations agree, in content and order.
+  return obligationsDigest(fromPlan.value) === duty.obligationsDigest ? { kind: "agrees" } : { kind: "drifted" };
 }
 
 /**

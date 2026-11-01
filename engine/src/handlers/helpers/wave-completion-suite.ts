@@ -35,6 +35,7 @@ import {
   boundedFailureMessage,
   evaluateWaveCompletionSuite,
   ownerCheckOf,
+  engineCheckResult,
   ownerCheckResult,
   ownerVerificationFindingLines,
   parseAcceptedWaveCompletionReceipt,
@@ -291,24 +292,6 @@ function lintCheckId(): CompletionCheckId {
   return parsed.value;
 }
 
-/** An engine-reserved check's observed result: its exit code, and no report. */
-function observedEngineCheckResult(
-  checkId: CompletionCheckId,
-  exitCode: 0 | 1,
-): CompletionCheckResult {
-  return freeze({
-    checkId,
-    scope: "wave",
-    outcome: freeze({
-      kind: "observed",
-      exitCode,
-      timedOut: false,
-      signal: null,
-      report: freeze({ kind: "not-required" }),
-    }),
-  });
-}
-
 /** The lint check's stored result, and the refusal it produced. The result
  *  keeps only the exit code; the refusal reaches the operator's diagnostic. */
 type ObservedLint = Readonly<{ result: CompletionCheckResult; refusal: string | null }>;
@@ -363,9 +346,9 @@ const NO_LINT_RESULT = "full-tier lint returned no terminal result";
  * reports the lint failure rather than a parser refusal. Pure.
  */
 export function lintCheckResult(checkId: CompletionCheckId, lint: HookResult): CompletionCheckResult {
-  if (lint.kind === "allow") return observedEngineCheckResult(checkId, 0);
+  if (lint.kind === "allow") return engineCheckResult(checkId, 0);
   const message = "message" in lint ? lint.message : NO_LINT_RESULT;
-  if (lint.kind === "block" && !message.includes("LINT ENGINE ERROR")) return observedEngineCheckResult(checkId, 1);
+  if (lint.kind === "block" && !message.includes("LINT ENGINE ERROR")) return engineCheckResult(checkId, 1);
   return freeze({
     checkId,
     scope: "wave",

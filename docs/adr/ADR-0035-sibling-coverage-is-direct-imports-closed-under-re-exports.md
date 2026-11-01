@@ -118,7 +118,7 @@ reads through an injected port: `ReadModule = (path) => ModuleRead`, where `Modu
 `siblingCoverage({ obligation, aliases, read })` starts at the matrix test and pulls each file the walk needs,
 at most once, parsing it only when present. For a specifier it reads the ladder candidates in order and stops at
 the first present one, so it reads exactly the candidates whose existence could change the resolution. A refused
-read stops the walk as that read's infrastructure failure; more than `COVERAGE_FRONTIER_BOUND` (512) present files
+read stops the walk as that read's infrastructure failure; more than `COVERAGE_READ_BOUND` (512) present files
 is `coverage-bound-exceeded`. Each path read once, in resolution order, is the same set of reads the earlier
 frontier made, so the bound, the minimal reads and the failure modes are unchanged.
 
@@ -127,8 +127,11 @@ next paths to read (`read`), `complete` or `bound-exceeded`, the shell looped ov
 time with `coverageOverFiles` over the gathered files. A frontier-equivalence property test proved the gathered
 files decided as the whole repository would. #133 removed the loop, the `CoverageGraphState`/`CoverageFrontierStep`
 types and the second decision. With nothing gathered across the seam, the property is now stated over the port:
-`siblingCoverage` through an in-memory port decides exactly as `coverageOverFiles` over the whole repository,
-reading each path at most once. It runs 1000 times over the same random layouts.
+`siblingCoverage` through an in-memory port decides exactly as an independent reference reach over the whole
+repository (a plain fixed-point closure built from the exported resolver and edge parser, sharing none of the walk's
+lazy reads or bound), reading each path at most once. It runs 1000 times over the same random layouts.
+`coverageOverFiles` is the same production walk over a file map, the read bound included; `reachedFiles` is the
+unbounded reach.
 
 `engine/src/orchestration/owner-verification-runner.ts` adapts the filesystem to the port in `coverage()`: each
 path is read through `readRepositoryText` against the canonical repository root, which never throws. A path
@@ -140,7 +143,9 @@ failure, and coverage stops there: an unreadable file is never reported as a mis
 
 **tsconfig `paths` resolution is pure; only the reads and the JSONC parse are injected.** Since the PR #131
 review remediation, `pathAliasesOf(matrixTest, read, parseJsonc)` lives in
-`engine/src/core/owner-verification/tsconfig-paths.ts`; the runner supplies the file read and a `jsonc-parser`
+`engine/src/core/owner-verification/tsconfig-paths.ts`; the runner supplies the file read, through the same
+`ReadModule` port coverage uses (so a refused config is that read's `repository-file-unreadable` failure, returned as
+the typed `AliasConfigError`, with no side channel), and a `jsonc-parser`
 adapter (the only `jsonc-parser` import, under its existing grant). It finds the nearest
 `tsconfig.json` from the matrix test's directory up to the repository root and parses it through that adapter.
 It follows `extends` chains, both relative and under `node_modules`, and rejects cycles. It resolves `paths`
@@ -192,7 +197,7 @@ scenarios live in `engine/tests/acceptance/owner-verification-core.acceptance.te
   exists to maintain.
 - Resolution, reach and the walk are pure (the port is injected). They are tested by table and property tests with no filesystem,
   and the purity lint keeps them that way.
-- The 512-file bound and the frontier's minimal reads keep the check cheap and its failure mode explicit. A
+- The 512-file bound and the walk's minimal reads keep the check cheap and its failure mode explicit. A
   `missing` verdict names every unreached path, owner first, which maps directly to the remedy in
   `docs/operations.md`.
 
@@ -210,7 +215,7 @@ scenarios live in `engine/tests/acceptance/owner-verification-core.acceptance.te
 - An unreadable candidate blocks as infrastructure (`repository-file-unreadable`) rather than counting as absent.
   A draft in #127 read `EACCES` and `ELOOP` as absent, so a permission problem showed up
   as a coverage miss; it was corrected before merge, so the behavior matches the `CoverageVerdict`
-  contract. The cost: a candidate path the frontier only probes (an extension or `/index` variant) that the
+  contract. The cost: a candidate path the walk only probes (an extension or `/index` variant) that the
   filesystem refuses, for example under a directory without search permission, blocks the gate until the
   permission is fixed, even when another candidate would have resolved the specifier.
 - The core now depends on `typescript` in a second seam (INV-1). A TypeScript upgrade that changes the AST shape

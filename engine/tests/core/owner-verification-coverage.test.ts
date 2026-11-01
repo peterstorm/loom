@@ -7,13 +7,14 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
-  COVERAGE_FRONTIER_BOUND,
+  COVERAGE_READ_BOUND,
   coverageOverFiles,
   decideCoverage,
   reachedFiles,
   resolveSpecifier,
   siblingCoverage,
 } from "../../src/core/owner-verification/coverage";
+import { moduleEdges } from "../../src/core/owner-verification/import-graph";
 import type { OwnerObligation, PathAliases, ReadModule } from "../../src/core/owner-verification/types";
 import { ownerObligation } from "../fixtures/owner-obligation";
 
@@ -222,6 +223,30 @@ describe("coverage laws", () => {
 // The self-driving walk over the ReadModule port (#133)
 // ---------------------------------------------------------------------------
 
+/**
+ * An independent reference decision over the whole repository: a plain
+ * fixed-point reach built only from the exported resolver and edge parser,
+ * sharing none of the walk's lazy reads, memoization or bound, so the
+ * properties below can fail when the walk does.
+ */
+const referenceCoverage = (repo: Readonly<Record<string, string>>, declared: OwnerObligation, aliases: PathAliases) => {
+  const known = new Set(Object.keys(repo));
+  const loads = (path: string, kinds: readonly ("import" | "reexport")[]): readonly string[] =>
+    moduleEdges(path, repo[path]!).filter((edge) => !edge.typeOnly && kinds.includes(edge.kind)).map((edge) => edge.specifier);
+  const reached = new Set<string>();
+  if (!known.has(declared.matrixTest)) return decideCoverage(reached, declared);
+  const visit = (from: string, specifiers: readonly string[]): void => {
+    for (const specifier of specifiers) {
+      const target = resolveSpecifier(from, specifier, aliases, known);
+      if (target === null || reached.has(target)) continue;
+      reached.add(target);
+      visit(target, loads(target, ["reexport"]));
+    }
+  };
+  visit(declared.matrixTest, loads(declared.matrixTest, ["import", "reexport"]));
+  return decideCoverage(reached, declared);
+};
+
 /** An in-memory port over `repo` that records every read, refusing the paths in `refused`. */
 const recordingPort = (repo: Readonly<Record<string, string>>, refused: ReadonlySet<string> = new Set()) => {
   const reads: string[] = [];
@@ -233,7 +258,7 @@ const recordingPort = (repo: Readonly<Record<string, string>>, refused: Readonly
   return { read, reads };
 };
 
-// Random repositories over every resolution path the frontier must gather
+// Random repositories over every resolution path the walk must read
 // ahead of the decision: single- and multi-target tsconfig aliases, `.tsx` and
 // `.mts` fallbacks, `.js`/`.mjs` specifiers naming TypeScript sources,
 // directory indexes, and layouts where an earlier ladder candidate (`m.ts`
@@ -330,21 +355,21 @@ describe("siblingCoverage: the walk drives its own reads", () => {
     expect(port.reads).not.toContain("src/unrelated.ts");
   });
 
-  it("FR-007: the self-driven walk decides exactly as the whole repository does", () => {
+  it("FR-007: the self-driven walk decides exactly as an independent whole-repository reach does", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 12 }), fc.constantFrom<"reexport" | "import">("reexport", "import"), (hops, edge) => {
       const repo = chainFiles(hops, edge);
       const port = recordingPort(repo);
       expect(siblingCoverage({ obligation: targetObligation, aliases: [], read: port.read }))
-        .toEqual(coverageOverFiles({ matrixTest: MATRIX, obligation: targetObligation, files: new Map(Object.entries(repo)), aliases: [] }));
+        .toEqual(referenceCoverage(repo, targetObligation, []));
       expect(new Set(port.reads).size).toBe(port.reads.length);
     }));
   });
 
-  it("FR-007: the self-driven walk decides exactly as the whole repository does, over aliases, fallbacks, indexes and ladder order", () => {
+  it("FR-007: the self-driven walk decides exactly as an independent whole-repository reach does, over aliases, fallbacks, indexes and ladder order", () => {
     fc.assert(fc.property(layoutRepository, ({ repo, obligation: declared }) => {
       const port = recordingPort(repo);
       expect(siblingCoverage({ obligation: declared, aliases: LAYOUT_ALIASES, read: port.read }))
-        .toEqual(coverageOverFiles({ matrixTest: MATRIX, obligation: declared, files: new Map(Object.entries(repo)), aliases: LAYOUT_ALIASES }));
+        .toEqual(referenceCoverage(repo, declared, LAYOUT_ALIASES));
       expect(new Set(port.reads).size).toBe(port.reads.length);
       expect(port.reads[0]).toBe(MATRIX);
     }), { numRuns: 1000 });
@@ -380,7 +405,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
     expect(port.reads).toEqual([MATRIX]);
   });
 
-  it("a refused read in the frontier is that read's infrastructure failure, never a missing path, and stops the reads", () => {
+  it("a refused read the walk needs is that read's infrastructure failure, never a missing path, and stops the reads", () => {
     const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b") };
     const port = recordingPort(repo, new Set([SIBLING_A]));
     expect(siblingCoverage({ obligation: obligation(), aliases: [], read: port.read })).toEqual({
@@ -390,7 +415,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
     expect(port.reads.at(-1)).toBe(SIBLING_A);
   });
 
-  it("a refused file outside the frontier is never read, so it never fails coverage", () => {
+  it("a refused file the walk never needs is never read, so it never fails coverage", () => {
     const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b"), "src/locked.ts": "" };
     const port = recordingPort(repo, new Set(["src/locked.ts"]));
     expect(siblingCoverage({ obligation: obligation(), aliases: [], read: port.read })).toEqual({ kind: "covered" });
@@ -398,12 +423,12 @@ describe("siblingCoverage: the walk drives its own reads", () => {
   });
 
   it("reading past the bound is a coverage-bound-exceeded infrastructure failure, and the walk reads no further", () => {
-    const repo = chainFiles(COVERAGE_FRONTIER_BOUND + 5, "reexport");
+    const repo = chainFiles(COVERAGE_READ_BOUND + 5, "reexport");
     const port = recordingPort(repo);
     const verdict = siblingCoverage({ obligation: targetObligation, aliases: [], read: port.read });
     expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "coverage-bound-exceeded" } });
-    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(String(COVERAGE_FRONTIER_BOUND));
-    expect(port.reads.filter((path) => path in repo)).toHaveLength(COVERAGE_FRONTIER_BOUND + 1);
-    expect(COVERAGE_FRONTIER_BOUND).toBe(512);
+    if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(String(COVERAGE_READ_BOUND));
+    expect(port.reads.filter((path) => path in repo)).toHaveLength(COVERAGE_READ_BOUND + 1);
+    expect(COVERAGE_READ_BOUND).toBe(512);
   });
 });

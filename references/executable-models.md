@@ -170,7 +170,7 @@ a hypothetical project, like the order domain of INV-1 and INV-2 above.
 **Tier:** advisory
 **Owner module:** `engine/src/core/owner-verification/obligations.ts`
 **Sibling entry points:**
-- `engine/src/core/owner-verification/suite-authority.ts` — authorizing the Wave's suite from the TaskGraph with the Wave duty's `check` (`waveOwnerDuty`); the gate helper and readiness both call it
+- `engine/src/core/owner-verification/suite-authority.ts` — authorizing the Wave's suite from the TaskGraph with `ownerCheckAuthorityOf(waveOwnerDuty(...))`; the gate helper and readiness both call it
 - `engine/src/handlers/helpers/wave-completion-suite.ts` — the Wave duty's owed obligations (`waveOwnerDuty`) that the owner check runs for
 - `engine/src/core/wave-completion-suite-readiness.ts` — re-authorizing the suite roster through `suite-authority.ts`
 - `engine/src/core/owner-verification/plan-integrity.ts` — the gate's drift check of plan against stamp (`stampAgreement` over the Wave duty)
@@ -251,7 +251,7 @@ Declaring an owner makes it an obligation the Wave Gate checks.
   owner "reached" through any sibling. Type-only imports and type-only
   re-exports are erased at runtime and never count. A miss
   blocks, naming every missing path, owner first. Bare package specifiers
-  reach nothing; a frontier of more than 512 files is an infrastructure
+  reach nothing; a walk reading more than 512 files is an infrastructure
   failure.
 - **Mutation verification.** The owner's lines changed in the Wave — against
   the `start_sha` of the Wave Tasks listing the owner, or their octopus

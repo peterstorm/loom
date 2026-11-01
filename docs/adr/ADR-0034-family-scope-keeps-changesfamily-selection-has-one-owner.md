@@ -4,8 +4,8 @@
 Accepted (2026-10-23). Records plan AD-4 of `.claude/plans/2026-10-21-g5b-owner-enforcement.md` (interview Q1d)
 and the ownership rule INV-3 of the same plan. It shipped with G5b owner enforcement on
 `feat/g5b-owner-enforcement`.
-Amended 2026-11-01 (#136): the five `OwnerScope` selections became two duty entry points, `waveOwnerDuty` and
-`taskOwnerDuty`; see "Two duty entry points" under Decision.
+Amended 2026-11-01 (#136): the opaque `OwnerScope` seam and its selections became two duty entry points,
+`waveOwnerDuty` and `taskOwnerDuty`; see "Two duty entry points" under Decision.
 
 ## Context
 G5a gave a plan's owned invariants a family: one owner module, its declared sibling entry points and a matrix
@@ -92,28 +92,29 @@ The module is pure and listed under `DEFAULT_PURE_MODULES` (INV-2). It classifie
 
 **Two duty entry points (#136; superseding the PR #131 `OwnerScope` seam).** Callers never filter the raw
 `owner_obligations` array. Two functions read a graph, and each answers with a union whose variants decide the
-absent-versus-empty distinction once:
+absent-versus-empty distinction once. Both duties are plain data, with one field per fact:
 
 - `waveOwnerDuty(graph, wave): WaveOwnerDuty` is the gate scope.
-  - `unstamped` (the field is absent): `check: null`, `owed: []`. The suite carries no owner check.
+  - `unstamped` (the field is absent): `owed: []`. The suite carries no owner check.
   - `stamped` (the obligations, `[]` included): `owed` keeps an obligation when some Task of that Wave has a
     `file_list` satisfying `changesFamily(invariantRoles(...))`, in stamp order; a Task without a `file_list`
-    changes nothing. `check` is `{ obligationsDigest, owed }`, whose `owed` is exactly the ids of `owed` and may
-    be empty: a stamped graph always carries the check, so plan integrity (FR-002) runs every Wave. The duty is
-    plain data; the stamp itself sits under a module-private key that only the drift check reads.
+    changes nothing. `obligationsDigest` is the whole stamp's identity.
+- `ownerCheckAuthorityOf(duty): OwnerCheckAuthority | null` derives the owner check from a Wave duty at one point:
+  `null` exactly when the stamp is absent, otherwise `{ obligationsDigest, owed }` with the ids of the duty's `owed`,
+  possibly none. A stamped graph always carries the check, so plan integrity (FR-002) runs every Wave.
 - `stampAgreement(duty, models): StampAgreement` is the gate's drift check of a Wave duty: `agrees`, `drifted` or
-  `underivable`. An unstamped duty is `drifted`, decided here rather than by each caller, so the old `unstamped`
-  agreement every caller had to map to drift is gone (PR #140 review: a first cut put a closure on the stamped
-  duty and left the unstamped mapping to plan integrity).
+  `underivable`, comparing the canonical digest of the obligations the plan derives with the duty's
+  `obligationsDigest`. An unstamped duty is `drifted`, decided here rather than by each caller.
 - `taskOwnerDuty(graph, fileList): TaskOwnerDuty` is the touch scope: `touched` keeps an obligation when
   `changesFamily(roles) || roles.matrixTest`, in stamp order. `unstamped` touches nothing (`touched: []`); the brief
   tells it apart from a stamped graph the Task does not touch.
 
-The PR #131 remediation had five functions over an opaque `OwnerScope` (`ownerScopeOf`, `ownerVerificationOwed`,
-`ownerCheckAuthority`, `obligationsTouchedBy`, `stampAgreement`). Issue #136 collapsed the four selections into the two duties
-above, plus the drift check over a Wave duty: each caller asks one question about one Wave or one Task and gets
-every answer to it in one value, so the owed obligations and the check's owed ids can no longer be taken from two
-different scopes.
+The PR #131 remediation put the stamp behind an opaque `OwnerScope` with three selections over it
+(`ownerVerificationOwed`, `ownerCheckAuthority`, `obligationsTouchedBy`) and a drift check (`stampAgreement`). #136
+replaced the scope and its selections with the two duties above, from which the check is derived, and
+`stampAgreement` now takes a Wave duty. Each caller asks one question about one Wave or one Task and gets every
+answer in one value, so the owed obligations and the check's owed ids can no longer come from two different
+scopes.
 
 `verifyOwed(obligations)` decides which of a set of obligations owe mutation (policy `verify`); population and the
 runner both use it, so the owes-mutation rule has one home too.
@@ -127,12 +128,12 @@ Callers in the shipped code:
 
 | Question | Caller (INV-3 sibling) | Selection |
 |---|---|---|
-| Suite authorization from a TaskGraph | `engine/src/core/owner-verification/suite-authority.ts` | `waveOwnerDuty(...).check` |
+| Suite authorization from a TaskGraph | `engine/src/core/owner-verification/suite-authority.ts` | `ownerCheckAuthorityOf(waveOwnerDuty(...))` |
 | Suite authorization at the gate | `engine/src/handlers/helpers/wave-completion-suite.ts` | through `suite-authority.ts` |
 | Suite re-authorization for readiness | `engine/src/core/wave-completion-suite-readiness.ts` | through `suite-authority.ts` |
 | Obligations the check runs for | `engine/src/handlers/helpers/wave-completion-suite.ts` | `waveOwnerDuty(...).owed` |
 | Plan drift against the stamp | `engine/src/core/owner-verification/plan-integrity.ts` | `stampAgreement(duty, models)` (unstamped is drift) |
-| Receipt roster validation on read | `engine/src/state-file-wire.ts` | `waveOwnerDuty(...).check` |
+| Receipt roster validation on read | `engine/src/state-file-wire.ts` | `ownerCheckAuthorityOf(waveOwnerDuty(...))` |
 | Which owed obligations run mutants | `engine/src/orchestration/owner-verification-runner.ts` | `verifyOwed`, through `verificationRuns` in `core/owner-verification/owed-verification.ts` |
 | Whether population needs an `affectedRunner` | `engine/src/core/task-graph-population.ts` | `verifyOwed` |
 | Reviewer-packet owner map | `engine/src/core/wave-review-authority.ts` | `taskOwnerDuty(...).touched` |
@@ -160,11 +161,11 @@ The matrix test `engine/tests/core/owner-obligations.matrix.test.ts` covers:
   lists, plus absent against empty `owner_obligations`.
 - **Sibling rows:** nine, one per caller in the table except the gate helper's suite authorization. That call goes
   through `suite-authority.ts`, so the suite-authority rows cover it. The packet and brief
-  follow `taskOwnerDuty`; suite authority, readiness and the State File wire follow the Wave duty's `check`; the gate helper hands the
+  follow `taskOwnerDuty`; suite authority, readiness and the State File wire follow `ownerCheckAuthorityOf`; the gate helper hands the
   runner exactly the Wave duty's `owed`; plan integrity follows `stampAgreement`; the runner and population follow
   `verifyOwed`.
 - **Properties:** the Wave scope is a subset of the touch scope; an absent stamp owes nothing and has no
-  authority; for a stamped graph, `check.owed` is exactly the ids of `owed`.
+  authority; for a stamped graph, the derived check's `owed` is exactly the ids of the duty's `owed`.
 
 INV-3 is advisory: no lint rule forbids an inline selection. The matrix test and review are its enforcement.
 
@@ -180,7 +181,7 @@ Two points where the shipped code differs from the plan's wording:
   above, the drift check and `verifyOwed`.
 - The plan's first draft exported `waveChangedObligations(waveTasks, obligations)` and selections over a raw
   graph. The PR #131 review remediation folded the Wave filter into `ownerVerificationOwed` and put every
-  selection behind an opaque `OwnerScope`; #136 then collapsed the five selections into the two duties. INV-3's
+  selection behind an opaque `OwnerScope`; #136 then replaced the scope and its selections with the two duties. INV-3's
   sibling list names every real caller (table above).
 
 ## Consequences
@@ -190,7 +191,7 @@ Two points where the shipped code differs from the plan's wording:
   disagree about which obligations apply. A change to scope is a change to one pure function and its matrix rows.
 - G5a and G5b share one definition of "changes the family". The validator's owner-first rule, the brief's
   sibling paragraph and the gate's owed set all classify through `plan-paths.ts`.
-- Pre-G5b graphs keep byte-identical suite rosters and digests: their Wave duty's `check` is `null`,
+- Pre-G5b graphs keep byte-identical suite rosters and digests: `ownerCheckAuthorityOf` gives `null` for them,
   and `authorizeWaveCompletionSuite` adds nothing.
 - A Wave that touches a matrix test still gets the owner map in review and owner duties in the brief, without
   paying for mutation runs that have no changed owner lines to mutate.
