@@ -14,21 +14,22 @@
  * attempt binding (an implementation role writes only once BOUND), and
  * canonicalizing the target path and project root (realpath) so the core
  * compares symlink-free absolute paths, and resolving the orchestrated
- * repository (the canonical root of the repository owning the live TaskGraph,
- * plus Loom's canonical protected directories) so core can let writes outside
- * all of them through. Pi reuses the same resolvers.
+ * repository (the canonical root of the repository owning each TaskGraph that
+ * armed the session, plus Loom's canonical protected directories) so core can
+ * let writes outside all of them through. Pi reuses the same resolvers,
+ * supplying its session TaskGraph pointer through `SessionGraphPointerSource`.
  */
 
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import {
-  editPlacement,
   shouldBlockDirectEdit,
   UNRESOLVED,
+  unresolvedTargets,
   type ActiveRosterProbe,
   type ArtifactWriteRequest,
-  type EditPlacement,
+  type EditSite,
   type EditTargets,
   type ImplementationBindingProbe,
   type OrchestratedRepository,
@@ -36,7 +37,13 @@ import {
 import { nonEmpty } from "../../core/acceptance-contract/kernel";
 import { observeTaskGraphProjectBoundary, protectedDirs, subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles, type ActiveAgent } from "../../machine/ledger";
-import { parseReportedAgentId, parseSessionId, type SessionId } from "../../machine/evidence";
+import { parseCanonicalTaskGraphPointer } from "../../machine/task-graph-pointer";
+import {
+  parseReportedAgentId,
+  parseSessionId,
+  TASK_GRAPH_POINTER_SUFFIX,
+  type SessionId,
+} from "../../machine/evidence";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
 import {
   ensureRosteredImplementationBinding,
@@ -172,16 +179,113 @@ function canonicalProtectedRoots(dirs: readonly [string, ...string[]]): readonly
   return nonEmpty(canonical);
 }
 
+/**
+ * What a session's `<session>.task_graph` pointer says: no pointer, the
+ * canonical TaskGraph it names, or `unreadable` — present but not provably
+ * one canonical path, which leaves the repository unresolved.
+ */
+export type SessionGraphPointer =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "names"; graphPath: string }>
+  | Readonly<{ kind: "unreadable"; reason: string }>;
+
+/**
+ * Port: the TaskGraph pointer of one session. Pi arms a session through its
+ * pointer too, so it supplies `sessionGraphPointerFile`; Claude Code arms only
+ * on the cwd-resolved graph and supplies `noSessionGraphPointer`.
+ */
+export type SessionGraphPointerSource = (sessionId: SessionId) => SessionGraphPointer;
+
+const NO_POINTER: SessionGraphPointer = Object.freeze({ kind: "absent" });
+
+/** The pointer source of a harness that arms on no session pointer. */
+export const noSessionGraphPointer: SessionGraphPointerSource = () => NO_POINTER;
+
+/**
+ * The pointer file under the subagent dir. Only a proven ENOENT is absent;
+ * any other read failure, or bytes that are not one exact canonical absolute
+ * path, are `unreadable`.
+ */
+export const sessionGraphPointerFile: SessionGraphPointerSource = (sessionId) => {
+  const pointerPath = `${subagentDir()}/${sessionId}${TASK_GRAPH_POINTER_SUFFIX}`;
+  let raw: string;
+  try {
+    raw = readFileSync(pointerPath, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return NO_POINTER;
+    return Object.freeze({ kind: "unreadable", reason: `cannot read ${pointerPath}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+  const pointer = parseCanonicalTaskGraphPointer(raw);
+  return pointer.ok
+    ? Object.freeze({ kind: "names", graphPath: pointer.value })
+    : Object.freeze({ kind: "unreadable", reason: `${pointerPath}: ${pointer.error}` });
+};
+
+/** What differs between harnesses when observing the graphs that armed a session. */
+export type SessionGraphHarness = Readonly<{
+  /** Fail-closed existence probe: only ENOENT answers false. */
+  graphExists: (path: string) => boolean;
+  sessionPointer: SessionGraphPointerSource;
+  /** The harness's operator sink for a refusal that has a cause. */
+  announce: (line: string) => void;
+}>;
+
+/** How a harness observes the TaskGraphs that armed one session. */
+export type SessionGraphPorts = SessionGraphHarness & Readonly<{
+  /** The cwd-resolved TaskGraph path (`taskGraphPath()`). */
+  taskGraph: string;
+  protectedDirectories: readonly [string, ...string[]];
+}>;
+
+/**
+ * The ONE rule both harnesses use for which graphs armed this session: the
+ * cwd-resolved TaskGraph when it exists, plus the graph the session's pointer
+ * names. Their repository roots and Loom's protected directories then resolve
+ * through `orchestratedRepositoryOf`. An unreadable pointer answers
+ * `unresolved`, announced through the harness's sink: the guard stays on for
+ * every target.
+ */
+export function sessionOrchestratedRepository(
+  sessionId: SessionId | null,
+  ports: SessionGraphPorts,
+): OrchestratedRepository {
+  const pointer = sessionId === null ? NO_POINTER : ports.sessionPointer(sessionId);
+  if (pointer.kind === "unreadable") {
+    ports.announce(`cannot read the session TaskGraph pointer: ${pointer.reason} — guarding every target`);
+    return UNRESOLVED;
+  }
+  const graphPaths = [
+    ...(ports.graphExists(ports.taskGraph) ? [ports.taskGraph] : []),
+    ...(pointer.kind === "names" ? [pointer.graphPath] : []),
+  ];
+  return orchestratedRepositoryOf(graphPaths, ports.protectedDirectories);
+}
+
+/**
+ * `sessionOrchestratedRepository` over the live configuration — the
+ * cwd-resolved `taskGraphPath()` and `protectedDirs()` — so each harness
+ * names only what differs (`SessionGraphHarness`).
+ */
+export const liveSessionRepository = (sessionId: SessionId | null, harness: SessionGraphHarness): OrchestratedRepository =>
+  sessionOrchestratedRepository(sessionId, { ...harness, taskGraph: taskGraphPath(), protectedDirectories: protectedDirs() });
+
+/** Claude Code arms only on the cwd-resolved graph, the path `graphActiveProbe` checks. */
+const CLAUDE_SESSION_GRAPHS: SessionGraphHarness = Object.freeze({
+  graphExists: pathExistsFailClosed,
+  sessionPointer: noSessionGraphPointer,
+  announce: (line: string) => { process.stderr.write(`block-direct-edits: ${line}\n`); },
+});
+
 /** Canonical write targets resolved against `cwd`; one failure leaves all unresolved. */
 export function canonicalEditTargets(paths: readonly string[], cwd: string): EditTargets {
   const canonical: string[] = [];
   for (const path of paths) {
     const target = canonicalWritePath(resolve(cwd, path));
-    if (target === null) return UNRESOLVED;
+    if (target === null) return unresolvedTargets(`cannot canonicalize write target ${path}`);
     canonical.push(target);
   }
   const resolved = nonEmpty(canonical);
-  return resolved === null ? UNRESOLVED : Object.freeze({ kind: "resolved", paths: resolved });
+  return resolved === null ? unresolvedTargets("the call names no write target") : Object.freeze({ kind: "resolved", paths: resolved });
 }
 
 /** The raw `file_path` a Claude Code file tool names, or `null`. */
@@ -191,16 +295,18 @@ const claudeFilePath = (input: PreToolUseInput): string | null => {
 };
 
 /**
- * Lazy placement of one Claude Code write: the target against the repository
- * owning the graph this hook armed on (`taskGraphPath()`, the same path
- * `graphActiveProbe` probed) and Loom's protected directories.
+ * Lazy site of one Claude Code write: the target, and the repository owning
+ * the graph this hook armed on (`taskGraphPath()`, the same path
+ * `graphActiveProbe` probed) with Loom's protected directories.
  */
-const claudeEditPlacement = (input: PreToolUseInput) => (): EditPlacement => {
+const claudeEditSite = (input: PreToolUseInput, sessionId: SessionId | null) => (): EditSite => {
   const filePath = claudeFilePath(input);
-  return editPlacement(
-    orchestratedRepositoryOf([taskGraphPath()], protectedDirs()),
-    filePath === null ? UNRESOLVED : canonicalEditTargets([filePath], input.cwd ?? process.cwd()),
-  );
+  return {
+    repository: liveSessionRepository(sessionId, CLAUDE_SESSION_GRAPHS),
+    targets: filePath === null
+      ? unresolvedTargets("the call names no file_path")
+      : canonicalEditTargets([filePath], input.cwd ?? process.cwd()),
+  };
 };
 
 /**
@@ -268,7 +374,7 @@ const handler: HookHandler = async (stdin) => {
     {
       artifactWrite: artifactWriteRequest(parsed),
       implementationBinding: sessionId === null ? undefined : callerBindingProbe(parsed, sessionId, roster),
-      placeEdit: claudeEditPlacement(parsed),
+      locateEdit: claudeEditSite(parsed, sessionId),
     },
   );
 };

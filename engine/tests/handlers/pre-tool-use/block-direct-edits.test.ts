@@ -23,20 +23,28 @@ import {
   guardedByRoot,
   shouldBlockDirectEdit,
   UNRESOLVED,
+  unresolvedTargets,
   type ActiveRosterEntry,
   type ActiveRosterProbe,
-  type EditPlacement,
+  type EditSite,
   type EditTargets,
   type OrchestratedRepository,
+  type WriteGrantScope,
 } from "../../../src/core/block-direct-edits";
 import blockDirectEdits, {
   activeRosterProbe,
   artifactWriteRequest,
   canonicalEditTargets,
   canonicalWritePath,
+  liveSessionRepository,
+  noSessionGraphPointer,
   orchestratedRepositoryOf,
+  sessionGraphPointerFile,
+  sessionOrchestratedRepository,
+  type SessionGraphPointer,
+  type SessionGraphPorts,
 } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import { SUBAGENT_DIR, pathExistsFailClosed } from "../../../src/config";
+import { SUBAGENT_DIR, pathExistsFailClosed, taskGraphPath } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
 import { sessionIdOf } from "../../fixtures/machine-identities";
 
@@ -768,8 +776,8 @@ describe("guardedByRoot / editPlacement — the pure placement rule", () => {
 
   it("anything unresolved places the call inside", () => {
     expect(editPlacement(UNRESOLVED, resolvedTargets("/elsewhere/x.ts")).kind).toBe("inside");
-    expect(editPlacement(resolvedRepository("/repo"), UNRESOLVED).kind).toBe("inside");
-    expect(editPlacement(UNRESOLVED, UNRESOLVED).kind).toBe("inside");
+    expect(editPlacement(resolvedRepository("/repo"), unresolvedTargets("unreadable")).kind).toBe("inside");
+    expect(editPlacement(UNRESOLVED, unresolvedTargets("unreadable")).kind).toBe("inside");
   });
 
   it("one guarded target places the whole call inside; every root counts", () => {
@@ -805,12 +813,12 @@ describe("guardedByRoot / editPlacement — the pure placement rule", () => {
 });
 
 describe("shouldBlockDirectEdit — placement gates every admission", () => {
-  const inside = (): EditPlacement => ({ kind: "inside" });
-  const outside = (): EditPlacement => ({ kind: "outside" });
+  const inside = (): EditSite => ({ repository: resolvedRepository("/repo"), targets: resolvedTargets("/repo/src/x.ts") });
+  const outside = (): EditSite => ({ repository: resolvedRepository("/repo"), targets: resolvedTargets("/scratch/x.ts") });
 
   it("the main agent may write outside the orchestrated repository; inside it stays blocked", () => {
-    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster, { placeEdit: outside }).kind).toBe("allow");
-    const blocked = shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster, { placeEdit: inside });
+    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster, { locateEdit: outside }).kind).toBe("allow");
+    const blocked = shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster, { locateEdit: inside });
     expect(blocked.kind).toBe("block");
     if (blocked.kind === "block") expect(blocked.message).toContain("Direct edits not allowed");
   });
@@ -821,18 +829,18 @@ describe("shouldBlockDirectEdit — placement gates every admission", () => {
 
   it("placement is never consulted when disarmed, for a non-file tool, or on an invalid session id", () => {
     const probe = vi.fn(outside);
-    expect(shouldBlockDirectEdit("Edit", sNoActive, () => false, noRoster, { placeEdit: probe }).kind).toBe("allow");
-    expect(shouldBlockDirectEdit("Bash", sNoActive, orchestrating, noRoster, { placeEdit: probe }).kind).toBe("allow");
-    expect(shouldBlockDirectEdit("Edit", "../../etc", orchestrating, noRoster, { placeEdit: probe }).kind).toBe("block");
+    expect(shouldBlockDirectEdit("Edit", sNoActive, () => false, noRoster, { locateEdit: probe }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Bash", sNoActive, orchestrating, noRoster, { locateEdit: probe }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", "../../etc", orchestrating, noRoster, { locateEdit: probe }).kind).toBe("block");
     expect(probe).not.toHaveBeenCalled();
   });
 
   it("inside the repository every admission is unchanged", () => {
     const request = { callerAgentId: "a1", targetPath: "/proj/src/x.ts", projectRoot: "/proj" };
-    const writer = shouldBlockDirectEdit("Write", sNoActive, orchestrating, roster(entry("a1", "specify-agent")), { artifactWrite: request, placeEdit: inside });
+    const writer = shouldBlockDirectEdit("Write", sNoActive, orchestrating, roster(entry("a1", "specify-agent")), { artifactWrite: request, locateEdit: inside });
     expect(writer.kind).toBe("block");
     if (writer.kind === "block") expect(writer.message).toContain("specify-agent may write only its artifacts");
-    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, roster(entry("code-implementer-agent")), { placeEdit: inside }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, roster(entry("code-implementer-agent")), { locateEdit: inside }).kind).toBe("allow");
   });
 });
 
@@ -850,7 +858,7 @@ describe("protected Loom directories stay guarded wherever they lie (code-review
     [`${machines}/code-implementer-agent.json`, "a machine definition"],
   ] as const;
   const parentWrite = (target: string) => shouldBlockDirectEdit(
-    "Write", sNoActive, orchestrating, noRoster, { placeEdit: () => editPlacement(repository, resolvedTargets(target)) },
+    "Write", sNoActive, orchestrating, noRoster, { locateEdit: () => ({ repository, targets: resolvedTargets(target) }) },
   );
 
   it.each(protectedTargets)("%s (%s) is placed inside and blocked for the parent", (target) => {
@@ -880,6 +888,237 @@ describe("protected Loom directories stay guarded wherever they lie (code-review
       const placed = editPlacement({ kind: "resolved", roots: [repoRoot], protectedRoots: [protectedRoot] }, resolvedTargets(target));
       expect(placed.kind).toBe("inside");
     }));
+  });
+});
+
+describe("shouldBlockDirectEdit — scoped write-grant confinement (Pi phase/panel writers)", () => {
+  // A Pi phase agent holds a minted grant: the roster admits it, then core
+  // confines every target inside the guarded area to the grant's dirs.
+  const SPECS = "/repo/.claude/specs/2026-08-12-foo";
+  const grantHolder = roster(entry("pi-grant-abcdef0123456789"));
+  const scope: WriteGrantScope = { kind: "resolved", dirs: [SPECS] };
+  const site = (targets: EditTargets): (() => EditSite) => () => ({ repository: resolvedRepository("/repo"), targets });
+  const decide = (targets: EditTargets, grantScope: WriteGrantScope = scope, rosterProbe = grantHolder) =>
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, rosterProbe, { locateEdit: site(targets), grantScope: () => grantScope });
+
+  it("admits targets strictly below a granted dir, nested ones included", () => {
+    expect(decide(resolvedTargets(`${SPECS}/spec.md`)).kind).toBe("allow");
+    expect(decide(resolvedTargets(`${SPECS}/nested/x.md`, `${SPECS}/spec.md`)).kind).toBe("allow");
+  });
+
+  it("refuses a target outside the scope, naming it and the allowed scope", () => {
+    const result = decide(resolvedTargets("/repo/README.md"));
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("write target /repo/README.md is outside the granted artifact scope");
+      expect(result.message).toContain(`Allowed write scope: ${SPECS}`);
+    }
+  });
+
+  it("one escaping target refuses the whole batch", () => {
+    expect(decide(resolvedTargets(`${SPECS}/spec.md`, "/repo/.claude/specs/other.md")).kind).toBe("block");
+  });
+
+  it("the scope dir itself, a sibling sharing its prefix, and a `..` escape are outside", () => {
+    expect(decide(resolvedTargets(SPECS)).kind).toBe("block");
+    expect(decide(resolvedTargets(`${SPECS}-other/x.md`)).kind).toBe("block");
+    expect(decide(resolvedTargets(`${SPECS}/../../state/active_task_graph.json`)).kind).toBe("block");
+  });
+
+  it("unresolved targets fail closed with the shell's reason", () => {
+    const result = decide(unresolvedTargets("edit 2 path is not a string"));
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("cannot verify every write target for a scoped phase-agent write grant: edit 2 path is not a string");
+    }
+  });
+
+  it("an unresolved scope refuses every guarded write, even one a resolved scope would admit", () => {
+    const result = decide(resolvedTargets(`${SPECS}/spec.md`), { kind: "unresolved", reason: "cannot canonicalize scope dir x" });
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("cannot verify the scoped phase-agent write grant's scope: cannot canonicalize scope dir x");
+  });
+
+  it("governs only writes inside the guarded area: an outside write passes, scope or not", () => {
+    expect(decide(resolvedTargets("/scratch/notes.md")).kind).toBe("allow");
+    expect(decide(resolvedTargets("/scratch/notes.md"), { kind: "unresolved", reason: "x" }).kind).toBe("allow");
+  });
+
+  it("a protected Loom directory is never outside: the scope still confines it", () => {
+    const result = decide(resolvedTargets(`${PROTECTED}/machines/specify-agent.json`));
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("outside the granted artifact scope");
+  });
+
+  it("never widens admission: an unadmitted session keeps the generic refusal", () => {
+    const result = decide(resolvedTargets(`${SPECS}/spec.md`), scope, noRoster);
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("Direct edits not allowed");
+  });
+
+  it("no scope (an unscoped grant or ungranted session) leaves the admission as decided", () => {
+    const target = site(resolvedTargets("/repo/src/x.ts"));
+    expect(shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: target }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: target, grantScope: () => undefined }).kind)
+      .toBe("allow");
+  });
+
+  it("the scope port is consulted only for an admitted write placed inside", () => {
+    const probe = vi.fn(() => scope);
+    const port = { grantScope: probe };
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: site(resolvedTargets("/scratch/x.md")), ...port });
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, noRoster, { locateEdit: site(resolvedTargets(`${SPECS}/spec.md`)), ...port });
+    shouldBlockDirectEdit("Bash", sNoActive, orchestrating, grantHolder, port);
+    shouldBlockDirectEdit("write", sNoActive, () => false, grantHolder, port);
+    expect(probe).not.toHaveBeenCalled();
+    shouldBlockDirectEdit("write", sNoActive, orchestrating, grantHolder, { locateEdit: site(resolvedTargets(`${SPECS}/spec.md`)), ...port });
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  const segment = fc.stringMatching(/^[A-Za-z0-9_-]{1,8}$/);
+  const absoluteDir = fc.array(segment, { minLength: 1, maxLength: 4 }).map((parts) => `/repo/${parts.join("/")}`);
+  const scopeOf = (dir: string): WriteGrantScope => ({ kind: "resolved", dirs: [dir] });
+
+  it("property: every target strictly below a granted dir is admitted", () => {
+    fc.assert(fc.property(absoluteDir, fc.array(segment, { minLength: 1, maxLength: 4 }), (dir, below) => {
+      expect(decide(resolvedTargets(`${dir}/${below.join("/")}`), scopeOf(dir)).kind).toBe("allow");
+    }));
+  });
+
+  it("property: a sibling sharing a granted dir as a string prefix is refused", () => {
+    fc.assert(fc.property(absoluteDir, segment, fc.array(segment, { maxLength: 3 }), (dir, suffix, below) => {
+      expect(decide(resolvedTargets([`${dir}${suffix}`, ...below].join("/")), scopeOf(dir)).kind).toBe("block");
+    }));
+  });
+});
+
+describe("sessionOrchestratedRepository — which graphs armed this session (shared by both harnesses)", () => {
+  const session = sessionIdOf(`armed-${process.pid}`);
+  const protectedDirectories = ["/loom-protected"] as const;
+  /** Every line the resolver announced through the harness's sink. */
+  let announced: string[] = [];
+  beforeEach(() => { announced = []; });
+  const ports = (over: Partial<SessionGraphPorts>): SessionGraphPorts => ({
+    taskGraph: "/nowhere/.claude/state/active_task_graph.json",
+    graphExists: () => false,
+    sessionPointer: noSessionGraphPointer,
+    announce: (line) => { announced.push(line); },
+    protectedDirectories,
+    ...over,
+  });
+
+  it("an unreadable pointer guards every target, announced through the harness sink — before any graph is probed", () => {
+    const graphExists = vi.fn(() => true);
+    const unreadable = (): SessionGraphPointer => ({ kind: "unreadable", reason: "pointer.task_graph: not canonical" });
+    expect(sessionOrchestratedRepository(session, ports({ graphExists, sessionPointer: unreadable }))).toBe(UNRESOLVED);
+    expect(announced).toEqual(["cannot read the session TaskGraph pointer: pointer.task_graph: not canonical — guarding every target"]);
+    expect(graphExists).not.toHaveBeenCalled();
+  });
+
+  it("no existing graph and no pointer resolves nothing, silently", () => {
+    expect(sessionOrchestratedRepository(session, ports({}))).toBe(UNRESOLVED);
+    expect(announced).toEqual([]);
+  });
+
+  it("a session without a parseable id consults no pointer", () => {
+    const pointer = vi.fn((): SessionGraphPointer => ({ kind: "unreadable", reason: "x" }));
+    expect(sessionOrchestratedRepository(null, ports({ sessionPointer: pointer }))).toBe(UNRESOLVED);
+    expect(pointer).not.toHaveBeenCalled();
+    expect(announced).toEqual([]);
+  });
+
+  it("the pointer port receives the branded session id", () => {
+    const pointer = vi.fn((): SessionGraphPointer => ({ kind: "absent" }));
+    sessionOrchestratedRepository(session, ports({ sessionPointer: pointer }));
+    expect(pointer).toHaveBeenCalledWith(session);
+  });
+
+  it("liveSessionRepository fills the live TaskGraph path and protected dirs, leaving the harness its differences", () => {
+    const graphExists = vi.fn(() => false);
+    const repository = liveSessionRepository(session, { graphExists, sessionPointer: noSessionGraphPointer, announce: () => {} });
+    expect(repository).toBe(UNRESOLVED);
+    expect(graphExists).toHaveBeenCalledWith(taskGraphPath());
+  });
+
+  describe("against real Git working trees", () => {
+    const base = canonicalTempDir("loom-armed-git-");
+    const own = join(base, "own");
+    const pointed = join(base, "pointed");
+    const git = (...args: string[]) => execFileSync("git", args, {
+      cwd: base,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+      stdio: "pipe",
+    });
+    const graphIn = (repo: string) => join(repo, ".claude", "state", "active_task_graph.json");
+
+    beforeAll(() => {
+      for (const repo of [own, pointed]) {
+        git("init", "-q", repo);
+        mkdirSync(join(repo, ".claude", "state"), { recursive: true });
+        writeFileSync(graphIn(repo), "{}");
+      }
+    });
+    afterAll(() => { rmSync(base, { recursive: true, force: true }); });
+
+    const pointerTo = (repo: string) => (): SessionGraphPointer => ({ kind: "names", graphPath: graphIn(repo) });
+
+    it("unions the cwd-resolved graph's repository with the pointed graph's repository", () => {
+      const repository = sessionOrchestratedRepository(session, ports({
+        taskGraph: graphIn(own), graphExists: () => true, sessionPointer: pointerTo(pointed),
+      }));
+      expect(repository).toMatchObject({ kind: "resolved", roots: [own, pointed] });
+    });
+
+    it("a missing cwd-resolved graph contributes nothing: only the pointed repository is guarded", () => {
+      const repository = sessionOrchestratedRepository(session, ports({ sessionPointer: pointerTo(pointed) }));
+      expect(repository).toMatchObject({ kind: "resolved", roots: [pointed] });
+    });
+
+    it("Claude Code's pointer-free source resolves the cwd-resolved graph alone", () => {
+      const repository = sessionOrchestratedRepository(session, ports({ taskGraph: graphIn(own), graphExists: () => true }));
+      expect(repository).toMatchObject({ kind: "resolved", roots: [own] });
+    });
+  });
+});
+
+describe("sessionGraphPointerFile — the Pi pointer adapter", () => {
+  const originalSubagentDir = process.env.LOOM_SUBAGENT_DIR;
+  const dir = canonicalTempDir("loom-pointer-file-");
+  const session = sessionIdOf(`pointer-${process.pid}`);
+  const pointerPath = join(dir, `${session}.task_graph`);
+
+  beforeEach(() => { process.env.LOOM_SUBAGENT_DIR = dir; });
+  afterEach(() => {
+    rmSync(pointerPath, { recursive: true, force: true });
+    if (originalSubagentDir === undefined) delete process.env.LOOM_SUBAGENT_DIR;
+    else process.env.LOOM_SUBAGENT_DIR = originalSubagentDir;
+  });
+  afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("no pointer file is absent", () => {
+    expect(sessionGraphPointerFile(session)).toEqual({ kind: "absent" });
+  });
+
+  it("one exact canonical absolute path names that graph", () => {
+    writeFileSync(pointerPath, "/repo/.claude/state/active_task_graph.json");
+    expect(sessionGraphPointerFile(session)).toEqual({ kind: "names", graphPath: "/repo/.claude/state/active_task_graph.json" });
+  });
+
+  it.each([
+    ["a relative path", "repo/graph.json"],
+    ["trailing whitespace", "/repo/graph.json\n"],
+    ["a non-normal path", "/repo/../graph.json"],
+    ["empty bytes", ""],
+  ])("%s is unreadable — persisted authority is never repaired", (_label, bytes) => {
+    writeFileSync(pointerPath, bytes);
+    expect(sessionGraphPointerFile(session)).toMatchObject({ kind: "unreadable" });
+  });
+
+  it("a read failure other than ENOENT (a directory) is unreadable, naming the cause", () => {
+    mkdirSync(pointerPath);
+    const pointer = sessionGraphPointerFile(session);
+    expect(pointer.kind).toBe("unreadable");
+    if (pointer.kind === "unreadable") expect(pointer.reason).toContain(`cannot read ${pointerPath}`);
   });
 });
 
@@ -1042,7 +1281,7 @@ describe("orchestratedRepositoryOf / canonicalEditTargets — Git working trees"
     } finally {
       stderr.mockRestore();
     }
-    expect(canonicalEditTargets([], base)).toBe(UNRESOLVED);
+    expect(canonicalEditTargets([], base)).toEqual({ kind: "unresolved", reason: "the call names no write target" });
   });
 });
 
