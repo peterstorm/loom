@@ -26,7 +26,7 @@ import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requi
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { match } from "ts-pattern";
-import { invariantRoles } from "./plan-paths";
+import { invariantRoles, type OwnedInvariant } from "./plan-paths";
 import type { TaskOwnerDuty } from "./owner-verification/obligations";
 import type { OwnerObligation } from "./owner-verification/types";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
@@ -118,12 +118,11 @@ export type ImplementationBriefInput = Readonly<{
   roster: readonly Task[];
   /** Contents of every rule document `ruleDocumentsFor(task.file_list)` names. */
   rules: ReadonlyMap<RuleDocument, string>;
-  /** The invariants the protected plan declares; empty when there is no plan. */
-  invariants: readonly PlanInvariant[];
-  /** The Task's owner duty (`taskOwnerDuty(graph, task.file_list)`). A graph
-   *  populated before owner verification carries no stamp and is owed no
-   *  owner duty, so the brief states none. */
-  ownerDuty: TaskOwnerDuty;
+  /** Where the Task's invariant ownership comes from: the stamped obligations
+   *  `taskOwnerDuty(graph, task.file_list)` touches, or, on a graph populated
+   *  before owner verification, the protected plan's Invariants (empty when
+   *  there is no plan), which owe no owner duty. */
+  ownership: InvariantOwnershipSource;
   /** The TaskGraph's Acceptance Contracts, with their freeze; empty when none. */
   contracts: readonly AcceptanceContract[];
   /** The TaskGraph's frozen verification manifest (`graph.verification_manifest`),
@@ -210,12 +209,34 @@ function scenarioTestNames(claims: readonly string[], spec: ParsedSpec | null): 
   ].join("\n");
 }
 
-/** One owned Invariant's plan block for a Task playing some role in its family; null when it plays none (or the Invariant is not owned). */
-function planBlock(fileList: readonly string[], invariant: PlanInvariant): string | null {
-  if (invariant.ownership.kind !== "owned") return null;
-  const { owner, siblings, matrixTest } = invariant.ownership;
-  const played = invariantRoles(fileList, invariant.ownership);
-  const roles = [
+/**
+ * Where a brief's invariant ownership comes from (#134).
+ *
+ * - `stamped`: the population stamp's obligations this Task touches, as
+ *   `taskOwnerDuty` (INV-3's owner) selects them. On a stamped graph the stamp
+ *   is the only source: roles, family and owner duties all render from the
+ *   same obligation, so a plan block and the duty the gate holds the Task to
+ *   can never disagree. A stamp that drifted from the plan still renders
+ *   whole, from the stamp the gate enforces (and blocks on until it agrees).
+ * - `plan`: a graph populated before owner verification carries no stamp, so
+ *   it renders the plan's own owned Invariants, as it always did, and owes no
+ *   owner duty.
+ */
+export type InvariantOwnershipSource =
+  | Extract<TaskOwnerDuty, { kind: "stamped" }>
+  | Readonly<{ kind: "plan"; invariants: readonly PlanInvariant[] }>;
+
+/** One owned Invariant as a block renders it, whichever source it came from. */
+type OwnedFamily = Readonly<{ id: string; title: string; statement: string | null; ownership: OwnedInvariant }>;
+
+const familyOfObligation = ({ invariant, title, statement, owner, siblings, matrixTest, mutation }: OwnerObligation): OwnedFamily =>
+  ({ id: invariant, title, statement, ownership: { kind: "owned", owner, siblings, matrixTest, mutation } });
+
+/** The role lines for each role the file list plays in the family: owner, sibling, matrix-test author — possibly several, possibly none. */
+function roleLines(fileList: readonly string[], ownership: OwnedInvariant): readonly string[] {
+  const { owner, matrixTest } = ownership;
+  const played = invariantRoles(fileList, ownership);
+  return [
     ...(played.owner
       ? [`- Owner: you change the owner module \`${owner}\`. Implement the rule there, once; every sibling entry point must call it.`]
       : []),
@@ -226,10 +247,14 @@ function planBlock(fileList: readonly string[], invariant: PlanInvariant): strin
       ? [`- Matrix test: you change \`${matrixTest}\`. It must exercise every sibling entry point listed below against the owner module.`]
       : []),
   ];
-  if (roles.length === 0) return null;
+}
+
+/** One owned Invariant's block: its statement, the Task's roles, then the whole family, so a sibling sees its owner and its peers. */
+function familyBlock({ id, title, statement, ownership }: OwnedFamily, roles: readonly string[]): string {
+  const { owner, siblings, matrixTest } = ownership;
   return [
-    `**${invariant.id}: ${invariant.title}**`,
-    ...(invariant.statement === null ? [] : [invariant.statement]),
+    `**${id}: ${title}**`,
+    ...(statement === null ? [] : [statement]),
     "",
     "**Your role:**",
     ...roles,
@@ -243,37 +268,27 @@ function planBlock(fileList: readonly string[], invariant: PlanInvariant): strin
 }
 
 /**
- * The ownership guidance for every owned invariant whose family this Task
- * changes: its role (owner, sibling, matrix-test author — possibly several),
- * then the whole family, so a sibling sees its owner and its peers. Unowned
- * and malformed invariants name no files, so they never render here (plan
- * validation has already refused a malformed one).
- *
- * Each owned Invariant the Task touches by the population stamp (`touched`,
- * decided by INV-3's owner `taskOwnerDuty`) also gets its owner duties
- * (`ownerDuties`). A touched obligation with no plan block of its own (a stamp
- * that drifted from the plan, which the Wave Gate blocks) still states its
- * duties, after the plan's blocks, rather than silently owing nothing.
+ * The ownership guidance for every owned Invariant whose family this Task
+ * plays a role in. Stamped: each touched obligation, in stamp order, with its
+ * owner duties (`ownerDuties`). Plan: each owned plan Invariant the Task
+ * plays a role in, in plan order, with no duty; unowned and malformed
+ * Invariants name no files, so they never render (plan validation has already
+ * refused a malformed one). A stamp that agrees with the plan renders the
+ * plan's blocks byte for byte, followed by each one's duties.
  */
-function invariantOwnership(
-  fileList: readonly string[],
-  invariants: readonly PlanInvariant[],
-  touched: readonly OwnerObligation[],
-): string {
-  const dutyOf = new Map(touched.map((obligation) => [obligation.invariant, obligation] as const));
-  const rendered = new Set<string>();
-  const blocks: string[] = [];
-  for (const invariant of invariants) {
-    const block = planBlock(fileList, invariant);
-    if (block === null) continue;
-    rendered.add(invariant.id);
-    const duty = dutyOf.get(invariant.id);
-    blocks.push(duty === undefined ? block : `${block}\n\n${ownerDuties(duty)}`);
-  }
-  const drifted = touched.filter(({ invariant }) => !rendered.has(invariant)).map((duty) =>
-    `**${duty.invariant}: ${duty.title}**\n\n${ownerDuties(duty)}`);
-  const all = [...blocks, ...drifted];
-  return all.length === 0 ? NO_INVARIANT_OWNERSHIP : all.join("\n\n");
+function invariantOwnership(fileList: readonly string[], source: InvariantOwnershipSource): string {
+  const blocks = match(source)
+    .with({ kind: "stamped" }, ({ touched }) => touched.map((obligation) => {
+      const family = familyOfObligation(obligation);
+      return `${familyBlock(family, roleLines(fileList, family.ownership))}\n\n${ownerDuties(obligation)}`;
+    }))
+    .with({ kind: "plan" }, ({ invariants }) => invariants.flatMap(({ id, title, statement, ownership }) => {
+      if (ownership.kind !== "owned") return [];
+      const roles = roleLines(fileList, ownership);
+      return roles.length === 0 ? [] : [familyBlock({ id, title, statement, ownership }, roles)];
+    }))
+    .exhaustive();
+  return blocks.length === 0 ? NO_INVARIANT_OWNERSHIP : blocks.join("\n\n");
 }
 
 const quoted = (path: string): string => `\`${path}\``;
@@ -589,11 +604,7 @@ export function renderImplementationBrief(
     spec_contributions_formatted: contributions.value,
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
-    invariant_ownership: invariantOwnership(
-      task.file_list ?? [],
-      input.invariants,
-      input.ownerDuty.touched,
-    ),
+    invariant_ownership: invariantOwnership(task.file_list ?? [], input.ownership),
     acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",

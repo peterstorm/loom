@@ -87,7 +87,7 @@ import { guardStateFileDecision } from "../../src/core/guard-state-file";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
-import { taskOwnerDuty } from "../../src/core/owner-verification/obligations";
+import { briefOwnership } from "../fixtures/owner-obligation";
 import { piGrantedAgentId } from "../../../pi/write-grant";
 import { piImplementationLedger } from "../../../pi/subagent-settlement";
 
@@ -756,8 +756,7 @@ function briefInput(graph: TaskGraph, task: Task, overrides: Partial<Implementat
     spec: { kind: "unavailable", reason: { kind: "no-spec-file" } },
     rules: RULES,
     roster: graph.tasks,
-    invariants: [],
-    ownerDuty: taskOwnerDuty(graph, task.file_list ?? []),
+    ownership: briefOwnership(graph.owner_obligations, [], task.file_list ?? []),
     contracts: [],
     verificationManifest: graph.verification_manifest,
     repositoryRoot: ROOT,

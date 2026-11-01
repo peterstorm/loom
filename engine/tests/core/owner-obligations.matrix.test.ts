@@ -90,7 +90,7 @@ import { runOwnerVerification, type OwnerVerificationInput } from "../../src/orc
 import { AFFECTED_RUNNER } from "../fixtures/stop-check-runners";
 import { parseAuthoredTaskRoster, populateTaskGraph } from "../../src/core/task-graph-population";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
-import { ownerObligation } from "../fixtures/owner-obligation";
+import { briefOwnership, ownerObligation } from "../fixtures/owner-obligation";
 
 const ADMISSION: OwnerObligation = ownerObligation({
   invariant: "INV-1",
@@ -257,8 +257,8 @@ describe("INV-3 sibling rows — review-packet owner map and brief duties follow
     const rendered = renderImplementationBrief({
       template: TEMPLATE, task: value, dispatch: derivation.dispatch, verificationManifest: undefined,
       planFile: PLAN_FILE, spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules: RULES,
-      roster: [], invariants: OWNED_PLAN_MODELS.invariants, contracts: [], repositoryRoot: "/repo", operatorNotes: [],
-      ownerDuty: taskOwnerDuty(stamp === undefined ? {} : { owner_obligations: stamp }, files),
+      roster: [], contracts: [], repositoryRoot: "/repo", operatorNotes: [],
+      ownership: briefOwnership(stamp, OWNED_PLAN_MODELS.invariants, files),
     });
     if (!rendered.ok) throw new Error(rendered.error.message);
     return [...rendered.value.prompt.matchAll(/\*\*Owner duties \((INV-\d+)\):\*\*/g)].map((match) => match[1]!);

@@ -4,6 +4,8 @@
 Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`, FR-027 and FR-028; plan
 `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-10; interview Q3c).
+Amended 2026-11-01 (#134): on a stamped graph the brief renders its whole ownership section from the stamp; the
+plan is read for ownership only on a pre-feature graph.
 
 ## Context
 G5b makes each owned Invariant a Wave Gate obligation. The engine-reserved completion check
@@ -68,16 +70,18 @@ Several forces constrain both halves:
 result's `ownerVerification`, taking its remedies from the gate's own diagnostic source.**
 
 ### Brief half
-- `engine/src/orchestration/implementation-brief.ts` calls `taskOwnerDuty(graph, task.file_list)` and hands the
-  `TaskOwnerDuty` to the renderer as `ownerDuty`; it never filters the raw `owner_obligations` stamp and decides
-  nothing (ADR-0034, #136). A pre-feature graph yields an unstamped duty, which touches
-  nothing, so no duty is rendered (the comment there cites AD-10).
-- `engine/src/core/implementation-brief.ts`: `invariantOwnership` receives the touched obligations that INV-3's
-  owner selects, `input.ownerDuty.touched` from `taskOwnerDuty` in
-  `engine/src/core/owner-verification/obligations.ts`. This is the touch scope, in which any role counts,
+- The brief's ownership has one source, an `InvariantOwnershipSource` (#134, amended 2026-11-01).
+  `engine/src/orchestration/implementation-brief.ts` asks `taskOwnerDuty(graph, task.file_list)` (ADR-0034,
+  #136) and never filters the raw `owner_obligations` stamp:
+  - **`stamped`:** the stamped obligations the Task touches. The whole ownership section renders from them:
+    each block's title, statement, role lines and family, then its duties. The plan is not read for ownership.
+  - **`plan`:** a pre-feature graph carries no stamp, so the shell reads the plan and renders its owned
+    Invariants' blocks as before, with no duty (AD-10). A plan that cannot be read refuses the brief.
+- `engine/src/core/implementation-brief.ts`: `invariantOwnership` renders that source. The stamped touched
+  obligations come from `taskOwnerDuty` in `engine/src/core/owner-verification/obligations.ts`. This is the touch scope, in which any role counts,
   including the matrix test. It is wider than the gate's `waveOwnerDuty(graph, wave).owed` scope, because whoever
   writes the matrix test needs to know the duty.
-- For each touched obligation, `ownerDuties` appends a paragraph under that Invariant's ownership block,
+- For each touched obligation, `ownerDuties` appends a paragraph under that obligation's ownership block,
   headed `**Owner duties (INV-N):**`:
   - **Coverage.** The paragraph says the matrix test must import the owner module and every named sibling
     entry point, or, when the Invariant declares no siblings, the owner alone. It also says the Wave Gate
@@ -86,10 +90,14 @@ result's `ownerVerification`, taking its remedies from the gate's own diagnostic
     mutation-verified, and that every mutant the fixed operator set makes must be killed by the matrix test.
     For `"exempt"`, it names the declared exemption and its reason, and says sibling coverage still applies.
     The match is exhaustive.
-- **Deviation from the plan, recorded:** the shipped renderer also handles an obligation that is touched
-  but has no plan block of its own, which happens when the stamp and the plan's blocks differ. It renders
-  that obligation as its own `**INV-N: title**` block after the plan's blocks, so the duty is never dropped
-  silently.
+- **Superseded deviation (#134).** As first shipped, a stamped graph rendered the plan's blocks and appended
+  each touched obligation's duties under its block. An obligation touched but without a plan block (stamp and
+  plan had drifted) got a bare `**INV-N: title**` heading and its duties after the plan's blocks, so the duty
+  was never dropped. That branch is gone. The stamp carries every field a block renders (title, statement,
+  sibling notes; `obligationsFromInvariants` copies them from the plan), so a stamped graph renders from the
+  stamp alone. A stamp that agrees with the plan renders the same bytes as before, plan order being stamp
+  order. A drifted stamp renders whole from the stamp the gate enforces, and the gate blocks until the two
+  agree again. A property test pins the byte equality.
 
 ### Status half
 - `engine/src/core/owner-verification/status.ts` is pure. Status says one thing about owner verification:
