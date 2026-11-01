@@ -13,8 +13,8 @@
  *
  * This is the ONE artifact-writer admission. Pi supplies no request: it cannot
  * name the calling agent here, and its phase/panel writers instead hold scoped
- * write grants (admitted as grant holders above; the extension then confines
- * each write to the grant's `deriveArtifactWriteScope` dirs). Both paths
+ * write grants — admitted as grant holders above, then confined here to the
+ * grant's `deriveArtifactWriteScope` dirs (`WriteGrantScope`). Both paths
  * classify writers through the same `artifact-write-scope` role policy.
  *
  * The guard protects the orchestrated repository — the repository that owns
@@ -23,8 +23,8 @@
  * wherever those lie. A write whose every canonical target lies outside both
  * (another worktree, a sibling directory, a session scratchpad) cannot touch
  * the orchestration and is allowed before any admission runs
- * (`editPlacement`). The shell resolves every side; anything it cannot
- * resolve stays guarded.
+ * (`editPlacement`). The shell resolves every side (`EditSite`); anything it
+ * cannot resolve stays guarded.
  *
  * On Claude Code an implementation role is not by itself a write grant: the
  * Agent's exact Implementation Attempt is bound lazily (`core/implementation-
@@ -179,18 +179,44 @@ export type OrchestratedRepository =
 /**
  * Every path one write call targets, absolute and symlink-canonical (a missing
  * file is canonicalised through its nearest existing ancestor), or
- * `unresolved` when any target is absent, malformed, or uncanonicalisable.
+ * `unresolved` — with the shell's reason — when any target is absent,
+ * malformed, or uncanonicalisable.
  */
 export type EditTargets =
   | Readonly<{ kind: "resolved"; paths: readonly [string, ...string[]] }>
-  | Readonly<{ kind: "unresolved" }>;
+  | Readonly<{ kind: "unresolved"; reason: string }>;
+
+/** Where one write call lands: the repository the guard protects and every
+ *  target the call names, both resolved by the shell. */
+export type EditSite = Readonly<{ repository: OrchestratedRepository; targets: EditTargets }>;
+
+/**
+ * The confinement of a Pi scoped write grant (a phase or panel writer): the
+ * symlink-canonical artifact dirs its holder may write inside the guarded
+ * area, or `unresolved` when the shell could not canonicalise them or prove
+ * the grant's authorizing cwd is the tool's cwd — then nothing guarded is
+ * writable. Absent for unscoped (implementation) grants and ungranted
+ * sessions. The twin of Claude Code's artifact-writer roots.
+ */
+export type WriteGrantScope =
+  | Readonly<{ kind: "resolved"; dirs: readonly [string, ...string[]] }>
+  | Readonly<{ kind: "unresolved"; reason: string }>;
 
 /** Where one write call lands relative to the orchestrated repository and
  *  Loom's protected directories: `inside` means guarded by either. */
 export type EditPlacement = Readonly<{ kind: "inside" }> | Readonly<{ kind: "outside" }>;
 
-/** The one `unresolved` answer for both `OrchestratedRepository` and `EditTargets`. */
+/** The one `unresolved` answer for `OrchestratedRepository`. */
 export const UNRESOLVED = Object.freeze({ kind: "unresolved" as const });
+
+/** Unresolved write targets, with the reason a scoped-grant refusal names. */
+export const unresolvedTargets = (reason: string): EditTargets => Object.freeze({ kind: "unresolved", reason });
+
+/** No site supplied: nothing is resolved, so the call is judged inside. */
+const UNPLACED_SITE: EditSite = Object.freeze({
+  repository: UNRESOLVED,
+  targets: unresolvedTargets("the harness supplied no write targets"),
+});
 
 const INSIDE: EditPlacement = Object.freeze({ kind: "inside" });
 const OUTSIDE: EditPlacement = Object.freeze({ kind: "outside" });
@@ -219,9 +245,6 @@ export function editPlacement(repository: OrchestratedRepository, targets: EditT
   return guarded ? INSIDE : OUTSIDE;
 }
 
-/** No placement supplied — the call is judged as inside the repository. */
-const placedInside = (): EditPlacement => INSIDE;
-
 /** True when `target` lies strictly below `root`; both must be absolute. */
 function strictlyInside(root: string, target: string): boolean {
   if (!isAbsolute(root) || !isAbsolute(target)) return false;
@@ -246,6 +269,33 @@ function artifactWriteVerdict(
 }
 
 /**
+ * Confine an admitted scoped-grant holder to its grant's dirs: every target
+ * must lie strictly below one of them. Unresolved targets or scope fail
+ * closed.
+ */
+function confineToGrantScope(scope: WriteGrantScope, targets: EditTargets): HookResult {
+  if (scope.kind === "unresolved") {
+    return {
+      kind: "block",
+      message: `BLOCKED: cannot verify the scoped phase-agent write grant's scope: ${scope.reason}; refusing the edit.`,
+    };
+  }
+  if (targets.kind === "unresolved") {
+    return {
+      kind: "block",
+      message: `BLOCKED: cannot verify every write target for a scoped phase-agent write grant: ${targets.reason}; refusing the edit.`,
+    };
+  }
+  const escaped = targets.paths.find((target) => !scope.dirs.some((dir) => strictlyInside(dir, target)));
+  return escaped === undefined
+    ? { kind: "allow" }
+    : {
+      kind: "block",
+      message: `BLOCKED: write target ${escaped} is outside the granted artifact scope.\nAllowed write scope: ${scope.dirs.join(", ")}`,
+    };
+}
+
+/**
  * The harness-specific inputs of one decision; each is optional because only
  * some harnesses can supply it.
  *
@@ -253,15 +303,18 @@ function artifactWriteVerdict(
  *   (Claude Code only; Pi cannot name the calling agent).
  * - `implementationBinding` — the lazy exact-authority binding (Claude Code
  *   only; Pi binds authority at spawn).
- * - `placeEdit` — the write's placement. Consulted lazily — only for an armed
- *   file tool with a parseable session id — because resolving the orchestrated
- *   repository costs the shell a Git probe. Omitted, every write is placed
- *   inside.
+ * - `locateEdit` — the write's `EditSite`, placed here by `editPlacement`.
+ *   Consulted lazily, at most once — only for an armed file tool with a
+ *   parseable session id — because resolving the orchestrated repository
+ *   costs the shell a Git probe. Omitted, every write is placed inside.
+ * - `grantScope` — the caller's scoped write grant (Pi only). An admitted
+ *   write inside the guarded area must also stay inside its dirs.
  */
 export type DirectEditPorts = Readonly<{
   artifactWrite?: ArtifactWriteRequest | undefined;
   implementationBinding?: ImplementationBindingProbe | undefined;
-  placeEdit?: (() => EditPlacement) | undefined;
+  locateEdit?: (() => EditSite) | undefined;
+  grantScope?: WriteGrantScope | undefined;
 }>;
 
 /**
@@ -278,7 +331,7 @@ export function shouldBlockDirectEdit(
   sessionId: string,
   taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
-  { artifactWrite, implementationBinding, placeEdit = placedInside }: DirectEditPorts = {},
+  { artifactWrite, implementationBinding, locateEdit, grantScope }: DirectEditPorts = {},
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -296,9 +349,24 @@ export function shouldBlockDirectEdit(
   }
 
   // A write that reaches neither the orchestrated repository nor a protected
-  // Loom directory is not this guard's concern; every admission below governs
-  // writes INSIDE them, unchanged.
-  if (placeEdit().kind === "outside") return { kind: "allow" };
+  // Loom directory is not this guard's concern; every admission below, and a
+  // scoped grant's confinement, govern writes INSIDE them.
+  const site = locateEdit?.() ?? UNPLACED_SITE;
+  if (editPlacement(site.repository, site.targets).kind === "outside") return { kind: "allow" };
+
+  const admission = admitInsideWrite(parsed, readActiveRoster, artifactWrite, implementationBinding);
+  return admission.kind === "allow" && grantScope !== undefined
+    ? confineToGrantScope(grantScope, site.targets)
+    : admission;
+}
+
+/** The roster, binding and artifact-writer admissions for a write placed inside. */
+function admitInsideWrite(
+  parsed: SessionId,
+  readActiveRoster: ActiveRosterProbe,
+  artifactWrite: ArtifactWriteRequest | undefined,
+  implementationBinding: ImplementationBindingProbe | undefined,
+): HookResult {
 
   // Allow if an IMPLEMENTATION subagent is active. Review agents and verifiers
   // are read-only and must never receive write capability, even when active.

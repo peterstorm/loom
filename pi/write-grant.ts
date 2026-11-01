@@ -10,8 +10,11 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { guardedDirs, subagentDir } from "../engine/src/config";
+import type { WriteGrantScope } from "../engine/src/core/block-direct-edits";
+import { nonEmpty } from "../engine/src/core/acceptance-contract/kernel";
+import { canonicalWritePath } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
 import {
   parseAgentType,
   parseGrantedAgentId,
@@ -344,86 +347,39 @@ function consumedEvidenceLedger(grant: StoredWriteGrant): PiEvidenceLedgerAddres
   return Object.freeze({ sessionId, agentType });
 }
 
-/** Errors that genuinely mean "this component does not exist yet" and so are
- *  answered by walking one level up. ENOENT is the ordinary case (the target is
- *  about to be written); ENOTDIR is its sibling when a component of the tail
- *  names an existing FILE. Every other errno — EACCES, ELOOP, ENAMETOOLONG,
- *  EIO — means the resolution could not be performed, which is NOT the same
- *  answer and must not be absorbed into it. */
-const ABSENT_COMPONENT_CODES: ReadonlySet<string> = new Set(["ENOENT", "ENOTDIR"]);
-
-/** Resolve a path and canonicalize it THROUGH symlinks: realpath the deepest
- *  EXISTING ancestor (the target itself may not exist yet — it is about to
- *  be written), then re-append the missing tail. A symlinked directory
- *  inside a scope dir can no longer resolve to a path outside it.
- *
- *  This is the sole basis for `writeTargetViolatesScope`, so an unresolvable
- *  ancestor must not read as "not there yet": a blanket catch turned EACCES and
- *  ELOOP into a re-appended tail whose "canonical" path did not describe what
- *  the filesystem would do on write. Non-absence errors propagate; the Pi
- *  tool-call guard wraps every check in a fail-closed catch, so a throw blocks
- *  the edit instead of widening the scope. */
-function canonicalTarget(path: string): string {
-  const abs = resolve(path);
-  let existing = abs;
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      return join(realpathSync(existing), ...tail.reverse());
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === undefined || !ABSENT_COMPONENT_CODES.has(code)) throw error;
-      const parent = dirname(existing);
-      if (parent === existing) return abs;
-      tail.push(basename(existing));
-      existing = parent;
-    }
-  }
-}
-
 /**
- * The genuinely PURE half of scope enforcement: is an ALREADY-CANONICAL target
- * inside at least one already-canonical scope dir?
+ * The core `WriteGrantScope` of a scoped (phase-agent) grant, for the
+ * direct-edit guard's confinement: each scope dir canonicalised through its
+ * nearest existing ancestor — the same canonicalisation the guard applies to
+ * write targets, so a symlinked scope dir is compared by its real location.
  *
- * Prefix matching is on trailing-slash dirs, so `…/specs/` never admits
- * `…/specs-other/x` or `…/specs2/x`. String math only — no filesystem, no
- * `process.cwd()` — so the rule can be exercised with plain path fixtures
- * instead of a working tree full of real directories and symlinks.
+ * Targets are resolved once, against the tool's cwd, for placement and
+ * confinement alike. The grant was authorized against `grantCwd`, so the two
+ * must be the same directory (consumption already proved it); a mismatch, or
+ * any uncanonicalisable dir, answers `unresolved` and the guard refuses every
+ * write inside its area. `undefined` for a whole-session (unscoped) grant.
  */
-export function canonicalPathViolatesScope(
-  canonicalTargetPath: string,
-  canonicalScopeDirs: readonly string[],
-): string | null {
-  for (const dir of canonicalScopeDirs) {
-    if (canonicalTargetPath.startsWith(dir.endsWith("/") ? dir : `${dir}/`)) return null;
+export function grantWriteScope(
+  scopeDirs: readonly string[] | undefined,
+  grantCwd: string | undefined,
+  toolCwd: string,
+): WriteGrantScope | undefined {
+  if (scopeDirs === undefined || scopeDirs.length === 0) return undefined;
+  const canonicalToolCwd = canonicalWritePath(resolve(toolCwd));
+  if (grantCwd !== undefined && canonicalToolCwd !== grantCwd) {
+    return Object.freeze({
+      kind: "unresolved",
+      reason: `the tool cwd ${toolCwd} is not the grant's authorizing cwd ${grantCwd}`,
+    });
   }
-  return `write target ${canonicalTargetPath} is outside the granted artifact scope`;
-}
-
-/**
- * Scope enforcement for a scoped (phase-agent) write grant: is the target path
- * inside at least one scope dir?
- *
- * NOT pure, and it used to say it was. `canonicalTarget` calls `realpathSync`,
- * so the answer depends on live filesystem state — which is the point (a
- * symlinked directory inside a scope dir must not resolve outside it), but it
- * made a security-critical predicate untestable without real directories and
- * hid an I/O boundary inside something labelled pure. The I/O now happens here,
- * once, up front, for the target and every scope dir together; the decision is
- * `canonicalPathViolatesScope` above, which touches nothing.
- *
- * Returns a description of the violation (for the block reason), or null when
- * the write may proceed.
- */
-export function writeTargetViolatesScope(
-  targetPath: string,
-  scopeDirs: readonly string[],
-  baseCwd: string = process.cwd(),
-): string | null {
-  return canonicalPathViolatesScope(
-    canonicalTarget(resolve(baseCwd, targetPath)),
-    scopeDirs.map(canonicalTarget),
-  );
+  const dirs: string[] = [];
+  for (const dir of scopeDirs) {
+    const canonical = canonicalWritePath(resolve(toolCwd, dir));
+    if (canonical === null) return Object.freeze({ kind: "unresolved", reason: `cannot canonicalize scope dir ${dir}` });
+    dirs.push(canonical);
+  }
+  const resolved = nonEmpty(dirs);
+  return resolved === null ? undefined : Object.freeze({ kind: "resolved", dirs: resolved });
 }
 
 export function sweepExpiredPiWriteGrants(now: number = Date.now()): void {

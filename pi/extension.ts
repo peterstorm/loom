@@ -38,25 +38,24 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
 import {
-  editPlacement,
   shouldBlockDirectEdit,
-  UNRESOLVED,
-  type EditPlacement,
+  unresolvedTargets,
+  type EditSite,
   type EditTargets,
-  type OrchestratedRepository,
 } from "../engine/src/core/block-direct-edits";
 // The roster read the direct-edit gate needs. It lives in the handler rather
 // than in core/ because core may not import the machine's filesystem shell;
 // Pi passes the same adapter Claude Code's wrapper does, so both harnesses
 // authorize `pi-grant-` capability tokens off the SAME roster — and scope the
-// guard to the orchestrated repository through the SAME resolvers.
+// guard to the orchestrated repository through the SAME resolver, Pi adding
+// its session TaskGraph pointer as the pointer source.
 import {
   activeRosterProbe,
   canonicalEditTargets,
-  orchestratedRepositoryOf,
+  sessionGraphPointerFile,
+  sessionOrchestratedRepository,
 } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
-import { parseCanonicalTaskGraphPointer } from "../engine/src/machine/task-graph-pointer";
-import { TASK_GRAPH_POINTER_SUFFIX, type SessionId } from "../engine/src/machine/evidence";
+import type { SessionId } from "../engine/src/machine/evidence";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
@@ -81,7 +80,7 @@ import { assertAnchoredFilesystemPlatformSupported } from "../engine/src/orchest
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
-import { sweepExpiredPiWriteGrants, writeTargetViolatesScope } from "./write-grant";
+import { grantWriteScope, sweepExpiredPiWriteGrants } from "./write-grant";
 import {
   captureLoomRuntimeIdentity,
   loadedRuntimeCompatibility,
@@ -153,38 +152,24 @@ function pathExistsFailClosed(path: string): boolean {
 }
 
 /**
- * The orchestrated repository for Pi's direct-edit placement: the repository
- * owning each graph that armed this session — the cwd-resolved TaskGraph and
- * the graph the session's `<session>.task_graph` pointer names — through the
- * shared Claude resolver (`orchestratedRepositoryOf`), so both harnesses scope
- * the guard by one rule — including Loom's protected directories, which stay
- * guarded wherever they lie. A pointer that cannot be read or parsed leaves
- * the repository `unresolved`: the guard stays on for every target.
+ * Where one Pi write lands: every target it names, canonical against `cwd`,
+ * and the repository owning each graph that armed this session — the
+ * cwd-resolved TaskGraph and the graph the session's `<session>.task_graph`
+ * pointer names — by the shared rule (`sessionOrchestratedRepository`), with
+ * Loom's protected directories guarded wherever they lie.
  */
-function piOrchestratedRepository(sessionId: SessionId | null): OrchestratedRepository {
-  const graphPaths: string[] = [];
-  const ownGraph = taskGraphPath();
-  if (pathExistsFailClosed(ownGraph)) graphPaths.push(ownGraph);
-  const pointerPath = sessionId === null ? null : `${subagentDir()}/${sessionId}${TASK_GRAPH_POINTER_SUFFIX}`;
-  if (pointerPath !== null && pathExistsFailClosed(pointerPath)) {
-    try {
-      const pointer = parseCanonicalTaskGraphPointer(readFileSync(pointerPath, "utf-8"));
-      if (!pointer.ok) throw new Error(pointer.error);
-      graphPaths.push(pointer.value);
-    } catch (error) {
-      process.stderr.write(
-        `loom(pi): cannot read the TaskGraph pointer ${pointerPath}: ${error instanceof Error ? error.message : String(error)} — guarding every target\n`,
-      );
-      return UNRESOLVED;
-    }
-  }
-  return orchestratedRepositoryOf(graphPaths, protectedDirs());
-}
-
-/** Every target one Pi write call names, canonical against `cwd`; malformed input stays unresolved. */
-function piEditTargets(input: unknown, cwd: string): EditTargets {
+function piEditSite(sessionId: SessionId | null, input: unknown, cwd: string): EditSite {
   const targets = piWriteTargetPaths(input);
-  return targets.ok ? canonicalEditTargets(targets.value, cwd) : UNRESOLVED;
+  const editTargets: EditTargets = targets.ok ? canonicalEditTargets(targets.value, cwd) : unresolvedTargets(targets.error);
+  return {
+    repository: sessionOrchestratedRepository(sessionId, {
+      taskGraph: taskGraphPath(),
+      graphExists: pathExistsFailClosed,
+      sessionPointer: sessionGraphPointerFile,
+      protectedDirectories: protectedDirs(),
+    }),
+    targets: editTargets,
+  };
 }
 
 export type PiResumeTaskGraphObservation =
@@ -359,11 +344,8 @@ export default function (
         if (rejectedGrant !== null) return rejectedGrant;
         // Only writes into the orchestrated repository or a protected Loom
         // directory are guarded, by the same placement rule Claude Code's
-        // handler applies. Resolved at most once: it costs a Git probe, and
-        // both checks below read it.
-        let placement: EditPlacement | undefined;
-        const placeEdit = (): EditPlacement =>
-          placement ??= editPlacement(piOrchestratedRepository(safeSessionId), piEditTargets(event.input, ctx.cwd));
+        // handler applies; core resolves the site lazily, at most once.
+        const granted = childWriteGrants.active.get(sessionId);
         const result = shouldBlockDirectEdit(
           event.toolName,
           sessionId,
@@ -371,38 +353,15 @@ export default function (
           activeRosterProbe,
           // No ArtifactWriteRequest: Pi cannot name the calling agent here.
           // Phase/panel writers are admitted as scoped write-grant holders and
-          // confined to their grant's scope dirs just below. No binding probe:
+          // confined by core to their grant's scope dirs. No binding probe:
           // Pi binds implementation authority at spawn.
-          { placeEdit },
+          {
+            locateEdit: () => piEditSite(safeSessionId, event.input, ctx.cwd),
+            grantScope: grantWriteScope(granted?.scopeDirs, granted?.grantCwd, ctx.cwd),
+          },
         );
         if (result.kind === "block") {
           return { block: true, reason: result.message };
-        }
-        // Phase/panel agents hold SCOPED grants: Edit/Write into the
-        // orchestrated repository may target only the artifact dirs the grant
-        // names — the twin of Claude Code's artifact-writer roots, which also
-        // govern only writes inside it. Unscoped (implementation) grants and
-        // ungranted sessions are untouched. A scoped session whose target
-        // cannot be verified fails closed.
-        const granted = childWriteGrants.active.get(sessionId);
-        if (granted !== undefined && granted.scopeDirs !== undefined && granted.scopeDirs.length > 0 &&
-            placeEdit().kind === "inside") {
-          const targets = piWriteTargetPaths(event.input);
-          if (!targets.ok) {
-            return {
-              block: true,
-              reason: `BLOCKED: cannot verify every write target for a scoped phase-agent write grant: ${targets.error}; refusing the edit.`,
-            };
-          }
-          for (const target of targets.value) {
-            const violation = writeTargetViolatesScope(target, granted.scopeDirs, granted.grantCwd ?? ctx.cwd);
-            if (violation !== null) {
-              return {
-                block: true,
-                reason: `BLOCKED: ${violation}.\nAllowed write scope: ${granted.scopeDirs.join(", ")}`,
-              };
-            }
-          }
         }
       }
 

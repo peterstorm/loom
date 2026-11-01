@@ -1,17 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   consumePiWriteGrant,
+  grantWriteScope,
   injectPiWriteGrant,
   issuePiWriteGrant,
   PI_WRITE_GRANT_START_WINDOW_MS,
   revokePiWriteGrant,
   sweepExpiredPiWriteGrants,
-  writeTargetViolatesScope,
 } from "../../pi/write-grant";
 import { artifactWriteRoots } from "../src/core/artifact-write-scope";
+import { shouldBlockDirectEdit, UNRESOLVED, type ActiveRosterEntry } from "../src/core/block-direct-edits";
+import { canonicalEditTargets } from "../src/handlers/pre-tool-use/block-direct-edits";
+import type { HookResult } from "../src/types";
+
+/**
+ * The direct-edit decision for one scoped-grant holder's write, inside the
+ * guarded area (the repository is left unresolved, so placement is `inside`):
+ * the targets and scope go through the same shell canonicalisation the Pi
+ * extension uses, and core confines them.
+ */
+function confined(scopeDirs: readonly string[] | undefined, cwd: string, ...targets: string[]): HookResult["kind"] {
+  const grantHolder = [{ agentId: "pi-grant-abcdef0123456789", agentType: null } as ActiveRosterEntry];
+  return shouldBlockDirectEdit("write", "scoped-session", () => true, () => grantHolder, {
+    locateEdit: () => ({ repository: UNRESOLVED, targets: canonicalEditTargets(targets, cwd) }),
+    grantScope: grantWriteScope(scopeDirs, realpathSync(cwd), cwd),
+  }).kind;
+}
+
 let root: string;
 let priorSubagentDir: string | undefined;
 
@@ -73,20 +91,21 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     const issued = issuePiWriteGrant({ agent: "architecture-agent", taskId: "phase:architecture", cwd, taskGraphPath: graph, scopeDirs });
     const consumed = consumePiWriteGrant(injectPiWriteGrant("Write the plan.\n", issued), cwd, "architecture-agent")!;
     expect(consumed.scopeDirs).toEqual(scopeDirs.map((dir) => join(cwd, dir) + "/"));
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "linter", "rules", "inv-1-pure.json"), consumed.scopeDirs!)).toBeNull();
-    expect(writeTargetViolatesScope(join(cwd, "src", "index.ts"), consumed.scopeDirs!)).not.toBeNull();
+    expect(confined(consumed.scopeDirs, cwd, join(cwd, ".claude", "linter", "rules", "inv-1-pure.json"))).toBe("allow");
+    expect(confined(consumed.scopeDirs, cwd, join(cwd, "src", "index.ts"))).toBe("block");
   });
 
-  it("enforces scope on write targets with trailing-slash prefix semantics", () => {
+  it("confines write targets on path-segment boundaries", () => {
     const { cwd } = fixture();
     const scope = [join(cwd, ".claude", "specs", "2026-08-12-foo") + "/"];
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo", "spec.md"), scope)).toBeNull();
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo", "nested", "x.md"), scope)).toBeNull();
+    expect(confined(scope, cwd, join(cwd, ".claude", "specs", "2026-08-12-foo", "spec.md"))).toBe("allow");
+    expect(confined(scope, cwd, join(cwd, ".claude", "specs", "2026-08-12-foo", "nested", "x.md"))).toBe("allow");
+    expect(confined(scope, cwd, ".claude/specs/2026-08-12-foo/relative.md")).toBe("allow");
     // Sibling dirs must not match.
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo-other", "x.md"), scope)).not.toBeNull();
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs2", "x.md"), scope)).not.toBeNull();
-    expect(writeTargetViolatesScope(join(cwd, "README.md"), scope)).not.toBeNull();
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "state", "active_task_graph.json"), scope)).not.toBeNull();
+    expect(confined(scope, cwd, join(cwd, ".claude", "specs", "2026-08-12-foo-other", "x.md"))).toBe("block");
+    expect(confined(scope, cwd, join(cwd, ".claude", "specs2", "x.md"))).toBe("block");
+    expect(confined(scope, cwd, join(cwd, "README.md"))).toBe("block");
+    expect(confined(scope, cwd, join(cwd, ".claude", "state", "active_task_graph.json"))).toBe("block");
   });
 
   it("canonicalizes through symlinks: a scoped symlink cannot escape the scope", () => {
@@ -98,22 +117,18 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     // A symlink INSIDE the scope dir pointing outside: writing through it
     // must be refused even though the raw path is under the scope prefix.
     symlinkSync(outside, join(cwd, ".claude", "specs", "2026-08-12-foo", "escape"));
-    expect(writeTargetViolatesScope(join(cwd, ".claude", "specs", "2026-08-12-foo", "escape", "x.md"), scope)).not.toBeNull();
+    expect(confined(scope, cwd, join(cwd, ".claude", "specs", "2026-08-12-foo", "escape", "x.md"))).toBe("block");
     // A symlink OUTSIDE the scope pointing INSIDE: writes through it stay
     // inside the real artifact tree and are admitted.
     symlinkSync(join(cwd, ".claude", "specs", "2026-08-12-foo"), join(outside, "link-in"));
-    expect(writeTargetViolatesScope(join(outside, "link-in", "spec.md"), scope)).toBeNull();
+    expect(confined(scope, cwd, join(outside, "link-in", "spec.md"))).toBe("allow");
   });
 
-  // `canonicalTarget` walks up on ENOENT/ENOTDIR only — "this component does not
-  // exist yet". Every OTHER errno means the resolution could not be PERFORMED,
-  // which is a different answer and must not be absorbed into it. The blanket
-  // catch this replaced re-appended the tail and returned a "canonical" path
-  // that did not describe what the filesystem would do on write, silently
-  // widening the granted scope. A real symlink loop reproduces ELOOP without
-  // mocking node:fs; the throw is what the Pi tool-call guard's fail-closed
-  // wrapper converts into a blocked edit.
-  it("propagates a non-absence errno (ELOOP) instead of widening the scope", () => {
+  // A target that cannot be canonicalised — a symlink loop (ELOOP), or a
+  // dangling symlink a write would follow out of the scope — must never read
+  // as "inside the scope". It leaves the targets unresolved, and core refuses
+  // a scoped write it cannot place.
+  it("refuses an uncanonicalisable target (ELOOP, dangling symlink) instead of widening the scope", () => {
     const { cwd } = fixture();
     const specs = join(cwd, ".claude", "specs", "2026-08-12-foo");
     mkdirSync(specs, { recursive: true });
@@ -122,16 +137,38 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     // Two symlinks pointing at each other: resolving either throws ELOOP.
     symlinkSync(join(specs, "b"), join(specs, "a"));
     symlinkSync(join(specs, "a"), join(specs, "b"));
+    expect(confined(scope, cwd, join(specs, "a", "spec.md"))).toBe("block");
 
-    let thrown: NodeJS.ErrnoException | null = null;
-    try {
-      writeTargetViolatesScope(join(specs, "a", "spec.md"), scope);
-    } catch (e) {
-      thrown = e as NodeJS.ErrnoException;
-    }
-    // The point is that it did NOT quietly answer "inside the scope".
-    expect(thrown).not.toBeNull();
-    expect(thrown!.code).toBe("ELOOP");
+    symlinkSync(join(root, "elsewhere", "x.md"), join(specs, "dangling.md"));
+    expect(confined(scope, cwd, join(specs, "dangling.md"))).toBe("block");
+  });
+
+  it("grantWriteScope: unscoped grants confine nothing; scope dirs canonicalise by their real location", () => {
+    const { cwd } = fixture();
+    expect(grantWriteScope(undefined, cwd, cwd)).toBeUndefined();
+    expect(grantWriteScope([], cwd, cwd)).toBeUndefined();
+    const real = join(cwd, ".claude", "specs", "real");
+    mkdirSync(real, { recursive: true });
+    symlinkSync(real, join(cwd, ".claude", "specs", "alias"));
+    expect(grantWriteScope([join(cwd, ".claude", "specs", "alias") + "/"], realpathSync(cwd), cwd))
+      .toEqual({ kind: "resolved", dirs: [realpathSync(real)] });
+  });
+
+  it("grantWriteScope: a tool cwd that is not the grant's authorizing cwd refuses every guarded write", () => {
+    const { cwd } = fixture();
+    const other = join(root, "other-cwd");
+    mkdirSync(other);
+    const scope = grantWriteScope([join(cwd, ".claude", "specs", "x") + "/"], realpathSync(cwd), other);
+    expect(scope).toMatchObject({ kind: "unresolved" });
+    if (scope?.kind === "unresolved") expect(scope.reason).toContain("is not the grant's authorizing cwd");
+  });
+
+  it("grantWriteScope: an uncanonicalisable scope dir is unresolved", () => {
+    const { cwd } = fixture();
+    const loop = join(cwd, ".claude", "loop");
+    symlinkSync(loop, loop);
+    expect(grantWriteScope([join(loop, "specs") + "/"], realpathSync(cwd), cwd))
+      .toEqual({ kind: "unresolved", reason: `cannot canonicalize scope dir ${join(loop, "specs")}/` });
   });
 
   it("refuses scope dirs that reach into loom-guarded state", () => {

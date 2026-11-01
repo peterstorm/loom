@@ -143,7 +143,7 @@ Before spawn, the parent mints a one-time cryptographic grant and injects its to
 Two grant shapes exist:
 
 - **Task-bound implementation grant** — bound to Agent, Task id, repository cwd, TaskGraph, and session; valid for the implementation session.
-- **Scoped artifact grant** — for writer roles only. Each writer role has fixed role roots (below); prompt authority may only narrow `.claude/specs`/`.claude/plans` roots to the spec, plan, or panel-run directories it names. A prompt path outside the role's roots (plan-alignment reading the plan) is dropped, never granted. Roots a prompt path cannot name (the lint-rule dirs) are granted whole.
+- **Scoped artifact grant** — for writer roles only. Each writer role has fixed role roots (below); prompt authority may only narrow `.claude/specs`/`.claude/plans` roots to the spec, plan, or panel-run directories it names. A prompt path outside the role's roots (plan-alignment reading the plan) is dropped, never granted. Roots a prompt path cannot name (the lint-rule dirs) are granted whole. The direct-edit guard confines a scoped grant holder's Edit/Write/MultiEdit to targets strictly below a granted dir, in the same core decision that places the write. A target it cannot canonicalise (a symlink loop, a dangling symlink) is refused, and so is every guarded write when the tool's cwd is not the cwd the grant was authorized against.
 
 Read-only roles—reviewers, verifier, judge, decompose, and spec-check—receive no grant even if their prompts mention writable-looking paths.
 
