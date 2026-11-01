@@ -112,6 +112,10 @@ _Avoid_: Review round, retry count, packet version
 A packet-bound collection of evidence from the exact expected reviewer roster for one Task and Review Generation. It snapshots all active Finding IDs; every reviewer must assess each prior ID exactly once before atomic finalization can resolve old Findings or activate new ones.
 _Avoid_: Review Generation, Refutation Panel, reviewer batch (without the binding)
 
+**Wave Review Roster**:
+The ordered reviewers one Wave **Task** is issued, derived per Task from protected state (`waveTaskReviewRoster`): the base five (code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-analyzer, comment-analyzer), plus architecture-tech-lead appended last when the Task's packets carry the **Owner Map** (ADR-0047). Order is slot authority, so the base five keep their indices either way. Issuance, the locked install, slot membership, retries, restart and completed-protocol verification all compare against this derived roster, never against a persisted copy.
+_Avoid_: Reviewer list, "the five reviewers" (an owner-mapped Task has six)
+
 **Lens**:
 A single committed perspective an agent argues from, assigned rather than chosen, so a panel's diversity is structural instead of hoped for. Deliberately two disjoint vocabularies — see Flagged Ambiguities.
 _Avoid_: Angle, viewpoint, role, persona
@@ -179,6 +183,10 @@ _Avoid_: Proven closed, Resolved Finding, semantic proof
 **State File**:
 The single source of truth for orchestration progress (`active_task_graph.json`). Write-protected; Hooks and explicitly whitelisted StateManager-backed CLI helpers are its only mutation paths.
 _Avoid_: Config, manifest, plan file
+
+**Orchestrated Repository**:
+The repository that owns a live State File: the symlink-canonical root of the Git working tree holding it, or, outside Git, the root implied by its documented `.claude/state/` / `.pi/state/` layout (`observeTaskGraphProjectBoundary`). The direct-edit guard protects this repository and, wherever they lie, Loom's protected directories (the subagent directory and the machine-definitions directory, `protectedDirs()`), which always stay guarded. A write whose every canonical target lies outside both — another worktree, a sibling directory, a session scratchpad — is allowed. Containment is decided on path-segment boundaries, so `/repo-foo` is not inside `/repo`. Worktrees nested under the root count as inside. A root or target that cannot be resolved keeps the write guarded ([ADR-0046](docs/adr/ADR-0046-the-direct-edit-guard-protects-only-the-orchestrated-repository.md)).
+_Avoid_: Project dir, cwd, checkout (when the guard's scope is meant)
 
 **Session TaskGraph Pointer Lease Registry**:
 The exact parsed immutable generation record beside one session's `.task_graph` pointer. Every same-target binder owns one lease; only the final lease may restore the generation's previous target, and a different target or contradictory/malformed crash state fails closed under the same no-follow lock.
@@ -458,7 +466,7 @@ An owned invariant's declared, reasoned opt-out of mutation verification: `**Mut
 _Avoid_: Waiver (that is a **Verification Policy** arm), skip
 
 **Owner Map**:
-The engine-issued, digest-bound section of a Wave review **Context Packet** for a code-reviewer or architecture-tech-lead reviewing a Task that touches an owned family. It lists each touched invariant's id, title, statement, owner, siblings, matrix test and the `<plan file>#INV-N` contract, followed by the fixed **Second Copy** rule. Every other packet is byte-identical; standalone reviews never carry one.
+The engine-issued, digest-bound section of a Wave review **Context Packet** for a code-reviewer or architecture-tech-lead reviewing a Task that touches an owned family; such a Task's **Wave Review Roster** includes architecture-tech-lead, so both packets are issued. It lists each touched invariant's id, title, statement, owner, siblings, matrix test and the `<plan file>#INV-N` contract, followed by the fixed **Second Copy** rule. Every other packet is byte-identical; standalone reviews never carry one.
 _Avoid_: Owner registry (there is no repository-wide one), ownership section (that is the implementation brief's)
 
 **Second Copy**:
@@ -489,6 +497,7 @@ _Avoid_: Stop gate, pre-gate (it gates nothing the Wave Gate owns)
 At every implementation agent's SubagentStop, claimant or not, the engine runs the **Affected Runner** over the attempt's **Changed Files** after the **Acceptance Stop Check**. A failing affected test blocks the stop, and the block message names each failing test and its file. The agent can be blocked at most 3 times, on a counter kept apart from the acceptance check's.
 - **Shared with the acceptance check.** Both checks run in sequence under one acquisition of the per-repository runner lock and inside one 300 s hook budget, with a 30 s reserve kept for settlement. When both fail, they produce one combined block message.
 - **Budget.** The affected runner launches only when the remaining budget holds its whole timeout; the timeout is never clipped.
+- **Expected RED.** A failing acceptance testcase that the Task's own **Wave Gate** would excuse (its contract's Wave, or a still-pending anchor after it) does not block: both apply the one rule `isExpectedRedAcceptanceFailure`. The stop reports it in a note instead, or lists it as not blocking beside the failures that do block. A collection error, a due testcase, or a contract whose RED was never observed still blocks.
 - **Trust model.** It fails open, with a named note, on every fault: a timeout, a kill, a missing report, budget exhaustion, a held lock, an unreadable counter, the cap, or a crash. The note reaches the orchestrating session too, not only the operator. It is report-only on Pi. It never reaches proof, receipts or Wave Gate evidence (INV-3).
 
 _Avoid_: Affected gate, regression check, test cadence
@@ -523,7 +532,7 @@ The Pi child's `tool_result` handler (`pi/evidence-recorder.ts`). A child holdin
 _Avoid_: Pi transcript converter, Pi evidence bridge
 
 **Acceptance Freeze**:
-What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift. Because the stamp lands when the contract Wave's gate completes, after its advisory decision, status names the advisories on frozen paths at that pause (`acceptance-freeze-pending`): they can still be fixed by re-dispatching the contract Task, but only by a **Contract Revision** after approval.
+What the contract Wave's accepted gate stamps on an **Acceptance Contract**: the sha256 of every frozen path and the roster of testcases it observed red. States: `awaiting-red` → `frozen` → (after a **Contract Revision**) `revised` → `frozen` again once a gate re-records the roster green. Every later gate re-hashes the frozen paths and blocks on drift. When the Wave completion suite accepts, only its receipt is installed; the stamp is computed from that receipt by the locked completion commit, in the same write as the completed-Wave history entry ([ADR-0044](docs/adr/ADR-0044-the-acceptance-freeze-is-stamped-by-the-completion-commit.md)). So it lands after the advisory decision, an abandoned run freezes nothing, and status names the advisories on frozen paths at that pause (`acceptance-freeze-pending`): they can still be fixed by reopening the contract Task (**Task Reopening**), but only by a **Contract Revision** after approval.
 _Avoid_: Snapshot, lock, baseline
 
 **Red Window**:
@@ -533,6 +542,10 @@ _Avoid_: Grace period, expected-failure list
 **Contract Revision**:
 The operator-only way to change an **Acceptance Contract**'s frozen bytes (`helper revise-contract`): it re-stamps them, clears the roster for the next gate to re-record, appends an audited revision, returns the current Wave's implemented claimants to revalidation and retires that Wave's review and suite authority. Refused while a Wave Gate is live, before the freeze or the contract Wave's completion, and while any claimant sits in a completed Wave.
 _Avoid_: Unfreeze, test fix, override
+
+**Task Reopening**:
+The operator-only way to make an `implemented` Task of the active Wave dispatchable again, so a Wave Gate advisory or surviving critical on it can be fixed (`helper orchestration reopen-task --wave N --task Tn --reason "…"`, [ADR-0045](docs/adr/ADR-0045-an-implemented-task-is-reopened-through-one-engine-operation.md)). It runs under the TaskGraph lock, in the same transition a **Contract Revision** uses (`returnWaveTasksToRevalidation`). It retires the Wave's review and suite authority, an abandoned run's tombstone included. It returns each named Task to protected `pending` revalidation at a new Review Generation, keeping its Findings as prior Findings. It leaves the Wave's other Tasks `implemented` and appends one `implemented-tasks-reopened` audit to `task_reopening_history`. Status then owes each reopened Task an `initial-implementation` dispatch, and the next Wave Gate starts only after each settles afresh. Refused outside the execute Phase or the active Wave, after the Wave completed, while a Wave Gate is live or an abandoned run names a successor, while implementation or a subagent is active, and for a Task that is not `implemented` or whose lineage cannot derive a dispatch. Replaying it while the Tasks await re-implementation changes nothing. Distinct from reopening a completed Wave (`helper reopen-completed-wave`).
+_Avoid_: Re-dispatch (alone), reset, force re-populate
 
 **Contract Status**:
 The read-only view of every **Acceptance Contract** in a TaskGraph (`helper contract-status`): its id, title and **Contract Task**, its **Acceptance Freeze** state (awaiting RED, frozen at a Wave with its roster, or revised with its revision count), and each covered Requirement's due Wave — the latest Wave of a Task claiming it — or unclaimed. A pure function of the parsed TaskGraph (`core/contract-status.ts`); the helper never writes the State File or takes its lock.
@@ -620,7 +633,7 @@ _Avoid_: Unstarted Wave (alone), pre-gate state
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 - Every plan invariant names its **Invariant Owner** (or why it has none); an owned one lists its **Sibling Entry Points** and **Matrix Test**, and the engine renders each **Task**'s role among them into its implementation brief
 - Population stamps one **Owner Obligation** per owned invariant; a **Wave** that changed an obligation's owner or a sibling owes **Owner Verification** at its **Wave Gate**, unless a **Mutation Exemption** removes the mutation half
-- A Task touching an owned family gets its **Owner Verification** duties in its brief, and its code-reviewer and architecture-tech-lead packets carry the **Owner Map**, against which reviewers report each **Second Copy**
+- A Task touching an owned family gets its **Owner Verification** duties in its brief, architecture-tech-lead joins its **Wave Review Roster**, and its code-reviewer and architecture-tech-lead packets carry the **Owner Map**, against which reviewers report each **Second Copy**
 - The **Family-site Metric** measures how many raw second sites remain per known family; it blocks nothing
 - An **Acceptance Contract** has exactly one **Contract Task**; every **Task** claiming a covered Requirement depends on it, may not write a frozen path, and turns the frozen testcases green at its own Wave Gate
 - Only an accepted Wave Gate stamps an **Acceptance Freeze**, and only a **Contract Revision** changes one; a claimant in a completed **Wave** blocks the revision until that Wave is reopened

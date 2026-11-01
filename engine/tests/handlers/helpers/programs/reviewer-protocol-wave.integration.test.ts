@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
-import { WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS, OWNER_MAPPED_WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
+import { OWNER_MAP_SECTION, renderOwnerMapSection } from "../../../../src/core/owner-verification/owner-map";
+import { ownerObligation } from "../../../fixtures/owner-obligation";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, reviewerRetryInstruction } from "../../../../src/core/reviewer-retry";
@@ -18,7 +20,10 @@ import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/progr
 import { readWaveReviewContext, waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
 import { deriveWaveAttemptTwo, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-review-retries";
-import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../../src/core/wave-gate-membership";
+import { persistedWaveAttemptTwoCompatibilityProblem, waveReviewerSlotProblem } from "../../../../src/core/wave-gate-membership";
+import { prepareExhaustedWaveGateRestart } from "../../../../src/core/wave-gate-replacement";
+import { captureKey } from "../../../../src/core/harness-capture";
+import { issuedWaveProtocol } from "../../../../src/handlers/helpers/programs/wave-review-context";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
@@ -71,6 +76,11 @@ const specText = `# Feature: Wave fixture
 | Wave evidence | Exact issued evidence |
 `;
 const specPass = "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\n";
+/** One owned Invariant whose owner module is the fixture Task's only file, so the Task touches its family. */
+const OWNED_X = ownerObligation({
+  invariant: "INV-1", title: "x is decided only by its owner", statement: "Every entry point reads x through src/x.ts.",
+  owner: "src/x.ts", siblings: [], matrixTest: "tests/x.matrix.test.ts", mutation: { kind: "verify" },
+});
 
 function project(priors: readonly Finding[] = []) {
   const root = canonicalTempDir("loom-p4-wave-");
@@ -126,6 +136,14 @@ async function start(p: ReturnType<typeof project>, runId = "run.current", paren
 }
 const resume = (p: ReturnType<typeof project>, handle: RunDirHandle) => runCli(p, ["resume", "--runs-root", p.runsRoot, "--run", handle.runId]);
 const graph = (p: ReturnType<typeof project>) => value(parseTaskGraph(JSON.parse(readFileSync(p.statePath, "utf8"))));
+/** The pre-fix shape of an owner-mapped Task's run: the five base reviewers bound, architecture-tech-lead absent. */
+const toBaseFive = (state: TaskGraph): TaskGraph => ({ ...state, tasks: state.tasks.map((task) => {
+  const run = task.review_run;
+  if (run?.reviewer_protocol === undefined) throw new Error("fixture must have a genuine installed current run");
+  const [first, ...rest] = run.slot_authority;
+  return { ...task, review_run: { ...run, expected_agents: BASE_WAVE_REVIEW_AGENTS,
+    slot_authority: [first, ...rest.slice(0, BASE_WAVE_REVIEW_AGENTS.length - 1)] } };
+}) });
 function registration(handle: RunDirHandle) {
   const parsed = parseRegisteredFacadeProgram(value(handle.readProgramRegistration()));
   if (parsed.kind !== "registered" || parsed.program.kind !== "wave-gate") throw new Error("expected actual Wave registration");
@@ -189,7 +207,7 @@ describe("registered Wave reviewer protocol", () => {
     const p = project(priors);
     const { handle, action } = await start(p);
     const issued = action.requests!;
-    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...WAVE_REVIEW_AGENTS]);
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
     expect(registration(handle).reviewerProtocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
     const run = graph(p).tasks[0]!.review_run!;
     expect(run.reviewer_protocol).toEqual(CURRENT_REVIEWER_PROTOCOL);
@@ -225,6 +243,138 @@ describe("registered Wave reviewer protocol", () => {
     expect(await resume(p, handle)).toEqual(final);
     expect(readFileSync(p.statePath)).toEqual(before);
   }, 60_000);
+
+  it("FR-022: issues architecture-tech-lead last for a Task touching an owned family, carries the owner map to both owner-map roles, and completes only with all six reviewers", async () => {
+    const p = project();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...OWNER_MAPPED_WAVE_REVIEW_AGENTS]);
+    const run = graph(p).tasks[0]!.review_run!;
+    expect(run.expected_agents).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+    expect(run.slot_authority!.map(({ agent }) => agent)).toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+    const architecture = issued.at(-1)!;
+    // A valid Reviewer Protocol v2 Wave request, minted from the catalog: the
+    // architecture reviewer's own profile and preloaded Skill.
+    expect(architecture.authority).toMatchObject({ role: "architecture-tech-lead", program: "wave-gate", attempt: 1,
+      modelProfile: "focused-review", requiredSkill: "deepen" });
+    expect(architecture.task).toContain("LOOM_REQUIRED_SKILL: deepen");
+    const ownerMapText = renderOwnerMapSection(join(p.root, "plan.md"), [OWNED_X]);
+    for (const { authority } of issued.slice(1)) {
+      const packet = value(handle.readContext(authority.contextDigest));
+      expect(packet.schemaVersion, authority.role).toBe(2);
+      expect(packet.fixedContext.some(({ label }) => label === "reviewer-payload-schema"), authority.role).toBe(true);
+      const section = packet.fixedContext.find(({ label }) => label === OWNER_MAP_SECTION);
+      const expected = authority.role === "code-reviewer" || authority.role === "architecture-tech-lead" ? ownerMapText : null;
+      expect(section === undefined ? null : Buffer.from(section.bytes).toString("utf8"), authority.role).toBe(expected);
+      expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
+    }
+    await capture(handle, issued[0]!.authority, specPass);
+    for (const { authority } of issued.slice(1, -1)) {
+      const step = await submit(p, handle, authority, payload(handle, authority));
+      expect(step.kind, `${authority.role}: ${JSON.stringify(step)}`).not.toBe("done");
+    }
+    const final = await submit(p, handle, architecture.authority, payload(handle, architecture.authority));
+    expect(final.kind, JSON.stringify(final)).toBe("done");
+    expect(graph(p).tasks[0]!.review_run).toBeUndefined();
+    const before = readFileSync(p.statePath);
+    expect(await resume(p, handle)).toEqual(final);
+    expect(readFileSync(p.statePath)).toEqual(before);
+  }, 60_000);
+
+  it("FR-022: a completed run's replay refuses an owner-mapped Task whose architecture-tech-lead protocol was never published", async () => {
+    const p = project();
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    expect(issued.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
+    await capture(handle, issued[0]!.authority, specPass);
+    let final: Action | undefined;
+    for (const { authority } of issued.slice(1)) final = await submit(p, handle, authority, payload(handle, authority));
+    expect(final?.kind, JSON.stringify(final)).toBe("done");
+    // T1 now touches an owned family, so its derived roster is the six reviewers;
+    // the completed run published only the base five.
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    expect(await resume(p, handle)).toMatchObject({
+      kind: "blocked",
+      diagnostic: { message: expect.stringContaining("completed Wave Task T1 lacks the complete published reviewer protocol roster") },
+    });
+  }, 60_000);
+
+  it("a completed run's replay refuses when a registered Task's roster can no longer be derived", async () => {
+    const p = project();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle, action } = await start(p);
+    const issued = action.requests!;
+    await capture(handle, issued[0]!.authority, specPass);
+    let final: Action | undefined;
+    for (const { authority } of issued.slice(1)) final = await submit(p, handle, authority, payload(handle, authority));
+    expect(final?.kind, JSON.stringify(final)).toBe("done");
+    await new StateManager(p.statePath).update((locked) => ({
+      ...locked,
+      tasks: locked.tasks.map((task) => task.id === "T1" ? { ...task, id: "T2" } : task),
+    }));
+    expect(await resume(p, handle)).toMatchObject({
+      kind: "blocked",
+      diagnostic: { message: expect.stringContaining("completed Wave Gate roster cannot be derived: registered Wave Task T1 disappeared") },
+    });
+  }, 60_000);
+
+  it("FR-022: an owner-mapped Task's Review Run bound to only the base five reviewers settles nothing: the roster is the Task's derived one", async () => {
+    const p = project();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle, action } = await start(p);
+    await new StateManager(p.statePath).update(toBaseFive);
+    await capture(handle, action.requests![0]!.authority, specPass);
+    for (const { authority } of action.requests!.slice(1, 1 + BASE_WAVE_REVIEW_AGENTS.length)) {
+      await capture(handle, authority, payload(handle, authority));
+    }
+    const blocked = await resume(p, handle);
+    expect(blocked).toMatchObject({ kind: "blocked", diagnostic: { message: expect.stringContaining("Task T1 active Review Run lacks engine-issued exact slot authority") } });
+    expect(graph(p).tasks[0]!.review_run?.evidence).toEqual([]);
+    expect(graph(p).tasks[0]!.review_status).not.toBe("passed");
+  }, 30_000);
+
+  it("FR-022: slot membership refuses a five-agent run against an owner-mapped Task's six-agent derived roster, and admits a plain Task's five", async () => {
+    const membership = (handle: RunDirHandle, authority: AgentRequestAuthority, state: TaskGraph) => {
+      const context = readWaveReviewContext([value(handle.readContext(authority.contextDigest))], authority.contextDigest);
+      if (context.kind !== "loaded") throw new Error("expected issued Wave context");
+      return waveReviewerSlotProblem(state, state.tasks[0]!, context.value, issuedWaveProtocol(handle, registration(handle), authority));
+    };
+    const owned = project();
+    await new StateManager(owned.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle, action } = await start(owned);
+    const codeReviewer = action.requests!.find(({ authority }) => authority.role === "code-reviewer")!.authority;
+    expect(membership(handle, codeReviewer, graph(owned))).toBeNull();
+    expect(membership(handle, codeReviewer, toBaseFive(graph(owned))))
+      .toBe("current reviewer protocol differs from protected workspace/request/context authority");
+
+    const plain = project();
+    const started = await start(plain, "run.plain");
+    const plainReviewer = started.action.requests!.find(({ authority }) => authority.role === "code-reviewer")!.authority;
+    expect(graph(plain).tasks[0]!.review_run!.expected_agents).toEqual(BASE_WAVE_REVIEW_AGENTS);
+    expect(membership(started.handle, plainReviewer, graph(plain))).toBeNull();
+  }, 30_000);
+
+  it("FR-022: exhausted-run restart over an owner-mapped Task binds all six slots, and refuses a five-agent run", async () => {
+    const p = project();
+    await new StateManager(p.statePath).update((locked) => ({ ...locked, owner_obligations: [OWNED_X] }));
+    const { handle } = await start(p);
+    const exhausted = (state: TaskGraph): TaskGraph => ({ ...state, tasks: state.tasks.map((task) => {
+      const run = task.review_run;
+      if (run?.reviewer_protocol === undefined) throw new Error("fixture must have a genuine installed current run");
+      const [first, ...rest] = run.slot_authority;
+      return { ...task, review_run: { ...run, slot_authority: [{ ...first, attempted: 2 as const },
+        ...rest.map((slot) => ({ ...slot, attempted: 2 as const }))] } };
+    }) });
+    const state = exhausted(graph(p));
+    const keys = new Set(state.tasks[0]!.review_run!.slot_authority!.map(({ slot_id }) => captureKey(slot_id, 2)));
+    const restarted = prepareExhaustedWaveGateRestart(state, handle.runId, registration(handle), "run.next", p.runsRoot, keys);
+    if (!restarted.ok) throw new Error(restarted.message);
+    expect(restarted.value.registration.restart?.exhaustedSlots)
+      .toEqual(OWNER_MAPPED_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`));
+    expect(prepareExhaustedWaveGateRestart(toBaseFive(state), handle.runId, registration(handle), "run.next", p.runsRoot, keys))
+      .toEqual({ ok: false, message: "task T1 Review Packet is not bound to the active epoch and exact reviewer roster" });
+  }, 30_000);
 
   it("re-anchors the completed Wave's claim hashes to the spec text its spec-check reviewed", async () => {
     const p = project();
@@ -475,8 +625,9 @@ describe("US1 scenario 1: a Wave Gate starts from the Wave number alone", () => 
     const p = project(mixedPriors());
     const { handle, action } = await start(p);
     const requests = action.requests!;
-    // The roster is the engine's: the spec-check slot, then every Wave reviewer, in catalog order.
-    expect(requests.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...WAVE_REVIEW_AGENTS]);
+    // The roster is the engine's: the spec-check slot, then the Task's derived roster (here the base five,
+    // since the fixture Task touches no owned family), in roster order.
+    expect(requests.map(({ authority }) => authority.role)).toEqual(["spec-check-invoker", ...BASE_WAVE_REVIEW_AGENTS]);
     // Request, slot and output identities are distinct, first attempts, and bound to this run.
     for (const identity of [
       requests.map(({ authority }) => authority.requestId),

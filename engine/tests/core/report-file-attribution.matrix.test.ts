@@ -101,6 +101,7 @@ function judgeRedStep(reported: string): string {
 function renderedFile(reported: string, repositoryRoot: string | null): string {
   const block = renderAffectedBlock(
     [{ file: reported, name: "AS-001: decides", outcome: "failed" }],
+    [],
     { declared: DECLARED, repositoryRoot },
     "",
     1,

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { withBatchSubjects } from "../../../../src/handlers/helpers/programs/wave-review-requests";
+import { BASE_WAVE_REVIEW_AGENTS } from "../../../../src/core/agent-catalog-projections";
 import { waveReviewSubjects } from "../../../../src/core/wave-review-authority";
 
-const subjects = waveReviewSubjects(["T1"]);
+const subjects = waveReviewSubjects([{ taskId: "T1", roster: BASE_WAVE_REVIEW_AGENTS }]);
 const requests = subjects.map((_, index) => `request-${index}`);
 
 describe("withBatchSubjects", () => {

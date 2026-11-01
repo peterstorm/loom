@@ -43,6 +43,7 @@ export const ORCHESTRATION_OPERATIONS = Object.freeze({
   abandon: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   remediate: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
   attest: Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
+  "reopen-task": Object.freeze({ input: "flags", runtimeSkew: "handshake-required" }),
 } as const satisfies Readonly<Record<string, OrchestrationOperationTraits>>);
 
 export type OrchestrationOperation = keyof typeof ORCHESTRATION_OPERATIONS;

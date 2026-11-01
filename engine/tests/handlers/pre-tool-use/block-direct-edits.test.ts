@@ -11,20 +11,30 @@
  * decision that never touches the filesystem.
  */
 
-import { describe, it, expect, afterAll, afterEach, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from "vitest";
+import fc from "fast-check";
+import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  editPlacement,
+  guardedByRoot,
   shouldBlockDirectEdit,
+  UNRESOLVED,
   type ActiveRosterEntry,
   type ActiveRosterProbe,
+  type EditPlacement,
+  type EditTargets,
+  type OrchestratedRepository,
 } from "../../../src/core/block-direct-edits";
 import blockDirectEdits, {
   activeRosterProbe,
   artifactWriteRequest,
+  canonicalEditTargets,
   canonicalWritePath,
+  orchestratedRepositoryOf,
 } from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import { SUBAGENT_DIR, pathExistsFailClosed } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
@@ -196,7 +206,7 @@ describe("shouldBlockDirectEdit — artifact writers (Claude Code caller admissi
     callerAgentId: string | null,
     targetPath: string | null,
     projectRoot = PROJECT,
-  ) => shouldBlockDirectEdit("Write", s, orchestrating, roster(...entries), { callerAgentId, targetPath, projectRoot });
+  ) => shouldBlockDirectEdit("Write", s, orchestrating, roster(...entries), { artifactWrite: { callerAgentId, targetPath, projectRoot } });
 
   it("phase writer inside its root → allow", () => {
     expect(decide([entry(CALLER, "specify-agent")], CALLER, SPEC).kind).toBe("allow");
@@ -283,7 +293,7 @@ describe("shouldBlockDirectEdit — artifact writers (Claude Code caller admissi
 
   it("does not loosen the implementation admission or the no-task-graph pass", () => {
     expect(decide([entry(CALLER, "code-implementer-agent")], null, "/anywhere/x.ts").kind).toBe("allow");
-    expect(shouldBlockDirectEdit("Write", s, () => false, noRoster, { callerAgentId: null, targetPath: null, projectRoot: PROJECT }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Write", s, () => false, noRoster, { artifactWrite: { callerAgentId: null, targetPath: null, projectRoot: PROJECT } }).kind).toBe("allow");
   });
 });
 
@@ -319,11 +329,11 @@ describe("artifactWriteRequest — the handler's canonicalization shell", () => 
     symlinkSync(outside, join(d, ".claude", "specs", "foo", "escape"));
     const request = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: join(d, ".claude/specs/foo/escape/evil.ts") } }), d);
     expect(request?.targetPath).toBe(join(outside, "evil.ts"));
-    const result = shouldBlockDirectEdit("Write", s, orchestrating, roster(entry("a1", "specify-agent")), request);
+    const result = shouldBlockDirectEdit("Write", s, orchestrating, roster(entry("a1", "specify-agent")), { artifactWrite: request });
     expect(result.kind).toBe("block");
     // The honest path through the same project is admitted.
     const honest = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: join(d, ".claude/specs/foo/spec.md") } }), d);
-    expect(shouldBlockDirectEdit("Write", s, orchestrating, roster(entry("a1", "specify-agent")), honest).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Write", s, orchestrating, roster(entry("a1", "specify-agent")), { artifactWrite: honest }).kind).toBe("allow");
   });
 
   it("a dangling symlink target is unresolvable (a write would follow it out)", () => {
@@ -338,7 +348,7 @@ describe("artifactWriteRequest — the handler's canonicalization shell", () => 
     const d = project();
     const request = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_name: "MultiEdit", tool_input: { file_path: ".claude/specs/foo/spec.md", edits: [] } }), d);
     expect(request).toEqual({ callerAgentId: "a1", targetPath: join(d, ".claude/specs/foo/spec.md"), projectRoot: d });
-    expect(shouldBlockDirectEdit("MultiEdit", s, orchestrating, roster(entry("a1", "specify-agent")), request).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("MultiEdit", s, orchestrating, roster(entry("a1", "specify-agent")), { artifactWrite: request }).kind).toBe("allow");
   });
 
   it("an unresolvable project root yields no request AND announces the cause on stderr", () => {
@@ -598,13 +608,12 @@ describe("shouldBlockDirectEdit — panel-artifact admission (grammar-constraine
     ({ callerAgentId, targetPath, projectRoot: PROJECT });
   const panel = roster(entry(JUDGE, "arch-judge-agent"), entry(INTERVIEWER, "arch-interviewer-agent"));
   const decide = (callerAgentId: string | null, targetPath: string | null) =>
-    shouldBlockDirectEdit("Write", s, orchestrating, panel, request(callerAgentId, targetPath)).kind;
+    shouldBlockDirectEdit("Write", s, orchestrating, panel, { artifactWrite: request(callerAgentId, targetPath) }).kind;
 
   it("allows each panel writer role on its run's panel-runs artifact path", () => {
     expect(decide(INTERVIEWER, "/proj/.claude/specs/2026-09-16-grammar-constrained-decoding/panel-runs/run-1/interview.md")).toBe("allow");
     const designer = roster(entry("opaque-designer", "arch-designer-agent"));
-    expect(shouldBlockDirectEdit("Write", s, orchestrating, designer,
-      request("opaque-designer", "/proj/.claude/specs/slug/panel-runs/run-1/candidates/candidate-lens.md")).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Write", s, orchestrating, designer, { artifactWrite: request("opaque-designer", "/proj/.claude/specs/slug/panel-runs/run-1/candidates/candidate-lens.md") }).kind).toBe("allow");
   });
 
   it("finds the caller's entry anywhere on the roster, not only the first", () => {
@@ -638,18 +647,18 @@ describe("shouldBlockDirectEdit — panel-artifact admission (grammar-constraine
   it("keeps the impl admission untouched: the request is irrelevant to it", () => {
     const impl = roster(entry("code-implementer-agent"));
     expect(shouldBlockDirectEdit("Edit", s, orchestrating, impl).kind).toBe("allow");
-    expect(shouldBlockDirectEdit("Edit", s, orchestrating, impl, request(null, "/etc/passwd")).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating, impl, { artifactWrite: request(null, "/etc/passwd") }).kind).toBe("allow");
   });
 
   it("both admissions share ONE roster probe", () => {
     const probe = vi.fn<ActiveRosterProbe>(() => [entry(INTERVIEWER, "arch-interviewer-agent")]);
-    shouldBlockDirectEdit("Write", s, orchestrating, probe, request(INTERVIEWER, "/proj/.claude/specs/slug/panel-runs/run-1/interview.md"));
+    shouldBlockDirectEdit("Write", s, orchestrating, probe, { artifactWrite: request(INTERVIEWER, "/proj/.claude/specs/slug/panel-runs/run-1/interview.md") });
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
   it("a traversal session id still fails CLOSED before the artifact admission", () => {
     const probe = vi.fn<ActiveRosterProbe>(() => [entry(INTERVIEWER, "arch-interviewer-agent")]);
-    const result = shouldBlockDirectEdit("Write", "../../etc", orchestrating, probe, request(INTERVIEWER, "/proj/.claude/specs/x.md"));
+    const result = shouldBlockDirectEdit("Write", "../../etc", orchestrating, probe, { artifactWrite: request(INTERVIEWER, "/proj/.claude/specs/x.md") });
     expect(result.kind).toBe("block");
     expect(probe).not.toHaveBeenCalled();
   });
@@ -661,21 +670,23 @@ describe("block-direct-edits handler — artifact-writer admission (end-to-end w
    * the handler reads the real roster, canonicalizes the raw file_path against
    * the hook's cwd and project dir, and hands core the CALLER's identity — so a
    * real .claude/specs target admits the calling panel writer, while an
-   * outside-the-project target and a main-agent call stay blocked. The guard is
-   * armed HERE, not by the checkout: `LOOM_STATE_PATH` is re-pointed at a
-   * per-suite temp State File (the lazy resolver the handler probes reads it at
-   * decision time), so the assertions hold on a fresh CI checkout exactly as
-   * they do in a checkout hosting a live orchestration run — a test that
-   * silently depended on the developer's state file passed locally and allowed
-   * every edit on CI.
+   * in-repository target outside its roots and a main-agent call stay blocked.
+   * The guard is armed HERE, not by the checkout: `LOOM_STATE_PATH` is
+   * re-pointed at a per-suite State File in the project's canonical
+   * `.claude/state/` layout (the lazy resolver the handler probes reads it at
+   * decision time, and the orchestrated repository is derived from it), so the
+   * assertions hold on a fresh CI checkout exactly as they do in a checkout
+   * hosting a live orchestration run — a test that silently depended on the
+   * developer's state file passed locally and allowed every edit on CI.
    */
-  const statePath = join(tmpdir(), `block-direct-armed-${process.pid}.json`);
   const originalStatePath = process.env.LOOM_STATE_PATH;
   const originalProjectDir = process.env.CLAUDE_PROJECT_DIR;
   const project = canonicalTempDir("loom-handler-artifact-");
+  const statePath = join(project, ".claude", "state", "active_task_graph.json");
   const CALLER = "a339f6fd51d78b179";
 
   beforeEach(() => {
+    mkdirSync(join(project, ".claude", "state"), { recursive: true });
     writeFileSync(statePath, "{}");
     process.env.LOOM_STATE_PATH = statePath;
     process.env.CLAUDE_PROJECT_DIR = project;
@@ -707,10 +718,19 @@ describe("block-direct-edits handler — artifact-writer admission (end-to-end w
     expect((await run({ agent_id: CALLER, tool_input: { file_path: target } })).kind).toBe("allow");
   });
 
-  it("an outside-the-project target stays blocked for the panel writer", async () => {
-    const result = await run({ agent_id: CALLER, tool_input: { file_path: join(tmpdir(), `outside-${process.pid}.md`) } });
+  it("an in-repository target outside its roots stays blocked for the panel writer", async () => {
+    const result = await run({ agent_id: CALLER, tool_input: { file_path: join(project, "src", "index.ts") } });
     expect(result.kind).toBe("block");
     if (result.kind === "block") expect(result.message).toContain("arch-interviewer-agent may write only its artifacts");
+  });
+
+  it("a target outside the orchestrated repository is not the guard's concern, even for the panel writer", async () => {
+    const outside = canonicalTempDir("loom-handler-outside-");
+    try {
+      expect((await run({ agent_id: CALLER, tool_input: { file_path: join(outside, "notes.md") } })).kind).toBe("allow");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("the main agent (no agent_id) stays blocked on the same in-scope target", async () => {
@@ -718,5 +738,376 @@ describe("block-direct-edits handler — artifact-writer admission (end-to-end w
     const result = await run({ tool_input: { file_path: target } });
     expect(result.kind).toBe("block");
     if (result.kind === "block") expect(result.message).toContain("BLOCKED: Direct edits not allowed");
+  });
+});
+
+// ─── Guard scope: the orchestrated repository and Loom's protected dirs ─────
+
+/** A protected Loom directory far from every repository root the cases use. */
+const PROTECTED = "/loom-protected";
+const resolvedRepository = (...roots: readonly [string, ...string[]]): OrchestratedRepository =>
+  ({ kind: "resolved", roots, protectedRoots: [PROTECTED] });
+const resolvedTargets = (...paths: readonly [string, ...string[]]): EditTargets => ({ kind: "resolved", paths });
+
+describe("guardedByRoot / editPlacement — the pure placement rule", () => {
+  it.each([
+    ["/repo", "/repo", true, "the root itself"],
+    ["/repo", "/repo/src/x.ts", true, "a file below the root"],
+    ["/repo", "/repo/.claude/worktrees/agent-1/x.ts", true, "a nested worktree directory stays inside"],
+    ["/repo", "/repo/..notes.md", true, "a name starting with `..` is inside"],
+    ["/repo", "/repo-foo/x.ts", false, "a sibling sharing the prefix is outside"],
+    ["/repo", "/repo2", false, "a sibling sharing the prefix (no separator) is outside"],
+    ["/repo", "/other/x.ts", false, "an unrelated tree is outside"],
+    ["/repo", "/", false, "an ancestor is outside"],
+    ["/repo", "/repo/../other/x.ts", false, "a `..` escape is judged after normalisation"],
+    ["/repo", "repo/x.ts", true, "a relative target cannot be placed — fails closed"],
+    ["repo", "/elsewhere/x.ts", true, "a relative root cannot be placed — fails closed"],
+  ])("guardedByRoot(%s, %s) = %s — %s", (root, target, guarded) => {
+    expect(guardedByRoot(root, target)).toBe(guarded);
+  });
+
+  it("anything unresolved places the call inside", () => {
+    expect(editPlacement(UNRESOLVED, resolvedTargets("/elsewhere/x.ts")).kind).toBe("inside");
+    expect(editPlacement(resolvedRepository("/repo"), UNRESOLVED).kind).toBe("inside");
+    expect(editPlacement(UNRESOLVED, UNRESOLVED).kind).toBe("inside");
+  });
+
+  it("one guarded target places the whole call inside; every root counts", () => {
+    expect(editPlacement(resolvedRepository("/repo"), resolvedTargets("/tmp/a", "/repo/b")).kind).toBe("inside");
+    expect(editPlacement(resolvedRepository("/repo", "/second"), resolvedTargets("/second/x")).kind).toBe("inside");
+    expect(editPlacement(resolvedRepository("/repo", "/second"), resolvedTargets("/tmp/a", "/repo-x/b")).kind).toBe("outside");
+  });
+
+  const segment = fc.stringMatching(/^[A-Za-z0-9_-]{1,8}$/);
+  const absoluteDir = fc.array(segment, { minLength: 1, maxLength: 4 }).map((parts) => `/${parts.join("/")}`);
+
+  it("property: a path below the root (or the root itself) is always inside", () => {
+    fc.assert(fc.property(absoluteDir, fc.array(segment, { maxLength: 4 }), (root, below) => {
+      const target = below.length === 0 ? root : `${root}/${below.join("/")}`;
+      expect(editPlacement(resolvedRepository(root), resolvedTargets(target)).kind).toBe("inside");
+    }));
+  });
+
+  it("property: a sibling sharing the root as a string prefix is always outside (segment boundary)", () => {
+    fc.assert(fc.property(absoluteDir, segment, fc.array(segment, { maxLength: 3 }), (root, suffix, below) => {
+      const sibling = [`${root}${suffix}`, ...below].join("/");
+      expect(editPlacement(resolvedRepository(root), resolvedTargets(sibling)).kind).toBe("outside");
+    }));
+  });
+
+  it("property: adding a target never moves a call from inside to outside", () => {
+    fc.assert(fc.property(absoluteDir, absoluteDir, absoluteDir, (root, first, second) => {
+      const one = editPlacement(resolvedRepository(root), resolvedTargets(first));
+      const both = editPlacement(resolvedRepository(root), resolvedTargets(first, second));
+      if (one.kind === "inside") expect(both.kind).toBe("inside");
+    }));
+  });
+});
+
+describe("shouldBlockDirectEdit — placement gates every admission", () => {
+  const inside = (): EditPlacement => ({ kind: "inside" });
+  const outside = (): EditPlacement => ({ kind: "outside" });
+
+  it("the main agent may write outside the orchestrated repository; inside it stays blocked", () => {
+    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster, { placeEdit: outside }).kind).toBe("allow");
+    const blocked = shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster, { placeEdit: inside });
+    expect(blocked.kind).toBe("block");
+    if (blocked.kind === "block") expect(blocked.message).toContain("Direct edits not allowed");
+  });
+
+  it("an omitted placement judges the write inside", () => {
+    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, noRoster).kind).toBe("block");
+  });
+
+  it("placement is never consulted when disarmed, for a non-file tool, or on an invalid session id", () => {
+    const probe = vi.fn(outside);
+    expect(shouldBlockDirectEdit("Edit", sNoActive, () => false, noRoster, { placeEdit: probe }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Bash", sNoActive, orchestrating, noRoster, { placeEdit: probe }).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", "../../etc", orchestrating, noRoster, { placeEdit: probe }).kind).toBe("block");
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("inside the repository every admission is unchanged", () => {
+    const request = { callerAgentId: "a1", targetPath: "/proj/src/x.ts", projectRoot: "/proj" };
+    const writer = shouldBlockDirectEdit("Write", sNoActive, orchestrating, roster(entry("a1", "specify-agent")), { artifactWrite: request, placeEdit: inside });
+    expect(writer.kind).toBe("block");
+    if (writer.kind === "block") expect(writer.message).toContain("specify-agent may write only its artifacts");
+    expect(shouldBlockDirectEdit("Edit", sNoActive, orchestrating, roster(entry("code-implementer-agent")), { placeEdit: inside }).kind).toBe("allow");
+  });
+});
+
+describe("protected Loom directories stay guarded wherever they lie (code-reviewer-1)", () => {
+  // Default layout: the subagent dir and the machine-definitions dir both sit
+  // OUTSIDE the orchestrated repository, and only Bash is covered by
+  // guard-state-file — so placement alone must keep them guarded.
+  const subagents = "/tmp/claude-subagents";
+  const machines = "/opt/loom/machines";
+  const repository: OrchestratedRepository = { kind: "resolved", roots: ["/repo"], protectedRoots: [subagents, machines] };
+  const protectedTargets = [
+    [`${subagents}/${sNoActive}.evidence.jsonl`, "the evidence ledger"],
+    [`${subagents}/${sNoActive}.active`, "the active roster"],
+    [`${subagents}/${sNoActive}.task_graph`, "the TaskGraph pointer"],
+    [`${machines}/code-implementer-agent.json`, "a machine definition"],
+  ] as const;
+  const parentWrite = (target: string) => shouldBlockDirectEdit(
+    "Write", sNoActive, orchestrating, noRoster, { placeEdit: () => editPlacement(repository, resolvedTargets(target)) },
+  );
+
+  it.each(protectedTargets)("%s (%s) is placed inside and blocked for the parent", (target) => {
+    expect(editPlacement(repository, resolvedTargets(target)).kind).toBe("inside");
+    const result = parentWrite(target);
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("Direct edits not allowed");
+  });
+
+  it("one protected target guards a batch that is otherwise outside", () => {
+    expect(editPlacement(repository, resolvedTargets("/scratch/a.md", `${machines}/x.json`)).kind).toBe("inside");
+  });
+
+  it("a scratch path outside both the repository and every protected directory is still allowed", () => {
+    expect(editPlacement(repository, resolvedTargets("/scratch/notes.md")).kind).toBe("outside");
+    expect(parentWrite("/scratch/notes.md").kind).toBe("allow");
+    // Segment boundary: a sibling sharing a protected root's prefix is outside.
+    expect(parentWrite(`${subagents}-other/notes.md`).kind).toBe("allow");
+  });
+
+  const segment = fc.stringMatching(/^[A-Za-z0-9_-]{1,8}$/);
+  const absoluteDir = fc.array(segment, { minLength: 1, maxLength: 4 }).map((parts) => `/${parts.join("/")}`);
+
+  it("property: a path at or below any protected root is inside, whatever the repository roots", () => {
+    fc.assert(fc.property(absoluteDir, absoluteDir, fc.array(segment, { maxLength: 4 }), (repoRoot, protectedRoot, below) => {
+      const target = below.length === 0 ? protectedRoot : `${protectedRoot}/${below.join("/")}`;
+      const placed = editPlacement({ kind: "resolved", roots: [repoRoot], protectedRoots: [protectedRoot] }, resolvedTargets(target));
+      expect(placed.kind).toBe("inside");
+    }));
+  });
+});
+
+describe("block-direct-edits handler — guard scope (end-to-end, canonical layout without Git)", () => {
+  const originalStatePath = process.env.LOOM_STATE_PATH;
+  const project = canonicalTempDir("loom-scope-repo-");
+  const sibling = `${project}-other`;
+  const elsewhere = canonicalTempDir("loom-scope-elsewhere-");
+
+  beforeEach(() => {
+    mkdirSync(join(project, ".claude", "state"), { recursive: true });
+    mkdirSync(join(project, "src"), { recursive: true });
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(join(project, ".claude", "state", "active_task_graph.json"), "{}");
+    process.env.LOOM_STATE_PATH = join(project, ".claude", "state", "active_task_graph.json");
+  });
+
+  afterEach(() => {
+    if (originalStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+    else process.env.LOOM_STATE_PATH = originalStatePath;
+  });
+
+  afterAll(() => {
+    for (const dir of [project, sibling, elsewhere]) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const parentWrite = (filePath: string | undefined, cwd = project) => blockDirectEdits(JSON.stringify({
+    tool_name: "Write",
+    session_id: sNoActive,
+    cwd,
+    tool_input: filePath === undefined ? {} : { file_path: filePath },
+  }), []);
+
+  it("a file inside the repository is blocked for the parent", async () => {
+    const result = await parentWrite(join(project, "src", "x.ts"));
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("Direct edits not allowed");
+    expect((await parentWrite("src/relative.ts")).kind).toBe("block");
+  });
+
+  it("a sibling directory sharing the root's prefix is outside", async () => {
+    expect((await parentWrite(join(sibling, "x.ts"))).kind).toBe("allow");
+  });
+
+  it("a scratchpad path (not-yet-existing, nested) is outside", async () => {
+    expect((await parentWrite(join(elsewhere, "scratchpad", "deep", "notes.md"))).kind).toBe("allow");
+    expect((await parentWrite("relative-notes.md", elsewhere)).kind).toBe("allow");
+  });
+
+  it("a symlink inside the repository pointing out is judged by its realpath — outside", async () => {
+    const link = join(project, "out-link");
+    rmSync(link, { force: true });
+    symlinkSync(elsewhere, link);
+    expect((await parentWrite(join(link, "x.ts"))).kind).toBe("allow");
+  });
+
+  it("a path through a symlinked directory into the repository is judged by its realpath — inside", async () => {
+    const link = join(elsewhere, "in-link");
+    rmSync(link, { force: true });
+    symlinkSync(project, link);
+    expect((await parentWrite(join(link, "src", "x.ts"))).kind).toBe("block");
+  });
+
+  it("an uncanonicalisable target (dangling symlink) stays guarded even outside the repository", async () => {
+    const dangling = join(elsewhere, "dangling");
+    rmSync(dangling, { force: true });
+    symlinkSync(join(elsewhere, "missing-target"), dangling);
+    expect((await parentWrite(dangling)).kind).toBe("block");
+  });
+
+  it("a write naming no target stays guarded", async () => {
+    expect((await parentWrite(undefined)).kind).toBe("block");
+  });
+
+  it("a LOOM_STATE_PATH override at no documented layout and outside Git guards every target, announced", async () => {
+    const odd = join(elsewhere, "state", "graph.json");
+    mkdirSync(join(elsewhere, "state"), { recursive: true });
+    writeFileSync(odd, "{}");
+    process.env.LOOM_STATE_PATH = odd;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect((await parentWrite(join(sibling, "x.ts"))).kind).toBe("block");
+      expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain("guarding every target");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
+
+describe("orchestratedRepositoryOf / canonicalEditTargets — Git working trees", () => {
+  const base = canonicalTempDir("loom-scope-git-");
+  const repo = join(base, "repo");
+  const worktree = join(base, "repo-fix");
+  const git = (...args: string[]) => execFileSync("git", args, {
+    cwd: base,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    stdio: "pipe",
+  });
+
+  beforeAll(() => {
+    git("init", "-q", repo);
+    git("-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "init");
+    git("-C", repo, "worktree", "add", "-q", worktree);
+    git("-C", repo, "worktree", "add", "-q", join(repo, ".claude", "worktrees", "nested"));
+    mkdirSync(join(repo, ".claude", "state"), { recursive: true });
+    writeFileSync(join(repo, ".claude", "state", "active_task_graph.json"), "{}");
+  });
+
+  afterAll(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  // Not yet created: canonicalised through its nearest existing ancestor.
+  const subagents = join(base, "subagents");
+  const graph = () => join(repo, ".claude", "state", "active_task_graph.json");
+
+  it("derives the root from the Git working tree holding the graph, and carries the canonical protected dirs", () => {
+    expect(orchestratedRepositoryOf([graph()], [subagents]))
+      .toEqual({ kind: "resolved", roots: [repo], protectedRoots: [subagents] });
+  });
+
+  it("canonicalises a symlinked protected directory to its real location, deduplicated", () => {
+    const real = join(base, "real-subagents");
+    const link = join(base, "linked-subagents");
+    mkdirSync(real, { recursive: true });
+    rmSync(link, { force: true });
+    symlinkSync(real, link);
+    expect(orchestratedRepositoryOf([graph()], [link, real]))
+      .toEqual({ kind: "resolved", roots: [repo], protectedRoots: [real] });
+  });
+
+  it("an uncanonicalisable protected directory guards every target, announced", () => {
+    const dangling = join(base, "dangling-subagents");
+    rmSync(dangling, { force: true });
+    symlinkSync(join(base, "missing"), dangling);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(orchestratedRepositoryOf([graph()], [dangling])).toBe(UNRESOLVED);
+      expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain("cannot canonicalize protected directory");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("another worktree of the same repository is outside; the orchestrated checkout and nested worktrees are inside", () => {
+    const repository = orchestratedRepositoryOf([graph()], [subagents]);
+    const place = (path: string, cwd = base) => editPlacement(repository, canonicalEditTargets([path], cwd)).kind;
+    expect(place(join(worktree, "engine", "src", "x.ts"))).toBe("outside");
+    expect(place("engine/src/x.ts", worktree)).toBe("outside");
+    expect(place(join(repo, "engine", "src", "x.ts"))).toBe("inside");
+    expect(place(join(repo, ".claude", "worktrees", "nested", "x.ts"))).toBe("inside");
+    expect(place(join(subagents, "s.evidence.jsonl"))).toBe("inside");
+  });
+
+  it("no armed graph resolves nothing, silently — every target stays guarded", () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(orchestratedRepositoryOf([], [subagents])).toBe(UNRESOLVED);
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(canonicalEditTargets([], base)).toBe(UNRESOLVED);
+  });
+});
+
+describe("block-direct-edits handler — protected directories outside the repository (end-to-end)", () => {
+  // LOOM_SUBAGENT_DIR and LOOM_MACHINES_DIR re-pointed at temp dirs OUTSIDE
+  // the orchestrated repository — the default layout's shape, hermetically.
+  const originalEnv = {
+    LOOM_STATE_PATH: process.env.LOOM_STATE_PATH,
+    LOOM_SUBAGENT_DIR: process.env.LOOM_SUBAGENT_DIR,
+    LOOM_MACHINES_DIR: process.env.LOOM_MACHINES_DIR,
+  };
+  const project = canonicalTempDir("loom-protected-repo-");
+  const subagents = canonicalTempDir("loom-protected-subagents-");
+  const machines = canonicalTempDir("loom-protected-machines-");
+  const scratch = canonicalTempDir("loom-protected-scratch-");
+
+  beforeEach(() => {
+    mkdirSync(join(project, ".claude", "state"), { recursive: true });
+    writeFileSync(join(project, ".claude", "state", "active_task_graph.json"), "{}");
+    process.env.LOOM_STATE_PATH = join(project, ".claude", "state", "active_task_graph.json");
+    process.env.LOOM_SUBAGENT_DIR = subagents;
+    process.env.LOOM_MACHINES_DIR = machines;
+  });
+
+  afterEach(() => {
+    for (const [name, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  afterAll(() => {
+    for (const dir of [project, subagents, machines, scratch]) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const parentWrite = (filePath: string) => blockDirectEdits(JSON.stringify({
+    tool_name: "Write",
+    session_id: sNoActive,
+    cwd: project,
+    tool_input: { file_path: filePath },
+  }), []);
+
+  it.each([
+    [`${sNoActive}.evidence.jsonl`, "the evidence ledger"],
+    [`${sNoActive}.active`, "the active roster"],
+    [`${sNoActive}.machine`, "a machine binding"],
+    [`${sNoActive}.task_graph`, "the TaskGraph pointer"],
+  ])("a parent Write to <subagentDir>/%s (%s) is blocked", async (name) => {
+    const result = await parentWrite(join(subagents, name));
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("Direct edits not allowed");
+  });
+
+  it("a parent Write into the machine-definitions dir is blocked", async () => {
+    expect((await parentWrite(join(machines, "code-implementer-agent.json"))).kind).toBe("block");
+  });
+
+  it("a protected directory reached through a symlink is judged by its realpath — blocked", async () => {
+    const link = join(scratch, "subagents-link");
+    rmSync(link, { force: true });
+    symlinkSync(subagents, link);
+    expect((await parentWrite(join(link, `${sNoActive}.evidence.jsonl`))).kind).toBe("block");
+  });
+
+  it("a scratch path outside the repository and every protected directory is still allowed", async () => {
+    expect((await parentWrite(join(scratch, "notes", "plan.md"))).kind).toBe("allow");
   });
 });

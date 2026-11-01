@@ -291,7 +291,8 @@ Declaring an owner makes it an obligation the Wave Gate checks.
 
 A Wave review packet for the code-reviewer and the architecture-tech-lead,
 for a Task that touches an owned family, carries an engine-issued **owner
-map**: each touched invariant's id, title, statement, owner, siblings, matrix
+map** (such a Task's Wave review roster appends the architecture-tech-lead to
+the base five reviewers, ADR-0047, so both packets are issued): each touched invariant's id, title, statement, owner, siblings, matrix
 test and `<plan file>#INV-N` contract, then the fixed second-copy rule. The
 section is inside the packet digest. The rule: a diff that implements a
 declared-owned invariant's predicate outside its owner is a finding citing
@@ -364,8 +365,10 @@ them, and only then do other tasks write the code that turns them green.
    path and the roster of testcases it observed red. The stamp lands at
    completion, after the advisory decision, so status lists the advisories on
    frozen paths at that pause (`acceptance-freeze-pending`). Fix the relevant
-   ones by re-dispatching the contract Task before approving; afterwards, only
-   a Contract Revision can change those bytes.
+   ones before approving: abandon the run, reopen the contract Task
+   (`helper orchestration reopen-task`), re-dispatch it, and start a fresh gate.
+   Abandoning freezes nothing, so the fresh gate sees no drift. After approval,
+   only a Contract Revision can change those bytes.
 3. **Red window.** A testcase is *pending* until the Wave completing all its
    Requirements, and *due* from then on. A pending testcase's failure is
    excused only at the Wave Gate — never in a task's own run. So every task
@@ -439,8 +442,10 @@ pending failures — into its brief.
    architecture phase) is the check skipped, and it says so.
 6. **The Wave Gate's completion suite** judges every Acceptance Contract the
    Wave owes something (RED in the contract Wave, GREEN by Requirement after),
-   stamps the Acceptance Freeze from the accepted receipt in the same locked
-   write, and blocks on frozen-path drift before reusing any receipt.
+   installs only the accepted receipt, and blocks on frozen-path drift before
+   reusing any receipt. The Acceptance Freeze is stamped from that receipt by
+   the locked completion commit, in the same write as the completed-Wave
+   history entry, so an abandoned run freezes nothing (ADR-0044).
    Whenever the TaskGraph carries `owner_obligations`, the same suite runs
    `loom:owner-verification`: the plan re-read, then sibling coverage and
    mutation verification for each owned invariant whose family the Wave

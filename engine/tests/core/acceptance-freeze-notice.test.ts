@@ -69,10 +69,14 @@ describe("pendingFreezeAdvisories", () => {
     const text = renderPendingFreezeAdvisories([{ contractId: "CT-1", taskId: "T1", findingId: "a-1", path: SURFACE.types }]);
     expect(text).toContain(`a-1 (T1, CT-1: ${SURFACE.types})`);
     expect(text).toContain("Approving freezes them as they are");
-    expect(text).toContain("abandon this run, re-dispatch the contract Task, and start a fresh Wave Gate");
+    expect(text).toContain("abandon this run, reopen the contract Task (helper orchestration reopen-task), re-dispatch it, and start a fresh Wave Gate");
   });
 });
 
+// These fixtures carry no suite receipt. The same pause with a receipt installed
+// by the real completion suite is pinned in
+// tests/handlers/helpers/wave-completion-suite.test.ts: installing the receipt
+// does not freeze the contract (ADR-0044), so the notice still fires.
 describe("status at the contract Wave's advisory pause", () => {
   const evaluated = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: [] },

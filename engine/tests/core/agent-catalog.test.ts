@@ -10,8 +10,12 @@ import {
   REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS,
   REVIEW_SUB_AGENTS,
-  WAVE_REVIEW_AGENTS,
+  BASE_WAVE_REVIEW_AGENTS,
+  isWaveReviewRole,
+  OWNER_MAPPED_WAVE_REVIEW_AGENTS,
+  waveReviewRoster,
 } from "../../src/core/agent-catalog-projections";
+import { OWNER_MAP_ROLES } from "../../src/core/owner-verification/owner-map";
 import * as config from "../../src/config";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 
@@ -94,20 +98,45 @@ describe("the wave review roster is a selection from the catalog", () => {
   it("config publishes none of the catalog projections", () => {
     for (const name of [
       "ARCH_PANEL_AGENTS", "IMPL_AGENTS", "isReviewAgent", "KNOWN_AGENTS", "PHASE_AGENT_MAP",
-      "REVIEW_AGENTS", "REVIEW_PANEL_AGENTS", "REVIEW_SUB_AGENTS", "WAVE_REVIEW_AGENTS", "frozenSet",
+      "REVIEW_AGENTS", "REVIEW_PANEL_AGENTS", "REVIEW_SUB_AGENTS", "BASE_WAVE_REVIEW_AGENTS",
+      "OWNER_MAPPED_WAVE_REVIEW_AGENTS", "waveReviewRoster", "isWaveReviewRole", "frozenSet",
     ]) expect(Object.keys(config), name).not.toContain(name);
   });
 
   it("keeps its index-binding order", () => {
-    expect(WAVE_REVIEW_AGENTS).toEqual([
+    expect(BASE_WAVE_REVIEW_AGENTS).toEqual([
       "code-reviewer", "silent-failure-hunter", "pr-test-analyzer",
       "type-design-analyzer", "comment-analyzer",
     ]);
   });
 
+  // FR-022 / ADR-0047: an owner-mapped Task's roster appends the architecture
+  // reviewer LAST, so every base reviewer keeps its index and slot identity.
+  it("the owner-mapped roster is the base roster with architecture-tech-lead appended last", () => {
+    expect(OWNER_MAPPED_WAVE_REVIEW_AGENTS).toEqual([...BASE_WAVE_REVIEW_AGENTS, "architecture-tech-lead"]);
+  });
+
+  it("waveReviewRoster maps owner-map presence to exactly one of the two rosters", () => {
+    expect(waveReviewRoster(false)).toBe(BASE_WAVE_REVIEW_AGENTS);
+    expect(waveReviewRoster(true)).toBe(OWNER_MAPPED_WAVE_REVIEW_AGENTS);
+  });
+
+  it("every owner-map role is issued on the owner-mapped roster, so no FR-022 role is dead", () => {
+    for (const role of OWNER_MAP_ROLES) {
+      expect(OWNER_MAPPED_WAVE_REVIEW_AGENTS, role).toContain(role);
+    }
+  });
+
   it("selects only reviewer-kind agents", () => {
-    for (const agent of WAVE_REVIEW_AGENTS) {
+    for (const agent of OWNER_MAPPED_WAVE_REVIEW_AGENTS) {
       expect(AGENT_CATALOG[agent].kind.kind, agent).toBe("reviewer");
+    }
+  });
+
+  it("isWaveReviewRole admits exactly the roles some Wave roster names", () => {
+    for (const agent of OWNER_MAPPED_WAVE_REVIEW_AGENTS) expect(isWaveReviewRole(agent), agent).toBe(true);
+    for (const agent of ["spec-check-invoker", "code-simplifier", "review-verifier-agent", "code-implementer-agent"]) {
+      expect(isWaveReviewRole(agent), agent).toBe(false);
     }
   });
 });

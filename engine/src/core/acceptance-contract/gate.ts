@@ -7,7 +7,12 @@
 
 import type { ArtifactDigest, NonEmpty } from "../orchestration-contract";
 import { attributeReportedFile } from "../report-file-attribution";
-import { isCollectionErrorTestcase, type JunitTestcasesResult, type ReportTestcaseOutcome } from "../structured-test-report";
+import {
+  isCollectionErrorTestcase,
+  type JunitTestcasesResult,
+  type ReportTestcase,
+  type ReportTestcaseOutcome,
+} from "../structured-test-report";
 import { freeze, nonEmpty } from "./kernel";
 import type { AcceptanceContract, AcceptanceTestcase, ContractAcceptanceFile, ContractTaskView } from "./model";
 import { contractWave, dueWaves } from "./tasks";
@@ -147,6 +152,27 @@ export function unprojectableFacts(checkId: string, reportDigest: ArtifactDigest
   return freeze({ kind: "unprojectable", checkId, reportDigest, reason });
 }
 
+/** The declared acceptance paths of every contract a gate owes something. */
+const owedAcceptancePaths = (expectation: AcceptanceExpectation): readonly string[] =>
+  expectation.contracts.flatMap(({ files }) => files.map(({ path }) => path));
+
+/**
+ * One report testcase as the gate observes it, or null when it belongs to no
+ * owed acceptance file. This is the one place a testcase is attributed and
+ * its collection error detected. The Wave Gate's facts and I7's
+ * `classifyFailedTestcase` are both built here.
+ */
+function observeTestcase(files: readonly string[], testcase: ReportTestcase): ObservedAcceptanceTestcase | null {
+  const file = testcaseAcceptanceFile(files, testcase.classname);
+  return file === null ? null : freeze({
+    file,
+    name: testcase.name,
+    outcome: testcase.outcome,
+    failureType: testcase.failureType,
+    collectionError: isCollectionErrorTestcase(testcase),
+  });
+}
+
 export function observeAcceptanceFacts(
   expectation: AcceptanceExpectation,
   checkId: string,
@@ -154,22 +180,13 @@ export function observeAcceptanceFacts(
   projection: JunitTestcasesResult,
 ): AcceptanceReportFacts {
   if (!projection.ok) return unprojectableFacts(checkId, reportDigest, projection.error.message);
-  const files = expectation.contracts.flatMap(({ files: declared }) => declared.map(({ path }) => path));
+  const files = owedAcceptancePaths(expectation);
   const testcases: ObservedAcceptanceTestcase[] = [];
   let otherFailures = 0;
   for (const testcase of projection.value) {
-    const file = testcaseAcceptanceFile(files, testcase.classname);
-    if (file === null) {
-      if (testcase.outcome === "failed") otherFailures += 1;
-      continue;
-    }
-    testcases.push(freeze({
-      file,
-      name: testcase.name,
-      outcome: testcase.outcome,
-      failureType: testcase.failureType,
-      collectionError: isCollectionErrorTestcase(testcase),
-    }));
+    const observed = observeTestcase(files, testcase);
+    if (observed !== null) testcases.push(observed);
+    else if (testcase.outcome === "failed") otherFailures += 1;
   }
   return freeze({ kind: "projected", checkId, reportDigest, testcases: Object.freeze(testcases), otherFailures });
 }
@@ -267,6 +284,57 @@ function contractFailures(
 }
 
 /**
+ * The one expected-red rule, shared by the Wave Gate's exit excuse and the I7
+ * affected stop check: a testcase attributed to an acceptance file (`file` is
+ * the declared path) that failed behaviorally, in its contract's RED Wave, or
+ * after it while every anchor it decides is still pending. A collection error,
+ * an unanchored or due testcase, and a file of no owed contract (including an
+ * unobservable one) are never expected RED: they fail closed.
+ */
+export function isExpectedRedAcceptanceFailure(
+  expectation: AcceptanceExpectation,
+  testcase: Pick<ObservedAcceptanceTestcase, "file" | "name" | "outcome" | "collectionError">,
+): boolean {
+  if (testcase.outcome !== "failed" || testcase.collectionError) return false;
+  const expected = expectation.contracts.find(({ files }) => files.some(({ path }) => path === testcase.file));
+  if (expected === undefined) return false;
+  if (expected.phase === "red") return true;
+  const anchors = decidedAnchors(expected, testcase);
+  return anchors.length > 0 && !isDue(expected, anchors, expectation.wave);
+}
+
+/** A report testcase that failed. Only `isFailedReportTestcase` narrows to one. */
+export type FailedReportTestcase = ReportTestcase & Readonly<{ outcome: "failed" }>;
+
+export const isFailedReportTestcase = (testcase: ReportTestcase): testcase is FailedReportTestcase =>
+  testcase.outcome === "failed";
+
+/**
+ * What one failed testcase is to the gate. `file` is the one rendered identity:
+ * the declared acceptance path when the testcase is attributed to one,
+ * otherwise the reported classname.
+ */
+export type FailedTestcaseClass =
+  | Readonly<{ kind: "expected-red"; file: string; name: string }>
+  | Readonly<{ kind: "blocking"; file: string; name: string; collectionError: boolean }>;
+
+/**
+ * Classify one failed testcase the way the Wave Gate does. It goes through
+ * the gate's own observation step (`observeTestcase`, the step the gate's facts
+ * are made by) and then the one expected-RED rule. I7 judges each failure
+ * here, so it cannot drift from the gate's `excused`.
+ */
+export function classifyFailedTestcase(expectation: AcceptanceExpectation, testcase: FailedReportTestcase): FailedTestcaseClass {
+  const observed = observeTestcase(owedAcceptancePaths(expectation), testcase);
+  if (observed === null) {
+    return freeze({ kind: "blocking", file: testcase.classname, name: testcase.name, collectionError: isCollectionErrorTestcase(testcase) });
+  }
+  return isExpectedRedAcceptanceFailure(expectation, observed)
+    ? freeze({ kind: "expected-red", file: observed.file, name: observed.name })
+    : freeze({ kind: "blocking", file: observed.file, name: observed.name, collectionError: observed.collectionError });
+}
+
+/**
  * A check's non-zero exit is excused only when its report shows failures and
  * every one is a collected RED or pending acceptance testcase. The judgment is
  * report-derived: an exit cause that never appears as a failing testcase (a
@@ -277,14 +345,7 @@ function contractFailures(
 function excused(expectation: AcceptanceExpectation, fact: AcceptanceReportFacts): boolean {
   if (fact.kind !== "projected" || fact.otherFailures > 0) return false;
   const failing = fact.testcases.filter(({ outcome }) => outcome === "failed");
-  return failing.length > 0 && failing.every((testcase) => {
-    if (testcase.collectionError) return false;
-    const expected = expectation.contracts.find(({ files }) => files.some(({ path }) => path === testcase.file));
-    if (expected === undefined) return false;
-    if (expected.phase === "red") return true;
-    const anchors = decidedAnchors(expected, testcase);
-    return anchors.length > 0 && !isDue(expected, anchors, expectation.wave);
-  });
+  return failing.length > 0 && failing.every((testcase) => isExpectedRedAcceptanceFailure(expectation, testcase));
 }
 
 export function judgeAcceptance(

@@ -331,8 +331,9 @@ export const guardedDirs = (): readonly string[] => [
  * helper invocation: a write into the subagent dir forges trusted evidence
  * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
  * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
- * the gate's rules. guard-state-file checks these BEFORE the helper allow. */
-const protectedDirs = (): readonly string[] => [subagentDir(), machinesDir()];
+ * the gate's rules. guard-state-file checks these BEFORE the helper allow, and
+ * block-direct-edits guards them for file tools wherever they lie (ADR-0046). */
+export const protectedDirs = (): readonly [string, ...string[]] => [subagentDir(), machinesDir()];
 
 const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
 

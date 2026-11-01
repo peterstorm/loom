@@ -143,17 +143,43 @@ export function assertPanelJudgeProfileUnique(
 // first import of this module, so an invalid catalog can never execute.
 assertPanelJudgeProfileUnique();
 
-/** Ordered Wave review roster policy — a selection FROM the catalog, not a
- *  second identity source. Ordering is load-bearing: wave-gate slot authority
- *  binds reviewers by index. Lives in this pure leaf so both config and the
- *  wave-gate machine can import it cycle-free. */
-export const WAVE_REVIEW_AGENTS = Object.freeze([
+/** The base Wave review roster: every Wave Task's reviewers — a selection FROM
+ *  the catalog, not a second identity source. Ordering is load-bearing:
+ *  wave-gate slot authority binds reviewers by index. Lives in this pure leaf
+ *  so both config and the wave-gate machine can import it cycle-free. */
+export const BASE_WAVE_REVIEW_AGENTS = Object.freeze([
   "code-reviewer",
   "silent-failure-hunter",
   "pr-test-analyzer",
   "type-design-analyzer",
   "comment-analyzer",
 ] as const satisfies readonly LoomAgentName[]);
+
+/** The roster of a Task whose Wave review packet carries the owner map
+ *  (FR-022, ADR-0047): the base five with `architecture-tech-lead` appended
+ *  LAST, so every base reviewer keeps its index and its slot identity. */
+export const OWNER_MAPPED_WAVE_REVIEW_AGENTS = Object.freeze([
+  ...BASE_WAVE_REVIEW_AGENTS,
+  "architecture-tech-lead",
+] as const satisfies readonly LoomAgentName[]);
+
+/** A Wave Task's ordered reviewer roster: exactly one of the two rosters above,
+ *  so no other ordering or subset is representable. */
+export type WaveReviewRoster = typeof BASE_WAVE_REVIEW_AGENTS | typeof OWNER_MAPPED_WAVE_REVIEW_AGENTS;
+
+/** Any role a Wave review roster can name. */
+export type WaveReviewRole = WaveReviewRoster[number];
+
+/** The roster of one Wave Task, from whether its review packet carries the
+ *  owner map. Which Tasks do is decided elsewhere, once (wave-review-authority's
+ *  owner-map obligations over obligations.ts's selection); this is only the
+ *  presence → roster mapping. */
+export const waveReviewRoster = (ownerMapped: boolean): WaveReviewRoster =>
+  ownerMapped ? OWNER_MAPPED_WAVE_REVIEW_AGENTS : BASE_WAVE_REVIEW_AGENTS;
+
+/** Whether `role` is one some Wave review roster names. */
+export const isWaveReviewRole = (role: string): role is WaveReviewRole =>
+  (OWNER_MAPPED_WAVE_REVIEW_AGENTS as readonly string[]).includes(role);
 
 export const LOOM_OWNED_AGENTS: readonly LoomAgentName[] = Object.freeze(
   AGENT_POLICIES.map(({ agent }) => agent),
@@ -234,9 +260,9 @@ export const IMPL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("impl"));
 export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
 
 /** Review sub-agents that produce findings per task. DERIVED from the Agent
- *  Catalog (kind `reviewer`) — membership only; the ordered wave roster is
- *  WAVE_REVIEW_AGENTS above (its index-binding order lives beside the
- *  identities it selects from). */
+ *  Catalog (kind `reviewer`) — membership only; the ordered wave rosters are
+ *  BASE_WAVE_REVIEW_AGENTS / OWNER_MAPPED_WAVE_REVIEW_AGENTS above (their
+ *  index-binding order lives beside the identities they select from). */
 export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("reviewer"));
 
 /**

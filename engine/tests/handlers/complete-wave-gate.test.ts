@@ -83,7 +83,7 @@ import {
   deriveWaveRefutationPlan,
   waveAdvisoryDecisionActionRequest,
 } from "../../src/core/wave-gate-preparation";
-import { WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
 import {
   blockedAction,
   doneAction,
@@ -2282,7 +2282,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
           generation: baseTask.review_generation ?? 0,
           packet_id: "1".repeat(64),
           head_sha: "2".repeat(64),
-          expected_agents: WAVE_REVIEW_AGENTS,
+          expected_agents: BASE_WAVE_REVIEW_AGENTS,
           prior_finding_ids: [],
           evidence: [],
         },

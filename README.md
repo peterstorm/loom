@@ -158,7 +158,8 @@ Each Task is reviewed by:
 - `silent-failure-hunter` — swallowed errors and unsafe fallback behavior;
 - `pr-test-analyzer` — test quality and missing regressions;
 - `type-design-analyzer` — invariants and illegal states;
-- `comment-analyzer` — inaccurate or decaying documentation.
+- `comment-analyzer` — inaccurate or decaying documentation;
+- `architecture-tech-lead` — only for a Task touching an owned Invariant's family, whose packets carry the owner map and second-copy rule (ADR-0047).
 
 ### Finding lifecycle
 

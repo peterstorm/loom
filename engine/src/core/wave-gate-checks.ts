@@ -31,6 +31,7 @@ import type { ProofFailure } from "./proof-obligations";
 import { renderProjectVerificationCoverage } from "./verification-manifest";
 import { deriveWaveCompletionSuiteReadiness } from "./wave-completion-suite-readiness";
 import { canonicalRecord, type NonEmpty } from "./orchestration-contract";
+import type { FrozenPathObservations } from "./acceptance-contract";
 
 export type GateCheck =
   | Readonly<{ passed: true; summary: string }>
@@ -263,6 +264,12 @@ export interface GateDeps {
   /** Shell-supplied current Wave workspace observation. The functional core
    * compares it with suite authority and performs no repository I/O. */
   readonly currentWaveWorkspace?: WaveWorkspaceObservation;
+  /** Shell observation of every Acceptance Contract frozen path, made BEFORE
+   * `currentWaveWorkspace` so a byte changed between the two reads makes the
+   * workspace stale against the suite receipt instead of being frozen. Only
+   * the completion commit reads it, to stamp the Acceptance Freeze; omitted,
+   * every path is unobserved and a stamp that needs one is refused. */
+  readonly currentFrozenPaths?: FrozenPathObservations;
   /** Shell-supplied persisted result observation, separate from workspace
    * authority so absence cannot be confused with an unreadable artifact. */
   readonly currentWaveCompletionResult?: WaveCompletionResultObservation;

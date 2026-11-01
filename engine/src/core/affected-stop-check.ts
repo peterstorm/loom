@@ -1,6 +1,9 @@
 /**
  * The affected-test stop check's pure core (I7, AD-10).
- * - `judgeAffectedRun` turns one affected run's parsed JUnit report into a verdict.
+ * - `judgeAffectedRun` turns one affected run's parsed JUnit report into a
+ *   verdict. Each failure is classified by the Wave Gate's own
+ *   `classifyFailedTestcase`, so one it would excuse as expected RED never
+ *   blocks.
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
  *   both stop checks, applying `blockAdmission`, the per-check cap gate.
  * - `renderAffectedBlock` and `renderStopChecksBlock` build the one combined
@@ -18,32 +21,43 @@
 import {
   ACCEPTANCE_BLOCK_HEADING,
   AFFECTED_BLOCK_HEADING,
+  AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
   type AFFECTED_STOP_CHECK_MAX_BLOCKS,
   type AffectedRunVerdict,
+  type ExcusedAcceptanceTestcase,
   type FailingAffectedTestcase,
   type JudgeAffectedRunFn,
   type StopCheckBlockCount,
   type StopCheckName,
 } from "./affected-stop-check-types";
+import { classifyFailedTestcase, isFailedReportTestcase } from "./acceptance-contract/gate";
 import { freeze, nonEmpty } from "./acceptance-contract/kernel";
 import type { NonEmpty } from "./orchestration-contract";
 import { attributeReportedFile } from "./report-file-attribution";
-import { isCollectionErrorTestcase } from "./structured-test-report";
 
 // --- Judging an affected run ---
 
-export const judgeAffectedRun: JudgeAffectedRunFn = (projection): AffectedRunVerdict => {
+/**
+ * Judge one affected run. Each failed testcase goes through the Wave Gate's
+ * own classification (`classifyFailedTestcase`): an expected-RED failure is
+ * excused, and anything else blocks, including a collection error in an
+ * acceptance file. Both lists name a testcase by the same file identity.
+ */
+export const judgeAffectedRun: JudgeAffectedRunFn = (projection, expectation): AffectedRunVerdict => {
   if (!projection.ok) return freeze({ kind: "unobservable", reason: `the affected runner's report could not be read: ${projection.error.message}` });
   if (projection.value.length === 0) return freeze({ kind: "passed", observed: "zero-tests" });
-  const failing = nonEmpty(projection.value
-    .filter(({ outcome }) => outcome === "failed")
-    .map((testcase): FailingAffectedTestcase => freeze({
-      file: testcase.classname,
-      name: testcase.name,
-      outcome: isCollectionErrorTestcase(testcase) ? "collection-error" : "failed",
-    })));
-  return failing === null ? freeze({ kind: "passed", observed: "some-tests" }) : freeze({ kind: "failing", testcases: failing });
+  const blocking: FailingAffectedTestcase[] = [];
+  const excused: ExcusedAcceptanceTestcase[] = [];
+  for (const testcase of projection.value.filter(isFailedReportTestcase)) {
+    const judged = classifyFailedTestcase(expectation, testcase);
+    if (judged.kind === "expected-red") excused.push(freeze({ file: judged.file, name: judged.name }));
+    else blocking.push(freeze({ file: judged.file, name: judged.name, outcome: judged.collectionError ? "collection-error" : "failed" }));
+  }
+  const failing = nonEmpty(blocking);
+  if (failing !== null) return freeze({ kind: "failing", testcases: failing, excused: freeze(excused) });
+  const allExcused = nonEmpty(excused);
+  return allExcused === null ? freeze({ kind: "passed", observed: "some-tests" }) : freeze({ kind: "excused", excused: allExcused });
 };
 
 // --- The block-counter transition rule ---
@@ -162,9 +176,14 @@ const OUTCOME_TEXT: Readonly<Record<FailingAffectedTestcase["outcome"], string>>
   "collection-error": "failed to collect",
 });
 
-/** The affected check's part of a block message: what is failing, and what the agent may do about it. */
+/** One expected-RED acceptance failure as a block message or note names it. */
+export const renderExcusedAcceptanceTestcase = ({ file, name }: ExcusedAcceptanceTestcase): string => `'${name}' (${file})`;
+
+/** The affected check's part of a block message: what is failing, what fails
+ *  without blocking, and what the agent may do about it. */
 export function renderAffectedBlock(
   testcases: NonEmpty<FailingAffectedTestcase>,
+  excused: readonly ExcusedAcceptanceTestcase[],
   attribution: AffectedFileAttribution,
   runnerOutput: string,
   blocksRemaining: number,
@@ -177,6 +196,7 @@ export function renderAffectedBlock(
     "LOOM AFFECTED-TEST STOP CHECK: tests affected by the files your attempt changed are failing.",
     "Keep working until they pass:",
     ...lines,
+    ...(excused.length === 0 ? [] : ["", AFFECTED_EXCUSED_HEADING, ...excused.map((testcase) => `- ${renderExcusedAcceptanceTestcase(testcase)}`)]),
     "",
     "Failures can also come from a sibling Task editing concurrently; if your own code is correct, say that and stop.",
     `This check blocks at most ${blocksRemaining} more time(s); after that your stop proceeds and the Wave Gate judges.`,

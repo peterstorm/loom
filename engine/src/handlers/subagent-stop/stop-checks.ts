@@ -9,7 +9,10 @@
  * - whether a check may block, and what each counter records, comes from
  *   `stopCheckBlockDecision`;
  * - verdicts come from `judgeStopCheck` and `judgeAffectedRun`, and the one
- *   combined block message from `renderStopChecksBlock`.
+ *   combined block message from `renderStopChecksBlock`. The affected judge
+ *   reads what the Task's own Wave Gate owes each contract
+ *   (`graphAcceptanceExpectation`), so a failure that gate excuses as
+ *   expected RED never blocks here.
  *
  * The order of operations at one stop: load the TaskGraph, resolve the
  * repository root, derive the changed files, plan, read each runnable check's
@@ -26,7 +29,7 @@
 
 import { join } from "node:path";
 import { match } from "ts-pattern";
-import { judgeStopCheck, renderStopCheckBlock } from "../../core/acceptance-contract";
+import { graphAcceptanceExpectation, judgeStopCheck, renderStopCheckBlock, type AcceptanceExpectation } from "../../core/acceptance-contract";
 // Not in the barrel: re-exporting it there would close an import cycle (see the module's header).
 import { planStopChecks } from "../../core/acceptance-contract/stop-check-planner";
 import {
@@ -49,6 +52,7 @@ import {
   blockAdmission,
   judgeAffectedRun,
   renderAffectedBlock,
+  renderExcusedAcceptanceTestcase,
   renderStopChecksBlock,
   stopCheckBlockDecision,
   type BlockAdmission,
@@ -205,10 +209,13 @@ async function runAcceptance(taskId: string, plan: OnAcceptance, root: Canonical
   return Object.freeze({ kind: "failing", part: (remaining) => renderStopCheckBlock(verdict.testcases, output, remaining) });
 }
 
+/** What the affected judge and renderer read from the TaskGraph for one Task. */
+type AffectedContext = Readonly<{ declared: readonly string[]; expectation: AcceptanceExpectation }>;
+
 async function runAffected(
   taskId: string,
   plan: OnAffected,
-  declared: readonly string[],
+  { declared, expectation }: AffectedContext,
   root: CanonicalRepositoryRoot,
   ports: StopCheckShellPorts,
 ): Promise<CheckResult> {
@@ -223,16 +230,21 @@ async function runAffected(
   if (outcome.report.kind !== "produced") return note("no-readable-report", outcome.report.kind);
   const read = readBack(ports, root, outcome.report);
   if (!read.ok) return note("no-readable-report", read.reason);
-  const verdict = judgeAffectedRun(parseJunitTestcases(read.bytes));
+  const verdict = judgeAffectedRun(parseJunitTestcases(read.bytes), expectation);
   switch (verdict.kind) {
     case "passed":
       return Object.freeze({ kind: "passed", note: verdict.observed === "zero-tests" ? affectedNoteText(taskId, "zero-tests") : null });
+    case "excused":
+      return Object.freeze({
+        kind: "passed",
+        note: affectedNoteText(taskId, "acceptance-red-excused", verdict.excused.map(renderExcusedAcceptanceTestcase).join("; ")),
+      });
     case "unobservable":
       return note("no-readable-report", verdict.reason);
     case "failing": {
       const output = runnerOutput(run);
       const attribution = Object.freeze({ declared: [...declared, ...plan.files], repositoryRoot: root });
-      return Object.freeze({ kind: "failing", part: (remaining) => renderAffectedBlock(verdict.testcases, attribution, output, remaining) });
+      return Object.freeze({ kind: "failing", part: (remaining) => renderAffectedBlock(verdict.testcases, verdict.excused, attribution, output, remaining) });
     }
   }
 }
@@ -320,7 +332,7 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
       affected: isRunnable(affected) ? affectedNote(taskId, "lock-held", lock.reason) : affected,
     }, issued, ports, []);
   }
-  const ran = await runAdmitted(input, { acceptance, affected }, graph, root, ports);
+  const ran = await runAdmitted(input, { acceptance, affected }, Object.freeze({ graph, wave: plan.wave }), root, ports);
   // Released on every path, and its fault named on every path: a crash under the lock still reports it.
   const releaseFault = lock.release();
   const lockNotes = releaseFault === null ? [] : [`stop checks for ${taskId}: ${releaseFault}`];
@@ -337,18 +349,21 @@ async function decide(input: StopChecksInput, ports: StopCheckShellPorts): Promi
 /** The checks' results under the held lock, or the fault that stopped them: a throw never skips the release. */
 type Ran = Readonly<{ ok: true; results: Results }> | Readonly<{ ok: false; cause: unknown }>;
 
+/** The TaskGraph a known Task's stop was planned from, and that Task's Wave. */
+type PlannedTask = Readonly<{ graph: TaskGraph; wave: number }>;
+
 /** Run each admitted check in order, acceptance then affected; an arm that is not runnable is already its result. */
 async function runAdmitted(
   input: StopChecksInput,
   arms: Readonly<{ acceptance: Arm<OnAcceptance>; affected: Arm<OnAffected> }>,
-  graph: TaskGraph,
+  planned: PlannedTask,
   root: CanonicalRepositoryRoot,
   ports: StopCheckShellPorts,
 ): Promise<Ran> {
   const { acceptance, affected } = arms;
   try {
     const acceptanceResult = isRunnable(acceptance) ? await runAcceptance(input.taskId, acceptance.plan, root, ports) : acceptance;
-    const affectedResult = isRunnable(affected) ? await runAffectedWithinBudget(input, affected.plan, graph, root, ports) : affected;
+    const affectedResult = isRunnable(affected) ? await runAffectedWithinBudget(input, affected.plan, planned, root, ports) : affected;
     return Object.freeze({ ok: true, results: Object.freeze({ acceptance: acceptanceResult, affected: affectedResult }) });
   } catch (cause) {
     return Object.freeze({ ok: false, cause });
@@ -364,7 +379,7 @@ const resultOf = <Plan>(arm: Arm<Plan>): CheckResult => isRunnable(arm) ? IDLE :
 async function runAffectedWithinBudget(
   input: StopChecksInput,
   plan: OnAffected,
-  graph: TaskGraph,
+  { graph, wave }: PlannedTask,
   root: CanonicalRepositoryRoot,
   ports: StopCheckShellPorts,
 ): Promise<CheckResult> {
@@ -373,8 +388,11 @@ async function runAffectedWithinBudget(
   if (left < plan.command.timeoutMs) {
     return affectedNote(input.taskId, "budget-exhausted", `${Math.max(left, 0)} ms left, the runner needs ${plan.command.timeoutMs} ms`);
   }
-  const declared = graph.tasks.find(({ id }) => id === input.taskId)?.file_list ?? [];
-  return runAffected(input.taskId, plan, declared, root, ports);
+  const context: AffectedContext = Object.freeze({
+    declared: graph.tasks.find(({ id }) => id === input.taskId)?.file_list ?? [],
+    expectation: graphAcceptanceExpectation(graph, wave),
+  });
+  return runAffected(input.taskId, plan, context, root, ports);
 }
 
 /**

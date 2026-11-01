@@ -11,6 +11,8 @@ import {
   type FrozenPathObservation,
 } from "../../src/core/acceptance-contract";
 import { digest, seen } from "../fixtures/acceptance-fixtures";
+import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import { labelledValue } from "../fixtures/parse-result";
 import { newWaveGate } from "../../src/core/wave-gate-model";
 import { parseTaskGraph } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
@@ -167,6 +169,33 @@ describe("reviseAcceptanceContract", () => {
 
   it("refuses while implementation reservations are active", () => {
     expect(refusal(populated({ executing_tasks: ["T3"] }))).toMatchObject({ kind: "implementation-active" });
+  });
+
+  it("refuses while a current-Wave Task holds an active implementation attempt, through the precondition Task Reopening shares", () => {
+    const authority = labelledValue("implementation attempt", createImplementationAttemptAuthority({
+      taskId: "T3", wave: 2, semanticAttempt: 1, reservationId: "revision-T3", headSha: "a".repeat(40),
+      reservedAt: "2026-10-25T00:00:00.000Z", taskScopeBaseline: [], dirtySetBaseline: [],
+    }));
+    // A parsed graph also names such a Task in executing_tasks; built unparsed,
+    // the attempt alone must still refuse.
+    const graph: TaskGraph = {
+      ...populated(),
+      tasks: populated().tasks.map((entry) => entry.id === "T3" ? { ...entry, active_implementation_attempt: authority } : entry),
+    };
+    expect(refusal(graph)).toEqual({
+      kind: "implementation-active",
+      message: "Contract Revision refused while implementation reservations are active: T3",
+    });
+  });
+
+  it("refuses an abandoned Wave Gate tombstone of another Wave as live", () => {
+    const graph = populated({
+      active_wave_gate: activeWaveGateFixture({
+        runId: "run.wave-1-abandoned", wave: 1, authorityDigest: "d".repeat(64), revision: 1,
+        terminalOutcome: { kind: "terminal-abandoned", reason: "stale", supersededBy: null },
+      }),
+    });
+    expect(refusal(graph)).toMatchObject({ kind: "live-wave-gate", message: expect.stringContaining("run.wave-1-abandoned owns Wave 1") });
   });
 
   it("refuses while a Wave Gate is live", () => {

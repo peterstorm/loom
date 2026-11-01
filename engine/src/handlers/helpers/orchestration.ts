@@ -27,6 +27,8 @@
  *   helper orchestration remediate --task <task-id> --receipt <terminal escalation receipt id>
  *                               --reason <text>
  *   helper orchestration attest --task <task-id> --reason <text>
+ *   helper orchestration reopen-task --wave <N> --task <task-id> [--task <task-id>]...
+ *                               --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -196,6 +198,7 @@ import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
 import { parseOrchestrationOperation } from "./orchestration-operations";
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
+import { reopenTaskOperation } from "./reopen-task";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
 import { argumentValue, argumentValues, hasFlag, unconsumedValueArguments } from "./cli-args";
@@ -245,6 +248,8 @@ function usage(): HookResult {
   "          (retires the exact terminal implementation escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
   "  attest   --task <task-id> --reason <text>",
   "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
+  "  reopen-task --wave <N> --task <task-id> [--task <task-id>]... --reason <text>",
+  "          (after abandoning the Wave's run: returns implemented Tasks of the active Wave to revalidation so status owes each a fresh dispatch; Findings stay as prior Findings, other Tasks stay implemented; audited and idempotent)",
     ].join("\n"),
   };
 }
@@ -1825,6 +1830,8 @@ export function orchestrationHandler(emission: () => Emission): HookHandler {
         return remediateOperation(rest);
       case "attest":
         return attestOperation(rest);
+      case "reopen-task":
+        return reopenTaskOperation(rest);
     }
   };
 }

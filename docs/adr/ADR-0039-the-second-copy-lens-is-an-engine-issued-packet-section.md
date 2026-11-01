@@ -3,7 +3,10 @@
 ## Status
 Accepted (2026-10-23). Shipped with the G5b owner-enforcement feature
 (`.claude/specs/2026-10-21-g5b-owner-enforcement/spec.md`, FR-022..FR-026, AS-022..AS-028, SC-005, OOS-009;
-plan `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-9).
+plan `.claude/plans/2026-10-21-g5b-owner-enforcement.md`, AD-9). Amended by ADR-0047 (2026-10-25): as shipped,
+the Wave review roster never issued `architecture-tech-lead`, so its half of the decision below was dead; the
+roster is now derived per Task and appends `architecture-tech-lead` whenever the Task's packets carry the owner
+map.
 
 ## Context
 G5a gives each owned Invariant one owner module, with sibling entry points that must call it and a matrix test
@@ -123,7 +126,9 @@ The section therefore appears only when all five plan conditions hold:
 - a stamped graph;
 - a non-empty touched set.
 
-**Receiving roles.** Only `code-reviewer` and `architecture-tech-lead` receive the section. These roles'
+**Receiving roles.** Only `code-reviewer` and `architecture-tech-lead` receive the section. Both are issued
+for an owner-mapped Task: its Wave review roster is the base five with `architecture-tech-lead` appended last,
+derived from the same owner-map presence (ADR-0047). These roles'
 packets carry nothing new:
 
 - `code-simplifier`
@@ -193,6 +198,8 @@ owner map (AS-027).
 - Standalone `/review-pr` has no second-copy lens. There is no TaskGraph and no repository-wide owner registry
   to issue one from.
 - Only two reviewer roles see the map. A second copy in a Task reviewed only by other roles is not prompted for.
+  (As first shipped only `code-reviewer` was actually issued; ADR-0047 makes `architecture-tech-lead` join the
+  roster of every owner-mapped Task.)
 - Any change to the stamp's rendered fields, or to `SECOND_COPY_RULE`, changes the digests of all affected
   packets. The rule text is effectively a versioned contract that has no version number of its own.
 - A stamped graph without `plan_file` now makes Wave review issuance fail rather than degrade. This is deliberate,

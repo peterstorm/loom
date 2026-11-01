@@ -53,7 +53,11 @@ Execute only the one typed action returned by `start`, `resume`, or `decide`:
   the semantic batch in one message. Pi's native subagent transport accepts at
   most eight requests per call, so partition larger batches into ordered
   chunks of at most eight without changing, dropping, or duplicating any
-  request; resume only after every chunk finishes.
+  request; resume only after every chunk finishes. The initial Wave review
+  batch is one spec-check request plus each Task's reviewer roster: five
+  reviewers, or six for a Task touching an owned Invariant's family
+  (`architecture-tech-lead` appended to carry the owner map, ADR-0047). Never
+  infer the count; spawn exactly the requests returned.
 - `await-user`: present the advisory findings the request references exactly as
   supplied, and ask the operator whether to approve them. The only decision a
   Wave Gate accepts is approval (below).
@@ -81,21 +85,61 @@ JSON
 
 The decision must be exactly `{"kind":"approve"}`; any other object is refused
 and nothing is recorded. Approval lets the gate continue past its advisories to
-lint and completion. To act on an advisory instead, do not decide: `abandon` the
-run with a reason, re-dispatch the affected Task to fix it, and start a fresh
-Wave Gate.
+lint and completion. To act on an advisory (or a surviving critical) instead, do
+not decide: follow [Acting on a Finding](#acting-on-a-finding).
 
 At a contract Wave's pause, read `helper orchestration status` before deciding.
 An `acceptance-freeze-pending` reason names every advisory on a file this
-gate's Acceptance Freeze stamps when it completes. Approving freezes those files
-as they are, and changing them afterwards needs a Contract Revision. So present
-those advisories first, and fix the relevant ones by re-dispatching the contract
-Task before approving.
+gate's Acceptance Freeze stamps when it completes. Receipt installation does not
+freeze anything, and neither does abandoning the run. Approving freezes those
+files as they are, and changing them afterwards needs a Contract Revision. So
+present those advisories first, and fix the relevant ones before approving by
+reopening the contract Task through [Acting on a Finding](#acting-on-a-finding).
 
 Resume is idempotent. Pi and Claude persist exact native-id/request bindings and
 raw final bytes directly into engine-declared slots. Never write transcripts,
 build manifests, select models, tally findings, mutate the protected State File,
 or stage deterministic operation output in the parent.
+
+## Acting on a Finding
+
+The one procedure for fixing a Wave Gate Finding (a relevant advisory at the
+pause, or a critical that blocks the Wave) without discarding the Wave's
+settled evidence. `/loom` points here; this is the only place it is spelled out.
+
+```bash
+# 1. Abandon the run, naming no successor.
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration abandon \
+  --runs-root "<exact-active_wave_gate.runsRoot>" \
+  --run "<exact-active_wave_gate.runId>" \
+  --reason "<why: the Finding to fix>"
+
+# 2. Reopen each affected implemented Task of the active Wave.
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration reopen-task \
+  --wave <N> --task <task-id> [--task <task-id>]... \
+  --reason "<the Finding to fix>"
+
+# 3. Dispatch each reopened Task from its brief, carrying the Finding.
+bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration brief \
+  --task <task-id> --note "<the Finding to fix>"
+```
+
+4. Once every reopened Task settles, start a fresh Wave Gate with `start
+   wave-gate` and a fresh run id (above).
+
+Reopening returns each named Task to revalidation, so status owes it a fresh
+dispatch (an `implemented` Task gets no brief, and the spawn gate refuses it).
+Its Findings stay as prior Findings for the next Review Run, the abandoned
+run's review and suite authority is retired, and the Wave's other Tasks stay
+`implemented`. The fix subagent spawns from that brief and can Edit/Write; the
+orchestrator cannot. Never use `populate-task-graph --force`, which resets
+every Task.
+
+`reopen-task` refuses outside the execute Phase, while a Wave Gate run is live,
+while any implementation reservation, attempt or subagent is active, for a Wave
+other than the active one or one that already completed, when the abandoned run
+names a successor, and for any Task that is not `implemented` in the active
+Wave. Repeating the same command after it succeeds changes nothing.
 
 ## Reviewer evidence
 

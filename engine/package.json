@@ -19,12 +19,12 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "fast-check": "^4.5.3",
-    "ts-pattern": "^5.9.0",
     "vitest": "^3.0.0"
   },
   "dependencies": {
     "jsonc-parser": "3.3.1",
     "saxes": "6.0.0",
+    "ts-pattern": "^5.9.0",
     "typescript": "^5.9.0",
     "zod": "4.3.6"
   }

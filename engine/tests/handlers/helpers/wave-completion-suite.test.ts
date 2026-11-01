@@ -24,9 +24,19 @@ import {
 } from "../../../src/core/verification-manifest";
 import {
   ensureWaveCompletionSuite,
+  observeCompletionFrozenPaths,
   observeCurrentWaveWorkspace,
+  observeWaveCompletionWorkspace,
   type RunCompletionCheck,
 } from "../../../src/handlers/helpers/wave-completion-suite";
+import { capturedSpecCheck } from "../../../src/core/spec-check";
+import { deriveLoomStatusFromParsedGraph } from "../../../src/core/loom-status";
+import type { GateDeps } from "../../../src/core/wave-gate-checks";
+import { commitWaveGateCompletion, deriveWaveReadiness } from "../../../src/core/wave-gate-machine";
+import { installWaveGateRegistration } from "../../../src/core/wave-gate-registration";
+import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
+import { findingId } from "../../fixtures/finding-id";
+import { parseTaskReopeningArgs, reopenImplementedTasks } from "../../../src/core/task-reopening";
 import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { StateManager } from "../../../src/state-manager";
@@ -332,6 +342,107 @@ async function ensure(f: Fixture) {
     graph: f.manager.load(),
     registration: f.registration,
   });
+}
+
+const GATE_DEPS: GateDeps = {
+  loadPlanModels: () => ({
+    kind: "loaded",
+    models: { lifecycles: [], pipeline: null, invariants: [], contracts: [], strays: [] },
+  }),
+  filePresence: () => ({ ok: true, exists: true }),
+};
+
+const advisoryOn = (file: string) => ({
+  id: findingId("comment-analyzer-1"),
+  agent: "comment-analyzer",
+  severity: "advisory" as const,
+  file,
+  line: 1,
+  claim: "the acceptance assertion names the wrong value",
+});
+
+/** The installed graph carried to the advisory pause: the gated Wave's Tasks
+ *  reviewed with `findings`, and its spec-check passed. */
+function atAdvisoryPause(graph: TaskGraph, findings: readonly ReturnType<typeof advisoryOn>[]): TaskGraph {
+  const wave = graph.current_wave!;
+  return {
+    ...graph,
+    tasks: graph.tasks.map((task) => task.wave !== wave ? task : {
+      ...task,
+      test_result: { verdict: "trusted-pass" as const },
+      test_evidence: "vitest: Tests 5 passed",
+      new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
+      review_status: "passed" as const,
+      findings,
+      critical_findings: [],
+      advisory_findings: findings.map(({ claim }) => claim),
+    }),
+    spec_check: capturedSpecCheck({ wave, runAt: "now", criticalFindings: [] }),
+  };
+}
+
+type CompletionObservations = Pick<GateDeps, "currentFrozenPaths" | "currentWaveWorkspace">;
+
+/**
+ * Commit the installed gate's completion as the Wave Gate program does under
+ * its lock: derive readiness from the ordered observations (frozen paths, then
+ * workspace) — the program's own unless `observed` replaces some — then
+ * commit. Returns the committed graph; throws on refusal.
+ */
+function commitCompletion(f: Fixture, observed: Partial<CompletionObservations> = {}): TaskGraph {
+  const paused = atAdvisoryPause(f.manager.load(), []);
+  const readiness = deriveWaveReadiness(paused, {
+    ...GATE_DEPS,
+    ...observeWaveCompletionWorkspace(paused, f.handle.runDirectory),
+    ...observed,
+  });
+  if (!readiness.ok) throw new Error(readiness.error.reasons.map(({ message }) => message).join("; "));
+  const committed = commitWaveGateCompletion(readiness.value);
+  if (!committed.ok) throw new Error(committed.error.message);
+  return committed.value.graph;
+}
+
+/** Abandon the fixture's run naming no successor, as `orchestration abandon` does. */
+async function abandonRun(f: Fixture): Promise<void> {
+  const abandoned = await f.manager.abandonActiveWaveGateRegistration({
+    runsRoot: f.manager.load().active_wave_gate!.runsRoot!,
+    runId: f.handle.runId as ActiveWaveGateRegistration["runId"],
+    reason: "fix the advisory first",
+    supersededBy: null,
+  });
+  if (abandoned.kind !== "stamped") throw new Error(`fixture run not abandoned: ${abandoned.kind}`);
+}
+
+/** Install a fresh run's registration for the fixture's Wave, over an abandoned
+ *  tombstone or none, exactly as `start wave-gate` does. */
+async function registerSuccessor(f: Fixture): Promise<Fixture> {
+  const runsRoot = join(f.root, ".claude/reviews/wave-gate-runs");
+  const wave = f.registration.input.wave!;
+  const runId = "run.wave-suite-successor" as ActiveWaveGateRegistration["runId"];
+  const created = createRunDirectory(runsRoot, runId);
+  if (!created.ok) throw new Error(created.error.message);
+  const taskIds = f.registration.taskIds;
+  let authorityDigest = "";
+  await f.manager.update((locked) => {
+    authorityDigest = waveGateAuthorityDigest(wave, taskIds, locked);
+    const installed = installWaveGateRegistration(locked, {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId,
+      wave,
+      authorityDigest: authorityDigest as ActiveWaveGateRegistration["authorityDigest"],
+      revision: 0,
+      runsRoot,
+      terminalOutcome: null,
+    }, taskIds);
+    if (installed.kind !== "installed") throw new Error(`successor not installed: ${JSON.stringify(installed)}`);
+    return installed.state;
+  });
+  return {
+    ...f,
+    handle: created.value,
+    registration: Object.freeze({ ...f.registration, authorityDigest }),
+  };
 }
 
 function reportCount(root: string): number {
@@ -782,14 +893,118 @@ describe("modern Wave completion suite shell", () => {
     const completionOutcome = (graph: TaskGraph) =>
       graph.active_wave_completion_suite?.checks.find(({ checkId }) => checkId === "project:completion")?.outcome;
 
-    it("accepts the contract Wave's expected RED and stamps the Acceptance Freeze with the receipt", async () => {
+    it("accepts the contract Wave's expected RED, installing only the receipt; completion stamps the Acceptance Freeze", async () => {
       const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
       const result = await ensure(f);
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
       const graph = f.manager.load();
       expect(completionOutcome(graph)).toMatchObject({ exitCode: 1 });
-      expect(graph.acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
+      expect(graph.acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
       expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
+      expect(commitCompletion(f).acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
+    });
+
+    it("completes a contract Wave an older engine already froze at receipt installation without re-stamping it", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      await f.manager.update((locked) => ({
+        ...locked,
+        acceptance_contracts: locked.acceptance_contracts?.map((entry) => ({ ...entry, freeze: contractFreeze("claimant-wave") })),
+      }));
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
+      expect(commitCompletion(f).acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
+    });
+
+    it("refuses completion when the frozen paths cannot be observed to stamp", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      expect(() => commitCompletion(f, { currentFrozenPaths: new Map() })).toThrow(
+        `Acceptance Freeze refused: CT-1: frozen paths could not be read to stamp the freeze: '${ACCEPTANCE_FILE}' (not observed)`,
+      );
+    });
+
+    it("refuses completion when the frozen paths' repository cannot be resolved", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const outside = canonicalTempDir("loom-wave-suite-freeze-no-git-");
+      roots.push(outside);
+      const unresolved = observeCompletionFrozenPaths(f.manager.load(), outside);
+      expect([...unresolved.entries()]).toEqual([[ACCEPTANCE_FILE, {
+        kind: "unreadable",
+        reason: expect.stringContaining("repository authority is unavailable: Git resolve-root failed"),
+      }]]);
+      expect(() => commitCompletion(f, { currentFrozenPaths: unresolved })).toThrow(
+        `Acceptance Freeze refused: CT-1: frozen paths could not be read to stamp the freeze: '${ACCEPTANCE_FILE}' ` +
+        "(repository authority is unavailable: Git resolve-root failed",
+      );
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("fails readiness, freezing nothing, when a frozen file changes after its observation and before the workspace's", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const frozenFirst = observeCompletionFrozenPaths(f.manager.load(), f.handle.runDirectory);
+      write(f.root, ACCEPTANCE_FILE, `${ACCEPTANCE_SOURCE}// changed between the two reads\n`);
+      const workspaceAfter = observeCurrentWaveWorkspace(f.manager.load(), f.handle.runDirectory);
+      expect(() => commitCompletion(f, { currentFrozenPaths: frozenFirst, currentWaveWorkspace: workspaceAfter }))
+        .toThrow("accepted Wave completion suite is stale");
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+    });
+
+    it("stamps the bytes the receipt judged when a frozen file changes after both ordered observations", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const observed = observeWaveCompletionWorkspace(f.manager.load(), f.handle.runDirectory);
+      write(f.root, ACCEPTANCE_FILE, `${ACCEPTANCE_SOURCE}// changed after both reads\n`);
+      expect(commitCompletion(f, observed).acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("claimant-wave"));
+    });
+
+    it("names an advisory on the contract's acceptance file at the advisory pause, because nothing is frozen yet", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      const paused = atAdvisoryPause(f.manager.load(), [advisoryOn(ACCEPTANCE_FILE)]);
+      const status = deriveLoomStatusFromParsedGraph(
+        { ok: true, value: paused },
+        { ...GATE_DEPS, currentWaveWorkspace: observeCurrentWaveWorkspace(paused, f.root) },
+        null,
+        { kind: "present", runId: f.handle.runId, path: f.handle.runDirectory, advisoryApproval: { kind: "not-approved" } },
+      );
+      expect(status.next.action.kind, JSON.stringify(status.next)).toBe("await-user");
+      expect(status.facts.waveCompletionSuiteReadiness).toMatchObject({ kind: "known", value: { kind: "accepted" } });
+      expect(status.next.reasons).toContainEqual(expect.objectContaining({
+        kind: "acceptance-freeze-pending",
+        message: expect.stringContaining(`comment-analyzer-1 (T1, CT-1: ${ACCEPTANCE_FILE})`),
+      }));
+    });
+
+    it("leaves an abandoned contract Wave unfrozen, so the reopened contract Task's fix gates and freezes with no drift", async () => {
+      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "installed" } });
+      await abandonRun(f);
+      const settled = f.manager.load().tasks.find(({ id }) => id === "T1")!;
+      const reopen = parseTaskReopeningArgs(["--wave", "1", "--task", "T1", "--reason", "comment-analyzer-1: fix the assertion"]);
+      if (!reopen.ok) throw new Error(reopen.error);
+      await f.manager.update((locked) => {
+        const reopened = reopenImplementedTasks(locked, reopen.value);
+        if (!reopened.ok || reopened.value.kind !== "reopened") throw new Error(`T1 not reopened: ${JSON.stringify(reopened)}`);
+        return reopened.value.graph;
+      });
+      const reopenedGraph = f.manager.load();
+      expect(reopenedGraph.tasks.find(({ id }) => id === "T1")).toMatchObject({ status: "pending", revalidation_required: true });
+      expect(reopenedGraph.acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+
+      // The re-dispatched contract Task fixes the acceptance file and settles again.
+      const fixedSource = `${ACCEPTANCE_SOURCE}// fixed after the advisory\n`;
+      write(f.root, ACCEPTANCE_FILE, fixedSource);
+      await f.manager.update((locked) => ({ ...locked, tasks: locked.tasks.map((entry) => entry.id === "T1" ? settled : entry) }));
+      const successor = await registerSuccessor(f);
+      const result = await ensure(successor);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({ state: "awaiting-red" });
+      expect(commitCompletion(successor).acceptance_contracts?.[0]?.freeze).toEqual({
+        ...contractFreeze("claimant-wave"),
+        paths: [{ path: ACCEPTANCE_FILE, sha256: contentDigest(fixedSource) }],
+      });
     });
 
     it("blocks a contract Wave whose acceptance already passes, naming the testcase", async () => {
@@ -830,17 +1045,18 @@ describe("modern Wave completion suite shell", () => {
       expect(f.manager.load().active_wave_completion_suite).toBeUndefined();
     });
 
-    it("re-records the roster green at the first gate after a Contract Revision, freezing the revised bytes", async () => {
+    it("re-records the roster green at the first gate after a Contract Revision, freezing the revised bytes on completion", async () => {
       const f = contractFixture("junit:AS-001=pass,AS-002=fail", "after-revision");
       const result = await ensure(f);
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, value: { kind: "accepted", disposition: "installed" } });
-      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual({
+      expect(f.manager.load().acceptance_contracts?.[0]?.freeze).toEqual(contractFreeze("after-revision"));
+      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
+      expect(commitCompletion(f).acceptance_contracts?.[0]?.freeze).toEqual({
         state: "frozen",
         wave: 2,
         paths: [{ path: ACCEPTANCE_FILE, sha256: ACCEPTANCE_DIGEST }],
         roster: [rosterEntry("AS-001"), rosterEntry("AS-002")],
       });
-      expect(await ensure(f)).toMatchObject({ ok: true, value: { disposition: "reused" } });
     });
 
     it("refuses to install when the protected contracts change while the checks run", async () => {
@@ -875,7 +1091,7 @@ describe("modern Wave completion suite shell", () => {
     });
 
     it("blocks with artifact drift once a frozen acceptance file changes outside any Task", async () => {
-      const f = contractFixture("junit:AS-001=fail,AS-002=fail", "contract-wave");
+      const f = contractFixture("junit:AS-001=pass,AS-002=fail", "claimant-wave");
       expect(await ensure(f)).toMatchObject({ ok: true });
       write(f.root, ACCEPTANCE_FILE, "it.skip('AS-001: decides AS-001', () => {});\n");
       expect(await ensure(f)).toMatchObject({

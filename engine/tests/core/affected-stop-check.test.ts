@@ -2,7 +2,9 @@
  * Unit and property tests for the affected stop check's pure core (AD-10):
  * - `judgeAffectedRun` names every failing affected testcase with its file
  *   and name, collection errors included, and passes a zero-test report with
- *   a note (AS-023);
+ *   a note (AS-023). A failure the Wave Gate excuses as expected RED (the
+ *   contract Wave, or a pending anchor after it) never blocks but is named; a
+ *   property pins that the two agree testcase by testcase (CT-2 amendment A1);
  * - `stopCheckBlockDecision` is the whole block-counter transition rule for
  *   both checks: 0 → 1 → 2 → 3, then the cap fails open; an unreadable count
  *   fails open; each check has its own cap (AS-029); a proceeding stop clears
@@ -18,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACCEPTANCE_BLOCK_HEADING,
   AFFECTED_BLOCK_HEADING,
+  AFFECTED_EXCUSED_HEADING,
   AFFECTED_NOTE_TEXT,
   AFFECTED_STOP_CHECK_MAX_BLOCKS,
   STOP_CHECK_NAMES,
@@ -35,8 +38,18 @@ import {
   type StopCheckBlockCaps,
   type StopCheckFailures,
 } from "../../src/core/affected-stop-check";
+import {
+  emptyAcceptanceExpectation,
+  graphAcceptanceExpectation,
+  judgeAcceptance,
+  observeAcceptanceFacts,
+  type AcceptanceContract,
+  type AcceptanceExpectation,
+} from "../../src/core/acceptance-contract";
 import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { parseJunitTestcases, type JunitTestcasesResult } from "../../src/core/structured-test-report";
+import { digest } from "../fixtures/acceptance-fixtures";
+import { contract, frozenPaths, surface, task } from "../fixtures/contract-status-fixtures";
 
 type Case = Readonly<{ file: string; name: string; outcome: "passed" | "failed" | "skipped" }>;
 
@@ -49,6 +62,38 @@ const junit = (cases: readonly Case[]): JunitTestcasesResult => parseJunitTestca
     "</testcase>").join("") +
   "</testsuite></testsuites>"));
 
+/** A gate that owes no contract anything: every failure blocks. */
+const NO_CONTRACTS = emptyAcceptanceExpectation(1);
+
+// CT-1 is written by T1 in Wave 1; T2 completes AS-001 in Wave 2 and T3
+// completes AS-002 in Wave 3.
+const SURFACE = surface("payload");
+const AS_001 = "payload > AS-001: one valid call wins";
+const AS_002 = "payload > AS-002: a refused call never supplies bytes";
+const TASKS = [
+  task("T1", 1, [SURFACE.types, SURFACE.acceptance]),
+  task("T2", 2, ["src/payload.ts"], ["AS-001"]),
+  task("T3", 3, ["src/payload-refusal.ts"], ["AS-002"]),
+];
+const CONTRACT = { id: "CT-1", surface: SURFACE, anchors: ["AS-001", "AS-002"] } as const;
+const AWAITING_RED = contract({ ...CONTRACT, freeze: { state: "awaiting-red" } });
+const FROZEN = contract({
+  ...CONTRACT,
+  freeze: {
+    state: "frozen",
+    wave: 1,
+    paths: frozenPaths(SURFACE, "a"),
+    roster: [
+      { file: SURFACE.acceptance, name: AS_001, anchors: ["AS-001"] },
+      { file: SURFACE.acceptance, name: AS_002, anchors: ["AS-002"] },
+    ],
+  },
+});
+const graphExpectation = (frozen: AcceptanceContract, wave: number): AcceptanceExpectation =>
+  graphAcceptanceExpectation({ acceptance_contracts: [frozen], tasks: TASKS }, wave);
+const acceptanceCase = (name: string, outcome: Case["outcome"]): Case => ({ file: SURFACE.acceptance, name, outcome });
+const REPORT = digest("e");
+
 const CAP = AFFECTED_STOP_CHECK_MAX_BLOCKS;
 /** Both checks at the production cap of 3. The acceptance constant lives in
  *  the acceptance shell, which this pure core's tests do not import. */
@@ -58,21 +103,21 @@ const unreadable = (reason: string): StopCheckBlockCount => ({ kind: "unreadable
 
 describe("judgeAffectedRun", () => {
   it("is unobservable when the report could not be parsed, naming why", () => {
-    const verdict = judgeAffectedRun(parseJunitTestcases(new TextEncoder().encode("not a report")));
+    const verdict = judgeAffectedRun(parseJunitTestcases(new TextEncoder().encode("not a report")), NO_CONTRACTS);
 
     expect(verdict.kind).toBe("unobservable");
     if (verdict.kind === "unobservable") expect(verdict.reason).toMatch(/report could not be read: .+/);
   });
 
   it("AS-023: passes a report with zero testcases as zero-tests", () => {
-    expect(judgeAffectedRun(junit([]))).toEqual({ kind: "passed", observed: "zero-tests" });
+    expect(judgeAffectedRun(junit([]), NO_CONTRACTS)).toEqual({ kind: "passed", observed: "zero-tests" });
   });
 
   it("passes when every testcase passed or was skipped", () => {
     expect(judgeAffectedRun(junit([
       { file: "src/a.test.ts", name: "a > works", outcome: "passed" },
       { file: "src/b.test.ts", name: "b > todo", outcome: "skipped" },
-    ]))).toEqual({ kind: "passed", observed: "some-tests" });
+    ]), NO_CONTRACTS)).toEqual({ kind: "passed", observed: "some-tests" });
   });
 
   it("names every failing testcase with its reported file and name, in report order, and a file that failed to collect", () => {
@@ -81,13 +126,108 @@ describe("judgeAffectedRun", () => {
       { file: "src/ledger.test.ts", name: "ledger > opens", outcome: "passed" },
       { file: "src/audit.test.ts", name: "src/audit.test.ts", outcome: "failed" },
       { file: "src/x.test.ts", name: "x > todo", outcome: "skipped" },
-    ]))).toEqual({
+    ]), NO_CONTRACTS)).toEqual({
       kind: "failing",
       testcases: [
         { file: "src/ledger.test.ts", name: "ledger > balances", outcome: "failed" },
         { file: "src/audit.test.ts", name: "src/audit.test.ts", outcome: "collection-error" },
       ],
+      excused: [],
     });
+  });
+});
+
+describe("judgeAffectedRun: expected-RED acceptance failures (the Wave Gate's rule)", () => {
+  const red = (wave: number) => graphExpectation(AWAITING_RED, wave);
+  const green = (wave: number) => graphExpectation(FROZEN, wave);
+
+  it("excuses every acceptance testcase failing in the contract Wave, and names them", () => {
+    expect(judgeAffectedRun(junit([
+      acceptanceCase(AS_001, "failed"),
+      acceptanceCase(AS_002, "failed"),
+      { file: "src/ledger.test.ts", name: "ledger > balances", outcome: "passed" },
+    ]), red(1))).toEqual({
+      kind: "excused",
+      excused: [{ file: SURFACE.acceptance, name: AS_001 }, { file: SURFACE.acceptance, name: AS_002 }],
+    });
+  });
+
+  it("after the contract Wave, excuses a pending testcase and blocks a due one", () => {
+    // Wave 2 completes AS-001 (due); AS-002 completes in Wave 3 (pending).
+    const verdict = judgeAffectedRun(junit([acceptanceCase(AS_001, "failed"), acceptanceCase(AS_002, "failed")]), green(2));
+
+    expect(verdict).toEqual({
+      kind: "failing",
+      testcases: [{ file: SURFACE.acceptance, name: AS_001, outcome: "failed" }],
+      excused: [{ file: SURFACE.acceptance, name: AS_002 }],
+    });
+    expect(judgeAffectedRun(junit([acceptanceCase(AS_002, "failed")]), green(2)).kind).toBe("excused");
+    expect(judgeAffectedRun(junit([acceptanceCase(AS_002, "failed")]), green(3)).kind).toBe("failing");
+  });
+
+  it("names blocking and excused acceptance failures by the same declared path, not the runner-relative classname", () => {
+    const cwdRelative = (name: string): Case => ({ file: "payload.acceptance.test.ts", name, outcome: "failed" });
+    expect(judgeAffectedRun(junit([cwdRelative(AS_001), cwdRelative(AS_002)]), green(2))).toEqual({
+      kind: "failing",
+      testcases: [{ file: SURFACE.acceptance, name: AS_001, outcome: "failed" }],
+      excused: [{ file: SURFACE.acceptance, name: AS_002 }],
+    });
+  });
+
+  it("blocks an acceptance file that failed to collect, even in the contract Wave", () => {
+    expect(judgeAffectedRun(junit([acceptanceCase(SURFACE.acceptance, "failed")]), red(1))).toEqual({
+      kind: "failing",
+      testcases: [{ file: SURFACE.acceptance, name: SURFACE.acceptance, outcome: "collection-error" }],
+      excused: [],
+    });
+  });
+
+  it("blocks a failure outside the acceptance files, naming the excused ones beside it", () => {
+    expect(judgeAffectedRun(junit([
+      acceptanceCase(AS_001, "failed"),
+      { file: "src/ledger.test.ts", name: "ledger > balances", outcome: "failed" },
+    ]), red(1))).toEqual({
+      kind: "failing",
+      testcases: [{ file: "src/ledger.test.ts", name: "ledger > balances", outcome: "failed" }],
+      excused: [{ file: SURFACE.acceptance, name: AS_001 }],
+    });
+  });
+
+  it("fails closed for a contract whose RED was never observed: nothing is frozen to excuse", () => {
+    expect(judgeAffectedRun(junit([acceptanceCase(AS_002, "failed")]), red(2))).toEqual({
+      kind: "failing",
+      testcases: [{ file: SURFACE.acceptance, name: AS_002, outcome: "failed" }],
+      excused: [],
+    });
+  });
+
+  it("excuses nothing before the contract Wave", () => {
+    const before = graphExpectation(contract({ ...CONTRACT, contractTask: "T2", freeze: { state: "awaiting-red" } }), 1);
+    expect(judgeAffectedRun(junit([acceptanceCase(AS_002, "failed")]), before).kind).toBe("failing");
+  });
+
+  it("property: a failure is excused exactly when the Wave Gate would excuse a check failing it alone, and nothing is dropped", () => {
+    const anyCase = fc.record({
+      file: fc.constantFrom(SURFACE.acceptance, "src/ledger.test.ts"),
+      name: fc.constantFrom(AS_001, AS_002, "payload > unanchored", SURFACE.acceptance, "src/ledger.test.ts"),
+      outcome: fc.constantFrom("passed", "failed", "skipped") as fc.Arbitrary<Case["outcome"]>,
+    });
+    fc.assert(fc.property(
+      fc.constantFrom(AWAITING_RED, FROZEN),
+      fc.integer({ min: 1, max: 4 }),
+      fc.array(anyCase, { minLength: 1, maxLength: 6 }),
+      (frozen, wave, cases) => {
+        const expectation = graphExpectation(frozen, wave);
+        const verdict = judgeAffectedRun(junit(cases), expectation);
+        const gateExcuses = (testcase: Case): boolean =>
+          judgeAcceptance(expectation, [observeAcceptanceFacts(expectation, "verify", REPORT, junit([testcase]))]).excusedCheckIds.length > 0;
+        const failed = cases.filter(({ outcome }) => outcome === "failed");
+        const excused = verdict.kind === "excused" || verdict.kind === "failing" ? verdict.excused : [];
+        const blocking = verdict.kind === "failing" ? verdict.testcases : [];
+        expect(blocking.length + excused.length).toBe(failed.length);
+        expect(excused.map(({ name }) => name)).toEqual(failed.filter(gateExcuses).map(({ name }) => name));
+      },
+    ));
   });
 });
 
@@ -257,7 +397,7 @@ describe("renderAffectedBlock", () => {
   ];
 
   it("names each failing test with its file, attributing a runner-cwd path to the changed repository file", () => {
-    const message = renderAffectedBlock(failing, { declared: ["engine/tests/ledger.test.ts", "engine/src/ledger.ts"], repositoryRoot: "/work/repo" }, "", 2);
+    const message = renderAffectedBlock(failing, [], { declared: ["engine/tests/ledger.test.ts", "engine/src/ledger.ts"], repositoryRoot: "/work/repo" }, "", 2);
 
     expect(message).toContain("- 'ledger > balances' (engine/tests/ledger.test.ts) — failed");
     // A file no declared path matches keeps the identity the report gave.
@@ -269,6 +409,7 @@ describe("renderAffectedBlock", () => {
   it("attributes an absolute reported path inside the repository", () => {
     const message = renderAffectedBlock(
       [{ file: "/work/repo/src/a.test.ts", name: "a > works", outcome: "failed" }],
+      [],
       { declared: ["src/a.test.ts"], repositoryRoot: "/work/repo" },
       "",
       0,
@@ -277,8 +418,16 @@ describe("renderAffectedBlock", () => {
     expect(message).toContain("- 'a > works' (src/a.test.ts) — failed");
   });
 
+  it("lists expected-RED acceptance failures as not blocking, after the failures that block", () => {
+    const message = renderAffectedBlock(failing, [{ file: SURFACE.acceptance, name: AS_002 }], { declared: [], repositoryRoot: null }, "", 1);
+
+    expect(message.indexOf(AFFECTED_EXCUSED_HEADING)).toBeGreaterThan(message.indexOf("ledger > balances"));
+    expect(message).toContain(`${AFFECTED_EXCUSED_HEADING}\n- '${AS_002}' (${SURFACE.acceptance})`);
+    expect(renderAffectedBlock(failing, [], { declared: [], repositoryRoot: null }, "", 1)).not.toContain(AFFECTED_EXCUSED_HEADING);
+  });
+
   it("appends the runner output tail when there is one", () => {
-    const message = renderAffectedBlock(failing, { declared: [], repositoryRoot: null }, "FAIL tests/ledger.test.ts\n", 1);
+    const message = renderAffectedBlock(failing, [], { declared: [], repositoryRoot: null }, "FAIL tests/ledger.test.ts\n", 1);
 
     expect(message).toContain("Runner output (tail):\nFAIL tests/ledger.test.ts");
     expect(message.endsWith("\n")).toBe(false);

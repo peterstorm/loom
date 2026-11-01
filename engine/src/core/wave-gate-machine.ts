@@ -29,6 +29,8 @@ import type {
   WaveCompletionResultObservation,
   WaveWorkspaceObservation,
 } from "../types";
+import { stampAcceptanceFreezes, type AcceptanceContract, type FrozenPathObservations } from "./acceptance-contract";
+import type { AcceptedWaveCompletionReceipt } from "./completion-suite";
 import { sha256Hex } from "./digest";
 import {
   canonicalRecord,
@@ -470,8 +472,15 @@ export type WaveReadinessSnapshot = Readonly<{
   lifecycleCheckpointDigest: ArtifactDigest | null;
   currentWaveWorkspaceObservation: WaveWorkspaceObservation | null;
   currentWaveCompletionResultObservation: WaveCompletionResultObservation | null;
+  /** The frozen paths as the shell observed them before the workspace
+   * (`GateDeps.currentFrozenPaths`, empty when not supplied). Only the
+   * completion commit reads them, to stamp the Acceptance Freeze; they are
+   * not readiness authority, so the readiness digest does not cover them. */
+  currentFrozenPathObservations: FrozenPathObservations;
   reasons: NonEmpty<StatusReason>;
 }>;
+
+const NO_FROZEN_PATH_OBSERVATIONS: FrozenPathObservations = new Map();
 
 const waveNextActionProofs = new WeakSet<object>();
 
@@ -739,6 +748,7 @@ export function deriveWaveReadiness(
     lifecycleCheckpointDigest: lifecycleProof?.lifecycleCheckpoint.checkpointDigest ?? null,
     currentWaveWorkspaceObservation: workspaceObservation,
     currentWaveCompletionResultObservation: completionResultObservation,
+    currentFrozenPathObservations: deps.currentFrozenPaths ?? NO_FROZEN_PATH_OBSERVATIONS,
     reasons: readinessReasons(graph, wave, decision, reviews, panel, tests, eligibility),
   });
   waveReadinessProofs.add(snapshot);
@@ -759,8 +769,31 @@ export type WaveCompletionCommitError = Readonly<{
 const commitFailure = (message: string): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> =>
   canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-completion-commit-rejected", message }) });
 
-/** Pure atomic payload: shell persists this graph and returns this receipt in
- * one StateManager transaction. No task/wave mutation is exposed separately. */
+/**
+ * The contracts with what the completing gate's accepted receipt observed
+ * stamped in: the contract Wave's Acceptance Freeze, or a revised roster
+ * re-recorded green. A receipt that judged no contract stamps nothing.
+ */
+function completionAcceptanceFreezes(
+  contracts: readonly AcceptanceContract[] | undefined,
+  receipt: AcceptedWaveCompletionReceipt | undefined,
+  frozenPaths: FrozenPathObservations,
+): DomainResult<readonly AcceptanceContract[] | undefined, string> {
+  if (contracts === undefined || receipt?.acceptance === undefined) return canonicalRecord({ ok: true, value: contracts });
+  return stampAcceptanceFreezes(contracts, receipt.acceptance.expectation, receipt.acceptance.facts, frozenPaths);
+}
+
+/**
+ * Pure atomic payload: shell persists this graph and returns this receipt in
+ * one StateManager transaction. No task/wave mutation is exposed separately.
+ *
+ * The Acceptance Freeze is stamped here, from the archived suite receipt and
+ * the frozen paths the readiness snapshot carries (observed by the shell under
+ * the completion lock, before the workspace), so it lands only once the
+ * advisory decision is made and the Wave completes: an abandoned run freezes
+ * nothing. The receipt's workspace digest, re-proven by readiness, pins those
+ * bytes to the ones it judged.
+ */
 export function commitWaveGateCompletion(
   snapshot: WaveReadinessSnapshot,
 ): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> {
@@ -830,6 +863,12 @@ export function commitWaveGateCompletion(
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
     return commitFailure(`Wave Gate run ${completedRegistration.runId} is already terminal in history`);
   }
+  const contracts = completionAcceptanceFreezes(
+    advanced.acceptance_contracts,
+    activeCompletionSuite,
+    snapshot.currentFrozenPathObservations,
+  );
+  if (!contracts.ok) return commitFailure(`Acceptance Freeze refused: ${contracts.error}`);
   const {
     active_wave_gate: _retired,
     active_wave_completion_suite: _archivedCompletionSuite,
@@ -837,6 +876,7 @@ export function commitWaveGateCompletion(
   } = advanced;
   const graph: TaskGraph = {
     ...withoutActive,
+    ...(contracts.value === undefined ? {} : { acceptance_contracts: contracts.value }),
     wave_gate_history: Object.freeze([...priorHistory, completedRegistration]),
   };
   return canonicalRecord({

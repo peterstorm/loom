@@ -27,7 +27,7 @@ import { captureKey } from "../../../src/core/harness-capture";
 import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
-import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
+import { BASE_WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
@@ -1552,6 +1552,77 @@ describe("orchestration CLI", () => {
     expect(notOwed.stderr).toContain("Task T1 is not in the owed dispatches (T2)");
   });
 
+  it("reopens an implemented Task after an abandoned run, so status owes it a dispatch and brief renders it", async () => {
+    const root = project();
+    modelFreePlan(root);
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    const advisory = {
+      id: "comment-analyzer-1", agent: "comment-analyzer", severity: "advisory", file: "src/t1.ts", line: 3,
+      claim: "the comment contradicts the code",
+    };
+    writeFileSync(statePath, JSON.stringify(executeGraph({
+      tasks: [
+        { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [],
+          findings: [advisory], critical_findings: [], advisory_findings: [advisory.claim] },
+        { id: "T2", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
+      ],
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.abandoned", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 1, runsRoot: join(root, "runs"),
+        terminalOutcome: { kind: "terminal-abandoned", reason: "fix comment-analyzer-1 first", supersededBy: null },
+      },
+    })));
+    const owedTaskIds = async (): Promise<readonly string[]> => {
+      const status = await runCli(["status", "--json"], "", root);
+      expect(status.status, status.stderr).toBe(0);
+      const recovery = (JSON.parse(status.stdout) as {
+        next: { action: { diagnostic?: { recovery?: { kind: string; dispatches?: readonly { taskId: string }[] } } } };
+      }).next.action.diagnostic?.recovery;
+      return recovery?.kind === "spawn-wave-implementation" ? recovery.dispatches!.map(({ taskId }) => taskId) : [];
+    };
+
+    expect(await owedTaskIds()).toEqual([]);
+    const refusedBrief = await runCli(["brief", "--task", "T1"], "", root);
+    expect(refusedBrief.status).not.toBe(0);
+    expect(refusedBrief.stderr).toContain("canonical status owes no implementation dispatch");
+
+    const reopen = ["reopen-task", "--wave", "1", "--task", "T1", "--reason", "comment-analyzer-1: fix the comment"];
+    const reopened = await runCli(reopen, "", root);
+    expect(reopened.status, reopened.stderr).toBe(0);
+    expect(reopened.stdout).toContain("\"kind\": \"implemented-tasks-reopened\"");
+    expect(reopened.stdout).toContain("T1 reopened for re-implementation");
+
+    expect(await owedTaskIds()).toEqual(["T1"]);
+    const brief = await runCli(["brief", "--task", "T1", "--note", "fix comment-analyzer-1", "--prompt"], "", root);
+    expect(brief.status, brief.stderr).toBe(0);
+    const rendered = (JSON.parse(brief.stdout) as {
+      briefs: readonly { taskId: string; dispatch: { kind: string }; prompt: string }[];
+    }).briefs;
+    expect(rendered.map(({ taskId, dispatch }) => [taskId, dispatch.kind])).toEqual([["T1", "initial-implementation"]]);
+    expect(rendered[0]!.prompt).toContain("fix comment-analyzer-1");
+
+    const graph = JSON.parse(readFileSync(statePath, "utf8")) as {
+      tasks: readonly { id: string; status: string; findings?: readonly unknown[] }[];
+      active_wave_gate?: unknown;
+      task_reopening_history: readonly { reopenedTaskIds: readonly string[]; abandonedRunId: string | null }[];
+    };
+    expect(graph.tasks.map(({ id, status }) => [id, status])).toEqual([["T1", "pending"], ["T2", "implemented"]]);
+    expect(graph.tasks[0]!.findings).toEqual([advisory]);
+    expect(graph.active_wave_gate).toBeUndefined();
+    expect(graph.task_reopening_history).toEqual([expect.objectContaining({ reopenedTaskIds: ["T1"], abandonedRunId: "run.abandoned" })]);
+
+    const committedBytes = readFileSync(statePath, "utf8");
+    const replay = await runCli(reopen, "", root);
+    expect(replay.status, replay.stderr).toBe(0);
+    expect(replay.stdout).toContain("already reopened; nothing changed");
+    expect(readFileSync(statePath, "utf8")).toBe(committedBytes);
+
+    const notImplemented = await runCli(["reopen-task", "--wave", "1", "--task", "T1", "--reason", "another"], "", root);
+    expect(notImplemented.status).not.toBe(0);
+    expect(notImplemented.stderr).toContain("T1 is pending");
+    expect(readFileSync(statePath, "utf8")).toBe(committedBytes);
+  });
+
   it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
@@ -2222,7 +2293,7 @@ describe("orchestration CLI", () => {
     ]);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    for (const [index, request] of initial.requests.slice(1, 1 + WAVE_REVIEW_AGENTS.length).entries()) {
+    for (const [index, request] of initial.requests.slice(1, 1 + BASE_WAVE_REVIEW_AGENTS.length).entries()) {
       expect((await captureReviewedTranscript(opened.value, request.authority,
         [...Buffer.from(transcript(index === 0 ? "new finding from completed sibling packet" : null))])).ok).toBe(true);
     }
@@ -2767,7 +2838,7 @@ describe("orchestration CLI", () => {
     const initial = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
-    const rejected = initial.requests.find(({ authority }) => authority.role === WAVE_REVIEW_AGENTS[0])!.authority;
+    const rejected = initial.requests.find(({ authority }) => authority.role === BASE_WAVE_REVIEW_AGENTS[0])!.authority;
     await opened.value.appendEvent({
       schemaVersion: 1,
       sequence: 0,
@@ -2848,7 +2919,7 @@ describe("orchestration CLI", () => {
       requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(retries.kind).toBe("spawn-batch");
-    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+    expect(retries.requests).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length);
 
     const [exhausted, ...pending] = retries.requests;
     expect((await captureReviewedTranscript(opened.value, 
@@ -3053,7 +3124,7 @@ describe("orchestration CLI", () => {
     };
     expect(batch.kind).toBe("spawn-batch");
     expect(batch.runId).toBe("run.wave-orphan-replacement");
-    expect(batch.requests).toHaveLength(1 + WAVE_REVIEW_AGENTS.length);
+    expect(batch.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(batch.requests.every(({ authority }) =>
       authority.runId === "run.wave-orphan-replacement" && authority.attempt === 1)).toBe(true);
 
@@ -3144,7 +3215,7 @@ describe("orchestration CLI", () => {
       requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(retries.kind).toBe("spawn-batch");
-    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
+    expect(retries.requests).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length);
 
     // Simulate a pre-diagnostic-prompt run: attempt 2 persisted the exact
     // attempt-1 context under its new request identity. Restart compatibility
@@ -3282,7 +3353,7 @@ describe("orchestration CLI", () => {
     };
     expect(replacement.kind).toBe("spawn-batch");
     expect(replacement.runId).toBe("run.wave-replacement");
-    expect(replacement.requests).toHaveLength(1 + WAVE_REVIEW_AGENTS.length);
+    expect(replacement.requests).toHaveLength(1 + BASE_WAVE_REVIEW_AGENTS.length);
     expect(replacement.requests.every(({ authority }) => authority.runId === "run.wave-replacement" && authority.attempt === 1)).toBe(true);
 
     const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
@@ -3311,7 +3382,7 @@ describe("orchestration CLI", () => {
       kind: "wave-gate-retired",
       previousRunId: "run.wave-exhausted",
       replacementRunId: "run.wave-replacement",
-      exhaustedSlots: expect.arrayContaining(WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`)),
+      exhaustedSlots: expect.arrayContaining(BASE_WAVE_REVIEW_AGENTS.map((agent) => `T1/${agent}`)),
     });
 
     // Simulate a crash after protected authority/review-run installation and a
@@ -3397,7 +3468,7 @@ describe("orchestration CLI", () => {
     }
     const resumed = await resumeWaveFixture(root, runsRoot, previousRun);
     const retries = resumed as { requests: readonly { authority: AgentRequestAuthority }[] };
-    expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length - 1);
+    expect(retries.requests).toHaveLength(BASE_WAVE_REVIEW_AGENTS.length - 1);
     for (const { authority } of retries.requests) {
       await opened.value.appendEvent({
         schemaVersion: 1,
