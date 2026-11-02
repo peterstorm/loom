@@ -2,8 +2,9 @@
  * The canonical Loom status read model and its renderers.
  *
  * `deriveLoomStatusFromParsedGraph` is the one entry point: it routes a parsed
- * protected graph to exactly one status branch (non-execute, terminal,
- * implementation window, advisory decision, or the ordinary readiness path)
+ * protected graph to exactly one status branch (non-execute, unpopulated
+ * execute, terminal, implementation window, advisory decision, or the
+ * ordinary readiness path)
  * and never repeats gate policy — every fact comes from `wave-status-facts`,
  * every gate verdict from `wave-gate-checks`, the implementation window's
  * recovery from `implementation-window`, and every proven action from the
@@ -597,6 +598,17 @@ function projectedAdvisoryStatus(
       );
 }
 
+/**
+ * An execute graph with no Tasks (issue #50): the approved task graph was never
+ * installed. Graphs written before #73 made population the only way into
+ * execute can still be in this state. Both recoveries are named, because only
+ * the operator knows whether an approved graph exists.
+ */
+export const UNPOPULATED_EXECUTE_RECOVERY =
+  "the execute Phase holds no Tasks: the approved task graph was never installed. Install it by piping the " +
+  "approved decompose output to `helper populate-task-graph`, which also accepts an execute graph; or return to " +
+  "decompose with `helper set-phase --phase decompose --clear-artifact decompose` and re-spawn the decompose agent";
+
 /** The unavailable status a live registration's Run Directory observation forces, or null when it is healthy. */
 function runDirectoryUnavailableStatus(
   graph: TaskGraph,
@@ -699,6 +711,7 @@ function routeLoomStatus(
       deps.currentWaveCompletionResult,
     );
   }
+  if (parsed.value.tasks.length === 0) return unavailableStatus(UNPOPULATED_EXECUTE_RECOVERY);
   const directoryUnavailable = runDirectoryUnavailableStatus(parsed.value, runDirectory);
   if (directoryUnavailable !== null) return directoryUnavailable;
   const persistedBlocked = persistedTerminalBlockedStatus(

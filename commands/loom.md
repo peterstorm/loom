@@ -444,7 +444,7 @@ in the assembled prompt, do not spawn.
 
 **Wait for agent completion.** Agent outputs pure JSON task graph.
 
-The decompose agent's completion does **not** advance the phase: `current_phase` stays `decompose` through validation and approval, and only `populate-task-graph` (4d) moves it to `execute`, in the same write that installs the Tasks. An agent that returns no usable output therefore leaves the phase at `decompose` — re-spawn it. A plan rejected at 4c also stays in `decompose`.
+The decompose agent's completion does **not** advance the phase: `current_phase` stays `decompose` through validation and approval, and only `populate-task-graph` (4d) moves it to `execute`, in the same write that installs the Tasks. An agent that returns no usable output therefore leaves the phase at `decompose` — re-spawn it. A plan rejected at 4c also stays in `decompose`. For the same reason `helper set-phase` refuses `--phase execute`: its loop-back can return to any earlier Phase but never enter `execute`. A graph left at `execute` with no Tasks by an engine older than this rule is reported by `/loom --status` as blocked, with both recoveries: pipe the approved decompose output to `populate-task-graph`, which also accepts an execute graph, or run `set-phase --phase decompose --clear-artifact decompose` and re-spawn the decompose agent.
 
 ### 4a. Validate Output
 

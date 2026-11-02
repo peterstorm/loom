@@ -9,6 +9,7 @@
  *     OLDEST stamps are pruned first, so interleaved calls in a session
  *     don't evict each other instantly
  *   - missing/corrupt state reads as null (fail closed downstream)
+ *   - a stamp answers only for the session that recorded it (issue #50 Gap 5)
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
@@ -28,7 +29,7 @@ import { sessionIdOf } from "../fixtures/machine-identities";
 
 const run = `call-start-${process.pid}-${Date.now()}`;
 const sid = (name: string) => sessionIdOf(`${run}-${name}`);
-const sessions = ["roundtrip", "prune", "restamp", "corrupt", "unreadable"].map(sid);
+const sessions = ["roundtrip", "prune", "restamp", "corrupt", "unreadable", "isolation-prior", "isolation-fresh"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -116,6 +117,19 @@ function registryContract(name: string, registry: SessionRegistry) {
       // oldest survivor (so interleaved calls aren't evicted instantly).
       expect(registry.callStartFor(s, "toolu_5")).toBe(1005);
       expect(registry.callStartFor(s, `toolu_${CALL_START_CAP + 4}`)).toBe(1000 + CALL_START_CAP + 4);
+    });
+
+    // Issue #50 Gap 5: a prior session's stamps, however recent, never answer
+    // for a fresh session. The file is keyed by session, so a stale
+    // `.callstart.json` that outlives its session cannot bind fresh evidence.
+    it("a stamp is visible only to the session that recorded it", async () => {
+      const prior = sid("isolation-prior");
+      const fresh = sid("isolation-fresh");
+      await registry.recordCallStart(prior, "toolu_shared", 9_999_999);
+      expect(registry.callStartFor(fresh, "toolu_shared")).toBeNull();
+      await registry.recordCallStart(fresh, "toolu_shared", 10);
+      expect(registry.callStartFor(fresh, "toolu_shared")).toBe(10);
+      expect(registry.callStartFor(prior, "toolu_shared")).toBe(9_999_999);
     });
   });
 }
