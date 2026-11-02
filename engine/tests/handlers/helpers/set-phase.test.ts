@@ -93,6 +93,17 @@ describe("set-phase helper", () => {
     expect(stderr).toContain("Invalid or missing --phase");
   });
 
+  // Issue #50: only populate-task-graph may enter execute, in the write that
+  // installs the Tasks, so the loop-back cannot strand an execute graph with
+  // no Tasks.
+  it("--phase execute is refused and the state is unchanged", () => {
+    const before = readFileSync(statePath, "utf-8");
+    const { exitCode, stderr } = runSetPhase(["--phase", "execute"]);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("populate-task-graph is the only writer of execute");
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+  });
+
   it("missing --phase returns error", () => {
     const { exitCode, stderr } = runSetPhase([]);
     expect(exitCode).not.toBe(0);
