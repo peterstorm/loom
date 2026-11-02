@@ -451,27 +451,58 @@ describe("phase transitions", () => {
     }
   });
 
-  it("refuses a readable directory whose name looks like the sole date-prefixed Plan", () => {
+  it("refuses a readable directory at the slug Plan path", () => {
     const specDir = ".claude/specs/2026-07-16-feature";
     mkdirSync(join(tmpDir, specDir), { recursive: true });
-    mkdirSync(join(tmpDir, ".claude", "plans", "2026-07-16-not-a-plan.md"), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans", "2026-07-16-feature.md"), { recursive: true });
 
     expect(resolveTransition("architecture", mkState({ spec_dir: specDir, plan_file: null }))).toEqual({
       kind: "not-ready",
-      reason: "no readable plan artifact is available inside .claude/plans",
+      reason: "no readable plan artifact is available inside .claude/plans " +
+        "(expected .claude/plans/2026-07-16-feature.md, or a plan the architecture agent wrote)",
     });
   });
 
-  it("ignores a Plan-shaped directory when exactly one readable regular Plan file also matches", () => {
+  it("adopts the slug Plan with no recorded plan_file", () => {
     const specDir = ".claude/specs/2026-07-16-feature";
     mkdirSync(join(tmpDir, specDir), { recursive: true });
-    mkdirSync(join(tmpDir, ".claude", "plans", "2026-07-16-directory.md"), { recursive: true });
-    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-plan.md"), "plan");
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-feature.md"), "plan");
 
     expect(resolveTransition("architecture", mkState({ spec_dir: specDir, plan_file: null }))).toEqual({
       kind: "ready",
       nextPhase: "plan-alignment",
-      artifact: ".claude/plans/2026-07-16-plan.md",
+      artifact: ".claude/plans/2026-07-16-feature.md",
+    });
+  });
+
+  // An architecture agent's first stop only handed back interview questions,
+  // before any plan existed. The sole same-day plan on disk belonged to an
+  // unrelated review, and adopting it advanced the phase and pinned it as
+  // plan_file, which population then trusted over the decompose payload.
+  it("never adopts another run's same-day Plan, so a stop before the plan exists does not advance", () => {
+    const specDir = ".claude/specs/2026-07-16-feature";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-pr99-remediation.md"), "someone else's plan");
+
+    expect(resolveTransition("architecture", mkState({ spec_dir: specDir, plan_file: null }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("expected .claude/plans/2026-07-16-feature.md"),
+    });
+  });
+
+  it("picks the slug Plan among other same-day Plans instead of refusing as ambiguous", () => {
+    const specDir = ".claude/specs/2026-07-16-feature";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-alpha.md"), "plan alpha");
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-feature.md"), "this run's plan");
+
+    expect(resolveTransition("architecture", mkState({ spec_dir: specDir, plan_file: null }))).toEqual({
+      kind: "ready",
+      nextPhase: "plan-alignment",
+      artifact: ".claude/plans/2026-07-16-feature.md",
     });
   });
 
@@ -606,56 +637,22 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     }
   });
 
-  it("TRAP: a same-date-prefix plan on disk would advance IF a panel agent reached the architecture case — proving the map gate is load-bearing", () => {
-    // Reproduce the exact hazard from design constraint 2: a stale same-day plan
-    // sits in .claude/plans/ while a designer/judge completes mid-panel.
+  it("a stale same-day plan cannot advance the phase mid-panel even if a panel agent reached the architecture case", () => {
+    // Design constraint 2's hazard: a stale same-day plan sits in .claude/plans/
+    // while a designer or judge completes mid-panel. Two independent guards now
+    // hold: panel agents miss PHASE_AGENT_MAP, and the architecture case adopts
+    // only the run's own slug plan, never a same-day file.
     const specDir = ".claude/specs/2026-07-16-feat";
     mkdirSync(join(tmpDir, specDir), { recursive: true });
     mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
-    // A same-date-prefix plan the date-prefix fallback in the architecture
-    // transition case would happily pick up.
     writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-stale.md"), "stale plan");
 
-    const state = mkState({
-      current_phase: "architecture",
-      spec_dir: specDir,
-      plan_file: null, // force the date-prefix fallback path
-    });
+    const state = mkState({ current_phase: "architecture", spec_dir: specDir, plan_file: null });
 
-    // IF the handler ever routed a panel agent into the architecture case, this
-    // is what it would compute — a bogus advance off a stale plan:
-    const wouldAdvance = resolveTransition("architecture", state);
-    expect(wouldAdvance).not.toBeNull();
-    expect(wouldAdvance!.nextPhase).toBe("plan-alignment");
-
-    // The ONLY thing preventing that is panel agents missing from PHASE_AGENT_MAP,
-    // so the handler returns passthrough before any transition is ever evaluated.
+    expect(resolveTransition("architecture", state)).toMatchObject({ kind: "not-ready" });
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
     }
-  });
-
-  it("an ambiguous date-prefix match refuses the architecture transition instead of adopting an arbitrary plan", () => {
-    // Multiple valid fallback candidates remain an explicit refusal: the
-    // operator must disambiguate through plan_file or the filesystem.
-    const specDir = ".claude/specs/2026-07-16-feat";
-    mkdirSync(join(tmpDir, specDir), { recursive: true });
-    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
-    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-alpha.md"), "plan alpha");
-    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-beta.md"), "plan beta");
-
-    const state = mkState({
-      current_phase: "architecture",
-      spec_dir: specDir,
-      plan_file: null, // force the date-prefix fallback path
-    });
-
-    const resolution = resolveTransition("architecture", state);
-    expect(resolution).toEqual({
-      kind: "not-ready",
-      reason: "multiple readable plan artifacts match 2026-07-16 inside .claude/plans; " +
-        "set plan_file or remove the extra candidates",
-    });
   });
 
   const withPhaseState = async (

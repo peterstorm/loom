@@ -67,8 +67,8 @@ function readRepoFile(...segments: string[]): string {
  *  1. Panel agents are DISJOINT from PHASE_AGENT_MAP. advance-phase keys off
  *     PHASE_AGENT_MAP at SubagentStop — if a designer or
  *     judge were mapped there, its completion would fire resolveTransition and
- *     the date-prefix plan fallback could advance the phase mid-panel (design
- *     constraint 2). Only architecture-agent (already in the map) advances.
+ *     could advance the phase mid-panel (design constraint 2). Only
+ *     architecture-agent (already in the map) advances.
  *
  *  2. Panel agents are NOT in KNOWN_AGENTS. That set gates task-graph agents;
  *     panel agents never appear in a task graph.
@@ -105,8 +105,8 @@ describe("ARCH_PANEL_AGENTS invariants", () => {
 
   it("keeps every panel agent out of PHASE_AGENT_MAP (undefined lookup ⇒ handler passthrough)", () => {
     // This is the exact lookup advance-phase performs. undefined ⇒ passthrough
-    // BEFORE resolveTransition, so a stale same-date plan file can never advance
-    // the phase on a panel agent's completion.
+    // BEFORE resolveTransition, so a panel agent's completion never evaluates a
+    // phase transition at all.
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[agent]).toBeUndefined();
     }
