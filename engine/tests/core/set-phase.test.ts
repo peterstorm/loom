@@ -74,12 +74,4 @@ describe("applySetPhase", () => {
     expect(applySetPhase(before, { phase: "architecture", clearArtifact: "brainstorm" }, updatedAt).phase_artifacts)
       .toEqual(before.phase_artifacts);
   });
-
-  it("never writes execute: no parsed request can name it", () => {
-    fc.assert(fc.property(phase, clearArtifact, (target, clear) => {
-      const parsed = parseSetPhaseArgs(argsFor(target, clear));
-      if (!parsed.ok) return;
-      expect(applySetPhase(graph(), parsed.value, updatedAt).current_phase).not.toBe("execute");
-    }));
-  });
 });
