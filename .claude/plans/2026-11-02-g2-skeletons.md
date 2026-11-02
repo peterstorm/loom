@@ -171,7 +171,7 @@ public static final PriceOrderFn priceOrder = (p0, p1) -> {
 
 The lambda arity is the single abstract method's parameter count. javac enforces the signature.
 
-**Supported roots.** Only paths under a `src/main/java/` root are supported, and the package comes from the path after it. Other Java roots, Kotlin and Scala report "unsupported language, no skeleton" (Q16b).
+**Supported roots.** Only paths under a `src/main/java/` root are supported, and the package comes from the path after it. Other Java roots, Kotlin and Scala report "unsupported language, no skeleton" (Q16b). That decision is AD-15's `skeletonLanguageOf`, not this reader's: `java-surface.ts` reads text and never classifies paths.
 
 **Why:** It mirrors the TypeScript `export const name: Alias` shape exactly, so both languages share one check: name, declared type token, marker in the initializer. That meets SC-006's shared reasons and the Java/TypeScript parity risk. There is no new dependency (Q14a).
 
@@ -204,6 +204,8 @@ export const parseOrder: ParseOrderFn = () => {
 - The import specifier copies the style (extensionless, `.js` or `.ts`) of the first frozen acceptance file, in declaration order, that imports the types file. With none, it is an extensionless relative path.
 
 **Java:** AD-7. `import <package>.<Holder>.<Alias>;` for each alias.
+
+The generator takes a `SkeletonTarget` (AD-15), which carries the language and, for Java, the package and class name. An unsupported path cannot be passed to it at all, so it has no language refusal of its own that could drift from the AS-040 outcome.
 
 No project formatter ever runs (Q16c).
 
@@ -266,7 +268,7 @@ Per frozen ADT, where a frozen ADT is a TypeScript discriminated union or brande
 A union of imported frozen variant types is "using the frozen types directly" and passes. Every violation is listed (FR-028). The checks stay syntactic, with no assignability or structural typing (Q16a).
 
 **Scope** (`engine/src/core/skeleton/scope.ts`, INV-5):
-- **Which files.** A Task's production files, classified by the existing `classifyTaskFiles` (INV-2 of G5b/I6), in TypeScript or Java.
+- **Which files.** A Task's production files, classified by the existing `classifyTaskFiles` (INV-2 of G5b/I6), that `skeletonLanguageOf` (AD-15) parses to a supported target. The judge receives each file with its target and never classifies paths itself.
 - **Which contracts.** Those the Task binds or claims, with a types file and freeze state `frozen` or `revised`.
 - **Applied when.** The signature check applies to the Task's bound files. The ADT check applies to the files of the types file's language.
 - **Exempt.** A Task that is attested, or that waives regression as `documentation-only` or `generated-artifact`, owes nothing (FR-019, AS-037). There are no new waivers (FR-020).
@@ -304,7 +306,7 @@ Each file is either complete or absent (NFR-021). Results are `written | exists 
 3. No binding:
    - the Task claims a `Types file: none` contract → `contract-has-no-types-file`;
    - otherwise → `no-bound-exports`.
-4. Bound, but not a supported language and root → `unsupported-language`.
+4. Bound, but `skeletonLanguageOf` (AD-15) returns `unsupported` → `unsupported-language`.
 5. Bound and supported → `skeleton-written { origin: "spawn" }` (to write).
 
 Exact render strings: "skeleton written", "no bound exports, no skeleton", "contract has no types file, no skeletons", "unsupported language, no skeleton", "exists, not skeletonized". It also owns `isUntouchedSkeleton`.
@@ -322,6 +324,27 @@ No logs and no metrics. Expected failures are never crashes (FR-045).
 
 **Rejected:**
 - Persisting projected outcomes before the spawn — state written by a read path.
+
+### AD-15: One supported-language predicate, parsed once into a `SkeletonTarget` (plan-alignment OWN-1; INV-6)
+
+**Choice:** `engine/src/core/skeleton/language.ts` exports `skeletonLanguageOf(path): SkeletonTarget | Unsupported`.
+- `SkeletonTarget` is either `{ language: "typescript" }` (`.ts`, `.tsx`, `.mts`, `.cts`) or `{ language: "java"; package; className }` (a `.java` path under a `src/main/java/` root, package from the path after it, class from the basename).
+- `Unsupported` carries a reason: other extension, Java outside a `src/main/java/` root, or a Kotlin or Scala file.
+- `SkeletonTarget` is branded, and `language.ts` is its only constructor.
+
+Applying sites:
+- materialization, the contract stub step and the revision refresh, which parse each bound path before generating;
+- `frozen-surface-observation.ts`, which picks the TypeScript or Java reader for a types file;
+- `outcomes.ts` (AD-13 step 4);
+- `scope.ts` (AD-11).
+
+Consumers of the parsed value: `generateSkeleton` takes a `SkeletonTarget`; `judgeConformance` receives each file with its target; `resolveBindings` receives a surface already tagged with its language. None of them classifies a path.
+
+**Why:** The AS-040 outcome, the generator's input, the conformance scope and the choice of types-file reader must agree on what is supported. Parse don't validate: one predicate, one branded result, so the downstream modules cannot disagree with it, because they never re-decide it.
+
+**Rejected:**
+- A per-module extension check, including the old `javaPackageOf` in `java-surface.ts` — four copies of one rule (the OWN-1 gap).
+- Folding the predicate into `outcomes.ts` — it is a different rule from outcome precedence. One invariant per rule.
 
 ### AD-14: Pure core, DomainResult end to end, simplicity axis (interview Q2a, Q3a, Q4a, Q13a, Q14a)
 
@@ -345,12 +368,13 @@ No logs and no metrics. Expected failures are never crashes (FR-045).
 ### Contract CT-1 (T1, Wave 1)
 
 ```
-engine/src/core/skeleton/types.ts                              — NEW, declarations only: ExportBinding, ExportBindingsDeclaration, BindingProblem, TsTypesSurface, TsImplementationSurface, JavaTypesSurface, JavaImplementationSurface, FrozenSurface, SurfaceProblem, ResolvedBinding, ResolutionProblem, SkeletonLanguage, SkeletonOrigin, SkeletonOutcome, SkeletonRecord, GeneratedSkeleton, ConformanceViolation, ViolationReason, ContractConformance, plus the function-type aliases ParseExportBindingsFn, ValidateExportBindingsFn, ReadTsTypesSurfaceFn, ReadTsImplementationSurfaceFn, TypesImportSpecifierFn, ReadJavaTypesSurfaceFn, ReadJavaImplementationSurfaceFn, ResolveBindingsFn, GenerateSkeletonFn, JudgeConformanceFn, SkeletonOutcomesFn
+engine/src/core/skeleton/types.ts                              — NEW, declarations only: ExportBinding, ExportBindingsDeclaration, BindingProblem, TsTypesSurface, TsImplementationSurface, JavaTypesSurface, JavaImplementationSurface, FrozenSurface, SurfaceProblem, ResolvedBinding, ResolutionProblem, SkeletonLanguage, SkeletonTarget, UnsupportedTarget, SkeletonOrigin, SkeletonOutcome, SkeletonRecord, GeneratedSkeleton, ConformanceViolation, ViolationReason, ContractConformance, plus the function-type aliases ParseExportBindingsFn, ValidateExportBindingsFn, ReadTsTypesSurfaceFn, ReadTsImplementationSurfaceFn, TypesImportSpecifierFn, ReadJavaTypesSurfaceFn, ReadJavaImplementationSurfaceFn, ResolveBindingsFn, GenerateSkeletonFn, JudgeConformanceFn, SkeletonOutcomesFn, SkeletonLanguageOfFn
 engine/src/core/skeleton/bindings.ts                           — NEW compiling stub (throws "not implemented"); T4 implements
 engine/src/core/skeleton/ts-surface.ts                         — NEW compiling stub, no typescript import; T5 implements
 engine/src/core/skeleton/java-surface.ts                       — NEW compiling stub; T6 implements
 engine/src/core/skeleton/generate.ts                           — NEW compiling stub; T7 implements
 engine/src/core/skeleton/resolve.ts                            — NEW compiling stub; T7 implements
+engine/src/core/skeleton/language.ts                           — NEW compiling stub; T9 implements
 engine/tests/acceptance/skeleton-generation.acceptance.test.ts — NEW (supported domain: TS/Java supported, Rust/Kotlin/odd roots unsupported, frozen-holder shapes, determinism and idempotency laws)
 ```
 
@@ -407,10 +431,13 @@ engine/tests/core/skeleton-java-surface.test.ts — NEW unit + property (comment
 ### Outcomes and conformance scope (T9, Wave 2)
 
 ```
-engine/src/core/skeleton/outcomes.ts            — NEW skeletonOutcomes, isUntouchedSkeleton, renderSkeletonOutcome (INV-4 owner)
+engine/src/core/skeleton/language.ts            — skeletonLanguageOf, the branded SkeletonTarget (INV-6 owner, AD-15)
+engine/src/core/skeleton/outcomes.ts            — NEW skeletonOutcomes, isUntouchedSkeleton, renderSkeletonOutcome (INV-4 owner; INV-6 sibling)
 engine/src/core/skeleton/scope.ts               — NEW conformanceScope(graph, task) (INV-5 owner)
 engine/tests/core/skeleton-outcomes.matrix.test.ts — NEW INV-4 matrix
 engine/tests/core/skeleton-scope.matrix.test.ts    — NEW INV-5 matrix
+engine/tests/core/skeleton-language.matrix.test.ts — NEW INV-6 matrix: owner, outcomes and scope rows
+engine/tests/core/skeleton-language.test.ts        — NEW unit + property (every path gets exactly one target or unsupported; the package always matches the path)
 engine/tests/core/skeleton-outcomes.test.ts        — NEW unit + property (exactly one outcome per non-test path)
 ```
 
@@ -450,6 +477,7 @@ engine/src/orchestration/skeleton-materialization.ts   — NEW materializeTaskSk
 engine/src/handlers/task-execution.ts                  — call materialization before baseline capture; block on stage-two problems
 engine/src/core/validate-task-execution.ts             — authority batch carries skeleton records and outcomes into the locked update
 engine/tests/orchestration/skeleton-writer.matrix.test.ts — NEW INV-3 matrix
+engine/tests/core/skeleton-language.matrix.test.ts     — add the materialization and frozen-surface-observation rows
 engine/tests/core/skeleton-outcomes.matrix.test.ts     — add the materialization row
 engine/tests/orchestration/skeleton-writer.test.ts     — NEW unit over a temp dir (EEXIST, symlinked parent, frozen path, temp cleanup)
 engine/tests/handlers/task-execution-skeletons.test.ts — NEW handler tests (both harness callers, refused registration then adoption)
@@ -481,6 +509,7 @@ engine/src/handlers/helpers/revise-contract.ts            — refresh untouched,
 engine/src/core/contract-revision.ts                      — revision outcome carries binding problems and stale paths
 engine/tests/orchestration/skeleton-writer.matrix.test.ts — add stub and revision rows
 engine/tests/core/skeleton-outcomes.matrix.test.ts        — add stub and revision rows
+engine/tests/core/skeleton-language.matrix.test.ts        — add stub and revision rows
 engine/tests/handlers/contract-stubs.test.ts              — NEW both stop shells
 engine/tests/handlers/revise-contract-skeletons.test.ts   — NEW
 ```
@@ -531,6 +560,9 @@ type BindingProblem = unsafe-path | frozen-path | malformed-entry{line} | duplic
   | unknown-contract{path,contract} | contract-without-types{path,contract} | bound-on-contract-task{path,contract}
   | unheld-path{path} | holder-not-after-contract{path,task,contractTask} | bound-on-waived-task{path,task,reason}
 type SkeletonLanguage = "typescript" | "java"
+type SkeletonTarget = Brand<Readonly<{ language: "typescript" } | { language: "java"; package: string; className: string }>, "SkeletonTarget">
+type UnsupportedTarget = Readonly<{ kind: "unsupported"; reason: "other-extension" | "java-outside-main-root" | "jvm-non-java" }>
+type SkeletonLanguageOfFn = (path: string) => SkeletonTarget | UnsupportedTarget
 type ResolutionProblem = missing-alias{alias,path,typesFile} | not-a-function{alias,path,typesFile} | generic-alias{...}
   | unsupported-holder-shape{typesFile,detail} | types-unparseable{typesFile,detail} | types-drifted{typesFile}
 type SkeletonOrigin = "spawn" | "contract-stub" | "revision"
@@ -542,7 +574,7 @@ type ContractConformance = Readonly<{ kind: "not-owed" }> | Readonly<{ kind: "ju
 type ParseExportBindingsFn = (fileStructureSection: string) => ExportBindingsDeclaration
 type ValidateExportBindingsFn = (bindings, contracts: readonly PlanContract[], tasks) => readonly BindingProblem[]
 type ResolveBindingsFn = (surface: FrozenSurface, bindings: readonly ExportBinding[]) => DomainResult<readonly ResolvedBinding[], NonEmpty<ResolutionProblem>>
-type GenerateSkeletonFn = (input: { path; contract; typesPath; surface; resolved; specifierStyle }) => DomainResult<GeneratedSkeleton, SurfaceProblem>
+type GenerateSkeletonFn = (input: { path; target: SkeletonTarget; contract; typesPath; surface; resolved; specifierStyle }) => DomainResult<GeneratedSkeleton, SurfaceProblem>
 type JudgeConformanceFn = (input: { surfaces; bindings; files: readonly { path; text: string | null }[] }) => ContractConformance
 type SkeletonOutcomesFn = (graph, taskId, observations: ReadonlyMap<string, { exists: boolean; sha256: string | null }>) => readonly { path; outcome }[]
 ```
@@ -586,7 +618,6 @@ typesImportSpecifier(acceptancePath, acceptanceText, typesPath): "extensionless"
 ```
 readJavaTypesSurface(path, text): DomainResult<JavaTypesSurface, SurfaceProblem>   // holder shape enforced
 readJavaImplementationSurface(path, text): DomainResult<JavaImplementationSurface, SurfaceProblem>
-javaPackageOf(path): string | null                                                 // null outside src/main/java
 ```
 
 **Depends on:** Skeleton types
@@ -600,11 +631,12 @@ javaPackageOf(path): string | null                                              
 
 ### Outcomes and scope
 
-**Responsibility:** One derivation each for "which outcome does this path have" (INV-4) and "which files of which Task owe which conformance" (INV-5).
-**Files:** `engine/src/core/skeleton/outcomes.ts`, `engine/src/core/skeleton/scope.ts`
+**Responsibility:** One derivation each for "which paths are supported skeleton targets" (INV-6), "which outcome does this path have" (INV-4) and "which files of which Task owe which conformance" (INV-5).
+**Files:** `engine/src/core/skeleton/language.ts`, `engine/src/core/skeleton/outcomes.ts`, `engine/src/core/skeleton/scope.ts`
 **Interface:**
 
 ```
+skeletonLanguageOf: SkeletonLanguageOfFn                  // language.ts, INV-6 owner
 skeletonOutcomes: SkeletonOutcomesFn
 isUntouchedSkeleton(record: SkeletonRecord | undefined, currentSha: string | null, canonicalSha: string | null): boolean
 renderSkeletonOutcome(outcome): string
@@ -733,7 +765,7 @@ Every decision is a pure function over text or graph data. The shells read bytes
 - `engine/src/core/skeleton/status.ts` — recorded and projected outcomes in `helper orchestration status`
 - `engine/src/core/implementation-brief.ts` — per-file outcome lines in the brief
 **Matrix test:** `engine/tests/core/skeleton-outcomes.matrix.test.ts`
-**Statement:** Every call site that names a path's skeleton outcome, or decides whether an existing skeleton is engine-untouched, calls `skeletonOutcomes` or `isUntouchedSkeleton`. None compares digests or orders the five outcomes inline. That covers registration, the contract stop, revision, status and the brief. The matrix test feeds one graph and observation set through every sibling and asserts the same outcome per path, the precedence order, and the exact render strings.
+**Statement:** Every call site that names a path's skeleton outcome, or decides whether an existing skeleton is engine-untouched, calls `skeletonOutcomes` or `isUntouchedSkeleton`. None compares digests or orders the five outcomes inline. That covers registration, the contract stop, revision, status and the brief. The matrix test feeds one graph and observation set through every sibling and asserts the same outcome per path, the precedence order, and the exact render strings. `generate.ts` and `scope.ts` are deliberately not siblings: neither names an outcome or judges untouchedness. Their shared language decision belongs to INV-6.
 
 ### INV-5: One derivation decides which files of which Task owe conformance, against which contracts
 
@@ -747,6 +779,22 @@ Every decision is a pure function over text or graph data. The shells read bytes
 
 ---
 
+### INV-6: One predicate decides which paths are supported skeleton targets, and in which language
+
+**Tier:** advisory
+**Owner module:** `engine/src/core/skeleton/language.ts`
+**Sibling entry points:**
+- `engine/src/core/skeleton/outcomes.ts` — AD-13 step 4, the `unsupported-language` outcome
+- `engine/src/core/skeleton/scope.ts` — which production files are TypeScript or Java for conformance
+- `engine/src/orchestration/skeleton-materialization.ts` — parses each bound path into the target it generates at registration
+- `engine/src/orchestration/frozen-surface-observation.ts` — picks the TypeScript or Java reader for a contract's types file
+- `engine/src/orchestration/contract-stub-materialization.ts` — parses each bound path into the target it stubs at the contract stop
+- `engine/src/handlers/helpers/revise-contract.ts` — parses each record's path into the target it refreshes on revision
+**Matrix test:** `engine/tests/core/skeleton-language.matrix.test.ts`
+**Statement:** Every call site that decides whether a path is TypeScript, supported Java (under `src/main/java/`, with its package and class) or unsupported calls `skeletonLanguageOf`, and no module compares extensions or Java roots inline. That covers the outcome derivation, the conformance scope, spawn materialization, the types-file reader choice, the contract stub step and the revision refresh. `generate.ts`, `conformance.ts` and `resolve.ts` are deliberately not siblings, because they take the already-parsed branded `SkeletonTarget` or a language-tagged surface and make no language decision. The matrix test runs one path table (`.ts`, `.tsx`, `.mts`, `.cts`, `src/main/java/a/b/C.java`, `src/test/java/C.java`, `lib/C.java`, `.kt`, `.scala`, `.rs`) through every sibling, and asserts the same supported or unsupported verdict and the same Java package everywhere, so a change to the predicate fails at every row.
+
+---
+
 ## Contracts
 
 ### CT-1: Bindings, frozen surfaces, resolution and canonical skeleton bytes
@@ -755,7 +803,7 @@ Every decision is a pure function over text or graph data. The shells read bytes
 **Acceptance tests:**
 - `engine/tests/acceptance/skeleton-generation.acceptance.test.ts` — FR-001, FR-002, FR-003, FR-006, FR-007, FR-008, FR-009, FR-010, AS-001, AS-002, AS-003, AS-004, AS-005, AS-011, AS-017
 **Supported domain:** `engine/tests/acceptance/skeleton-generation.acceptance.test.ts`
-**Statement:** `parseExportBindings` accepts `` - `path` — CT-n: name: Alias, … `` lines and records each export against its file. `validateExportBindings` refuses each of these with a diagnostic naming the file and the entry: an unsafe path, a frozen path, a malformed or duplicate entry, and a file whose lines name two contracts. `resolveBindings` refuses each alias the frozen surface does not declare, and each alias that is not a non-generic function type (TypeScript) or single-abstract-method interface (Java), naming the alias, the binding file and the types file. `generateSkeleton` emits, for TypeScript: type imports of exactly the bound aliases, with the acceptance tests' specifier style; one `export const name: Alias` per binding, throwing `unimplemented: name`. For Java it emits one `public static final Alias name` lambda per binding, throwing `UnsupportedOperationException("unimplemented: name")`, in a `public final class` named after the file. It emits nothing beyond the bound exports and their imports. 100 generations over the same input are byte-identical, and generating from an untouched skeleton's inputs reproduces its bytes. The supported table accepts TypeScript and Java under `src/main/java/`. It refuses Rust, Kotlin, other Java roots and a Java types file that is not one top-level holder.
+**Statement:** `parseExportBindings` accepts `` - `path` — CT-n: name: Alias, … `` lines and records each export against its file. `validateExportBindings` refuses each of these with a diagnostic naming the file and the entry: an unsafe path, a frozen path, a malformed or duplicate entry, and a file whose lines name two contracts. `resolveBindings` refuses each alias the frozen surface does not declare, and each alias that is not a non-generic function type (TypeScript) or single-abstract-method interface (Java), naming the alias, the binding file and the types file. `generateSkeleton` emits, for TypeScript: type imports of exactly the bound aliases, with the acceptance tests' specifier style; one `export const name: Alias` per binding, throwing `unimplemented: name`. For Java it emits one `public static final Alias name` lambda per binding, throwing `UnsupportedOperationException("unimplemented: name")`, in a `public final class` named after the file. It emits nothing beyond the bound exports and their imports. 100 generations over the same input are byte-identical, and generating from an untouched skeleton's inputs reproduces its bytes. The supported table, read through `skeletonLanguageOf` and then `generateSkeleton`, accepts TypeScript and Java under `src/main/java/`. It refuses Rust, Kotlin, other Java roots and a Java types file that is not one top-level holder.
 
 ### CT-2: The completion conformance judge
 
@@ -786,7 +834,7 @@ Fifteen Tasks over six Waves. Every acceptance testcase is named `FR-0NN: …` o
 
 The contract Tasks hand-write their compiling stubs, because G2 is not live while it is being built.
 
-The project already has a schema-2 `.loom/verification-manifest.json` with `affectedRunner` and `acceptanceRunner` writing JUnit. So contracts and the mutation-verified owned invariants (INV-3, INV-4, INV-5, none exempt) populate without operator setup.
+The project already has a schema-2 `.loom/verification-manifest.json` with `affectedRunner` and `acceptanceRunner` writing JUnit. So contracts and the mutation-verified owned invariants (INV-3, INV-4, INV-5, INV-6, none exempt) populate without operator setup.
 
 Requirements outside the contracts are claimed as ordinary tested work:
 - FR-004 — T7
@@ -798,7 +846,7 @@ Requirements outside the contracts are claimed as ordinary tested work:
 
 ### Phase 1: CT-1 contract (no dependencies)
 
-- **T1 — CT-1 contract Task.** Write `core/skeleton/types.ts` (declarations only), the CT-1 acceptance file with its supported/unsupported table, and the compiling stubs `bindings.ts`, `ts-surface.ts` (no `typescript` import), `java-surface.ts`, `generate.ts` and `resolve.ts`, each `export const x: XFn = () => { throw new Error("not implemented"); }`. Claims nothing. Contributes FR-001..FR-010.
+- **T1 — CT-1 contract Task.** Write `core/skeleton/types.ts` (declarations only), the CT-1 acceptance file with its supported/unsupported table, and the compiling stubs `bindings.ts`, `ts-surface.ts` (no `typescript` import), `java-surface.ts`, `generate.ts`, `resolve.ts` and `language.ts`, each `export const x: XFn = () => { throw new Error("not implemented"); }`. Claims nothing. Contributes FR-001..FR-010.
 - **Files:** `engine/src/core/skeleton/types.ts`, the five stubs, `engine/tests/acceptance/skeleton-generation.acceptance.test.ts`
 
 ### Phase 2: Remaining contracts and the pure foundations (depends on Phase 1)
@@ -808,12 +856,12 @@ Requirements outside the contracts are claimed as ordinary tested work:
 - **T4 — Plan grammar and binding validation.** Depends on T1. `parseExportBindings`, `validateExportBindings`, `bindingStampAgreement`, the File Structure section and stray in `parse-plan-models.ts`, and wiring into `validate-model-bindings.ts`. Claims FR-001, FR-002, AS-001, AS-002, AS-003, AS-004, AS-005.
 - **T5 — TypeScript surface seam.** Depends on T1. `ts-surface.ts`, the seam constant, both INV-1 rule copies, purity listing of `engine/src/core/skeleton/`, lint and purity tests. Contributes FR-003, FR-006, FR-015, FR-016.
 - **T6 — Java reader.** Depends on T1. `java-surface.ts` with the holder-shape refusal. Contributes FR-003, FR-007, FR-015, FR-016.
-- **T9 — Outcomes and conformance scope.** Depends on T1. `outcomes.ts` (INV-4 owner), `scope.ts` (INV-5 owner), both matrix tests and their owner rows. Contributes FR-018, FR-019, FR-030.
+- **T9 — Language predicate, outcomes and conformance scope.** Depends on T1. `language.ts` (INV-6 owner, AD-15), `outcomes.ts` (INV-4 owner, INV-6 sibling), `scope.ts` (INV-5 owner, INV-6 sibling), the three matrix tests with their owner rows and the INV-6 outcomes and scope rows. Contributes FR-018, FR-019, FR-030.
 - **Files:** per File Structure groups CT-2, CT-3, T4, T5, T6, T9
 
 ### Phase 3: Generator, judge, persistence (depends on Phase 2)
 
-- **T7 — Generator and resolution.** Depends on T1, T5, T6. Canonical TypeScript and Java bytes (AD-8), specifier style, stage-two resolution. Claims FR-003, FR-004, FR-006, FR-007, FR-008, FR-009, FR-010, AS-011, AS-017.
+- **T7 — Generator and resolution.** Depends on T1, T5, T6, T9 (it takes the `SkeletonTarget` that `language.ts` mints). Canonical TypeScript and Java bytes (AD-8), specifier style, stage-two resolution. Claims FR-003, FR-004, FR-006, FR-007, FR-008, FR-009, FR-010, AS-011, AS-017.
 - **T8 — Conformance judge.** Depends on T2, T5, T6. Claims FR-013, FR-014, FR-015, FR-016, FR-017, FR-022, AS-020 through AS-036.
 - **T10 — Persistence and population.** Depends on T4, T9. TaskGraph fields, State File wire, population stamping. Claims FR-031.
 - **Files:** per File Structure groups T7, T8, T10
@@ -823,14 +871,14 @@ Requirements outside the contracts are claimed as ordinary tested work:
 - **T11 — Writer and per-Task spawn materialization (AD-1).** Depends on T3, T7, T9, T10.
   - `skeleton-writer.ts` (INV-3 owner), `frozen-surface-observation.ts`, `skeleton-materialization.ts` (INV-3 and INV-4 sibling).
   - The call in `registerTaskExecutionBatch` before baseline capture, and the authority batch carrying records and outcomes.
-  - The INV-3 matrix test, and the materialization row in the INV-4 matrix.
+  - The INV-3 matrix test, the materialization row in the INV-4 matrix, and the materialization and frozen-surface-observation rows in the INV-6 matrix.
   - Claims FR-005, FR-011, FR-030, FR-032, FR-045, AS-007, AS-008, AS-009, AS-010, AS-012, AS-013, AS-014, AS-016, AS-018, AS-019.
 - **Files:** per File Structure group T11
 
 ### Phase 5: Proof channel, stubs and revision (depends on Phase 4)
 
 - **T12 — Proof channel.** Depends on T3, T8, T9, T10, T11. The new failure variant, the required `contractConformance`, the evaluation order, the retry appendix, engine-digest subtraction in both the proof scope and the repository delta, `contract-conformance-observation.ts` (INV-5 sibling) in all three settlement shells, and the INV-5 matrix row. Claims FR-012, FR-018, FR-019, FR-020, FR-021, AS-015, AS-037.
-- **T13 — Contract stubs and revision refresh.** Depends on T3, T7, T9, T10, T11. `contract-stub-materialization.ts` in both stop shells (AD-9), revision refresh and stale flags (AD-10), and the INV-3 and INV-4 matrix rows for both siblings. Claims FR-023, FR-033, AS-043, AS-044, AS-049, AS-050, AS-051.
+- **T13 — Contract stubs and revision refresh.** Depends on T3, T7, T9, T10, T11. `contract-stub-materialization.ts` in both stop shells (AD-9), revision refresh and stale flags (AD-10), and the INV-3, INV-4 and INV-6 matrix rows for both siblings. Claims FR-023, FR-033, AS-043, AS-044, AS-049, AS-050, AS-051.
 - **Files:** per File Structure groups T12, T13
 
 ### Phase 6: Status, brief, docs (depends on Phase 5)
@@ -856,7 +904,7 @@ ADR tasks are added by decompose in a final Wave, one per AD. The AD-6 ADR amend
 | java-surface (T6) | holder shape refusals, sealed/permits (explicit and implicit), records, SAM arity, fields and initializers, text blocks | none | blanking comments and strings never changes the declaration read |
 | Generator and resolution (T7) | each resolution problem, TS and Java bytes, specifier fallback | generated TS reparsed by ts-surface, generated Java reread by java-surface | 100-run byte identity; idempotency; output contains exactly the bound names |
 | Conformance (T8) | SC-006 seeded matrix in both languages, near-miss view-models | none | adding helpers or extra exports never adds a violation |
-| Outcomes and scope (T9) | precedence, render strings, scope exemptions | INV-4 and INV-5 matrices | exactly one outcome per non-test path |
+| Language, outcomes and scope (T9) | the supported path table, precedence, render strings, scope exemptions | INV-4, INV-5 and INV-6 matrices | exactly one outcome per non-test path; exactly one target or unsupported per path |
 | Persistence (T10) | wire parse and refusals | pre-G2 State File loads unchanged; population stamps | none |
 | Writer and materialization (T11) | writer results (EEXIST, symlinked parent, frozen, io failure, temp cleanup) | `registerTaskExecutionBatch` through the Claude and Pi callers over a temp repo; refused registration then adoption; 20-file Wave timing (NFR-001) | none |
 | Proof channel (T12) | evaluation order, new parser arm, retry appendix, subtraction | `settleExactImplementation` over a temp repo; read failure → infrastructure-blocked; 20-bound-file completion timing (NFR-002) | none |
