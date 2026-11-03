@@ -241,8 +241,8 @@ export const PHASE_AGENT_MAP: Readonly<Record<string, Phase | undefined>> = Obje
  *  (kind `arch-panel`). Recognized by phase validation as architecture-phase
  *  work, but INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
  *  architecture-agent's SubagentStop advances the phase. If a designer/judge were
- *  a phase agent, its completion would fire a phase transition and the date-prefix
- *  plan fallback could advance the phase mid-panel. The disjointness is structural
+ *  a phase agent, its completion would fire a phase transition that could advance
+ *  the phase mid-panel. The disjointness is structural
  *  for exact names (one key, one kind) AND enforced at config load
  *  (assertPanelPhaseDisjoint) for suffix-variant collisions — belt and
  *  suspenders. Built via frozenSet so runtime mutation is blocked, symmetric

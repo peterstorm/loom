@@ -7,7 +7,7 @@
  * which includes init as the first phase).
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
@@ -132,9 +132,14 @@ function discoverArtifactWithin(
 }
 
 /** Resolve the Plan artifact for the architecture arm: recorded authority
- * first, then the canonical slug path, then an exact-one date-prefix fallback.
- * Every candidate must be a readable regular file and all containment is
- * resolved against the TaskGraph Project Boundary. */
+ * first, then the canonical slug path `.claude/plans/<spec_dir slug>.md`.
+ * Nothing else is adopted. A same-day plan with another name belongs to some
+ * other run, and adopting it once advanced the phase on an architecture agent
+ * stop that had written no plan, then pinned that foreign plan as `plan_file`
+ * (population trusts `plan_file` over the decompose payload). A plan written
+ * under another name is still recorded from the agent's transcript. Every
+ * candidate must be a readable regular file and all containment is resolved
+ * against the TaskGraph Project Boundary. */
 function resolvePlanArtifact(
   state: Pick<TaskGraph, "plan_file" | "spec_dir">,
   baseDir: string,
@@ -146,51 +151,19 @@ function resolvePlanArtifact(
   if (recorded !== null && recorded !== "" && phaseArtifactExists(recorded, baseDir)) {
     return { kind: "ready", artifact: recorded };
   }
-  const fallback = derivedPlanCandidate(state.spec_dir, baseDir);
-  if (fallback.kind === "ambiguous") {
-    return transitionNotReady(
-      `multiple readable plan artifacts match ${fallback.datePrefix} inside ${PLAN_ARTIFACT_DIR}; ` +
-      "set plan_file or remove the extra candidates",
+  const bySlug = slugPlanPath(state.spec_dir);
+  return bySlug !== null && phaseArtifactExists(bySlug, baseDir)
+    ? { kind: "ready", artifact: bySlug }
+    : transitionNotReady(
+      `no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}` +
+      (bySlug === null ? "" : ` (expected ${bySlug}, or a plan the architecture agent wrote)`),
     );
-  }
-  return fallback.kind === "candidate"
-    ? { kind: "ready", artifact: fallback.path }
-    : transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
 }
 
-type DerivedPlanCandidate =
-  | Readonly<{ kind: "candidate"; path: string }>
-  | Readonly<{ kind: "unavailable" }>
-  | Readonly<{ kind: "ambiguous"; datePrefix: string }>;
-
-/** Resolve the documented fallback without guessing: zero valid candidates is
- * unavailable, one is authority, and multiple remain an explicit ambiguity. */
-function derivedPlanCandidate(
-  specDir: string | null | undefined,
-  baseDir: string,
-): DerivedPlanCandidate {
+/** The run's canonical Plan path, named by its spec directory's slug. */
+function slugPlanPath(specDir: string | null | undefined): string | null {
   const slug = !specDir ? "" : (specDir.split("/").pop() ?? "");
-  const bySlug = slug === "" ? null : `.claude/plans/${slug}.md`;
-  if (bySlug !== null && phaseArtifactExists(bySlug, baseDir)) {
-    return Object.freeze({ kind: "candidate", path: bySlug });
-  }
-  const datePrefix = slug.slice(0, 10);
-  if (datePrefix === "") return Object.freeze({ kind: "unavailable" });
-  let names: string[];
-  try {
-    names = readdirSync(join(baseDir, ".claude", "plans"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ kind: "unavailable" });
-    throw error;
-  }
-  const candidates = names
-    .filter((name) => name.startsWith(datePrefix) && name.endsWith(".md"))
-    .map((name) => `.claude/plans/${name}`)
-    .filter((path) => phaseArtifactExists(path, baseDir));
-  if (candidates.length === 0) return Object.freeze({ kind: "unavailable" });
-  return candidates.length === 1
-    ? Object.freeze({ kind: "candidate", path: candidates[0]! })
-    : Object.freeze({ kind: "ambiguous", datePrefix });
+  return slug === "" ? null : `${PLAN_ARTIFACT_DIR}/${slug}.md`;
 }
 
 /** Why a finished decompose agent never moves the phase. populate-task-graph
