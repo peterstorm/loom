@@ -1,8 +1,9 @@
 /**
  * Sibling coverage (AD-5; FR-005..FR-007): whether a matrix test's import
- * graph reaches its owned Invariant's owner and every declared sibling entry
- * point. Pure: every function here is a function of file text already read,
- * the matrix test's tsconfig `paths` and the declared paths.
+ * graph reaches every family path due by the Wave: its owned Invariant's
+ * owner and each sibling entry point `duePaths` holds due. Pure: every
+ * function here is a function of file text already read, the matrix test's
+ * tsconfig `paths` and the due paths.
  *
  * - Resolution: a relative specifier tries the extension ladder against the
  *   importing file's directory; a specifier matching a `paths` alias tries the
@@ -14,8 +15,9 @@
  *   make the owner "reached" through any sibling and empty AS-003. A
  *   type-only edge is erased at runtime and never loads its module, so it is
  *   never followed: coverage means the module is loaded, not merely named.
- * - Decision: `covered`, or `missing` with every unreached declared path in
- *   declared order, the owner first.
+ * - Decision: `covered`, or `missing` with every unreached due path in
+ *   declared order, the owner first. Which paths are due is the family
+ *   schedule's decision (`obligations.ts`), never this module's.
  *
  * `siblingCoverage` drives the traversal itself (#133): it pulls each file it
  * needs through the `ReadModule` port the shell adapts the filesystem to, so
@@ -31,7 +33,6 @@ import type {
   CoverageVerdict,
   ModuleRead,
   OwnerInfrastructureFailure,
-  OwnerObligation,
   PathAlias,
   PathAliases,
   ReadModule,
@@ -213,24 +214,23 @@ export const reachedFiles = (matrixTest: string, files: ReadonlyMap<string, stri
 // The decision
 // ---------------------------------------------------------------------------
 
-/** `covered`, or every declared path the reached files miss, in declared order with the owner first. */
+/** `covered`, or every due path the reached files miss, in the order given (declared, the owner first). */
 export const decideCoverage = (
   reached: ReadonlySet<string>,
-  obligation: OwnerObligation,
+  due: NonEmpty<string>,
 ): Extract<CoverageVerdict, { kind: "covered" | "missing" }> => {
-  const declared = [obligation.owner, ...obligation.siblings.map((sibling) => sibling.path)];
-  const [first, ...rest] = declared.filter((path) => !reached.has(normalizeRepoPath(path) ?? path));
+  const [first, ...rest] = due.filter((path) => !reached.has(normalizeRepoPath(path) ?? path));
   if (first === undefined) return { kind: "covered" };
   const paths: NonEmpty<string> = [first, ...rest];
   return { kind: "missing", paths };
 };
 
-/** Coverage from `matrixTest` over the port, bounded at `COVERAGE_READ_BOUND` present files. */
-function coverageThrough(matrixTest: string, obligation: OwnerObligation, aliases: PathAliases, read: ReadModule): CoverageVerdict {
+/** Coverage of the due paths from `matrixTest` over the port, bounded at `COVERAGE_READ_BOUND` present files. */
+function coverageThrough(matrixTest: string, due: NonEmpty<string>, aliases: PathAliases, read: ReadModule): CoverageVerdict {
   const reader = boundedEdges(matrixTest, read, COVERAGE_READ_BOUND);
   const reached = walk(matrixTest, reader.edgesOf, aliases);
   const failure = reader.failure();
-  return failure === null ? decideCoverage(reached, obligation) : { kind: "infrastructure", failure };
+  return failure === null ? decideCoverage(reached, due) : { kind: "infrastructure", failure };
 }
 
 /**
@@ -241,8 +241,8 @@ function coverageThrough(matrixTest: string, obligation: OwnerObligation, aliase
  * walk as that read's infrastructure failure, never a missing path; more than
  * `COVERAGE_READ_BOUND` present files is `coverage-bound-exceeded`.
  */
-export const siblingCoverage: SiblingCoverageFn = ({ obligation, aliases, read }) =>
-  coverageThrough(obligation.matrixTest, obligation, aliases, read);
+export const siblingCoverage: SiblingCoverageFn = ({ matrixTest, due, aliases, read }) =>
+  coverageThrough(matrixTest, due, aliases, read);
 
 /**
  * The production walk over a file map that holds every file there is, the
@@ -250,5 +250,5 @@ export const siblingCoverage: SiblingCoverageFn = ({ obligation, aliases, read }
  * than the bound decides `coverage-bound-exceeded`, exactly as the gate
  * would. `reachedFiles` is the unbounded reach.
  */
-export const coverageOverFiles: CoverageOverFilesFn = ({ matrixTest, obligation, files, aliases }) =>
-  coverageThrough(matrixTest, obligation, aliases, readFromMap(files));
+export const coverageOverFiles: CoverageOverFilesFn = ({ matrixTest, due, files, aliases }) =>
+  coverageThrough(matrixTest, due, aliases, readFromMap(files));

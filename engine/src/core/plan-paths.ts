@@ -11,6 +11,10 @@ import { pathsMatch } from "./plan-path-match";
 
 export type OwnedInvariant = Extract<InvariantOwnership, { kind: "owned" }>;
 
+/** The paths of an owned family, which is all role classification reads: a
+ *  plan's owned Invariant and a stamped Owner Obligation both carry them. */
+export type FamilyPaths = Pick<OwnedInvariant, "owner" | "siblings" | "matrixTest">;
+
 /** The roles one Task's `file_list` plays in an owned invariant family. */
 export type InvariantRoles = Readonly<{
   owner: boolean;
@@ -19,14 +23,17 @@ export type InvariantRoles = Readonly<{
   matrixTest: boolean;
 }>;
 
+/** Whether a file list holds `path`, under the one plan path rule: how role classification and the family schedule both read a file list. */
+export const listsPath = (fileList: readonly string[], path: string): boolean => fileList.some((file) => pathsMatch(file, path));
+
 /**
  * Which roles a file list plays in one owned invariant family. Plan
  * validation and the implementation brief both classify through here, so a
  * Task the validator holds to the owner-first rule is the Task the brief
  * calls a sibling.
  */
-export function invariantRoles(fileList: readonly string[], ownership: OwnedInvariant): InvariantRoles {
-  const changes = (path: string): boolean => fileList.some((file) => pathsMatch(file, path));
+export function invariantRoles(fileList: readonly string[], ownership: FamilyPaths): InvariantRoles {
+  const changes = (path: string): boolean => listsPath(fileList, path);
   return {
     owner: changes(ownership.owner),
     siblings: ownership.siblings.filter(({ path }) => changes(path)),

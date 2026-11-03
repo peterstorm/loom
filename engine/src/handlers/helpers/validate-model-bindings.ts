@@ -21,7 +21,8 @@ import { match } from "ts-pattern";
 
 import { readFileSync } from "node:fs";
 import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
-import { contractBindingErrors, type ContractBindingTask } from "../../core/acceptance-contract";
+import { contractBindingErrors, contractWriter, frozenPaths, type ContractBindingTask } from "../../core/acceptance-contract";
+import { firstOwingWave, type ScheduledTask } from "../../core/owner-verification/obligations";
 import { dependsOnAny } from "../../core/task-dependencies";
 import { parseVerificationPolicy, type NewTestWaiverReason } from "../../core/verification-policy";
 import type { OwnershipProblem, PlanInvariant } from "../../types";
@@ -86,6 +87,8 @@ function renderOwnershipProblem(problem: OwnershipProblem): string {
 
 type TaskRecord = Readonly<{
   id: string;
+  /** The Task's Wave; null when malformed, which structural validation reports. */
+  wave: number | null;
   files: readonly string[];
   dependsOn: readonly string[];
   /** Requirement Completion Claims (`spec_anchors`). */
@@ -109,6 +112,7 @@ function newTestWaiver(policy: unknown): NewTestWaiverReason | null {
 function taskRecords(tasks: readonly Record<string, unknown>[]): readonly TaskRecord[] {
   return tasks.filter((t): t is Record<string, unknown> => typeof t === "object" && t !== null).map((t) => ({
     id: typeof t.id === "string" ? t.id : "<unnamed task>",
+    wave: typeof t.wave === "number" && Number.isSafeInteger(t.wave) ? t.wave : null,
     files: strings(t.file_list),
     dependsOn: strings(t.depends_on),
     claims: strings(t.spec_anchors),
@@ -166,14 +170,43 @@ function duplicateRoleErrors(label: string, declared: readonly DeclaredRole[]): 
   });
 }
 
-/** A change to the owner or a sibling updates the family's matrix test. */
-function matrixTestErrors(label: string, ownership: OwnedInvariant, roled: readonly RoledTask[]): string[] {
+/**
+ * A change to the owner or a sibling updates the family's matrix test, and
+ * the matrix test lands no later than the first Wave the Wave Gate verifies
+ * the family in (`firstOwingWave`, the gate's own schedule).
+ */
+function matrixTestErrors(
+  label: string,
+  ownership: OwnedInvariant,
+  roled: readonly RoledTask[],
+  contractTaskIds: ReadonlySet<string>,
+): string[] {
   const familyTasks = roled.filter(({ roles }) => changesFamily(roles));
-  if (familyTasks.length === 0 || roled.some(({ roles }) => roles.matrixTest)) return [];
+  if (familyTasks.length === 0) return [];
+  const matrixTasks = roled.filter(({ roles }) => roles.matrixTest);
+  if (matrixTasks.length === 0) {
+    return [
+      `${label}: ${familyTasks.map(({ record }) => record.id).join(", ")} touches the family but no task's file_list includes the matrix test ` +
+        `'${ownership.matrixTest}' — a change to the owner or a sibling must update the test that runs the rule through every entry point`,
+    ];
+  }
+  const scheduled = scheduledTasks(roled.map(({ record }) => record));
+  if (scheduled === null) return [];
+  const owing = firstOwingWave(scheduled, contractTaskIds, ownership);
+  const lands = Math.min(...matrixTasks.map(({ record }) => record.wave ?? Number.POSITIVE_INFINITY));
+  if (owing === null || lands <= owing) return [];
+  const owingIds = familyTasks.filter(({ record }) => record.wave === owing && !contractTaskIds.has(record.id)).map(({ record }) => record.id);
+  const landingIds = matrixTasks.filter(({ record }) => record.wave === lands).map(({ record }) => record.id);
   return [
-    `${label}: ${familyTasks.map(({ record }) => record.id).join(", ")} touches the family but no task's file_list includes the matrix test ` +
-      `'${ownership.matrixTest}' — a change to the owner or a sibling must update the test that runs the rule through every entry point`,
+    `${label}: ${owingIds.join(", ")} change the family in Wave ${owing}, but the matrix test '${ownership.matrixTest}' first lands in ` +
+      `Wave ${lands} (${landingIds.join(", ")}) — the Wave Gate verifies the family in Wave ${owing}, so the matrix test must land in that Wave or earlier`,
   ];
+}
+
+/** The records as the family schedule reads them, or null when any Wave is malformed (structural validation reports it). */
+function scheduledTasks(records: readonly TaskRecord[]): readonly ScheduledTask[] | null {
+  const scheduled = records.flatMap(({ id, wave, files }) => (wave === null ? [] : [{ id, wave, file_list: [...files] }]));
+  return scheduled.length === records.length ? scheduled : null;
 }
 
 /** A sibling's Task reaches the owner's Task, so the owner exists before its callers. */
@@ -195,11 +228,12 @@ function ownerFirstErrors(label: string, roled: readonly RoledTask[]): string[] 
  * Ownership checks for one invariant: a malformed declaration names its
  * problems; an owned one must name paths that exist or that a task creates,
  * give each path one role, update its matrix test whenever the family
- * changes, and build siblings after the owner.
+ * changes and by the first Wave that owes it, and build siblings after the owner.
  */
 function ownershipErrors(
   inv: PlanInvariant,
   tasks: readonly Record<string, unknown>[],
+  contractTaskIds: ReadonlySet<string>,
   deps: ModelBindingDeps,
 ): string[] {
   const label = `${inv.id} ("${inv.title}")`;
@@ -213,9 +247,22 @@ function ownershipErrors(
   return [
     ...unresolvedPathErrors(label, declared, records, deps),
     ...duplicateRoleErrors(label, declared),
-    ...matrixTestErrors(label, ownership, roled),
+    ...matrixTestErrors(label, ownership, roled, contractTaskIds),
     ...ownerFirstErrors(label, roled),
   ];
+}
+
+/**
+ * The contract Tasks the plan's contracts resolve to under the one writer
+ * rule. A contract that resolves to no single writer names none here; contract
+ * binding reports it, and every Task's change then owes, which verifies more.
+ */
+function planContractTaskIds(models: PlanModels, tasks: readonly ContractBindingTask[]): ReadonlySet<string> {
+  return new Set(models.contracts.flatMap(({ declaration }) => {
+    if (declaration.kind === "malformed") return [];
+    const writer = contractWriter(frozenPaths(declaration), tasks);
+    return writer.ok ? [writer.value] : [];
+  }));
 }
 
 /** The raw roster narrowed to what contract binding reads. */
@@ -347,9 +394,11 @@ export function validateModelBindings(
     }
   }
 
-  for (const inv of models.invariants) errors.push(...ownershipErrors(inv, tasks, deps));
+  const bindingTasks = contractBindingTasks(tasks);
+  const contractTaskIds = planContractTaskIds(models, bindingTasks);
+  for (const inv of models.invariants) errors.push(...ownershipErrors(inv, tasks, contractTaskIds, deps));
 
-  errors.push(...contractBindingErrors(models.contracts, contractBindingTasks(tasks)));
+  errors.push(...contractBindingErrors(models.contracts, bindingTasks));
 
   return errors.length === 0 ? ok() : fail(errors);
 }

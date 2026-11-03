@@ -5,6 +5,8 @@ Accepted (2026-10-23). Records plan AD-5 of `.claude/plans/2026-10-21-g5b-owner-
 AS-001..AS-003, AS-006). It shipped with G5b owner enforcement on `feat/g5b-owner-enforcement`.
 Amended 2026-11-01 (#133): the coverage walk drives its own reads through a `ReadModule` port; the shell-driven
 frontier step is gone.
+Amended 2026-11-03 (ADR-0063): coverage takes the matrix test and the family paths due by the Wave
+(`duePaths`) instead of the obligation, so a sibling only a later Wave lists is not yet required.
 
 ## Context
 G5b turns an owned invariant's family (one owner module, its declared sibling entry points and a matrix test)

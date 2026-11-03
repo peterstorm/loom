@@ -15,23 +15,16 @@ import {
   siblingCoverage,
 } from "../../src/core/owner-verification/coverage";
 import { moduleEdges } from "../../src/core/owner-verification/import-graph";
-import type { OwnerObligation, PathAliases, ReadModule } from "../../src/core/owner-verification/types";
-import { ownerObligation } from "../fixtures/owner-obligation";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
+import type { PathAliases, ReadModule } from "../../src/core/owner-verification/types";
 
 const OWNER = "src/rules/owner.ts";
 const SIBLING_A = "src/rules/sibling-a.ts";
 const SIBLING_B = "src/rules/sibling-b.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
 
-const obligation = (siblings: readonly string[] = [SIBLING_A, SIBLING_B], owner: string = OWNER): OwnerObligation => ownerObligation({
-  invariant: "INV-7",
-  title: "Admission is decided only by the owner",
-  statement: null,
-  owner,
-  siblings: siblings.map((path) => ({ path, note: null })),
-  matrixTest: MATRIX,
-  mutation: { kind: "verify" },
-});
+/** The due family paths coverage must reach, as `duePaths` hands them over: the owner first, then the siblings in declared order. */
+const due = (siblings: readonly string[] = [SIBLING_A, SIBLING_B], owner: string = OWNER): NonEmpty<string> => [owner, ...siblings];
 
 const ALIASES: PathAliases = [{ pattern: "@rules/*", targets: ["src/rules/*"] }];
 const known = (...paths: string[]): ReadonlySet<string> => new Set(paths);
@@ -47,7 +40,7 @@ const SOURCES: Readonly<Record<string, string>> = {
 const over = (matrixText: string, siblings?: readonly string[], aliases: PathAliases = ALIASES) =>
   coverageOverFiles({
     matrixTest: MATRIX,
-    obligation: obligation(siblings),
+    due: due(siblings),
     files: new Map(Object.entries({ ...SOURCES, [MATRIX]: matrixText })),
     aliases,
   });
@@ -124,18 +117,18 @@ describe("reachedFiles and decideCoverage", () => {
   });
 
   it("FR-006: decideCoverage names every missing path in declared order, the owner first", () => {
-    expect(decideCoverage(new Set(), obligation([SIBLING_B, SIBLING_A]))).toEqual({ kind: "missing", paths: [OWNER, SIBLING_B, SIBLING_A] });
-    expect(decideCoverage(new Set([SIBLING_B]), obligation([SIBLING_B, SIBLING_A]))).toEqual({ kind: "missing", paths: [OWNER, SIBLING_A] });
-    expect(decideCoverage(new Set([OWNER, SIBLING_A, SIBLING_B]), obligation())).toEqual({ kind: "covered" });
+    expect(decideCoverage(new Set(), due([SIBLING_B, SIBLING_A]))).toEqual({ kind: "missing", paths: [OWNER, SIBLING_B, SIBLING_A] });
+    expect(decideCoverage(new Set([SIBLING_B]), due([SIBLING_B, SIBLING_A]))).toEqual({ kind: "missing", paths: [OWNER, SIBLING_A] });
+    expect(decideCoverage(new Set([OWNER, SIBLING_A, SIBLING_B]), due())).toEqual({ kind: "covered" });
   });
 
   it("FR-006: a declared path spelled with `./` still matches its reached file, and is reported as declared", () => {
-    expect(decideCoverage(new Set([OWNER]), obligation([], `./${OWNER}`))).toEqual({ kind: "covered" });
-    expect(decideCoverage(new Set(), obligation([], `./${OWNER}`))).toEqual({ kind: "missing", paths: [`./${OWNER}`] });
+    expect(decideCoverage(new Set([OWNER]), due([], `./${OWNER}`))).toEqual({ kind: "covered" });
+    expect(decideCoverage(new Set(), due([], `./${OWNER}`))).toEqual({ kind: "missing", paths: [`./${OWNER}`] });
   });
 
   it("a missing matrix test reaches nothing", () => {
-    expect(coverageOverFiles({ matrixTest: MATRIX, obligation: obligation([]), files: new Map(Object.entries(SOURCES)), aliases: [] }))
+    expect(coverageOverFiles({ matrixTest: MATRIX, due: due([]), files: new Map(Object.entries(SOURCES)), aliases: [] }))
       .toEqual({ kind: "missing", paths: [OWNER] });
   });
 
@@ -174,20 +167,20 @@ const chainFiles = (hops: number, edge: "reexport" | "import"): Record<string, s
   return files;
 };
 
-const targetObligation = obligation([], "src/chain/target.ts");
+const targetDue = due([], "src/chain/target.ts");
 
 describe("coverage laws", () => {
   it("FR-007: AS-006: a re-export chain of any length reaches its target", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 40 }), (hops) => {
       const files = new Map(Object.entries(chainFiles(hops, "reexport")));
-      expect(coverageOverFiles({ matrixTest: MATRIX, obligation: targetObligation, files, aliases: [] })).toEqual({ kind: "covered" });
+      expect(coverageOverFiles({ matrixTest: MATRIX, due: targetDue, files, aliases: [] })).toEqual({ kind: "covered" });
     }));
   });
 
   it("FR-007: AS-003: a plain import chain longer than one hop never reaches its target", () => {
     fc.assert(fc.property(fc.integer({ min: 2, max: 40 }), (hops) => {
       const files = new Map(Object.entries(chainFiles(hops, "import")));
-      expect(coverageOverFiles({ matrixTest: MATRIX, obligation: targetObligation, files, aliases: [] }))
+      expect(coverageOverFiles({ matrixTest: MATRIX, due: targetDue, files, aliases: [] }))
         .toEqual({ kind: "missing", paths: ["src/chain/target.ts"] });
     }));
   });
@@ -203,7 +196,7 @@ describe("coverage laws", () => {
     fc.assert(fc.property(fc.constantFrom(...MATRICES), fc.integer(), (matrixText, seed) => {
       const entries = Object.entries({ ...SOURCES, [MATRIX]: matrixText });
       const shuffled = fc.sample(fc.shuffledSubarray(entries, { minLength: entries.length, maxLength: entries.length }), { seed, numRuns: 1 })[0]!;
-      const input = { matrixTest: MATRIX, obligation: obligation(), aliases: ALIASES };
+      const input = { matrixTest: MATRIX, due: due(), aliases: ALIASES };
       expect(coverageOverFiles({ ...input, files: new Map(shuffled) })).toEqual(coverageOverFiles({ ...input, files: new Map(entries) }));
       expect([...reachedFiles(MATRIX, new Map(shuffled), ALIASES)].sort()).toEqual([...reachedFiles(MATRIX, new Map(entries), ALIASES)].sort());
     }), { numRuns: 60 });
@@ -211,7 +204,7 @@ describe("coverage laws", () => {
 
   it("FR-007: a file nothing imports never changes the verdict, whatever its text", () => {
     fc.assert(fc.property(fc.constantFrom(...MATRICES), fc.stringMatching(/^[a-z]{1,8}$/), fc.string(), (matrixText, name, text) => {
-      const input = { matrixTest: MATRIX, obligation: obligation(), aliases: ALIASES };
+      const input = { matrixTest: MATRIX, due: due(), aliases: ALIASES };
       const base = { ...SOURCES, [MATRIX]: matrixText };
       expect(coverageOverFiles({ ...input, files: new Map(Object.entries({ ...base, [`src/unrelated/${name}.ts`]: text })) }))
         .toEqual(coverageOverFiles({ ...input, files: new Map(Object.entries(base)) }));
@@ -229,12 +222,12 @@ describe("coverage laws", () => {
  * sharing none of the walk's lazy reads, memoization or bound, so the
  * properties below can fail when the walk does.
  */
-const referenceCoverage = (repo: Readonly<Record<string, string>>, declared: OwnerObligation, aliases: PathAliases) => {
+const referenceCoverage = (repo: Readonly<Record<string, string>>, declared: NonEmpty<string>, aliases: PathAliases) => {
   const known = new Set(Object.keys(repo));
   const loads = (path: string, kinds: readonly ("import" | "reexport")[]): readonly string[] =>
     moduleEdges(path, repo[path]!).filter((edge) => !edge.typeOnly && kinds.includes(edge.kind)).map((edge) => edge.specifier);
   const reached = new Set<string>();
-  if (!known.has(declared.matrixTest)) return decideCoverage(reached, declared);
+  if (!known.has(MATRIX)) return decideCoverage(reached, declared);
   const visit = (from: string, specifiers: readonly string[]): void => {
     for (const specifier of specifiers) {
       const target = resolveSpecifier(from, specifier, aliases, known);
@@ -243,7 +236,7 @@ const referenceCoverage = (repo: Readonly<Record<string, string>>, declared: Own
       visit(target, loads(target, ["reexport"]));
     }
   };
-  visit(declared.matrixTest, loads(declared.matrixTest, ["import", "reexport"]));
+  visit(MATRIX, loads(MATRIX, ["import", "reexport"]));
   return decideCoverage(reached, declared);
 };
 
@@ -326,7 +319,7 @@ const textOf = (from: string, edges: readonly LayoutEdge[]): string =>
     return kind === "reexport" ? `export ${type}* from "${specifier}";` : `import ${type}* as e${index} from "${specifier}";`;
   }).join("\n") + "\n";
 
-/** A repository of the slots plus the matrix test, and an obligation over them: m0 the owner, m1 and m2 its siblings. */
+/** A repository of the slots plus the matrix test, and the due paths over them: m0 the owner, m1 and m2 its siblings. */
 const layoutRepository = fc.record({
   layouts: fc.tuple(...SLOTS.map(() => fc.constantFrom(...LAYOUTS))),
   edges: fc.tuple(...SLOTS.map(() => fc.array(layoutEdge, { maxLength: 3 }))),
@@ -337,7 +330,7 @@ const layoutRepository = fc.record({
     for (const file of filesOf(slot, layouts[index]!)) repo[file] = textOf(file, edges[index]!);
   });
   const declaredPath = (index: number): string => filesOf(SLOTS[index]!, layouts[index]!)[0] ?? `src/${SLOTS[index]!}.ts`;
-  return { repo, obligation: obligation([declaredPath(1), declaredPath(2)], declaredPath(0)) };
+  return { repo, due: due([declaredPath(1), declaredPath(2)], declaredPath(0)) };
 });
 
 describe("siblingCoverage: the walk drives its own reads", () => {
@@ -348,7 +341,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
       "src/unrelated.ts": "export {};\n",
     };
     const port = recordingPort(repo);
-    expect(siblingCoverage({ obligation: obligation(), aliases: ALIASES, read: port.read })).toEqual({ kind: "covered" });
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: ALIASES, read: port.read })).toEqual({ kind: "covered" });
     expect(port.reads[0]).toBe(MATRIX);
     expect(new Set(port.reads).size).toBe(port.reads.length);
     expect(port.reads.filter((path) => path in repo).sort()).toEqual([MATRIX, "src/rules/index.ts", OWNER, SIBLING_A, SIBLING_B].sort());
@@ -359,16 +352,16 @@ describe("siblingCoverage: the walk drives its own reads", () => {
     fc.assert(fc.property(fc.integer({ min: 1, max: 12 }), fc.constantFrom<"reexport" | "import">("reexport", "import"), (hops, edge) => {
       const repo = chainFiles(hops, edge);
       const port = recordingPort(repo);
-      expect(siblingCoverage({ obligation: targetObligation, aliases: [], read: port.read }))
-        .toEqual(referenceCoverage(repo, targetObligation, []));
+      expect(siblingCoverage({ matrixTest: MATRIX, due: targetDue, aliases: [], read: port.read }))
+        .toEqual(referenceCoverage(repo, targetDue, []));
       expect(new Set(port.reads).size).toBe(port.reads.length);
     }));
   });
 
   it("FR-007: the self-driven walk decides exactly as an independent whole-repository reach does, over aliases, fallbacks, indexes and ladder order", () => {
-    fc.assert(fc.property(layoutRepository, ({ repo, obligation: declared }) => {
+    fc.assert(fc.property(layoutRepository, ({ repo, due: declared }) => {
       const port = recordingPort(repo);
-      expect(siblingCoverage({ obligation: declared, aliases: LAYOUT_ALIASES, read: port.read }))
+      expect(siblingCoverage({ matrixTest: MATRIX, due: declared, aliases: LAYOUT_ALIASES, read: port.read }))
         .toEqual(referenceCoverage(repo, declared, LAYOUT_ALIASES));
       expect(new Set(port.reads).size).toBe(port.reads.length);
       expect(port.reads[0]).toBe(MATRIX);
@@ -382,7 +375,7 @@ describe("siblingCoverage: the walk drives its own reads", () => {
       "src/m0/index.ts": "export const later = 0;\n",
     };
     const port = recordingPort(repo);
-    siblingCoverage({ obligation: obligation([], "src/m0.ts"), aliases: [], read: port.read });
+    siblingCoverage({ matrixTest: MATRIX, due: due([], "src/m0.ts"), aliases: [], read: port.read });
     expect(port.reads).toEqual([MATRIX, "src/m0", "src/m0.ts"]);
   });
 
@@ -394,21 +387,21 @@ describe("siblingCoverage: the walk drives its own reads", () => {
       "src/m1.ts": 'export * from "@m/m0";\n',
     };
     const port = recordingPort(repo);
-    expect(siblingCoverage({ obligation: obligation(["src/m1.ts"], "gen/m0.ts"), aliases: LAYOUT_ALIASES, read: port.read }))
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(["src/m1.ts"], "gen/m0.ts"), aliases: LAYOUT_ALIASES, read: port.read }))
       .toEqual({ kind: "covered" });
     expect(port.reads).toContain("gen/m0.ts");
   });
 
   it("a missing matrix test reads only the matrix test and reaches nothing", () => {
     const port = recordingPort({});
-    expect(siblingCoverage({ obligation: obligation([]), aliases: [], read: port.read })).toEqual({ kind: "missing", paths: [OWNER] });
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due([]), aliases: [], read: port.read })).toEqual({ kind: "missing", paths: [OWNER] });
     expect(port.reads).toEqual([MATRIX]);
   });
 
   it("a refused read the walk needs is that read's infrastructure failure, never a missing path, and stops the reads", () => {
     const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b") };
     const port = recordingPort(repo, new Set([SIBLING_A]));
-    expect(siblingCoverage({ obligation: obligation(), aliases: [], read: port.read })).toEqual({
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: [], read: port.read })).toEqual({
       kind: "infrastructure",
       failure: { kind: "repository-file-unreadable", detail: `${SIBLING_A} cannot be read: EACCES` },
     });
@@ -418,14 +411,14 @@ describe("siblingCoverage: the walk drives its own reads", () => {
   it("a refused file the walk never needs is never read, so it never fails coverage", () => {
     const repo = { ...SOURCES, [MATRIX]: importing("../src/rules/owner", "../src/rules/sibling-a", "../src/rules/sibling-b"), "src/locked.ts": "" };
     const port = recordingPort(repo, new Set(["src/locked.ts"]));
-    expect(siblingCoverage({ obligation: obligation(), aliases: [], read: port.read })).toEqual({ kind: "covered" });
+    expect(siblingCoverage({ matrixTest: MATRIX, due: due(), aliases: [], read: port.read })).toEqual({ kind: "covered" });
     expect(port.reads).not.toContain("src/locked.ts");
   });
 
   it("reading past the bound is a coverage-bound-exceeded infrastructure failure, and the walk reads no further", () => {
     const repo = chainFiles(COVERAGE_READ_BOUND + 5, "reexport");
     const port = recordingPort(repo);
-    const verdict = siblingCoverage({ obligation: targetObligation, aliases: [], read: port.read });
+    const verdict = siblingCoverage({ matrixTest: MATRIX, due: targetDue, aliases: [], read: port.read });
     expect(verdict).toMatchObject({ kind: "infrastructure", failure: { kind: "coverage-bound-exceeded" } });
     if (verdict.kind === "infrastructure") expect(verdict.failure.detail).toContain(String(COVERAGE_READ_BOUND));
     expect(port.reads.filter((path) => path in repo)).toHaveLength(COVERAGE_READ_BOUND + 1);

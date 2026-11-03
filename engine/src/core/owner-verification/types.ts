@@ -8,9 +8,10 @@
  * Vocabulary (CONTEXT.md):
  * - Owner Obligation: one owned Invariant of the plan, stamped into the
  *   TaskGraph at population. The Wave Gate owes it sibling coverage and
- *   mutation verification when the Wave changed its family (owner or sibling).
+ *   mutation verification when the Wave owes its family (`owesInWave`).
  * - Sibling coverage: the matrix test's direct imports, closed under
- *   re-exports and resolved to files, reach the owner and every sibling.
+ *   re-exports and resolved to files, reach the owner and every sibling due
+ *   by the Wave (`duePaths`).
  * - Mutation verification: every mutant of the owner's lines changed in the
  *   Wave, made by one fixed operator, is killed by the matrix test.
  * - Mutation exemption: an owned Invariant's declared, reasoned opt-out of
@@ -105,9 +106,9 @@ export type PathAlias = Readonly<{ pattern: string; targets: readonly string[] }
 export type PathAliases = readonly PathAlias[];
 
 /**
- * Whether a matrix test reaches its owned Invariant's owner and every
- * declared sibling. `missing` names every unreached path in declared order,
- * the owner first. `infrastructure` is a failure to read the files the walk
+ * Whether a matrix test reaches every due family path: the owner and each
+ * sibling due by the Wave. `missing` names every unreached due path in
+ * declared order, the owner first. `infrastructure` is a failure to read the files the walk
  * needs: a reached file that exists but cannot be read
  * (`repository-file-unreadable`), an unresolvable tsconfig
  * (`alias-config-unresolvable`), or the read bound exceeded
@@ -118,12 +119,12 @@ export type CoverageVerdict =
   | Readonly<{ kind: "missing"; paths: NonEmpty<string> }>
   | Readonly<{ kind: "infrastructure"; failure: OwnerInfrastructureFailure }>;
 
-/** The file-map coverage decision's input: the matrix test, the obligation
- *  it must cover, every repository file (repository-relative path → text),
- *  and the aliases specifiers resolve through. */
+/** The file-map coverage decision's input: the matrix test, the due family
+ *  paths it must reach (`duePaths`, owner first), every repository file
+ *  (repository-relative path → text), and the aliases specifiers resolve through. */
 export type CoverageInput = Readonly<{
   matrixTest: string;
-  obligation: OwnerObligation;
+  due: NonEmpty<string>;
   files: ReadonlyMap<string, string>;
   aliases: PathAliases;
 }>;
@@ -145,8 +146,8 @@ export type ModuleRead =
 /** The port sibling coverage pulls repository files through, one path at a time. */
 export type ReadModule = (path: string) => ModuleRead;
 
-/** Sibling coverage's input: the obligation (whose matrix test the walk starts from), the aliases, and the port. */
-export type SiblingCoverageInput = Readonly<{ obligation: OwnerObligation; aliases: PathAliases; read: ReadModule }>;
+/** Sibling coverage's input: the matrix test the walk starts from, the due family paths it must reach (`duePaths`, owner first), the aliases, and the port. */
+export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: NonEmpty<string>; aliases: PathAliases; read: ReadModule }>;
 
 /** `coverage.ts`'s entry point: it drives its own traversal through the port and decides. */
 export type SiblingCoverageFn = (input: SiblingCoverageInput) => CoverageVerdict;
