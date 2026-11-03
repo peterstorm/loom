@@ -6,6 +6,8 @@ and the ownership rule INV-3 of the same plan. It shipped with G5b owner enforce
 `feat/g5b-owner-enforcement`.
 Amended 2026-11-01 (#136): the opaque `OwnerScope` seam and its selections became two duty entry points,
 `waveOwnerDuty` and `taskOwnerDuty`; see "Two duty entry points" under Decision.
+Amended 2026-11-03 (ADR-0063): `waveOwnerDuty` selects through the family schedule (`owesInWave`): the owner
+must be due, and a contract Task's change owes nothing.
 
 ## Context
 G5a gave a plan's owned invariants a family: one owner module, its declared sibling entry points and a matrix

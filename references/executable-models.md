@@ -233,18 +233,27 @@ Declaring an owner makes it an obligation the Wave Gate checks.
   is unreadable, it has strays or malformed ownership, or the obligations it
   derives differ from the stamp (`plan-drift`: re-populate, or restore the
   plan). This runs even in a Wave that owes nothing.
-- **Which invariants are checked.** Exactly the owned invariants whose family
-  the Wave changed: some Wave Task's `file_list` holds the owner or a
-  sibling. A change to the matrix test alone does not trigger the checks.
+- **Which invariants are checked.** Exactly the owned invariants the Wave
+  owes: the owner is due (below), and some Wave Task other than a contract
+  Task has the owner or a sibling in its `file_list`. A change to the matrix
+  test alone does not trigger the checks. A contract Task writes at most a
+  compiling stub of the owner, so its change owes nothing: verification
+  starts with the first Wave whose implementation Task changes the family.
   Unowned invariants are never checked. One module decides this
   (`core/owner-verification/obligations.ts`).
+- **Families grow Wave by Wave.** A family path is *due* by a Wave when no
+  Task lists it (it exists already) or a Task of that Wave or an earlier one
+  does. A sibling that only a later Wave lists is not yet due, so a plan may
+  add siblings across Waves and update the matrix test in each. A due path
+  the matrix test fails to reach still blocks. Population refuses a plan
+  whose matrix test first lands after the first Wave that owes the family.
 - **Sibling coverage.** The matrix test's direct imports — static `import`,
   side-effect imports, `import x = require`, string-literal `import()` and
   `require()` — plus everything reached through `export … from` re-exports,
   resolved to files through relative paths (the extension
   ladder `""`, `.ts`, `.tsx`, `.mts`, `.cts`, a `.js`-family specifier mapped
   to its TypeScript source, then `index.ts`/`index.tsx`) and the matrix test's
-  tsconfig `paths`, must include the owner and every declared sibling.
+  tsconfig `paths`, must include the owner and every sibling due by the Wave.
   Direct imports and re-export chains of any length count; plain import
   chains are not followed, so a module that merely imports the owner does
   not credit it: siblings import the owner, so following them would make the
@@ -448,8 +457,8 @@ pending failures — into its brief.
    history entry, so an abandoned run freezes nothing (ADR-0044).
    Whenever the TaskGraph carries `owner_obligations`, the same suite runs
    `loom:owner-verification`: the plan re-read, then sibling coverage and
-   mutation verification for each owned invariant whose family the Wave
-   changed (see "Owner verification at the Wave Gate").
+   mutation verification for each owned invariant the Wave owes (see "Owner
+   verification at the Wave Gate").
 
 ## Known residuals (honest limits)
 
@@ -477,8 +486,13 @@ pending failures — into its brief.
   mutant is invalid carries no mutation evidence, so it blocks as the
   `no-valid-mutants` infrastructure failure rather than passing.
 - **A matrix-test-only change triggers nothing.** The checks run when the Wave
-  changed the owner or a sibling; a Wave touching only the matrix test owes
-  no coverage or mutation run (the plan is still re-read).
+  owes the family; a Wave touching only the matrix test owes no coverage or
+  mutation run (the plan is still re-read).
+- **A contract Task's stub is trusted to be a stub.** A contract Task's change
+  to an owner owes nothing, and lines it wrote are part of the base a later
+  Wave's mutants are planned from. A contract Task that put real logic in an
+  owner would leave that logic unmutated; contract review and the frozen
+  acceptance tests, not owner verification, guard against it.
 - **The second-copy lens is review judgment.** Whether a copy diverges or is
   identical is the reviewer's call, checked by the Refutation Panel; an
   identical copy is advisory, so it does not block a Wave by itself.

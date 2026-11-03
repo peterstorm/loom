@@ -276,9 +276,15 @@ Per component, not global.
   says which call sites the rule covers — otherwise the sibling list cannot be
   checked for completeness.
 - **Owner verification (G5b)** — every owned `INV-N` becomes an Owner
-  Obligation. At the Wave Gate of a Wave that changes its owner or a sibling,
-  the matrix test must import the owner and every sibling (directly or through
-  `export … from` re-exports; an import proves reach, not exercise), and every
+  Obligation. At the Wave Gate of a Wave that changes its owner or a sibling
+  (a contract Task's stub does not count), the matrix test must import the
+  owner and every sibling due by that Wave: one that exists already or that
+  this or an earlier Wave builds (directly or through `export … from`
+  re-exports; an import proves reach, not exercise). Siblings may land Wave by
+  Wave if each of those Waves updates the matrix test, which must itself land
+  no later than the first Wave that owes the family (the first Wave whose
+  non-contract Task changes the owner or a sibling once the owner is due).
+  And every
   mutant of the owner's lines changed in that Wave must be killed by it (six
   fixed operators, at most 24 mutants, each run through the verification
   manifest's `affectedRunner`). A plan with a non-exempt owned invariant needs

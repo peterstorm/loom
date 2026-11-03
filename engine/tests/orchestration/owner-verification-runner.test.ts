@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import type { ArtifactDigest, DomainResult } from "../../src/core/orchestration-contract";
 import { parseArtifactDigest, success } from "../../src/core/orchestration-contract/identity";
 import { obligationsDigest } from "../../src/core/owner-verification/obligations";
@@ -178,6 +179,28 @@ describe("runOwnerVerification", () => {
     const repo = build({ matrixTest: "sibling-omitting" });
     const verdict = onlyVerdict(await verify(repo));
     expect(verdict.coverage).toEqual({ kind: "missing", paths: [OWNER_FIXTURE.siblings[1]] });
+  }, TIMEOUT_MS);
+
+  it("a sibling only a later Wave lists is not yet due: the matrix test need not reach it this Wave", async () => {
+    const repo = build({ matrixTest: "sibling-omitting" });
+    const graph = repo.manager.load() as StampedGraph;
+    const later = { ...graph.tasks[0]!, id: "T2", wave: 2, file_list: [OWNER_FIXTURE.siblings[1]] };
+    const verdict = onlyVerdict(await verify(repo, { graph: { ...graph, tasks: [...graph.tasks, later] } }));
+    expect(verdict.coverage).toEqual({ kind: "covered" });
+  }, TIMEOUT_MS);
+
+  it("an owner change only a contract Task made is no change the mutants cover: the baseline runs alone", async () => {
+    const repo = build();
+    const graph = repo.manager.load() as StampedGraph;
+    const contract: AcceptanceContract = {
+      schemaVersion: 1, id: "CT-1", title: "Admission surface", statement: "s", contractTask: graph.tasks[0]!.id,
+      types: { kind: "file", path: "src/rules/types.ts" },
+      acceptance: [{ path: "tests/admission.acceptance.test.ts", anchors: ["AS-001"] }],
+      supportedDomain: null, freeze: { state: "awaiting-red" }, revisions: [],
+    };
+    const verdict = onlyVerdict(await verify(repo, { graph: { ...graph, acceptance_contracts: [contract] } }));
+    expect(verdict.mutation).toMatchObject({ kind: "verified", generated: 0, ownerChangedInWave: false });
+    expect(repo.runnerLaunches()).toHaveLength(1);
   }, TIMEOUT_MS);
 
   it("an exempt Invariant still runs coverage, runs no matrix test, and needs no runner", async () => {
