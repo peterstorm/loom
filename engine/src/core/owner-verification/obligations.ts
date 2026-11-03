@@ -24,11 +24,12 @@
  *   - `taskOwnerDuty` is the review-packet and brief scope: the obligations
  *     in which a file list plays any role, matrix test included.
  * - The family schedule is the one rule for when a family grows, shared by
- *   the gate and population validation:
+ *   the gate, the implementation brief and population validation:
  *   - `duePaths`: a family path is due by a Wave when no Task lists it (it
  *     exists already) or a Task of that Wave or an earlier one does. A path
  *     only a later Wave lists is not yet due, so a plan may add siblings Wave
- *     by Wave; a due path that is missing still fails coverage.
+ *     by Wave; a due path that is missing still fails coverage. It returns
+ *     the owner and the due siblings, never empty.
  *   - `owesInWave`: a Wave owes an obligation when its owner is due and a
  *     Wave Task other than a contract Task changes the owner or a sibling.
  *     A change to the matrix test alone owes nothing. A contract Task writes
@@ -47,11 +48,11 @@ import type { PlanInvariant, PlanModels, Task, TaskGraph } from "../../types";
 import type { AcceptanceContract } from "../acceptance-contract";
 import { canonicalDigest } from "../digest";
 import { parseInvariantId, type InvariantId } from "../invariant-id";
-import { canonicalStructuralEquals, failure, success, type ArtifactDigest, type DomainResult } from "../orchestration-contract/identity";
+import { canonicalStructuralEquals, failure, success, type ArtifactDigest, type DomainResult, type NonEmpty } from "../orchestration-contract/identity";
 import { isPlaceholderExemptionReason } from "../parse-plan-models";
 import { isRecord } from "../plain-record";
-import { pathsMatch, samePlanPath } from "../plan-path-match";
-import { changesFamily, invariantRoles, type FamilyPaths } from "../plan-paths";
+import { samePlanPath } from "../plan-path-match";
+import { changesFamily, invariantRoles, listsPath, type FamilyPaths } from "../plan-paths";
 import type { SiblingEntryPoint } from "../sibling-entry-point";
 import type {
   MutationOwed,
@@ -345,17 +346,20 @@ export function implementationTasks<T extends ScheduledTask>(
 // The family schedule: when a family's paths are due and when a Wave owes it
 // ---------------------------------------------------------------------------
 
-const lists = (task: ScheduledTask, path: string): boolean => (task.file_list ?? []).some((file) => pathsMatch(file, path));
-
 /** Whether a family path is due by `wave`: no Task lists it (it exists already), or a Task of this Wave or an earlier one does. */
 function isDueBy(tasks: readonly ScheduledTask[], wave: number, path: string): boolean {
-  const listing = tasks.filter((task) => lists(task, path));
+  const listing = tasks.filter((task) => listsPath(task.file_list ?? [], path));
   return listing.length === 0 || listing.some((task) => task.wave <= wave);
 }
 
-/** The family paths due by `wave`, in declared order with the owner first: what the matrix test must reach then. */
-export const duePaths = (tasks: readonly ScheduledTask[], wave: number, family: FamilyPaths): readonly string[] =>
-  [family.owner, ...family.siblings.map(({ path }) => path)].filter((path) => isDueBy(tasks, wave, path));
+/**
+ * What the matrix test must reach by `wave`, in declared order: the owner,
+ * then each sibling due by then. The owner always leads, so the list is never
+ * empty: coverage runs only for an owed obligation, and an owed obligation's
+ * owner is due (`owesInWave`).
+ */
+export const duePaths = (tasks: readonly ScheduledTask[], wave: number, family: FamilyPaths): NonEmpty<string> =>
+  [family.owner, ...family.siblings.map(({ path }) => path).filter((path) => isDueBy(tasks, wave, path))];
 
 /** Whether `wave` owes the family: its owner is due, and a Wave Task other than a contract Task changes the owner or a sibling. */
 export function owesInWave(

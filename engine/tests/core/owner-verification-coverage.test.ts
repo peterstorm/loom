@@ -15,6 +15,7 @@ import {
   siblingCoverage,
 } from "../../src/core/owner-verification/coverage";
 import { moduleEdges } from "../../src/core/owner-verification/import-graph";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import type { PathAliases, ReadModule } from "../../src/core/owner-verification/types";
 
 const OWNER = "src/rules/owner.ts";
@@ -23,7 +24,7 @@ const SIBLING_B = "src/rules/sibling-b.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
 
 /** The due family paths coverage must reach, as `duePaths` hands them over: the owner first, then the siblings in declared order. */
-const due = (siblings: readonly string[] = [SIBLING_A, SIBLING_B], owner: string = OWNER): readonly string[] => [owner, ...siblings];
+const due = (siblings: readonly string[] = [SIBLING_A, SIBLING_B], owner: string = OWNER): NonEmpty<string> => [owner, ...siblings];
 
 const ALIASES: PathAliases = [{ pattern: "@rules/*", targets: ["src/rules/*"] }];
 const known = (...paths: string[]): ReadonlySet<string> => new Set(paths);
@@ -221,7 +222,7 @@ describe("coverage laws", () => {
  * sharing none of the walk's lazy reads, memoization or bound, so the
  * properties below can fail when the walk does.
  */
-const referenceCoverage = (repo: Readonly<Record<string, string>>, declared: readonly string[], aliases: PathAliases) => {
+const referenceCoverage = (repo: Readonly<Record<string, string>>, declared: NonEmpty<string>, aliases: PathAliases) => {
   const known = new Set(Object.keys(repo));
   const loads = (path: string, kinds: readonly ("import" | "reexport")[]): readonly string[] =>
     moduleEdges(path, repo[path]!).filter((edge) => !edge.typeOnly && kinds.includes(edge.kind)).map((edge) => edge.specifier);

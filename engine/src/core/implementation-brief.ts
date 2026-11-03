@@ -27,7 +27,7 @@ import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { match } from "ts-pattern";
 import { invariantRoles, type OwnedInvariant } from "./plan-paths";
-import { duePaths, type TaskOwnerDuty } from "./owner-verification/obligations";
+import { contractTaskIdsOf, duePaths, owesInWave, type TaskOwnerDuty } from "./owner-verification/obligations";
 import type { OwnerObligation } from "./owner-verification/types";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
@@ -319,29 +319,23 @@ function invariantOwnership(
 const quoted = (path: string): string => `\`${path}\``;
 
 /**
- * Where the Task stands in the family schedule (`obligations.ts`): its Wave
- * and roster, which decide the paths due by then, and whether it is a
- * contract Task, whose change owes no owner verification.
+ * Where the Task stands in the family schedule (`obligations.ts`), read with
+ * the gate's own inputs: the Wave, the roster that decides what is due, and
+ * the contract Tasks (`contractTaskIdsOf`) whose change owes nothing.
  */
-type DutySchedule = Readonly<{ wave: number; roster: readonly Task[]; contractTask: boolean }>;
+type DutySchedule = Readonly<{ task: Task; roster: readonly Task[]; contractTaskIds: ReadonlySet<string> }>;
 
 function dutySchedule(task: Task, roster: readonly Task[], contracts: readonly AcceptanceContract[]): DutySchedule {
   return {
-    wave: task.wave,
+    task,
     roster: roster.some(({ id }) => id === task.id) ? roster : [...roster, task],
-    contractTask: contracts.some(({ contractTask }) => contractTask === task.id),
+    contractTaskIds: contractTaskIdsOf({ acceptance_contracts: contracts }),
   };
 }
 
-/** What the matrix test must import by `wave`: the owner, and the siblings due by then (quoted). */
-function coverageTargets(
-  { invariant, owner, siblings }: OwnerObligation,
-  dueSiblings: readonly string[],
-  laterSiblings: readonly string[],
-  wave: number,
-): string {
+/** What the matrix test must import by `wave`: the owner, then the siblings due by then (already quoted). */
+function coverageTargets({ invariant, owner, siblings }: OwnerObligation, dueSiblings: readonly string[], wave: number): string {
   if (siblings.length === 0) return `the owner module ${quoted(owner)} (${invariant} declares no sibling entry point)`;
-  if (laterSiblings.length === 0) return `the owner module ${quoted(owner)} and every sibling entry point: ${dueSiblings.join(", ")}`;
   if (dueSiblings.length === 0) return `the owner module ${quoted(owner)}; no sibling entry point is due by Wave ${wave}`;
   return `the owner module ${quoted(owner)} and every sibling entry point due by Wave ${wave}: ${dueSiblings.join(", ")}`;
 }
@@ -351,23 +345,29 @@ function coverageTargets(
  * AD-10, FR-027): sibling coverage of the matrix test over the paths due by
  * the Task's Wave (`duePaths`), then mutation verification of the owner's
  * changed lines, or the declared exemption. A contract Task's stub owes
- * neither, so its brief says when verification starts instead.
+ * neither, so its brief says when verification starts instead; a Wave the
+ * gate does not owe (`owesInWave`) is told so before the duties it will owe.
  */
-function ownerDuties(obligation: OwnerObligation, schedule: DutySchedule): string {
+function ownerDuties(obligation: OwnerObligation, { task, roster, contractTaskIds }: DutySchedule): string {
   const { invariant, owner, siblings, matrixTest, mutation } = obligation;
-  if (schedule.contractTask) {
+  if (contractTaskIds.has(task.id)) {
     return `**Owner duties (${invariant}):** none in this Wave. You are a contract Task, so your change to this family is a ` +
       `compiling stub, and a stub owes no owner verification. The Wave Gate verifies ${invariant} from the first Wave in which ` +
       "an implementation Task changes its owner or a sibling.";
   }
-  const due = new Set(duePaths(schedule.roster, schedule.wave, obligation));
-  const dueSiblings = siblings.filter(({ path }) => due.has(path)).map(({ path }) => quoted(path));
-  const laterSiblings = siblings.filter(({ path }) => !due.has(path)).map(({ path }) => quoted(path));
+  const due = new Set(duePaths(roster, task.wave, obligation));
+  const quotedSiblings = (isDue: boolean): readonly string[] =>
+    siblings.filter(({ path }) => due.has(path) === isDue).map(({ path }) => quoted(path));
+  const laterSiblings = quotedSiblings(false);
+  const owed = owesInWave(roster, contractTaskIds, task.wave, obligation)
+    ? ""
+    : `Wave ${task.wave} owes no owner verification for ${invariant}: no Task of it other than a contract Task changes the ` +
+      "owner or a sibling, or the owner is not due yet. These duties bind from the first Wave that does. ";
   const later = laterSiblings.length === 0
     ? ""
     : ` Later Waves add ${laterSiblings.join(", ")}; the matrix test imports each one in the Wave that adds it, so this Wave's gate does not require them.`;
-  const coverage = `**Owner duties (${invariant}):** the matrix test ${quoted(matrixTest)} must import ` +
-    `${coverageTargets(obligation, dueSiblings, laterSiblings, schedule.wave)}. ` +
+  const coverage = `**Owner duties (${invariant}):** ${owed}the matrix test ${quoted(matrixTest)} must import ` +
+    `${coverageTargets(obligation, quotedSiblings(true), task.wave)}. ` +
     `The Wave Gate checks that its imports, followed through re-exports, reach each of them.${later}`;
   const mutationDuty = match(mutation)
     .with({ kind: "verify" }, () =>

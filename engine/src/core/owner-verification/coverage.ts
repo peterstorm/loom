@@ -217,7 +217,7 @@ export const reachedFiles = (matrixTest: string, files: ReadonlyMap<string, stri
 /** `covered`, or every due path the reached files miss, in the order given (declared, the owner first). */
 export const decideCoverage = (
   reached: ReadonlySet<string>,
-  due: readonly string[],
+  due: NonEmpty<string>,
 ): Extract<CoverageVerdict, { kind: "covered" | "missing" }> => {
   const [first, ...rest] = due.filter((path) => !reached.has(normalizeRepoPath(path) ?? path));
   if (first === undefined) return { kind: "covered" };
@@ -226,7 +226,7 @@ export const decideCoverage = (
 };
 
 /** Coverage of the due paths from `matrixTest` over the port, bounded at `COVERAGE_READ_BOUND` present files. */
-function coverageThrough(matrixTest: string, due: readonly string[], aliases: PathAliases, read: ReadModule): CoverageVerdict {
+function coverageThrough(matrixTest: string, due: NonEmpty<string>, aliases: PathAliases, read: ReadModule): CoverageVerdict {
   const reader = boundedEdges(matrixTest, read, COVERAGE_READ_BOUND);
   const reached = walk(matrixTest, reader.edgesOf, aliases);
   const failure = reader.failure();

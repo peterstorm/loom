@@ -142,6 +142,15 @@ describe("owner duties in the brief (AD-10)", () => {
     expect(someParagraph(section, "mutation-verified", ADMISSION.owner)).toBe(true);
   });
 
+  it("a Wave the gate does not owe is told so: a sibling built before the owner is due owes nothing yet", () => {
+    const owner = taskFixture({ id: "T2", description: "Build the owner", agent: "code-implementer-agent", wave: 2, depends_on: [], file_list: [ADMISSION.owner] });
+    const section = ownership(["src/rules/sibling-a.ts"], STAMP, { roster: [owner], contracts: [] });
+    expect(someParagraph(section, "**Owner duties (INV-1):** Wave 1 owes no owner verification for INV-1", "bind from the first Wave", "must import"))
+      .toBe(true);
+    // The Wave that builds the owner owes the duties outright.
+    expect(ownership([ADMISSION.owner], STAMP)).not.toContain("owes no owner verification");
+  });
+
   it("a contract Task's stub owes no owner verification: its brief says when verification starts", () => {
     const contract: AcceptanceContract = {
       schemaVersion: 1, id: "CT-1", title: "Admission surface", statement: "s", contractTask: "T1",

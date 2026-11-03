@@ -72,9 +72,14 @@ Their consumers:
   never a change the mutants must cover.
 - Plan validation (`validate-model-bindings.ts`) refuses a matrix test whose first Task lands after
   `firstOwingWave`. Contract Tasks are resolved with the one writer rule (`contractWriter`).
-- The implementation brief renders the owner duties from the same schedule. It names the siblings due by the
-  Task's Wave, says that later Waves add the rest, and tells a contract Task that its stub owes no
-  verification yet.
+- The implementation brief renders the owner duties from the same schedule, through the gate's own
+  `owesInWave` and `contractTaskIdsOf`. It names the siblings due by the Task's Wave, says that later Waves add
+  the rest, tells a contract Task that its stub owes no verification yet, and tells a Task in a Wave the gate
+  does not owe (a sibling built before the owner is due, a matrix-test-only change) that its duties bind from
+  the first Wave that does.
+- `duePaths` always leads with the owner and returns `NonEmpty<string>`, and coverage takes `NonEmpty<string>`,
+  so an empty due list, which would pass coverage vacuously, is unrepresentable. `listsPath` in `plan-paths.ts`
+  is the one file-list predicate the schedule and role classification share.
 
 `invariantRoles` now takes `FamilyPaths` (owner, siblings, matrix test), so an `OwnerObligation` is classified
 directly, without a second adapter.
@@ -100,12 +105,13 @@ directly, without a second adapter.
 **Tests:**
 - `engine/tests/core/owner-obligations.matrix.test.ts`: schedule rows (due by Wave, contract change owes
   nothing, owner not yet due), the G2 INV-6 regression across Waves 1–5, properties (due paths only grow, and
-  the first owing Wave is the earliest one that owes), and a population-validation sibling row.
+  the first owing Wave is the earliest one that owes), a population-validation sibling row, and a State File
+  wire row: a contract-stub Wave's receipt authority owes nothing, and a contract-unaware one is refused.
 - `engine/tests/orchestration/owner-verification-runner.test.ts`: a not-yet-due sibling is not required, and an
   owner change made only by a contract Task runs the baseline alone.
 - `engine/tests/handlers/validate-model-bindings.test.ts`: a late matrix test is refused, incremental siblings
   are accepted, and a contract stub does not move the first owing Wave.
-- `engine/tests/core/implementation-brief-owner-duties.test.ts`: the brief defers later siblings, and a
-  contract Task is owed no verification.
+- `engine/tests/core/implementation-brief-owner-duties.test.ts`: the brief defers later siblings, a contract
+  Task is owed no verification, and a sibling built before its owner is due is told its Wave owes nothing yet.
 - `engine/tests/core/owner-verification-coverage.test.ts` and
   `engine/tests/acceptance/owner-verification-core.acceptance.test.ts`: coverage over explicit due paths.

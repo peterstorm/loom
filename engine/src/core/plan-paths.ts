@@ -23,6 +23,9 @@ export type InvariantRoles = Readonly<{
   matrixTest: boolean;
 }>;
 
+/** Whether a file list holds `path`, under the one plan path rule: how role classification and the family schedule both read a file list. */
+export const listsPath = (fileList: readonly string[], path: string): boolean => fileList.some((file) => pathsMatch(file, path));
+
 /**
  * Which roles a file list plays in one owned invariant family. Plan
  * validation and the implementation brief both classify through here, so a
@@ -30,7 +33,7 @@ export type InvariantRoles = Readonly<{
  * calls a sibling.
  */
 export function invariantRoles(fileList: readonly string[], ownership: FamilyPaths): InvariantRoles {
-  const changes = (path: string): boolean => fileList.some((file) => pathsMatch(file, path));
+  const changes = (path: string): boolean => listsPath(fileList, path);
   return {
     owner: changes(ownership.owner),
     siblings: ownership.siblings.filter(({ path }) => changes(path)),

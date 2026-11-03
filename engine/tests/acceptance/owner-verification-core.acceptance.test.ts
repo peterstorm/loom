@@ -22,6 +22,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { coverageOverFiles } from "../../src/core/owner-verification/coverage";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 import { applyMutant, mutationPlan, mutationPlanOf, parseMutantCap } from "../../src/core/owner-verification/mutation-plan";
 import { classifyBaseline, classifyMutantRun, verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import type {
@@ -46,7 +47,7 @@ const BARREL = "src/rules/index.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
 
 /** The due family paths: the owner first, then the siblings in declared order. */
-const due = (siblings: readonly string[] = [SIBLING_A, SIBLING_B]): readonly string[] => [OWNER, ...siblings];
+const due = (siblings: readonly string[] = [SIBLING_A, SIBLING_B]): NonEmpty<string> => [OWNER, ...siblings];
 
 /** `@rules/*` resolves to `src/rules/*`, repository-relative. */
 const ALIASES: PathAliases = [{ pattern: "@rules/*", targets: ["src/rules/*"] }];

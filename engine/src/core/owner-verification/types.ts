@@ -124,7 +124,7 @@ export type CoverageVerdict =
  *  (repository-relative path → text), and the aliases specifiers resolve through. */
 export type CoverageInput = Readonly<{
   matrixTest: string;
-  due: readonly string[];
+  due: NonEmpty<string>;
   files: ReadonlyMap<string, string>;
   aliases: PathAliases;
 }>;
@@ -147,7 +147,7 @@ export type ModuleRead =
 export type ReadModule = (path: string) => ModuleRead;
 
 /** Sibling coverage's input: the matrix test the walk starts from, the due family paths it must reach (`duePaths`, owner first), the aliases, and the port. */
-export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: readonly string[]; aliases: PathAliases; read: ReadModule }>;
+export type SiblingCoverageInput = Readonly<{ matrixTest: string; due: NonEmpty<string>; aliases: PathAliases; read: ReadModule }>;
 
 /** `coverage.ts`'s entry point: it drives its own traversal through the port and decides. */
 export type SiblingCoverageFn = (input: SiblingCoverageInput) => CoverageVerdict;

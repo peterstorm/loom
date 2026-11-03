@@ -87,7 +87,7 @@ import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
 import { planModelsIntegrityFailure } from "../../src/core/owner-verification/plan-integrity";
 import { ownerObservationDecision } from "../../src/core/owner-verification/owed-verification";
-import { emptyAcceptanceExpectation } from "../../src/core/acceptance-contract";
+import { emptyAcceptanceExpectation, type AcceptanceContract } from "../../src/core/acceptance-contract";
 import { evaluateWaveCompletionSuite } from "../../src/core/completion-suite";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
 import {
@@ -412,6 +412,22 @@ describe("INV-3 sibling rows — suite authorization, readiness and the State Fi
     const unstamped = suiteGraph(files, undefined);
     expect(loads(unstamped, null)).toBe(true);
     expect(loads(unstamped, { obligationsDigest: obligationsDigest([]), owed: [] })).toBe(false);
+  });
+
+  it("the State File wire re-derives the contract-aware authority: a contract Task's stub owes nothing, and a receipt owing it is refused", () => {
+    const contract: AcceptanceContract = {
+      schemaVersion: 1, id: "CT-1", title: "Admission surface", statement: "s", contractTask: "T1",
+      types: { kind: "file", path: "src/rules/types.ts" },
+      acceptance: [{ path: "tests/admission.acceptance.test.ts", anchors: ["AS-001"] }],
+      supportedDomain: null, freeze: { state: "awaiting-red" }, revisions: [],
+    };
+    const stub = task("T1", 1, [ADMISSION.owner, "src/rules/types.ts", "tests/admission.acceptance.test.ts"]);
+    const stamped: TaskGraph = { ...graph([stub], OBLIGATIONS), verification_manifest: MANIFEST, active_wave_gate: ACTIVE, acceptance_contracts: [contract] };
+    const owner = ownerCheckAuthorityOf(waveOwnerDuty(stamped, 1));
+    expect(owner?.owed).toEqual([]);
+    expect(loads(stamped, owner)).toBe(true);
+    // The authority a contract-unaware duty would mint owes INV-1; the wire refuses it.
+    expect(loads(stamped, { ...owner!, owed: [ADMISSION.invariant] })).toBe(false);
   });
 });
 

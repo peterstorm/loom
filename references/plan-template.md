@@ -282,7 +282,9 @@ Per component, not global.
   this or an earlier Wave builds (directly or through `export … from`
   re-exports; an import proves reach, not exercise). Siblings may land Wave by
   Wave if each of those Waves updates the matrix test, which must itself land
-  no later than the first Wave that changes the family. And every
+  no later than the first Wave that owes the family (the first Wave whose
+  non-contract Task changes the owner or a sibling once the owner is due).
+  And every
   mutant of the owner's lines changed in that Wave must be killed by it (six
   fixed operators, at most 24 mutants, each run through the verification
   manifest's `affectedRunner`). A plan with a non-exempt owned invariant needs
