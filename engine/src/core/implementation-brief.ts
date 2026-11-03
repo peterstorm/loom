@@ -27,7 +27,7 @@ import { findResidualPlaceholders } from "./validate-template-substitution";
 import { ACCEPTANCE_RED_WINDOW, taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import { match } from "ts-pattern";
 import { invariantRoles, type OwnedInvariant } from "./plan-paths";
-import type { TaskOwnerDuty } from "./owner-verification/obligations";
+import { duePaths, type TaskOwnerDuty } from "./owner-verification/obligations";
 import type { OwnerObligation } from "./owner-verification/types";
 import { contractRole, coveredAnchors, frozenPaths, type AcceptanceContract } from "./acceptance-contract";
 import { redThenGreenDuty } from "./implementation-application";
@@ -292,12 +292,21 @@ function familyBlock({ id, title, statement, ownership }: OwnedFamily, roles: re
  * refused a malformed one). A stamp that agrees with the plan renders the
  * plan's blocks byte for byte, followed by each one's duties.
  */
-function invariantOwnership(fileList: readonly string[], source: InvariantOwnershipSource): string {
+function invariantOwnership(
+  task: Task,
+  roster: readonly Task[],
+  contracts: readonly AcceptanceContract[],
+  source: InvariantOwnershipSource,
+): string {
+  const fileList = task.file_list ?? [];
   const blocks = match(source)
-    .with({ kind: "stamped" }, ({ touched }) => touched.map((obligation) => {
-      const family = familyOfObligation(obligation);
-      return `${familyBlock(family, roleLines(fileList, family.ownership))}\n\n${ownerDuties(obligation)}`;
-    }))
+    .with({ kind: "stamped" }, ({ touched }) => {
+      const schedule = dutySchedule(task, roster, contracts);
+      return touched.map((obligation) => {
+        const family = familyOfObligation(obligation);
+        return `${familyBlock(family, roleLines(fileList, family.ownership))}\n\n${ownerDuties(obligation, schedule)}`;
+      });
+    })
     .with({ kind: "plan" }, ({ invariants }) => invariants.flatMap(({ id, title, statement, ownership }) => {
       if (ownership.kind !== "owned") return [];
       const roles = roleLines(fileList, ownership);
@@ -310,16 +319,56 @@ function invariantOwnership(fileList: readonly string[], source: InvariantOwners
 const quoted = (path: string): string => `\`${path}\``;
 
 /**
- * The owner duties the Wave Gate holds an owned Invariant's family to (plan
- * AD-10, FR-027): sibling coverage of the matrix test, then mutation
- * verification of the owner's changed lines, or the declared exemption.
+ * Where the Task stands in the family schedule (`obligations.ts`): its Wave
+ * and roster, which decide the paths due by then, and whether it is a
+ * contract Task, whose change owes no owner verification.
  */
-function ownerDuties({ invariant, owner, siblings, matrixTest, mutation }: OwnerObligation): string {
-  const reached = siblings.length === 0
-    ? `the owner module ${quoted(owner)} (${invariant} declares no sibling entry point)`
-    : `the owner module ${quoted(owner)} and every sibling entry point: ${siblings.map(({ path }) => quoted(path)).join(", ")}`;
-  const coverage = `**Owner duties (${invariant}):** the matrix test ${quoted(matrixTest)} must import ${reached}. ` +
-    "The Wave Gate checks that its imports, followed through re-exports, reach each of them.";
+type DutySchedule = Readonly<{ wave: number; roster: readonly Task[]; contractTask: boolean }>;
+
+function dutySchedule(task: Task, roster: readonly Task[], contracts: readonly AcceptanceContract[]): DutySchedule {
+  return {
+    wave: task.wave,
+    roster: roster.some(({ id }) => id === task.id) ? roster : [...roster, task],
+    contractTask: contracts.some(({ contractTask }) => contractTask === task.id),
+  };
+}
+
+/** What the matrix test must import by `wave`: the owner, and the siblings due by then (quoted). */
+function coverageTargets(
+  { invariant, owner, siblings }: OwnerObligation,
+  dueSiblings: readonly string[],
+  laterSiblings: readonly string[],
+  wave: number,
+): string {
+  if (siblings.length === 0) return `the owner module ${quoted(owner)} (${invariant} declares no sibling entry point)`;
+  if (laterSiblings.length === 0) return `the owner module ${quoted(owner)} and every sibling entry point: ${dueSiblings.join(", ")}`;
+  if (dueSiblings.length === 0) return `the owner module ${quoted(owner)}; no sibling entry point is due by Wave ${wave}`;
+  return `the owner module ${quoted(owner)} and every sibling entry point due by Wave ${wave}: ${dueSiblings.join(", ")}`;
+}
+
+/**
+ * The owner duties the Wave Gate holds an owned Invariant's family to (plan
+ * AD-10, FR-027): sibling coverage of the matrix test over the paths due by
+ * the Task's Wave (`duePaths`), then mutation verification of the owner's
+ * changed lines, or the declared exemption. A contract Task's stub owes
+ * neither, so its brief says when verification starts instead.
+ */
+function ownerDuties(obligation: OwnerObligation, schedule: DutySchedule): string {
+  const { invariant, owner, siblings, matrixTest, mutation } = obligation;
+  if (schedule.contractTask) {
+    return `**Owner duties (${invariant}):** none in this Wave. You are a contract Task, so your change to this family is a ` +
+      `compiling stub, and a stub owes no owner verification. The Wave Gate verifies ${invariant} from the first Wave in which ` +
+      "an implementation Task changes its owner or a sibling.";
+  }
+  const due = new Set(duePaths(schedule.roster, schedule.wave, obligation));
+  const dueSiblings = siblings.filter(({ path }) => due.has(path)).map(({ path }) => quoted(path));
+  const laterSiblings = siblings.filter(({ path }) => !due.has(path)).map(({ path }) => quoted(path));
+  const later = laterSiblings.length === 0
+    ? ""
+    : ` Later Waves add ${laterSiblings.join(", ")}; the matrix test imports each one in the Wave that adds it, so this Wave's gate does not require them.`;
+  const coverage = `**Owner duties (${invariant}):** the matrix test ${quoted(matrixTest)} must import ` +
+    `${coverageTargets(obligation, dueSiblings, laterSiblings, schedule.wave)}. ` +
+    `The Wave Gate checks that its imports, followed through re-exports, reach each of them.${later}`;
   const mutationDuty = match(mutation)
     .with({ kind: "verify" }, () =>
       `The owner's lines changed in the Wave, in ${quoted(owner)}, will be mutation-verified: every mutant the fixed ` +
@@ -620,7 +669,7 @@ export function renderImplementationBrief(
     spec_contributions_formatted: contributions.value,
     scenario_test_names: scenarioTestNames(task.spec_anchors ?? [], index),
     plan_context: task.plan_context?.trim() || "None recorded for this Task; read the full plan.",
-    invariant_ownership: invariantOwnership(task.file_list ?? [], input.ownership),
+    invariant_ownership: invariantOwnership(task, input.roster, input.contracts, input.ownership),
     acceptance_contract: acceptanceContractSection(task, input.contracts, input.roster),
     file_list: bulleted(task.file_list ?? [], "None declared."),
     plan_file_path: input.planFile ?? "none recorded",

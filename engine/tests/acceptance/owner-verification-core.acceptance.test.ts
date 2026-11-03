@@ -4,7 +4,8 @@
  * - Sibling coverage (`coverageOverFiles`): a matrix test covers an owned
  *   Invariant only when its direct imports, closed under re-exports and
  *   resolved through relative paths and tsconfig `paths` aliases to files,
- *   include the owner and every declared sibling entry point.
+ *   include every due family path: the owner and each sibling entry point
+ *   due by the Wave (`duePaths`), handed over in declared order.
  * - The mutation plan (`mutationPlan`, `applyMutant`): a pure, deterministic
  *   function of owner bytes, changed lines and cap, built from exactly the six
  *   fixed operators on changed lines only, capped with an evenly spaced
@@ -29,12 +30,10 @@ import type {
   MutantCap,
   MutationOperator,
   MutationPlan,
-  OwnerObligation,
   PathAliases,
   MutationPlanInput,
   SurvivorDiagnostic,
 } from "../../src/core/owner-verification/types";
-import { ownerObligation } from "../fixtures/owner-obligation";
 
 // ---------------------------------------------------------------------------
 // Sibling coverage
@@ -46,15 +45,8 @@ const SIBLING_B = "src/rules/sibling-b.ts";
 const BARREL = "src/rules/index.ts";
 const MATRIX = "tests/rules.matrix.test.ts";
 
-const obligation = (siblings: readonly string[] = [SIBLING_A, SIBLING_B]): OwnerObligation => ownerObligation({
-  invariant: "INV-1",
-  title: "Admission is decided only by the owner",
-  statement: "Every entry point admits through decide().",
-  owner: OWNER,
-  siblings: siblings.map((path) => ({ path, note: null })),
-  matrixTest: MATRIX,
-  mutation: { kind: "verify" },
-});
+/** The due family paths: the owner first, then the siblings in declared order. */
+const due = (siblings: readonly string[] = [SIBLING_A, SIBLING_B]): readonly string[] => [OWNER, ...siblings];
 
 /** `@rules/*` resolves to `src/rules/*`, repository-relative. */
 const ALIASES: PathAliases = [{ pattern: "@rules/*", targets: ["src/rules/*"] }];
@@ -74,7 +66,7 @@ const files = (matrixText: string, extra: Readonly<Record<string, string>> = {})
   new Map(Object.entries({ ...SOURCES, ...extra, [MATRIX]: matrixText }));
 
 const coverage = (matrixText: string, siblings?: readonly string[], aliases: PathAliases = ALIASES) =>
-  coverageOverFiles({ matrixTest: MATRIX, obligation: obligation(siblings), files: files(matrixText), aliases });
+  coverageOverFiles({ matrixTest: MATRIX, due: due(siblings), files: files(matrixText), aliases });
 
 const importing = (...specifiers: string[]): string =>
   specifiers.map((specifier, index) => `import * as m${index} from "${specifier}";`).join("\n") + "\nit('decides', () => {});\n";
@@ -159,7 +151,7 @@ describe("sibling coverage (CT-1)", () => {
         const shuffled = new Map(entries.map((entry, index) => [keys[index]!, index, entry] as const)
           .sort((left, right) => left[0] - right[0] || left[1] - right[1])
           .map(([, , entry]) => entry));
-        const input = { matrixTest: MATRIX, obligation: obligation(), aliases: ALIASES };
+        const input = { matrixTest: MATRIX, due: due(), aliases: ALIASES };
         const ordered = coverageOverFiles({ ...input, files: files(matrixText) });
         expect(coverageOverFiles({ ...input, files: shuffled })).toEqual(ordered);
         expect(coverageOverFiles({ ...input, files: files(matrixText) })).toEqual(ordered);
@@ -173,7 +165,7 @@ describe("sibling coverage (CT-1)", () => {
       fc.stringMatching(/^[a-z]{1,8}$/),
       fc.string(),
       (matrixText, name, text) => {
-        const input = { matrixTest: MATRIX, obligation: obligation(), aliases: ALIASES };
+        const input = { matrixTest: MATRIX, due: due(), aliases: ALIASES };
         const before = coverageOverFiles({ ...input, files: files(matrixText) });
         const after = coverageOverFiles({ ...input, files: files(matrixText, { [`src/unrelated/${name}.ts`]: text }) });
         expect(after).toEqual(before);

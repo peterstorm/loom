@@ -182,7 +182,7 @@ export const mutationBoundMs = (verifying: MutationOwed, plans: ReadonlyMap<Inva
 export const renderOwnerVerificationFailure = (failure: OwnerVerificationFailure): string =>
   match(failure)
     .with({ kind: "missing-siblings" }, ({ invariant, matrixTest, paths }) =>
-      `${invariant}: matrix test ${matrixTest} does not import ${paths.join(", ")}; strengthen ${matrixTest} to import the owner and every sibling entry point`)
+      `${invariant}: matrix test ${matrixTest} does not import ${paths.join(", ")}; strengthen ${matrixTest} to import the owner and every sibling entry point due by this Wave`)
     .with({ kind: "red-baseline" }, ({ invariant, matrixTest, failures }) =>
       `${invariant}: matrix test ${matrixTest} is red against the unmutated workspace, so no mutant ran; failing: ${failures.join("; ")}`)
     .with({ kind: "survivor" }, ({ invariant, owner, matrixTest, survivor }) =>

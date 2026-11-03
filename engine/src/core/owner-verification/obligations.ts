@@ -16,14 +16,26 @@
  * - Two duty entry points read a graph. Each answers with a union that
  *   decides the absent-versus-empty distinction once, so no caller filters
  *   the stamp or re-encodes it:
- *   - `waveOwnerDuty` is the gate scope: the obligations whose family (owner
- *     or a sibling, G5a's `changesFamily`) some Wave Task changes, and the
- *     stamp's digest. `ownerCheckAuthorityOf` derives the owner check from
- *     it (null exactly when the stamp is absent). A change to the
- *     matrix test alone does not trigger the checks. `stampAgreement` is its
- *     drift check against the plan, an absent stamp being drift.
+ *   - `waveOwnerDuty` is the gate scope: the obligations `owesInWave`
+ *     selects, and the stamp's digest. `ownerCheckAuthorityOf` derives the
+ *     owner check from it (null exactly when the stamp is absent).
+ *     `stampAgreement` is its drift check against the plan, an absent stamp
+ *     being drift.
  *   - `taskOwnerDuty` is the review-packet and brief scope: the obligations
  *     in which a file list plays any role, matrix test included.
+ * - The family schedule is the one rule for when a family grows, shared by
+ *   the gate and population validation:
+ *   - `duePaths`: a family path is due by a Wave when no Task lists it (it
+ *     exists already) or a Task of that Wave or an earlier one does. A path
+ *     only a later Wave lists is not yet due, so a plan may add siblings Wave
+ *     by Wave; a due path that is missing still fails coverage.
+ *   - `owesInWave`: a Wave owes an obligation when its owner is due and a
+ *     Wave Task other than a contract Task changes the owner or a sibling.
+ *     A change to the matrix test alone owes nothing. A contract Task writes
+ *     at most compiling stubs there, as `entryPointErrors` already rules, so
+ *     its change owes nothing until real code lands.
+ *   - `firstOwingWave`: the earliest Wave that owes it, by which population
+ *     validation requires the matrix test.
  *
  * Roles are classified through `plan-paths.ts`, the one path rule plan
  * validation and the brief already share.
@@ -32,13 +44,14 @@
 import { match } from "ts-pattern";
 
 import type { PlanInvariant, PlanModels, Task, TaskGraph } from "../../types";
+import type { AcceptanceContract } from "../acceptance-contract";
 import { canonicalDigest } from "../digest";
 import { parseInvariantId, type InvariantId } from "../invariant-id";
 import { canonicalStructuralEquals, failure, success, type ArtifactDigest, type DomainResult } from "../orchestration-contract/identity";
 import { isPlaceholderExemptionReason } from "../parse-plan-models";
 import { isRecord } from "../plain-record";
-import { samePlanPath } from "../plan-path-match";
-import { changesFamily, invariantRoles, type InvariantRoles, type OwnedInvariant } from "../plan-paths";
+import { pathsMatch, samePlanPath } from "../plan-path-match";
+import { changesFamily, invariantRoles, type FamilyPaths } from "../plan-paths";
 import type { SiblingEntryPoint } from "../sibling-entry-point";
 import type {
   MutationOwed,
@@ -300,25 +313,66 @@ export function obligationsAgree(stamped: readonly OwnerObligation[], fromPlan: 
 // The two owner duties: what a Wave owes the gate, and what one Task touches
 // ---------------------------------------------------------------------------
 
-/** The Tasks the Wave duty reads: only their Wave and file list matter. */
-type ScopedTask = Pick<Task, "wave" | "file_list">;
+/** The Tasks the family schedule reads: their identity, Wave and file list. */
+export type ScheduledTask = Pick<Task, "id" | "wave" | "file_list">;
 
 /** The stamp a duty reads; absent on a graph populated before owner verification. */
 type OwnerStamp = Readonly<{ owner_obligations?: TaskGraph["owner_obligations"] }>;
 
-/** The graph the Wave duty reads: its Tasks and the stamp. */
-type StampedGraph = OwnerStamp & Readonly<{ tasks: readonly ScopedTask[] }>;
+/**
+ * The graph the Wave duty reads: its Tasks, the stamp and its contracts' Tasks.
+ * A graph that omits `acceptance_contracts` has no contract Task, so every
+ * Task's change can owe: the omission verifies more, never less.
+ */
+type StampedGraph = OwnerStamp & Readonly<{
+  tasks: readonly ScheduledTask[];
+  acceptance_contracts?: readonly Pick<AcceptanceContract, "contractTask">[];
+}>;
 
-const familyOf = (obligation: OwnerObligation): OwnedInvariant => ({
-  kind: "owned",
-  owner: obligation.owner,
-  siblings: obligation.siblings,
-  matrixTest: obligation.matrixTest,
-  mutation: obligation.mutation,
-});
+/** The ids of a graph's contract Tasks, the one Task writing each contract's frozen surface. */
+export const contractTaskIdsOf = (graph: Pick<StampedGraph, "acceptance_contracts">): ReadonlySet<string> =>
+  new Set((graph.acceptance_contracts ?? []).map(({ contractTask }) => contractTask));
 
-const rolesIn = (fileList: readonly string[], obligation: OwnerObligation): InvariantRoles =>
-  invariantRoles(fileList, familyOf(obligation));
+/** A graph's Tasks other than its contract Tasks: the ones whose family change owes, and whose change the mutants cover. */
+export function implementationTasks<T extends ScheduledTask>(
+  graph: Readonly<{ tasks: readonly T[] }> & Pick<StampedGraph, "acceptance_contracts">,
+): readonly T[] {
+  const contractTaskIds = contractTaskIdsOf(graph);
+  return graph.tasks.filter((task) => !contractTaskIds.has(task.id));
+}
+
+// ---------------------------------------------------------------------------
+// The family schedule: when a family's paths are due and when a Wave owes it
+// ---------------------------------------------------------------------------
+
+const lists = (task: ScheduledTask, path: string): boolean => (task.file_list ?? []).some((file) => pathsMatch(file, path));
+
+/** Whether a family path is due by `wave`: no Task lists it (it exists already), or a Task of this Wave or an earlier one does. */
+function isDueBy(tasks: readonly ScheduledTask[], wave: number, path: string): boolean {
+  const listing = tasks.filter((task) => lists(task, path));
+  return listing.length === 0 || listing.some((task) => task.wave <= wave);
+}
+
+/** The family paths due by `wave`, in declared order with the owner first: what the matrix test must reach then. */
+export const duePaths = (tasks: readonly ScheduledTask[], wave: number, family: FamilyPaths): readonly string[] =>
+  [family.owner, ...family.siblings.map(({ path }) => path)].filter((path) => isDueBy(tasks, wave, path));
+
+/** Whether `wave` owes the family: its owner is due, and a Wave Task other than a contract Task changes the owner or a sibling. */
+export function owesInWave(
+  tasks: readonly ScheduledTask[],
+  contractTaskIds: ReadonlySet<string>,
+  wave: number,
+  family: FamilyPaths,
+): boolean {
+  return isDueBy(tasks, wave, family.owner) && tasks.some((task) =>
+    task.wave === wave && !contractTaskIds.has(task.id) && changesFamily(invariantRoles(task.file_list ?? [], family)));
+}
+
+/** The earliest Wave that owes the family, or null when none does. */
+export function firstOwingWave(tasks: readonly ScheduledTask[], contractTaskIds: ReadonlySet<string>, family: FamilyPaths): number | null {
+  const waves = [...new Set(tasks.map(({ wave }) => wave))].sort((a, b) => a - b);
+  return waves.find((wave) => owesInWave(tasks, contractTaskIds, wave, family)) ?? null;
+}
 
 /**
  * What a Wave owes the owner gate (the gate scope). Plain data, one field per
@@ -327,9 +381,9 @@ const rolesIn = (fileList: readonly string[], obligation: OwnerObligation): Inva
  * - `unstamped`: the graph predates owner verification. It owes nothing
  *   (`owed: []`) and its suite carries no owner check.
  * - `stamped`: the stamp, `[]` included, always carries the check, so plan
- *   integrity runs every Wave. `owed` is the obligations whose family (owner
- *   or a sibling, G5a's `changesFamily`) some Task of the Wave changes, in
- *   stamp order; `obligationsDigest` is the whole stamp's identity.
+ *   integrity runs every Wave. `owed` is the obligations the Wave owes
+ *   (`owesInWave`), in stamp order; `obligationsDigest` is the whole stamp's
+ *   identity.
  */
 export type WaveOwnerDuty =
   | Readonly<{ kind: "unstamped"; owed: readonly [] }>
@@ -340,9 +394,8 @@ const UNSTAMPED_WAVE: WaveOwnerDuty = Object.freeze({ kind: "unstamped", owed: O
 export function waveOwnerDuty(graph: StampedGraph, wave: number): WaveOwnerDuty {
   const stamp = graph.owner_obligations;
   if (stamp === undefined) return UNSTAMPED_WAVE;
-  const waveTasks = graph.tasks.filter((task) => task.wave === wave);
-  const owed = Object.freeze(stamp.filter((obligation) =>
-    waveTasks.some(({ file_list }) => changesFamily(rolesIn(file_list ?? [], obligation)))));
+  const contractTaskIds = contractTaskIdsOf(graph);
+  const owed = Object.freeze(stamp.filter((obligation) => owesInWave(graph.tasks, contractTaskIds, wave, obligation)));
   return Object.freeze({ kind: "stamped", obligationsDigest: obligationsDigest(stamp), owed });
 }
 
@@ -395,7 +448,7 @@ export function taskOwnerDuty(graph: OwnerStamp, fileList: readonly string[]): T
   return Object.freeze({
     kind: "stamped",
     touched: Object.freeze(stamp.filter((obligation) => {
-      const roles = rolesIn(fileList, obligation);
+      const roles = invariantRoles(fileList, obligation);
       return changesFamily(roles) || roles.matrixTest;
     })),
   });

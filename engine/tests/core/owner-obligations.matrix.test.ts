@@ -35,6 +35,13 @@
  * Sibling row (PR #131): `task-graph-population.ts` refuses a manifest
  * without an `affectedRunner` exactly when `verifyOwed` selects some
  * obligation to owe mutation.
+ *
+ * Owner rows (family schedule): `duePaths` holds a path due once no Task
+ * lists it or a Task of that Wave or an earlier one does; `owesInWave` owes
+ * when the owner is due and a Task other than a contract Task changes the
+ * family; `waveOwnerDuty` reads the graph's contract Tasks from
+ * `acceptance_contracts`. Sibling row: `validate-model-bindings.ts` refuses
+ * exactly a matrix test landing after `firstOwingWave`.
  */
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -58,9 +65,13 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import {
+  duePaths,
+  firstOwingWave,
+  implementationTasks,
   obligationsAgree,
   obligationsDigest,
   obligationsFromPlan,
+  owesInWave,
   ownerCheckAuthorityOf,
   parseOwnerObligations,
   stampAgreement,
@@ -68,7 +79,9 @@ import {
   verifyOwed,
   waveOwnerDuty,
   type OwnerCheckAuthority,
+  type ScheduledTask,
 } from "../../src/core/owner-verification/obligations";
+import { validateModelBindings } from "../../src/handlers/helpers/validate-model-bindings";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { verifiedMutationOf } from "../../src/core/owner-verification/outcome";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
@@ -710,5 +723,145 @@ describe("INV-3 properties", () => {
         owed: ids(waveOwnerDuty(stamped, wave).owed),
       });
     }));
+  });
+});
+
+describe("INV-3 owner rows — the family schedule: when a path is due and when a Wave owes", () => {
+  const [SIBLING_A, SIBLING_B] = ADMISSION.siblings.map(({ path }) => path) as [string, string];
+  const NO_CONTRACT: ReadonlySet<string> = new Set();
+
+  it("a path no Task lists is due already; a path only a later Wave lists is not yet due", () => {
+    const tasks = [task("T1", 1, [ADMISSION.owner]), task("T2", 3, [SIBLING_B])];
+    expect(duePaths(tasks, 1, ADMISSION)).toEqual([ADMISSION.owner, SIBLING_A]);
+    expect(duePaths(tasks, 2, ADMISSION)).toEqual([ADMISSION.owner, SIBLING_A]);
+    expect(duePaths(tasks, 3, ADMISSION)).toEqual([ADMISSION.owner, SIBLING_A, SIBLING_B]);
+  });
+
+  it("a path an earlier and a later Wave both list is due from the earlier Wave on", () => {
+    const tasks = [task("T1", 1, [ADMISSION.owner]), task("T2", 2, [SIBLING_A]), task("T3", 4, [SIBLING_A, SIBLING_B])];
+    expect(duePaths(tasks, 2, ADMISSION)).toEqual([ADMISSION.owner, SIBLING_A]);
+    expect(duePaths(tasks, 3, ADMISSION)).toEqual([ADMISSION.owner, SIBLING_A]);
+    expect(duePaths(tasks, 4, ADMISSION)).toEqual([ADMISSION.owner, SIBLING_A, SIBLING_B]);
+  });
+
+  it("a contract Task's change owes nothing; the first implementation change owes", () => {
+    const tasks = [task("T1", 1, [ADMISSION.owner]), task("T2", 2, [ADMISSION.owner, ADMISSION.matrixTest])];
+    const contract = new Set(["T1"]);
+    expect(owesInWave(tasks, contract, 1, ADMISSION)).toBe(false);
+    expect(owesInWave(tasks, contract, 2, ADMISSION)).toBe(true);
+    expect(firstOwingWave(tasks, contract, ADMISSION)).toBe(2);
+    // Without the contract, the same Wave-1 change owes.
+    expect(owesInWave(tasks, NO_CONTRACT, 1, ADMISSION)).toBe(true);
+    expect(firstOwingWave(tasks, NO_CONTRACT, ADMISSION)).toBe(1);
+  });
+
+  it("a sibling change before the owner is due owes nothing, since there is no rule yet to verify", () => {
+    const tasks = [task("T1", 1, [SIBLING_A]), task("T2", 2, [ADMISSION.owner])];
+    expect(owesInWave(tasks, NO_CONTRACT, 1, ADMISSION)).toBe(false);
+    expect(firstOwingWave(tasks, NO_CONTRACT, ADMISSION)).toBe(2);
+  });
+
+  it("a matrix-test-only change never owes, and a family no Task changes is never owed", () => {
+    const tasks = [task("T1", 1, [ADMISSION.matrixTest]), task("T2", 2, ["src/other.ts"])];
+    expect(owesInWave(tasks, NO_CONTRACT, 1, ADMISSION)).toBe(false);
+    expect(firstOwingWave(tasks, NO_CONTRACT, ADMISSION)).toBeNull();
+    expect(firstOwingWave([], NO_CONTRACT, ADMISSION)).toBeNull();
+  });
+
+  it("waveOwnerDuty reads the contract Tasks from acceptance_contracts; a graph without them owes every change", () => {
+    const tasks = [task("T1", 1, [ADMISSION.owner]), task("T2", 2, [ADMISSION.owner, SIBLING_A])];
+    const withContract = { tasks, owner_obligations: OBLIGATIONS, acceptance_contracts: [{ contractTask: "T1" }] };
+    expect(ids(waveOwnerDuty(withContract, 1).owed)).toEqual([]);
+    expect(ids(waveOwnerDuty(withContract, 2).owed)).toEqual(["INV-1"]);
+    expect(ids(waveOwnerDuty({ tasks, owner_obligations: OBLIGATIONS }, 1).owed)).toEqual(["INV-1"]);
+    expect(implementationTasks(withContract).map(({ id }) => id)).toEqual(["T2"]);
+    expect(implementationTasks({ tasks }).map(({ id }) => id)).toEqual(["T1", "T2"]);
+  });
+
+  it("regression: a contract Wave writing the owner's stub owes nothing, and each later Wave owes only the siblings landed by then", () => {
+    // The G2 skeletons plan's INV-6 family, which blocked its Wave 1 gate: the
+    // contract Task T1 stubs the owner, T9 builds it with two siblings, and
+    // later Waves add the rest, each updating the matrix test.
+    const LANGUAGE = ownerObligation({
+      invariant: "INV-6",
+      title: "Language support is decided only by the language predicate",
+      statement: null,
+      owner: "src/skeleton/language.ts",
+      siblings: [
+        "src/skeleton/outcomes.ts", "src/skeleton/scope.ts", "src/skeleton-materialization.ts",
+        "src/frozen-surface-observation.ts", "src/contract-stub-materialization.ts", "src/revise-contract.ts",
+      ].map((path) => ({ path, note: null })),
+      matrixTest: "tests/skeleton-language.matrix.test.ts",
+      mutation: { kind: "verify" },
+    });
+    const tasks = [
+      task("T1", 1, ["src/skeleton/types.ts", "src/skeleton/language.ts", "tests/skeleton.acceptance.test.ts"]),
+      task("T9", 2, ["src/skeleton/language.ts", "src/skeleton/outcomes.ts", "src/skeleton/scope.ts", LANGUAGE.matrixTest]),
+      task("T11", 4, ["src/skeleton-materialization.ts", "src/frozen-surface-observation.ts", LANGUAGE.matrixTest]),
+      task("T13", 5, ["src/contract-stub-materialization.ts", "src/revise-contract.ts", LANGUAGE.matrixTest]),
+    ];
+    const stamped = { tasks, owner_obligations: [LANGUAGE], acceptance_contracts: [{ contractTask: "T1" }] };
+    expect([1, 2, 3, 4, 5].map((wave) => ids(waveOwnerDuty(stamped, wave).owed))).toEqual([[], ["INV-6"], [], ["INV-6"], ["INV-6"]]);
+    expect(duePaths(tasks, 2, LANGUAGE)).toEqual(["src/skeleton/language.ts", "src/skeleton/outcomes.ts", "src/skeleton/scope.ts"]);
+    expect(duePaths(tasks, 4, LANGUAGE)).toEqual([
+      "src/skeleton/language.ts", "src/skeleton/outcomes.ts", "src/skeleton/scope.ts",
+      "src/skeleton-materialization.ts", "src/frozen-surface-observation.ts",
+    ]);
+    expect(duePaths(tasks, 5, LANGUAGE)).toEqual([LANGUAGE.owner, ...LANGUAGE.siblings.map(({ path }) => path)]);
+    expect(firstOwingWave(tasks, new Set(["T1"]), LANGUAGE)).toBe(2);
+  });
+
+  const universe = [ADMISSION.owner, SIBLING_A, SIBLING_B, ADMISSION.matrixTest, "src/other.ts"];
+  const scheduled: fc.Arbitrary<readonly ScheduledTask[]> = fc.array(
+    fc.record({ wave: fc.integer({ min: 1, max: 4 }), file_list: fc.subarray(universe) }),
+    { maxLength: 6 },
+  ).map((rows) => rows.map(({ wave, file_list }, i) => ({ id: `T${i + 1}`, wave, file_list })));
+  const contractIds = (tasks: readonly ScheduledTask[]): fc.Arbitrary<ReadonlySet<string>> =>
+    fc.subarray(tasks.map(({ id }) => id)).map((picked) => new Set(picked));
+
+  it("due paths only grow with the Wave, keep declared order, and every family path is due by the last Wave", () => {
+    fc.assert(fc.property(scheduled, (tasks) => {
+      const family = [ADMISSION.owner, SIBLING_A, SIBLING_B];
+      for (let wave = 1; wave < 4; wave += 1) {
+        const now = duePaths(tasks, wave, ADMISSION);
+        for (const path of now) expect(duePaths(tasks, wave + 1, ADMISSION)).toContain(path);
+        expect(now).toEqual(family.filter((path) => now.includes(path)));
+      }
+      expect(duePaths(tasks, 4, ADMISSION)).toEqual(family);
+    }));
+  });
+
+  it("a Wave whose family changes are all a contract Task's never owes, and the first owing Wave is the earliest that does", () => {
+    fc.assert(fc.property(scheduled.chain((tasks) => fc.tuple(fc.constant(tasks), contractIds(tasks))), ([tasks, contract]) => {
+      for (let wave = 1; wave <= 4; wave += 1) {
+        const implementers = tasks.filter((t) => t.wave === wave && !contract.has(t.id) &&
+          (t.file_list ?? []).some((file) => [ADMISSION.owner, SIBLING_A, SIBLING_B].includes(file)));
+        if (implementers.length === 0) expect(owesInWave(tasks, contract, wave, ADMISSION)).toBe(false);
+      }
+      const first = firstOwingWave(tasks, contract, ADMISSION);
+      const owing = [1, 2, 3, 4].filter((wave) => owesInWave(tasks, contract, wave, ADMISSION));
+      expect(first).toBe(owing[0] ?? null);
+    }));
+  });
+});
+
+describe("INV-3 sibling row — population validation refuses exactly a matrix test landing after firstOwingWave", () => {
+  const PRESENT = { readFile: () => ({ ok: false as const, error: "unread" }), pathPresence: () => ({ kind: "present" as const }) };
+  const roster = (ownerWave: number, matrixWave: number) => [
+    { id: "T1", description: "owner", agent: "code-implementer-agent", wave: ownerWave, depends_on: [], file_list: [ADMISSION.owner] },
+    { id: "T2", description: "matrix", agent: "code-implementer-agent", wave: matrixWave, depends_on: [], file_list: [ADMISSION.matrixTest] },
+  ];
+
+  it.each([
+    { ownerWave: 2, matrixWave: 1 },
+    { ownerWave: 2, matrixWave: 2 },
+    { ownerWave: 2, matrixWave: 3 },
+    { ownerWave: 1, matrixWave: 4 },
+  ])("owner in Wave $ownerWave, matrix test in Wave $matrixWave", ({ ownerWave, matrixWave }) => {
+    const tasks = roster(ownerWave, matrixWave);
+    const first = firstOwingWave(tasks, new Set(), ADMISSION);
+    const result = validateModelBindings(OWNED_PLAN_MODELS, tasks, PRESENT);
+    const late = (result.ok ? [] : result.errors).filter((error) => error.includes("first lands in"));
+    expect(late.length > 0).toBe(first !== null && matrixWave > first);
   });
 });

@@ -2125,8 +2125,19 @@ function parseVerificationManifestField(raw: unknown): ParseResult<FrozenVerific
     : parseErr(`verification_manifest: ${parsed.error.errors.join("; ")}`);
 }
 
-/** The graph fields the owner check's authority derives from. */
-type OwnerStampedGraph = Pick<TaskGraph, "tasks" | "owner_obligations">;
+/** The graph fields the owner check's authority derives from: the contracts
+ *  name the Tasks whose stubs owe nothing (`owesInWave`). */
+type OwnerStampedGraph = Pick<TaskGraph, "tasks" | "owner_obligations" | "acceptance_contracts">;
+
+/** The proven Tasks and obligation fields as the owner check's authority reads them. */
+const ownerStampedGraph = (
+  tasks: readonly unknown[],
+  obligations: Readonly<{ acceptanceContracts: readonly AcceptanceContract[] | undefined; ownerObligations: readonly OwnerObligation[] | undefined }>,
+): OwnerStampedGraph => ({
+  tasks: tasks as TaskGraph["tasks"],
+  owner_obligations: obligations.ownerObligations,
+  acceptance_contracts: obligations.acceptanceContracts,
+});
 
 function completionRosterConflict(
   receipt: AcceptedWaveCompletionReceipt,
@@ -2595,8 +2606,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!gating.ok) return parseErr(gating.error);
   const obligations = parseTaskGraphObligationFields(obj, contractShapes.value, tasks.value);
   if (!obligations.ok) return parseErr(obligations.error);
-  const stamped = { tasks: tasks.value as TaskGraph["tasks"], owner_obligations: obligations.value.ownerObligations };
-  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value, stamped);
+  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value, ownerStampedGraph(tasks.value, obligations.value));
   if (!authority.ok) return parseErr(authority.error);
   const history = parseTaskGraphHistoryFields(
     obj,

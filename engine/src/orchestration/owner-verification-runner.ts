@@ -43,6 +43,7 @@ import { failure, success, type DomainResult } from "../core/orchestration-contr
 import type { ArtifactDigest } from "../core/orchestration-contract";
 import { MODULE_ABSENT, siblingCoverage } from "../core/owner-verification/coverage";
 import { mutationPlan, applyMutant, mutantTimeoutMs, MUTANT_CAP_PER_INVARIANT } from "../core/owner-verification/mutation-plan";
+import { duePaths, implementationTasks } from "../core/owner-verification/obligations";
 import { pathAliasesOf, type ParseJsonc } from "../core/owner-verification/tsconfig-paths";
 import { waveBaseOf, type WaveBase } from "../core/owner-verification/wave-base";
 import { ownerAtBaseEntry } from "../core/owner-verification/ls-tree";
@@ -151,10 +152,16 @@ function coverageAliases(root: CanonicalRepositoryRoot, matrixTest: string): Dom
     : infrastructure("alias-config-unresolvable", `the import graph of ${matrixTest} cannot be resolved: ${aliases.error.reason}`));
 }
 
-function coverage(root: CanonicalRepositoryRoot, obligation: OwnerObligation): CoverageVerdict {
-  const aliases = coverageAliases(root, obligation.matrixTest);
+/** The matrix test's reach over the family paths due by this Wave (`duePaths`): a sibling only a later Wave lists is not yet owed. */
+function coverage(input: OwnerVerificationInput, obligation: OwnerObligation): CoverageVerdict {
+  const aliases = coverageAliases(input.root, obligation.matrixTest);
   if (!aliases.ok) return coverageInfrastructure(aliases.error);
-  return siblingCoverage({ obligation, aliases: aliases.value, read: (path) => readRepositoryText(root, path) });
+  return siblingCoverage({
+    matrixTest: obligation.matrixTest,
+    due: duePaths(input.graph.tasks, input.wave, obligation),
+    aliases: aliases.value,
+    read: (path) => readRepositoryText(input.root, path),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +288,8 @@ function planMutation(input: OwnerVerificationInput, obligation: OwnerObligation
     return failure(infrastructure("plan-drift", `${obligation.invariant} names the owner ${obligation.owner}, which is not a file in the workspace`));
   }
   const ownerText = owner.text;
-  const chosen = waveBaseOf(input.graph.tasks, input.wave, obligation.owner);
+  // A contract Task's stub never owes, so its change is not one the mutants must cover.
+  const chosen = waveBaseOf(implementationTasks(input.graph), input.wave, obligation.owner);
   if (!chosen.ok) return chosen;
   if (chosen.value.kind === "owner-unchanged") return success({ ownerText, plan: null });
   const base = resolveWaveBase(input.root, obligation.owner, chosen.value);
@@ -356,7 +364,7 @@ async function verifyObligations(input: OwnerVerificationInput, runs: readonly O
   const verdicts: InvariantVerdict[] = [];
   const plans = new Map<InvariantId, MutationPlan>();
   for (const run of runs) {
-    const covered = coverage(input.root, run.obligation);
+    const covered = coverage(input, run.obligation);
     const evidence: MutationEvidence = run.kind === "exempt" ? { kind: "exempt" } : await mutationEvidence(input, run);
     if (evidence.kind === "owner-changed") plans.set(run.obligation.invariant, evidence.plan);
     verdicts.push(invariantVerdict(run.obligation, covered, evidence));

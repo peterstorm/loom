@@ -421,6 +421,51 @@ describe("validateModelBindings", () => {
       ];
       expect(validateModelBindings(modelsWithOwnership(OWNED), tasks, depsWith({})).ok).toBe(true);
     });
+
+    it("rejects a matrix test that first lands after the Wave the gate first verifies the family in", () => {
+      const tasks = [
+        task({ id: "T1", file_list: ["src/probe.ts"] }),
+        task({ id: "T2", wave: 2, depends_on: ["T1"], file_list: ["src/panel.ts", "tests/probe.matrix.test.ts"] }),
+      ];
+      const result = validateModelBindings(modelsWithOwnership(OWNED), tasks, depsWith({ "src/review.ts": "" }));
+      expect(errorsOf(result)).toEqual([expect.stringContaining(
+        "T1 change the family in Wave 1, but the matrix test 'tests/probe.matrix.test.ts' first lands in Wave 2 (T2)",
+      )]);
+    });
+
+    it("accepts siblings landing Wave by Wave, each Wave updating the matrix test", () => {
+      const tasks = [
+        task({ id: "T1", file_list: ["src/probe.ts", "tests/probe.matrix.test.ts"] }),
+        task({ id: "T2", wave: 2, depends_on: ["T1"], file_list: ["src/panel.ts", "tests/probe.matrix.test.ts"] }),
+        task({ id: "T3", wave: 3, depends_on: ["T2"], file_list: ["src/review.ts", "tests/probe.matrix.test.ts"] }),
+      ];
+      expect(validateModelBindings(modelsWithOwnership(OWNED), tasks, NO_FILES).ok).toBe(true);
+    });
+
+    it("a contract Task's stub of the owner owes nothing: the matrix test may land with the first real change", () => {
+      const CONTRACT_PLAN = [
+        "## Contracts", "",
+        "### CT-1: Probe surface", "",
+        "**Types file:** `src/probe-contract.ts`",
+        "**Acceptance tests:**",
+        "- `tests/probe.acceptance.test.ts` — AS-001",
+        "**Statement:** Probes fail closed.", "",
+      ].join("\n");
+      const models: PlanModels = { ...modelsWithOwnership(OWNED), contracts: parsePlanModels(CONTRACT_PLAN).contracts };
+      const contractTask = task({
+        id: "T1", spec_contributions: ["AS-001"],
+        file_list: ["src/probe-contract.ts", "tests/probe.acceptance.test.ts", "src/probe.ts"],
+      });
+      const builder = task({
+        id: "T2", wave: 2, depends_on: ["T1"], spec_anchors: ["AS-001"],
+        file_list: ["src/probe.ts", "src/panel.ts", "src/review.ts", "tests/probe.matrix.test.ts"],
+      });
+      expect(validateModelBindings(models, [contractTask, builder], NO_FILES)).toEqual({ ok: true });
+      // The same Wave-1 change by a Task that is not the contract Task owes, so the late matrix test is refused.
+      const unbound = { ...models, contracts: [] };
+      expectError(validateModelBindings(unbound, [{ ...contractTask, spec_contributions: [] }, { ...builder, spec_anchors: [] }], NO_FILES),
+        "change the family in Wave 1, but the matrix test 'tests/probe.matrix.test.ts' first lands in Wave 2 (T2)");
+    });
   });
 
   describe("contracts", () => {

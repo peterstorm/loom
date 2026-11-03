@@ -1,9 +1,10 @@
 /**
  * The brief's owner duties (plan AD-10, FR-027, AS-028): a duty paragraph per
  * owned Invariant the Task touches (`taskOwnerDuty`, any role), naming
- * the coverage duty (the matrix test must import the owner and every sibling)
- * and the mutation duty (the owner's changed lines are mutation-verified) or
- * the declared exemption. Rendered only when the graph carries the
+ * the coverage duty (the matrix test must import the owner and every sibling
+ * due by the Task's Wave, `duePaths`) and the mutation duty (the owner's
+ * changed lines are mutation-verified) or the declared exemption. A contract
+ * Task's stub owes neither (ADR-0063). Rendered only when the graph carries the
  * `owner_obligations` stamp, so pre-feature graphs get no false duty. On a
  * stamped graph the stamp is the only source of the whole ownership section
  * (#134); a pre-feature graph renders the plan's own blocks.
@@ -21,6 +22,7 @@ import {
   type ImplementationBriefInput,
   type RuleDocument,
 } from "../../src/core/implementation-brief";
+import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import type { OwnerObligation } from "../../src/core/owner-verification/types";
 import { obligationsFromPlan, taskOwnerDuty } from "../../src/core/owner-verification/obligations";
 import { parsePlanModels } from "../../src/core/parse-plan-models";
@@ -57,7 +59,10 @@ const task = (fileList: readonly string[]): Task => taskFixture({
   file_list: [...fileList],
 });
 
-function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[] | undefined): string {
+/** The rest of the graph the brief reads: the other Tasks and the contracts. */
+type Graph = Readonly<{ roster: readonly Task[]; contracts: readonly AcceptanceContract[] }>;
+
+function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[] | undefined, graph: Graph = { roster: [], contracts: [] }): string {
   const value = task(fileList);
   const derivation = deriveTaskImplementationDispatch(value);
   if (derivation.kind !== "dispatch") throw new Error(`fixture must be owed a dispatch, got ${derivation.kind}`);
@@ -69,8 +74,8 @@ function ownership(fileList: readonly string[], stamp: readonly OwnerObligation[
     planFile: ".claude/plans/plan.md",
     spec: { kind: "unavailable", reason: { kind: "no-spec-file" } },
     rules: RULES,
-    roster: [],
-    contracts: [],
+    roster: graph.roster,
+    contracts: graph.contracts,
     repositoryRoot: "/repo",
     operatorNotes: [],
     ownership: briefOwnership(stamp, INVARIANTS, value.file_list ?? []),
@@ -127,6 +132,27 @@ describe("owner duties in the brief (AD-10)", () => {
 
   it("FR-027: a Task touching no owned family renders no duty", () => {
     expect(ownership(["src/other.ts"], STAMP)).not.toContain("Owner duties");
+  });
+
+  it("a sibling only a later Wave adds is not this Wave's duty: the brief names the due siblings and defers the rest", () => {
+    const later = taskFixture({ id: "T2", description: "Add a sibling", agent: "code-implementer-agent", wave: 2, depends_on: ["T1"], file_list: ["src/rules/sibling-b.ts"] });
+    const section = ownership([ADMISSION.owner, ADMISSION.matrixTest], STAMP, { roster: [later], contracts: [] });
+    expect(someParagraph(section, "must import", "every sibling entry point due by Wave 1: `src/rules/sibling-a.ts`",
+      "Later Waves add `src/rules/sibling-b.ts`")).toBe(true);
+    expect(someParagraph(section, "mutation-verified", ADMISSION.owner)).toBe(true);
+  });
+
+  it("a contract Task's stub owes no owner verification: its brief says when verification starts", () => {
+    const contract: AcceptanceContract = {
+      schemaVersion: 1, id: "CT-1", title: "Admission surface", statement: "s", contractTask: "T1",
+      types: { kind: "file", path: "src/rules/types.ts" },
+      acceptance: [{ path: "tests/admission.acceptance.test.ts", anchors: ["AS-001"] }],
+      supportedDomain: null, freeze: { state: "awaiting-red" }, revisions: [],
+    };
+    const section = ownership([ADMISSION.owner], STAMP, { roster: [], contracts: [contract] });
+    expect(someParagraph(section, "**Owner duties (INV-1):** none in this Wave", "contract Task", "compiling stub")).toBe(true);
+    expect(section).not.toContain("must import");
+    expect(section).not.toContain("mutation-verified");
   });
 
   it("#134: a touched stamped obligation the plan does not declare renders whole, from the stamp", () => {
