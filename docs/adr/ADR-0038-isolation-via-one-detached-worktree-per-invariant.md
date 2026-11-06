@@ -168,6 +168,9 @@ made, and a matrix test whose import graph reached a later dependency (`saxes`, 
 as a red baseline, even though the test passed in the real workspace. Two fixes:
 - `shareNodeModules` now removes whatever the checkout put at `node_modules` and links the real workspace's
   directory in its place. The isolated copy always resolves the dependencies the real workspace has installed.
+  Before removing anything it resolves the parent directory and refuses, as `worktree-failed`, one that lies
+  outside the isolated copy (a committed symlink as the runner's `cwd`), so the replacement can never delete
+  the real workspace's `node_modules`.
   Covered by "replaces a node_modules the checkout carries (committed to Git) with the link to the real
   workspace's" in `engine/tests/orchestration/owner-mutation-workspace.test.ts`.
 - `engine/node_modules` is no longer tracked. Dependencies come from `bun install --frozen-lockfile` against

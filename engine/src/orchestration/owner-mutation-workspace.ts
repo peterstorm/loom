@@ -142,7 +142,10 @@ function overlay(source: CanonicalRepositoryRoot, target: string): Step<void> {
  * Symlink each directory's `node_modules` from the real workspace; the links
  * this created, for removal. A `node_modules` the checkout itself carries
  * (committed to Git) is replaced, never kept: the matrix test must resolve the
- * real workspace's installed packages, not a stale committed subset.
+ * real workspace's installed packages, not a stale committed subset. A
+ * directory whose checkout resolves outside the isolated copy (a committed
+ * symlink) is refused before anything is removed, so the replacement can never
+ * delete the real workspace's dependencies.
  */
 function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runnerCwd: string): Step<readonly string[]> {
   const links: string[] = [];
@@ -151,8 +154,12 @@ function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runne
       const from = join(absolute(source, directory), "node_modules");
       const to = join(absolute(target, directory), "node_modules");
       if (!existsSync(from)) continue;
-      rmSync(to, { recursive: true, force: true });
       mkdirSync(dirname(to), { recursive: true });
+      const parent = realpathSync.native(dirname(to));
+      if (parent !== target && !parent.startsWith(`${target}/`)) {
+        return failure(`sharing node_modules refused: ${directory} resolves to ${parent}, outside the isolated copy`);
+      }
+      rmSync(to, { recursive: true, force: true });
       symlinkSync(from, to);
       links.push(to);
     }

@@ -167,6 +167,27 @@ describe("withMutationWorkspace", () => {
     expect(repo.worktrees()).toEqual([repo.root]);
   }, TIMEOUT_MS);
 
+  it("refuses, as worktree-failed, a runner cwd whose checkout resolves outside the isolated copy, and never touches the real node_modules", async () => {
+    const repo = build();
+    const outside = join(repo.root, "real-tools");
+    mkdirSync(join(outside, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(outside, "node_modules", "pkg", "index.js"), "export {};\n");
+    symlinkSync(outside, join(repo.root, "tools"));
+    appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\nreal-tools/\n");
+    execFileSync("git", ["-C", repo.root, "add", "tools"]);
+    execFileSync("git", ["-C", repo.root, "commit", "-q", "-m", "track an absolute symlink as the runner cwd"]);
+    let used = false;
+    const result = await withMutationWorkspace({ ...specOf(repo), runnerCwd: pathOf("tools") }, async () => { used = true; });
+    expect(used).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("worktree-failed");
+    expect(result.error.detail).toMatch(/outside the isolated copy/);
+    expect(lstatSync(join(outside, "node_modules")).isDirectory()).toBe(true);
+    expect(read(outside, "node_modules/pkg/index.js")).toBe("export {};\n");
+    expect(repo.worktrees()).toEqual([repo.root]);
+  }, TIMEOUT_MS);
+
   it("AS-016: a run rewrites only the owner, deletes the stale report first, and restores the original owner bytes after", async () => {
     const repo = build();
     const original = read(repo.root, OWNER_FIXTURE.owner);
