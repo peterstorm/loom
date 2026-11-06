@@ -41,7 +41,7 @@ describe("validate-template-substitution — property tests", () => {
     fc.assert(
       fc.property(
         fc.stringMatching(/^[a-z][a-z0-9_]{3,15}$/).filter(
-          (s) => !["type", "id", "name", "system", "files"].includes(s),
+          (s) => !["type", "id", "name", "system", "files", "revision"].includes(s),
         ),
         (varName) => {
           const prompt = `Do something with {${varName}}`;
@@ -82,6 +82,12 @@ describe("validate-template-substitution — identifier-glued braces are express
     expect(validateTemplate("stale: {revision} | null")).toBe("allow");
     expect(validateTemplate("a |\t{tag} or {tag}  | b")).toBe("allow");
     expect(validateTemplate("run | then use {task_id} here")).toBe("block");
+  });
+
+  it("intersection notation FrozenSurface & {typesSha256}, A&{b}, {b} & C → allow; a lone & elsewhere still blocks", () => {
+    expect(validateTemplate("returns FrozenSurface & {typesSha256}. Content-addressed adoption")).toBe("allow");
+    expect(validateTemplate("A&{b} or {b}&C or {b} & C")).toBe("allow");
+    expect(validateTemplate("build & then read {plan_file}")).toBe("block");
   });
 
   it("a placeholder after a non-identifier character still blocks: loom-{task_id}, ({wave}), /{plan_file}", () => {
@@ -146,6 +152,11 @@ describe("validate-template-substitution — edge cases", () => {
     expect(ACCEPTANCE_RUNNER_FILES_PLACEHOLDER).toBe("{files}");
     expect(validateTemplate("the argv holds each file as one argument in place of `{files}`")).toBe("allow");
     expect(validateTemplate("in place of {files} for {task_id}")).toBe("block");
+  });
+
+  it("{revision} → allow — the stale-skeleton record field named in Task prose, not a template variable", () => {
+    expect(validateTemplate("each modified record left on disk and flagged stale {revision}; resolution problems")).toBe("allow");
+    expect(validateTemplate("flagged stale {revision} for {task_id}")).toBe("block");
   });
 
   it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {
