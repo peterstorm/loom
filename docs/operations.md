@@ -949,6 +949,7 @@ Whenever any implementation agent stops, claimant or not, the engine runs the te
 - **Separate caps.** Each check has its own per-agent counter (`*.acceptance-stop-check.json` and `*.affected-stop-check.json`), each capped at 3 blocks. A check's counter increases only when that check contributes failures to a block. Both counters clear when the stop proceeds.
 - **Not completion evidence.** No affected-run fact reaches settlement, proof, receipts or Wave Gate evidence. A test proves this by settling the same Task under every affected outcome and finding byte-identical proof and receipts.
 - **Pi is report-only.** The Pi parent runs both checks over the child's epoch in the parent ledger after the child has ended, and reports the outcome as below. It never blocks.
+- **A handed-back agent is never blocked.** A Claude Code subagent that ends its turn with a delivered `SubagentHandback` has finished: the harness does not keep it working, so a block would only drop the stop's settlement and leave the Task stranded with live authority. When a check would block such a stop, the dispatcher reads the agent's transcript (`claudeFinalTurnHandedBack`), turns the block into a note (`… cannot be held open: it settles now, and the Wave Gate judges the Task.`) and settles. A failed or unanswered handback, a legacy final text, or a transcript it cannot read keeps the block.
 
 ### Stop-check notes reach the orchestrator
 

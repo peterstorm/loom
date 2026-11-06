@@ -146,6 +146,43 @@ describe("dispatch runs the Acceptance Stop Check before settlement", () => {
     expect(readFileSync(statePath).equals(before)).toBe(true);
   });
 
+  it("settles instead of blocking when the agent already ended its turn with a delivered SubagentHandback", async () => {
+    const root = project();
+    const statePath = stateFile(root);
+    sidecar(statePath);
+    const cleanupCalls: string[] = [];
+    const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
+    const handedBackStop = JSON.stringify({ ...JSON.parse(stop), agent_transcript_path: handbackTranscript(root) });
+
+    const result = await runDispatch(handedBackStop, [], cleanup, failingAcceptancePorts(root));
+
+    // The harness cannot hold a handed-back agent open, so a block would drop
+    // settlement: the stop settles, and the failing testcase is a note.
+    expect(result.kind).not.toBe("block");
+    expect(cleanupCalls).toHaveLength(1);
+    expect(JSON.stringify(result)).toContain("AS-001: one valid call wins");
+    expect(JSON.stringify(result)).toContain("SubagentHandback");
+    expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(true);
+  });
+
+  it("still blocks when the agent's final turn delivered no handback", async () => {
+    const root = project();
+    const statePath = stateFile(root);
+    sidecar(statePath);
+    const before = readFileSync(statePath);
+    const cleanupCalls: string[] = [];
+    const cleanup: HookHandler = async (stdin) => { cleanupCalls.push(stdin); return { kind: "passthrough" }; };
+    const transcript = join(root, "agent-legacy.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } })}\n`);
+    const legacyStop = JSON.stringify({ ...JSON.parse(stop), agent_transcript_path: transcript });
+
+    const result = await runDispatch(legacyStop, [], cleanup, failingAcceptancePorts(root));
+
+    expect(result).toMatchObject({ kind: "block", message: expect.stringContaining("AS-001: one valid call wins") });
+    expect(cleanupCalls).toEqual([]);
+    expect(readFileSync(statePath).equals(before)).toBe(true);
+  });
+
   it("lets the stop through to settlement and cleanup when the check cannot decide", async () => {
     const root = project();
     const statePath = stateFile(root);
@@ -241,6 +278,46 @@ describe("a stop-check note reaches the orchestrating session (#121)", () => {
     expect(existsSync(stopCheckNotePath(SESSION, AGENT))).toBe(false);
   });
 });
+
+/** Ports whose real acceptance check sees the owed testcase failing, so it decides to block. */
+function failingAcceptancePorts(root: string): StopCheckShellPorts {
+  return {
+    ...inertPorts(),
+    repositoryRoot: () => {
+      const parsed = parseCanonicalRepositoryRoot(root);
+      return parsed.ok ? { ok: true, root: parsed.value } : { ok: false, reason: "root" };
+    },
+    runCheck: async (check) => {
+      const bytes = new TextEncoder().encode(
+        `<testsuites tests="1" failures="1"><testsuite name="s" tests="1" failures="1"><testcase classname="${SURFACE.acceptance}" name="AS-001: one valid call wins">` +
+        `<failure type="AssertionError"/></testcase></testsuite></testsuites>`);
+      writeFileSync(join(root, "report.xml"), bytes);
+      return {
+        ok: true,
+        value: {
+          checkResult: {
+            checkId: check.checkId, scope: "wave",
+            outcome: { kind: "observed", exitCode: 1, timedOut: false, signal: null,
+              report: { kind: "produced", path: "report.xml", digest: sha256Bytes(bytes), byteLength: bytes.byteLength } },
+          },
+          diagnostics: { stdoutTail: "", stderrTail: "", stdoutTruncated: false, stderrTruncated: false },
+        },
+      } as never;
+    },
+    readReport: (path) => readFileSync(path),
+  };
+}
+
+/** A subagent transcript whose final turn is a delivered SubagentHandback. */
+function handbackTranscript(root: string): string {
+  const path = join(root, "agent-handback.jsonl");
+  writeFileSync(path, [
+    { type: "user", message: { role: "user", content: "LOOM_IMPLEMENTATION_BRIEF: T2" } },
+    { type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "h1", name: "SubagentHandback", input: { message: "T2 report" } }] } },
+    { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "h1", content: "Report delivered to your caller.", is_error: false }] } },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  return path;
+}
 
 /** The same Tasks under a manifest that declares no runner: both checks skip silently. */
 function writeStateWithoutRunners(root: string): string {
