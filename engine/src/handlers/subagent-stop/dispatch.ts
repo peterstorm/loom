@@ -35,6 +35,36 @@ import { epochChangedFiles, runStopChecks } from "./stop-checks";
 import { claudeEpochLedger } from "./update-task-status";
 import { publishStopCheckNote } from "../../stop-check-note-sidecar";
 import { contractStubStopNote } from "../../orchestration/contract-stub-materialization";
+import { readFileSync } from "node:fs";
+import { claudeFinalTurnHandedBack, parseClaudeTranscript } from "../../core/claude-transcript-projection";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { readSettledJsonl } from "../../utils/read-settled-jsonl";
+import type { ParsedSubagentStopInput } from "../../parsers/parse-subagent-stop-input";
+
+type SubagentStopInput = Extract<ParsedSubagentStopInput, { ok: true }>["value"];
+
+/**
+ * Whether this stop is final: the agent already handed its report back with
+ * `SubagentHandback`, so a block cannot keep it working. Read only when a stop
+ * check would block. Any read fault answers false, which keeps the block.
+ */
+export type StopFinality = (input: SubagentStopInput) => Promise<boolean>;
+
+export const transcriptStopFinality: StopFinality = async (input) => {
+  try {
+    const path = resolveAgentTranscriptPath(input);
+    if (path === null) return false;
+    const raw = await readSettledJsonl(() => readFileSync(path, "utf-8"));
+    return claudeFinalTurnHandedBack(parseClaudeTranscript(raw.split("\n")));
+  } catch {
+    return false;
+  }
+};
+
+/** The note a block becomes when the agent can no longer be held open. */
+export const handedBackBlockNote = (blockMessage: string): string =>
+  `${blockMessage}\n(The agent already ended its turn with SubagentHandback, so this stop cannot be held open: ` +
+  "it settles now, and the Wave Gate judges the Task.)";
 
 import {
   snapshotImplementationAttemptSidecar,
@@ -106,6 +136,7 @@ export const runDispatch = async (
   args: string[],
   cleanup: HookHandler = cleanupSubagentFlag,
   stopCheckPorts: StopCheckShellPorts = PRODUCTION_STOP_CHECK_PORTS,
+  stopFinality: StopFinality = transcriptStopFinality,
 ): Promise<HookResult> => {
   // The hook budget (FR-025) is measured from the hook clock's first reading.
   const hookStartedAtMs = stopCheckPorts.now();
@@ -371,8 +402,19 @@ export const runDispatch = async (
       hookStartedAtMs,
     }, stopCheckPorts);
     const afterStubNote = (message: string): string => (stubNote === null ? message : `${stubNote}\n${message}`);
-    if (outcome.kind === "block") return { kind: "block", message: afterStubNote(outcome.message) };
-    const note = outcome.kind === "note" ? afterStubNote(outcome.message) : stubNote;
+    // A block keeps the agent working only if the harness can hold it open. An
+    // agent that already delivered its SubagentHandback has ended: blocking it
+    // would drop this stop's settlement and strand the Task's authority, so the
+    // block becomes a note and the stop settles (the Wave Gate still judges).
+    const handedBackNote = outcome.kind === "block" && await stopFinality(input)
+      ? handedBackBlockNote(outcome.message)
+      : null;
+    if (outcome.kind === "block" && handedBackNote === null) {
+      return { kind: "block", message: afterStubNote(outcome.message) };
+    }
+    const note = outcome.kind === "note"
+      ? afterStubNote(outcome.message)
+      : handedBackNote !== null ? afterStubNote(handedBackNote) : stubNote;
     if (note !== null) {
       // The systemMessage reaches only the operator. The sidecar carries the
       // note to the orchestrating model (#121), and is written before

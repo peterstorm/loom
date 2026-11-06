@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   claudeEmissionFrames,
   claudeEmissionScan,
+  claudeFinalTurnHandedBack,
   claudeToolOutputs,
   claudeTranscriptCandidates,
   claudeTranscriptSpawnPrompt,
@@ -45,6 +46,21 @@ describe("claudeTranscriptCandidates", () => {
     expect(claudeTranscriptCandidates(delivered)).toEqual({ ok: true, value: [{ origin: "transcript.line[1].handback", text: "report" }] });
     const failed = parseClaudeTranscript([prompt, toolUse("h1", "SubagentHandback", { message: "report" }), toolResult("h1", "no", true)]);
     expect(claudeTranscriptCandidates(failed)).toEqual({ ok: true, value: [] });
+  });
+});
+
+describe("claudeFinalTurnHandedBack", () => {
+  it("is true only when the final turn delivered a SubagentHandback", () => {
+    const handedBack = (lines: string[]) => claudeFinalTurnHandedBack(parseClaudeTranscript(lines));
+    expect(handedBack([prompt, toolUse("h1", "SubagentHandback", { message: "report" }), toolResult("h1", "ok")])).toBe(true);
+    // A failed or unanswered handback delivered nothing: the agent can still be held.
+    expect(handedBack([prompt, toolUse("h1", "SubagentHandback", { message: "report" }), toolResult("h1", "no", true)])).toBe(false);
+    expect(handedBack([prompt, toolUse("h1", "SubagentHandback", { message: "report" })])).toBe(false);
+    // A legacy final assistant text, or a handback in an earlier turn, is not a delivered final handback.
+    expect(handedBack([prompt, assistantText("final")])).toBe(false);
+    expect(handedBack([prompt, toolUse("h1", "SubagentHandback", { message: "r" }), toolResult("h1", "ok"), assistantText("more")])).toBe(false);
+    // A corrupt final turn proves nothing.
+    expect(handedBack([prompt, toolUse("h1", "SubagentHandback", { message: "report" }), "{torn"])).toBe(false);
   });
 });
 

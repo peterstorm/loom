@@ -285,6 +285,17 @@ export function claudeTranscriptCandidates(transcript: ClaudeTranscript): Claude
 }
 
 /**
+ * True when the final turn delivered a `SubagentHandback`: the subagent has
+ * handed its report back and ended, so the harness cannot keep it working and
+ * a SubagentStop block would only drop the stop's settlement. A failed or
+ * unanswered handback, a legacy final text, or a corrupt final turn is false.
+ */
+export function claudeFinalTurnHandedBack(transcript: ClaudeTranscript): boolean {
+  const candidates = claudeTranscriptCandidates(transcript);
+  return candidates.ok && candidates.value.some(({ origin }) => origin.endsWith(".handback"));
+}
+
+/**
  * The prompt a Claude subagent was spawned with: its transcript's opening user
  * message, written by the harness from the Agent call's prompt. `null` when the
  * opening line is not such a message (it then carries no request marker).
