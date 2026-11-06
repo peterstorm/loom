@@ -10,7 +10,8 @@
  *   `git status --porcelain=v2 -z --untracked-files=all` names is copied (or
  *   deleted) exactly, so the matrix test runs against the Wave's bytes.
  * - The repository root's and the runner cwd's `node_modules` are shared by
- *   symlink, never copied, and never written through.
+ *   symlink, never copied, and never written through; one the checkout
+ *   carries from HEAD is replaced by the link.
  * - `runWithOwner` rewrites only the owner file, deletes the runner's stale
  *   report, runs, and restores the owner's original bytes afterwards, even
  *   when the run throws; a restore that fails after a throwing run keeps the
@@ -137,14 +138,20 @@ function overlay(source: CanonicalRepositoryRoot, target: string): Step<void> {
   }
 }
 
-/** Symlink each directory's `node_modules` from the real workspace; the links this created, for removal. */
+/**
+ * Symlink each directory's `node_modules` from the real workspace; the links
+ * this created, for removal. A `node_modules` the checkout itself carries
+ * (committed to Git) is replaced, never kept: the matrix test must resolve the
+ * real workspace's installed packages, not a stale committed subset.
+ */
 function shareNodeModules(source: CanonicalRepositoryRoot, target: string, runnerCwd: string): Step<readonly string[]> {
   const links: string[] = [];
   try {
     for (const directory of [...new Set([".", runnerCwd])]) {
       const from = join(absolute(source, directory), "node_modules");
       const to = join(absolute(target, directory), "node_modules");
-      if (!existsSync(from) || existsSync(to)) continue;
+      if (!existsSync(from)) continue;
+      rmSync(to, { recursive: true, force: true });
       mkdirSync(dirname(to), { recursive: true });
       symlinkSync(from, to);
       links.push(to);
