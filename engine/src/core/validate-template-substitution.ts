@@ -14,8 +14,11 @@ import { ACCEPTANCE_RUNNER_FILES_PLACEHOLDER } from "./verification-manifest";
  *  literal, never a task-prompt variable — and {files} is the acceptance
  *  runner's own argument placeholder, which any Spec or plan describing a
  *  runner names verbatim and an engine-rendered brief then carries. No /loom
- *  template uses {files} as a variable. */
-const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", ACCEPTANCE_RUNNER_FILES_PLACEHOLDER]);
+ *  template uses {files} as a variable. {revision} is the stale-skeleton record
+ *  field of the State File (`stale: null | {revision}`), which Task prose names
+ *  as field notation (`flagged stale {revision}`); no /loom template uses it as
+ *  a variable either. */
+const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", "{revision}", ACCEPTANCE_RUNNER_FILES_PLACEHOLDER]);
 
 /**
  * The single source of truth for "unsubstituted template variable" detection:
@@ -33,10 +36,11 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", ACCEPTA
  * A brace glued to a preceding identifier character is expression syntax, not
  * a placeholder: ADT field notation in plan and spec prose
  * (`red-then-green-unproven{gap}`), struct literals (`Point{x}`); so is a brace
- * next to a `|`, the union notation of the same prose, glued (`{none}|{some T}`)
- * or spaced (`null | {revision}`, `{tag} | other`). No /loom template puts a
- * variable directly after an identifier character or beside a `|`, so such a
- * match is skipped. The `${...}` strip leaves a space
+ * next to a `|` or `&`, the union and intersection notation of the same prose,
+ * glued (`{none}|{some T}`, `A&{b}`) or spaced (`null | {revision}`,
+ * `FrozenSurface & {typesSha256}`). No /loom template puts a variable directly
+ * after an identifier character or beside a type operator, so such a match is
+ * skipped. The `${...}` strip leaves a space
  * behind, so a placeholder glued to a stripped expansion
  * (`x${done}{leftover}`) is still caught.
  *
@@ -49,7 +53,7 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", ACCEPTA
  */
 export function findResidualPlaceholders(prompt: string): string[] {
   const cleaned = prompt.replace(/\$\{[^}]*\}/g, " ");
-  const matches = cleaned.match(/(?<![A-Za-z0-9_|])(?<!\|[ \t]+)\{[a-zA-Z_][a-zA-Z0-9_]*\}(?![ \t]*\|)/g) ?? [];
+  const matches = cleaned.match(/(?<![A-Za-z0-9_|&])(?<![|&][ \t]+)\{[a-zA-Z_][a-zA-Z0-9_]*\}(?![ \t]*[|&])/g) ?? [];
   return matches.filter((v) => !FALSE_POSITIVES.has(v));
 }
 
