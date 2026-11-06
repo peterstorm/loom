@@ -271,7 +271,8 @@ Declaring an owner makes it an obligation the Wave Gate checks.
   most 24 per invariant (evenly spaced over the candidates, the rest
   reported as unmutated). Each mutant runs in one detached git worktree per
   invariant (HEAD plus every uncommitted, untracked and deleted path of the
-  real workspace, `node_modules` shared by symlink) through the frozen
+  real workspace, `node_modules` shared by symlink, replacing any the
+  checkout carries) through the frozen
   manifest's `affectedRunner`, with the matrix test as its only file and a
   time limit of 60 s clamped to the runner's own timeout. The matrix test
   must first pass unmutated: a red baseline blocks and runs no mutant. The

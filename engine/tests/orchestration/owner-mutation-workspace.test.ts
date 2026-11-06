@@ -141,6 +141,53 @@ describe("withMutationWorkspace", () => {
     expect(existsSync(join(repo.root, "node_modules", "pkg", "index.js"))).toBe(true);
   }, TIMEOUT_MS);
 
+  it("replaces a node_modules the checkout carries (committed to Git) with the link to the real workspace's", async () => {
+    const repo = build();
+    mkdirSync(join(repo.root, "node_modules", "stale"), { recursive: true });
+    writeFileSync(join(repo.root, "node_modules", "stale", "index.js"), "export const stale = true;\n");
+    execFileSync("git", ["-C", repo.root, "add", "-f", "node_modules"]);
+    execFileSync("git", ["-C", repo.root, "commit", "-q", "-m", "vendor a partial node_modules"]);
+    appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\n");
+    mkdirSync(join(repo.root, "node_modules", "installed"), { recursive: true });
+    writeFileSync(join(repo.root, "node_modules", "installed", "index.js"), "export {};\n");
+    const result = await withMutationWorkspace(specOf(repo), async (workspace) => {
+      const link = join(workspace.root, "node_modules");
+      return {
+        isLink: lstatSync(link).isSymbolicLink(),
+        target: readlinkSync(link),
+        installedVisible: existsSync(join(link, "installed", "index.js")),
+      };
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: { isLink: true, target: join(repo.root, "node_modules"), installedVisible: true },
+    });
+    expect(read(repo.root, "node_modules/stale/index.js")).toBe("export const stale = true;\n");
+    expect(read(repo.root, "node_modules/installed/index.js")).toBe("export {};\n");
+    expect(repo.worktrees()).toEqual([repo.root]);
+  }, TIMEOUT_MS);
+
+  it("refuses, as worktree-failed, a runner cwd whose checkout resolves outside the isolated copy, and never touches the real node_modules", async () => {
+    const repo = build();
+    const outside = join(repo.root, "real-tools");
+    mkdirSync(join(outside, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(outside, "node_modules", "pkg", "index.js"), "export {};\n");
+    symlinkSync(outside, join(repo.root, "tools"));
+    appendFileSync(join(repo.root, ".git", "info", "exclude"), "node_modules/\nreal-tools/\n");
+    execFileSync("git", ["-C", repo.root, "add", "tools"]);
+    execFileSync("git", ["-C", repo.root, "commit", "-q", "-m", "track an absolute symlink as the runner cwd"]);
+    let used = false;
+    const result = await withMutationWorkspace({ ...specOf(repo), runnerCwd: pathOf("tools") }, async () => { used = true; });
+    expect(used).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("worktree-failed");
+    expect(result.error.detail).toMatch(/outside the isolated copy/);
+    expect(lstatSync(join(outside, "node_modules")).isDirectory()).toBe(true);
+    expect(read(outside, "node_modules/pkg/index.js")).toBe("export {};\n");
+    expect(repo.worktrees()).toEqual([repo.root]);
+  }, TIMEOUT_MS);
+
   it("AS-016: a run rewrites only the owner, deletes the stale report first, and restores the original owner bytes after", async () => {
     const repo = build();
     const original = read(repo.root, OWNER_FIXTURE.owner);
