@@ -62,9 +62,9 @@ enum PaymentResult {
 // Exhaustive pattern matching
 fn handle_payment(result: &PaymentResult) -> String {
     match result {
-        PaymentResult::Success { tx_id, .. } => format!("Success: {tx_id}"),
-        PaymentResult::Failed { code, message } => format!("Failed: {code} - {message}"),
-        PaymentResult::Pending { redirect_url } => format!("Redirect to: {redirect_url}"),
+        PaymentResult::Success { tx_id, .. } => format!("Success: {}", tx_id),
+        PaymentResult::Failed { code, message } => format!("Failed: {} - {}", code, message),
+        PaymentResult::Pending { redirect_url } => format!("Redirect to: {}", redirect_url),
     }
 }
 
@@ -184,7 +184,7 @@ enum OrderError {
     NotFound(OrderId),
     #[error("invalid quantity: must be positive")]
     InvalidQuantity,
-    #[error("insufficient stock for {product_id}")]
+    #[error("insufficient stock for {}", .product_id)]
     InsufficientStock { product_id: ProductId },
 }
 

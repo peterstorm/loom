@@ -10,7 +10,7 @@ globs: "**/*.java"
 Organize packages to mirror the Functional Core / Imperative Shell / Infrastructure layering. Dependency arrows point inward: infra → domain, orchestrator → domain. Never outward.
 
 ```
-{base}/
+<base>/
 ├── domain/              Pure functional core (no Spring annotations, no I/O)
 │   ├── model/           Value objects, entities, sealed types, records
 │   ├── port/            Port interfaces (seams — owned by domain, implemented in infra)
