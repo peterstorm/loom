@@ -33,9 +33,10 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", ACCEPTA
  * A brace glued to a preceding identifier character is expression syntax, not
  * a placeholder: ADT field notation in plan and spec prose
  * (`red-then-green-unproven{gap}`), struct literals (`Point{x}`); so is a brace
- * glued to a `|`, the union notation of the same prose (`{none}|{some T}`). No
- * /loom template puts a variable directly after an identifier character or
- * against a `|`, so such a match is skipped. The `${...}` strip leaves a space
+ * next to a `|`, the union notation of the same prose, glued (`{none}|{some T}`)
+ * or spaced (`null | {revision}`, `{tag} | other`). No /loom template puts a
+ * variable directly after an identifier character or beside a `|`, so such a
+ * match is skipped. The `${...}` strip leaves a space
  * behind, so a placeholder glued to a stripped expansion
  * (`x${done}{leftover}`) is still caught.
  *
@@ -48,7 +49,7 @@ const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}", ACCEPTA
  */
 export function findResidualPlaceholders(prompt: string): string[] {
   const cleaned = prompt.replace(/\$\{[^}]*\}/g, " ");
-  const matches = cleaned.match(/(?<![A-Za-z0-9_|])\{[a-zA-Z_][a-zA-Z0-9_]*\}(?!\|)/g) ?? [];
+  const matches = cleaned.match(/(?<![A-Za-z0-9_|])(?<!\|[ \t]+)\{[a-zA-Z_][a-zA-Z0-9_]*\}(?![ \t]*\|)/g) ?? [];
   return matches.filter((v) => !FALSE_POSITIVES.has(v));
 }
 

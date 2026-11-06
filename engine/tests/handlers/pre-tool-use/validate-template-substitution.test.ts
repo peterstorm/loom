@@ -77,6 +77,13 @@ describe("validate-template-substitution — identifier-glued braces are express
     expect(validateTemplate("parsed to {none} here")).toBe("block");
   });
 
+  it("spaced union notation null | {revision} and {tag} | other → allow; a pipe without a union still blocks", () => {
+    expect(validateTemplate("stale null | {revision}}). task.skeleton_outcomes")).toBe("allow");
+    expect(validateTemplate("stale: {revision} | null")).toBe("allow");
+    expect(validateTemplate("a |\t{tag} or {tag}  | b")).toBe("allow");
+    expect(validateTemplate("run | then use {task_id} here")).toBe("block");
+  });
+
   it("a placeholder after a non-identifier character still blocks: loom-{task_id}, ({wave}), /{plan_file}", () => {
     expect(validateTemplate("/tmp/loom-{task_id}-bun.xml")).toBe("block");
     expect(validateTemplate("Wave ({wave})")).toBe("block");
