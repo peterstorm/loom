@@ -3,8 +3,11 @@ import fc from "fast-check";
 
 import { canonicalStructuralEquals } from "../../src/core/orchestration-contract";
 import {
+  CONTRACT_VIOLATED_FAILURE_KIND_PREFIX,
   TRUSTED_LEDGER_ONLY_POLICY,
   PI_STRUCTURED_EVIDENCE_POLICY,
+  contractViolatedFailureKind,
+  parseContractViolatedFailureKind,
   derivePendingTaskProof,
   deriveProofObligations,
   evaluateProofObligations,
@@ -22,6 +25,11 @@ import {
   type ObservedProofEvidence,
   type ProofObligationInput,
 } from "../../src/core/proof-obligations";
+import type { ConformanceViolation, ContractConformance } from "../../src/core/skeleton/types";
+
+const NOT_OWED: ContractConformance = { kind: "not-owed" };
+
+const UNIMPLEMENTED: ConformanceViolation = { subject: "priceOrder", reason: "still-unimplemented", remedy: null };
 
 const input: ProofObligationInput = {
   newTestsRequired: true,
@@ -34,6 +42,7 @@ const completeEvidence: ObservedProofEvidence = {
   filesModified: [...input.declaredArtifacts],
   newTestsWritten: true,
   newTestEvidence: "vitest: 12 tests passed",
+  contractConformance: NOT_OWED,
 };
 
 describe("proof obligation derivation", () => {
@@ -229,7 +238,7 @@ describe("proof evaluation", () => {
 
   it("evaluates every obligation exactly once even when several fail", () => {
     const obligations = deriveProofObligations(input);
-    const proof = evaluateProofObligations(obligations, { taskCompleted: false, filesModified: [] });
+    const proof = evaluateProofObligations(obligations, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED });
 
     expect(proof.state).toBe("failed");
     expect(proof.results).toHaveLength(obligations.length);
@@ -278,6 +287,7 @@ describe("unknown-input parsers", () => {
       filesModified: ["src/a.ts"],
       newTestsWritten: true,
       newTestEvidence: "one test",
+      contractConformance: { kind: "not-owed" },
     };
     const parsedInput = parseProofObligationInput(rawInput);
     const parsedEvidence = parseObservedProofEvidence(rawEvidence);
@@ -297,7 +307,7 @@ describe("unknown-input parsers", () => {
   it("round-trips every authored proof state and rejects result coverage drift", () => {
     const proofs = [
       derivePendingTaskProof(input),
-      evaluateTaskProof(input, { taskCompleted: false, filesModified: [] }),
+      evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED }),
       evaluateTaskProof(input, completeEvidence),
     ];
     for (const proof of proofs) {
@@ -315,7 +325,7 @@ describe("unknown-input parsers", () => {
   });
 
   it("rejects state/result disagreement and forged aggregate evidence", () => {
-    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [] });
+    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED });
     const wrongState = { ...JSON.parse(JSON.stringify(failed)), state: "satisfied", evidence: [] };
     expect(parseTaskProof(wrongState).ok).toBe(false);
 
@@ -427,6 +437,7 @@ describe("proof properties", () => {
             testResult: testsPass ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
             filesModified: artifacts.filter((_, index) => index % 2 === 0),
             newTestsWritten,
+            contractConformance: NOT_OWED,
           };
           const obligations = deriveProofObligations(source);
           const once = evaluateProofObligations(obligations, evidence);
@@ -455,6 +466,7 @@ describe("proof properties", () => {
             testResult: { verdict: "trusted-pass" },
             filesModified: artifacts,
             newTestsWritten: true,
+            contractConformance: NOT_OWED,
           };
           const variants: ObservedProofEvidence[] = [
             { ...full, testResult: undefined },
@@ -474,7 +486,7 @@ describe("proof properties", () => {
 
   it("PROPERTY: every proof/test ADT arm rejects surplus fields", () => {
     const pending = derivePendingTaskProof(input);
-    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [] });
+    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED });
     const satisfied = evaluateTaskProof(input, completeEvidence);
     const cases: readonly Readonly<{
       parser: (raw: unknown) => Readonly<{ ok: boolean }>;
@@ -499,6 +511,7 @@ describe("proof properties", () => {
         { kind: "untrusted-regression-pass", label: "fallback" },
         { kind: "new-tests-not-observed" },
         { kind: "declared-artifact-not-changed", artifact: "src/a.ts" },
+        { kind: "declared-artifact-contract-violated", artifact: "src/a.ts", violations: [UNIMPLEMENTED] },
       ].map((value) => ({ parser: parseProofFailure, value })),
       ...[
         { kind: "task-completed" },
@@ -524,7 +537,7 @@ describe("proof properties", () => {
           declaredArtifacts: [],
         },
       },
-      { parser: parseObservedProofEvidence, value: { taskCompleted: true, filesModified: [] } },
+      { parser: parseObservedProofEvidence, value: { taskCompleted: true, filesModified: [], contractConformance: NOT_OWED } },
       { parser: parseProofEvaluationPolicy, value: { untrustedPass: "reject" } },
     ];
 
@@ -551,5 +564,259 @@ describe("proof properties", () => {
       }),
       { numRuns: 100 },
     );
+  });
+});
+
+describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
+  const ARTIFACT = "src/order/pricing.ts";
+  const OTHER = "src/order/quotes.ts";
+  const contractInput: ProofObligationInput = { newTestsRequired: false, declaredArtifacts: [ARTIFACT, OTHER] };
+  const RENAMED: ConformanceViolation = { subject: "parseOrder", reason: "renamed", remedy: null };
+  const RELISTED: ConformanceViolation = {
+    subject: "OrderState",
+    reason: "re-lists-frozen-variants",
+    remedy: "LocalState re-lists the variants of the frozen union OrderState",
+  };
+  const judged = (entries: readonly (readonly [string, readonly [ConformanceViolation, ...ConformanceViolation[]]])[]): ContractConformance =>
+    ({ kind: "judged", violations: new Map(entries) });
+  const observed = (filesModified: readonly string[], contractConformance: ContractConformance): ObservedProofEvidence => ({
+    taskCompleted: true,
+    filesModified,
+    contractConformance,
+  });
+  const resultFor = (proof: ReturnType<typeof evaluateTaskProof>, artifact: string) =>
+    proof.results.find(({ obligation }) => obligation.kind === "declared-artifact-changed" && obligation.artifact === artifact);
+
+  it("AS-015: an untouched engine skeleton is refused as still unimplemented, never as not-changed", () => {
+    const proof = evaluateTaskProof(contractInput, observed([OTHER], judged([[ARTIFACT, [UNIMPLEMENTED]]])));
+
+    expect(proof.state).toBe("failed");
+    expect(resultFor(proof, ARTIFACT)).toEqual({
+      state: "failed",
+      obligation: { kind: "declared-artifact-changed", artifact: ARTIFACT },
+      failure: { kind: "declared-artifact-contract-violated", artifact: ARTIFACT, violations: [UNIMPLEMENTED] },
+    });
+    expect(proof.state === "failed" ? proof.failures : []).toEqual([
+      { kind: "declared-artifact-contract-violated", artifact: ARTIFACT, violations: [UNIMPLEMENTED] },
+    ]);
+  });
+
+  it("FR-021: violations are reported ahead of the changed test, every one of them, in judge order", () => {
+    const proof = evaluateTaskProof(contractInput, observed([ARTIFACT, OTHER], judged([[ARTIFACT, [UNIMPLEMENTED, RENAMED, RELISTED]]])));
+
+    expect(resultFor(proof, ARTIFACT)?.state).toBe("failed");
+    expect(proof.state === "failed" ? proof.failures : []).toEqual([
+      { kind: "declared-artifact-contract-violated", artifact: ARTIFACT, violations: [UNIMPLEMENTED, RENAMED, RELISTED] },
+    ]);
+    // The sibling artifact, changed and conforming, is satisfied as changed.
+    expect(resultFor(proof, OTHER)).toEqual({
+      state: "satisfied",
+      obligation: { kind: "declared-artifact-changed", artifact: OTHER },
+      evidence: { kind: "declared-artifact-changed", artifact: OTHER },
+    });
+  });
+
+  it("FR-012: a judged artifact with no violation is satisfied only when it changed", () => {
+    const conforming = judged([]);
+    expect(evaluateTaskProof(contractInput, observed([ARTIFACT, OTHER], conforming)).state).toBe("satisfied");
+    const unchanged = evaluateTaskProof(contractInput, observed([OTHER], conforming));
+    expect(unchanged.state === "failed" ? unchanged.failures : []).toEqual([
+      { kind: "declared-artifact-not-changed", artifact: ARTIFACT },
+    ]);
+  });
+
+  it("a not-owed observation leaves the changed test alone", () => {
+    expect(evaluateTaskProof(contractInput, observed([ARTIFACT, OTHER], NOT_OWED)).state).toBe("satisfied");
+    const unchanged = evaluateTaskProof(contractInput, observed([], NOT_OWED));
+    expect(unchanged.state === "failed" ? unchanged.failures.map(({ kind }) => kind) : []).toEqual([
+      "declared-artifact-not-changed",
+      "declared-artifact-not-changed",
+    ]);
+  });
+
+  it("violations of a path that is no declared artifact refuse nothing", () => {
+    const proof = evaluateTaskProof(contractInput, observed([ARTIFACT, OTHER], judged([["src/elsewhere.ts", [UNIMPLEMENTED]]])));
+    expect(proof.state).toBe("satisfied");
+  });
+
+  it("AS-037: the declared-artifact-attested verify-only arm is never judged", () => {
+    const attested = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: [ARTIFACT], declaredArtifactExpectation: "attested" },
+      observed([], judged([[ARTIFACT, [UNIMPLEMENTED]]])),
+    );
+    expect(attested.state).toBe("satisfied");
+    expect(attested.results.map(({ state }) => state)).toEqual(["satisfied", "satisfied", "satisfied"]);
+  });
+
+  it("FR-021: a contract-violated failure round-trips through the failure, result and proof parsers", () => {
+    const proof = evaluateTaskProof(contractInput, observed([OTHER], judged([[ARTIFACT, [UNIMPLEMENTED, RELISTED]]])));
+    const json = JSON.parse(JSON.stringify(proof)) as unknown;
+    const parsed = parseTaskProof(json);
+    expect(parsed).toEqual({ ok: true, value: proof });
+    const failure = { kind: "declared-artifact-contract-violated", artifact: ARTIFACT, violations: [UNIMPLEMENTED, RELISTED] };
+    expect(parseProofFailure(failure)).toEqual({ ok: true, value: failure });
+  });
+
+  it("refuses a contract-violated failure with no violation, an unknown reason, a malformed violation or a blank artifact", () => {
+    const base = { kind: "declared-artifact-contract-violated", artifact: ARTIFACT };
+    for (const raw of [
+      { ...base, violations: [] },
+      { ...base, violations: "priceOrder" },
+      { ...base, violations: [{ subject: "priceOrder", reason: "forgotten", remedy: null }] },
+      { ...base, violations: [{ subject: "", reason: "deleted", remedy: null }] },
+      { ...base, violations: [{ subject: "priceOrder", reason: "deleted", remedy: 3 }] },
+      { ...base, violations: [{ subject: "priceOrder", reason: "deleted" }] },
+      { ...base, violations: [{ subject: "priceOrder", reason: "deleted", remedy: null, extra: true }] },
+      { ...base, violations: [null] },
+      { kind: base.kind, artifact: " ", violations: [UNIMPLEMENTED] },
+      { kind: base.kind, violations: [UNIMPLEMENTED] },
+    ]) {
+      expect(parseProofFailure(raw).ok, JSON.stringify(raw)).toBe(false);
+    }
+    for (const reason of ["deleted", "renamed", "retyped", "still-unimplemented", "shadows-frozen-adt", "re-lists-frozen-variants"]) {
+      expect(parseProofFailure({ ...base, violations: [{ subject: "x", reason, remedy: null }] }).ok, reason).toBe(true);
+    }
+  });
+
+  it("refuses a contract-violated result bound to another artifact or to the attested arm", () => {
+    const failure = { kind: "declared-artifact-contract-violated", artifact: ARTIFACT, violations: [UNIMPLEMENTED] };
+    expect(parseProofObligationResult({
+      state: "failed", obligation: { kind: "declared-artifact-changed", artifact: ARTIFACT }, failure,
+    }).ok).toBe(true);
+    expect(parseProofObligationResult({
+      state: "failed", obligation: { kind: "declared-artifact-changed", artifact: OTHER }, failure,
+    }).ok).toBe(false);
+    expect(parseProofObligationResult({
+      state: "failed", obligation: { kind: "declared-artifact-attested", artifact: ARTIFACT }, failure,
+    }).ok).toBe(false);
+    expect(parseProofObligationResult({
+      state: "failed", obligation: { kind: "task-completed" }, failure,
+    }).ok).toBe(false);
+  });
+
+  it("parses both contractConformance arms into a defensive copy, and an absent one as no judgment", () => {
+    const raw = { taskCompleted: true, filesModified: [ARTIFACT] };
+    expect(parseObservedProofEvidence(raw)).toEqual({ ok: true, value: { taskCompleted: true, filesModified: [ARTIFACT] } });
+    expect(parseObservedProofEvidence({ ...raw, contractConformance: { kind: "not-owed" } })).toEqual({
+      ok: true,
+      value: { taskCompleted: true, filesModified: [ARTIFACT], contractConformance: { kind: "not-owed" } },
+    });
+    const source = new Map<string, unknown>([[ARTIFACT, [UNIMPLEMENTED, RENAMED]]]);
+    const parsed = parseObservedProofEvidence({ ...raw, contractConformance: { kind: "judged", violations: source } });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    source.set(OTHER, [RELISTED]);
+    expect(parsed.value.contractConformance).toEqual({ kind: "judged", violations: new Map([[ARTIFACT, [UNIMPLEMENTED, RENAMED]]]) });
+  });
+
+  it("refuses a malformed contractConformance observation", () => {
+    const raw = { taskCompleted: true, filesModified: [] };
+    for (const contractConformance of [
+      null,
+      "not-owed",
+      { kind: "owed" },
+      { kind: "not-owed", violations: new Map() },
+      { kind: "judged" },
+      { kind: "judged", violations: [[ARTIFACT, [UNIMPLEMENTED]]] },
+      { kind: "judged", violations: { [ARTIFACT]: [UNIMPLEMENTED] } },
+      { kind: "judged", violations: new Map([[ARTIFACT, []]]) },
+      { kind: "judged", violations: new Map([["", [UNIMPLEMENTED]]]) },
+      { kind: "judged", violations: new Map([[ARTIFACT, [{ subject: "x", reason: "lost", remedy: null }]]]) },
+      { kind: "judged", violations: new Map([[ARTIFACT, [UNIMPLEMENTED]]]), surplus: 1 },
+    ]) {
+      expect(parseObservedProofEvidence({ ...raw, contractConformance }).ok, String(contractConformance)).toBe(false);
+    }
+  });
+});
+
+describe("contract-violated receipt failure kind (FR-021)", () => {
+  const ARTIFACT = "src/order/pricing.ts";
+  const RELISTED: ConformanceViolation = {
+    subject: "OrderState",
+    reason: "re-lists-frozen-variants",
+    remedy: "LocalState re-lists the variants of the frozen union OrderState",
+  };
+  type Violations = readonly [ConformanceViolation, ...ConformanceViolation[]];
+  const failureOf = (violations: Violations) =>
+    ({ kind: "declared-artifact-contract-violated" as const, artifact: ARTIFACT, violations });
+
+  it("FR-021: round-trips every violation of an artifact, file, subject, reason and remedy, through the receipt kind", () => {
+    const kind = contractViolatedFailureKind(failureOf([UNIMPLEMENTED, RELISTED]), 4_096);
+    expect(kind.startsWith(`${CONTRACT_VIOLATED_FAILURE_KIND_PREFIX}`)).toBe(true);
+    expect(parseContractViolatedFailureKind(kind)).toEqual({
+      ok: true,
+      value: { artifact: ARTIFACT, shown: [UNIMPLEMENTED, RELISTED], omitted: 0 },
+    });
+  });
+
+  it("bounds an over-long list to the longest prefix that fits and counts the rest", () => {
+    const many = Array.from({ length: 400 }, (_, index): ConformanceViolation =>
+      ({ subject: `export${index}`, reason: "deleted", remedy: null })) as unknown as Violations;
+    const kind = contractViolatedFailureKind(failureOf(many), 4_096);
+    expect(kind.length).toBeLessThanOrEqual(4_096);
+    const parsed = parseContractViolatedFailureKind(kind);
+    if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+    expect(parsed.value.omitted).toBeGreaterThan(0);
+    expect(parsed.value.shown.length + parsed.value.omitted).toBe(400);
+    expect(parsed.value.shown).toEqual(many.slice(0, parsed.value.shown.length));
+    // One more shown violation would not have fit.
+    const tighter = contractViolatedFailureKind(failureOf(many), kind.length - 1);
+    const tighterParsed = parseContractViolatedFailureKind(tighter);
+    expect(tighterParsed.ok && tighterParsed.value.shown.length).toBe(parsed.value.shown.length - 1);
+  });
+
+  it("counts a single violation too long for the bound instead of dropping it", () => {
+    const huge: ConformanceViolation = { subject: "x", reason: "retyped", remedy: "r".repeat(5_000) };
+    const kind = contractViolatedFailureKind(failureOf([huge]), 4_096);
+    expect(kind.length).toBeLessThanOrEqual(4_096);
+    expect(parseContractViolatedFailureKind(kind)).toEqual({ ok: true, value: { artifact: ARTIFACT, shown: [], omitted: 1 } });
+  });
+
+  it("property: decoding an encoded kind yields a prefix of the violations plus the count it leaves out", () => {
+    const violation = fc.record({
+      // Canonical subjects: the violation parser trims, as it does for the stored Proof.
+      subject: fc.string({ minLength: 1, maxLength: 40 }).map((value) => value.trim()).filter((value) => value !== ""),
+      reason: fc.constantFrom(
+        "deleted", "renamed", "retyped", "still-unimplemented", "shadows-frozen-adt", "re-lists-frozen-variants",
+      ) as fc.Arbitrary<ConformanceViolation["reason"]>,
+      remedy: fc.option(fc.string({ maxLength: 80 }), { nil: null }),
+    });
+    fc.assert(fc.property(
+      fc.array(violation, { minLength: 1, maxLength: 30 }),
+      fc.integer({ min: 200, max: 4_096 }),
+      (violations, bound) => {
+        const kind = contractViolatedFailureKind(failureOf(violations as unknown as Violations), bound);
+        expect(kind.length).toBeLessThanOrEqual(bound);
+        const parsed = parseContractViolatedFailureKind(kind);
+        if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+        expect(parsed.value.artifact).toBe(ARTIFACT);
+        expect(parsed.value.shown).toEqual(violations.slice(0, parsed.value.shown.length));
+        expect(parsed.value.shown.length + parsed.value.omitted).toBe(violations.length);
+      },
+    ));
+  });
+
+  it("refuses a kind that is not an exact, well-formed contract-violated receipt kind", () => {
+    const encode = (body: unknown) => `${CONTRACT_VIOLATED_FAILURE_KIND_PREFIX}${JSON.stringify(body)}`;
+    const good = { artifact: ARTIFACT, omitted: 0, violations: [UNIMPLEMENTED] };
+    for (const kind of [
+      "proof:declared-artifact-not-changed",
+      `proof:declared-artifact-contract-violated ${ARTIFACT}: priceOrder: still-unimplemented`,
+      `${CONTRACT_VIOLATED_FAILURE_KIND_PREFIX}{`,
+      encode([good]),
+      encode({ ...good, extra: true }),
+      encode({ ...good, artifact: " " }),
+      encode({ ...good, omitted: -1 }),
+      encode({ ...good, omitted: 1.5 }),
+      encode({ ...good, violations: [], omitted: 0 }),
+      encode({ ...good, violations: [{ subject: "x", reason: "lost", remedy: null }] }),
+      encode({ artifact: ARTIFACT, violations: [UNIMPLEMENTED] }),
+    ]) {
+      expect(parseContractViolatedFailureKind(kind).ok, kind).toBe(false);
+    }
+    expect(parseContractViolatedFailureKind(encode({ ...good, violations: [], omitted: 2 }))).toEqual({
+      ok: true,
+      value: { artifact: ARTIFACT, shown: [], omitted: 2 },
+    });
   });
 });

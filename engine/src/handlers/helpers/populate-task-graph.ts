@@ -31,6 +31,7 @@ import { observeExactHead } from "../../utils/git";
 import { runGit } from "../../utils/git-execution-policy";
 import { renderProofBoundaryNotice } from "../../core/proof-boundary-observation";
 import { acceptanceObservationProblem } from "../../core/acceptance-contract";
+import { parsePlanExportBindings } from "../../core/parse-plan-models";
 import {
   parseAuthoredTaskRoster,
   populateTaskGraph,
@@ -388,10 +389,17 @@ const handler: HookHandler = async (stdin, args) => {
     existingState.plan_file ??
     existingState.phase_artifacts?.architecture ??
     decompose.plan_file;
+  // The plan is read ONCE: the binding check validates these bytes and the
+  // export bindings population stamps are parsed from the same bytes, so a
+  // plan edited between the two can never stamp bindings that were not checked.
+  const planRead = typeof planFile === "string" ? productionModelBindingDeps.readFile(planFile) : null;
   const bindings = checkPlanModelBindings(
     planFile,
     decompose.tasks as unknown as Record<string, unknown>[],
-    productionModelBindingDeps,
+    {
+      ...productionModelBindingDeps,
+      readFile: (path) => (path === planFile && planRead !== null ? planRead : productionModelBindingDeps.readFile(path)),
+    },
   );
   if (!bindings.ok) {
     return {
@@ -404,6 +412,7 @@ const handler: HookHandler = async (stdin, args) => {
   }
   // checkPlanModelBindings only passes when planFile is a readable string
   const validatedPlanFile = planFile as string;
+  const exportBindings = planRead?.ok === true ? parsePlanExportBindings(planRead.content) : undefined;
 
   // Operator command authority is observed once in the repository shell before
   // lock acquisition. The locked transform below carries this prepared value;
@@ -454,6 +463,9 @@ const handler: HookHandler = async (stdin, args) => {
     // Validated by checkPlanModelBindings above (exemptions included), so the
     // locked transform stamps Owner Obligations from proven plan data.
     invariants: bindings.models.invariants,
+    // Validated by checkPlanModelBindings above from the same plan bytes;
+    // population re-validates them against the roster before stamping.
+    ...(exportBindings === undefined ? {} : { exportBindings }),
   });
   const preflight = populateTaskGraph(existingState, command);
   if (!preflight.ok) return { kind: "error", message: preflight.error.message };

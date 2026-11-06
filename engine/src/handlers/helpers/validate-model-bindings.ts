@@ -8,6 +8,8 @@
  * declares a model must bind it — a descriptive model with nothing to run is
  * a validation error, not a warning. Near-miss declarations (see
  * PlanModels.strays) are errors too: a typo must not read as an opt-out.
+ * `**Export bindings:**` in File Structure are refused by
+ * `validateExportBindings` (FR-002) before population stamps them.
  *
  * Pure core (`validateModelBindings`) with filesystem access injected via
  * `ModelBindingDeps`; `checkPlanModelBindings` is the shared fail-closed
@@ -20,11 +22,13 @@
 import { match } from "ts-pattern";
 
 import { readFileSync } from "node:fs";
-import { parsePlanModels, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
+import { parsePlanModels, parsePlanExportBindings, hasModels, renderStray, type PlanModels } from "../../core/parse-plan-models";
 import { contractBindingErrors, contractWriter, frozenPaths, type ContractBindingTask } from "../../core/acceptance-contract";
 import { firstOwingWave, type ScheduledTask } from "../../core/owner-verification/obligations";
 import { dependsOnAny } from "../../core/task-dependencies";
-import { parseVerificationPolicy, type NewTestWaiverReason } from "../../core/verification-policy";
+import { parseVerificationPolicy, type NewTestWaiverReason, type RegressionWaiverReason } from "../../core/verification-policy";
+import { renderBindingProblem, validateExportBindings } from "../../core/skeleton/bindings";
+import type { ExportBindingsDeclaration } from "../../core/skeleton/types";
 import type { OwnershipProblem, PlanInvariant } from "../../types";
 import { observePathPresence, type PathPresence } from "../../utils/path-presence";
 import { changesFamily, invariantRoles, type InvariantRoles, type OwnedInvariant } from "../../core/plan-paths";
@@ -95,16 +99,23 @@ type TaskRecord = Readonly<{
   claims: readonly string[];
   /** The `verification_policy.new_tests` waiver reason, when waived. */
   newTestWaiver: NewTestWaiverReason | null;
+  /** The `verification_policy.regression` waiver reason, when waived. */
+  regressionWaiver: RegressionWaiverReason | null;
 }>;
 
 const strings = (raw: unknown): readonly string[] =>
   Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : [];
 
-/** The authored new-test waiver, read through the one policy parser; a
- *  malformed policy waives nothing here, and structural validation reports it. */
-function newTestWaiver(policy: unknown): NewTestWaiverReason | null {
+/** The authored waivers, read through the one policy parser; a malformed
+ *  policy waives nothing here, and structural validation reports it. */
+function waivers(policy: unknown): Pick<TaskRecord, "newTestWaiver" | "regressionWaiver"> {
   const parsed = parseVerificationPolicy(policy);
-  return parsed.ok && parsed.value.newTests.kind === "waived" ? parsed.value.newTests.reason : null;
+  if (!parsed.ok) return { newTestWaiver: null, regressionWaiver: null };
+  const { newTests, regression } = parsed.value;
+  return {
+    newTestWaiver: newTests.kind === "waived" ? newTests.reason : null,
+    regressionWaiver: regression.kind === "waived" ? regression.reason : null,
+  };
 }
 
 /** Total over the raw roster: a repair input may carry entries that are not
@@ -116,7 +127,7 @@ function taskRecords(tasks: readonly Record<string, unknown>[]): readonly TaskRe
     files: strings(t.file_list),
     dependsOn: strings(t.depends_on),
     claims: strings(t.spec_anchors),
-    newTestWaiver: newTestWaiver(t.verification_policy),
+    ...waivers(t.verification_policy),
   }));
 }
 
@@ -271,10 +282,19 @@ function contractBindingTasks(tasks: readonly Record<string, unknown>[]): readon
     ({ id, file_list: files, spec_anchors: claims, depends_on: dependsOn, newTestWaiver: waiver }));
 }
 
+/** What a plan without `**Export bindings:**` declares. */
+const NO_EXPORT_BINDINGS: ExportBindingsDeclaration = { bindings: [], problems: [] };
+
+/**
+ * Validate a plan's model bindings against the task roster. `exportBindings`
+ * is the plan's `parsePlanExportBindings` result; it is kept apart from
+ * `models` so a plan without bindings validates to its pre-feature result.
+ */
 export function validateModelBindings(
   models: PlanModels,
   tasks: readonly Record<string, unknown>[],
   deps: ModelBindingDeps,
+  exportBindings: ExportBindingsDeclaration = NO_EXPORT_BINDINGS,
 ): ValidationResult {
   const errors: string[] = [];
   const allFiles = taskRecords(tasks).flatMap(({ files }) => files);
@@ -400,6 +420,12 @@ export function validateModelBindings(
 
   errors.push(...contractBindingErrors(models.contracts, bindingTasks));
 
+  const bindingViews = taskRecords(tasks).map(({ id, files, dependsOn, regressionWaiver }) =>
+    ({ id, file_list: files, depends_on: dependsOn, regressionWaiver }));
+  for (const problem of validateExportBindings(exportBindings, models.contracts, bindingViews)) {
+    errors.push(`Export bindings: ${renderBindingProblem(problem)}`);
+  }
+
   return errors.length === 0 ? ok() : fail(errors);
 }
 
@@ -449,9 +475,12 @@ export function checkPlanModelBindings(
     };
   }
   const models = parsePlanModels(read.content);
+  const exportBindings = parsePlanExportBindings(read.content);
   // A model-free plan still validates: a Task may not claim the contract
   // new-test waiver when no contract exists to stand in for its tests.
-  const result = validateModelBindings(models, tasks, deps);
+  const result = validateModelBindings(models, tasks, deps, exportBindings);
   if (!result.ok) return { kind: "invalid-bindings", ok: false, errors: result.errors, models };
-  return hasModels(models) ? { kind: "validated", ok: true, models } : { kind: "opted-out", ok: true, models };
+  // Export bindings opt a plan in like any model; an invalid one never reaches here.
+  const declared = hasModels(models) || exportBindings.bindings.length > 0;
+  return declared ? { kind: "validated", ok: true, models } : { kind: "opted-out", ok: true, models };
 }

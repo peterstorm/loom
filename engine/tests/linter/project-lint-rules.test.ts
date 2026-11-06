@@ -146,4 +146,30 @@ describe("project lint rules: the INV-1 TypeScript seam rule mirrors the one sea
       expect([...seams].sort(), dir).toEqual([...TYPESCRIPT_COMPILER_API_SEAMS].sort());
     }
   });
+
+  it("G2 AD-6: the seams are exactly mutation-plan, import-graph and the skeleton ts-surface, in both copies", () => {
+    const THREE_SEAMS = [
+      "engine/src/core/owner-verification/import-graph.ts",
+      "engine/src/core/owner-verification/mutation-plan.ts",
+      "engine/src/core/skeleton/ts-surface.ts",
+    ];
+    expect([...TYPESCRIPT_COMPILER_API_SEAMS].sort()).toEqual(THREE_SEAMS);
+    for (const dir of [CANONICAL, PI]) {
+      const rule = JSON.parse(readFileSync(join(dir, "inv-1-typescript-compiler-api-seam.json"), "utf-8")) as { excludePatterns: readonly string[] };
+      expect([...rule.excludePatterns].sort(), dir).toEqual([".test.ts", ...THREE_SEAMS].sort());
+    }
+  });
+
+  it("G2 AD-6: the skeleton seam may import typescript, and its sibling skeleton modules may not", () => {
+    for (const projectDir of [CANONICAL, PI]) {
+      const rule = loadRules(DEFAULT_RULES_DIR, projectDir, "full", { includeProgrammatic: false })
+        .find(({ name }) => name === "inv-1-typescript-compiler-api-seam");
+      if (rule === undefined) throw new Error(`inv-1-typescript-compiler-api-seam missing under ${projectDir}`);
+      const lint = (path: string): readonly number[] =>
+        executeRules([rule], join(REPO_ROOT, path), "import ts from \"typescript\";", noDeadline).map(({ line }) => line);
+      expect(lint("engine/src/core/skeleton/ts-surface.ts"), projectDir).toEqual([]);
+      expect(lint("engine/src/core/skeleton/java-surface.ts"), projectDir).toEqual([1]);
+      expect(lint("engine/src/core/skeleton/generate.ts"), projectDir).toEqual([1]);
+    }
+  });
 });

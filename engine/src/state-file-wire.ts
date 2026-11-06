@@ -136,6 +136,19 @@ import {
   waveOwnerDuty,
   type OwnerCheckAuthority,
 } from "./core/owner-verification/obligations";
+import { parseIdentifier } from "./core/skeleton/bindings";
+import { skeletonLanguageOf } from "./core/skeleton/language";
+import type {
+  BoundExport,
+  ExportBinding,
+  Identifier,
+  PathSkeletonOutcome,
+  SkeletonLanguage,
+  SkeletonOrigin,
+  SkeletonOutcome,
+  SkeletonRecord,
+  UnsupportedReason,
+} from "./core/skeleton/types";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2048,6 +2061,9 @@ function migrateParsedTask(
   if (task.resolved_findings !== undefined) {
     migrated = { ...migrated, resolved_findings: Object.freeze(parseStoredResolutions(task.resolved_findings)) };
   }
+  const skeletonOutcomes = parseSkeletonOutcomesField(task.skeleton_outcomes, task.file_list, `tasks[${index}].skeleton_outcomes`);
+  if (!skeletonOutcomes.ok) return parseErr(skeletonOutcomes.error);
+  if (skeletonOutcomes.value !== undefined) migrated = { ...migrated, skeleton_outcomes: skeletonOutcomes.value };
   return parseOk(migrated);
 }
 
@@ -2414,6 +2430,276 @@ function bindAcceptanceContracts(
   return parseOk(contracts);
 }
 
+// ---------------------------------------------------------------------------
+// G2 skeletons (AD-4): export_bindings, skeletons, tasks[].skeleton_outcomes
+// ---------------------------------------------------------------------------
+
+const EXPORT_BINDING_FIELDS = ["path", "contract", "exports"] as const;
+const BOUND_EXPORT_FIELDS = ["name", "alias"] as const;
+const SKELETON_RECORD_FIELDS = ["path", "contract", "language", "origin", "engineSha256", "typesSha256", "stale"] as const;
+const PATH_OUTCOME_FIELDS = ["path", "outcome"] as const;
+const SKELETON_SHA256 = /^[0-9a-f]{64}$/;
+
+/** Exhaustive by construction: a new variant of either union fails to compile here. */
+const SKELETON_ORIGINS = {
+  spawn: true,
+  "contract-stub": true,
+  revision: true,
+} as const satisfies Record<SkeletonOrigin, true>;
+const SKELETON_LANGUAGES = { typescript: true, java: true } as const satisfies Record<SkeletonLanguage, true>;
+const UNSUPPORTED_REASONS = {
+  "other-extension": true,
+  "java-outside-main-root": true,
+  "java-invalid-name": true,
+  "jvm-non-java": true,
+} as const satisfies Record<UnsupportedReason, true>;
+
+const isMember = <K extends string>(members: Readonly<Record<K, true>>, value: unknown): value is K =>
+  typeof value === "string" && Object.hasOwn(members, value);
+
+/** An exact record proven field by field, or the first reason it is none. */
+function exactRecord(
+  raw: unknown,
+  required: readonly string[],
+  label: string,
+): ParseResult<Readonly<Record<string, unknown>>> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const fieldsError = exactFieldsError(raw, required, [], label);
+  return fieldsError === null ? parseOk(raw) : parseErr(fieldsError);
+}
+
+/** A repository path as every State File path is stored: canonical and relative. */
+function storedPath(raw: unknown, label: string): ParseResult<string> {
+  const path = parseReviewPath(raw, label);
+  return path.ok ? parseOk(path.value) : parseErr(path.errors.join("; "));
+}
+
+function parseIdentifierField(raw: unknown, label: string): ParseResult<Identifier> {
+  if (typeof raw !== "string") return parseErr(`${label} must be a string`);
+  const identifier = parseIdentifier(raw);
+  return identifier.ok ? parseOk(identifier.value) : parseErr(`${label} '${raw}' is no identifier (${identifier.error})`);
+}
+
+function parseBoundExport(raw: unknown, label: string): ParseResult<BoundExport> {
+  const fields = exactRecord(raw, BOUND_EXPORT_FIELDS, label);
+  if (!fields.ok) return fields;
+  const name = parseIdentifierField(fields.value.name, `${label}.name`);
+  if (!name.ok) return name;
+  const alias = parseIdentifierField(fields.value.alias, `${label}.alias`);
+  if (!alias.ok) return alias;
+  return parseOk(Object.freeze({ name: name.value, alias: alias.value }));
+}
+
+/** The contracts a binding or record may name: the stamped ones freezing a types file. */
+const typedContractIds = (contracts: readonly AcceptanceContract[] | undefined): ReadonlySet<string> =>
+  new Set((contracts ?? []).filter(({ types }) => types.kind === "file").map(({ id }) => id));
+
+function parseExportBinding(raw: unknown, label: string, typedContracts: ReadonlySet<string>): ParseResult<ExportBinding> {
+  const fields = exactRecord(raw, EXPORT_BINDING_FIELDS, label);
+  if (!fields.ok) return fields;
+  const path = storedPath(fields.value.path, `${label}.path`);
+  if (!path.ok) return path;
+  const contract = fields.value.contract;
+  if (typeof contract !== "string") return parseErr(`${label}.contract must be a string`);
+  if (!typedContracts.has(contract)) {
+    return parseErr(`${label} binds '${path.value}' to ${contract}, which is no stamped acceptance contract with a types file`);
+  }
+  const rawExports = fields.value.exports;
+  if (!Array.isArray(rawExports)) return parseErr(`${label}.exports must be a non-empty array`);
+  const exports: BoundExport[] = [];
+  for (const [index, entry] of rawExports.entries()) {
+    const bound = parseBoundExport(entry, `${label}.exports[${index}]`);
+    if (!bound.ok) return bound;
+    if (exports.some(({ name }) => name === bound.value.name)) {
+      return parseErr(`${label} binds the export name '${bound.value.name}' more than once`);
+    }
+    exports.push(bound.value);
+  }
+  const [first, ...rest] = exports;
+  if (first === undefined) return parseErr(`${label}.exports must be a non-empty array`);
+  const nonEmpty: NonEmpty<BoundExport> = [first, ...rest];
+  // `Object.freeze` types an array as `readonly T[]`, so freeze in place and keep the tuple type.
+  Object.freeze(nonEmpty);
+  return parseOk(Object.freeze({ path: path.value, contract, exports: nonEmpty }));
+}
+
+/**
+ * The population stamp, in plan order. Absent stays absent: a graph populated
+ * before G2 binds nothing. Present, `[]` included, each binding is an exact
+ * record of a canonical path bound once, to a stamped contract that freezes a
+ * types file, with distinct validated identifiers.
+ */
+function parseExportBindingsField(
+  raw: unknown,
+  contracts: readonly AcceptanceContract[] | undefined,
+): ParseResult<readonly ExportBinding[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("export_bindings must be an array");
+  const typedContracts = typedContractIds(contracts);
+  const bindings: ExportBinding[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const binding = parseExportBinding(entry, `export_bindings[${index}]`, typedContracts);
+    if (!binding.ok) return binding;
+    if (bindings.some(({ path }) => path === binding.value.path)) {
+      return parseErr(`export_bindings binds '${binding.value.path}' more than once`);
+    }
+    bindings.push(binding.value);
+  }
+  return parseOk(Object.freeze(bindings));
+}
+
+function parseStale(raw: unknown, label: string): ParseResult<SkeletonRecord["stale"]> {
+  if (raw === null) return parseOk(null);
+  const fields = exactRecord(raw, ["revision"], label);
+  if (!fields.ok) return fields;
+  const revision = fields.value.revision;
+  return typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 1
+    ? parseOk(Object.freeze({ revision }))
+    : parseErr(`${label}.revision must be a positive safe integer, got ${JSON.stringify(revision)}`);
+}
+
+function parseDigestField(raw: unknown, label: string): ParseResult<string> {
+  return typeof raw === "string" && SKELETON_SHA256.test(raw)
+    ? parseOk(raw)
+    : parseErr(`${label} must be a lowercase SHA-256 digest, got ${JSON.stringify(raw)}`);
+}
+
+/**
+ * One engine-written skeleton record. Its path is a stamped binding's, under
+ * that binding's contract, and its language is the one `skeletonLanguageOf`
+ * (INV-6) gives the path — a record of an unsupported path describes a file
+ * the engine never writes.
+ */
+function parseSkeletonRecord(raw: unknown, label: string, bindings: readonly ExportBinding[]): ParseResult<SkeletonRecord> {
+  const fields = exactRecord(raw, SKELETON_RECORD_FIELDS, label);
+  if (!fields.ok) return fields;
+  const { contract, language, origin } = fields.value;
+  const path = storedPath(fields.value.path, `${label}.path`);
+  if (!path.ok) return path;
+  if (typeof contract !== "string") return parseErr(`${label}.contract must be a string`);
+  if (!isMember(SKELETON_LANGUAGES, language)) return parseErr(`${label}.language must be typescript or java, got ${JSON.stringify(language)}`);
+  if (!isMember(SKELETON_ORIGINS, origin)) return parseErr(`${label}.origin must be spawn, contract-stub or revision, got ${JSON.stringify(origin)}`);
+  const engineSha256 = parseDigestField(fields.value.engineSha256, `${label}.engineSha256`);
+  if (!engineSha256.ok) return engineSha256;
+  const typesSha256 = parseDigestField(fields.value.typesSha256, `${label}.typesSha256`);
+  if (!typesSha256.ok) return typesSha256;
+  const stale = parseStale(fields.value.stale, `${label}.stale`);
+  if (!stale.ok) return stale;
+  const binding = bindings.find((candidate) => candidate.path === path.value);
+  if (binding === undefined) return parseErr(`${label} records '${path.value}', which export_bindings has not bound`);
+  if (binding.contract !== contract) {
+    return parseErr(`${label} records '${path.value}' under ${contract}, but export_bindings binds it to ${binding.contract}`);
+  }
+  const target = skeletonLanguageOf(path.value);
+  if (target.kind === "unsupported") return parseErr(`${label} records '${path.value}', which is no skeleton target (${target.reason})`);
+  if (target.language !== language) return parseErr(`${label} records '${path.value}' as ${language}, but the path is ${target.language}`);
+  return parseOk(Object.freeze({
+    path: path.value,
+    contract,
+    language,
+    origin,
+    engineSha256: engineSha256.value,
+    typesSha256: typesSha256.value,
+    stale: stale.value,
+  }));
+}
+
+/**
+ * The engine-written skeleton records (FR-031), sorted by path with no path
+ * twice (strictly ascending by code unit). Absent stays absent: none written.
+ */
+function parseSkeletonsField(
+  raw: unknown,
+  bindings: readonly ExportBinding[] | undefined,
+): ParseResult<readonly SkeletonRecord[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr("skeletons must be an array");
+  const records: SkeletonRecord[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const record = parseSkeletonRecord(entry, `skeletons[${index}]`, bindings ?? []);
+    if (!record.ok) return record;
+    const previous = records.at(-1);
+    if (previous !== undefined && !(previous.path < record.value.path)) {
+      return parseErr(`skeletons must be sorted by path with no path twice: '${record.value.path}' follows '${previous.path}'`);
+    }
+    records.push(record.value);
+  }
+  return parseOk(Object.freeze(records));
+}
+
+function parseSkeletonOutcome(raw: unknown, label: string): ParseResult<SkeletonOutcome> {
+  if (!isRecord(raw)) return parseErr(`${label} must be an object`);
+  const exact = (required: readonly string[], outcome: SkeletonOutcome): ParseResult<SkeletonOutcome> => {
+    const fieldsError = exactFieldsError(raw, required, [], label);
+    return fieldsError === null ? parseOk(Object.freeze(outcome)) : parseErr(fieldsError);
+  };
+  switch (raw.kind) {
+    case "skeleton-written":
+      return isMember(SKELETON_ORIGINS, raw.origin)
+        ? exact(["kind", "origin"], { kind: "skeleton-written", origin: raw.origin })
+        : parseErr(`${label}.origin must be spawn, contract-stub or revision, got ${JSON.stringify(raw.origin)}`);
+    case "unsupported-language":
+      return isMember(UNSUPPORTED_REASONS, raw.reason)
+        ? exact(["kind", "reason"], { kind: "unsupported-language", reason: raw.reason })
+        : parseErr(`${label}.reason is no unsupported-language reason, got ${JSON.stringify(raw.reason)}`);
+    case "no-bound-exports":
+      return exact(["kind"], { kind: "no-bound-exports" });
+    case "contract-has-no-types-file":
+      return exact(["kind"], { kind: "contract-has-no-types-file" });
+    case "exists-not-skeletonized":
+      return exact(["kind"], { kind: "exists-not-skeletonized" });
+    default:
+      return parseErr(`${label}.kind is no skeleton outcome, got ${JSON.stringify(raw.kind)}`);
+  }
+}
+
+/**
+ * A Task's recorded skeleton outcomes (FR-030): one outcome ADT per path, each
+ * path in the Task's own file_list. Absent stays absent: not yet registered.
+ */
+function parseSkeletonOutcomesField(
+  raw: unknown,
+  fileList: unknown,
+  label: string,
+): ParseResult<readonly PathSkeletonOutcome[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) return parseErr(`${label} must be an array`);
+  const declared = Array.isArray(fileList) ? fileList : [];
+  const outcomes: PathSkeletonOutcome[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const entryLabel = `${label}[${index}]`;
+    const fields = exactRecord(entry, PATH_OUTCOME_FIELDS, entryLabel);
+    if (!fields.ok) return fields;
+    const path = storedPath(fields.value.path, `${entryLabel}.path`);
+    if (!path.ok) return path;
+    if (!declared.includes(path.value)) return parseErr(`${entryLabel} records '${path.value}', which is not in the Task's file_list`);
+    if (outcomes.some((recorded) => recorded.path === path.value)) {
+      return parseErr(`${label} records '${path.value}' more than once`);
+    }
+    const outcome = parseSkeletonOutcome(fields.value.outcome, `${entryLabel}.outcome`);
+    if (!outcome.ok) return outcome;
+    outcomes.push(Object.freeze({ path: path.value, outcome: outcome.value }));
+  }
+  return parseOk(Object.freeze(outcomes));
+}
+
+type ParsedSkeletonFields = Readonly<{
+  exportBindings: readonly ExportBinding[] | undefined;
+  skeletons: readonly SkeletonRecord[] | undefined;
+}>;
+
+/** The graph's G2 fields, bound to its stamped contracts. */
+function parseTaskGraphSkeletonFields(
+  obj: Record<string, unknown>,
+  contracts: readonly AcceptanceContract[] | undefined,
+): ParseResult<ParsedSkeletonFields> {
+  const exportBindings = parseExportBindingsField(obj.export_bindings, contracts);
+  if (!exportBindings.ok) return exportBindings;
+  const skeletons = parseSkeletonsField(obj.skeletons, exportBindings.value);
+  if (!skeletons.ok) return skeletons;
+  return parseOk({ exportBindings: exportBindings.value, skeletons: skeletons.value });
+}
+
 type ParsedTaskGraphParts = Readonly<{
   phaseArtifacts: Readonly<Record<string, string>>;
   skippedPhases: readonly Phase[];
@@ -2425,14 +2711,25 @@ type ParsedTaskGraphParts = Readonly<{
   proofBoundaryObservation: ProofBoundaryObservation | undefined;
   acceptanceContracts: readonly AcceptanceContract[] | undefined;
   ownerObligations: readonly OwnerObligation[] | undefined;
+  skeletonFields: ParsedSkeletonFields;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
 }>;
 
-export type ParsedTask = Task & Readonly<{ id: TaskId }>;
+/** A loaded Task. `skeleton_outcomes` (FR-030, AD-4) is typed here rather
+ *  than on `Task`: `core/skeleton/types` imports `types.ts`, so `Task` cannot
+ *  name the outcome ADT without an import cycle. */
+export type ParsedTask = Task & Readonly<{
+  id: TaskId;
+  /** One outcome per path, each path in the Task's file_list; absent until its first registration. */
+  skeleton_outcomes?: readonly PathSkeletonOutcome[];
+}>;
+/** A loaded TaskGraph, carrying the G2 fields of `SkeletonGraph` as proven. */
 export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Readonly<{
   tasks: readonly ParsedTask[];
   executing_tasks?: readonly TaskId[];
+  export_bindings?: readonly ExportBinding[];
+  skeletons?: readonly SkeletonRecord[];
 }>;
 
 function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
@@ -2482,6 +2779,8 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(specTraceAmendments === undefined ? {} : { spec_trace_amendments: specTraceAmendments }),
     ...(parts.acceptanceContracts === undefined ? {} : { acceptance_contracts: parts.acceptanceContracts }),
     ...(parts.ownerObligations === undefined ? {} : { owner_obligations: parts.ownerObligations }),
+    ...(parts.skeletonFields.exportBindings === undefined ? {} : { export_bindings: parts.skeletonFields.exportBindings }),
+    ...(parts.skeletonFields.skeletons === undefined ? {} : { skeletons: parts.skeletonFields.skeletons }),
   } as unknown as ParsedTaskGraph;
 }
 
@@ -2606,7 +2905,9 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!gating.ok) return parseErr(gating.error);
   const obligations = parseTaskGraphObligationFields(obj, contractShapes.value, tasks.value);
   if (!obligations.ok) return parseErr(obligations.error);
-  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value, ownerStampedGraph(tasks.value, obligations.value));
+  const skeletonFields = parseTaskGraphSkeletonFields(obj, obligations.value.acceptanceContracts);
+  if (!skeletonFields.ok) return parseErr(skeletonFields.error);
+  const authority =parseTaskGraphAuthorityFields(obj, verificationManifest.value, ownerStampedGraph(tasks.value, obligations.value));
   if (!authority.ok) return parseErr(authority.error);
   const history = parseTaskGraphHistoryFields(
     obj,
@@ -2623,6 +2924,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     waveGates: gating.value.waveGates,
     specCheck: gating.value.specCheck,
     ...obligations.value,
+    skeletonFields: skeletonFields.value,
     authority: authority.value,
     history: history.value,
   }));

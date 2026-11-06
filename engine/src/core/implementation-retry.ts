@@ -27,7 +27,10 @@ import { canonicalJson, type JsonValue } from "./review-packet";
 import { sha256Hex } from "./digest";
 import { parseTaskId, type TaskId } from "./task-id";
 import {
+  CONTRACT_VIOLATED_FAILURE_KIND_PREFIX,
+  parseContractViolatedFailureKind,
   parseTaskProof,
+  type ContractViolatedReceiptEntry,
   type TaskProof,
   isAttestationDriftFailureKind,
 } from "./proof-obligations";
@@ -209,8 +212,50 @@ function retryContextFor(receipt: RetryRequiredSettlementReceipt): Implementatio
   });
 }
 
+/** The one labeled line that carries attempt-2 admission authority. */
+const renderRetryContextLine = (context: ImplementationRetryContext): string =>
+  `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: ${canonicalJson(context as unknown as JsonValue)}`;
+
+const CONTRACT_VIOLATIONS_HEADING =
+  "Declared-artifact contract violations (declared-artifact-contract-violated) the previous attempt left; " +
+  "fix every one before completing:";
+
+/** Receipt text is data: a line break inside it must never open a new prompt line. */
+const oneLine = (text: string): string => text.replace(/[\r\n]+/gu, " ");
+
+function contractViolationEntryLines({ artifact, shown, omitted }: ContractViolatedReceiptEntry): readonly string[] {
+  return [
+    `${oneLine(artifact)}:`,
+    ...shown.map(({ subject, reason, remedy }) =>
+      `  - ${oneLine(subject)}: ${reason}${remedy === null ? "" : ` — ${oneLine(remedy)}`}`),
+    ...(omitted === 0 ? [] : [`  - and ${omitted} more violation${omitted === 1 ? "" : "s"} not shown`]),
+  ];
+}
+
+/**
+ * The retry appendix's violation section (FR-021): every
+ * `declared-artifact-contract-violated` failure kind of the predecessor
+ * receipt, rendered as its file, then each violation's subject, reason and
+ * remedy. A kind that does not parse is shown verbatim, never dropped.
+ */
+function contractViolationLines(failureKinds: readonly string[]): readonly string[] {
+  const entries = failureKinds
+    .filter((kind) => kind.startsWith(CONTRACT_VIOLATED_FAILURE_KIND_PREFIX))
+    .flatMap((kind) => {
+      const parsed = parseContractViolatedFailureKind(kind);
+      return parsed.ok ? contractViolationEntryLines(parsed.value) : [`unreadable receipt entry: ${JSON.stringify(kind)}`];
+    });
+  return entries.length === 0 ? [] : [CONTRACT_VIOLATIONS_HEADING, ...entries];
+}
+
+/**
+ * The exact attempt-2 retry appendix: the authority line, then — when the
+ * predecessor was refused for contract violations — every violation to fix.
+ * Both derive from the retry context alone, so status, the spawn gate and the
+ * State File load boundary render the same bytes.
+ */
 export function renderImplementationRetryContext(context: ImplementationRetryContext): string {
-  return `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: ${canonicalJson(context as unknown as JsonValue)}`;
+  return [renderRetryContextLine(context), ...contractViolationLines(context.failureKinds)].join("\n");
 }
 
 type PromptContextParse<T> =
@@ -645,10 +690,16 @@ export function authorizeImplementationSpawn(
       error: `Task ${task.id} requires the exact attempt-2 retry context from orchestration status`,
     };
   }
-  if (supplied.sourceLine !== disposition.promptAppendix) {
+  if (supplied.sourceLine !== renderRetryContextLine(disposition.context)) {
     return {
       ok: false,
       error: `Task ${task.id} retry context bytes do not match current receipt ${disposition.predecessor.receiptId}`,
+    };
+  }
+  if (!prompt.includes(disposition.promptAppendix)) {
+    return {
+      ok: false,
+      error: `Task ${task.id} retry appendix must carry the exact contract violations of receipt ${disposition.predecessor.receiptId}`,
     };
   }
   return {

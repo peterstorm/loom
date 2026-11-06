@@ -34,6 +34,7 @@ import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "./accepta
 import { epochChangedFiles, runStopChecks } from "./stop-checks";
 import { claudeEpochLedger } from "./update-task-status";
 import { publishStopCheckNote } from "../../stop-check-note-sidecar";
+import { contractStubStopNote } from "../../orchestration/contract-stub-materialization";
 
 import {
   snapshotImplementationAttemptSidecar,
@@ -349,6 +350,11 @@ export const runDispatch = async (
   let stopCheckNote: string | undefined;
   if (category === "impl" && sidecarObservation.kind === "authority-observed") {
     const { sidecar } = sidecarObservation;
+    // A contract Task's stop first writes the stubs its contract's acceptance
+    // tests import (AD-9), so the stop checks below already see them. Total:
+    // what it cannot stub is a note, never a block.
+    const stubNote = await contractStubStopNote(manager, sidecar.authority.taskId);
+    if (stubNote !== null) process.stderr.write(`[loom] ${stubNote}\n`);
     const epoch = claudeEpochLedger(
       evidenceSnapshot.kind === "snapshot"
         ? { kind: "read", records: evidenceSnapshot.events }
@@ -364,18 +370,20 @@ export const runDispatch = async (
       changedFiles: epochChangedFiles(epoch, stopCheckPorts.pathExists),
       hookStartedAtMs,
     }, stopCheckPorts);
-    if (outcome.kind === "block") return { kind: "block", message: outcome.message };
-    if (outcome.kind === "note") {
+    const afterStubNote = (message: string): string => (stubNote === null ? message : `${stubNote}\n${message}`);
+    if (outcome.kind === "block") return { kind: "block", message: afterStubNote(outcome.message) };
+    const note = outcome.kind === "note" ? afterStubNote(outcome.message) : stubNote;
+    if (note !== null) {
       // The systemMessage reaches only the operator. The sidecar carries the
       // note to the orchestrating model (#121), and is written before
       // settlement so a settlement failure cannot lose it.
       const published = publishStopCheckNote(sidecar.sessionId, sidecar.agentId, {
         taskId: sidecar.authority.taskId,
-        message: outcome.message,
+        message: note,
       });
       stopCheckNote = published.ok
-        ? outcome.message
-        : `${outcome.message}\n(the note was not kept for the orchestrator: ${published.reason})`;
+        ? note
+        : `${note}\n(the note was not kept for the orchestrator: ${published.reason})`;
     }
   }
 

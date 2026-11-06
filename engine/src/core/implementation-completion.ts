@@ -15,6 +15,7 @@ import {
   type WaveNumber,
 } from "./completion-suite";
 import {
+  contractViolatedFailureKind,
   evaluateProofObligations,
   parseObservedProofEvidence,
   parseProofEvaluationPolicy,
@@ -1326,9 +1327,18 @@ export function createEscalationRemediationReceipt(raw: unknown): Parsed<Escalat
 }
 
 /** The receipt failure kind a proof failure mints. An I6 failure names its
- *  unmet step, so each gap is a distinct kind (FR-009). */
+ *  unmet step, so each gap is a distinct kind (FR-009). A contract-violated
+ *  failure carries its artifact and every violation that fits the receipt's
+ *  reason bound (FR-021), which the semantic retry appendix renders. */
 function proofFailureKind(failure: ProofFailure): string {
-  return failure.kind === "red-then-green-unproven" ? redThenGreenFailureKind(failure.gap) : `proof:${failure.kind}`;
+  switch (failure.kind) {
+    case "red-then-green-unproven":
+      return redThenGreenFailureKind(failure.gap);
+    case "declared-artifact-contract-violated":
+      return contractViolatedFailureKind(failure, MAX_REASON_LENGTH);
+    default:
+      return `proof:${failure.kind}`;
+  }
 }
 
 function semanticTransition(

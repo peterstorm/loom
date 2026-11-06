@@ -4,6 +4,9 @@ import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { obligationsFromInvariants, renderObligationsError, verifyOwed } from "./owner-verification/obligations";
 import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
+import { renderBindingProblem, validateExportBindings } from "./skeleton/bindings";
+import type { BindingTaskView, ExportBinding, ExportBindingsDeclaration, SkeletonRecord } from "./skeleton/types";
+import type { SkeletonGraph } from "./skeleton/scope";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
 import {
   ACCEPTANCE_RED_WINDOW,
@@ -121,6 +124,11 @@ export type TaskGraphPopulationCommand = Readonly<{
   /** The validated plan's `## Invariants`; empty when the plan declares none.
    *  Population stamps their Owner Obligations, `[]` included (AD-2). */
   invariants: readonly PlanInvariant[];
+  /** The plan's `**Export bindings:**` as `parsePlanExportBindings` read them
+   *  (AD-3). Population re-runs `validateExportBindings` against `contracts`
+   *  and the roster and stamps the bindings only when it refuses nothing.
+   *  Absent means the plan binds nothing, the same as an empty declaration. */
+  exportBindings?: ExportBindingsDeclaration;
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
@@ -135,7 +143,8 @@ export type TaskGraphPopulationError = Readonly<{
     | "unknown-requirement"
     | "invalid-contracts"
     | "invalid-owner-obligations"
-    | "owner-verification-runner-missing";
+    | "owner-verification-runner-missing"
+    | "invalid-export-bindings";
   message: string;
 }>;
 
@@ -145,7 +154,7 @@ const POPULATABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>(["decompose", "exe
 export type TaskGraphPopulationResult =
   | Readonly<{
       ok: true;
-      value: Readonly<{ state: TaskGraph; waves: readonly number[] }>;
+      value: Readonly<{ state: SkeletonGraph; waves: readonly number[] }>;
     }>
   | Readonly<{ ok: false; error: TaskGraphPopulationError }>;
 
@@ -225,6 +234,67 @@ function ownerRunnerRefusal(
           "Install .loom/verification-manifest.json with an \"affectedRunner\" (schemaVersion 2), or give each such " +
           "Invariant a reasoned **Mutation exemption:**, then re-run populate-task-graph.",
       );
+}
+
+/** What a plan without `**Export bindings:**` declares. */
+const NO_EXPORT_BINDINGS: ExportBindingsDeclaration = Object.freeze({ bindings: Object.freeze([]), problems: Object.freeze([]) });
+
+/** The roster as binding validation reads it: the authored regression waiver,
+ *  as plan validation reads it, never the red-window one population adds. */
+const bindingTaskViews = (tasks: readonly AuthoredTask[]): readonly BindingTaskView[] =>
+  tasks.map((task) => {
+    const { regression } = taskVerificationPolicy(task);
+    return {
+      id: task.id,
+      file_list: task.file_list,
+      depends_on: task.depends_on ?? [],
+      regressionWaiver: regression.kind === "waived" ? regression.reason : null,
+    };
+  });
+
+type ExportBindingsStamp =
+  | Readonly<{ ok: true; value: readonly ExportBinding[] }>
+  | Readonly<{ ok: false; error: TaskGraphPopulationResult }>;
+
+/**
+ * The `export_bindings` stamp (AD-4): the declaration's bindings in plan
+ * order, once `validateExportBindings` refuses nothing against the plan's
+ * contracts and this roster. Plan validation already refused every problem;
+ * re-validating here keeps the aggregate command total over its own input,
+ * so no graph is ever stamped with a binding plan validation would refuse.
+ */
+function exportBindingsStamp(
+  declaration: ExportBindingsDeclaration,
+  contracts: readonly PlanContract[],
+  tasks: readonly AuthoredTask[],
+): ExportBindingsStamp {
+  const problems = validateExportBindings(declaration, contracts, bindingTaskViews(tasks));
+  if (problems.length > 0) {
+    return {
+      ok: false,
+      error: reject(
+        "invalid-export-bindings",
+        `TaskGraph population refused: ${problems.map(renderBindingProblem).join("; ")}; ` +
+          "fix the plan's **Export bindings:**, then re-run populate-task-graph.",
+      ),
+    };
+  }
+  return { ok: true, value: Object.freeze(declaration.bindings.map((binding) => Object.freeze({ ...binding }))) };
+}
+
+/**
+ * The engine-written skeleton records re-population keeps (FR-031): those
+ * whose path the new stamp still binds to the same contract, in their sorted
+ * order. The bytes on disk outlive population, so dropping such a record
+ * would misreport an untouched skeleton as "exists, not skeletonized"; a
+ * record whose binding is gone describes no skeleton any more.
+ */
+function carriedSkeletons(
+  records: readonly SkeletonRecord[],
+  stamp: readonly ExportBinding[],
+): readonly SkeletonRecord[] {
+  return Object.freeze(records.filter((record) =>
+    stamp.some((binding) => binding.path === record.path && binding.contract === record.contract)));
 }
 
 /**
@@ -344,6 +414,11 @@ export function populateTaskGraph(
   const ownerObligations = derived.value;
   const runnerRefusal = ownerRunnerRefusal(ownerObligations, command.verificationManifest);
   if (runnerRefusal !== null) return runnerRefusal;
+  const exportBindings = exportBindingsStamp(command.exportBindings ?? NO_EXPORT_BINDINGS, command.contracts, command.tasks);
+  if (!exportBindings.ok) return exportBindings.error;
+  // Every TaskGraph is a SkeletonGraph: the view only names the G2 fields it may carry.
+  const existingView: SkeletonGraph = existing;
+  const skeletons = carriedSkeletons(existingView.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
 
@@ -366,9 +441,11 @@ export function populateTaskGraph(
     proof_boundary_observation: _staleProofBoundaryObservation,
     acceptance_contracts: _staleAcceptanceContracts,
     owner_obligations: _staleOwnerObligations,
+    export_bindings: _staleExportBindings,
+    skeletons: _staleSkeletons,
     ...existingWithoutWaveAuthority
-  } = existing;
-  const state: TaskGraph = Object.freeze({
+  } = existingView;
+  const state: SkeletonGraph = Object.freeze({
     ...existingWithoutWaveAuthority,
     current_phase: "execute",
     phase_artifacts: { ...existing.phase_artifacts, decompose: "task_graph" },
@@ -389,6 +466,10 @@ export function populateTaskGraph(
     // Always stamped, `[]` included: only a graph populated before owner
     // verification lacks the field, and it alone owes nothing (FR-004).
     owner_obligations: ownerObligations,
+    // Always stamped, `[]` included: only a graph populated before G2 lacks
+    // it, so a binding the plan gains later reads as drift, never as absence.
+    export_bindings: exportBindings.value,
+    ...(skeletons.length === 0 ? {} : { skeletons }),
     current_wave: 1,
     executing_tasks: Object.freeze([]),
     wave_gates: waveGates,

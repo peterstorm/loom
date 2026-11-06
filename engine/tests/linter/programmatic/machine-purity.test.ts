@@ -338,7 +338,7 @@ describe("functional core — executable purity closure", () => {
     }
   });
 
-  it("expands the owner-verification package entry to every file and grants typescript only to its two seams", () => {
+  it("expands the owner-verification package entry to every file and grants typescript only to the compiler API seams", () => {
     expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/owner-verification/");
     for (const seam of TYPESCRIPT_COMPILER_API_SEAMS) {
       expect(PURE_FILES).toContain(seam);
@@ -350,6 +350,21 @@ describe("functional core — executable purity closure", () => {
     const seam = TYPESCRIPT_COMPILER_API_SEAMS[0]!;
     const widened = auditClosure([seam], new Map([[seam, `${readSource(seam)}\nimport "typescript/lib/tsserverlibrary";`]]));
     expect(widened.errors).toContain(`${seam}: unaudited package typescript/lib/tsserverlibrary`);
+  });
+
+  it("G2 INV-2: lists the skeleton core as pure and grants typescript to its ts-surface seam alone", () => {
+    const SKELETON_SEAM = "engine/src/core/skeleton/ts-surface.ts";
+    expect(DEFAULT_PURE_MODULES).toContain("engine/src/core/skeleton/");
+    expect(TYPESCRIPT_COMPILER_API_SEAMS).toContain(SKELETON_SEAM);
+    expect(isPureModule(SKELETON_SEAM)).toBe(true);
+    expect(PURE_FILES).toContain("engine/src/core/skeleton/types.ts");
+    expect(auditClosure([SKELETON_SEAM]).errors).toEqual([]);
+    expect(auditClosure([SKELETON_SEAM]).visited).toContain("engine/src/core/owner-verification/import-graph.ts");
+    const sibling = "engine/src/core/skeleton/types.ts";
+    const refused = auditClosure([sibling], new Map([[sibling, `${readSource(sibling)}\nimport ts from "typescript";`]]));
+    expect(refused.errors).toContain(`${sibling}: unaudited package typescript`);
+    const widened = auditClosure([SKELETON_SEAM], new Map([[SKELETON_SEAM, `${readSource(SKELETON_SEAM)}\nimport "typescript/lib/tsserverlibrary";`]]));
+    expect(widened.errors).toContain(`${SKELETON_SEAM}: unaudited package typescript/lib/tsserverlibrary`);
   });
 
   it.each([

@@ -13,6 +13,10 @@ import { parseArtifactDigest } from "../../src/core/orchestration-contract";
 import { registerTaskExecutionBaseline } from "../../src/core/validate-task-execution";
 import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
 import { PHASES, type PlanContract, type TaskGraph } from "../../src/types";
+import { parseExportBindings } from "../../src/core/skeleton/bindings";
+import type { SkeletonRecord } from "../../src/core/skeleton/types";
+import type { SkeletonGraph } from "../../src/core/skeleton/scope";
+import { parseTaskGraph } from "../../src/state-file-wire";
 
 const specSource = `# Feature: Population
 
@@ -558,5 +562,91 @@ describe("populateTaskGraph owns the decompose → execute transition (issue #50
         });
       }
     }));
+  });
+});
+
+describe("populateTaskGraph stamps the plan's export bindings (AD-4)", () => {
+  // T1 writes CT-1 in Wave 1; T2 implements the bound files in Wave 2.
+  const boundRoster = () => roster([
+    { ...authoredTask("T1", 1, []), file_list: ["src/population-contract.ts", "tests/population.acceptance.test.ts"] },
+    { ...authoredTask("T2", 2, ["AS-001"]), depends_on: ["T1"], file_list: ["src/T2.ts", "src/T2-extra.ts"] },
+  ]);
+  const declaration = (text: string) => parseExportBindings(`**Export bindings:**\n${text}\n`);
+  const BOTH = declaration("- `src/T2.ts` — CT-1: run: RunFn\n- `src/T2-extra.ts` — CT-1: extra: RunFn, more: RunFn");
+  const boundCommand = (overrides: Partial<TaskGraphPopulationCommand> = {}) =>
+    command({ tasks: boundRoster(), contracts: [CONTRACT], exportBindings: BOTH, ...overrides });
+  const skeletonRecord = (path: string, contract = "CT-1"): SkeletonRecord => Object.freeze({
+    path,
+    contract,
+    language: "typescript",
+    origin: "spawn",
+    engineSha256: "e".repeat(64),
+    typesSha256: "f".repeat(64),
+    stale: null,
+  });
+
+  it("stamps the validated bindings in plan order", () => {
+    const result = populateTaskGraph(graph(), boundCommand());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.state.export_bindings).toEqual(BOTH.bindings);
+    expect(result.value.state.export_bindings?.map(({ path }) => path)).toEqual(["src/T2.ts", "src/T2-extra.ts"]);
+    expect(Object.isFrozen(result.value.state.export_bindings)).toBe(true);
+  });
+
+  it("stamps an empty list when the plan binds nothing, so a binding added later reads as drift", () => {
+    const omitted = populateTaskGraph(graph(), command());
+    expect(omitted.ok && omitted.value.state.export_bindings).toEqual([]);
+    const empty = populateTaskGraph(graph(), command({ exportBindings: { bindings: [], problems: [] } }));
+    expect(empty.ok && empty.value.state.export_bindings).toEqual([]);
+  });
+
+  it.each([
+    ["an unknown contract", "- `src/T2.ts` — CT-9: run: RunFn", /src\/T2\.ts.*CT-9/],
+    ["a malformed binding line", "- `src/T2.ts` — run: RunFn", /src\/T2\.ts/],
+    ["a path no Task implements", "- `src/nowhere.ts` — CT-1: run: RunFn", /src\/nowhere\.ts.*file_list/],
+    ["a frozen path", "- `src/population-contract.ts` — CT-1: run: RunFn", /frozen path of CT-1/],
+  ])("refuses %s, so no graph is ever stamped with a binding plan validation refuses", (_label, text, message) => {
+    const result = populateTaskGraph(graph(), boundCommand({ exportBindings: declaration(text) }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid-export-bindings");
+    expect(result.error.message).toMatch(message);
+  });
+
+  it("loads back through the State File wire unchanged", () => {
+    const result = populateTaskGraph(graph(), boundCommand());
+    if (!result.ok) throw new Error(result.error.message);
+    const parsed = parseTaskGraph(JSON.parse(JSON.stringify(result.value.state)));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.export_bindings).toEqual(BOTH.bindings);
+  });
+
+  it("FR-031: re-population keeps each engine-written record whose path stays bound to its contract, and drops the rest", () => {
+    const first = populateTaskGraph(graph(), boundCommand());
+    if (!first.ok) throw new Error(first.error.message);
+    const recorded: SkeletonGraph = {
+      ...first.value.state,
+      skeletons: [skeletonRecord("src/T2-extra.ts"), skeletonRecord("src/T2.ts"), skeletonRecord("src/T2.tsx", "CT-9")],
+      tasks: first.value.state.tasks.map((entry) => entry.id === "T2"
+        ? { ...entry, skeleton_outcomes: [{ path: "src/T2.ts", outcome: { kind: "skeleton-written", origin: "spawn" } }] }
+        : entry),
+    };
+
+    const narrowed = populateTaskGraph(recorded, boundCommand({
+      force: true,
+      exportBindings: declaration("- `src/T2.ts` — CT-1: run: RunFn"),
+    }));
+    expect(narrowed.ok).toBe(true);
+    if (!narrowed.ok) return;
+    expect(narrowed.value.state.skeletons).toEqual([skeletonRecord("src/T2.ts")]);
+    // Outcomes are recorded at each registration, never carried across population.
+    expect(narrowed.value.state.tasks.every((entry) => !("skeleton_outcomes" in entry))).toBe(true);
+    const parsed = parseTaskGraph(JSON.parse(JSON.stringify(narrowed.value.state)));
+    expect(parsed.ok && parsed.value.skeletons).toEqual([skeletonRecord("src/T2.ts")]);
+
+    const unbound = populateTaskGraph(recorded, boundCommand({ force: true, exportBindings: { bindings: [], problems: [] } }));
+    expect(unbound.ok).toBe(true);
+    if (unbound.ok) expect("skeletons" in unbound.value.state).toBe(false);
   });
 });

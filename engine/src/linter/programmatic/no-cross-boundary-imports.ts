@@ -43,18 +43,20 @@ export interface BoundaryRule {
 }
 
 /**
- * ADR-0042 (G5b INV-1): the only modules through which the TypeScript compiler
- * API enters engine code. Each parses text it is given and never touches
- * `ts.sys`, a Program or a language service. This is the one list: the
- * core boundary's per-file `typescript` grant below and machine-purity's
- * closure audit both read it. The INV-1 regex rule
- * (`{.claude,.pi}/linter/rules/inv-1-typescript-compiler-api-seam.json`)
- * cannot import code, so its `excludePatterns` mirror this pair and a linter
+ * ADR-0042 (G5b INV-1, amended by G2 AD-6): the only modules through which the
+ * TypeScript compiler API enters engine code — module edges, mutation sites,
+ * and the declaration surfaces skeletons and conformance read. Each parses
+ * text it is given and never touches `ts.sys`, a Program or a language
+ * service. This is the one list: the core boundary's per-file `typescript`
+ * grant below and machine-purity's closure audit both read it. The INV-1 regex
+ * rule (`{.claude,.pi}/linter/rules/inv-1-typescript-compiler-api-seam.json`)
+ * cannot import code, so its `excludePatterns` mirror this list and a linter
  * test fails when the mirror drifts.
  */
 export const TYPESCRIPT_COMPILER_API_SEAMS: readonly string[] = Object.freeze([
   "engine/src/core/owner-verification/import-graph.ts",
   "engine/src/core/owner-verification/mutation-plan.ts",
+  "engine/src/core/skeleton/ts-surface.ts",
 ]);
 
 /**

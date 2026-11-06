@@ -524,6 +524,9 @@ interface TaskCommonMetadataBase {
   readonly implementation_attestation?: true;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
+  // `skeleton_outcomes` (FR-030, AD-4) is typed on the State File wire's
+  // `ParsedTask`, not here: `core/skeleton/types` imports this file, so naming
+  // its outcome ADT here would close an import cycle.
 }
 
 export type TaskCommonMetadata = Readonly<TaskCommonMetadataBase>;
@@ -1272,6 +1275,10 @@ export interface TaskGraph {
    * `core/owner-verification/obligations.ts` (INV-3).
    */
   readonly owner_obligations?: readonly OwnerObligation[];
+  // The G2 fields `export_bindings` and `skeletons` (AD-4, FR-031) are typed
+  // on `core/skeleton/scope`'s `SkeletonGraph` view, which every TaskGraph
+  // satisfies: `core/skeleton/types` imports this file, so naming its types
+  // here would close an import cycle. `state-file-wire` proves both at load.
   readonly updated_at?: string;
 }
 
@@ -1310,6 +1317,10 @@ export type BlockPrefix = "LC" | "INV" | "CT";
 /** All canonical model sections. */
 export type ModelSection = BlockSection | "Pipeline";
 
+/** Where a model label belongs: a model section, or `## File Structure` for
+ *  `**Export bindings:**` (AD-3). */
+export type LabelHome = ModelSection | "File Structure";
+
 /**
  * A near-miss or misplaced model marker. Each variant carries the context
  * needed to explain itself (`renderStray`); validation treats ANY stray as
@@ -1326,7 +1337,7 @@ export type Stray =
       readonly prefix: BlockPrefix;
     }
   | { readonly kind: "misplaced-heading"; readonly heading: string; readonly home: BlockSection }
-  | { readonly kind: "misplaced-label"; readonly label: string; readonly home: ModelSection };
+  | { readonly kind: "misplaced-label"; readonly label: string; readonly home: LabelHome };
 
 export interface PlanLifecycle {
   /** e.g. "LC-1" */

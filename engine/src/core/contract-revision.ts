@@ -14,7 +14,15 @@
  * reservation or active attempt) is the one Task Reopening shares,
  * `reopenableWave`; the contract checks are its own.
  *
- * Pure: the shell supplies its observations of the frozen paths.
+ * A revision also settles the contract's engine-written skeletons (AD-10,
+ * FR-033): the shell has already refreshed each untouched one from the
+ * revised types and hands over its new record, and names each modified one,
+ * which keeps its bytes and record and is flagged `stale: { revision }`. The
+ * binding problems the revised types raise are reported, never committed:
+ * the next spawn's stage two re-resolves the stamped types and blocks on them.
+ *
+ * Pure: the shell supplies its observations of the frozen paths and the
+ * skeleton refresh it already wrote.
  */
 
 import { match } from "ts-pattern";
@@ -29,6 +37,9 @@ import {
   type FrozenPathObservations,
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
+import { samePlanPath } from "./plan-path-match";
+import type { SkeletonGraph } from "./skeleton/scope";
+import type { ResolutionProblem, SkeletonRecord } from "./skeleton/types";
 import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
 import type { TaskGraph } from "../types";
 
@@ -51,7 +62,71 @@ export type ContractRevisionRefusalKind =
 
 export type ContractRevisionRefusal = Readonly<{ kind: ContractRevisionRefusalKind; message: string }>;
 
-export type RevisedContract = Readonly<{ graph: TaskGraph; contract: string; revision: ContractRevision }>;
+/**
+ * Why the engine could not (re)write one contract's skeleton from its current
+ * types: a stage-two resolution problem, a bound path whose language differs
+ * from the types file's, or a write or read the shell could not carry out.
+ * The contract stub step and the revision refresh both report these.
+ */
+export type SkeletonProblem =
+  | ResolutionProblem
+  | Readonly<{ kind: "language-mismatch"; path: string; contract: string; typesFile: string }>
+  | Readonly<{ kind: "write-failed"; path: string; detail: string }>;
+
+/**
+ * What the revision shell did to the contract's engine-written skeletons
+ * before the locked update: the new records of the untouched ones it
+ * refreshed (origin `revision`), the paths of the modified ones it left on
+ * disk, and every problem the revised types raised.
+ */
+export type SkeletonRevision = Readonly<{
+  refreshed: readonly SkeletonRecord[];
+  modified: readonly string[];
+  bindingProblems: readonly SkeletonProblem[];
+}>;
+
+/** A revision of a contract with no engine-written skeleton to settle. */
+export const NO_SKELETON_REVISION: SkeletonRevision = Object.freeze({
+  refreshed: Object.freeze([]),
+  modified: Object.freeze([]),
+  bindingProblems: Object.freeze([]),
+});
+
+export type RevisedContract = Readonly<{
+  graph: TaskGraph;
+  contract: string;
+  revision: ContractRevision;
+  /** The paths of the refreshed skeletons. */
+  refreshed: readonly string[];
+  /** The paths now flagged `stale against revised contract`. */
+  staleSkeletons: readonly string[];
+  bindingProblems: readonly SkeletonProblem[];
+}>;
+
+/**
+ * The skeleton records with `added` installed: one record per path, an added
+ * record replacing the one at its path, sorted by path in code-unit order
+ * (the order the State File wire proves).
+ */
+export function installSkeletonRecords(
+  current: readonly SkeletonRecord[],
+  added: readonly SkeletonRecord[],
+): readonly SkeletonRecord[] {
+  const byPath = new Map([...current, ...added].map((record) => [record.path, record] as const));
+  return Object.freeze([...byPath.values()].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)));
+}
+
+/** The records after a revision: refreshed ones installed, the records of
+ *  modified skeletons flagged stale with the revision number. */
+function revisedSkeletonRecords(
+  current: readonly SkeletonRecord[],
+  skeletons: SkeletonRevision,
+  revision: number,
+): readonly SkeletonRecord[] {
+  const flagged = current.map((record): SkeletonRecord =>
+    skeletons.modified.some((path) => samePlanPath(path, record.path)) ? freeze({ ...record, stale: freeze({ revision }) }) : record);
+  return installSkeletonRecords(flagged, skeletons.refreshed);
+}
 
 const USAGE = 'Usage: helper revise-contract --contract CT-<n> --reason "<why the frozen bytes changed>"';
 
@@ -95,12 +170,15 @@ export function parseContractRevisionArgs(args: readonly string[]): DomainResult
 
 /**
  * Record an operator Contract Revision against the observed frozen bytes, or
- * refuse with the exact precondition that failed.
+ * refuse with the exact precondition that failed. `skeletons` is what the
+ * shell already did to the contract's skeletons; it is committed with the
+ * revision.
  */
 export function reviseAcceptanceContract(
   graph: TaskGraph,
   request: ContractRevisionRequest,
   observations: FrozenPathObservations,
+  skeletons: SkeletonRevision = NO_SKELETON_REVISION,
 ): DomainResult<RevisedContract, ContractRevisionRefusal> {
   const contracts = graph.acceptance_contracts ?? [];
   const contract = contracts.find(({ id }) => id === request.contract);
@@ -158,9 +236,22 @@ export function reviseAcceptanceContract(
   });
   // The current Wave's suite receipt and reviews judged the old bytes. The
   // transition reads no contract, so the revised one is written over its result.
-  const revisedGraph: TaskGraph = {
+  const view: SkeletonGraph = graph;
+  const skeletonsChanged = skeletons.refreshed.length > 0 || skeletons.modified.length > 0;
+  const revisedGraph: SkeletonGraph = {
     ...returnWaveTasksToRevalidation(reopenable.value, revalidatedIds),
     acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
+    ...(skeletonsChanged ? { skeletons: revisedSkeletonRecords(view.skeletons ?? [], skeletons, revision.revision) } : {}),
   };
-  return freeze({ ok: true as const, value: freeze({ graph: revisedGraph, contract: contract.id, revision }) });
+  return freeze({
+    ok: true as const,
+    value: freeze({
+      graph: revisedGraph,
+      contract: contract.id,
+      revision,
+      refreshed: Object.freeze(skeletons.refreshed.map(({ path }) => path)),
+      staleSkeletons: skeletons.modified,
+      bindingProblems: skeletons.bindingProblems,
+    }),
+  });
 }

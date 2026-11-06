@@ -24,6 +24,8 @@ import {
   implementationAttemptContextMatchesAuthority,
   type ImplementationAttemptContext,
 } from "./implementation-retry";
+import type { SkeletonGraph } from "./skeleton/scope";
+import type { PathSkeletonOutcome, SkeletonRecord } from "./skeleton/types";
 
 export interface ValidateTaskExecutionInput {
   readonly agentType: string;
@@ -345,16 +347,37 @@ type TaskExecutionBaselineBundle = Readonly<{
 
 export type TaskExecutionBaselines = ReadonlyMap<string, TaskExecutionBaselineBundle>;
 
+/**
+ * What skeleton materialization (AD-1) hands registration: the skeleton
+ * records it wrote, adopted or refreshed, and each registering Task's
+ * outcomes (FR-030). Both commit in the same locked update as the
+ * reservation. A Task with no entry records no outcomes (a graph populated
+ * before G2).
+ */
+export type TaskSkeletonRegistration = Readonly<{
+  records: readonly SkeletonRecord[];
+  outcomes: ReadonlyMap<string, readonly PathSkeletonOutcome[]>;
+}>;
+
+const NO_SKELETON_REGISTRATION: TaskSkeletonRegistration = Object.freeze({ records: Object.freeze([]), outcomes: new Map() });
+
+/** A Task as registration writes it: `skeleton_outcomes` is the G2 field the
+ *  State File wire proves (`ParsedTask`), named here because `Task` cannot
+ *  name the outcome ADT without an import cycle. */
+type SkeletonOutcomeTask = Task & Readonly<{ skeleton_outcomes?: readonly PathSkeletonOutcome[] }>;
+
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
   context: ImplementationAttemptContext;
   retryHistoryStart: number;
   retryLineagePredecessorReceiptId: ImplementationSettlementReceiptId | null;
   baselines: TaskExecutionBaselineBundle;
+  /** The Task's skeleton outcomes to record, or null to leave them as they are. */
+  skeletonOutcomes: readonly PathSkeletonOutcome[] | null;
 }>;
 
 export type TaskExecutionAuthorityBatch =
-  | Readonly<{ ok: true; plans: readonly TaskExecutionAuthorityPlan[] }>
+  | Readonly<{ ok: true; plans: readonly TaskExecutionAuthorityPlan[]; skeletonRecords: readonly SkeletonRecord[] }>
   | Readonly<{ ok: false; error: string }>;
 
 /** Mint one exact authority per bound Task while preserving binding order. */
@@ -366,6 +389,7 @@ export function createTaskExecutionAuthorityBatch(
   headSha: string,
   reservedAt: IsoInstant,
   baselines: TaskExecutionBaselines,
+  skeletons: TaskSkeletonRegistration = NO_SKELETON_REGISTRATION,
 ): TaskExecutionAuthorityBatch {
   if (taskIds.length !== reservationIds.length || taskIds.length !== inputs.length) {
     return { ok: false, error: "Implementation reservation identity count does not match bound Task count." };
@@ -405,9 +429,10 @@ export function createTaskExecutionAuthorityBatch(
       retryHistoryStart: admission.historyStart,
       retryLineagePredecessorReceiptId: admission.lineagePredecessorReceiptId,
       baselines: taskBaselines,
+      skeletonOutcomes: skeletons.outcomes.get(taskId) ?? null,
     }));
   }
-  return { ok: true, plans: Object.freeze(plans) };
+  return { ok: true, plans: Object.freeze(plans), skeletonRecords: skeletons.records };
 }
 
 export type ProvenStaleReservation =
@@ -517,12 +542,27 @@ function reclaimTaskAttempt(
   return task;
 }
 
-/** Install a prevalidated batch and retire only exact stale identities. */
+/**
+ * The graph's skeleton records with `added` installed: one record per path,
+ * an added record replacing the one it supersedes, sorted by path in code-unit
+ * order (the order the State File wire proves).
+ */
+function mergeSkeletonRecords(
+  current: readonly SkeletonRecord[],
+  added: readonly SkeletonRecord[],
+): readonly SkeletonRecord[] {
+  const byPath = new Map([...current, ...added].map((record) => [record.path, record] as const));
+  return Object.freeze([...byPath.values()].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)));
+}
+
+/** Install a prevalidated batch and retire only exact stale identities. The
+ *  batch's skeleton records and outcomes land in the same update. */
 export function applyTaskExecutionAuthorityBatch(
   state: TaskGraph,
   plans: readonly TaskExecutionAuthorityPlan[],
   stale: readonly ProvenStaleReservation[],
   reclaimedAt: IsoInstant,
+  skeletonRecords: readonly SkeletonRecord[] = [],
 ): TaskGraph {
   const staleTaskIds = exactStaleTaskIds(state, stale);
   const planByTask = new Map<string, TaskExecutionAuthorityPlan>(
@@ -538,7 +578,7 @@ export function applyTaskExecutionAuthorityBatch(
     const task = reclaimTaskAttempt(original, stale, reclaimedAt, invalidatedTaskIds.has(original.id));
     const plan = planByTask.get(task.id);
     if (plan === undefined) return task;
-    return {
+    const registered: SkeletonOutcomeTask = {
       ...registerTaskExecutionBaseline(
         task,
         plan.authority.headSha,
@@ -553,7 +593,9 @@ export function applyTaskExecutionAuthorityBatch(
       implementation_retry_predecessor_receipt_id: plan.retryLineagePredecessorReceiptId ?? undefined,
       reserved_at: plan.authority.reservedAt,
       legacy_execution_reservation: undefined,
+      ...(plan.skeletonOutcomes === null ? {} : { skeleton_outcomes: plan.skeletonOutcomes }),
     };
+    return registered;
   });
   const invalidatedWaves = new Set(
     state.tasks.filter((task) => invalidatedTaskIds.has(task.id)).map((task) => task.wave),
@@ -576,7 +618,8 @@ export function applyTaskExecutionAuthorityBatch(
     };
     return reconcileWaveBlock({ ...gates, [key]: reopened }, tasks, specCheck, wave);
   }, state.wave_gates);
-  return {
+  const view: SkeletonGraph = state;
+  const next: SkeletonGraph = {
     ...state,
     executing_tasks: [...new Set([
       ...(state.executing_tasks ?? []).filter((taskId) => !staleTaskIds.has(taskId)),
@@ -586,7 +629,9 @@ export function applyTaskExecutionAuthorityBatch(
     ...(specCheck === undefined && state.spec_check !== undefined ? { spec_check: undefined } : {}),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     wave_gates: waveGates,
+    ...(skeletonRecords.length === 0 ? {} : { skeletons: mergeSkeletonRecords(view.skeletons ?? [], skeletonRecords) }),
   };
+  return next;
 }
 
 /** Roll back only authorities that are still current; late replacements stand. */

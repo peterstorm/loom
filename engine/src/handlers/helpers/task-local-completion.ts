@@ -7,7 +7,7 @@
  */
 
 import { lstatSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Task } from "../../types";
 import {
   buildTaskLocalByteObservation,
@@ -17,6 +17,9 @@ import {
   type TaskLocalByteObservation,
 } from "../../core/implementation-application";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
+import { sha256Bytes } from "../../core/digest";
+import type { SkeletonRecord } from "../../core/skeleton/types";
+import { readRunBytesNoFollow, resolveBaseDirectory } from "../../orchestration/no-follow-fs";
 import { captureDeclaredArtifactBaseline } from "../../utils/declared-artifact-snapshot";
 import { changedRepositoryArtifactsSince } from "../../utils/repository-change-baseline";
 import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
@@ -34,6 +37,11 @@ export type TaskLocalCompletionArgs = Readonly<{
   parserPathLabel: string;
   siblingOwnedPaths: readonly string[];
   authoritativeStatePath?: string;
+  /** Every skeleton the engine recorded writing (AD-4): bytes still equal to
+   *  a record's digest are subtracted from the Task's writes (FR-012).
+   *  `settleExactImplementation` always passes the graph's records; absent
+   *  reads as none recorded. */
+  engineSkeletons?: readonly SkeletonRecord[];
 }>;
 
 type RequiredTaskBaselines = Readonly<{
@@ -103,6 +111,28 @@ export function isEngineOwnedRuntimePath(path: string, authoritativeStatePath: s
   return authoritativeStatePath !== null && path === authoritativeStatePath;
 }
 
+/**
+ * The raw-bytes digest of each recorded skeleton path that holds a regular
+ * file now, keyed by the record's path, read without following any link. A
+ * missing path, or one holding no regular file, has no digest; any other
+ * failure to read throws, and the observation is then unavailable.
+ */
+function currentSkeletonDigests(repositoryRoot: string, records: readonly SkeletonRecord[]): ReadonlyMap<string, string> {
+  if (records.length === 0) return new Map();
+  const realRoot = resolveBaseDirectory(repositoryRoot);
+  return new Map(records.flatMap(({ path }) => {
+    const absolute = join(realRoot, path);
+    try {
+      if (!lstatSync(absolute).isFile()) return [];
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return [];
+      throw error;
+    }
+    return [[path, sha256Bytes(readRunBytesNoFollow(absolute))] as const];
+  }));
+}
+
 function observeAvailableTaskScope(
   args: TaskLocalCompletionArgs,
   baselines: RequiredTaskBaselines,
@@ -155,6 +185,8 @@ function observeAvailableTaskScope(
       priorAttributedPaths,
       repositoryChangedPaths,
       siblingOwnedPaths,
+      engineSkeletons: args.engineSkeletons ?? [],
+      currentSkeletonDigests: currentSkeletonDigests(args.repositoryRoot, args.engineSkeletons ?? []),
     });
   } catch (error) {
     observationFailure = error;
