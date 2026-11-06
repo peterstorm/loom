@@ -68,9 +68,10 @@ run through the frozen `affectedRunner`, and the real workspace digest is checke
 - `overlay` lists every path from `git status --porcelain=v2 -z --untracked-files=all` and makes that path
   in the worktree match the real workspace. It copies the file's bytes, recreates a symlink, copies a
   directory, or deletes a path that the real workspace deleted.
-- `shareNodeModules` symlinks `node_modules` for the repository root and for the runner's `cwd`, when those
-  directories exist in the real workspace and not in the worktree. It records the links it creates so they
-  can be unlinked without being followed.
+- `shareNodeModules` symlinks `node_modules` for the repository root and for the runner's `cwd`, whenever
+  those directories exist in the real workspace. A `node_modules` the checkout already carries (one committed
+  to Git) is removed and replaced by the link (amended 2026-11-06, below). It records the links it creates so
+  they can be unlinked without being followed.
 - `runWithOwner(ownerText, execute)` handles one run. It deletes the runner's report path, so a stale report
   cannot vouch for this run. It writes the mutant over the owner file when `ownerText` is non-null, runs
   `execute`, and restores the owner's original bytes in `finally`. The owner file is the only file it
@@ -157,3 +158,20 @@ Behavior is covered by `engine/tests/orchestration/owner-mutation-workspace.test
   in series, and there is no parallelism across Invariants or mutants.
 - The feature depends on `git worktree` being available. It also briefly adds a registration under the
   shared `.git`, which an operator inspecting `git worktree list` mid-gate will see.
+
+## Amendment (2026-11-06): a committed `node_modules` is replaced, not kept
+`shareNodeModules` first skipped any directory whose worktree already had a `node_modules`. Loom's own
+repository had a stale, partial `engine/node_modules` committed since its initial commit (2,488 files, about 48
+packages, though `.gitignore` lists `node_modules/`). Every worktree checked that copy out, the link was never
+made, and a matrix test whose import graph reached a later dependency (`saxes`, through
+`core/structured-test-report.ts`) failed its baseline with "Cannot find package". Owner verification reported this
+as a red baseline, even though the test passed in the real workspace. Two fixes:
+- `shareNodeModules` now removes whatever the checkout put at `node_modules` and links the real workspace's
+  directory in its place. The isolated copy always resolves the dependencies the real workspace has installed.
+  Before removing anything it resolves the parent directory and refuses, as `worktree-failed`, one that lies
+  outside the isolated copy (a committed symlink as the runner's `cwd`), so the replacement can never delete
+  the real workspace's `node_modules`.
+  Covered by "replaces a node_modules the checkout carries (committed to Git) with the link to the real
+  workspace's" in `engine/tests/orchestration/owner-mutation-workspace.test.ts`.
+- `engine/node_modules` is no longer tracked. Dependencies come from `bun install --frozen-lockfile` against
+  `engine/bun.lock`, as `docs/operations.md` already prescribes.
