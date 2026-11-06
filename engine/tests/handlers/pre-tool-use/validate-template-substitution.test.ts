@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
@@ -143,6 +143,20 @@ describe("validate-template-substitution — edge cases", () => {
     // the rules' package-structure diagrams contain literal `infra/{system}/`
     // and `└── {system}/`. Those are content, not unsubstituted variables.
     expect(validateTemplate("Adapter lives in infra/{system}/ under └── {system}/")).toBe("allow");
+  });
+
+  it("every Loom rules file passes the gate — the briefs inline them wholesale", () => {
+    // The brief carries the rules for its Task's language, and the spawn gate
+    // judges the expanded brief. A `{word}` in a rules file (a diagram root, a
+    // Rust format capture) would refuse every brief for that language, so the
+    // rules text avoids the form instead of the gate whitelisting it.
+    const rulesDir = join(__dirname, "../../../../rules");
+    const rules = readdirSync(rulesDir).filter((file) => file.endsWith(".md"));
+    expect(rules).toContain("java-patterns.md");
+    for (const file of rules) {
+      expect({ file, residual: findResidualPlaceholders(readFileSync(join(rulesDir, file), "utf-8")) })
+        .toEqual({ file, residual: [] });
+    }
   });
 
   it("{files} → allow — the acceptance runner's own argument placeholder, not a template variable", () => {
