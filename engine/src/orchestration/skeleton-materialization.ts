@@ -10,13 +10,14 @@
  *    or generic alias, drifted or unreadable types file, unfrozen contract or
  *    language mismatch blocks the whole batch, every problem named, before a
  *    byte is written (AS-008, AS-009).
- * 2. **Plan.** Each registering Task's production paths are observed (absent,
- *    or present with their digest and the canonical skeleton's), and the pure
- *    `planTaskSkeletons` derives the outcomes (`skeletonOutcomes`, INV-4) and
- *    the actions: create a missing bound skeleton (first attempt, a retry whose
- *    skeleton was deleted, an infrastructure respawn — FR-005, FR-032), adopt
- *    canonical bytes with no record (a write whose locked record failed), or
- *    refresh an untouched skeleton generated from an older surface.
+ * 2. **Plan.** Each registering Task's production paths are observed
+ *    (`observeSkeletonPaths`: absent, or present with their digest and the
+ *    canonical skeleton's), and the pure `planTaskSkeletons` derives the
+ *    outcomes (`skeletonOutcomesOf`, INV-4) and the actions: create a missing
+ *    bound skeleton (first attempt, a retry whose skeleton was deleted, an
+ *    infrastructure respawn — FR-005, FR-032), adopt canonical bytes with no
+ *    record (a write whose locked record failed), or refresh an untouched
+ *    skeleton generated from an older surface (`presentSkeletonOf`).
  * 3. **Write.** Every byte goes through the no-clobber writer (INV-3); an
  *    existing file is never modified (FR-011).
  * 4. **Return** the new or updated records and each Task's outcomes, which
@@ -28,57 +29,32 @@
  * refused registration stay, and the next registration adopts them by content.
  */
 
-import { lstatSync } from "node:fs";
-import { join } from "node:path";
-import { frozenPaths } from "../core/acceptance-contract";
-import { sha256Bytes } from "../core/digest";
 import { isNonEmpty, type DomainResult, type NonEmpty } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
-import { generateSkeleton } from "../core/skeleton/generate";
-import { skeletonLanguageOf } from "../core/skeleton/language";
-import { skeletonOutcomes } from "../core/skeleton/outcomes";
+import { productionFiles, type SkeletonGraph } from "../core/skeleton/graph-view";
+import { presentSkeletonOf, skeletonOutcomesOf } from "../core/skeleton/outcomes";
+import { renderResolutionProblem, renderSkeletonProblem } from "../core/skeleton/problems";
+import type { SkeletonCandidate } from "../core/skeleton/records";
+import type { AdoptAction, CreateAction, RefreshAction } from "../core/skeleton/refresh-plan";
 import { resolveBindings } from "../core/skeleton/resolve";
-import { productionFiles, type SkeletonGraph } from "../core/skeleton/scope";
-import type {
-  ExportBinding,
-  GeneratedSkeleton,
-  GenerateSkeletonInput,
-  PathObservation,
-  PathSkeletonOutcome,
-  ResolutionProblem,
-  ResolvedBinding,
-  SkeletonOrigin,
-  SkeletonRecord,
-  SpecifierStyle,
-} from "../core/skeleton/types";
+import type { ExportBinding, PathObservation, PathSkeletonOutcome, SkeletonOrigin, SkeletonRecord } from "../core/skeleton/types";
 import type { TaskSkeletonRegistration } from "../core/validate-task-execution";
 import type { TaskGraph } from "../types";
-import {
-  observeFrozenSurface,
-  observeSpecifierStyle,
-  typedContract,
-  type ObservedFrozenSurface,
-} from "./frozen-surface-observation";
-import { readRunBytesNoFollow, resolveBaseDirectory } from "./no-follow-fs";
-import { createSkeleton, refreshSkeleton, renderSkeletonWriteResult, type SkeletonWriteResult } from "./skeleton-writer";
+import { observeFrozenSurface, observeSpecifierStyle, typedContract } from "./frozen-surface-observation";
+import { observeSkeletonPaths } from "./skeleton-observation";
+import { frozenSkeletonPaths, generatedSkeleton, writePlanned } from "./skeleton-refresh";
+import { renderSkeletonWriteResult } from "./skeleton-writer";
 
 // ---------------------------------------------------------------------------
 // Pure core: the plan of one Task
 // ---------------------------------------------------------------------------
 
-/** The canonical skeleton of one bound path, with the contract and types-file
- *  digest its record names. */
-export type SkeletonCandidate = Readonly<{ skeleton: GeneratedSkeleton; contract: string; typesSha256: string }>;
-
-/** What registration does at one path. */
-export type SkeletonAction =
-  | Readonly<{ kind: "create"; candidate: SkeletonCandidate }>
-  | Readonly<{ kind: "adopt"; candidate: SkeletonCandidate }>
-  | Readonly<{ kind: "refresh"; candidate: SkeletonCandidate; expectedSha256: string; origin: SkeletonOrigin }>;
+/** What registration does at one path; a refresh keeps the origin of the record it replaces. */
+export type SkeletonAction = CreateAction | AdoptAction | (RefreshAction & Readonly<{ origin: SkeletonOrigin }>);
 
 export type TaskSkeletonPlan = Readonly<{
   taskId: string;
-  /** Exactly one outcome per production path, from `skeletonOutcomes`. */
+  /** Exactly one outcome per production path, from `skeletonOutcomesOf`. */
   outcomes: readonly PathSkeletonOutcome[];
   actions: readonly SkeletonAction[];
 }>;
@@ -87,15 +63,15 @@ const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
 /**
  * The outcomes and actions of one Task, given what was observed and the
- * canonical skeleton of every bound path. `skeletonOutcomes` decides each
+ * canonical skeleton of every bound path. `skeletonOutcomesOf` decides each
  * outcome and whether a present file is untouched; this only maps a
  * `skeleton-written` outcome to the write it still needs:
  * - absent → create;
  * - present with no record → adopt (untouched with no record means canonical);
- * - present, recorded, but not the current canonical bytes → refresh from
- *   the engine bytes it holds.
+ * - present, recorded, and engine bytes from an older surface
+ *   (`presentSkeletonOf`) → refresh from the engine bytes it holds.
  * A `skeleton-written` path with no canonical skeleton cannot be written: it
- * is listed as a problem.
+ * is listed as a problem. A Task the graph does not hold cannot be planned.
  */
 export function planTaskSkeletons(
   graph: TaskGraph,
@@ -104,7 +80,9 @@ export function planTaskSkeletons(
   candidates: ReadonlyMap<string, SkeletonCandidate>,
 ): DomainResult<TaskSkeletonPlan, NonEmpty<string>> {
   const view: SkeletonGraph = graph;
-  const outcomes = skeletonOutcomes(graph, taskId, observations);
+  const derived = skeletonOutcomesOf(graph, taskId, observations);
+  if (!derived.ok) return { ok: false, error: [`${derived.error.taskId} is not a Task of the TaskGraph; no skeleton can be planned for it`] };
+  const outcomes = derived.value;
   const planned = outcomes.map(({ path, outcome }): DomainResult<readonly SkeletonAction[], string> => {
     if (outcome.kind !== "skeleton-written") return { ok: true, value: [] };
     const observation = observations.get(path) ?? ABSENT;
@@ -117,9 +95,9 @@ export function planTaskSkeletons(
     if (observation.kind === "absent") return { ok: true, value: [{ kind: "create", candidate }] };
     const record = (view.skeletons ?? []).find((recorded) => samePlanPath(recorded.path, path));
     if (record === undefined) return { ok: true, value: [{ kind: "adopt", candidate }] };
-    return observation.sha256 === candidate.skeleton.sha256
-      ? { ok: true, value: [] }
-      : { ok: true, value: [{ kind: "refresh", candidate, expectedSha256: observation.sha256, origin: record.origin }] };
+    return presentSkeletonOf(record, observation.sha256, candidate.skeleton.sha256) === "engine-bytes"
+      ? { ok: true, value: [{ kind: "refresh", candidate, expectedSha256: observation.sha256, origin: record.origin }] }
+      : { ok: true, value: [] };
   });
   const problems = planned.flatMap((result) => (result.ok ? [] : [result.error]));
   if (isNonEmpty(problems)) return { ok: false, error: Object.freeze(problems) };
@@ -133,25 +111,6 @@ export function planTaskSkeletons(
   };
 }
 
-/** One diagnostic line per stage-two problem, naming the alias, the binding
- *  file and the types file where the problem has them. */
-export function renderResolutionProblem(problem: ResolutionProblem): string {
-  switch (problem.kind) {
-    case "missing-alias":
-      return `${problem.path} binds ${problem.alias}, but the frozen types file ${problem.typesFile} declares no ${problem.alias}`;
-    case "not-a-function":
-      return `${problem.path} binds ${problem.alias}, but ${problem.alias} in the frozen types file ${problem.typesFile} is not a function type`;
-    case "generic-alias":
-      return `${problem.path} binds ${problem.alias}, but ${problem.alias} in the frozen types file ${problem.typesFile} is a generic function type, which no skeleton can bind`;
-    case "unsupported-holder-shape":
-      return `the frozen types file ${problem.typesFile} has an unsupported holder shape (${problem.detail})`;
-    case "types-unparseable":
-      return `the frozen types file ${problem.typesFile} cannot be read as a types surface (${problem.detail})`;
-    case "types-drifted":
-      return `the frozen types file ${problem.typesFile} no longer matches its Acceptance Freeze stamp`;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Shell
 // ---------------------------------------------------------------------------
@@ -160,28 +119,10 @@ type Problems = NonEmpty<string>;
 
 const NOTHING: TaskSkeletonRegistration = Object.freeze({ records: Object.freeze([]), outcomes: new Map() });
 
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
 /** The bindings in order, grouped by contract in first-appearance order. */
 function byContract(bindings: readonly ExportBinding[]): readonly (readonly [string, readonly ExportBinding[]])[] {
   const contracts = [...new Set(bindings.map(({ contract }) => contract))];
   return contracts.map((id) => [id, bindings.filter(({ contract }) => contract === id)] as const);
-}
-
-/** The generator input of one resolved binding, or why none exists. */
-function generatorInput(
-  binding: ResolvedBinding,
-  surface: ObservedFrozenSurface,
-  specifierStyle: SpecifierStyle | null,
-): GenerateSkeletonInput | string | null {
-  const target = skeletonLanguageOf(binding.path);
-  if (target.kind === "unsupported") return null;
-  const { contract, exports } = binding;
-  if (target.language === "typescript" && surface.language === "typescript") {
-    return { language: "typescript", target, surface, contract, exports, specifierStyle };
-  }
-  if (target.language === "java" && surface.language === "java") return { language: "java", target, surface, contract, exports };
-  return `${binding.path} is ${target.language}, but it binds ${contract}, whose types file ${surface.path} is ${surface.language}`;
 }
 
 /** The canonical skeleton of every supported held binding of one contract. */
@@ -207,14 +148,14 @@ function contractCandidates(
   }
   const style = surface.value.language === "typescript" ? observeSpecifierStyle(root, contract) : { ok: true as const, value: null };
   if (!style.ok) return { ok: false, error: [style.error] };
-  const inputs = resolved.value.map((binding) => generatorInput(binding, surface.value, style.value));
-  const mismatches = inputs.filter((input): input is string => typeof input === "string");
+  const generations = resolved.value.map((binding) => generatedSkeleton(surface.value, binding, style.value));
+  const mismatches = generations.flatMap((generation) => (generation.ok ? [] : [renderSkeletonProblem(generation.error)]));
   if (isNonEmpty(mismatches)) return { ok: false, error: mismatches };
   return {
     ok: true,
-    value: inputs.flatMap((input) => (input === null || typeof input === "string"
-      ? []
-      : [Object.freeze({ skeleton: generateSkeleton(input), contract: contractId, typesSha256: surface.value.typesSha256 })])),
+    value: generations.flatMap((generation) => (generation.ok && generation.value !== null
+      ? [Object.freeze({ skeleton: generation.value, contract: contractId, typesSha256: surface.value.typesSha256 })]
+      : [])),
   };
 }
 
@@ -234,67 +175,25 @@ function candidatesFor(
   };
 }
 
-/**
- * What is at one repository path now. A regular file is present with its
- * digest; a link or directory is present with no content digest (the empty
- * string, which equals no digest), so it is never judged an untouched
- * skeleton and never written over.
- */
-function observePath(realRoot: string, path: string, canonicalSha256: string | null): DomainResult<PathObservation, string> {
-  const absolute = join(realRoot, path);
-  try {
-    if (!lstatSync(absolute).isFile()) return { ok: true, value: Object.freeze({ kind: "present", sha256: "", canonicalSha256 }) };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | null)?.code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { ok: true, value: ABSENT };
-    return { ok: false, error: `cannot observe ${path}: ${errorMessage(error)}` };
-  }
-  try {
-    return { ok: true, value: Object.freeze({ kind: "present", sha256: sha256Bytes(readRunBytesNoFollow(absolute)), canonicalSha256 }) };
-  } catch (error) {
-    return { ok: false, error: `cannot read ${path} without following a link: ${errorMessage(error)}` };
-  }
-}
-
+/** What is at each path, or every path that cannot be read without following a link. */
 function observePaths(
   root: string,
   paths: readonly string[],
   candidates: ReadonlyMap<string, SkeletonCandidate>,
 ): DomainResult<ReadonlyMap<string, PathObservation>, Problems> {
-  let realRoot: string;
-  try {
-    realRoot = resolveBaseDirectory(root);
-  } catch (error) {
-    return { ok: false, error: [`cannot resolve the repository root ${root}: ${errorMessage(error)}`] };
-  }
-  const observed = [...new Set(paths)].map((path) =>
-    [path, observePath(realRoot, path, candidates.get(normalizePlanPath(path))?.skeleton.sha256 ?? null)] as const);
-  const problems = observed.flatMap(([, result]) => (result.ok ? [] : [result.error]));
+  const observed = observeSkeletonPaths(root, paths, (path) => candidates.get(normalizePlanPath(path))?.skeleton.sha256 ?? null);
+  if (!observed.ok) return { ok: false, error: [observed.error] };
+  const problems = observed.value.problems.map(renderSkeletonProblem);
   if (isNonEmpty(problems)) return { ok: false, error: problems };
-  return { ok: true, value: new Map(observed.flatMap(([path, result]) => (result.ok ? [[path, result.value] as const] : []))) };
+  return { ok: true, value: observed.value.observations };
 }
-
-const recordOf = (candidate: SkeletonCandidate, origin: SkeletonOrigin, engineSha256: string): SkeletonRecord =>
-  Object.freeze({
-    path: candidate.skeleton.path,
-    contract: candidate.contract,
-    language: candidate.skeleton.language,
-    origin,
-    engineSha256,
-    typesSha256: candidate.typesSha256,
-    stale: null,
-  });
 
 /** Carry out one action through the writer; the record it leaves, or why none. */
 function perform(root: string, action: SkeletonAction, frozen: ReadonlySet<string>): DomainResult<SkeletonRecord, string> {
-  const { candidate } = action;
-  const { path, bytes, sha256 } = candidate.skeleton;
-  if (action.kind === "adopt") return { ok: true, value: recordOf(candidate, "spawn", sha256) };
-  const result: SkeletonWriteResult = action.kind === "create"
-    ? createSkeleton(root, path, bytes, frozen)
-    : refreshSkeleton(root, path, action.expectedSha256, bytes, frozen);
-  if (result.kind !== "written") return { ok: false, error: renderSkeletonWriteResult(path, result) };
-  return { ok: true, value: recordOf(candidate, action.kind === "create" ? "spawn" : action.origin, result.sha256) };
+  const written = writePlanned(root, action, action.kind === "refresh" ? action.origin : "spawn", frozen);
+  return written.kind === "recorded"
+    ? { ok: true, value: written.record }
+    : { ok: false, error: renderSkeletonWriteResult(action.candidate.skeleton.path, written.result) };
 }
 
 /**
@@ -320,7 +219,7 @@ export function materializeTaskSkeletons(
   const planProblems = plans.flatMap((plan) => (plan.ok ? [] : plan.error));
   if (isNonEmpty(planProblems)) return { ok: false, error: planProblems };
   const settled = plans.flatMap((plan) => (plan.ok ? [plan.value] : []));
-  const frozen = new Set((view.acceptance_contracts ?? []).flatMap((contract) => frozenPaths(contract)).map(normalizePlanPath));
+  const frozen = frozenSkeletonPaths(view);
   const performed = settled.flatMap(({ actions }) => actions.map((action) => perform(root, action, frozen)));
   const writeProblems = performed.flatMap((result) => (result.ok ? [] : [result.error]));
   if (isNonEmpty(writeProblems)) return { ok: false, error: writeProblems };

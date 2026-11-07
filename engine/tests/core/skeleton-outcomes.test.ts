@@ -1,5 +1,5 @@
 /**
- * `skeletonOutcomes` (AD-13, FR-030): properties over generated Tasks,
+ * `skeletonOutcomesOf` (AD-13, FR-030): properties over generated Tasks,
  * bindings, records and observations — exactly one outcome per non-test
  * file_list path, in file_list order, never one for a test file; the
  * derivation is deterministic; and each outcome agrees with the precedence
@@ -10,7 +10,8 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { isTestFileBySuffixes, DEFAULT_TEST_FILE_SUFFIXES } from "../../src/core/test-file-classification";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
-import { isUntouchedSkeleton, renderSkeletonOutcome, skeletonOutcomes } from "../../src/core/skeleton/outcomes";
+import { isUntouchedSkeleton, renderSkeletonOutcome } from "../../src/core/skeleton/outcomes";
+import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
 import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import type { ExportBinding, Identifier, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
@@ -87,11 +88,11 @@ const build = ({ files, boundMask, recordMask, observed }: RawScenario): Scenari
   };
 };
 
-describe("skeletonOutcomes: properties", () => {
+describe("skeletonOutcomesOf: properties", () => {
   it("exactly one outcome per non-test path, in file_list order, none for a test file", () => {
     fc.assert(fc.property(scenarioArb, (raw) => {
       const { graph, files, observations } = build(raw);
-      const outcomes = skeletonOutcomes(graph, "T2", observations);
+      const outcomes = knownSkeletonOutcomes(graph, "T2", observations);
       expect(outcomes.map(({ path }) => path)).toEqual(files.filter((path) => !isTestFileBySuffixes(path, DEFAULT_TEST_FILE_SUFFIXES)));
       for (const { outcome } of outcomes) expect(RENDERED.has(renderSkeletonOutcome(outcome))).toBe(true);
     }), { numRuns: 300 });
@@ -100,14 +101,14 @@ describe("skeletonOutcomes: properties", () => {
   it("is deterministic", () => {
     fc.assert(fc.property(scenarioArb, (raw) => {
       const { graph, observations } = build(raw);
-      expect(skeletonOutcomes(graph, "T2", observations)).toEqual(skeletonOutcomes(graph, "T2", observations));
+      expect(knownSkeletonOutcomes(graph, "T2", observations)).toEqual(knownSkeletonOutcomes(graph, "T2", observations));
     }), { numRuns: 200 });
   });
 
   it("each outcome is the one its precedence step selects", () => {
     fc.assert(fc.property(scenarioArb, (raw) => {
       const { graph, bound, records, observations } = build(raw);
-      for (const { path, outcome } of skeletonOutcomes(graph, "T2", observations)) {
+      for (const { path, outcome } of knownSkeletonOutcomes(graph, "T2", observations)) {
         const observation = observations.get(path) ?? { kind: "absent" };
         const record = records.get(path);
         const target = skeletonLanguageOf(path);
@@ -135,7 +136,7 @@ function manifestWithSuffixes(testFileSuffixes: readonly string[]): FrozenVerifi
   return frozen.value;
 }
 
-describe("skeletonOutcomes: the frozen test-file classification decides test paths", () => {
+describe("skeletonOutcomesOf: the frozen test-file classification decides test paths", () => {
   it("a manifest's suffixes, not the engine default, exclude test files", () => {
     const task = taskFixture({
       id: "T2", description: "T2", agent: "code-implementer-agent", wave: 2, depends_on: [],
@@ -145,6 +146,6 @@ describe("skeletonOutcomes: the frozen test-file classification decides test pat
       ...graphFixture([task]),
       verification_manifest: manifestWithSuffixes(["Test.java"]),
     };
-    expect(skeletonOutcomes(graph, "T2", new Map()).map(({ path }) => path)).toEqual(["src/a.test.ts"]);
+    expect(knownSkeletonOutcomes(graph, "T2", new Map()).map(({ path }) => path)).toEqual(["src/a.test.ts"]);
   });
 });

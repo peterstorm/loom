@@ -842,6 +842,10 @@ export type StatusReasonKind =
    *  outstanding Task of the Wave (stage two, AS-051): registration refuses
    *  the spawn until a Contract Revision or a re-planned binding repairs it. */
   | "skeleton-bindings-unresolved"
+  /** Status could not observe the current Wave's skeleton paths while a spawn
+   *  is owed (AD-13): informational, never blocking, because registration
+   *  observes them again and refuses the spawn on anything it cannot read. */
+  | "skeletons-unobserved"
   | "run-complete"
   /** The final Wave's gate committed and every Task is completed: the
    *  orchestration is finished and `helper complete-orchestration` retires it. */

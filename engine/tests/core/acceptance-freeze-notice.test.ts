@@ -17,6 +17,7 @@ import { parseTaskGraph } from "../../src/state-manager";
 import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { contract, frozenPaths, surface } from "../fixtures/contract-status-fixtures";
 import { findingId } from "../fixtures/finding-id";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const SURFACE = surface("payload");
 const finding = (id: string, severity: "advisory" | "critical", file: string | null) =>
@@ -80,7 +81,7 @@ describe("pendingFreezeAdvisories", () => {
 describe("status at the contract Wave's advisory pause", () => {
   const evaluated = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: [] },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
+    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
   );
   if (evaluated.state !== "satisfied") throw new Error("fixture proof must be satisfied");
   const proof = evaluated;

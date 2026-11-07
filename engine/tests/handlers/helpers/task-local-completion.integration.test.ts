@@ -1,15 +1,19 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { createImplementationAttemptAuthority } from "../../../src/core/implementation-completion";
 import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
+import { sha256Bytes } from "../../../src/core/digest";
+import type { SkeletonRecord } from "../../../src/core/skeleton/types";
 import {
   collectDiff,
   collectNewTestEvidence,
   observeTaskLocalCompletion,
   realDiffDepsAt,
+  REAL_TASK_LOCAL_PORTS,
+  type TaskLocalCompletionPorts,
 } from "../../../src/handlers/helpers/task-local-completion";
 import { captureDeclaredArtifactBaseline } from "../../../src/utils/declared-artifact-snapshot";
 import { captureRepositoryChangeBaseline } from "../../../src/utils/repository-change-baseline";
@@ -17,7 +21,8 @@ import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const roots: string[] = [];
 
-function repository() {
+/** `seed` adds repository files to the seed commit, before the attempt's baselines. */
+function repository(seed: Readonly<Record<string, string>> = {}) {
   const root = canonicalTempDir("loom-task-local-suite-");
   roots.push(root);
   execFileSync("git", ["init", "--quiet"], { cwd: root });
@@ -26,6 +31,10 @@ function repository() {
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src/a.ts"), "export const a = 1;\n");
   writeFileSync(join(root, "sibling.ts"), "export const sibling = 1;\n");
+  for (const [path, text] of Object.entries(seed)) {
+    mkdirSync(join(root, path, ".."), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
   execFileSync("git", ["add", "."], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "seed"], { cwd: root });
   const attemptBaseline = captureDeclaredArtifactBaseline(root, ["src/a.ts"]);
@@ -245,6 +254,7 @@ describe("Task-local completion observation shell", () => {
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
     }, {
+      ...REAL_TASK_LOCAL_PORTS,
       observeHead: () => observedHeads.shift() ?? { ok: false, error: "unexpected extra HEAD read" },
     });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
@@ -262,7 +272,7 @@ describe("Task-local completion observation shell", () => {
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
       siblingOwnedPaths: [],
-    }, { observeHead: () => ({ ok: false, error: "git object database unreadable" }) });
+    }, { ...REAL_TASK_LOCAL_PORTS, observeHead: () => ({ ok: false, error: "git object database unreadable" }) });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
       kind: "observation-unavailable",
       reason: expect.stringContaining("git object database unreadable"),
@@ -357,6 +367,104 @@ describe("Task-local completion observation shell", () => {
       siblingOwnedPaths: [],
     });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
+    expect(observed.taskBytesChangedOrUnobservable).toBe(true);
+  });
+});
+
+describe("current skeleton digests at the Task-local observation seam (FR-012)", () => {
+  // Another Task's engine-written contract stub, outside this Task's scope:
+  // only bytes still equal to the engine's record are subtracted from the
+  // repository changes, so the digest observation decides out-of-scope.
+  const STUB = "contracts/order-stub.ts";
+  const ENGINE_BYTES = "export const priceOrder = () => {\n  throw new Error(\"unimplemented: priceOrder\");\n};\n";
+
+  const engineRecord = (path: string): SkeletonRecord => ({
+    path,
+    contract: "CT-1",
+    language: "typescript",
+    origin: "contract-stub",
+    engineSha256: sha256Bytes(Buffer.from(ENGINE_BYTES)),
+    typesSha256: "0".repeat(64),
+    stale: null,
+  });
+
+  const observeWith = (
+    fixture: ReturnType<typeof repository>,
+    records: readonly SkeletonRecord[],
+    ports: TaskLocalCompletionPorts = REAL_TASK_LOCAL_PORTS,
+  ) => observeTaskLocalCompletion({
+    repositoryRoot: fixture.root,
+    task: fixture.task,
+    authority: fixture.authority,
+    parserModifiedPaths: [],
+    parserPathLabel: "test transcript paths",
+    siblingOwnedPaths: [],
+    engineSkeletons: records,
+  }, ports);
+
+  it("subtracts a recorded path whose regular file still holds the engine's bytes", () => {
+    const fixture = repository();
+    mkdirSync(join(fixture.root, "contracts"));
+    writeFileSync(join(fixture.root, STUB), ENGINE_BYTES);
+
+    const observed = observeWith(fixture, [engineRecord(STUB)]);
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(observed.unresolvedRepositoryPaths).toEqual([]);
+  });
+
+  it.each([
+    ["ENOENT: no file at the path", "contracts/never-written.ts"],
+    ["ENOTDIR: a parent is a regular file", "sibling.ts/order-stub.ts"],
+  ])("%s yields no digest and keeps the observation available", (_name, path) => {
+    const fixture = repository();
+
+    const observed = observeWith(fixture, [engineRecord(path)]);
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+  });
+
+  it("gives a deleted engine skeleton no digest, so its deletion stays an out-of-scope write", () => {
+    const fixture = repository({ [STUB]: ENGINE_BYTES });
+    rmSync(join(fixture.root, STUB));
+
+    const observed = observeWith(fixture, [engineRecord(STUB)]);
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
+  });
+
+  it("gives a symlink no digest even when its target holds the engine's bytes, so it is never subtracted", () => {
+    const fixture = repository();
+    const outside = canonicalTempDir("loom-task-local-skeleton-target-");
+    roots.push(outside);
+    writeFileSync(join(outside, "order-stub.ts"), ENGINE_BYTES);
+    mkdirSync(join(fixture.root, "contracts"));
+    symlinkSync(join(outside, "order-stub.ts"), join(fixture.root, STUB));
+
+    const observed = observeWith(fixture, [engineRecord(STUB)]);
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: [STUB] });
+  });
+
+  const ioError = (operation: string) => Object.assign(new Error(`EIO: i/o error, ${operation}`), { code: "EIO" });
+
+  it.each([
+    ["the lstat fails", { lstat: () => { throw ioError("lstat"); } }, "EIO: i/o error, lstat"],
+    ["the no-follow read fails", { readNoFollow: () => { throw ioError("read"); } }, "EIO: i/o error, read"],
+  ])("makes the observation unavailable when %s with any error but ENOENT or ENOTDIR", (_name, failing, reason) => {
+    const fixture = repository();
+    mkdirSync(join(fixture.root, "contracts"));
+    writeFileSync(join(fixture.root, STUB), ENGINE_BYTES);
+
+    const observed = observeWith(fixture, [engineRecord(STUB)], {
+      ...REAL_TASK_LOCAL_PORTS,
+      skeletonFiles: { ...REAL_TASK_LOCAL_PORTS.skeletonFiles, ...failing },
+    });
+
+    expect(observed.suite.checks[0]?.outcome).toMatchObject({
+      kind: "observation-unavailable",
+      reason: expect.stringContaining(reason),
+    });
     expect(observed.taskBytesChangedOrUnobservable).toBe(true);
   });
 });

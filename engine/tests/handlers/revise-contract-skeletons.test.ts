@@ -1,26 +1,26 @@
 /**
  * Contract Revision refreshes untouched skeletons and flags modified ones
- * stale (plan AD-10, FR-033), through the `revise-contract` handler, its
- * refresh step `refreshRevisedSkeletons`, its pure planner
- * `planSkeletonRevision`, and the pure `reviseAcceptanceContract` that commits
- * the result.
+ * stale (plan AD-10, FR-033, ADR-0057), through the `revise-contract`
+ * handler, its refresh step `refreshRevisedSkeletons`, and the pure
+ * `reviseAcceptanceContract` that commits the result. The record-driven
+ * planner itself is matrixed in `tests/core/skeleton-outcomes.matrix.test.ts`.
  */
 
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NO_SKELETON_REVISION,
   reviseAcceptanceContract,
-  type SkeletonRevision,
+  revisionOutcomeMessage,
+  skeletonRevisionOf,
 } from "../../src/core/contract-revision";
 import { frozenPathsToObserve } from "../../src/core/acceptance-contract";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
-import type { GeneratedSkeleton, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
-import reviseContract, {
-  planSkeletonRevision,
-  refreshRevisedSkeletons,
-  revisionOutcomeMessage,
-} from "../../src/handlers/helpers/revise-contract";
+import type { SkeletonGraph } from "../../src/core/skeleton/graph-view";
+import reviseContract from "../../src/handlers/helpers/revise-contract";
 import { observeFrozenDigests } from "../../src/orchestration/frozen-path-observation";
+import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
+import type { SkeletonRecord } from "../../src/core/skeleton/types";
 import { StateManager } from "../../src/state-manager";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import {
@@ -190,19 +190,72 @@ describe("the revise-contract handler", () => {
   });
 });
 
+/**
+ * Run `edit` once, the first time the skeleton writer draws its prepared
+ * name: after the revision observed the file and planned its refresh, and
+ * before the writer's own digest guard reads it.
+ */
+function editDuringTheWrite(edit: () => void): void {
+  const random = Math.random.bind(Math);
+  let edited = false;
+  vi.spyOn(Math, "random").mockImplementation(() => {
+    if (!edited && (new Error().stack ?? "").includes("preparedName")) {
+      edited = true;
+      edit();
+    }
+    return random();
+  });
+}
+
+describe("a skeleton modified after the revision observed it (ADR-0057)", () => {
+  it("is refused by the writer as `modified`, keeps the implementer's bytes, and its record is flagged stale in the same commit", async () => {
+    const repo = seededRepo([PATHS.javaPricing]);
+    repo.write(JAVA_CONTRACT.types, JAVA_TYPES_WITH_CURRENCY);
+    const implemented = "package com.acme.order.pricing;\n\nfinal class Pricing {}\n";
+    editDuringTheWrite(() => writeFileSync(join(repo.root, PATHS.javaPricing), implemented));
+
+    const revision = await revise("CT-2");
+
+    expect(revision.kind, revision.message).toBe("passthrough");
+    expect(repo.read(PATHS.javaPricing)).toBe(implemented);
+    const state = repo.rawState();
+    expect(recordedSkeletons(state).get(PATHS.javaPricing)).toEqual({
+      ...seededRecord(PATHS.javaPricing, canonicalSkeletonOf(PATHS.javaPricing)),
+      stale: { revision: 1 },
+    });
+    expect(revision.stderr).toContain(`skeleton ${PATHS.javaPricing}: stale against revised contract (modified, left as it is)`);
+    expect(revision.stderr).not.toContain("skeleton binding problem");
+  });
+
+  it("settles that path stale, never refreshed, in what the refresh hands the commit", () => {
+    const repo = seededRepo([PATHS.javaPricing]);
+    repo.write(JAVA_CONTRACT.types, JAVA_TYPES_WITH_CURRENCY);
+    editDuringTheWrite(() => writeFileSync(join(repo.root, PATHS.javaPricing), "edited\n"));
+
+    const refreshed = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
+
+    expect(refreshed).toEqual({ ok: true, value: skeletonRevisionOf([[PATHS.javaPricing, { kind: "stale" }]], []) });
+  });
+});
+
 describe("refreshRevisedSkeletons", () => {
-  it("writes the refreshed bytes before any record is committed, and reports what it did", () => {
+  it("writes the refreshed bytes before any record is committed, and settles each path once", () => {
     const repo = seededRepo([PATHS.javaPricing, PATHS.javaExisting]);
     repo.write(PATHS.javaExisting, "package com.acme.order.pricing;\n\nfinal class Existing {}\n");
     repo.write(JAVA_CONTRACT.types, JAVA_TYPES_WITH_CURRENCY);
 
     const refreshed = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-2");
 
-    expect(refreshed.ok).toBe(true);
-    if (!refreshed.ok) return;
-    expect(refreshed.value.refreshed.map(({ path, origin }) => [path, origin])).toEqual([[PATHS.javaPricing, "revision"]]);
-    expect(refreshed.value.modified).toEqual([PATHS.javaExisting]);
-    expect(refreshed.value.bindingProblems).toEqual([]);
+    expect(refreshed).toEqual({
+      ok: true,
+      value: skeletonRevisionOf([
+        [PATHS.javaPricing, {
+          kind: "refreshed",
+          skeleton: { contract: "CT-2", language: "java", engineSha256: sha256(JAVA_PRICING_REVISED), typesSha256: sha256(JAVA_TYPES_WITH_CURRENCY) },
+        }],
+        [PATHS.javaExisting, { kind: "stale" }],
+      ], []),
+    });
     expect(repo.read(PATHS.javaPricing)).toBe(JAVA_PRICING_REVISED);
     // Nothing is committed yet: the handler's locked update does that.
     expect(recordedSkeletons(repo.rawState()).get(PATHS.javaPricing)?.origin).toBe("spawn");
@@ -220,7 +273,7 @@ describe("refreshRevisedSkeletons", () => {
 
     const refreshed = refreshRevisedSkeletons(repo.root, graphOf(repo), "CT-1");
 
-    expect(refreshed.ok && refreshed.value.refreshed).toEqual([]);
+    expect(refreshed.ok && refreshed.value.settlements.size).toBe(0);
     expect(refreshed.ok && refreshed.value.bindingProblems).toEqual([
       expect.objectContaining({ kind: "types-unparseable", typesFile: TS_CONTRACT.types }),
     ]);
@@ -228,33 +281,11 @@ describe("refreshRevisedSkeletons", () => {
   });
 });
 
-describe("planSkeletonRevision (pure)", () => {
-  const ENGINE = "e".repeat(64);
-  const CANONICAL = "c".repeat(64);
-  const EDITED = "d".repeat(64);
-  const record = (path: string): SkeletonRecord => ({
-    path, contract: "CT-1", language: "typescript", origin: "spawn", engineSha256: ENGINE, typesSha256: "f".repeat(64), stale: null,
-  });
-  const skeleton = (path: string): GeneratedSkeleton => ({ path, language: "typescript", bytes: `// ${path}\n`, sha256: CANONICAL });
-  const present = (sha256: string): PathObservation => ({ kind: "present", sha256, canonicalSha256: CANONICAL });
-
-  it("refreshes engine bytes, re-records canonical bytes, flags edited bytes, and leaves absent and unresolved untouched files", () => {
-    const records = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"].map(record);
-    const observations = new Map<string, PathObservation>([
-      ["a.ts", present(ENGINE)],
-      ["b.ts", present(CANONICAL)],
-      ["c.ts", present(EDITED)],
-      ["d.ts", { kind: "absent" }],
-      ["e.ts", present(ENGINE)],
-      ["f.ts", present(EDITED)],
-    ]);
-    const skeletons = ["a.ts", "b.ts", "c.ts", "d.ts"].map(skeleton);
-    expect(planSkeletonRevision(records, observations, skeletons)).toEqual([
-      { kind: "refresh", record: record("a.ts"), skeleton: skeleton("a.ts"), expectedSha256: ENGINE },
-      { kind: "re-record", record: record("b.ts"), skeleton: skeleton("b.ts") },
-      { kind: "stale", record: record("c.ts") },
-      { kind: "stale", record: record("f.ts") },
-    ]);
+describe("skeletonRevisionOf", () => {
+  it("keeps one settlement per normalized path, so no path is both refreshed and stale", () => {
+    const refreshed = { kind: "refreshed", skeleton: { contract: "CT-1", language: "typescript", engineSha256: "e", typesSha256: "t" } } as const;
+    const revision = skeletonRevisionOf([["./src/a.ts", refreshed], ["src/a.ts", { kind: "stale" }]], []);
+    expect([...revision.settlements]).toEqual([["src/a.ts", { kind: "stale" }]]);
   });
 });
 
@@ -263,16 +294,19 @@ describe("reviseAcceptanceContract commits the skeleton revision (pure)", () => 
     ...seededRecord(path, canonicalSkeletonOf(path)), origin: "revision", typesSha256: sha256(TS_TYPES_WITH_REFUND),
   });
 
-  it("FR-033: installs refreshed records, flags modified ones with the revision number, and reports both", () => {
+  it("FR-033: installs refreshed records, flags stale ones with the revision number, and reports both", () => {
     const repo = seededRepo([PATHS.tsQuotes], { [PATHS.tsPricing]: IMPLEMENTED_PRICING });
     repo.write(TS_CONTRACT.types, TS_TYPES_WITH_REFUND);
     const graph = graphOf(repo);
     const observations = frozenObservations(repo, graph);
-    const skeletons: SkeletonRevision = {
-      refreshed: [revisedRecord(PATHS.tsQuotes)],
-      modified: [PATHS.tsPricing],
-      bindingProblems: [{ kind: "missing-alias", alias: "RefundFn", path: PATHS.tsQuotes, typesFile: TS_CONTRACT.types }],
-    };
+    const { contract, language, engineSha256, typesSha256 } = revisedRecord(PATHS.tsQuotes);
+    const skeletons = skeletonRevisionOf(
+      [
+        [PATHS.tsQuotes, { kind: "refreshed", skeleton: { contract, language, engineSha256, typesSha256 } }],
+        [PATHS.tsPricing, { kind: "stale" }],
+      ],
+      [{ kind: "missing-alias", alias: "RefundFn", path: PATHS.tsQuotes, typesFile: TS_CONTRACT.types }],
+    );
 
     const revised = reviseAcceptanceContract(graph, { contract: "CT-1", reason: "why" }, observations, skeletons);
 
@@ -283,6 +317,7 @@ describe("reviseAcceptanceContract commits the skeleton revision (pure)", () => 
       { ...seededRecord(PATHS.tsPricing, canonicalSkeletonOf(PATHS.tsPricing)), stale: { revision: 1 } },
       revisedRecord(PATHS.tsQuotes),
     ]);
+    expect(revised.value.refreshed).toEqual([PATHS.tsQuotes]);
     expect(revised.value.staleSkeletons).toEqual([PATHS.tsPricing]);
     expect(revised.value.bindingProblems).toEqual(skeletons.bindingProblems);
   });

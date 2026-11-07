@@ -39,11 +39,11 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
-import { skeletonOutcomes } from "../../src/core/skeleton/outcomes";
+import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
 import { conformanceScope, type SkeletonGraph } from "../../src/core/skeleton/scope";
 import type { ExportBinding, Identifier, UnsupportedReason } from "../../src/core/skeleton/types";
 import type { Task, TaskGraph } from "../../src/types";
-import { refreshRevisedSkeletons } from "../../src/handlers/helpers/revise-contract";
+import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
 import { materializeContractStubs } from "../../src/orchestration/contract-stub-materialization";
 import { observeFrozenSurface } from "../../src/orchestration/frozen-surface-observation";
 import { materializeTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
@@ -177,10 +177,10 @@ describe("INV-6 owner: the only constructor of the SkeletonTarget brand", () => 
   });
 });
 
-describe("INV-6 sibling: skeletonOutcomes (AD-13 step 4) agrees with the owner", () => {
+describe("INV-6 sibling: skeletonOutcomesOf (AD-13 step 4) agrees with the owner", () => {
   for (const row of TABLE) {
     it(`${row.path}, bound and absent`, () => {
-      const [only, ...rest] = skeletonOutcomes(graphBinding(row.path), "T2", new Map());
+      const [only, ...rest] = knownSkeletonOutcomes(graphBinding(row.path), "T2", new Map());
       expect(rest).toEqual([]);
       expect(only).toEqual({
         path: row.path,
@@ -417,14 +417,16 @@ describe("INV-6 sibling: refreshRevisedSkeletons agrees with the owner", () => {
       const root = tempRepo({ [TYPES]: TS_TYPES_TEXT, [JAVA_TYPES]: JAVA_TYPES_TEXT, [ACCEPTANCE]: ACCEPTANCE_TEXT, [row.path]: OLD_SKELETON });
       const result = refreshRevisedSkeletons(root, revisionGraph(row), row.verdict === "java" ? "CT-2" : "CT-1");
       expect(result.ok && result.value.bindingProblems).toEqual([]);
-      expect(result.ok && result.value.modified).toEqual([]);
+      const settled = result.ok
+        ? [...result.value.settlements].map(([path, settlement]) =>
+          settlement.kind === "refreshed" ? [path, settlement.kind, settlement.skeleton.language] : [path, settlement.kind])
+        : null;
       if (row.verdict === "unsupported") {
-        expect(result.ok && result.value.refreshed).toEqual([]);
+        expect(settled).toEqual([]);
         expect(readAt(root, row.path)).toBe(OLD_SKELETON);
       } else {
         expectOwnersTarget(row, readAt(root, row.path));
-        expect(result.ok && result.value.refreshed.map(({ path, language, origin }) => [path, language, origin]))
-          .toEqual([[row.path, row.verdict, "revision"]]);
+        expect(settled).toEqual([[row.path, "refreshed", row.verdict]]);
       }
     });
   }

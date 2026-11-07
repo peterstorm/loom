@@ -750,7 +750,8 @@ Every decision is a pure function over text or graph data. The shells read bytes
 **Sibling entry points:**
 - `engine/src/orchestration/skeleton-materialization.ts` — writes the spawning Task's missing skeletons and refreshes untouched stale-surface ones at registration
 - `engine/src/orchestration/contract-stub-materialization.ts` — writes and refreshes contract stubs at the contract Task's stop
-- `engine/src/handlers/helpers/revise-contract.ts` — refreshes untouched skeletons after a Contract Revision
+- `engine/src/orchestration/skeleton-revision.ts` — refreshes untouched skeletons after a Contract Revision (run by `handlers/helpers/revise-contract.ts`)
+- `engine/src/orchestration/skeleton-refresh.ts` — `writePlanned`, the one step through which all three siblings call the writer
 **Matrix test:** `engine/tests/orchestration/skeleton-writer.matrix.test.ts`
 **Statement:** Every code path that writes a skeleton, contract stub or refreshed skeleton into the repository calls `createSkeleton` or `refreshSkeleton`. These are the spawn materialization, the contract stop step and the revision refresh. No path calls `writeFileSync`, `renameSync` or `linkSync` on a skeleton path itself. The writer refuses a non-repo-relative path, a frozen path and any symlinked ancestor. It never replaces an existing file on create, and never replaces a file whose digest differs from the expected engine digest on refresh. The matrix test drives each sibling over a temp repository with a pre-existing file, a frozen path, a symlinked parent and a modified skeleton, and asserts the bytes are unchanged and the refusal is a value.
 
@@ -760,12 +761,11 @@ Every decision is a pure function over text or graph data. The shells read bytes
 **Owner module:** `engine/src/core/skeleton/outcomes.ts`
 **Sibling entry points:**
 - `engine/src/orchestration/skeleton-materialization.ts` — which paths to write, regenerate or adopt at registration, and the recorded skeleton_outcomes
-- `engine/src/orchestration/contract-stub-materialization.ts` — which stubs are missing or untouched at the contract stop
-- `engine/src/handlers/helpers/revise-contract.ts` — untouched (refresh) versus modified (stale) on revision
+- `engine/src/core/skeleton/refresh-plan.ts` — `planSkeletonRefresh`, the one planner of the contract stop (candidate-driven: which stubs are missing or untouched) and the revision (record-driven: untouched, refresh, versus modified, stale)
 - `engine/src/core/skeleton/status.ts` — recorded and projected outcomes in `helper orchestration status`
 - `engine/src/core/implementation-brief.ts` — per-file outcome lines in the brief
 **Matrix test:** `engine/tests/core/skeleton-outcomes.matrix.test.ts`
-**Statement:** Every call site that names a path's skeleton outcome, or decides whether an existing skeleton is engine-untouched, calls `skeletonOutcomes` or `isUntouchedSkeleton`. None compares digests or orders the five outcomes inline. That covers registration, the contract stop, revision, status and the brief. The matrix test feeds one graph and observation set through every sibling and asserts the same outcome per path, the precedence order, and the exact render strings. `generate.ts` and `scope.ts` are deliberately not siblings: neither names an outcome or judges untouchedness. Their shared language decision belongs to INV-6.
+**Statement:** Every call site that names a path's skeleton outcome, or decides whether an existing skeleton is engine-untouched, calls `skeletonOutcomesOf`, `isUntouchedSkeleton` or `presentSkeletonOf`. None compares digests or orders the five outcomes inline. That covers registration, the contract stop, revision, status and the brief. The matrix test feeds one graph and observation set through every sibling and asserts the same outcome per path, the precedence order, and the exact render strings. `generate.ts` and `scope.ts` are deliberately not siblings: neither names an outcome or judges untouchedness. Their shared language decision belongs to INV-6.
 
 ### INV-5: One derivation decides which files of which Task owe conformance, against which contracts
 
@@ -786,10 +786,9 @@ Every decision is a pure function over text or graph data. The shells read bytes
 **Sibling entry points:**
 - `engine/src/core/skeleton/outcomes.ts` — AD-13 step 4, the `unsupported-language` outcome
 - `engine/src/core/skeleton/scope.ts` — which production files are TypeScript or Java for conformance
-- `engine/src/orchestration/skeleton-materialization.ts` — parses each bound path into the target it generates at registration
+- `engine/src/orchestration/skeleton-materialization.ts` — generates each bound path's target at registration (through `generatedSkeleton`)
 - `engine/src/orchestration/frozen-surface-observation.ts` — picks the TypeScript or Java reader for a contract's types file
-- `engine/src/orchestration/contract-stub-materialization.ts` — parses each bound path into the target it stubs at the contract stop
-- `engine/src/handlers/helpers/revise-contract.ts` — parses each record's path into the target it refreshes on revision
+- `engine/src/orchestration/skeleton-refresh.ts` — `generatedSkeleton`, which parses each bound path into its target for registration, the contract stop (`contract-stub-materialization.ts`) and the revision refresh (`skeleton-revision.ts`)
 **Matrix test:** `engine/tests/core/skeleton-language.matrix.test.ts`
 **Statement:** Every call site that decides whether a path is TypeScript, supported Java (under `src/main/java/`, with its package and class) or unsupported calls `skeletonLanguageOf`, and no module compares extensions or Java roots inline. That covers the outcome derivation, the conformance scope, spawn materialization, the types-file reader choice, the contract stub step and the revision refresh. `generate.ts`, `conformance.ts` and `resolve.ts` are deliberately not siblings, because they take the already-parsed branded `SkeletonTarget` or a language-tagged surface and make no language decision. The matrix test runs one path table (`.ts`, `.tsx`, `.mts`, `.cts`, `src/main/java/a/b/C.java`, `src/test/java/C.java`, `lib/C.java`, `.kt`, `.scala`, `.rs`) through every sibling, and asserts the same supported or unsupported verdict and the same Java package everywhere, so a change to the predicate fails at every row.
 

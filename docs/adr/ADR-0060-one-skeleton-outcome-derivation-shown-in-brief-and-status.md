@@ -60,7 +60,7 @@ path at both times, and a read path must not write state.
 
 ## Decision
 **`engine/src/core/skeleton/outcomes.ts` is the single owner of skeleton outcomes. It exports
-`skeletonOutcomes`, `isUntouchedSkeleton` and `renderSkeletonOutcome`. Registration records the outcome it acted
+`skeletonOutcomesOf`, `isUntouchedSkeleton`, `presentSkeletonOf` and `renderSkeletonOutcome`. Registration records the outcome it acted
 on. Status and the brief show the recorded outcome when there is one and otherwise the one the same derivation
 projects now.**
 
@@ -82,24 +82,29 @@ projects now.**
   exception.
 - **Untouched judgment.** `isUntouchedSkeleton(record, currentSha, canonicalSha)` is true only when the file
   exists and its digest equals the record's `engineSha256` or the canonical digest. Spawn materialization
-  (`engine/src/orchestration/skeleton-materialization.ts`) reaches it through `skeletonOutcomes`, which applies
-  it at precedence step 1. The contract-stop step (`engine/src/orchestration/contract-stub-materialization.ts`),
-  the revision refresh (`engine/src/handlers/helpers/revise-contract.ts`) and settlement digest subtraction
-  (`engine/src/core/implementation-application.ts`) call `isUntouchedSkeleton` directly. None of them compares
-  digests itself.
+  (`engine/src/orchestration/skeleton-materialization.ts`) reaches it through `skeletonOutcomesOf`, which
+  applies it at precedence step 1, and `presentSkeletonOf`, which says whether an untouched file is already
+  canonical or engine bytes to refresh. The contract-stop step (`engine/src/orchestration/contract-stub-materialization.ts`)
+  and the revision refresh (`engine/src/orchestration/skeleton-revision.ts`) share one pure planner,
+  `planSkeletonRefresh` (`engine/src/core/skeleton/refresh-plan.ts`, candidate-driven and record-driven),
+  which acts on `presentSkeletonOf`; settlement digest subtraction (`engine/src/core/implementation-application.ts`)
+  calls `isUntouchedSkeleton` directly. None of them compares digests itself.
 - **Exact strings.** `renderSkeletonOutcome` is an exhaustive `ts-pattern` match that returns the five FR-030
   strings. It is the only place those strings are produced.
 - **Recorded and projected.** Registration (`engine/src/core/validate-task-execution.ts`) writes the Task's
   `skeleton_outcomes` inside the spawn reservation (ADR-0048). `taskSkeletonOutcomes` in
   `engine/src/core/skeleton/status.ts` returns one entry per path in file_list order. Each entry is the recorded
-  outcome marked `recorded`, or the outcome `skeletonOutcomes` derives now marked `projected`. Read paths never
+  outcome marked `recorded`, or the outcome `skeletonOutcomesOf` derives now marked `projected`. Read paths never
   persist a projection.
 - **Status.** `skeletonStatusReport` builds the `skeletons` part of `LoomStatusDocument`
   (`engine/src/core/loom-status.ts`). It is a closed union of `not-applicable | unobserved | reported`. The
   `reported` case lists every current-Wave Task with its per-path outcome and basis, every stale record
   (`staleSkeletons`, FR-033) and every stage-two binding problem. The status shell
-  (`engine/src/handlers/helpers/orchestration.ts`) observes the paths and passes them in. A TaskGraph populated
-  before the binding stamp is reported as `not-applicable`, not as an error.
+  (`engine/src/handlers/helpers/orchestration.ts`) observes the paths through `observeSkeletons`
+  (`engine/src/orchestration/skeleton-observation.ts`, the observation the brief shell reads too) and passes
+  them in. A TaskGraph populated before the binding stamp is reported as `not-applicable`, not as an error. A
+  report status could not observe blocks nothing (registration observes again and is the authority), but
+  while a spawn is owed status names it under the `skeletons-unobserved` reason.
 - **Brief.** `engine/src/core/implementation-brief.ts` renders the Frozen signatures section from
   `taskSkeletonOutcomes` and `renderSkeletonOutcome`, with stale flags from `renderStaleSkeleton`. Status and the
   brief therefore cannot disagree about a path.

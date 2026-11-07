@@ -23,6 +23,7 @@ import {
   type TaskGraph,
   type TaskStatus,
 } from "../../src/types";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 /*
  * Protected-state builders. Each mints its value through the production
@@ -102,6 +103,7 @@ export function satisfiedProof(files: readonly string[], era: RedThenGreenEra = 
   const evaluated = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: files, redThenGreen: era },
     {
+      contractConformance: CONFORMANCE_NOT_OWED,
       taskCompleted: true,
       testResult: { verdict: "trusted-pass" },
       filesModified: files,
@@ -185,7 +187,7 @@ export function taskFixture(input: TaskFixtureInput): Task {
   }
   const evaluated = suppliedProof?.state === "failed"
     ? suppliedProof
-    : evaluateProofObligations(pending.obligations, { taskCompleted: false, filesModified: [] });
+    : evaluateProofObligations(pending.obligations, { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: false, filesModified: [] });
   if (evaluated.state !== "failed") {
     return { ...metadata, status: "pending", proof: pending };
   }

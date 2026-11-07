@@ -5,17 +5,17 @@
  * `helper orchestration brief` CLI and the Pi extension's brief-marker
  * expansion, so both harnesses spawn byte-identical briefs.
  *
- * It also owns the skeleton observation (G2 AD-13) that the brief's Frozen
- * Signatures section and `helper orchestration status` both read, so the two
- * observe a path the same way: `observeSkeletons`. A brief is refused while
- * the plan's export bindings have drifted from the TaskGraph stamp, because
- * its frozen duties would then come from bindings the plan no longer holds.
+ * The brief's Frozen Signatures section reads the skeleton paths through
+ * `observeSkeletons` (`skeleton-observation.ts`), the observation
+ * `helper orchestration status` reads too, so the two observe a path the same
+ * way. A brief is refused while the plan's export bindings have drifted from
+ * the TaskGraph stamp, because its frozen duties would then come from
+ * bindings the plan no longer holds.
  */
 
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { observeTaskGraphProjectBoundary } from "../config";
-import { contractRole } from "../core/acceptance-contract";
 import {
   invariantOwnershipSourceOf,
   renderImplementationBrief,
@@ -25,142 +25,16 @@ import {
   type ImplementationBriefRequest,
   type RuleDocument,
 } from "../core/implementation-brief";
-import { isNonEmpty, type DomainResult } from "../core/orchestration-contract";
-import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
+import type { DomainResult } from "../core/orchestration-contract";
 import { bindingStampAgreement } from "../core/skeleton/bindings";
-import { productionFiles, type SkeletonGraph } from "../core/skeleton/scope";
-import type { SkeletonProblem } from "../core/contract-revision";
-import type { UnresolvedSkeletonBinding } from "../core/skeleton/status";
-import type { ExportBinding, FrozenSurface, PathObservation } from "../core/skeleton/types";
+import type { SkeletonGraph } from "../core/skeleton/graph-view";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
 import { taskOwnerDuty } from "../core/owner-verification/obligations";
 import { parsePlanExportBindings, parsePlanModels } from "../core/parse-plan-models";
 import { StateManager } from "../state-manager";
 import type { PlanInvariant, Task, TaskGraph } from "../types";
-import {
-  canonicalContractSkeletons,
-  observeSkeletonPaths,
-  renderSkeletonProblem,
-} from "./contract-stub-materialization";
-import { observeFrozenSurface, typedContract, type TypedContract } from "./frozen-surface-observation";
-import { renderResolutionProblem } from "./skeleton-materialization";
+import { observeSkeletons } from "./skeleton-observation";
 import { observeSpecIndex } from "./spec-index-observation";
-
-// ---------------------------------------------------------------------------
-// The skeleton observation, shared with `helper orchestration status`
-// ---------------------------------------------------------------------------
-
-/**
- * What is on disk for some Tasks' skeletons: each production path, absent or
- * present with its digest and its canonical skeleton's; each relevant
- * contract's frozen surface as its freeze stamps it, or the line naming why
- * it could not be read; and every stage-two problem of the resolving Tasks'
- * bindings, exactly as registration would meet them.
- */
-export type SkeletonObservation = Readonly<{
-  observations: ReadonlyMap<string, PathObservation>;
-  surfaces: ReadonlyMap<string, DomainResult<FrozenSurface, string>>;
-  unresolved: readonly UnresolvedSkeletonBinding[];
-}>;
-
-const NOTHING_OBSERVED: SkeletonObservation = Object.freeze({
-  observations: new Map(),
-  surfaces: new Map(),
-  unresolved: Object.freeze([]),
-});
-
-/** The contracts whose frozen surface matters: those the resolving Tasks bind, then those any observed Task claims. */
-function relevantContractIds(graph: SkeletonGraph, observed: readonly Task[], heldContracts: readonly string[]): readonly string[] {
-  const claimed = (graph.acceptance_contracts ?? []).filter((contract) =>
-    observed.some((task) => contractRole(contract, task, graph.tasks).kind === "claimant")).map(({ id }) => id);
-  return [...new Set([...heldContracts, ...claimed])];
-}
-
-/**
- * Observe the skeletons of `observed`, resolving the bindings of `resolving`
- * (the Tasks a spawn would register). Each contract a resolving Task binds is
- * read in `stamped` mode, as registration reads it, so a drifted or
- * unparseable types file is the problem registration would refuse with; a
- * contract that resolves gets canonical skeletons (`canonicalContractSkeletons`)
- * and every per-binding problem. A contract still `awaiting-red` has no frozen
- * surface yet and is skipped. A TaskGraph populated before export bindings
- * were stamped writes no skeletons, so nothing is read. An unreadable path or
- * repository root is the error.
- */
-export function observeSkeletons(
-  root: string,
-  graph: TaskGraph,
-  observed: readonly Task[],
-  resolving: readonly Task[],
-): DomainResult<SkeletonObservation, string> {
-  const view: SkeletonGraph = graph;
-  if (view.export_bindings === undefined) return { ok: true, value: NOTHING_OBSERVED };
-  const resolvingPaths = resolving.flatMap((task) => productionFiles(view, task));
-  const held = view.export_bindings.filter((binding) => resolvingPaths.some((path) => samePlanPath(path, binding.path)));
-  const contracts = relevantContractIds(view, observed, held.map(({ contract }) => contract)).flatMap((id) => {
-    const found = (view.acceptance_contracts ?? []).find((contract) => contract.id === id);
-    const typed = found === undefined ? null : typedContract(found);
-    return typed === null || typed.freeze.state === "awaiting-red" ? [] : [typed];
-  });
-  const read = contracts.map((contract) =>
-    observeContract(root, contract, held.filter((binding) => binding.contract === contract.id)));
-  const failed = read.flatMap((result) => (result.ok ? [] : [result.error]));
-  if (isNonEmpty(failed)) return { ok: false, error: failed.join("; ") };
-  const observedContracts = read.flatMap((result) => (result.ok ? [result.value] : []));
-  const canonical = new Map(observedContracts.flatMap(({ canonical: digests }) => digests));
-  const paths = [...new Set(observed.flatMap((task) => productionFiles(view, task)))];
-  const present = observeSkeletonPaths(root, paths, (path) => canonical.get(normalizePlanPath(path)) ?? null);
-  if (!present.ok) return present;
-  if (isNonEmpty(present.value.problems)) return { ok: false, error: present.value.problems.map(renderSkeletonProblem).join("; ") };
-  return {
-    ok: true,
-    value: Object.freeze({
-      observations: present.value.observations,
-      surfaces: new Map(observedContracts.map(({ id, surface }) => [id, surface] as const)),
-      unresolved: Object.freeze(observedContracts.flatMap(({ unresolved }) => unresolved)),
-    }),
-  };
-}
-
-/** What one contract contributes: its surface, its bound paths' canonical digests, and its stage-two problems. */
-type ContractObservation = Readonly<{
-  id: string;
-  surface: DomainResult<FrozenSurface, string>;
-  canonical: readonly (readonly [string, string])[];
-  unresolved: readonly UnresolvedSkeletonBinding[];
-}>;
-
-/**
- * One contract's frozen surface in `stamped` mode, and — when a resolving Task
- * binds it — the canonical skeletons and problems of those `bindings`. A
- * surface that cannot be read is that contract's one problem; failing to read
- * its acceptance files for the specifier style is the error.
- */
-function observeContract(root: string, contract: TypedContract, bindings: readonly ExportBinding[]): DomainResult<ContractObservation, string> {
-  const stamped = observeFrozenSurface(root, contract, "stamped");
-  const unresolvedOf = (problem: SkeletonProblem): UnresolvedSkeletonBinding => Object.freeze({ problem, message: renderSkeletonProblem(problem) });
-  if (!stamped.ok) {
-    const unreadable: ContractObservation = {
-      id: contract.id,
-      surface: { ok: false, error: renderResolutionProblem(stamped.error) },
-      canonical: [],
-      unresolved: bindings.length === 0 ? [] : [unresolvedOf(stamped.error)],
-    };
-    return { ok: true, value: Object.freeze(unreadable) };
-  }
-  if (bindings.length === 0) return { ok: true, value: Object.freeze({ id: contract.id, surface: stamped, canonical: [], unresolved: [] }) };
-  const generated = canonicalContractSkeletons(root, contract, bindings);
-  if (!generated.ok) return generated;
-  return {
-    ok: true,
-    value: Object.freeze({
-      id: contract.id,
-      surface: stamped,
-      canonical: generated.value.candidates.map(({ skeleton }) => [normalizePlanPath(skeleton.path), skeleton.sha256] as const),
-      unresolved: generated.value.problems.map(unresolvedOf),
-    }),
-  };
-}
 
 /**
  * Whether the recorded plan's export bindings still agree with the TaskGraph

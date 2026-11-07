@@ -19,6 +19,7 @@ import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFr
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
 import { value } from "../../../fixtures/parse-result";
+import { CONFORMANCE_NOT_OWED } from "../../../../src/core/skeleton/conformance-verdict";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const roots: string[] = [];
@@ -223,7 +224,7 @@ async function waveFixture() {
 | Fixture | Scripted test data |
 `);
   const proof = evaluateTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/a.ts"], newTestsWritten: true });
+    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/a.ts"], newTestsWritten: true });
   if (proof.state !== "satisfied") throw new Error("fixture proof construction failed");
   const graph = value(parseTaskGraph({ ...graphFixture([taskFixture({ id: "T1", description: "scripted native fixture",
     agent: "code-implementer-agent", wave: 1, depends_on: [], status: "implemented", proof,

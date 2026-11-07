@@ -67,12 +67,26 @@ function requireTaskBaselines(task: Task): RequiredTaskBaselines {
   };
 }
 
-export type TaskLocalCompletionPorts = Readonly<{
-  observeHead: (repositoryRoot: string) => git.GitHeadObservation;
+/** The two no-follow reads that observe a recorded skeleton path's current
+ *  bytes. Errors propagate as thrown: `currentSkeletonDigests` alone decides
+ *  which mean "no regular file here" and which make the observation
+ *  unavailable. */
+export type SkeletonFilePort = Readonly<{
+  lstat: (absolute: string) => Readonly<{ isFile: () => boolean }>;
+  readNoFollow: (absolute: string) => Uint8Array;
 }>;
 
-const REAL_TASK_LOCAL_PORTS: TaskLocalCompletionPorts = Object.freeze({
+export type TaskLocalCompletionPorts = Readonly<{
+  observeHead: (repositoryRoot: string) => git.GitHeadObservation;
+  skeletonFiles: SkeletonFilePort;
+}>;
+
+export const REAL_TASK_LOCAL_PORTS: TaskLocalCompletionPorts = Object.freeze({
   observeHead: git.observeExactHead,
+  skeletonFiles: Object.freeze({
+    lstat: (absolute: string) => lstatSync(absolute),
+    readNoFollow: (absolute: string) => readRunBytesNoFollow(absolute),
+  }),
 });
 
 function authorityHead(
@@ -117,19 +131,23 @@ export function isEngineOwnedRuntimePath(path: string, authoritativeStatePath: s
  * missing path, or one holding no regular file, has no digest; any other
  * failure to read throws, and the observation is then unavailable.
  */
-function currentSkeletonDigests(repositoryRoot: string, records: readonly SkeletonRecord[]): ReadonlyMap<string, string> {
+function currentSkeletonDigests(
+  repositoryRoot: string,
+  records: readonly SkeletonRecord[],
+  files: SkeletonFilePort,
+): ReadonlyMap<string, string> {
   if (records.length === 0) return new Map();
   const realRoot = resolveBaseDirectory(repositoryRoot);
   return new Map(records.flatMap(({ path }) => {
     const absolute = join(realRoot, path);
     try {
-      if (!lstatSync(absolute).isFile()) return [];
+      if (!files.lstat(absolute).isFile()) return [];
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | null)?.code;
       if (code === "ENOENT" || code === "ENOTDIR") return [];
       throw error;
     }
-    return [[path, sha256Bytes(readRunBytesNoFollow(absolute))] as const];
+    return [[path, sha256Bytes(files.readNoFollow(absolute))] as const];
   }));
 }
 
@@ -186,7 +204,7 @@ function observeAvailableTaskScope(
       repositoryChangedPaths,
       siblingOwnedPaths,
       engineSkeletons: args.engineSkeletons ?? [],
-      currentSkeletonDigests: currentSkeletonDigests(args.repositoryRoot, args.engineSkeletons ?? []),
+      currentSkeletonDigests: currentSkeletonDigests(args.repositoryRoot, args.engineSkeletons ?? [], ports.skeletonFiles),
     });
   } catch (error) {
     observationFailure = error;

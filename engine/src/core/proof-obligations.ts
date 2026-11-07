@@ -1,5 +1,10 @@
 import { canonicalStructuralEquals } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
+import {
+  isViolationReason,
+  type ConformanceViolation,
+  type ContractConformance,
+} from "./skeleton/conformance-verdict";
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
@@ -44,30 +49,6 @@ const mapNonEmpty = <A, B>(values: NonEmpty<A>, f: (value: A, index: number) => 
   const [head, ...tail] = values;
   return nonEmpty(f(head, 0), tail.map((value, index) => f(value, index + 1)));
 };
-
-/**
- * The proof channel's view of a completion conformance verdict (AD-5, FR-021):
- * the same shapes as CT-1's `ViolationReason`, `ConformanceViolation` and
- * `ContractConformance` in `core/skeleton/types`. They are declared here,
- * structurally, because that module imports the TaskGraph, which imports this
- * one: importing it would close a cycle. The compiler still binds the two —
- * the settlement shells hand the observation's `ContractConformance` straight
- * to this `contractConformance`, so a reason CT-1 adds that this list lacks
- * fails to compile there.
- */
-type ViolationReason =
-  | "deleted"
-  | "renamed"
-  | "retyped"
-  | "still-unimplemented"
-  | "shadows-frozen-adt"
-  | "re-lists-frozen-variants";
-
-type ConformanceViolation = Readonly<{ subject: string; reason: ViolationReason; remedy: string | null }>;
-
-type ContractConformance =
-  | Readonly<{ kind: "not-owed" }>
-  | Readonly<{ kind: "judged"; violations: ReadonlyMap<string, NonEmpty<ConformanceViolation>> }>;
 
 /** The engine-authored requirements for one implementation task. */
 export type ProofObligation =
@@ -250,13 +231,12 @@ export interface ObservedProofEvidence {
   readonly redThenGreen?: RedThenGreenObservation;
   /**
    * The completion conformance judgment (AD-5): `not-owed`, or every
-   * violation of the Task's in-scope files by artifact. Every settlement path
-   * decides it — the exact settlement and reconcile through
+   * violation of the Task's in-scope files by artifact. Required: every
+   * settlement path decides it — the exact settlement and reconcile through
    * `observeContractConformance`, the authority-free legacy stop as
-   * `not-owed`. Absent only where a Proof is built with no settlement at all
-   * (test fixtures, pre-G2 callers), which judges nothing.
+   * `not-owed` — so no path can skip the contract check by omission.
    */
-  readonly contractConformance?: ContractConformance;
+  readonly contractConformance: ContractConformance;
 }
 
 /**
@@ -591,8 +571,8 @@ const evaluateRedThenGreen = (
       });
 
 /** The violations the conformance judgment found in one artifact, or none. */
-const violationsOf = (conformance: ContractConformance | undefined, artifact: string): NonEmpty<ConformanceViolation> | undefined =>
-  conformance?.kind === "judged" ? conformance.violations.get(artifact) : undefined;
+const violationsOf = (conformance: ContractConformance, artifact: string): NonEmpty<ConformanceViolation> | undefined =>
+  conformance.kind === "judged" ? conformance.violations.get(artifact) : undefined;
 
 /**
  * The `declared-artifact-changed` arm (AD-5): a contract violation is
@@ -1008,19 +988,6 @@ function parseRedThenGreenObservation(
   return fail([`${path}.kind must be shown or unproven`]);
 }
 
-/** Every violation reason, bound to the union so a new reason fails here. */
-const VIOLATION_REASONS: Readonly<Record<ViolationReason, true>> = Object.freeze({
-  deleted: true,
-  renamed: true,
-  retyped: true,
-  "still-unimplemented": true,
-  "shadows-frozen-adt": true,
-  "re-lists-frozen-variants": true,
-});
-
-const isViolationReason = (raw: unknown): raw is ViolationReason =>
-  typeof raw === "string" && Object.hasOwn(VIOLATION_REASONS, raw);
-
 function parseConformanceViolation(raw: unknown, path: string): ProofParseResult<ConformanceViolation> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
   return parseExactRecordArm(raw, path, ["subject", "reason", "remedy"], () => {
@@ -1092,8 +1059,10 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   }
   const redThenGreen = raw.redThenGreen === undefined ? undefined : parseRedThenGreenObservation(raw.redThenGreen);
   if (redThenGreen !== undefined && !redThenGreen.ok) errors.push(...redThenGreen.errors);
-  const contractConformance = raw.contractConformance === undefined ? undefined : parseContractConformance(raw.contractConformance);
-  if (contractConformance !== undefined && !contractConformance.ok) errors.push(...contractConformance.errors);
+  // Required: an observation that has not decided conformance is refused,
+  // never read as judging nothing (AD-5).
+  const contractConformance = parseContractConformance(raw.contractConformance);
+  if (!contractConformance.ok) errors.push(...contractConformance.errors);
 
   if (typeof raw.taskCompleted !== "boolean") errors.push("taskCompleted must be a boolean");
   const files: string[] = [];
@@ -1113,7 +1082,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     errors.push("newTestEvidence must be a string when present");
   }
 
-  if (errors.length > 0) return fail(errors);
+  if (errors.length > 0 || !contractConformance.ok) return fail(errors);
   return ok(Object.freeze({
     taskCompleted: raw.taskCompleted === true,
     ...(testResult === undefined ? {} : { testResult }),
@@ -1121,7 +1090,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     ...(typeof raw.newTestsWritten === "boolean" ? { newTestsWritten: raw.newTestsWritten } : {}),
     ...(typeof raw.newTestEvidence === "string" ? { newTestEvidence: raw.newTestEvidence } : {}),
     ...(redThenGreen?.ok ? { redThenGreen: redThenGreen.value } : {}),
-    ...(contractConformance?.ok ? { contractConformance: contractConformance.value } : {}),
+    contractConformance: contractConformance.value,
   }));
 }
 

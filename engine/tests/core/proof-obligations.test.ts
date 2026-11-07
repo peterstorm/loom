@@ -25,9 +25,8 @@ import {
   type ObservedProofEvidence,
   type ProofObligationInput,
 } from "../../src/core/proof-obligations";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import type { ConformanceViolation, ContractConformance } from "../../src/core/skeleton/types";
-
-const NOT_OWED: ContractConformance = { kind: "not-owed" };
 
 const UNIMPLEMENTED: ConformanceViolation = { subject: "priceOrder", reason: "still-unimplemented", remedy: null };
 
@@ -42,7 +41,7 @@ const completeEvidence: ObservedProofEvidence = {
   filesModified: [...input.declaredArtifacts],
   newTestsWritten: true,
   newTestEvidence: "vitest: 12 tests passed",
-  contractConformance: NOT_OWED,
+  contractConformance: CONFORMANCE_NOT_OWED,
 };
 
 describe("proof obligation derivation", () => {
@@ -238,7 +237,7 @@ describe("proof evaluation", () => {
 
   it("evaluates every obligation exactly once even when several fail", () => {
     const obligations = deriveProofObligations(input);
-    const proof = evaluateProofObligations(obligations, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED });
+    const proof = evaluateProofObligations(obligations, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED });
 
     expect(proof.state).toBe("failed");
     expect(proof.results).toHaveLength(obligations.length);
@@ -307,7 +306,7 @@ describe("unknown-input parsers", () => {
   it("round-trips every authored proof state and rejects result coverage drift", () => {
     const proofs = [
       derivePendingTaskProof(input),
-      evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED }),
+      evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED }),
       evaluateTaskProof(input, completeEvidence),
     ];
     for (const proof of proofs) {
@@ -325,7 +324,7 @@ describe("unknown-input parsers", () => {
   });
 
   it("rejects state/result disagreement and forged aggregate evidence", () => {
-    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED });
+    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED });
     const wrongState = { ...JSON.parse(JSON.stringify(failed)), state: "satisfied", evidence: [] };
     expect(parseTaskProof(wrongState).ok).toBe(false);
 
@@ -437,7 +436,7 @@ describe("proof properties", () => {
             testResult: testsPass ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
             filesModified: artifacts.filter((_, index) => index % 2 === 0),
             newTestsWritten,
-            contractConformance: NOT_OWED,
+            contractConformance: CONFORMANCE_NOT_OWED,
           };
           const obligations = deriveProofObligations(source);
           const once = evaluateProofObligations(obligations, evidence);
@@ -466,7 +465,7 @@ describe("proof properties", () => {
             testResult: { verdict: "trusted-pass" },
             filesModified: artifacts,
             newTestsWritten: true,
-            contractConformance: NOT_OWED,
+            contractConformance: CONFORMANCE_NOT_OWED,
           };
           const variants: ObservedProofEvidence[] = [
             { ...full, testResult: undefined },
@@ -486,7 +485,7 @@ describe("proof properties", () => {
 
   it("PROPERTY: every proof/test ADT arm rejects surplus fields", () => {
     const pending = derivePendingTaskProof(input);
-    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: NOT_OWED });
+    const failed = evaluateTaskProof(input, { taskCompleted: false, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED });
     const satisfied = evaluateTaskProof(input, completeEvidence);
     const cases: readonly Readonly<{
       parser: (raw: unknown) => Readonly<{ ok: boolean }>;
@@ -537,7 +536,7 @@ describe("proof properties", () => {
           declaredArtifacts: [],
         },
       },
-      { parser: parseObservedProofEvidence, value: { taskCompleted: true, filesModified: [], contractConformance: NOT_OWED } },
+      { parser: parseObservedProofEvidence, value: { taskCompleted: true, filesModified: [], contractConformance: CONFORMANCE_NOT_OWED } },
       { parser: parseProofEvaluationPolicy, value: { untrustedPass: "reject" } },
     ];
 
@@ -626,8 +625,8 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
   });
 
   it("a not-owed observation leaves the changed test alone", () => {
-    expect(evaluateTaskProof(contractInput, observed([ARTIFACT, OTHER], NOT_OWED)).state).toBe("satisfied");
-    const unchanged = evaluateTaskProof(contractInput, observed([], NOT_OWED));
+    expect(evaluateTaskProof(contractInput, observed([ARTIFACT, OTHER], CONFORMANCE_NOT_OWED)).state).toBe("satisfied");
+    const unchanged = evaluateTaskProof(contractInput, observed([], CONFORMANCE_NOT_OWED));
     expect(unchanged.state === "failed" ? unchanged.failures.map(({ kind }) => kind) : []).toEqual([
       "declared-artifact-not-changed",
       "declared-artifact-not-changed",
@@ -694,9 +693,16 @@ describe("declared-artifact contract conformance (AD-5, FR-021)", () => {
     }).ok).toBe(false);
   });
 
-  it("parses both contractConformance arms into a defensive copy, and an absent one as no judgment", () => {
+  it("refuses an observation that has not decided contractConformance (AD-5: required, never judges nothing)", () => {
+    expect(parseObservedProofEvidence({ taskCompleted: true, filesModified: [ARTIFACT] })).toEqual({
+      ok: false,
+      errors: ["contractConformance must be decided as not-owed or judged"],
+    });
+    expect(parseObservedProofEvidence({ taskCompleted: true, filesModified: [ARTIFACT], contractConformance: undefined }).ok).toBe(false);
+  });
+
+  it("parses both contractConformance arms into a defensive copy", () => {
     const raw = { taskCompleted: true, filesModified: [ARTIFACT] };
-    expect(parseObservedProofEvidence(raw)).toEqual({ ok: true, value: { taskCompleted: true, filesModified: [ARTIFACT] } });
     expect(parseObservedProofEvidence({ ...raw, contractConformance: { kind: "not-owed" } })).toEqual({
       ok: true,
       value: { taskCompleted: true, filesModified: [ARTIFACT], contractConformance: { kind: "not-owed" } },

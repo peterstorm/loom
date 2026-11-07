@@ -22,8 +22,6 @@
  *   the scope still judges the Task's files against every other contract).
  */
 
-import { lstatSync } from "node:fs";
-import { join } from "node:path";
 import type { AcceptanceContract } from "../core/acceptance-contract";
 import type { DomainResult } from "../core/orchestration-contract";
 import { judgeConformance } from "../core/skeleton/conformance";
@@ -32,17 +30,13 @@ import { conformanceScope } from "../core/skeleton/scope";
 import type { ConformanceFile, ContractConformance, ContractSurface, SkeletonTarget } from "../core/skeleton/types";
 import type { Task, TaskGraph } from "../types";
 import { observeFrozenSurface, typedContract } from "./frozen-surface-observation";
-import { readRunBytesNoFollow, resolveBaseDirectory } from "./no-follow-fs";
-import { renderResolutionProblem } from "./skeleton-materialization";
+import { resolveBaseDirectory } from "./no-follow-fs";
+import { readRepositoryLeafNoFollow } from "./repository-leaf";
+import { renderResolutionProblem } from "../core/skeleton/problems";
 
 const NOT_OWED: ContractConformance = Object.freeze({ kind: "not-owed" });
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
-const isAbsence = (error: unknown): boolean => {
-  const code = (error as NodeJS.ErrnoException | null)?.code;
-  return code === "ENOENT" || code === "ENOTDIR";
-};
 
 /** Every value, or the first failure. */
 function allOf<T>(results: readonly DomainResult<T, string>[]): DomainResult<readonly T[], string> {
@@ -62,19 +56,10 @@ function observeSurface(root: string, contract: AcceptanceContract): DomainResul
 
 /** One in-scope file as the judge reads it: its text, or null when no regular file is there. */
 function observeFile(realRoot: string, target: SkeletonTarget): DomainResult<ConformanceFile, string> {
-  const absolute = join(realRoot, target.path);
-  try {
-    if (!lstatSync(absolute).isFile()) return { ok: true, value: Object.freeze({ target, text: null }) };
-  } catch (error) {
-    return isAbsence(error)
-      ? { ok: true, value: Object.freeze({ target, text: null }) }
-      : { ok: false, error: `cannot observe ${target.path}: ${errorMessage(error)}` };
-  }
-  try {
-    return { ok: true, value: Object.freeze({ target, text: readRunBytesNoFollow(absolute).toString("utf-8") }) };
-  } catch (error) {
-    return { ok: false, error: `cannot read ${target.path} without following a link: ${errorMessage(error)}` };
-  }
+  const leaf = readRepositoryLeafNoFollow(realRoot, target.path);
+  if (!leaf.ok) return { ok: false, error: `${target.path}: ${leaf.error}` };
+  const text = leaf.value.kind === "file" ? leaf.value.bytes.toString("utf-8") : null;
+  return { ok: true, value: Object.freeze({ target, text }) };
 }
 
 export function observeContractConformance(

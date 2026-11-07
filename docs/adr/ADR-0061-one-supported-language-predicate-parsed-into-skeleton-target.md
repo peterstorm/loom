@@ -118,8 +118,8 @@ every consumer of the decision takes the parsed value.**
   - `engine/src/core/skeleton/scope.ts`: AD-11, which production files and which types file are TypeScript or
     Java for conformance.
   - `engine/src/orchestration/skeleton-materialization.ts`: parses each bound path into the target it
-    generates at registration. The Contract Revision refresh in `engine/src/handlers/helpers/revise-contract.ts`
-    reuses these candidates.
+    generates at registration. The Contract Revision refresh in `engine/src/orchestration/skeleton-revision.ts`
+    reuses the shared generation in `engine/src/orchestration/skeleton-refresh.ts`.
   - `engine/src/orchestration/contract-stub-materialization.ts`: parses each bound path at the contract Task's
     stop.
   - `engine/src/orchestration/frozen-surface-observation.ts`: picks the TypeScript or Java reader for a types

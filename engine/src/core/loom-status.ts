@@ -540,6 +540,22 @@ const windowReasonKind = (recovery: WaveImplementationRecovery): StatusReason["k
     .exhaustive();
 
 /**
+ * The named reason a spawn is owed while status could not observe the
+ * Wave's skeletons: nothing blocks on it (registration observes them again
+ * and refuses on what it cannot read), but the operator sees why status
+ * shows no outcome and no stage-two problem. Nothing for any other recovery,
+ * or a report that observed.
+ */
+function skeletonsUnobservedReason(recovery: WaveImplementationRecovery, skeletons: SkeletonStatusReport): readonly StatusReason[] {
+  if (recovery.kind !== "spawn-wave-implementation" || skeletons.kind !== "unobserved") return [];
+  return [statusReason(
+    "skeletons-unobserved",
+    `status could not observe Wave ${recovery.wave}'s skeleton paths (${skeletons.reason}); ` +
+      "registration observes them again and refuses the spawn on anything it cannot read",
+  )];
+}
+
+/**
  * The implementation window's status: an execute Wave without a live Wave
  * Gate. Routing it through the readiness path reported invalid authority and
  * blanked every fact category; here the facts are derivable and the owed move
@@ -551,11 +567,8 @@ function unstartedWaveStatus(
   graph: TaskGraph,
   deps: StatusDeps,
 ): LoomStatus | null {
-  const window = classifyImplementationWindow(
-    graph,
-    deps.implementationReservations,
-    unresolvedSkeletonBindings(deps.skeletons ?? SKELETONS_NOT_OBSERVED),
-  );
+  const skeletons = deps.skeletons ?? SKELETONS_NOT_OBSERVED;
+  const window = classifyImplementationWindow(graph, deps.implementationReservations, unresolvedSkeletonBindings(skeletons));
   if (window.kind === "not-in-window") return null;
   if (window.kind === "contradiction") return deriveUnavailableLoomStatus([window.reason]);
   if (window.kind === "unavailable") return unavailableStatus(window.message);
@@ -572,6 +585,7 @@ function unstartedWaveStatus(
       task.taskId,
     )),
     statusReason(windowReasonKind(recovery), message),
+    ...skeletonsUnobservedReason(recovery, skeletons),
   ];
 
   return canonicalRecord({

@@ -87,8 +87,8 @@ it before `runStopChecks` and before settlement.**
   2. *Generate.* Each resolved binding whose path `skeletonLanguageOf` (INV-6) maps to the types
      file's language gets the same canonical bytes registration writes, from `generateSkeleton`. A
      language mismatch is a `language-mismatch` problem. An unsupported path gets nothing.
-  3. *Plan.* The pure `planContractStubs` decides each path's action through `isUntouchedSkeleton`
-     (INV-4): `create` a missing path; `adopt` a file that already holds the canonical bytes;
+  3. *Plan.* The pure `planSkeletonRefresh` (`candidate-driven`, `core/skeleton/refresh-plan.ts`) decides
+     each path's action through `presentSkeletonOf` (INV-4): `create` a missing path; `adopt` a file that already holds the canonical bytes;
      `refresh` an untouched stub whose canonical bytes changed after a stop-check block and further
      types-file edits. A file anyone else wrote gets no action.
   4. *Write.* `createSkeleton` and `refreshSkeleton` in `skeleton-writer.ts` (INV-3) never write a
@@ -111,9 +111,10 @@ it before `runStopChecks` and before settlement.**
   frozen path. At its owning implementation Wave it is an ordinary skeleton record: it reports
   "skeleton written (contract stub)", and the US5 and US6 conformance checks apply to it. Engine-byte
   subtraction (ADR for AD-5) keeps an untouched stub out of the contract Task's out-of-scope set.
-- **Shared with revision.** `canonicalContractSkeletons`, `observeSkeletonPaths` and `writeFailure`
-  are also used by the Contract Revision refresh (AD-10, `handlers/helpers/revise-contract.ts`), so
-  both refresh paths generate and observe the same way.
+- **Shared with revision.** `canonicalContractSkeletons`, `writePlanned` and `writeFailure`
+  (`orchestration/skeleton-refresh.ts`), `observeSkeletonPaths` (`orchestration/skeleton-observation.ts`)
+  and the planner are also used by the Contract Revision refresh (AD-10, `orchestration/skeleton-revision.ts`),
+  so both refresh paths generate, observe, decide and write the same way.
 
 ## Consequences
 

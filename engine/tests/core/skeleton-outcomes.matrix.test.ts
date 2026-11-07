@@ -1,8 +1,8 @@
 /**
  * INV-4 matrix: each file_list path's skeleton outcome, and whether an
  * existing skeleton is engine-untouched, are decided only by
- * `core/skeleton/outcomes.ts` (`skeletonOutcomesOf` and its `skeletonOutcomes`
- * wrapper, `isUntouchedSkeleton`).
+ * `core/skeleton/outcomes.ts` (`skeletonOutcomesOf`, `isUntouchedSkeleton`,
+ * and `presentSkeletonOf` for what an untouched file holds).
  *
  * Owner rows (T9): one graph and one observation set exercise every step of
  * the AD-13 precedence, and every pair of steps where a lower step would
@@ -16,22 +16,24 @@
  *   4. bound and unsupported → `unsupported-language` with the reason;
  *   5. bound and supported → `skeleton-written { origin: "spawn" }`.
  * Test files never get an outcome; an unknown Task is `unknown-task`, never
- * an empty list (the wrapper keeps its empty list for known-id callers), while
- * a Task with no production files has an empty list. The five render
- * strings are exact.
+ * an empty list, while a Task with no production files has an empty list.
+ * `presentSkeletonOf` is `touched` exactly when the file is not untouched,
+ * else `canonical` or `engine-bytes`. The five render strings are exact.
  *
  * Sibling row (T11): the spawn materialization's `planTaskSkeletons`, fed
  * this same graph and observation set, records exactly the owner's outcome
- * per path, and maps only an owner-decided `skeleton-written` outcome to a
- * write: create when absent, adopt canonical bytes with no record, nothing
- * for an already untouched recorded skeleton or any other outcome.
+ * per path, refuses an `unknown-task`, and maps only an owner-decided
+ * `skeleton-written` outcome to a write: create when absent, adopt canonical
+ * bytes with no record, refresh only `engine-bytes`, nothing for any other
+ * outcome.
  *
- * Sibling rows (T13): the contract stop's `planContractStubs` and the
- * revision's `planSkeletonRevision`, fed this same graph's records and
- * observation set with a canonical skeleton per writable bound path, act on a
- * present file exactly when the owner judges it untouched (create, adopt or
- * refresh; refresh or re-record), flag a record stale exactly when the owner
- * judges its file touched, and agree with the owner's outcome for the path.
+ * Sibling rows (T13): `planSkeletonRefresh`, the one planner of the contract
+ * stop (`candidate-driven`) and the revision (`record-driven`), fed this
+ * same graph's records and observation set with a canonical skeleton per
+ * writable bound path, acts on a present file exactly when the owner judges
+ * it untouched (adopt when `canonical`, else refresh), flags a record stale
+ * exactly when the owner judges its file touched, and agrees with the
+ * owner's outcome for the path.
  *
  * Sibling rows (T14): `helper orchestration status`'s `skeletonStatusReport`
  * and the brief's `renderFrozenSignatures`, fed this same graph (Wave 2
@@ -43,23 +45,23 @@
 
 import { describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-import { renderFrozenSignatures } from "../../src/core/implementation-brief";
-import { isUntouchedSkeleton, renderSkeletonOutcome, skeletonOutcomes, skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
+import { renderFrozenSignatures, TASK_NOT_OBSERVED } from "../../src/core/implementation-brief";
+import { isUntouchedSkeleton, presentSkeletonOf, renderSkeletonOutcome, skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
+import type { SkeletonCandidate } from "../../src/core/skeleton/records";
+import { planSkeletonRefresh } from "../../src/core/skeleton/refresh-plan";
+import type { SkeletonGraph } from "../../src/core/skeleton/graph-view";
 import { renderSkeletonStatus, skeletonStatusReport } from "../../src/core/skeleton/status";
 import type {
   ExportBinding,
-  GeneratedSkeleton,
   Identifier,
   PathObservation,
   SkeletonOutcome,
   SkeletonRecord,
 } from "../../src/core/skeleton/types";
-import { planSkeletonRevision } from "../../src/handlers/helpers/revise-contract";
-import { planContractStubs } from "../../src/orchestration/contract-stub-materialization";
-import { planTaskSkeletons, type SkeletonCandidate } from "../../src/orchestration/skeleton-materialization";
+import { planTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
 import type { Task } from "../../src/types";
 import { digest } from "../fixtures/acceptance-fixtures";
+import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const ENGINE = "e".repeat(64);
@@ -192,7 +194,7 @@ const NO_TYPES: SkeletonOutcome = { kind: "contract-has-no-types-file" };
 
 describe("INV-4 owner: skeletonOutcomes precedence over one graph and observation set", () => {
   it("gives exactly one outcome per non-test path of a binder, in file_list order", () => {
-    expect(skeletonOutcomes(GRAPH, "T2", OBSERVATIONS)).toEqual([
+    expect(knownSkeletonOutcomes(GRAPH, "T2", OBSERVATIONS)).toEqual([
       { path: "src/stub.ts", outcome: written("contract-stub") },
       { path: "src/adopted.ts", outcome: written("spawn") },
       { path: "src/refreshed.ts", outcome: written("revision") },
@@ -208,7 +210,7 @@ describe("INV-4 owner: skeletonOutcomes precedence over one graph and observatio
   });
 
   it("a claimant of a Types-file-none contract: unbound paths say so, bound and present paths keep their steps", () => {
-    expect(skeletonOutcomes(GRAPH, "T3", OBSERVATIONS)).toEqual([
+    expect(knownSkeletonOutcomes(GRAPH, "T3", OBSERVATIONS)).toEqual([
       { path: "src/cli.ts", outcome: NO_TYPES },
       { path: "src/cli-bound.ts", outcome: written("spawn") },
       { path: "src/cli-present.ts", outcome: EXISTS },
@@ -216,30 +218,22 @@ describe("INV-4 owner: skeletonOutcomes precedence over one graph and observatio
   });
 
   it("a claimant of only a typed contract has no bound exports on an unbound path", () => {
-    expect(skeletonOutcomes(GRAPH, "T4", OBSERVATIONS)).toEqual([{ path: "src/typed-helper.ts", outcome: NO_BOUND }]);
+    expect(knownSkeletonOutcomes(GRAPH, "T4", OBSERVATIONS)).toEqual([{ path: "src/typed-helper.ts", outcome: NO_BOUND }]);
   });
 
   it("the contract Task of a Types-file-none contract is no claimant of it", () => {
-    expect(skeletonOutcomes(GRAPH, "T1", new Map()).map(({ outcome }) => outcome)).toEqual([NO_BOUND]);
+    expect(knownSkeletonOutcomes(GRAPH, "T1", new Map()).map(({ outcome }) => outcome)).toEqual([NO_BOUND]);
   });
 
   it("an unknown Task is unknown-task, distinguishable from a Task with no production files", () => {
     expect(skeletonOutcomesOf(GRAPH, "T9", OBSERVATIONS)).toEqual({ ok: false, error: { kind: "unknown-task", taskId: "T9" } });
     const testsOnly: SkeletonGraph = { ...GRAPH, tasks: [...GRAPH.tasks, task("T5", ["tests/only.test.ts"])] };
     expect(skeletonOutcomesOf(testsOnly, "T5", OBSERVATIONS)).toEqual({ ok: true, value: [] });
-    // The known-id wrapper the shells still call keeps its empty list for an unknown id.
-    expect(skeletonOutcomes(GRAPH, "T9", OBSERVATIONS)).toEqual([]);
-  });
-
-  it("the wrapper is skeletonOutcomesOf's value for every known Task", () => {
-    for (const id of ["T1", "T2", "T3", "T4"]) {
-      expect(skeletonOutcomesOf(GRAPH, id, OBSERVATIONS)).toEqual({ ok: true, value: skeletonOutcomes(GRAPH, id, OBSERVATIONS) });
-    }
   });
 
   it("a graph without bindings or records: every absent path is unbound, every present one exists", () => {
     const graph = graphFixture([task("T2", ["src/a.ts", "src/b.ts"])]);
-    expect(skeletonOutcomes(graph, "T2", new Map([["src/b.ts", present(ENGINE, ENGINE)]]))).toEqual([
+    expect(knownSkeletonOutcomes(graph, "T2", new Map([["src/b.ts", present(ENGINE, ENGINE)]]))).toEqual([
       { path: "src/a.ts", outcome: NO_BOUND },
       { path: "src/b.ts", outcome: written("spawn") },
     ]);
@@ -265,6 +259,25 @@ describe("INV-4 owner: isUntouchedSkeleton", () => {
   }
 });
 
+describe("INV-4 owner: presentSkeletonOf", () => {
+  const rows: readonly [string, SkeletonRecord | undefined, string, string | null, ReturnType<typeof presentSkeletonOf>][] = [
+    ["recorded engine digest, other canonical bytes", record("src/a.ts", "spawn"), ENGINE, CANONICAL, "engine-bytes"],
+    ["recorded engine digest, no canonical bytes", record("src/a.ts", "spawn"), ENGINE, null, "engine-bytes"],
+    ["recorded engine digest that is the canonical digest", record("src/a.ts", "spawn"), ENGINE, ENGINE, "canonical"],
+    ["canonical bytes with a record", record("src/a.ts", "spawn"), CANONICAL, CANONICAL, "canonical"],
+    ["canonical bytes without a record", undefined, CANONICAL, CANONICAL, "canonical"],
+    ["edited bytes with a record", record("src/a.ts", "spawn"), EDITED, CANONICAL, "touched"],
+    ["edited bytes, no record, no canonical", undefined, EDITED, null, "touched"],
+    ["a link or directory (no content digest)", record("src/a.ts", "spawn"), "", CANONICAL, "touched"],
+  ];
+  for (const [name, recorded, current, canonical, present] of rows) {
+    it(`${name} → ${present}`, () => {
+      expect(presentSkeletonOf(recorded, current, canonical)).toBe(present);
+      expect(present === "touched").toBe(!isUntouchedSkeleton(recorded, current, canonical));
+    });
+  }
+});
+
 describe("INV-4 owner: exact render strings", () => {
   const rows: readonly [SkeletonOutcome, string][] = [
     [written("spawn"), "skeleton written"],
@@ -284,7 +297,7 @@ describe("INV-4 owner: exact render strings", () => {
 
   it("renders every outcome of the matrix graph to one of the five strings", () => {
     const strings = new Set(["T1", "T2", "T3", "T4"].flatMap((id) =>
-      skeletonOutcomes(GRAPH, id, OBSERVATIONS).map(({ outcome }) => renderSkeletonOutcome(outcome))));
+      knownSkeletonOutcomes(GRAPH, id, OBSERVATIONS).map(({ outcome }) => renderSkeletonOutcome(outcome))));
     expect([...strings].sort()).toEqual([
       "contract has no types file, no skeletons",
       "exists, not skeletonized",
@@ -295,12 +308,14 @@ describe("INV-4 owner: exact render strings", () => {
   });
 });
 
+/** The canonical skeleton of one bound path, as stage two and the stub and revision steps generate it. */
+const candidate = (path: string): SkeletonCandidate => ({
+  skeleton: { path, language: path.endsWith(".java") ? "java" : "typescript", bytes: `// ${path}\n`, sha256: CANONICAL },
+  contract: "CT-1",
+  typesSha256: "f".repeat(64),
+});
+
 describe("INV-4 sibling: planTaskSkeletons (spawn materialization) agrees with the owner", () => {
-  const candidate = (path: string): SkeletonCandidate => ({
-    skeleton: { path, language: path.endsWith(".java") ? "java" : "typescript", bytes: `// ${path}\n`, sha256: CANONICAL },
-    contract: "CT-1",
-    typesSha256: "f".repeat(64),
-  });
   /** A canonical skeleton for every bound supported path, as stage two generates them. */
   const CANDIDATES: ReadonlyMap<string, SkeletonCandidate> = new Map([
     "src/adopted.ts",
@@ -312,13 +327,20 @@ describe("INV-4 sibling: planTaskSkeletons (spawn materialization) agrees with t
     "src/cli-bound.ts",
   ].map((path) => [path, candidate(path)] as const));
 
-  for (const taskId of ["T1", "T2", "T3", "T4", "T9"]) {
+  for (const taskId of ["T1", "T2", "T3", "T4"]) {
     it(`${taskId}: records exactly the owner's outcome for every path`, () => {
       const plan = planTaskSkeletons(GRAPH, taskId, OBSERVATIONS, CANDIDATES);
       expect(plan.ok).toBe(true);
-      if (plan.ok) expect(plan.value.outcomes).toEqual(skeletonOutcomes(GRAPH, taskId, OBSERVATIONS));
+      if (plan.ok) expect(plan.value.outcomes).toEqual(knownSkeletonOutcomes(GRAPH, taskId, OBSERVATIONS));
     });
   }
+
+  it("refuses to plan a Task the owner calls unknown-task, naming it", () => {
+    expect(planTaskSkeletons(GRAPH, "T9", OBSERVATIONS, CANDIDATES)).toEqual({
+      ok: false,
+      error: ["T9 is not a Task of the TaskGraph; no skeleton can be planned for it"],
+    });
+  });
 
   it("writes only where the owner says skeleton-written: create absent paths, adopt unrecorded canonical bytes", () => {
     const plan = planTaskSkeletons(GRAPH, "T2", OBSERVATIONS, CANDIDATES);
@@ -336,7 +358,7 @@ describe("INV-4 sibling: planTaskSkeletons (spawn materialization) agrees with t
   it("refreshes an untouched recorded skeleton whose canonical bytes changed, keeping its origin", () => {
     const stale = new Map(OBSERVATIONS).set("src/stub.ts", present(ENGINE, CANONICAL));
     const plan = planTaskSkeletons(GRAPH, "T2", stale, new Map(CANDIDATES).set("src/stub.ts", candidate("src/stub.ts")));
-    expect(plan.ok && plan.value.outcomes).toEqual(skeletonOutcomes(GRAPH, "T2", stale));
+    expect(plan.ok && plan.value.outcomes).toEqual(knownSkeletonOutcomes(GRAPH, "T2", stale));
     expect(plan.ok && plan.value.actions.find((action) => action.candidate.skeleton.path === "src/stub.ts")).toEqual({
       kind: "refresh",
       candidate: candidate("src/stub.ts"),
@@ -358,48 +380,57 @@ describe("INV-4 sibling: planTaskSkeletons (spawn materialization) agrees with t
 
 /** The canonical skeleton of every bound T2 path the generator can write, in
  *  stamp order, as the stub and revision steps generate them. */
-const SKELETONS: readonly GeneratedSkeleton[] = (GRAPH.export_bindings ?? [])
+const CANDIDATE_LIST: readonly SkeletonCandidate[] = (GRAPH.export_bindings ?? [])
   .filter(({ path }) => (T2_FILES as readonly string[]).includes(path) && !path.endsWith(".kt"))
-  .map(({ path }) => ({ path, language: path.endsWith(".java") ? "java" : "typescript", bytes: `// ${path}\n`, sha256: CANONICAL }));
+  .map(({ path }) => candidate(path));
 
-const T2_OUTCOMES = new Map(skeletonOutcomes(GRAPH, "T2", OBSERVATIONS).map(({ path, outcome }) => [path, outcome] as const));
+const T2_OUTCOMES = new Map(knownSkeletonOutcomes(GRAPH, "T2", OBSERVATIONS).map(({ path, outcome }) => [path, outcome] as const));
 const recordAt = (path: string): SkeletonRecord | undefined => (GRAPH.skeletons ?? []).find((recorded) => recorded.path === path);
 const currentSha = (path: string): string | null => {
   const observation = OBSERVATIONS.get(path);
   return observation?.kind === "present" ? observation.sha256 : null;
 };
 
-describe("INV-4 sibling: planContractStubs (the contract Task's stop) agrees with the owner", () => {
-  const actions = planContractStubs(GRAPH.skeletons ?? [], OBSERVATIONS, SKELETONS);
+describe("INV-4 sibling: planSkeletonRefresh candidate-driven (the contract Task's stop) agrees with the owner", () => {
+  const actions = planSkeletonRefresh("candidate-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST);
 
   it("creates absent stubs, adopts canonical bytes, refreshes untouched engine bytes, and never touches the rest", () => {
-    expect(actions.map((action) => [action.kind, action.skeleton.path])).toEqual([
+    expect(actions.map((action) => [action.kind, action.candidate.skeleton.path])).toEqual([
       ["create", "src/main/java/a/b/C.java"],
       ["create", "src/pricing.ts"],
       ["refresh", "src/stub.ts"],
       ["adopt", "src/adopted.ts"],
       ["adopt", "src/refreshed.ts"],
     ]);
-    expect(actions.find((action) => action.skeleton.path === "src/stub.ts")).toMatchObject({ expectedSha256: ENGINE });
+    expect(actions.find((action) => action.candidate.skeleton.path === "src/stub.ts")).toEqual({
+      kind: "refresh",
+      candidate: candidate("src/stub.ts"),
+      expectedSha256: ENGINE,
+    });
   });
 
   it("acts on a present path exactly when the owner judges it untouched, and only where the owner says skeleton-written", () => {
-    for (const skeleton of SKELETONS) {
-      const acted = actions.some((action) => action.skeleton.path === skeleton.path);
+    for (const { skeleton } of CANDIDATE_LIST) {
+      const acted = actions.find((action) => action.candidate.skeleton.path === skeleton.path);
       const sha = currentSha(skeleton.path);
-      if (sha !== null) expect(acted, skeleton.path).toBe(isUntouchedSkeleton(recordAt(skeleton.path), sha, CANONICAL));
-      if (acted) expect(T2_OUTCOMES.get(skeleton.path)?.kind, skeleton.path).toBe("skeleton-written");
+      if (sha !== null) {
+        expect(acted !== undefined, skeleton.path).toBe(isUntouchedSkeleton(recordAt(skeleton.path), sha, CANONICAL));
+        if (acted !== undefined) {
+          expect(acted.kind, skeleton.path).toBe(presentSkeletonOf(recordAt(skeleton.path), sha, CANONICAL) === "canonical" ? "adopt" : "refresh");
+        }
+      }
+      if (acted !== undefined) expect(T2_OUTCOMES.get(skeleton.path)?.kind, skeleton.path).toBe("skeleton-written");
     }
   });
 });
 
-describe("INV-4 sibling: planSkeletonRevision (the Contract Revision) agrees with the owner", () => {
-  const actions = planSkeletonRevision(GRAPH.skeletons ?? [], OBSERVATIONS, SKELETONS);
+describe("INV-4 sibling: planSkeletonRefresh record-driven (the Contract Revision) agrees with the owner", () => {
+  const actions = planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST);
 
-  it("refreshes untouched engine bytes, re-records canonical ones, and flags modified ones stale", () => {
-    expect(actions.map((action) => [action.kind, action.record.path])).toEqual([
+  it("refreshes untouched engine bytes, adopts canonical ones, flags modified ones stale, and skips unresolved untouched ones", () => {
+    expect(actions.map((action) => [action.kind, action.kind === "stale" ? action.record.path : action.candidate.skeleton.path])).toEqual([
       ["stale", "src/edited.ts"],
-      ["re-record", "src/refreshed.ts"],
+      ["adopt", "src/refreshed.ts"],
       ["refresh", "src/stub.ts"],
     ]);
   });
@@ -408,10 +439,21 @@ describe("INV-4 sibling: planSkeletonRevision (the Contract Revision) agrees wit
     for (const record of GRAPH.skeletons ?? []) {
       const sha = currentSha(record.path);
       if (sha === null) continue;
+      const canonical = CANDIDATE_LIST.some(({ skeleton }) => skeleton.path === record.path) ? CANONICAL : null;
       const stale = actions.some((action) => action.kind === "stale" && action.record.path === record.path);
-      expect(stale, record.path).toBe(!isUntouchedSkeleton(record, sha, CANONICAL));
+      expect(stale, record.path).toBe(!isUntouchedSkeleton(record, sha, canonical));
       if (stale) expect(T2_OUTCOMES.get(record.path), record.path).toEqual(EXISTS);
     }
+  });
+
+  it("flags a modified record stale even when its binding no longer resolves, and needs nothing for a deleted file", () => {
+    const observations = new Map(OBSERVATIONS).set("src/unbound-skeleton.ts", present(EDITED)).set("src/stub.ts", ABSENT);
+    expect(planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], observations, CANDIDATE_LIST)
+      .map((action) => [action.kind, action.kind === "stale" ? action.record.path : action.candidate.skeleton.path])).toEqual([
+      ["stale", "src/edited.ts"],
+      ["adopt", "src/refreshed.ts"],
+      ["stale", "src/unbound-skeleton.ts"],
+    ]);
   });
 });
 
@@ -427,7 +469,7 @@ describe("INV-4 sibling: skeletonStatusReport (helper orchestration status) agre
     if (report.kind !== "reported") return;
     expect(report.tasks.map(({ taskId }) => taskId)).toEqual([...WAVE_2_TASKS]);
     for (const { taskId, files } of report.tasks) {
-      expect(files.map(({ path, outcome }) => ({ path, outcome })), taskId).toEqual(skeletonOutcomes(WAVE_2, taskId, OBSERVATIONS));
+      expect(files.map(({ path, outcome }) => ({ path, outcome })), taskId).toEqual(knownSkeletonOutcomes(WAVE_2, taskId, OBSERVATIONS));
       expect(files.every(({ basis }) => basis === "projected"), taskId).toBe(true);
     }
   });
@@ -435,7 +477,7 @@ describe("INV-4 sibling: skeletonStatusReport (helper orchestration status) agre
   it("renders each path with the owner's exact string", () => {
     const lines = renderSkeletonStatus(report);
     for (const taskId of WAVE_2_TASKS) {
-      for (const { path, outcome } of skeletonOutcomes(WAVE_2, taskId, OBSERVATIONS)) {
+      for (const { path, outcome } of knownSkeletonOutcomes(WAVE_2, taskId, OBSERVATIONS)) {
         expect(lines, path).toContain(`  - ${taskId} ${path}: ${renderSkeletonOutcome(outcome)} (projected)`);
       }
     }
@@ -454,7 +496,7 @@ describe("INV-4 sibling: skeletonStatusReport (helper orchestration status) agre
       return reported.kind === "reported" ? reported.tasks.find((entry) => entry.taskId === taskId)?.files : undefined;
     };
     expect(files("T4")).toEqual([{ path: "src/typed-helper.ts", outcome: recorded, basis: "recorded" }]);
-    expect(files("T2")?.map(({ path, outcome }) => ({ path, outcome }))).toEqual(skeletonOutcomes(graph, "T2", OBSERVATIONS));
+    expect(files("T2")?.map(({ path, outcome }) => ({ path, outcome }))).toEqual(knownSkeletonOutcomes(graph, "T2", OBSERVATIONS));
   });
 });
 
@@ -464,7 +506,7 @@ describe("INV-4 sibling: renderFrozenSignatures (the implementation brief) agree
       const subject = WAVE_2.tasks.find(({ id }) => id === taskId);
       if (subject === undefined) throw new Error(taskId);
       const section = renderFrozenSignatures(subject, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [] });
-      const outcomes = skeletonOutcomes(WAVE_2, taskId, OBSERVATIONS);
+      const outcomes = knownSkeletonOutcomes(WAVE_2, taskId, OBSERVATIONS);
       for (const { path, outcome } of outcomes) {
         expect(section.split("\n"), path).toContain(`- \`${path}\` — ${renderSkeletonOutcome(outcome)}`);
       }
@@ -472,4 +514,11 @@ describe("INV-4 sibling: renderFrozenSignatures (the implementation brief) agree
       expect(listed).toHaveLength(outcomes.length);
     });
   }
+
+  it("states no outcome for a Task the owner calls unknown-task, saying the observed graph does not hold it", () => {
+    const stranger = task("T9", ["src/pricing.ts"]);
+    expect(skeletonOutcomesOf(WAVE_2, "T9", OBSERVATIONS).ok).toBe(false);
+    expect(renderFrozenSignatures(stranger, { graph: WAVE_2, observations: OBSERVATIONS, surfaces: new Map(), unresolved: [] }))
+      .toBe(TASK_NOT_OBSERVED);
+  });
 });

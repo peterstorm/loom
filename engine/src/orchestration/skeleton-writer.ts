@@ -13,24 +13,40 @@
  *   every directory is opened through the anchored no-follow primitives, so a
  *   component swapped after the walk fails the write instead of redirecting it.
  *
+ * Both first write the bytes, complete and with the skeleton mode, to a
+ * prepared name beside the target, then publish them under the target name
+ * with one syscall, and remove the prepared name whatever happened.
+ *
  * `createSkeleton` never replaces anything (FR-011): an existing leaf of any
- * kind is `exists`. It writes the bytes to a prepared file in the target
- * directory, then publishes it with `link(prepared, target)`, which fails with
- * `EEXIST` rather than overwrite, and drops the prepared name.
+ * kind is `exists`. It publishes with `link(prepared, target)`, which fails
+ * with `EEXIST` rather than overwrite, so a file that appears at any moment
+ * before the link is never replaced.
  *
  * `refreshSkeleton` replaces a file only when its current bytes digest to
  * `expectedSha256` (the engine's own bytes): otherwise `modified`. A missing
- * file is `absent` and a non-regular leaf `not-a-regular-file`. It renames a
- * prepared temp file over the target.
+ * file is `absent` and a non-regular leaf `not-a-regular-file`. It publishes
+ * with `rename(prepared, target)`. POSIX has no compare-and-rename, so the
+ * guard is placed as late as it can be: the replacement is prepared first,
+ * and only then are the target's bytes read (no-follow) and digested,
+ * immediately followed by the rename. A write that lands before that read —
+ * at any time during the walk, the directory opens or the preparation — is
+ * seen and refused as `modified`. The window that remains is the interval
+ * between that read returning and the rename taking effect, with no I/O in
+ * it but the rename itself: a write landing there (in place, or by replacing
+ * the name) is lost. Closing it would take an atomic exchange
+ * (`renameat2(RENAME_EXCHANGE)`) and a verified swap back, which Node does
+ * not expose.
  *
  * Each file is complete or absent (NFR-021): bytes only ever appear under the
- * target name through one link or one rename, and every prepared name is
- * removed whatever happens. Missing parent directories are created one
+ * target name through one link or one rename. A prepared name that cannot be
+ * removed after the bytes were published leaves the write `written`, naming
+ * the prepared name left behind (`leftover`); after anything else, it is an
+ * `io-failed` naming both. Missing parent directories are created one
  * anchored component at a time. There is no retry; an I/O failure is
  * `io-failed` with the operating system's message.
  */
 
-import { linkSync, lstatSync, mkdirSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { sha256Bytes, sha256Hex } from "../core/digest";
 import { normalizePlanPath } from "../core/plan-path-match";
@@ -56,7 +72,9 @@ export type SkeletonWriteRefusal =
   | "modified";
 
 export type SkeletonWriteResult =
-  | Readonly<{ kind: "written"; sha256: string }>
+  /** The bytes are published under the target name. `leftover` is the prepared
+   *  name that could not be removed afterwards, if any: the write still stands. */
+  | Readonly<{ kind: "written"; sha256: string; leftover: null | Readonly<{ name: string; message: string }> }>
   | Readonly<{ kind: "exists" }>
   | Readonly<{ kind: "refused"; reason: SkeletonWriteRefusal }>
   | Readonly<{ kind: "io-failed"; message: string }>;
@@ -67,8 +85,8 @@ const DIRECTORY_MODE = 0o755;
 
 const refused = (reason: SkeletonWriteRefusal): SkeletonWriteResult => Object.freeze({ kind: "refused", reason });
 const EXISTS: SkeletonWriteResult = Object.freeze({ kind: "exists" });
-const ioFailed = (error: unknown): SkeletonWriteResult =>
-  Object.freeze({ kind: "io-failed", message: error instanceof Error ? error.message : String(error) });
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const ioFailed = (error: unknown): SkeletonWriteResult => Object.freeze({ kind: "io-failed", message: messageOf(error) });
 
 const errnoOf = (error: unknown): string | undefined => (error as NodeJS.ErrnoException | null)?.code;
 
@@ -155,10 +173,6 @@ function openParent(root: AnchoredDirectory, directories: readonly string[]): An
   }
 }
 
-/** A prepared name beside the target, unique to this write. */
-const preparedName = (leaf: string): string =>
-  `.${leaf}.loom-skeleton-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
 type Effect = (parent: AnchoredDirectory, leaf: string) => SkeletonWriteResult;
 
 /** The shared rules, then `effect` inside the anchored parent directory. */
@@ -194,26 +208,78 @@ function guarded(
   }
 }
 
+/** A prepared name beside the target, unique to this write. */
+const preparedName = (leaf: string): string =>
+  `.${leaf}.loom-skeleton-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const written = (bytes: string): SkeletonWriteResult => Object.freeze({ kind: "written", sha256: sha256Hex(bytes), leftover: null });
+
+/**
+ * What a write reports when its prepared name could not be removed
+ * afterwards. Bytes that reached the target are published: still `written`,
+ * naming the prepared name left behind. Any other result becomes an I/O
+ * failure naming both what happened and the name left behind.
+ */
+export function withPreparedNameLeft(result: SkeletonWriteResult, prepared: string, error: unknown): SkeletonWriteResult {
+  const leftover = Object.freeze({ name: prepared, message: messageOf(error) });
+  switch (result.kind) {
+    case "written":
+      return Object.freeze({ ...result, leftover });
+    case "exists":
+      return ioFailed(`a file appeared at the target meanwhile, and the prepared name ${prepared} was left behind (${leftover.message})`);
+    case "refused":
+      return ioFailed(`refused (${result.reason}), and the prepared name ${prepared} was left behind (${leftover.message})`);
+    case "io-failed":
+      return ioFailed(`${result.message}, and the prepared name ${prepared} was left behind (${leftover.message})`);
+  }
+}
+
+/**
+ * Write `bytes` to a prepared name beside the target (complete, with the
+ * skeleton mode), let `publish` put them under the target name, then remove
+ * the prepared name whatever happened.
+ */
+function publishPrepared(
+  parent: AnchoredDirectory,
+  leaf: string,
+  bytes: string,
+  publish: (prepared: string) => SkeletonWriteResult,
+): SkeletonWriteResult {
+  const prepared = preparedName(leaf);
+  let result: SkeletonWriteResult;
+  try {
+    writeDirectoryFileAtomicModeNoFollow(parent, prepared, bytes, SKELETON_MODE);
+    result = publish(prepared);
+  } catch (error) {
+    result = ioFailed(error);
+  }
+  try {
+    removeDirectoryFileNoFollow(parent, prepared);
+  } catch (error) {
+    return withPreparedNameLeft(result, prepared, error);
+  }
+  return result;
+}
+
 /** Write `bytes` at `path` only if nothing is there: `written`, or `exists`. */
 export function createSkeleton(root: string, path: string, bytes: string, frozen: ReadonlySet<string>): SkeletonWriteResult {
-  return guarded(root, path, frozen, (leaf) => (leaf === "absent" ? null : EXISTS), (parent, leaf) => {
-    const prepared = preparedName(leaf);
-    try {
-      writeDirectoryFileAtomicModeNoFollow(parent, prepared, bytes, SKELETON_MODE);
+  return guarded(root, path, frozen, (leaf) => (leaf === "absent" ? null : EXISTS), (parent, leaf) =>
+    publishPrepared(parent, leaf, bytes, (prepared) => {
       try {
         linkSync(anchoredChildPath(parent, prepared), anchoredChildPath(parent, leaf));
       } catch (error) {
         return linkFailureResult(error);
       }
-      return Object.freeze({ kind: "written", sha256: sha256Hex(bytes) });
-    } finally {
-      removeDirectoryFileNoFollow(parent, prepared);
-    }
-  });
+      return written(bytes);
+    }));
 }
 
-/** Replace the file at `path` with `bytes` only while its bytes digest to
- *  `expectedSha256`: `written`, or refused `absent`/`not-a-regular-file`/`modified`. */
+/**
+ * Replace the file at `path` with `bytes` only while its bytes digest to
+ * `expectedSha256`: `written`, or refused `absent`/`not-a-regular-file`/`modified`.
+ * The replacement is prepared first; the digest is read last, right before
+ * the rename (see the module header for the window that remains).
+ */
 export function refreshSkeleton(
   root: string,
   path: string,
@@ -223,18 +289,21 @@ export function refreshSkeleton(
 ): SkeletonWriteResult {
   const onLeaf = (leaf: "absent" | "file" | "other"): SkeletonWriteResult | null =>
     leaf === "absent" ? refused("absent") : leaf === "other" ? refused("not-a-regular-file") : null;
-  return guarded(root, path, frozen, onLeaf, (parent, leaf) => {
-    if (sha256Bytes(readDirectoryFileNoFollow(parent, leaf)) !== expectedSha256) return refused("modified");
-    writeDirectoryFileAtomicModeNoFollow(parent, leaf, bytes, SKELETON_MODE);
-    return Object.freeze({ kind: "written", sha256: sha256Hex(bytes) });
-  });
+  return guarded(root, path, frozen, onLeaf, (parent, leaf) =>
+    publishPrepared(parent, leaf, bytes, (prepared) => {
+      if (sha256Bytes(readDirectoryFileNoFollow(parent, leaf)) !== expectedSha256) return refused("modified");
+      renameSync(anchoredChildPath(parent, prepared), anchoredChildPath(parent, leaf));
+      return written(bytes);
+    }));
 }
 
 /** One line naming why a write did not happen, for a refusal diagnostic. */
 export function renderSkeletonWriteResult(path: string, result: SkeletonWriteResult): string {
   switch (result.kind) {
     case "written":
-      return `${path}: written`;
+      return result.leftover === null
+        ? `${path}: written`
+        : `${path}: written; its prepared name ${result.leftover.name} was left behind (${result.leftover.message})`;
     case "exists":
       return `${path}: a file appeared there during registration; it was left untouched`;
     case "refused":

@@ -10,6 +10,7 @@ import { checkLifecycleArtifacts } from "../../src/core/wave-gate-checks";
 import type { Task } from "../../src/types";
 import type { PlanModels } from "../../src/core/parse-plan-models";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 function waveTask(fileList: string[]): Task {
   return {
@@ -182,6 +183,7 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
     const proof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: [machineFile] },
       {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: [machineFile],

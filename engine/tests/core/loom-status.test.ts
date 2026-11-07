@@ -4,23 +4,26 @@
  *
  * Pure rows: `skeletonStatusReport` lists every non-test file_list path of
  * the current Wave's Tasks with exactly one outcome — recorded when the
- * Task's registration recorded one, else projected through `skeletonOutcomes`
+ * Task's registration recorded one, else projected through `skeletonOutcomesOf`
  * — every stale flag, and every stage-two problem; `renderSkeletonStatus`
  * renders it with the exact AD-13 strings. `classifyImplementationWindow`
  * replaces `spawn-wave-implementation` with `repair-skeleton-bindings` while
  * a stage-two problem stands, and status names it under the
- * `skeleton-bindings-unresolved` reason.
+ * `skeleton-bindings-unresolved` reason. A report status could not observe
+ * blocks nothing, but an owed spawn names it as `skeletons-unobserved`.
  *
  * Shell rows: `helper orchestration status [--json]`, spawned exactly as an
  * operator types it, over the skeleton fixture repository.
  */
 
+import { chmodSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "../../src/core/implementation-window";
 import { deriveLoomStatusFromParsedGraph, renderLoomStatusHuman, renderLoomStatusJson } from "../../src/core/loom-status";
-import { skeletonOutcomes } from "../../src/core/skeleton/outcomes";
-import { productionFiles, type SkeletonGraph } from "../../src/core/skeleton/scope";
+import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
+import { productionFiles, type SkeletonGraph } from "../../src/core/skeleton/graph-view";
 import {
   renderSkeletonStatus,
   skeletonReportScope,
@@ -159,7 +162,7 @@ describe("skeletonStatusReport", () => {
     expect(report.tasks.flatMap(({ files }) => files.map(({ path }) => path))).not.toContain("tests/pricing.test.ts");
   });
 
-  it("FR-040: projects each fallback outcome through skeletonOutcomes, one per path", () => {
+  it("FR-040: projects each fallback outcome through skeletonOutcomesOf, one per path", () => {
     const report = skeletonStatusReport(GRAPH, OBSERVATIONS, []);
     expect(report).toEqual({
       kind: "reported",
@@ -180,7 +183,7 @@ describe("skeletonStatusReport", () => {
       stale: [{ path: "src/legacy.ts", contract: "CT-1", stale: { revision: 1 } }],
       unresolved: [],
     });
-    const projected = skeletonOutcomes(GRAPH, "T2", OBSERVATIONS);
+    const projected = knownSkeletonOutcomes(GRAPH, "T2", OBSERVATIONS);
     if (report.kind === "reported") {
       expect(report.tasks[0]?.files.map(({ path, outcome }) => ({ path, outcome }))).toEqual(projected);
     }
@@ -214,7 +217,7 @@ describe("skeletonStatusReport", () => {
   });
 
   it("FR-040: a recorded outcome is shown as recorded, even where projection would now differ", () => {
-    expect(skeletonOutcomes(GRAPH, "T4", OBSERVATIONS)).toEqual([{ path: "src/quotes.ts", outcome: EXISTS }]);
+    expect(knownSkeletonOutcomes(GRAPH, "T4", OBSERVATIONS)).toEqual([{ path: "src/quotes.ts", outcome: EXISTS }]);
     const report = skeletonStatusReport(GRAPH, OBSERVATIONS, []);
     expect(report.kind === "reported" && report.tasks[2]).toEqual({
       taskId: "T4",
@@ -357,6 +360,29 @@ describe("the status document's skeleton report", () => {
     expect(document.skeletons.kind).toBe("unobserved");
     expect(document.next.reasons.map(({ kind }) => kind)).not.toContain("skeleton-bindings-unresolved");
   });
+
+  it("names a failed observation as skeletons-unobserved while it still owes the spawn (registration stays the authority)", () => {
+    const document = deriveLoomStatusFromParsedGraph(
+      { ok: true, value: GRAPH },
+      { ...STATUS_DEPS, skeletons: skeletonsUnobserved("cannot read src/pricing.ts") },
+    );
+    const action = document.next.action;
+    expect(action.kind === "blocked" && action.diagnostic.kind).toBe("wave-gate-not-started");
+    expect(action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started" && action.diagnostic.recovery.kind)
+      .toBe("spawn-wave-implementation");
+    const reason = document.next.reasons.find(({ kind }) => kind === "skeletons-unobserved");
+    expect(reason).toEqual({
+      kind: "skeletons-unobserved",
+      message: "status could not observe Wave 2's skeleton paths (cannot read src/pricing.ts); " +
+        "registration observes them again and refuses the spawn on anything it cannot read",
+      taskId: null,
+    });
+  });
+
+  it("names nothing unobserved once the skeletons were observed", () => {
+    const document = deriveLoomStatusFromParsedGraph({ ok: true, value: GRAPH }, { ...STATUS_DEPS, skeletons: skeletonStatusReport(GRAPH, OBSERVATIONS, []) });
+    expect(document.next.reasons.map(({ kind }) => kind)).not.toContain("skeletons-unobserved");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -373,6 +399,24 @@ describe("helper orchestration status --json", () => {
     expect(document.skeletons.tasks?.map(({ taskId }) => taskId)).toEqual(["T4", "T5", "T6", "T7", "T8"]);
     expect(document.next.reasons.map(({ kind }) => kind)).not.toContain("skeleton-bindings-unresolved");
     expect(someLine(orchestrationStatus(repo, false).stdout, PATHS.tsPricing, OUTCOME_TEXT.written)).toBe(true);
+  });
+
+  it("a skeleton path status cannot read is reported unobserved under the skeletons-unobserved reason, and the spawn is still owed", () => {
+    const repo = skeletonRepo();
+    repo.write(PATHS.tsPricing, "export {};\n");
+    chmodSync(join(repo.root, PATHS.tsPricing), 0o000);
+    try {
+      const document = statusDocument(repo) as Readonly<{
+        skeletons: ReportedJson;
+        next: { reasons: readonly { kind: string; message: string }[] };
+      }>;
+      expect(document.skeletons.kind).toBe("unobserved");
+      const reason = document.next.reasons.find(({ kind }) => kind === "skeletons-unobserved");
+      expect(reason?.message).toContain(PATHS.tsPricing);
+      expect(document.next.reasons.map(({ kind }) => kind)).toContain("wave-gate-not-started");
+    } finally {
+      chmodSync(join(repo.root, PATHS.tsPricing), 0o644);
+    }
   });
 
   it("AS-051: a frozen types file that drifted from its stamp blocks the spawn, naming the types file", () => {

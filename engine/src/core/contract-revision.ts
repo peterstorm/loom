@@ -16,10 +16,11 @@
  *
  * A revision also settles the contract's engine-written skeletons (AD-10,
  * FR-033): the shell has already refreshed each untouched one from the
- * revised types and hands over its new record, and names each modified one,
- * which keeps its bytes and record and is flagged `stale: { revision }`. The
- * binding problems the revised types raise are reported, never committed:
- * the next spawn's stage two re-resolves the stamped types and blocks on them.
+ * revised types and hands over one settlement per path — the new digests of
+ * a refreshed one, or `stale` for a modified one, which keeps its bytes and
+ * record and is flagged `stale: { revision }`. The binding problems the
+ * revised types raise are reported, never committed: the next spawn's stage
+ * two re-resolves the stamped types and blocks on them.
  *
  * Pure: the shell supplies its observations of the frozen paths and the
  * skeleton refresh it already wrote.
@@ -37,14 +38,18 @@ import {
   type FrozenPathObservations,
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
-import { samePlanPath } from "./plan-path-match";
-import type { SkeletonGraph } from "./skeleton/scope";
-import type { ResolutionProblem, SkeletonRecord } from "./skeleton/types";
+import { normalizePlanPath } from "./plan-path-match";
+import type { SkeletonGraph } from "./skeleton/graph-view";
+import { renderSkeletonProblem, type SkeletonProblem } from "./skeleton/problems";
+import { installSkeletonRecords } from "./skeleton/records";
+import type { SkeletonRecord } from "./skeleton/types";
 import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
 import type { TaskGraph } from "../types";
 
 /** The longest reason a revision records; it is an audit line, not a document. */
 const MAX_REVISION_REASON_LENGTH = 512;
+
+const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 
 export type ContractRevisionRequest = Readonly<{ contract: string; reason: string }>;
 
@@ -63,34 +68,43 @@ export type ContractRevisionRefusalKind =
 export type ContractRevisionRefusal = Readonly<{ kind: ContractRevisionRefusalKind; message: string }>;
 
 /**
- * Why the engine could not (re)write one contract's skeleton from its current
- * types: a stage-two resolution problem, a bound path whose language differs
- * from the types file's, or a write or read the shell could not carry out.
- * The contract stub step and the revision refresh both report these.
+ * How a revision settles one engine-written skeleton of the contract: either
+ * refreshed from the revised types (its record takes these digests, origin
+ * `revision`), or left on disk because it was modified (its record is kept,
+ * flagged `stale: { revision }`). Refused at write time with reason
+ * `modified` is the same settlement as modified when observed (ADR-0057).
  */
-export type SkeletonProblem =
-  | ResolutionProblem
-  | Readonly<{ kind: "language-mismatch"; path: string; contract: string; typesFile: string }>
-  | Readonly<{ kind: "write-failed"; path: string; detail: string }>;
+export type SkeletonSettlement =
+  | Readonly<{ kind: "refreshed"; skeleton: RefreshedSkeleton }>
+  | Readonly<{ kind: "stale" }>;
+
+/** The record fields a refresh rewrites; the path is the settlement's key. */
+export type RefreshedSkeleton = Readonly<Pick<SkeletonRecord, "contract" | "language" | "engineSha256" | "typesSha256">>;
 
 /**
  * What the revision shell did to the contract's engine-written skeletons
- * before the locked update: the new records of the untouched ones it
- * refreshed (origin `revision`), the paths of the modified ones it left on
- * disk, and every problem the revised types raised.
+ * before the locked update: one settlement per skeleton path it settled,
+ * keyed by normalized path so no path is both refreshed and stale, and every
+ * problem the revised types raised. Built only by `skeletonRevisionOf`.
  */
 export type SkeletonRevision = Readonly<{
-  refreshed: readonly SkeletonRecord[];
-  modified: readonly string[];
+  settlements: ReadonlyMap<string, SkeletonSettlement>;
   bindingProblems: readonly SkeletonProblem[];
 }>;
 
+/** The revision of `settled` paths (a later settlement of one path replaces
+ *  an earlier one) and `bindingProblems`. */
+export const skeletonRevisionOf = (
+  settled: readonly (readonly [path: string, settlement: SkeletonSettlement])[],
+  bindingProblems: readonly SkeletonProblem[],
+): SkeletonRevision =>
+  freeze({
+    settlements: new Map(settled.map(([path, settlement]) => [normalizePlanPath(path), settlement] as const)),
+    bindingProblems: Object.freeze([...bindingProblems]),
+  });
+
 /** A revision of a contract with no engine-written skeleton to settle. */
-export const NO_SKELETON_REVISION: SkeletonRevision = Object.freeze({
-  refreshed: Object.freeze([]),
-  modified: Object.freeze([]),
-  bindingProblems: Object.freeze([]),
-});
+export const NO_SKELETON_REVISION: SkeletonRevision = skeletonRevisionOf([], []);
 
 export type RevisedContract = Readonly<{
   graph: TaskGraph;
@@ -98,39 +112,34 @@ export type RevisedContract = Readonly<{
   revision: ContractRevision;
   /** The paths of the refreshed skeletons. */
   refreshed: readonly string[];
-  /** The paths now flagged `stale against revised contract`. */
+  /** The paths whose records are now flagged `stale: { revision }`; status
+   *  renders each as `stale against revised contract`. */
   staleSkeletons: readonly string[];
   bindingProblems: readonly SkeletonProblem[];
 }>;
 
-/**
- * The skeleton records with `added` installed: one record per path, an added
- * record replacing the one at its path, sorted by path in code-unit order
- * (the order the State File wire proves).
- */
-export function installSkeletonRecords(
-  current: readonly SkeletonRecord[],
-  added: readonly SkeletonRecord[],
-): readonly SkeletonRecord[] {
-  const byPath = new Map([...current, ...added].map((record) => [record.path, record] as const));
-  return Object.freeze([...byPath.values()].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)));
-}
+/** The settled paths of one kind, in settlement order. */
+const settledPaths = (skeletons: SkeletonRevision, kind: SkeletonSettlement["kind"]): readonly string[] =>
+  Object.freeze([...skeletons.settlements].flatMap(([path, settlement]) => (settlement.kind === kind ? [path] : [])));
 
-/** The records after a revision: refreshed ones installed, the records of
- *  modified skeletons flagged stale with the revision number. */
+/** The records after a revision: each stale-settled record flagged with the
+ *  revision number, each refreshed one installed with origin `revision`. */
 function revisedSkeletonRecords(
   current: readonly SkeletonRecord[],
   skeletons: SkeletonRevision,
   revision: number,
 ): readonly SkeletonRecord[] {
   const flagged = current.map((record): SkeletonRecord =>
-    skeletons.modified.some((path) => samePlanPath(path, record.path)) ? freeze({ ...record, stale: freeze({ revision }) }) : record);
-  return installSkeletonRecords(flagged, skeletons.refreshed);
+    skeletons.settlements.get(normalizePlanPath(record.path))?.kind === "stale"
+      ? freeze({ ...record, stale: freeze({ revision }) })
+      : record);
+  const refreshed = [...skeletons.settlements].flatMap(([path, settlement]): readonly SkeletonRecord[] =>
+    settlement.kind === "refreshed" ? [freeze({ path, ...settlement.skeleton, origin: "revision", stale: null })] : []);
+  return installSkeletonRecords(flagged, refreshed);
 }
 
 const USAGE = 'Usage: helper revise-contract --contract CT-<n> --reason "<why the frozen bytes changed>"';
 
-const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const refuse = (kind: ContractRevisionRefusalKind, message: string): DomainResult<never, ContractRevisionRefusal> =>
   freeze({ ok: false as const, error: freeze({ kind, message }) });
 
@@ -237,11 +246,10 @@ export function reviseAcceptanceContract(
   // The current Wave's suite receipt and reviews judged the old bytes. The
   // transition reads no contract, so the revised one is written over its result.
   const view: SkeletonGraph = graph;
-  const skeletonsChanged = skeletons.refreshed.length > 0 || skeletons.modified.length > 0;
   const revisedGraph: SkeletonGraph = {
     ...returnWaveTasksToRevalidation(reopenable.value, revalidatedIds),
     acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
-    ...(skeletonsChanged ? { skeletons: revisedSkeletonRecords(view.skeletons ?? [], skeletons, revision.revision) } : {}),
+    ...(skeletons.settlements.size > 0 ? { skeletons: revisedSkeletonRecords(view.skeletons ?? [], skeletons, revision.revision) } : {}),
   };
   return freeze({
     ok: true as const,
@@ -249,9 +257,28 @@ export function reviseAcceptanceContract(
       graph: revisedGraph,
       contract: contract.id,
       revision,
-      refreshed: Object.freeze(skeletons.refreshed.map(({ path }) => path)),
-      staleSkeletons: skeletons.modified,
+      refreshed: settledPaths(skeletons, "refreshed"),
+      staleSkeletons: settledPaths(skeletons, "stale"),
       bindingProblems: skeletons.bindingProblems,
     }),
   });
+}
+
+/** The outcome an operator reads: the revision, then one line per refreshed
+ *  skeleton, stale skeleton and binding problem. */
+export function revisionOutcomeMessage(
+  { contract, revision, refreshed, staleSkeletons, bindingProblems }:
+    Pick<RevisedContract, "contract" | "revision" | "refreshed" | "staleSkeletons" | "bindingProblems">,
+): string {
+  const revalidated = revision.revalidatedTaskIds.length === 0
+    ? "no implemented claimant needed revalidation"
+    : `${revision.revalidatedTaskIds.join(", ")} returned to revalidation`;
+  return [
+    `${contract} revision ${revision.revision} recorded; ${revalidated}. The next Wave Gate re-records its acceptance roster green.`,
+    ...refreshed.map((path) => `skeleton refreshed ${path} from the revised types`),
+    ...staleSkeletons.map((path) => `skeleton ${path}: stale against revised contract (modified, left as it is)`),
+    ...bindingProblems.map((problem) =>
+      `skeleton binding problem: ${renderSkeletonProblem(problem)}; the next spawn's stage two blocks on it`),
+    "",
+  ].join("\n");
 }

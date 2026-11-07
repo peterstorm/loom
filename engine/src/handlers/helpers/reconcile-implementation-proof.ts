@@ -271,15 +271,15 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
  * existed); whether I6 is owed is the Task's `redThenGreenDuty` under it (see
  * `reconcileEra`). Both are required, so every caller states its graph's era
  * rather than defaulting into the legacy one. `contractConformance` is the
- * observation's verdict over the Task's current bytes (AD-5); the reconcile
- * handler always passes it, and absent judges nothing. */
+ * observation's verdict over the Task's current bytes (AD-5), required for
+ * the same reason: every caller decides it. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
   allowLegacyPositiveMigration: boolean,
   verificationManifest: FrozenVerificationManifest | undefined,
-  contractConformance?: ContractConformance,
+  contractConformance: ContractConformance,
 ): Task {
   if (task.status === "completed") return task;
   // The ADT arrives parsed; no legacy-pair re-coercion here.
@@ -301,7 +301,7 @@ export function reconcileTaskFromStoredEvidence(
       newTestsWritten,
       newTestEvidence,
       ...(redThenGreen === undefined ? {} : { redThenGreen }),
-      ...(contractConformance === undefined ? {} : { contractConformance }),
+      contractConformance,
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );

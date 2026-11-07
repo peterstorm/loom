@@ -27,6 +27,7 @@ import {
 import type { Task } from "../../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -47,6 +48,7 @@ function failedTask(taskCompleted = true): Task {
     {
       taskCompleted,
       testResult,
+      contractConformance: CONFORMANCE_NOT_OWED,
       filesModified: [],
       newTestsWritten: false,
       newTestEvidence: "",
@@ -402,6 +404,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       false,
       undefined,
+      CONFORMANCE_NOT_OWED,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -420,6 +423,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
     const satisfiedProof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
       {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult,
         filesModified: ["src/a.ts"],
@@ -443,6 +447,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       false,
       undefined,
+      CONFORMANCE_NOT_OWED,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -466,6 +471,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
       false,
       undefined,
+      CONFORMANCE_NOT_OWED,
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
       {
@@ -480,6 +486,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       NEW_TEST_EVIDENCE_NOT_WRITTEN,
       false,
       undefined,
+      CONFORMANCE_NOT_OWED,
     );
 
     expect(regressionWaived.status).toBe("pending");
@@ -518,6 +525,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       parseNewTestEvidence(false, "verification waived"),
       true,
       undefined,
+      CONFORMANCE_NOT_OWED,
     );
     expect(migrated).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
     expect(migrated.legacy_missing_proof).toBeUndefined();
@@ -530,6 +538,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
       parseNewTestEvidence(true, "1 new test method, 2 assertions"),
       false,
       undefined,
+      CONFORMANCE_NOT_OWED,
     );
 
     expect(reconciled.status).toBe("pending");

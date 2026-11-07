@@ -24,7 +24,8 @@ import {
   implementationAttemptContextMatchesAuthority,
   type ImplementationAttemptContext,
 } from "./implementation-retry";
-import type { SkeletonGraph } from "./skeleton/scope";
+import type { SkeletonGraph } from "./skeleton/graph-view";
+import { installSkeletonRecords } from "./skeleton/records";
 import type { PathSkeletonOutcome, SkeletonRecord } from "./skeleton/types";
 
 export interface ValidateTaskExecutionInput {
@@ -542,19 +543,6 @@ function reclaimTaskAttempt(
   return task;
 }
 
-/**
- * The graph's skeleton records with `added` installed: one record per path,
- * an added record replacing the one it supersedes, sorted by path in code-unit
- * order (the order the State File wire proves).
- */
-function mergeSkeletonRecords(
-  current: readonly SkeletonRecord[],
-  added: readonly SkeletonRecord[],
-): readonly SkeletonRecord[] {
-  const byPath = new Map([...current, ...added].map((record) => [record.path, record] as const));
-  return Object.freeze([...byPath.values()].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)));
-}
-
 /** Install a prevalidated batch and retire only exact stale identities. The
  *  batch's skeleton records and outcomes land in the same update. */
 export function applyTaskExecutionAuthorityBatch(
@@ -629,7 +617,7 @@ export function applyTaskExecutionAuthorityBatch(
     ...(specCheck === undefined && state.spec_check !== undefined ? { spec_check: undefined } : {}),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     wave_gates: waveGates,
-    ...(skeletonRecords.length === 0 ? {} : { skeletons: mergeSkeletonRecords(view.skeletons ?? [], skeletonRecords) }),
+    ...(skeletonRecords.length === 0 ? {} : { skeletons: installSkeletonRecords(view.skeletons ?? [], skeletonRecords) }),
   };
   return next;
 }

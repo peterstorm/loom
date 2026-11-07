@@ -106,10 +106,12 @@ import {
 } from "../../src/state-manager";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const satisfiedProof = evaluateTaskProof(
   { newTestsRequired: true, declaredArtifacts: [] },
   {
+    contractConformance: CONFORMANCE_NOT_OWED,
     taskCompleted: true,
     testResult: { verdict: "trusted-pass" },
     filesModified: [],
@@ -265,7 +267,7 @@ describe("checkImplementationProof (pure)", () => {
   it("requires both an implementation-bearing status and satisfied proof", () => {
     const failedProof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
-      { taskCompleted: true, filesModified: [] },
+      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [] },
     );
     expect(checkImplementationProof([baseTask]).passed).toBe(true);
     for (const task of [
@@ -900,7 +902,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
   it("a failed proof can never be force-completed into an unloadable graph", () => {
     const failedProof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["missing.ts"] },
-      { taskCompleted: true, filesModified: [] },
+      { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, filesModified: [] },
     );
     const state = mkGraph({
       tasks: [taskState({ status: "pending", proof: failedProof, new_tests_required: false })],
@@ -2639,6 +2641,7 @@ describe("protected active Wave Gate registration", () => {
     const artifactProof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: [relativeArtifact] },
       {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: [relativeArtifact],

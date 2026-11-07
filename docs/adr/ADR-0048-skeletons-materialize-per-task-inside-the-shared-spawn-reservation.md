@@ -75,7 +75,7 @@ The order inside registration:
      problem is named, and none of these checks writes a byte.
    - **Plan.** Each registering Task's production paths (`productionFiles`) are observed: absent, or present
      with their digest and the digest of the canonical skeleton. The pure `planTaskSkeletons` derives the outcomes
-     through `skeletonOutcomes` (AD-13, INV-4) and a list of actions. **Create** writes a missing bound skeleton:
+     through `skeletonOutcomesOf` (AD-13, INV-4) and a list of actions. **Create** writes a missing bound skeleton:
      a first attempt, a retry whose skeleton was deleted, or a respawn (FR-005, FR-032). **Adopt** records
      canonical bytes that are on disk with no record, for example after a refused registration. **Refresh**
      rewrites an untouched skeleton that was generated from an older surface.
@@ -103,8 +103,8 @@ Invariants:
   exist, `implementation-window.ts` replaces `spawn-wave-implementation` with the
   `skeleton-bindings-unresolved` blocker, so the spawn-time refusal is visible before anyone tries to spawn.
 - Contract stubs (contract Task stop, `contract-stub-materialization.ts`) and the Contract Revision refresh
-  (`revise-contract.ts`) are separate entry points by necessity. They share the same writer and the same
-  outcome derivation.
+  (`skeleton-revision.ts`, run by `revise-contract.ts`) are separate entry points by necessity. They share the
+  same writer, the same refresh planner (`core/skeleton/refresh-plan.ts`) and the same outcome derivation.
 
 ## Consequences
 

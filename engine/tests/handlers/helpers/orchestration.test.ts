@@ -66,6 +66,7 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
+import { CONFORMANCE_NOT_OWED } from "../../../src/core/skeleton/conformance-verdict";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -200,7 +201,7 @@ function specCheckDocuments(specFile: string | null, planFile: string | null) {
 function passingWaveTaskProof() {
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
   );
   if (proof.state !== "satisfied") throw new Error("passing Wave Task proof fixture must be satisfied");
   return proof;

@@ -22,6 +22,7 @@ import type {
   SkeletonLanguage,
   UnsupportedReason,
 } from "./persisted";
+import type { ContractConformance } from "./conformance-verdict";
 
 /** The persisted values (AD-4) live in the leaf `./persisted.ts`, which
  *  `engine/src/types.ts` can import without a cycle; re-exported here so every
@@ -346,23 +347,11 @@ export type PathObservation =
 // Conformance (AD-11)
 // ---------------------------------------------------------------------------
 
-/** Why a production file breaks its contract (FR-021). Tags only: the
- *  diagnostic's wording is rendered from them, never stored in them. */
-export type ViolationReason =
-  | "deleted"
-  | "renamed"
-  | "retyped"
-  | "still-unimplemented"
-  | "shadows-frozen-adt"
-  | "re-lists-frozen-variants";
-
-/** `subject` is the bound export or frozen ADT the violation concerns;
- *  `remedy` names the fix where one is fixed (re-listing), else null. */
-export type ConformanceViolation = Readonly<{ subject: string; reason: ViolationReason; remedy: string | null }>;
-
-export type ContractConformance =
-  | Readonly<{ kind: "not-owed" }>
-  | Readonly<{ kind: "judged"; violations: ReadonlyMap<string, NonEmpty<ConformanceViolation>> }>;
+/** The verdict values (`ViolationReason`, `ConformanceViolation`,
+ *  `ContractConformance`) live in the leaf `./conformance-verdict.ts`, which
+ *  the proof channel can import without a cycle; re-exported here so every
+ *  skeleton consumer keeps one import site. */
+export type { ConformanceViolation, ContractConformance, ViolationReason } from "./conformance-verdict";
 
 /** One in-scope production file with its parsed target; `text` null when missing. */
 export type ConformanceFile = Readonly<{ target: SkeletonTarget; text: string | null }>;

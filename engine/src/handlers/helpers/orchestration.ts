@@ -103,7 +103,8 @@ import {
   type ImplementationBrief,
   type OperatorNote,
 } from "../../core/implementation-brief";
-import { observeSkeletons, renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
+import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
+import { observeSkeletons } from "../../orchestration/skeleton-observation";
 import {
   skeletonReportScope,
   skeletonStatusReport,
@@ -575,9 +576,10 @@ function implementationReservationObservation(
 /**
  * The skeleton report (AD-13, FR-040): observe the current Wave's paths and
  * resolve its outstanding Tasks' bindings against their frozen types files
- * (`observeSkeletons`, the brief's own observation), then let the pure report
+ * (`observeSkeletons`, the observation the brief reads too), then let the pure report
  * decide every outcome. A graph or path status cannot read is reported
- * `unobserved`, naming why; registration stays the authority that refuses
+ * `unobserved`, naming why, and an owed spawn carries it as the
+ * `skeletons-unobserved` reason; registration stays the authority that refuses
  * a spawn on what it cannot read.
  */
 function skeletonStatusObservation(

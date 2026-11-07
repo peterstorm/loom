@@ -108,10 +108,10 @@ owner of the rule:
 
 Every consumer calls this one predicate and none restates it:
 
-- `skeletonOutcomes`, which derives the outcomes;
+- `skeletonOutcomesOf`, which derives the outcomes;
 - spawn materialization (`engine/src/orchestration/skeleton-materialization.ts`);
 - contract-stub materialization (`engine/src/orchestration/contract-stub-materialization.ts`);
-- the Contract Revision refresh (`engine/src/handlers/helpers/revise-contract.ts`). It regenerates an
+- the Contract Revision refresh (`engine/src/orchestration/skeleton-revision.ts`). It regenerates an
   untouched skeleton from the revised types file and flags a modified one stale.
 
 Shells observe each path as a `PathObservation`: either `absent`, or `present` with the current digest and

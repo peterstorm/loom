@@ -8,23 +8,24 @@
  * An outcome is `recorded` when the Task's registration recorded one for the
  * path (`skeleton_outcomes`, the outcome the engine acted on), else
  * `projected`: what registration would decide now. Both come from the one
- * derivation, `skeletonOutcomes` — this module never compares digests and
+ * derivation, `skeletonOutcomesOf` — this module never compares digests and
  * never orders the outcomes itself. The implementation brief reads each
  * Task's outcomes through `taskSkeletonOutcomes` too, so status and brief
  * never disagree on a path.
  *
  * Pure: the shell observes the paths and resolves the bindings, and passes
- * both in. A stage-two problem arrives with its rendered line, because its
- * renderer is the registration shell's.
+ * both in. A stage-two problem arrives with its rendered line
+ * (`renderSkeletonProblem`), so status, brief and window quote one string.
  */
 
 import { match } from "ts-pattern";
-import type { SkeletonProblem } from "../contract-revision";
+import type { DomainResult } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
 import type { Task, TaskGraph } from "../../types";
-import { renderSkeletonOutcome, skeletonOutcomes } from "./outcomes";
-import type { SkeletonGraph } from "./scope";
-import type { PathObservation, PathSkeletonOutcome, SkeletonOutcome } from "./types";
+import { renderSkeletonOutcome, skeletonOutcomesOf } from "./outcomes";
+import type { SkeletonGraph } from "./graph-view";
+import type { SkeletonProblem } from "./problems";
+import type { PathObservation, PathSkeletonOutcome, SkeletonOutcome, UnknownTask } from "./types";
 
 /** Whether an outcome is the one registration recorded, or the one it would decide now. */
 export type SkeletonOutcomeBasis = "recorded" | "projected";
@@ -94,21 +95,27 @@ export function skeletonReportScope(graph: TaskGraph): SkeletonReportScope {
 /**
  * Exactly one outcome per non-test file_list path of the Task, in file_list
  * order: the recorded one where registration recorded it, else the one
- * `skeletonOutcomes` projects from the observations.
+ * `skeletonOutcomesOf` projects from the observations; or `unknown-task` for
+ * an id the graph does not hold.
  */
 export function taskSkeletonOutcomes(
   graph: TaskGraph,
   taskId: string,
   observations: ReadonlyMap<string, PathObservation>,
-): readonly FileSkeletonStatus[] {
+): DomainResult<readonly FileSkeletonStatus[], UnknownTask> {
+  const projected = skeletonOutcomesOf(graph, taskId, observations);
+  if (!projected.ok) return projected;
   const owner: RecordedOutcomeTask | undefined = graph.tasks.find(({ id }) => id === taskId);
   const recorded = owner?.skeleton_outcomes ?? [];
-  return Object.freeze(skeletonOutcomes(graph, taskId, observations).map(({ path, outcome }): FileSkeletonStatus => {
-    const kept = recorded.find((entry) => samePlanPath(entry.path, path));
-    return Object.freeze(kept === undefined
-      ? { path, outcome, basis: "projected" }
-      : { path, outcome: kept.outcome, basis: "recorded" });
-  }));
+  return {
+    ok: true,
+    value: Object.freeze(projected.value.map(({ path, outcome }): FileSkeletonStatus => {
+      const kept = recorded.find((entry) => samePlanPath(entry.path, path));
+      return Object.freeze(kept === undefined
+        ? { path, outcome, basis: "projected" }
+        : { path, outcome: kept.outcome, basis: "recorded" });
+    })),
+  };
 }
 
 /** Every stale skeleton record of the graph, in record order. */
@@ -118,6 +125,11 @@ export function staleSkeletons(graph: TaskGraph): readonly StaleSkeleton[] {
     stale === null ? [] : [Object.freeze({ path, contract, stale })]));
 }
 
+/**
+ * The report of the current Wave. Its Tasks come from the graph itself, so
+ * each is known; were one not, the report is `unobserved`, naming it, rather
+ * than a Task shown with no paths.
+ */
 export function skeletonStatusReport(
   graph: TaskGraph,
   observations: ReadonlyMap<string, PathObservation>,
@@ -125,11 +137,16 @@ export function skeletonStatusReport(
 ): SkeletonStatusReport {
   const scope = skeletonReportScope(graph);
   if (scope.kind === "not-applicable") return scope;
+  const tasks: TaskSkeletonStatus[] = [];
+  for (const { id } of scope.tasks) {
+    const files = taskSkeletonOutcomes(graph, id, observations);
+    if (!files.ok) return skeletonsUnobserved(`Task ${files.error.taskId} of Wave ${scope.wave} is not in the TaskGraph`);
+    tasks.push(Object.freeze({ taskId: id, files: files.value }));
+  }
   return Object.freeze({
     kind: "reported",
     wave: scope.wave,
-    tasks: Object.freeze(scope.tasks.map(({ id }) =>
-      Object.freeze({ taskId: id, files: taskSkeletonOutcomes(graph, id, observations) }))),
+    tasks: Object.freeze(tasks),
     stale: staleSkeletons(graph),
     unresolved: Object.freeze([...unresolved]),
   });

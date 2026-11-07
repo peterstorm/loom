@@ -39,7 +39,8 @@ import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { samePlanPath } from "./plan-path-match";
 import { renderSkeletonOutcome } from "./skeleton/outcomes";
-import { conformanceScope, type SkeletonGraph } from "./skeleton/scope";
+import type { SkeletonGraph } from "./skeleton/graph-view";
+import { conformanceScope } from "./skeleton/scope";
 import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
 import type { ExportBinding, FrozenAdt, FrozenSurface, PathObservation } from "./skeleton/types";
 import type { PlanInvariant, Task, TaskGraph, WaveImplementationDispatch } from "../types";
@@ -495,6 +496,8 @@ export const NO_EXPORT_BINDING_STAMP =
   "None — the TaskGraph was populated before export bindings were stamped, so the engine writes no skeletons for this run.";
 /** Literal substituted for `{frozen_signatures}` when the Task owns no production file. */
 export const NO_PRODUCTION_FILES = "None — this Task owns no production file, so it has no skeleton outcome.";
+/** Literal substituted for `{frozen_signatures}` when the observed TaskGraph does not hold the Task. */
+export const TASK_NOT_OBSERVED = "None — the TaskGraph its skeletons were observed in does not hold this Task, so it has no skeleton outcome.";
 
 const FROZEN_SIGNATURES_LEAD =
   "Each production file you own, with its skeleton outcome and the exports bound to it. An outcome not yet recorded is what the " +
@@ -554,7 +557,9 @@ export function renderFrozenSignatures(task: Task, input: FrozenSignaturesInput 
   const { graph, observations, surfaces, unresolved } = input;
   const view: SkeletonGraph = graph;
   if (view.export_bindings === undefined) return NO_EXPORT_BINDING_STAMP;
-  const files = taskSkeletonOutcomes(graph, task.id, observations);
+  const outcomes = taskSkeletonOutcomes(graph, task.id, observations);
+  if (!outcomes.ok) return TASK_NOT_OBSERVED;
+  const files = outcomes.value;
   if (files.length === 0) return NO_PRODUCTION_FILES;
   const scope = conformanceScope(graph, task);
   const bindings = scope.kind === "owed" ? scope.bindings : [];

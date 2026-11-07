@@ -22,6 +22,7 @@ import {
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { ConformanceViolation, ContractConformance, SkeletonRecord } from "../../src/core/skeleton/types";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 import { authorizeImplementationSpawn, deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
@@ -117,11 +118,10 @@ function graph(task: Task): TaskGraph {
   };
 }
 
-const NOT_OWED: ContractConformance = { kind: "not-owed" };
 
 const completedEvidence = {
   taskCompleted: true,
-  contractConformance: NOT_OWED,
+  contractConformance: CONFORMANCE_NOT_OWED,
   newTests: parseNewTestEvidence(false, "verification_policy.new_tests waived: legacy-new-tests-required-false"),
 };
 
@@ -359,7 +359,7 @@ describe("shared evidence preservation", () => {
     const attempt = authority();
     const normalized = normalizeImplementationEvidence(
       pendingTask(attempt),
-      { taskCompleted: true, contractConformance: NOT_OWED },
+      { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED },
       observedBytes(attempt),
     );
     expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
@@ -384,7 +384,7 @@ describe("shared evidence preservation", () => {
       });
       const normalized = normalizeImplementationEvidence(task, {
         taskCompleted: true,
-        contractConformance: NOT_OWED,
+        contractConformance: CONFORMANCE_NOT_OWED,
         testResult: { verdict: "untrusted", passed: true, label: "fallback", provenance: "unverified" },
         testEvidence: "fallback",
       }, bytes);
@@ -466,7 +466,7 @@ describe("exact transition application", () => {
           testResult: { verdict: "trusted-fail" },
           testEvidence: "red",
           newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
-          contractConformance: NOT_OWED,
+          contractConformance: CONFORMANCE_NOT_OWED,
         },
         TRUSTED_LEDGER_ONLY_POLICY,
         observedBytes(attempt),
@@ -677,7 +677,7 @@ describe("exact transition application", () => {
       })),
       attempt,
       "2026-08-24T00:03:50.000Z" as never,
-      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, contractConformance: NOT_OWED },
+      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, contractConformance: CONFORMANCE_NOT_OWED },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(attempt),
     ));

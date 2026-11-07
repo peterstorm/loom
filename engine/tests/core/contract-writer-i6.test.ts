@@ -41,6 +41,7 @@ import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import { withoutRedThenGreen, withRedThenGreen } from "../fixtures/red-then-green-proof";
 import { indexedSpec } from "../fixtures/spec-index-fixture";
 import { briefOwnership } from "../fixtures/owner-obligation";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 // --- Fixtures ---
 
@@ -314,6 +315,7 @@ describe("settlement implements a test-only contract writer with no implementati
       kind: "implementation-observed",
       observedAt: "2026-10-21T00:01:00.000Z",
       evidence: {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: [ACCEPTANCE],

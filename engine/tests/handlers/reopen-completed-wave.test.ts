@@ -29,9 +29,11 @@ import { taskFixture } from "../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { findingId } from "../fixtures/finding-id";
 import { value } from "../fixtures/parse-result";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const proof = (() => {
   const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
+    contractConformance: CONFORMANCE_NOT_OWED,
     taskCompleted: true, testResult: undefined, filesModified: [], newTestsWritten: false,
   });
   if (evaluated.state !== "satisfied") throw new Error("fixture proof must satisfy");
@@ -352,6 +354,7 @@ describe("reopen completed Wave", () => {
       expect(spawnSync("git", ["init"], { cwd: root, encoding: "utf8" }).status).toBe(0);
       const statePath = join(root, ".claude", "state", "active_task_graph.json");
       const e2eProof = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }, {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true, testResult: undefined, filesModified: ["src/a.ts"], newTestsWritten: false,
       });
       if (e2eProof.state !== "satisfied") throw new Error("e2e fixture proof must satisfy");

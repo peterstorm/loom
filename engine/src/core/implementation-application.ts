@@ -40,7 +40,8 @@ import type { RedThenGreenObservation } from "./red-then-green-types";
 import { invalidateTaskReview } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { isUntouchedSkeleton } from "./skeleton/outcomes";
-import type { ContractConformance, SkeletonRecord } from "./skeleton/types";
+import { CONFORMANCE_NOT_OWED, type ContractConformance } from "./skeleton/conformance-verdict";
+import type { SkeletonRecord } from "./skeleton/types";
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
@@ -396,7 +397,7 @@ export function applyCompletionInfrastructureFailure(
  * `taskCompleted: false`, so its Proof always fails); the Task's conformance is
  * judged by the exact settlement or the reconcile that can complete it.
  */
-const LEGACY_STOP_CONFORMANCE: ContractConformance = freeze({ kind: "not-owed" });
+const LEGACY_STOP_CONFORMANCE: ContractConformance = CONFORMANCE_NOT_OWED;
 
 /** Apply one authority-free legacy Stop observation against locked state. */
 export function applyUntrustedStopResolution(
@@ -470,9 +471,9 @@ export type IncomingImplementationEvidence = Readonly<{
    *  owes `red-then-green` and the settlement shell judged its ledger. */
   redThenGreen?: RedThenGreenObservation;
   /** The settlement shell's conformance decision (AD-5): `not-owed`, or the
-   *  judge's verdict over the Task's in-scope files. `settleExactImplementation`
-   *  always decides it; absent judges nothing. */
-  contractConformance?: ContractConformance;
+   *  judge's verdict over the Task's in-scope files. Required, so a settlement
+   *  path cannot skip the contract check by omitting it. */
+  contractConformance: ContractConformance;
 }>;
 
 /**
@@ -821,7 +822,7 @@ export function settleObservedImplementation(
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
       ...(incoming.redThenGreen === undefined ? {} : { redThenGreen: incoming.redThenGreen }),
-      ...(incoming.contractConformance === undefined ? {} : { contractConformance: incoming.contractConformance }),
+      contractConformance: incoming.contractConformance,
     },
     proofEvaluationPolicy,
   });

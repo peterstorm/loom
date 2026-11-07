@@ -25,6 +25,7 @@ import {
   derivePendingTaskProof,
 } from "../../src/core/proof-obligations";
 import { value } from "../fixtures/parse-result";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 function authority(
   semanticAttempt: 1 | 2,
@@ -71,6 +72,7 @@ function observation(observedAt: string, taskCompleted: boolean) {
     observedAt,
     evidence: {
       taskCompleted,
+      contractConformance: CONFORMANCE_NOT_OWED,
       testResult: { verdict: "trusted-pass" },
       filesModified: [],
       newTestsWritten: false,
@@ -315,6 +317,7 @@ describe("bounded implementation retry admission", () => {
     }, attempt, attempt, {
       ...observation("2026-09-01T00:12:00.000Z", true),
       evidence: {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: ["src/extra.ts"],

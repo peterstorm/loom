@@ -78,10 +78,11 @@ observation explicitly, and engine-written bytes are subtracted before the chang
   `ConformanceViolation = { subject, reason, remedy }`, and `reason` is one closed set:
   `deleted | renamed | retyped | still-unimplemented | shadows-frozen-adt | re-lists-frozen-variants`.
   The `remedy` names the fix where one exists, for example `Extract<FrozenUnion, …>` for a re-listed
-  union. The proof channel declares these shapes structurally, because importing CT-1's
-  `core/skeleton/types` would close an import cycle through the TaskGraph. The settlement shells pass
-  the observation's `ContractConformance` straight through, so a reason CT-1 adds that this list lacks
-  fails to compile.
+  union. `ViolationReason` (derived from the one `VIOLATION_REASONS` list the parser also reads),
+  `ConformanceViolation` and `ContractConformance` have one owner, the leaf
+  `engine/src/core/skeleton/conformance-verdict.ts`. It imports nothing from the TaskGraph or the proof
+  channel, so `core/proof-obligations.ts` imports it without the cycle that importing CT-1's
+  `core/skeleton/types` would close; `core/skeleton/types` re-exports it.
 - **Observation** (`ContractConformance`). `{ kind: "not-owed" } | { kind: "judged"; violations:
   ReadonlyMap<artifact, NonEmpty<ConformanceViolation>> }`. An empty violation set is
   `judged` with an empty Map, never an empty array.
@@ -136,7 +137,9 @@ As AD-5 specified, `contractConformance` is a required field of `ObservedProofEv
 settlement path must decide it: an observed verdict from `observeContractConformance`, or the named
 `not-owed` constant `LEGACY_STOP_CONFORMANCE` on the Pi untrusted stop. A new settlement path that
 forgets to observe conformance fails to compile, so the risk Option 3 was rejected for cannot arise.
-Callers outside settlement, such as test fixtures, pass `{ kind: "not-owed" }` explicitly.
+Callers outside settlement, such as test fixtures, pass the shared `CONFORMANCE_NOT_OWED` constant
+(`core/skeleton/conformance-verdict.ts`) explicitly, and `parseObservedProofEvidence` refuses an
+observation that carries no decision.
 
 ## Consequences
 
@@ -160,14 +163,11 @@ Callers outside settlement, such as test fixtures, pass `{ kind: "not-owed" }` e
 **Negative:**
 - The `declared-artifact-changed` arm now checks conformance as well as change. Someone reading only
   the obligation name will undercount what it enforces.
-- The proof channel duplicates CT-1's violation shapes structurally to avoid an import cycle. The
-  compiler keeps them aligned only through the settlement shells' pass-through, not through a shared
-  declaration.
 - Receipts truncate the violations they encode to fit the failure-kind bound, and the retry appendix
   is rendered from the receipt. When one file has very many violations, the appendix lists only the
   encoded prefix and an "and N more violations not shown" line. The stored Proof keeps them all.
 - Callers of `evaluateTaskProof` outside settlement, such as test fixtures, must pass an explicit
-  `not-owed` value.
+  `not-owed` value (`CONFORMANCE_NOT_OWED`).
 - Conformance is checked only on files that are declared artifacts and parse to a supported skeleton
   language. A contract whose types file no skeleton language reads contributes no surface. This is a
   stated limit, not a waiver.

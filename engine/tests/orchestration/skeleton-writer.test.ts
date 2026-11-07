@@ -45,7 +45,7 @@ describe("createSkeleton", () => {
   it("writes the bytes, world-readable, and reports their digest", () => {
     const root = repo();
     put(root, "src/keep.ts", OTHER);
-    expect(createSkeleton(root, "src/a.ts", BYTES, NONE)).toEqual({ kind: "written", sha256: sha256Hex(BYTES) });
+    expect(createSkeleton(root, "src/a.ts", BYTES, NONE)).toEqual({ kind: "written", sha256: sha256Hex(BYTES), leftover: null });
     expect(read(root, "src/a.ts")).toBe(BYTES);
     expect(statSync(join(root, "src/a.ts")).mode & 0o777).toBe(0o644);
     expect(entries(root, "src")).toEqual(["a.ts", "keep.ts"]);
@@ -153,7 +153,7 @@ describe("refreshSkeleton", () => {
   it("replaces a file whose bytes are the expected engine bytes", () => {
     const root = repo();
     put(root, "src/a.ts", OTHER);
-    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(OTHER), BYTES, NONE)).toEqual({ kind: "written", sha256: sha256Hex(BYTES) });
+    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(OTHER), BYTES, NONE)).toEqual({ kind: "written", sha256: sha256Hex(BYTES), leftover: null });
     expect(read(root, "src/a.ts")).toBe(BYTES);
     expect(statSync(join(root, "src/a.ts")).mode & 0o777).toBe(0o644);
     expect(entries(root, "src")).toEqual(["a.ts"]);
@@ -207,7 +207,7 @@ describe("refreshSkeleton", () => {
 
 describe("renderSkeletonWriteResult", () => {
   it("names the path and why it was not written", () => {
-    expect(renderSkeletonWriteResult("src/a.ts", { kind: "written", sha256: "0".repeat(64) })).toBe("src/a.ts: written");
+    expect(renderSkeletonWriteResult("src/a.ts", { kind: "written", sha256: "0".repeat(64), leftover: null })).toBe("src/a.ts: written");
     expect(renderSkeletonWriteResult("src/a.ts", { kind: "exists" })).toContain("left untouched");
     expect(renderSkeletonWriteResult("src/a.ts", { kind: "refused", reason: "frozen-path" })).toBe("src/a.ts: refused (frozen-path)");
     expect(renderSkeletonWriteResult("src/a.ts", { kind: "io-failed", message: "EACCES" })).toBe("src/a.ts: write failed (EACCES)");

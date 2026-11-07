@@ -40,6 +40,7 @@ import { digest } from "./acceptance-fixtures";
 import { ownerObligation } from "./owner-obligation";
 import { labelledValue, value } from "./parse-result";
 import { AFFECTED_RUNNER } from "./stop-check-runners";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 export const LEDGER_PLAN_FILE = ".claude/plans/2026-10-22-ledger.md";
 
@@ -84,7 +85,7 @@ const MANIFEST: FrozenVerificationManifest = value(freezeVerificationManifest(ne
 const FILES = [LEDGER.owner];
 const PROOF = evaluateTaskProof(
   { newTestsRequired: false, declaredArtifacts: FILES },
-  { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: FILES, newTestsWritten: false },
+  { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: FILES, newTestsWritten: false },
 );
 
 /** The stamped graph, as raw State File JSON: Wave 1 implemented, its gate live, `LEDGER` owed. */

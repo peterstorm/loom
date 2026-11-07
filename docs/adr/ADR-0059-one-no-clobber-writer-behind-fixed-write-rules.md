@@ -13,8 +13,8 @@ wrote lived under `.loom/` or `.claude/`. Three entry points now write into the 
   reservation. It also refreshes untouched skeletons whose frozen surface has changed.
 - **Contract stop.** `contract-stub-materialization.ts` writes and refreshes contract stubs when the contract
   Task stops.
-- **Contract Revision.** `revise-contract.ts` refreshes untouched skeletons after an operator revises a types
-  file.
+- **Contract Revision.** `skeleton-revision.ts`, run by `revise-contract.ts`, refreshes untouched skeletons after
+  an operator revises a types file.
 
 Every one of these writes must obey the same safety promises:
 
@@ -107,17 +107,22 @@ closed result union.**
     anchored parent, with mode `0644`.
   - The prepared file is published with `link(prepared, target)`. `link` never overwrites, so a file that
     appeared after the walk returns `EEXIST`, which `linkFailureResult` maps to `exists`.
-  - The prepared name is removed in a `finally`, whatever happens.
+  - The prepared name is removed whatever happens. If only that removal fails after the link published the
+    bytes, the result stays `written` and names the prepared name left behind (`leftover`); after any other
+    result it is `io-failed`, naming both.
 - **Refresh.** A missing leaf is refused as `absent`, and a non-regular leaf as `not-a-regular-file`. Otherwise:
-  - The current bytes are read no-follow through the anchored parent and digested.
+  - The replacement is prepared first: the bytes go to a prepared name beside the target, with mode `0644`.
+  - Only then are the current bytes read no-follow through the anchored parent and digested, immediately
+    before the publish.
   - If the digest is not `expectedSha256`, the result is `modified`. That digest is the engine's own recorded
-    skeleton digest (ADR-0055), so a file a human or Agent has touched is never replaced.
-  - On a match, `writeDirectoryFileAtomicModeNoFollow` writes a prepared temporary file and renames it over the
-    target.
+    skeleton digest (ADR-0055), so a file a human or Agent has touched is never replaced, including one
+    touched while the replacement was being prepared.
+  - On a match, `rename(prepared, target)` publishes the bytes. The prepared name is removed as for create.
 - **Atomicity (NFR-021).** Bytes only ever appear under the target name through one `link` or one `rename`, so
   each file is either complete or absent.
 - **Ownership (INV-3).** The writer is the owner module. Its sibling entry points are
-  `skeleton-materialization.ts`, `contract-stub-materialization.ts` and `revise-contract.ts`. They call only
+  `skeleton-materialization.ts`, `contract-stub-materialization.ts` and `skeleton-revision.ts` (run by
+  `revise-contract.ts`), all through `writePlanned` in `skeleton-refresh.ts`. They call only
   these two functions and contain no `writeFileSync`, `renameSync` or `linkSync` on a skeleton path. Each
   caller decides create versus refresh from its pure plan (the skeleton record and its `expectedSha256`) and
   turns the result into its own outcome.
@@ -136,10 +141,13 @@ closed result union.**
   wording.
 
 **Negative:**
-- Refresh compares the digest and then renames, as two steps. An edit that lands in the gap between them
-  (microseconds, inside the anchored parent) would be overwritten. This window is accepted because a refresh
-  only targets files whose bytes still equal the engine's own output. A truly atomic compare-and-swap would
-  need file locking that the engine does not use for source files.
+- Refresh compares the digest and then renames, as two steps; POSIX has no compare-and-rename. The guard is
+  placed as late as it can be (after the replacement is prepared, right before the rename), so the window
+  that remains is the interval between the digest read returning and the rename taking effect, with no I/O
+  in it but the rename itself. An edit that lands exactly there (in place or by replacing the name) would be
+  overwritten. This is accepted because a refresh only targets files whose bytes still equal the engine's
+  own output. Closing it would need an atomic exchange (`renameat2(RENAME_EXCHANGE)`) with a verified swap
+  back, which Node does not expose, or file locking the engine does not use for source files.
 - INV-3 is advisory. Nothing mechanical prevents a future module from writing a source file directly. The rule
   is kept by review, by this ADR and by the module's header comment.
 - No retry means a transient I/O error, for example a full disk, makes the user run the step again rather than

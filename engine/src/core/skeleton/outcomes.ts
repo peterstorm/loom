@@ -2,9 +2,10 @@
  * The one skeleton-outcome derivation (AD-13, INV-4 owner): exactly one
  * `SkeletonOutcome` per non-test file_list path (FR-030), and the one
  * judgment of whether an existing file is an untouched engine skeleton
- * (AD-4's content-addressed recognition). Registration, the contract stop,
- * revision, status and the brief all call these; none compares digests or
- * orders the outcomes itself. Pure.
+ * (AD-4's content-addressed recognition), with what an untouched one holds
+ * (`presentSkeletonOf`). Registration, the contract stop, revision, status
+ * and the brief all call these; none compares digests or orders the outcomes
+ * itself. Pure.
  *
  * Precedence, first match wins:
  *   1. an untouched engine skeleton → `skeleton-written` with its record's
@@ -23,7 +24,7 @@
 import { match } from "ts-pattern";
 import { contractRole } from "../acceptance-contract";
 import { samePlanPath } from "../plan-path-match";
-import type { Task, TaskGraph } from "../../types";
+import type { Task } from "../../types";
 import { skeletonLanguageOf } from "./language";
 import { productionFiles, type SkeletonGraph } from "./graph-view";
 import type {
@@ -42,6 +43,20 @@ import type {
  */
 export function isUntouchedSkeleton(record: SkeletonRecord | undefined, currentSha: string | null, canonicalSha: string | null): boolean {
   return currentSha !== null && (currentSha === record?.engineSha256 || currentSha === canonicalSha);
+}
+
+/**
+ * What a present file at a skeleton path holds, the one judgment every writer
+ * step acts on: anyone else's bytes (`touched`, never written over), the
+ * canonical bytes already (`canonical`, adopted or kept as they are), or the
+ * engine's bytes from an older surface (`engine-bytes`, which a refresh
+ * replaces when there are canonical bytes to write).
+ */
+export type PresentSkeleton = "touched" | "canonical" | "engine-bytes";
+
+export function presentSkeletonOf(record: SkeletonRecord | undefined, currentSha: string, canonicalSha: string | null): PresentSkeleton {
+  if (!isUntouchedSkeleton(record, currentSha, canonicalSha)) return "touched";
+  return currentSha === canonicalSha ? "canonical" : "engine-bytes";
 }
 
 const written = (origin: SkeletonOrigin): SkeletonOutcome => Object.freeze({ kind: "skeleton-written", origin });
@@ -76,21 +91,6 @@ export const skeletonOutcomesOf: SkeletonOutcomesOfFn = (graph, taskId, observat
     value: Object.freeze(productionFiles(view, task).map((path): PathSkeletonOutcome =>
       Object.freeze({ path, outcome: outcomeOf(view, task, path, observations.get(path) ?? ABSENT) }))),
   };
-};
-
-/**
- * `skeletonOutcomesOf` for a caller that holds an id the graph is known to
- * contain (a registered Task, a Wave's Task): the outcomes, or none for an
- * unknown id. Kept for the shells that still call it; a caller that cannot
- * prove its id calls `skeletonOutcomesOf` and handles `unknown-task`.
- */
-export const skeletonOutcomes = (
-  graph: TaskGraph,
-  taskId: string,
-  observations: ReadonlyMap<string, PathObservation>,
-): readonly PathSkeletonOutcome[] => {
-  const outcomes = skeletonOutcomesOf(graph, taskId, observations);
-  return outcomes.ok ? outcomes.value : Object.freeze([]);
 };
 
 /** The exact operator wording of each outcome (FR-030). */
