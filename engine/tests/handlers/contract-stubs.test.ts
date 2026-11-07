@@ -218,7 +218,7 @@ describe("materializeContractStubs", () => {
 
     const again = await materializeContractStubs(repo.root, managerOf(repo), "T1");
 
-    expect(again.ok && again.value).toEqual({ written: [], problems: [] });
+    expect(again.ok && again.value).toEqual({ written: [], problems: [], leftovers: [] });
     expect(repo.rawState()).toEqual(before);
     for (const path of CT1_STUBS) expect(repo.read(path), path).toBe(canonicalSkeletonOf(path));
   });
@@ -275,7 +275,7 @@ describe("materializeContractStubs", () => {
 
     for (const taskId of ["T3", "T4", "T9"]) {
       const result = await materializeContractStubs(repo.root, managerOf(repo), taskId);
-      expect(result.ok && result.value, taskId).toEqual({ written: [], problems: [] });
+      expect(result.ok && result.value, taskId).toEqual({ written: [], problems: [], leftovers: [] });
     }
 
     expect(repo.rawState()).toEqual(state);
@@ -310,7 +310,21 @@ describe("stubbedContracts", () => {
 
 describe("renderContractStubs and contractStubStopNote", () => {
   it("says nothing when every stub resolved", () => {
-    expect(renderContractStubs("T1", { ok: true, value: { written: [], problems: [] } })).toBeNull();
+    expect(renderContractStubs("T1", { ok: true, value: { written: [], problems: [], leftovers: [] } })).toBeNull();
+  });
+
+  it("notes each prepared name left behind after the problems, and on its own when there is no problem", () => {
+    const leftover = { path: PATHS.tsQuotes, name: ".quotes.ts.loom-skeleton-1", message: "EBUSY" };
+    const note = `contract stubs of T1: note: ${PATHS.tsQuotes}: the prepared name .quotes.ts.loom-skeleton-1 beside it could not be removed (EBUSY); delete it`;
+    expect(renderContractStubs("T1", { ok: true, value: { written: [], problems: [], leftovers: [leftover] } })).toBe(note);
+    expect(renderContractStubs("T1", {
+      ok: true,
+      value: { written: [], problems: [{ kind: "write-failed", path: PATHS.tsPricing, detail: "refused (frozen-path)" }], leftovers: [leftover] },
+    })).toBe([
+      "contract stubs of T1: not every stub could be written; its acceptance tests cannot import what is missing",
+      `- ${PATHS.tsPricing}: refused (frozen-path)`,
+      note,
+    ].join("\n"));
   });
 
   it("names each problem on its own line, and an infrastructure failure as one line", () => {
@@ -323,6 +337,7 @@ describe("renderContractStubs and contractStubStopNote", () => {
           { kind: "language-mismatch", path: PATHS.javaPricing, contract: "CT-1", typesFile: TS_CONTRACT.types },
           { kind: "write-failed", path: PATHS.tsQuotes, detail: "refused (symlinked-ancestor)" },
         ],
+        leftovers: [],
       },
     });
     expect(rendered).toBe([

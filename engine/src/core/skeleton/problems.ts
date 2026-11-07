@@ -37,6 +37,17 @@ export function renderResolutionProblem(problem: ResolutionProblem): string {
   }
 }
 
+/**
+ * A prepared name the writer could not remove beside a skeleton `path` after
+ * a write: a stray dot-file the operator deletes. Never a blocker — the write
+ * it belongs to stands (or was refused) on its own.
+ */
+export type LeftPreparedName = Readonly<{ path: string; name: string; message: string }>;
+
+/** One note naming the stray prepared name and that it is safe to delete. */
+export const renderLeftPreparedName = ({ path, name, message }: LeftPreparedName): string =>
+  `${path}: the prepared name ${name} beside it could not be removed (${message}); delete it`;
+
 /** One line naming why the engine could not (re)write a skeleton. */
 export const renderSkeletonProblem = (problem: SkeletonProblem): string =>
   match(problem)

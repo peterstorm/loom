@@ -14,9 +14,12 @@
  *   in record order. A deleted file needs nothing (the next registration
  *   regenerates it); a modified one is flagged stale; an untouched one whose
  *   binding no longer resolves has no canonical bytes and is left as it is.
+ *
+ * Paths are matched by `samePlanPath` everywhere, the observations included:
+ * an observation keyed `./src/a.ts` is the observation of `src/a.ts`.
  */
 
-import { samePlanPath } from "../plan-path-match";
+import { normalizePlanPath, samePlanPath } from "../plan-path-match";
 import { presentSkeletonOf } from "./outcomes";
 import type { SkeletonCandidate } from "./records";
 import type { PathObservation, SkeletonRecord } from "./types";
@@ -39,6 +42,15 @@ type SkeletonRefreshIteration = "candidate-driven" | "record-driven";
 
 const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
+/** What was observed at a path, looked up by normalized path; absent when nothing was. */
+type ObservationAt = (path: string) => PathObservation;
+
+/** The lookup over `observations` that agrees with `samePlanPath`. */
+function observationAt(observations: ReadonlyMap<string, PathObservation>): ObservationAt {
+  const byPath = new Map([...observations].map(([path, observation]) => [normalizePlanPath(path), observation] as const));
+  return (path) => byPath.get(normalizePlanPath(path)) ?? ABSENT;
+}
+
 /** The write an untouched present file needs, or `null` for one anyone else wrote. */
 function untouchedAction(
   record: SkeletonRecord | undefined,
@@ -52,11 +64,11 @@ function untouchedAction(
 
 function candidateDriven(
   records: readonly SkeletonRecord[],
-  observations: ReadonlyMap<string, PathObservation>,
+  observed: ObservationAt,
   candidates: readonly SkeletonCandidate[],
 ): readonly CandidateRefreshAction[] {
   return candidates.flatMap((candidate): readonly CandidateRefreshAction[] => {
-    const observation = observations.get(candidate.skeleton.path) ?? ABSENT;
+    const observation = observed(candidate.skeleton.path);
     if (observation.kind === "absent") return [{ kind: "create", candidate }];
     const record = records.find((recorded) => samePlanPath(recorded.path, candidate.skeleton.path));
     const action = untouchedAction(record, observation.sha256, candidate);
@@ -66,11 +78,11 @@ function candidateDriven(
 
 function recordDriven(
   records: readonly SkeletonRecord[],
-  observations: ReadonlyMap<string, PathObservation>,
+  observed: ObservationAt,
   candidates: readonly SkeletonCandidate[],
 ): readonly RecordRefreshAction[] {
   return records.flatMap((record): readonly RecordRefreshAction[] => {
-    const observation = observations.get(record.path) ?? ABSENT;
+    const observation = observed(record.path);
     if (observation.kind === "absent") return [];
     const candidate = candidates.find(({ skeleton }) => samePlanPath(skeleton.path, record.path));
     if (candidate === undefined) {
@@ -104,7 +116,8 @@ export function planSkeletonRefresh(
   observations: ReadonlyMap<string, PathObservation>,
   candidates: readonly SkeletonCandidate[],
 ): readonly (CandidateRefreshAction | RecordRefreshAction)[] {
+  const observed = observationAt(observations);
   return Object.freeze(iteration === "candidate-driven"
-    ? candidateDriven(records, observations, candidates)
-    : recordDriven(records, observations, candidates));
+    ? candidateDriven(records, observed, candidates)
+    : recordDriven(records, observed, candidates));
 }

@@ -162,7 +162,7 @@ describe("refreshSkeleton", () => {
   it("refuses a modified file and leaves its bytes", () => {
     const root = repo();
     put(root, "src/a.ts", OTHER);
-    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(BYTES), BYTES, NONE)).toEqual({ kind: "refused", reason: "modified" });
+    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(BYTES), BYTES, NONE)).toEqual({ kind: "refused", reason: "modified", leftover: null });
     expect(read(root, "src/a.ts")).toBe(OTHER);
   });
 

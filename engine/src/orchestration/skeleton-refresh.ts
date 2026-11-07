@@ -2,9 +2,10 @@
  * The shell steps every skeleton writer shares (AD-9, AD-10, AD-12): generate
  * a contract's canonical skeletons from its types file as it is now, name the
  * paths no writer may touch, carry out one planned write through the
- * no-clobber writer (INV-3), and name why a write did not land. The contract
- * stub step (`contract-stub-materialization.ts`), the Contract Revision's
- * refresh (`skeleton-revision.ts`) and registration
+ * no-clobber writer (INV-3), name why a write did not land, and carry the
+ * prepared name a write left behind (a non-blocking note every caller
+ * surfaces). The contract stub step (`contract-stub-materialization.ts`), the
+ * Contract Revision's refresh (`skeleton-revision.ts`) and registration
  * (`skeleton-materialization.ts`) build on these; the decisions they act on
  * are the pure core's (`core/skeleton/refresh-plan.ts`, INV-4).
  */
@@ -15,7 +16,7 @@ import type { DomainResult } from "../core/orchestration-contract";
 import { normalizePlanPath } from "../core/plan-path-match";
 import { generateSkeleton } from "../core/skeleton/generate";
 import { skeletonLanguageOf } from "../core/skeleton/language";
-import type { SkeletonProblem } from "../core/skeleton/problems";
+import type { LeftPreparedName, SkeletonProblem } from "../core/skeleton/problems";
 import { skeletonRecordOf, type SkeletonCandidate } from "../core/skeleton/records";
 import type { AdoptAction, CreateAction, RefreshAction } from "../core/skeleton/refresh-plan";
 import { resolveBindings } from "../core/skeleton/resolve";
@@ -30,7 +31,13 @@ import type {
 } from "../core/skeleton/types";
 import type { TaskGraph } from "../types";
 import { observeFrozenSurface, observeSpecifierStyle, type TypedContract } from "./frozen-surface-observation";
-import { createSkeleton, refreshSkeleton, type SkeletonWriteResult } from "./skeleton-writer";
+import {
+  createSkeleton,
+  leftoverClause,
+  refreshSkeleton,
+  type PreparedNameLeftover,
+  type SkeletonWriteResult,
+} from "./skeleton-writer";
 
 /** Every path an Acceptance Freeze covers or will cover: the writer never writes one. */
 export const frozenSkeletonPaths = (graph: TaskGraph): ReadonlySet<string> =>
@@ -102,15 +109,26 @@ export function canonicalContractSkeletons(
 /** A writer result that wrote nothing. */
 export type UnwrittenResult = Exclude<SkeletonWriteResult, { kind: "written" }>;
 
-/** What one planned write left: the record the engine keeps, or why the writer wrote nothing. */
+/**
+ * What one planned write left: the record the engine keeps (with the prepared
+ * name the write left beside it, if any), or why the writer wrote nothing.
+ */
 export type PlannedWrite =
-  | Readonly<{ kind: "recorded"; record: SkeletonRecord }>
+  | RecordedWrite
   | Readonly<{ kind: "unwritten"; result: UnwrittenResult }>;
+
+/** A planned write that left a record. */
+export type RecordedWrite = Readonly<{ kind: "recorded"; record: SkeletonRecord; leftover: LeftPreparedName | null }>;
+
+/** The writer's leftover at `path` as the note every caller surfaces, or null. */
+export const leftPreparedNameAt = (path: string, leftover: PreparedNameLeftover | null): LeftPreparedName | null =>
+  leftover === null ? null : Object.freeze({ path, ...leftover });
 
 /**
  * Carry out one planned write through the writer (INV-3): an adoption writes
  * nothing, a creation never replaces anything, a refresh replaces only the
- * engine bytes it expects. The record it leaves has `origin`.
+ * engine bytes it expects. The record it leaves has `origin`; a prepared
+ * name the published write could not remove travels with it.
  */
 export function writePlanned(
   root: string,
@@ -118,19 +136,23 @@ export function writePlanned(
   origin: SkeletonOrigin,
   frozen: ReadonlySet<string>,
 ): PlannedWrite {
-  const recorded: PlannedWrite = Object.freeze({ kind: "recorded", record: skeletonRecordOf(action.candidate, origin) });
-  if (action.kind === "adopt") return recorded;
+  const recorded = (leftover: LeftPreparedName | null): PlannedWrite =>
+    Object.freeze({ kind: "recorded", record: skeletonRecordOf(action.candidate, origin), leftover });
+  if (action.kind === "adopt") return recorded(null);
   const { path, bytes } = action.candidate.skeleton;
   const result = action.kind === "create"
     ? createSkeleton(root, path, bytes, frozen)
     : refreshSkeleton(root, path, action.expectedSha256, bytes, frozen);
-  return result.kind === "written" ? recorded : Object.freeze({ kind: "unwritten", result });
+  return result.kind === "written"
+    ? recorded(leftPreparedNameAt(path, result.leftover))
+    : Object.freeze({ kind: "unwritten", result });
 }
 
 /** Why a write did not land, as the detail of a `write-failed` problem. */
 export function writeFailure(path: string, result: UnwrittenResult): SkeletonProblem {
   const detail = match(result)
     .with({ kind: "exists" }, () => "a file appeared there meanwhile; it was left untouched")
+    .with({ kind: "refused", reason: "modified" }, ({ leftover }) => `refused (modified)${leftoverClause(leftover)}`)
     .with({ kind: "refused" }, ({ reason }) => `refused (${reason})`)
     .with({ kind: "io-failed" }, ({ message }) => `write failed (${message})`)
     .exhaustive();

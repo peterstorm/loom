@@ -213,6 +213,29 @@ describe("export_bindings, skeletons and skeleton_outcomes round-trip", () => {
   });
 });
 
+describe("an export name that is also an alias of its binding", () => {
+  const selfAliased = [{ name: "PriceOrderFn", alias: "PriceOrderFn" }];
+
+  it("loads on a Java binding: a Java field and a type never share a namespace", () => {
+    const graph = loaded(g2Graph({ bindings: withBinding(3, { exports: selfAliased }) }));
+    expect(viaDisk(graph.export_bindings?.find(({ path }) => path === JAVA_PRICING))).toEqual({
+      path: JAVA_PRICING, contract: "CT-1", exports: selfAliased,
+    });
+  });
+
+  it("loads on a binding no skeleton is generated for", () => {
+    const graph = loaded(g2Graph({ bindings: withBinding(2, { exports: selfAliased }) }));
+    expect(viaDisk(graph.export_bindings?.find(({ path }) => path === RATES))).toEqual({
+      path: RATES, contract: "CT-1", exports: selfAliased,
+    });
+  });
+
+  it("is refused on a TypeScript binding", () => {
+    expect(refusal(g2Graph({ bindings: withBinding(1, { exports: selfAliased }) })))
+      .toMatch(/export_bindings\[1\] binds the export name 'PriceOrderFn', which is also an alias of the binding \(name-collides-with-alias\)/);
+  });
+});
+
 describe("export_bindings refusals", () => {
   it.each([
     ["a non-array stamp", { bindings: { path: PRICING } }, /export_bindings must be an array/],
@@ -237,6 +260,11 @@ describe("export_bindings refusals", () => {
       /export_bindings\[0\] binds the export name 'PriceOrderFn', which is also an alias of the binding \(name-collides-with-alias\)/,
     ],
     ["an export whose name is its own alias", { bindings: withBinding(1, { exports: [{ name: "PriceOrderFn", alias: "PriceOrderFn" }] }) }, /export_bindings\[1\].*'PriceOrderFn'.*name-collides-with-alias/],
+    [
+      "a Java alias that is the file's own class name",
+      { bindings: withBinding(3, { exports: [{ name: "priceOrder", alias: "Pricing" }] }) },
+      /export_bindings\[3\] binds the alias 'Pricing', the Java file's own class name \(alias-collides-with-class\)/,
+    ],
   ])("refuses %s", (_label, fields, message) => {
     expect(refusal(g2Graph(fields))).toMatch(message);
   });

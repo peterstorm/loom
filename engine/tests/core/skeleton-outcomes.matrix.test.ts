@@ -456,6 +456,39 @@ describe("INV-4 sibling: planSkeletonRefresh record-driven (the Contract Revisio
   });
 });
 
+describe("INV-4 sibling: planSkeletonRefresh reads an observation by normalized path, as it matches records and candidates", () => {
+  /** The matrix observations with every key spelled `./path`, or with backslashes. */
+  const respelled = (spell: (path: string) => string): ReadonlyMap<string, PathObservation> =>
+    new Map([...OBSERVATIONS].map(([path, observation]) => [spell(path), observation] as const));
+  const SPELLINGS: readonly [string, (path: string) => string][] = [
+    ["./-prefixed", (path) => `./${path}`],
+    ["backslashed", (path) => path.replaceAll("/", "\\")],
+  ];
+  const kinds = (actions: readonly ({ kind: string; candidate?: SkeletonCandidate; record?: SkeletonRecord })[]) =>
+    actions.map((action) => [action.kind, action.candidate?.skeleton.path ?? action.record?.path]);
+
+  for (const [name, spell] of SPELLINGS) {
+    it(`record-driven keeps every stale flag over ${name} observation keys`, () => {
+      const actions = planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], respelled(spell), CANDIDATE_LIST);
+      expect(actions).toEqual(planSkeletonRefresh("record-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST));
+      expect(kinds(actions)).toContainEqual(["stale", "src/edited.ts"]);
+    });
+
+    it(`candidate-driven creates nothing over a present file behind ${name} observation keys`, () => {
+      const actions = planSkeletonRefresh("candidate-driven", GRAPH.skeletons ?? [], respelled(spell), CANDIDATE_LIST);
+      expect(actions).toEqual(planSkeletonRefresh("candidate-driven", GRAPH.skeletons ?? [], OBSERVATIONS, CANDIDATE_LIST));
+      expect(kinds(actions)).not.toContainEqual(["create", "src/refreshed.ts"]);
+    });
+  }
+
+  it("matches a non-normalized record path against a normalized observation key", () => {
+    const records = (GRAPH.skeletons ?? []).map((recorded) =>
+      (recorded.path === "src/edited.ts" ? { ...recorded, path: "./src/edited.ts" } : recorded));
+    expect(kinds(planSkeletonRefresh("record-driven", records, OBSERVATIONS, CANDIDATE_LIST)))
+      .toContainEqual(["stale", "./src/edited.ts"]);
+  });
+});
+
 /** The matrix graph with Wave 2 current: the Wave its implementation Tasks run in. */
 const WAVE_2: TaskGraph = { ...GRAPH, current_wave: 2 };
 const WAVE_2_TASKS = ["T1", "T2", "T3", "T4"] as const;

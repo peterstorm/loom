@@ -21,6 +21,11 @@
  * through the same four cases: a pre-existing or modified file stays
  * byte-identical, and a frozen path or a symlinked parent is a problem value
  * naming the writer's refusal, with nothing written.
+ *
+ * Every caller carries a prepared name the writer could not remove through
+ * `PlannedWrite` and surfaces it as a non-blocking note: registration on
+ * stderr, the contract stop in its stop note, the revision in its leftovers
+ * (a `modified` refusal still settling stale).
  */
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -28,7 +33,8 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../../src/core/digest";
 import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
-import { materializeContractStubs } from "../../src/orchestration/contract-stub-materialization";
+import { materializeContractStubs, renderContractStubs } from "../../src/orchestration/contract-stub-materialization";
+import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { materializeTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
 import {
   createSkeleton,
@@ -51,23 +57,34 @@ import {
   PATHS,
   seededRecord,
   skeletonRepo,
+  spawnFor,
   TS_CONTRACT,
   TS_LEGACY_TEXT,
   type SkeletonRepo,
 } from "../fixtures/skeleton-repo";
 
-/** Fault injection: while `failure` is set, every prepared-name cleanup throws it. */
+/** Fault injection: while `failure` is set, every prepared-name cleanup throws
+ *  it. Only the writer's prepared names fail: the State File and its sidecars
+ *  remove their own files as ever. */
 const cleanup = vi.hoisted(() => ({ failure: null as Error | null }));
 vi.mock("../../src/orchestration/no-follow-fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/orchestration/no-follow-fs")>();
   return {
     ...actual,
     removeDirectoryFileNoFollow: (...args: Parameters<typeof actual.removeDirectoryFileNoFollow>): void => {
-      if (cleanup.failure !== null) throw cleanup.failure;
+      if (cleanup.failure !== null && args[1].includes(".loom-skeleton-")) throw cleanup.failure;
       actual.removeDirectoryFileNoFollow(...args);
     },
   };
 });
+
+const EBUSY_MESSAGE = "EBUSY: resource busy or locked, unlink";
+
+/** The prepared names left beside `path` in the repository. */
+const preparedNamesBeside = (root: string, path: string): readonly string[] => {
+  const leaf = path.split("/").at(-1)!;
+  return names(root, dirname(path)).filter((name) => name.startsWith(`.${leaf}.loom-skeleton-`));
+};
 
 const roots: string[] = [];
 afterEach(() => {
@@ -146,7 +163,7 @@ describe("INV-3 owner: the rules every writer entry point shares", () => {
         const root = tempRepo();
         put(root, "src/a.ts", OTHER);
         const result = writer.write(root, "src/a.ts", NONE);
-        expect(result).toEqual(writer === create ? { kind: "exists" } : { kind: "refused", reason: "modified" });
+        expect(result).toEqual(writer === create ? { kind: "exists" } : { kind: "refused", reason: "modified", leftover: null });
         expect(read(root, "src/a.ts")).toBe(OTHER);
         expect(names(root, "src")).toEqual(["a.ts"]);
       });
@@ -387,7 +404,7 @@ describe("INV-3 owner: a target that changes while refreshSkeleton prepares its 
     const root = tempRepo();
     put(root, "src/a.ts", ENGINE);
     duringPreparation(() => writeFileSync(join(root, "src/a.ts"), OTHER));
-    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "modified" });
+    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "modified", leftover: null });
     expect(read(root, "src/a.ts")).toBe(OTHER);
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
@@ -397,7 +414,7 @@ describe("INV-3 owner: a target that changes while refreshSkeleton prepares its 
     put(root, "src/a.ts", ENGINE);
     put(root, "elsewhere/b.ts", OTHER);
     duringPreparation(() => renameSync(join(root, "elsewhere/b.ts"), join(root, "src/a.ts")));
-    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "modified" });
+    expect(refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE)).toEqual({ kind: "refused", reason: "modified", leftover: null });
     expect(read(root, "src/a.ts")).toBe(OTHER);
     expect(names(root, "src")).toEqual(["a.ts"]);
   });
@@ -431,6 +448,24 @@ describe("INV-3 owner: a prepared name that cannot be removed", () => {
     expect(read(root, "src/a.ts")).toBe(NEXT);
   });
 
+  it("keeps a `modified` refusal refused, naming the prepared name left behind and keeping the other writer's bytes", () => {
+    const root = tempRepo();
+    put(root, "src/a.ts", ENGINE);
+    cleanup.failure = failure;
+    duringPreparation(() => writeFileSync(join(root, "src/a.ts"), OTHER));
+    const result = refreshSkeleton(root, "src/a.ts", sha256Hex(ENGINE), NEXT, NONE);
+    cleanup.failure = null;
+    const left = names(root, "src").filter((name) => name !== "a.ts");
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatch(/^\.a\.ts\.loom-skeleton-\S+$/);
+    expect(result).toEqual({
+      kind: "refused",
+      reason: "modified",
+      leftover: { name: left[0], message: "EBUSY: resource busy or locked, unlink" },
+    });
+    expect(read(root, "src/a.ts")).toBe(OTHER);
+  });
+
   it("is an I/O failure naming both when nothing was published", () => {
     const root = tempRepo();
     mkdirSync(join(root, "src"));
@@ -452,9 +487,14 @@ describe("INV-3 owner: a prepared name that cannot be removed", () => {
       kind: "io-failed",
       message: "a file appeared at the target meanwhile, and the prepared name .p was left behind (gone)",
     });
-    expect(withPreparedNameLeft({ kind: "refused", reason: "modified" }, ".p", failure)).toEqual({
+    expect(withPreparedNameLeft({ kind: "refused", reason: "modified", leftover: null }, ".p", failure)).toEqual({
+      kind: "refused",
+      reason: "modified",
+      leftover: { name: ".p", message: failure.message },
+    });
+    expect(withPreparedNameLeft({ kind: "refused", reason: "frozen-path" }, ".p", failure)).toEqual({
       kind: "io-failed",
-      message: `refused (modified), and the prepared name .p was left behind (${failure.message})`,
+      message: `refused (frozen-path), and the prepared name .p was left behind (${failure.message})`,
     });
     expect(withPreparedNameLeft({ kind: "io-failed", message: "ENOSPC" }, ".p", failure)).toEqual({
       kind: "io-failed",
@@ -468,6 +508,12 @@ describe("INV-3 owner: a prepared name that cannot be removed", () => {
       sha256: sha256Hex(NEXT),
       leftover: { name: ".p", message: "EBUSY" },
     })).toBe("src/a.ts: written; its prepared name .p was left behind (EBUSY)");
+    expect(renderSkeletonWriteResult("src/a.ts", {
+      kind: "refused",
+      reason: "modified",
+      leftover: { name: ".p", message: "EBUSY" },
+    })).toBe("src/a.ts: refused (modified); its prepared name .p was left behind (EBUSY)");
+    expect(renderSkeletonWriteResult("src/a.ts", { kind: "refused", reason: "modified", leftover: null })).toBe("src/a.ts: refused (modified)");
   });
 });
 
@@ -666,5 +712,90 @@ describe("INV-3 sibling: refreshRevisedSkeletons writes only through the writer"
     expect(result.ok && result.value.settlements.size).toBe(0);
     expect(result.ok && result.value.bindingProblems.map(({ kind }) => kind)).toEqual(["write-failed"]);
     expect(readFileSync(join(outside, "Pricing.java"), "utf8")).toBe(canonicalSkeletonOf(PATHS.javaPricing));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Siblings: a prepared name a write left behind is a note, never a blocker
+// ---------------------------------------------------------------------------
+
+describe("INV-3 siblings: a prepared name a published write left behind", () => {
+  const failure = errno("EBUSY", EBUSY_MESSAGE);
+
+  it("registration records the skeleton, returns the leftover and prints it on stderr without blocking", async () => {
+    const repo = skeletonRepo();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    cleanup.failure = failure;
+    const outcome = await registerTaskExecutionBatch([spawnFor(repo.rawState(), "T4")]);
+    cleanup.failure = null;
+    expect(outcome.kind).toBe("registered");
+    expect(repo.read(PATHS.tsPricing)).toBe(canonicalSkeletonOf(PATHS.tsPricing));
+    const [left] = preparedNamesBeside(repo.root, PATHS.tsPricing);
+    expect(left).toBeDefined();
+    const printed = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(printed).toContain(
+      `[loom] skeleton note: ${PATHS.tsPricing}: the prepared name ${left} beside it could not be removed (${EBUSY_MESSAGE}); delete it\n`,
+    );
+  });
+
+  it("materializeTaskSkeletons names every leftover beside the record it wrote", () => {
+    const repo = skeletonRepo();
+    cleanup.failure = failure;
+    const result = materializeTaskSkeletons(repo.root, loaded(repo), ["T4"]);
+    cleanup.failure = null;
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const written = result.value.records.map(({ path }) => path);
+    expect(written).toContain(PATHS.tsPricing);
+    expect(result.value.leftovers).toEqual(written.map((path) => ({
+      path,
+      name: preparedNamesBeside(repo.root, path)[0],
+      message: EBUSY_MESSAGE,
+    })));
+  });
+
+  it("the contract stop records its stubs and says the leftover in its note", async () => {
+    const repo = contractWave();
+    cleanup.failure = failure;
+    const result = await materializeContractStubs(repo.root, managerOf(repo), "T2");
+    cleanup.failure = null;
+    expect(result.ok && result.value.problems).toEqual([]);
+    expect(result.ok && result.value.written.map(({ path }) => path)).toEqual([PATHS.javaPricing, PATHS.javaExisting]);
+    const leftovers = [PATHS.javaPricing, PATHS.javaExisting].map((path) => ({
+      path,
+      name: preparedNamesBeside(repo.root, path)[0]!,
+      message: EBUSY_MESSAGE,
+    }));
+    expect(result.ok && result.value.leftovers).toEqual(leftovers);
+    expect(renderContractStubs("T2", result)).toBe(leftovers.map(({ path, name }) =>
+      `contract stubs of T2: note: ${path}: the prepared name ${name} beside it could not be removed (${EBUSY_MESSAGE}); delete it`).join("\n"));
+  });
+
+  it("the revision refreshes the skeleton and carries the cleanup failure the writer reported", () => {
+    const repo = revisedJavaRepo();
+    cleanup.failure = failure;
+    const result = refreshRevisedSkeletons(repo.root, loaded(repo), "CT-2");
+    cleanup.failure = null;
+    expect(result.ok && [...result.value.settlements].map(([path, { kind }]) => [path, kind])).toEqual([[PATHS.javaPricing, "refreshed"]]);
+    expect(result.ok && result.value.bindingProblems).toEqual([]);
+    // The publishing rename consumed the prepared name, so nothing is left on
+    // disk; the failed cleanup the writer reported still reaches the caller.
+    expect(result.ok && result.value.leftovers).toEqual([
+      { path: PATHS.javaPricing, name: expect.stringMatching(/^\.Pricing\.java\.loom-skeleton-\S+$/), message: EBUSY_MESSAGE },
+    ]);
+  });
+
+  it("the revision still settles a skeleton modified during its write stale, never write-failed, naming the leftover", () => {
+    const repo = revisedJavaRepo();
+    cleanup.failure = failure;
+    duringPreparation(() => writeFileSync(join(repo.root, PATHS.javaPricing), OTHER));
+    const result = refreshRevisedSkeletons(repo.root, loaded(repo), "CT-2");
+    cleanup.failure = null;
+    expect(repo.read(PATHS.javaPricing)).toBe(OTHER);
+    expect(result.ok && [...result.value.settlements]).toEqual([[PATHS.javaPricing, { kind: "stale" }]]);
+    expect(result.ok && result.value.bindingProblems).toEqual([]);
+    expect(result.ok && result.value.leftovers).toEqual([
+      { path: PATHS.javaPricing, name: preparedNamesBeside(repo.root, PATHS.javaPricing)[0], message: EBUSY_MESSAGE },
+    ]);
   });
 });

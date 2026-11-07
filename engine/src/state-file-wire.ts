@@ -136,7 +136,7 @@ import {
   waveOwnerDuty,
   type OwnerCheckAuthority,
 } from "./core/owner-verification/obligations";
-import { parseContractId, parseIdentifier } from "./core/skeleton/bindings";
+import { aliasClassClashes, aliasCollisions, parseContractId, parseIdentifier } from "./core/skeleton/bindings";
 import { skeletonLanguageOf } from "./core/skeleton/language";
 import type {
   BoundExport,
@@ -2518,12 +2518,17 @@ function parseExportBinding(raw: unknown, label: string, typedContracts: Readonl
     }
     exports.push(bound.value);
   }
-  // The plan grammar refuses this as `name-collides-with-alias`: a TypeScript
-  // skeleton would import the alias and declare the name in one scope.
-  const aliases = new Set<string>(exports.map(({ alias }) => alias));
-  const collision = exports.find(({ name }) => aliases.has(name));
+  // The plan grammar's `name-collides-with-alias`, by its one rule: only a
+  // TypeScript skeleton imports the alias and declares the name in one scope.
+  const [collision] = aliasCollisions(path.value, exports);
   if (collision !== undefined) {
-    return parseErr(`${label} binds the export name '${collision.name}', which is also an alias of the binding (name-collides-with-alias)`);
+    return parseErr(`${label} binds the export name '${collision}', which is also an alias of the binding (name-collides-with-alias)`);
+  }
+  // And `alias-collides-with-class`: a Java skeleton imports every alias, so
+  // none may be the file's own class name.
+  const [classClash] = aliasClassClashes(path.value, exports);
+  if (classClash !== undefined) {
+    return parseErr(`${label} binds the alias '${classClash}', the Java file's own class name (alias-collides-with-class)`);
   }
   const [first, ...rest] = exports;
   if (first === undefined) return parseErr(`${label}.exports must be a non-empty array`);
@@ -2538,7 +2543,9 @@ function parseExportBinding(raw: unknown, label: string, typedContracts: Readonl
  * before G2 binds nothing. Present, `[]` included, each binding is an exact
  * record of a canonical path bound once, to a stamped contract (a parsed
  * `ContractId`) that freezes a types file, with distinct validated
- * identifiers and no export name that is also an alias of the binding.
+ * identifiers and, on a TypeScript path, no export name that is also an alias
+ * of the binding (`aliasCollisions`), and on a Java path no alias that is the
+ * file's own class name (`aliasClassClashes`).
  */
 function parseExportBindingsField(
   raw: unknown,

@@ -64,7 +64,8 @@ export type MalformedEntryReason =
  * when the line carries no readable path) and exactly one reason.
  *
  * Parse-time problems (`malformed-entry`, `duplicate-name`,
- * `name-collides-with-alias`, `duplicate-path`, `multi-contract`) are
+ * `name-collides-with-alias`, `alias-collides-with-class`, `duplicate-path`,
+ * `multi-contract`) are
  * collected by `parseExportBindings`; the graph-shape
  * problems by `validateExportBindings`, which also reports every parse-time
  * problem it receives.
@@ -78,6 +79,10 @@ export type BindingProblem =
    *  skeleton would import that alias and declare the name in one scope
    *  (TS2440). */
   | Readonly<{ kind: "name-collides-with-alias"; path: string; name: string }>
+  /** An alias equal to the Java file's own class name: the skeleton's
+   *  single-type import of the alias would clash with the top-level class
+   *  the file declares (JLS 7.5.1). */
+  | Readonly<{ kind: "alias-collides-with-class"; path: string; alias: string }>
   | Readonly<{ kind: "duplicate-path"; path: string; contract: string }>
   | Readonly<{ kind: "multi-contract"; path: string; contracts: readonly [string, string, ...string[]] }>
   | Readonly<{ kind: "unknown-contract"; path: string; contract: string }>

@@ -117,7 +117,14 @@ closed result union.**
   - If the digest is not `expectedSha256`, the result is `modified`. That digest is the engine's own recorded
     skeleton digest (ADR-0055), so a file a human or Agent has touched is never replaced, including one
     touched while the replacement was being prepared.
-  - On a match, `rename(prepared, target)` publishes the bytes. The prepared name is removed as for create.
+  - On a match, `rename(prepared, target)` publishes the bytes. The prepared name is removed as for create,
+    with one difference: a `modified` refusal whose prepared name cannot be removed stays `modified`,
+    naming the prepared name left behind (`leftover`), so the Contract Revision still settles the path stale
+    (ADR-0057) instead of reporting a write failure.
+- **Leftovers are notes.** `writePlanned` carries a `written` result's leftover with the record it leaves
+  (`PlannedWrite.recorded.leftover`), and every caller surfaces it without blocking: registration prints
+  `[loom] skeleton note: …` on stderr, the contract stop adds a `note:` line to its stop note, and the
+  revision lists it in its outcome as `skeleton note: …` (`renderLeftPreparedName`).
 - **Atomicity (NFR-021).** Bytes only ever appear under the target name through one `link` or one `rename`, so
   each file is either complete or absent.
 - **Ownership (INV-3).** The writer is the owner module. Its sibling entry points are

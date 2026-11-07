@@ -80,9 +80,15 @@ fence and directly under a group's fenced block. Each `- ` item binds one file t
   template text.
 - **Malformed entries.** Each malformed entry is a `malformed-entry` problem with a closed reason:
   `not-a-binding-line`, `missing-contract`, `missing-name`, `missing-alias`, `empty-exports`,
-  `invalid-identifier` or `reserved-word`. A repeated export name in one file is `duplicate-name`. An export
-  name equal to an alias of its own line is `name-collides-with-alias`: the TypeScript skeleton would
-  import that alias and declare the name in one scope.
+  `invalid-identifier` or `reserved-word`. A repeated export name in one file is `duplicate-name`. On a
+  TypeScript binding (a path `skeletonLanguageOf` parses to a TypeScript target), an export name equal to
+  an alias of its own line is `name-collides-with-alias`: the TypeScript skeleton would import that alias
+  and declare the name in one scope. A Java binding may reuse an alias as a name, since a Java field and a
+  type never share a namespace, and a path that gets no skeleton has no scope to collide in.
+  `aliasCollisions` in `bindings.ts` is the one rule; the State File wire calls it too. On a Java binding,
+  an alias equal to the file's own class name is `alias-collides-with-class`: the Java skeleton imports
+  every alias, and a single-type import of the name the file declares is a compile error (JLS 7.5.1).
+  `aliasClassClashes` is that rule, also called by the wire.
 - **Misplacement.** `parse-plan-models.ts` calls `parseExportBindings` on the File Structure section. A
   label found in any other section is a `misplaced-label` stray, never an opt-out.
 - **Canonical form.** `renderExportBinding` emits the canonical line, and parsing that line yields the same
@@ -92,7 +98,8 @@ fence and directly under a group's fenced block. Each `- ` item binds one file t
 `engine/src/handlers/helpers/validate-model-bindings.ts`, and re-run by
 `engine/src/core/task-graph-population.ts` before stamping). Each refusal is rendered by
 `renderBindingProblem` and names the file and the reason (FR-002). It returns every grammar problem above
-(`malformed-entry`, `duplicate-name`, `name-collides-with-alias`, `multi-contract`, `duplicate-path`) first,
+(`malformed-entry`, `duplicate-name`, `name-collides-with-alias`, `alias-collides-with-class`,
+`multi-contract`, `duplicate-path`) first,
 then these graph-shape refusals of each well-formed binding:
 
 | Problem kind | Refused when |
@@ -112,7 +119,9 @@ than TypeScript or Java is accepted. At its spawn it reports "unsupported langua
 **Persistence handoff.** Population stamps the validated bindings into the TaskGraph as `export_bindings`
 in plan order (AD-4). The State File wire re-proves the stored stamp at every load: each contract is minted
 through `parseContractId`, every name and alias through `parseIdentifier`, and a stored name equal to an
-alias of its binding is refused as `name-collides-with-alias`. `bindingStampAgreement(plan, stamp)` compares the rendered lines, and the brief shell
+alias of its TypeScript binding is refused as `name-collides-with-alias` (`aliasCollisions`, the grammar's
+own rule), as is a Java binding's alias equal to its class name (`alias-collides-with-class`,
+`aliasClassClashes`). `bindingStampAgreement(plan, stamp)` compares the rendered lines, and the brief shell
 refuses a spawn on drift until re-population. `references/plan-template.md` and
 `commands/templates/phase-decompose.md` document the label and tell decompose to copy it verbatim.
 

@@ -20,7 +20,8 @@
  * a refreshed one, or `stale` for a modified one, which keeps its bytes and
  * record and is flagged `stale: { revision }`. The binding problems the
  * revised types raise are reported, never committed: the next spawn's stage
- * two re-resolves the stamped types and blocks on them.
+ * two re-resolves the stamped types and blocks on them. A prepared name a
+ * skeleton write left behind is reported as a note, never a refusal.
  *
  * Pure: the shell supplies its observations of the frozen paths and the
  * skeleton refresh it already wrote.
@@ -39,7 +40,7 @@ import {
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
 import { normalizePlanPath } from "./plan-path-match";
-import { renderSkeletonProblem, type SkeletonProblem } from "./skeleton/problems";
+import { renderLeftPreparedName, renderSkeletonProblem, type LeftPreparedName, type SkeletonProblem } from "./skeleton/problems";
 import { installSkeletonRecords } from "./skeleton/records";
 import type { SkeletonRecord } from "./skeleton/types";
 import { reopenableWave, returnWaveTasksToRevalidation, type WaveReopeningRefusal } from "./task-revalidation";
@@ -83,23 +84,27 @@ export type RefreshedSkeleton = Readonly<Pick<SkeletonRecord, "contract" | "lang
 /**
  * What the revision shell did to the contract's engine-written skeletons
  * before the locked update: one settlement per skeleton path it settled,
- * keyed by normalized path so no path is both refreshed and stale, and every
- * problem the revised types raised. Built only by `skeletonRevisionOf`.
+ * keyed by normalized path so no path is both refreshed and stale, every
+ * problem the revised types raised, and every prepared name a write left
+ * behind. Built only by `skeletonRevisionOf`.
  */
 export type SkeletonRevision = Readonly<{
   settlements: ReadonlyMap<string, SkeletonSettlement>;
   bindingProblems: readonly SkeletonProblem[];
+  leftovers: readonly LeftPreparedName[];
 }>;
 
 /** The revision of `settled` paths (a later settlement of one path replaces
- *  an earlier one) and `bindingProblems`. */
+ *  an earlier one), `bindingProblems` and `leftovers`. */
 export const skeletonRevisionOf = (
   settled: readonly (readonly [path: string, settlement: SkeletonSettlement])[],
   bindingProblems: readonly SkeletonProblem[],
+  leftovers: readonly LeftPreparedName[] = [],
 ): SkeletonRevision =>
   freeze({
     settlements: new Map(settled.map(([path, settlement]) => [normalizePlanPath(path), settlement] as const)),
     bindingProblems: Object.freeze([...bindingProblems]),
+    leftovers: Object.freeze([...leftovers]),
   });
 
 /** A revision of a contract with no engine-written skeleton to settle. */
@@ -115,6 +120,8 @@ export type RevisedContract = Readonly<{
    *  renders each as `stale against revised contract`. */
   staleSkeletons: readonly string[];
   bindingProblems: readonly SkeletonProblem[];
+  /** The prepared names the skeleton writes left behind: notes, never refusals. */
+  leftovers: readonly LeftPreparedName[];
 }>;
 
 /** The settled paths of one kind, in settlement order. */
@@ -258,15 +265,16 @@ export function reviseAcceptanceContract(
       refreshed: settledPaths(skeletons, "refreshed"),
       staleSkeletons: settledPaths(skeletons, "stale"),
       bindingProblems: skeletons.bindingProblems,
+      leftovers: skeletons.leftovers,
     }),
   });
 }
 
 /** The outcome an operator reads: the revision, then one line per refreshed
- *  skeleton, stale skeleton and binding problem. */
+ *  skeleton, stale skeleton, binding problem and prepared name left behind. */
 export function revisionOutcomeMessage(
-  { contract, revision, refreshed, staleSkeletons, bindingProblems }:
-    Pick<RevisedContract, "contract" | "revision" | "refreshed" | "staleSkeletons" | "bindingProblems">,
+  { contract, revision, refreshed, staleSkeletons, bindingProblems, leftovers }:
+    Pick<RevisedContract, "contract" | "revision" | "refreshed" | "staleSkeletons" | "bindingProblems" | "leftovers">,
 ): string {
   const revalidated = revision.revalidatedTaskIds.length === 0
     ? "no implemented claimant needed revalidation"
@@ -277,6 +285,7 @@ export function revisionOutcomeMessage(
     ...staleSkeletons.map((path) => `skeleton ${path}: stale against revised contract (modified, left as it is)`),
     ...bindingProblems.map((problem) =>
       `skeleton binding problem: ${renderSkeletonProblem(problem)}; the next spawn's stage two blocks on it`),
+    ...leftovers.map((leftover) => `skeleton note: ${renderLeftPreparedName(leftover)}`),
     "",
   ].join("\n");
 }

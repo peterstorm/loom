@@ -40,7 +40,9 @@
  * Each file is complete or absent (NFR-021): bytes only ever appear under the
  * target name through one link or one rename. A prepared name that cannot be
  * removed after the bytes were published leaves the write `written`, naming
- * the prepared name left behind (`leftover`); after anything else, it is an
+ * the prepared name left behind (`leftover`); after a `modified` refusal it
+ * stays that refusal, naming it the same way, so a caller still reads the
+ * target as changed by someone else; after anything else, it is an
  * `io-failed` naming both. Missing parent directories are created one
  * anchored component at a time. There is no retry; an I/O failure is
  * `io-failed` with the operating system's message.
@@ -71,19 +73,27 @@ export type SkeletonWriteRefusal =
   | "absent"
   | "modified";
 
+/** A prepared name the writer could not remove after a write, and why. */
+export type PreparedNameLeftover = Readonly<{ name: string; message: string }>;
+
 export type SkeletonWriteResult =
   /** The bytes are published under the target name. `leftover` is the prepared
    *  name that could not be removed afterwards, if any: the write still stands. */
-  | Readonly<{ kind: "written"; sha256: string; leftover: null | Readonly<{ name: string; message: string }> }>
+  | Readonly<{ kind: "written"; sha256: string; leftover: PreparedNameLeftover | null }>
   | Readonly<{ kind: "exists" }>
-  | Readonly<{ kind: "refused"; reason: SkeletonWriteRefusal }>
+  /** Refused before the replacement was prepared: nothing was left behind. */
+  | Readonly<{ kind: "refused"; reason: Exclude<SkeletonWriteRefusal, "modified"> }>
+  /** The target's bytes changed: refused after the replacement was prepared,
+   *  so `leftover` names the prepared name that could not be removed, if any. */
+  | Readonly<{ kind: "refused"; reason: "modified"; leftover: PreparedNameLeftover | null }>
   | Readonly<{ kind: "io-failed"; message: string }>;
 
 /** Source files are world-readable and owner-writable, like any checkout. */
 const SKELETON_MODE = 0o644;
 const DIRECTORY_MODE = 0o755;
 
-const refused = (reason: SkeletonWriteRefusal): SkeletonWriteResult => Object.freeze({ kind: "refused", reason });
+const refused = (reason: Exclude<SkeletonWriteRefusal, "modified">): SkeletonWriteResult => Object.freeze({ kind: "refused", reason });
+const MODIFIED: SkeletonWriteResult = Object.freeze({ kind: "refused", reason: "modified", leftover: null });
 const EXISTS: SkeletonWriteResult = Object.freeze({ kind: "exists" });
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const ioFailed = (error: unknown): SkeletonWriteResult => Object.freeze({ kind: "io-failed", message: messageOf(error) });
@@ -116,7 +126,7 @@ function repoRelativeSegments(path: string): readonly string[] | null {
 
 /** What the no-follow `lstat` walk found at the target. */
 type Walked =
-  | Readonly<{ kind: "refused"; reason: SkeletonWriteRefusal }>
+  | Readonly<{ kind: "refused"; reason: "symlinked-ancestor" }>
   | Readonly<{ kind: "leaf"; leaf: "absent" | "file" | "other" }>;
 
 /**
@@ -217,18 +227,22 @@ const written = (bytes: string): SkeletonWriteResult => Object.freeze({ kind: "w
 /**
  * What a write reports when its prepared name could not be removed
  * afterwards. Bytes that reached the target are published: still `written`,
- * naming the prepared name left behind. Any other result becomes an I/O
- * failure naming both what happened and the name left behind.
+ * naming the prepared name left behind. A `modified` refusal stays that
+ * refusal, naming it the same way: the target still changed under someone
+ * else's hand. Any other result becomes an I/O failure naming both what
+ * happened and the name left behind.
  */
 export function withPreparedNameLeft(result: SkeletonWriteResult, prepared: string, error: unknown): SkeletonWriteResult {
-  const leftover = Object.freeze({ name: prepared, message: messageOf(error) });
+  const leftover: PreparedNameLeftover = Object.freeze({ name: prepared, message: messageOf(error) });
   switch (result.kind) {
     case "written":
       return Object.freeze({ ...result, leftover });
     case "exists":
       return ioFailed(`a file appeared at the target meanwhile, and the prepared name ${prepared} was left behind (${leftover.message})`);
     case "refused":
-      return ioFailed(`refused (${result.reason}), and the prepared name ${prepared} was left behind (${leftover.message})`);
+      return result.reason === "modified"
+        ? Object.freeze({ ...result, leftover })
+        : ioFailed(`refused (${result.reason}), and the prepared name ${prepared} was left behind (${leftover.message})`);
     case "io-failed":
       return ioFailed(`${result.message}, and the prepared name ${prepared} was left behind (${leftover.message})`);
   }
@@ -291,23 +305,25 @@ export function refreshSkeleton(
     leaf === "absent" ? refused("absent") : leaf === "other" ? refused("not-a-regular-file") : null;
   return guarded(root, path, frozen, onLeaf, (parent, leaf) =>
     publishPrepared(parent, leaf, bytes, (prepared) => {
-      if (sha256Bytes(readDirectoryFileNoFollow(parent, leaf)) !== expectedSha256) return refused("modified");
+      if (sha256Bytes(readDirectoryFileNoFollow(parent, leaf)) !== expectedSha256) return MODIFIED;
       renameSync(anchoredChildPath(parent, prepared), anchoredChildPath(parent, leaf));
       return written(bytes);
     }));
 }
 
+/** `; its prepared name … was left behind (…)` for a leftover, else nothing. */
+export const leftoverClause = (leftover: PreparedNameLeftover | null): string =>
+  leftover === null ? "" : `; its prepared name ${leftover.name} was left behind (${leftover.message})`;
+
 /** One line naming why a write did not happen, for a refusal diagnostic. */
 export function renderSkeletonWriteResult(path: string, result: SkeletonWriteResult): string {
   switch (result.kind) {
     case "written":
-      return result.leftover === null
-        ? `${path}: written`
-        : `${path}: written; its prepared name ${result.leftover.name} was left behind (${result.leftover.message})`;
+      return `${path}: written${leftoverClause(result.leftover)}`;
     case "exists":
       return `${path}: a file appeared there during registration; it was left untouched`;
     case "refused":
-      return `${path}: refused (${result.reason})`;
+      return `${path}: refused (${result.reason})${result.reason === "modified" ? leftoverClause(result.leftover) : ""}`;
     case "io-failed":
       return `${path}: write failed (${result.message})`;
   }

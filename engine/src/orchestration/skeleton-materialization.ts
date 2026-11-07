@@ -21,7 +21,9 @@
  * 3. **Write.** Every byte goes through the no-clobber writer (INV-3); an
  *    existing file is never modified (FR-011).
  * 4. **Return** the new or updated records and each Task's outcomes, which
- *    registration commits in the same locked update as the reservation.
+ *    registration commits in the same locked update as the reservation, and
+ *    every prepared name a write left behind, which registration reports as
+ *    a note and never blocks on.
  *
  * A graph populated before G2 (no `export_bindings` stamp) materializes
  * nothing and records nothing. Every expected failure is a value (FR-045):
@@ -33,16 +35,16 @@ import { isNonEmpty, type DomainResult, type NonEmpty } from "../core/orchestrat
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
 import { productionFiles } from "../core/skeleton/graph-view";
 import { presentSkeletonOf, skeletonOutcomesOf } from "../core/skeleton/outcomes";
-import { renderResolutionProblem, renderSkeletonProblem } from "../core/skeleton/problems";
+import { renderResolutionProblem, renderSkeletonProblem, type LeftPreparedName } from "../core/skeleton/problems";
 import type { SkeletonCandidate } from "../core/skeleton/records";
 import type { AdoptAction, CreateAction, RefreshAction } from "../core/skeleton/refresh-plan";
 import { resolveBindings } from "../core/skeleton/resolve";
-import type { ExportBinding, PathObservation, PathSkeletonOutcome, SkeletonOrigin, SkeletonRecord } from "../core/skeleton/types";
+import type { ExportBinding, PathObservation, PathSkeletonOutcome, SkeletonOrigin } from "../core/skeleton/types";
 import type { TaskSkeletonRegistration } from "../core/validate-task-execution";
 import type { TaskGraph } from "../types";
 import { observeFrozenSurface, observeSpecifierStyle, typedContract } from "./frozen-surface-observation";
 import { observeSkeletonPaths } from "./skeleton-observation";
-import { frozenSkeletonPaths, generatedSkeleton, writePlanned } from "./skeleton-refresh";
+import { frozenSkeletonPaths, generatedSkeleton, writePlanned, type RecordedWrite } from "./skeleton-refresh";
 import { renderSkeletonWriteResult } from "./skeleton-writer";
 
 // ---------------------------------------------------------------------------
@@ -116,7 +118,10 @@ export function planTaskSkeletons(
 
 type Problems = NonEmpty<string>;
 
-const NOTHING: TaskSkeletonRegistration = Object.freeze({ records: Object.freeze([]), outcomes: new Map() });
+/** What registration commits, and the prepared names its writes left behind. */
+export type MaterializedSkeletons = TaskSkeletonRegistration & Readonly<{ leftovers: readonly LeftPreparedName[] }>;
+
+const NOTHING: MaterializedSkeletons = Object.freeze({ records: Object.freeze([]), outcomes: new Map(), leftovers: Object.freeze([]) });
 
 /** The bindings in order, grouped by contract in first-appearance order. */
 function byContract(bindings: readonly ExportBinding[]): readonly (readonly [string, readonly ExportBinding[]])[] {
@@ -187,24 +192,26 @@ function observePaths(
   return { ok: true, value: observed.value.observations };
 }
 
-/** Carry out one action through the writer; the record it leaves, or why none. */
-function perform(root: string, action: SkeletonAction, frozen: ReadonlySet<string>): DomainResult<SkeletonRecord, string> {
+/** Carry out one action through the writer; the record it leaves (with any
+ *  prepared name left beside it), or why none. */
+function perform(root: string, action: SkeletonAction, frozen: ReadonlySet<string>): DomainResult<RecordedWrite, string> {
   const written = writePlanned(root, action, action.kind === "refresh" ? action.origin : "spawn", frozen);
   return written.kind === "recorded"
-    ? { ok: true, value: written.record }
+    ? { ok: true, value: written }
     : { ok: false, error: renderSkeletonWriteResult(action.candidate.skeleton.path, written.result) };
 }
 
 /**
  * Resolve, plan and write the skeletons of the registering Tasks. Returns the
- * records written, adopted or refreshed, and every registering Task's
- * outcomes; or every problem that blocks the registration.
+ * records written, adopted or refreshed, every registering Task's outcomes
+ * and every prepared name a write left behind; or every problem that blocks
+ * the registration.
  */
 export function materializeTaskSkeletons(
   root: string,
   graph: TaskGraph,
   taskIds: readonly string[],
-): DomainResult<TaskSkeletonRegistration, Problems> {
+): DomainResult<MaterializedSkeletons, Problems> {
   if (graph.export_bindings === undefined) return { ok: true, value: NOTHING };
   const tasks = graph.tasks.filter(({ id }) => taskIds.includes(id));
   const paths = tasks.flatMap((task) => productionFiles(graph, task));
@@ -224,8 +231,9 @@ export function materializeTaskSkeletons(
   return {
     ok: true,
     value: Object.freeze({
-      records: Object.freeze(performed.flatMap((result) => (result.ok ? [result.value] : []))),
+      records: Object.freeze(performed.flatMap((result) => (result.ok ? [result.value.record] : []))),
       outcomes: new Map(settled.map(({ taskId, outcomes }) => [taskId, outcomes] as const)),
+      leftovers: Object.freeze(performed.flatMap((result) => (result.ok && result.value.leftover !== null ? [result.value.leftover] : []))),
     }),
   };
 }

@@ -184,7 +184,8 @@ describe("readTsTypesSurface: frozen ADTs", () => {
     expect(problems?.discriminant).toBe("kind");
     expect(problems?.tags).toContain("unsafe-path");
     expect(problems?.tags).toContain("name-collides-with-alias");
-    expect(problems?.tags).toHaveLength(13);
+    expect(problems?.tags).toContain("alias-collides-with-class");
+    expect(problems?.tags).toHaveLength(14);
   });
 
   it("reads the persisted leaf: the Identifier and ContractId brands and the outcome union", () => {

@@ -422,9 +422,14 @@ declares:
 - **Grammar.** A column-0 `**Export bindings:**` label directly under a File
   Structure group's fenced block, outside any fence, with
   `` - `path` — CT-n: name: Alias, … `` items. Names and aliases are
-  identifiers that are no TypeScript or Java reserved word, and no name may
-  equal an alias on its own line (`name-collides-with-alias`: the TypeScript
-  skeleton imports every alias and declares every name in one scope). The
+  identifiers that are no TypeScript or Java reserved word, and on a TypeScript
+  binding no name may equal an alias on its own line
+  (`name-collides-with-alias`: the TypeScript skeleton imports every alias and
+  declares every name in one scope; a Java binding may reuse an alias as a
+  name, since a Java field and a type never share a namespace). On a Java
+  binding no alias may equal the file's own class name
+  (`alias-collides-with-class`: the skeleton imports every alias, and
+  importing the name the file declares does not compile). The
   label anywhere else is a `misplaced-label` stray.
 - **One contract per file.** A path on lines of two contracts is refused as
   multi-contract; on two lines of one contract, as a duplicate.

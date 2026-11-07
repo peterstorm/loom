@@ -215,6 +215,36 @@ Prose after the list.
     // Another line's alias is in another file's scope: no collision.
     expect(parse("- `src/a.ts` — CT-1: a: BFn", "- `src/b.ts` — CT-1: BFn: CFn").problems).toEqual([]);
     expect(validate(self)).toContainEqual({ kind: "name-collides-with-alias", path: "src/a.ts", name: "PriceOrderFn" });
+    for (const tsPath of ["src/a.tsx", "src/a.mts", "src/a.cts"]) {
+      expect(parse(`- \`${tsPath}\` — CT-1: PriceOrderFn: PriceOrderFn`).problems)
+        .toEqual([{ kind: "name-collides-with-alias", path: tsPath, name: "PriceOrderFn" }]);
+    }
+  });
+
+  it("accepts an export name equal to an alias on a Java or non-skeleton binding: only a TypeScript skeleton shares one scope", () => {
+    const java = "src/main/java/com/acme/order/Pricing.java";
+    const javaLine = `- \`${java}\` — CT-1: PriceOrderFn: PriceOrderFn, a: BFn, BFn: CFn`;
+    expect(parse(javaLine)).toEqual({
+      bindings: [binding(java, "CT-1", ["PriceOrderFn", "PriceOrderFn"], ["a", "BFn"], ["BFn", "CFn"])],
+      problems: [],
+    });
+    expect(validate(javaLine).map(({ kind }) => kind)).not.toContain("name-collides-with-alias");
+    for (const unsupported of ["src/order/rates.py", "src/order/pricing.d.ts", "src/order/Pricing.kt"]) {
+      expect(parse(`- \`${unsupported}\` — CT-1: PriceOrderFn: PriceOrderFn`).problems).toEqual([]);
+    }
+  });
+
+  it("refuses a Java alias equal to the file's own class name: the skeleton's import would clash with the class it declares", () => {
+    const java = "src/main/java/com/acme/order/Pricing.java";
+    const clash = `- \`${java}\` — CT-1: priceOrder: Pricing, quote: Pricing`;
+    expect(parse(clash)).toEqual({ bindings: [], problems: [{ kind: "alias-collides-with-class", path: java, alias: "Pricing" }] });
+    expect(validate(clash)).toContainEqual({ kind: "alias-collides-with-class", path: java, alias: "Pricing" });
+    // An export name equal to the class name is a method, not an import: no clash.
+    expect(parse(`- \`${java}\` — CT-1: Pricing: PriceOrderFn`).problems).toEqual([]);
+    // A TypeScript file declares no class of its name, and an unsupported path no skeleton at all.
+    for (const other of ["src/order/Pricing.ts", "src/order/Pricing.kt", "lib/Pricing.java"]) {
+      expect(parse(`- \`${other}\` — CT-1: priceOrder: Pricing`).problems, other).toEqual([]);
+    }
   });
 
   it("names every malformed shape with its reason", () => {
@@ -378,6 +408,7 @@ describe("renderBindingProblem", () => {
     { kind: "malformed-entry", path: null, line: "- src/a.ts", reason: "not-a-binding-line" },
     { kind: "duplicate-name", path: "src/a.ts", name: "a" },
     { kind: "name-collides-with-alias", path: "src/a.ts", name: "AFn" },
+    { kind: "alias-collides-with-class", path: "src/main/java/com/acme/A.java", alias: "A" },
     { kind: "duplicate-path", path: "src/a.ts", contract: "CT-1" },
     { kind: "multi-contract", path: "src/a.ts", contracts: ["CT-1", "CT-2"] },
     { kind: "unknown-contract", path: "src/a.ts", contract: "CT-9" },
@@ -395,9 +426,10 @@ describe("renderBindingProblem", () => {
     expect(renderBindingProblem(problems[2]!)).toContain("missing its export name");
     expect(renderBindingProblem(problems[3]!)).toContain("'- src/a.ts'");
     expect(renderBindingProblem(problems[5]!)).toContain("'AFn'");
-    expect(renderBindingProblem(problems[7]!)).toContain("CT-1 and CT-2");
-    expect(renderBindingProblem(problems[12]!)).toContain("T5");
-    expect(renderBindingProblem(problems[12]!)).toContain("T1");
+    expect(renderBindingProblem(problems[6]!)).toContain("'A'");
+    expect(renderBindingProblem(problems[8]!)).toContain("CT-1 and CT-2");
+    expect(renderBindingProblem(problems[13]!)).toContain("T5");
+    expect(renderBindingProblem(problems[13]!)).toContain("T1");
     expect(new Set(problems.map(renderBindingProblem)).size).toBe(problems.length);
   });
 });
@@ -446,6 +478,12 @@ describe("properties", () => {
       const parsed = parse(line);
       expect(parsed.problems).toEqual(shared.map((name) => ({ kind: "name-collides-with-alias", path: "src/a.ts", name })));
       expect(parsed.bindings).toHaveLength(shared.length === 0 ? 1 : 0);
+      // On Java only the class-name clash applies, and only to an alias `A`.
+      const javaPath = "src/main/java/com/acme/A.java";
+      const java = parse(line.replace("`src/a.ts`", `\`${javaPath}\``));
+      const clashes = aliases.has("A") ? [{ kind: "alias-collides-with-class", path: javaPath, alias: "A" }] : [];
+      expect(java.problems).toEqual(clashes);
+      expect(java.bindings).toHaveLength(clashes.length === 0 ? 1 : 0);
     }));
   });
 

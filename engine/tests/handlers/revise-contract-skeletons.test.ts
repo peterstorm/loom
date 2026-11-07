@@ -320,6 +320,20 @@ describe("reviseAcceptanceContract commits the skeleton revision (pure)", () => 
     expect(revised.value.refreshed).toEqual([PATHS.tsQuotes]);
     expect(revised.value.staleSkeletons).toEqual([PATHS.tsPricing]);
     expect(revised.value.bindingProblems).toEqual(skeletons.bindingProblems);
+    expect(revised.value.leftovers).toEqual([]);
+  });
+
+  it("reports the prepared names the refresh left behind, committing nothing for them", () => {
+    const repo = seededRepo([PATHS.tsQuotes]);
+    repo.write(TS_CONTRACT.types, TS_TYPES_WITH_REFUND);
+    const graph = graphOf(repo);
+    const leftovers = [{ path: PATHS.tsQuotes, name: ".quotes.ts.loom-skeleton-1", message: "EBUSY" }];
+
+    const revised = reviseAcceptanceContract(graph, { contract: "CT-1", reason: "why" }, frozenObservations(repo, graph),
+      skeletonRevisionOf([], [], leftovers));
+
+    expect(revised.ok && revised.value.leftovers).toEqual(leftovers);
+    expect(revised.ok && revised.value.graph.skeletons).toEqual(graph.skeletons);
   });
 
   it("leaves the skeletons untouched with no skeleton revision", () => {
@@ -344,22 +358,25 @@ describe("revisionOutcomeMessage", () => {
       refreshed: [],
       staleSkeletons: [],
       bindingProblems: [],
+      leftovers: [],
     })).toBe("CT-1 revision 2 recorded; no implemented claimant needed revalidation. The next Wave Gate re-records its acceptance roster green.\n");
   });
 
-  it("adds one line per refreshed and stale skeleton and per binding problem", () => {
+  it("adds one line per refreshed and stale skeleton, per binding problem and per prepared name left behind", () => {
     const message = revisionOutcomeMessage({
       contract: "CT-1",
       revision: { revision: 1, reason: "r", previous: [], paths: [], revalidatedTaskIds: ["T4"] } as never,
       refreshed: [PATHS.tsQuotes],
       staleSkeletons: [PATHS.tsPricing],
       bindingProblems: [{ kind: "missing-alias", alias: "ParseOrderFn", path: PATHS.tsPricing, typesFile: TS_CONTRACT.types }],
+      leftovers: [{ path: PATHS.tsPricing, name: ".pricing.ts.loom-skeleton-1", message: "EBUSY" }],
     });
     expect(message.split("\n")).toEqual([
       "CT-1 revision 1 recorded; T4 returned to revalidation. The next Wave Gate re-records its acceptance roster green.",
       `skeleton refreshed ${PATHS.tsQuotes} from the revised types`,
       `skeleton ${PATHS.tsPricing}: stale against revised contract (modified, left as it is)`,
       `skeleton binding problem: ${PATHS.tsPricing} binds ParseOrderFn, but the frozen types file ${TS_CONTRACT.types} declares no ParseOrderFn; the next spawn's stage two blocks on it`,
+      `skeleton note: ${PATHS.tsPricing}: the prepared name .pricing.ts.loom-skeleton-1 beside it could not be removed (EBUSY); delete it`,
       "",
     ]);
   });

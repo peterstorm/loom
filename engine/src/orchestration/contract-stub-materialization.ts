@@ -21,7 +21,8 @@
  *    whose canonical bytes changed after a stop-check block and further
  *    edits. A file anyone else wrote is never touched.
  * 4. **Write** through the no-clobber writer (INV-3), then record each stub
- *    as an origin `contract-stub` skeleton under the State File lock.
+ *    as an origin `contract-stub` skeleton under the State File lock. A
+ *    prepared name a write could not remove is a note of the stop's output.
  *
  * A binding that does not resolve writes no stub: its problem is returned for
  * the stop's output, and the contract gate then sees an uncollected
@@ -34,7 +35,7 @@
 import { observeTaskGraphProjectBoundary } from "../config";
 import { contractRole } from "../core/acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "../core/orchestration-contract";
-import { renderSkeletonProblem, type SkeletonProblem } from "../core/skeleton/problems";
+import { renderLeftPreparedName, renderSkeletonProblem, type LeftPreparedName, type SkeletonProblem } from "../core/skeleton/problems";
 import { installSkeletonRecords } from "../core/skeleton/records";
 import { planSkeletonRefresh } from "../core/skeleton/refresh-plan";
 import type { SkeletonRecord } from "../core/skeleton/types";
@@ -56,10 +57,15 @@ export type SkeletonRecordStore = Readonly<{
 /** The stop shells' store: the record store, and the State File path that names the repository. */
 export type ContractStubStore = SkeletonRecordStore & Readonly<{ getPath(): string }>;
 
-/** What one stop did: the records it wrote or changed, and every binding it could not stub. */
-export type ContractStubs = Readonly<{ written: readonly SkeletonRecord[]; problems: readonly SkeletonProblem[] }>;
+/** What one stop did: the records it wrote or changed, every binding it
+ *  could not stub, and every prepared name a write left behind. */
+export type ContractStubs = Readonly<{
+  written: readonly SkeletonRecord[];
+  problems: readonly SkeletonProblem[];
+  leftovers: readonly LeftPreparedName[];
+}>;
 
-const NOTHING: ContractStubs = Object.freeze({ written: Object.freeze([]), problems: Object.freeze([]) });
+const NOTHING: ContractStubs = Object.freeze({ written: Object.freeze([]), problems: Object.freeze([]), leftovers: Object.freeze([]) });
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -82,13 +88,18 @@ export function stubbedContracts(graph: TaskGraph, taskId: string): readonly Typ
   }));
 }
 
-/** What the stop says: nothing when every stub resolved, else one line per problem. */
+/** What the stop says: nothing when every stub resolved and nothing was left
+ *  behind, else one line per problem, then one note per prepared name left. */
 export function renderContractStubs(taskId: string, result: DomainResult<ContractStubs, string>): string | null {
   if (!result.ok) return `contract stubs of ${taskId}: the engine could not write them (${result.error})`;
-  if (result.value.problems.length === 0) return null;
+  const { problems, leftovers } = result.value;
+  if (problems.length === 0 && leftovers.length === 0) return null;
   return [
-    `contract stubs of ${taskId}: not every stub could be written; its acceptance tests cannot import what is missing`,
-    ...result.value.problems.map((problem) => `- ${renderSkeletonProblem(problem)}`),
+    ...(problems.length === 0 ? [] : [
+      `contract stubs of ${taskId}: not every stub could be written; its acceptance tests cannot import what is missing`,
+      ...problems.map((problem) => `- ${renderSkeletonProblem(problem)}`),
+    ]),
+    ...leftovers.map((leftover) => `contract stubs of ${taskId}: note: ${renderLeftPreparedName(leftover)}`),
   ].join("\n");
 }
 
@@ -113,21 +124,18 @@ function stubContract(
   // A path that could not be read is already a problem: nothing is planned for it.
   const observable = candidates.filter(({ skeleton }) => observed.value.observations.has(skeleton.path));
   const performed = planSkeletonRefresh("candidate-driven", graph.skeletons ?? [], observed.value.observations, observable)
-    .map((action): DomainResult<SkeletonRecord, SkeletonProblem> => {
-      const written = writePlanned(root, action, "contract-stub", frozen);
-      return written.kind === "recorded"
-        ? { ok: true, value: written.record }
-        : { ok: false, error: writeFailure(action.candidate.skeleton.path, written.result) };
-    });
+    .map((action) => ({ path: action.candidate.skeleton.path, written: writePlanned(root, action, "contract-stub", frozen) }));
   return {
     ok: true,
     value: Object.freeze({
-      written: Object.freeze(performed.flatMap((result) => (result.ok ? [result.value] : []))),
+      written: Object.freeze(performed.flatMap(({ written }) => (written.kind === "recorded" ? [written.record] : []))),
       problems: Object.freeze([
         ...canonical.value.problems,
         ...observed.value.problems,
-        ...performed.flatMap((result) => (result.ok ? [] : [result.error])),
+        ...performed.flatMap(({ path, written }) => (written.kind === "unwritten" ? [writeFailure(path, written.result)] : [])),
       ]),
+      leftovers: Object.freeze(performed.flatMap(({ written }) =>
+        (written.kind === "recorded" && written.leftover !== null ? [written.leftover] : []))),
     }),
   };
 }
@@ -158,6 +166,7 @@ export async function materializeContractStubs(
   const written = stubbed.flatMap((result) => (result.ok ? result.value.written : []))
     .filter((record) => !recorded.some((existing) => canonicalStructuralEquals(existing, record)));
   const problems = stubbed.flatMap((result) => (result.ok ? result.value.problems : []));
+  const leftovers = stubbed.flatMap((result) => (result.ok ? result.value.leftovers : []));
   if (written.length > 0) {
     try {
       await store.updateAndReturn((current) => ({
@@ -168,7 +177,10 @@ export async function materializeContractStubs(
       return { ok: false, error: `the stubs were written, but their records were not: ${errorMessage(error)}` };
     }
   }
-  return { ok: true, value: Object.freeze({ written: Object.freeze(written), problems: Object.freeze(problems) }) };
+  return {
+    ok: true,
+    value: Object.freeze({ written: Object.freeze(written), problems: Object.freeze(problems), leftovers: Object.freeze(leftovers) }),
+  };
 }
 
 /**
