@@ -161,6 +161,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/panel-contract.ts": ["zod/v4"],
       "engine/src/core/review-panel.ts": ["zod/v4"],
       "engine/src/core/emission-tool.ts": ["zod/v4"],
+      // The security-audit run-metadata grammar (ADR-0064): run-metadata.json is
+      // an external document the program reads, so this contract volume parses it
+      // with one strict schema, exactly as the standalone lineage contract does.
+      "engine/src/core/security-audit-contract.ts": ["zod/v4"],
       // ADR-0042 (G5b INV-1): the TypeScript compiler API enters the pure core
       // through exactly the seams TYPESCRIPT_COMPILER_API_SEAMS names; no
       // other core module may import it.

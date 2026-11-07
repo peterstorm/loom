@@ -1,0 +1,486 @@
+/**
+ * Security-audit grammar: profiles, scope, run metadata, coverage identity,
+ * fingerprints, budget admission and prior-run carry rules.
+ *
+ * This is the leaf volume of the security-audit concept. It parses and it
+ * decides; it never reads, writes, spawns or publishes. Everything that does
+ * I/O lives in `handlers/helpers/programs/security-audit/`, and the ledger and
+ * verdict volumes (`security-coverage`, `security-findings`) consume these
+ * names without re-deriving them.
+ *
+ * Provenance of the vocabulary: `references/security-lenses/` and
+ * `ATTRIBUTION.md`. The upstream skill's four incomplete-run tokens, its
+ * fingerprint grammar, its prior-status table and its canonical coverage ID
+ * encoding are preserved deliberately — the differential test
+ * (`engine/tests/security/security-oracle.test.ts`) proves this module and
+ * upstream's validator agree about them.
+ *
+ * Pure module: no I/O, no clock, no randomness.
+ */
+
+import { z } from "zod/v4";
+import { match } from "ts-pattern";
+import { compareStrings } from "./ordering";
+import { failure, success, type DomainResult } from "./orchestration-contract/identity";
+
+// --- Limits ---
+
+export const SECURITY_AUDIT_LIMITS = Object.freeze({
+  /** Coverage units one run may hold (upstream's ledger ceiling). */
+  units: 10_000,
+  /** Entries in any per-unit collection (paths, checks, attempts, blocks). */
+  collectionItems: 1_000,
+  /** Archived attempts per unit. */
+  attemptsPerUnit: 1_000,
+  /** Canonical reference text length, before percent-encoding. */
+  referenceLength: 1_024,
+  /** Free prose length inside one record field. */
+  proseLength: 4_096,
+  /** Findings one run may publish. */
+  findings: 1_000,
+  /** Blocks one lens selection may name. */
+  companionBlocks: 64,
+});
+
+// --- Profiles ---
+
+export const SECURITY_PROFILES = ["quick", "standard", "deep"] as const;
+export type SecurityProfile = (typeof SECURITY_PROFILES)[number];
+
+/** The tokens upstream fixes for a run that could not be completed. Closed on
+ *  purpose: an incomplete run that cannot name its reason is a silent one. */
+export const SECURITY_INCOMPLETE_REASONS = [
+  "budget_cannot_fund_reconnaissance_and_reserves",
+  "budget_cannot_reserve_critics_and_validation",
+  "critic_budget_exhausted",
+  "validation_budget_exhausted",
+] as const;
+export type SecurityIncompleteReason = (typeof SECURITY_INCOMPLETE_REASONS)[number];
+
+export type SecurityProfileError = Readonly<{ kind: "invalid-security-profile"; message: string }>;
+
+export const parseSecurityProfile = (raw: unknown): DomainResult<SecurityProfile, SecurityProfileError> =>
+  match(raw)
+    .when(
+      (value): value is SecurityProfile =>
+        typeof value === "string" && (SECURITY_PROFILES as readonly string[]).includes(value),
+      (value) => success(value),
+    )
+    .otherwise(() =>
+      failure({
+        kind: "invalid-security-profile" as const,
+        message: `profile must be one of ${SECURITY_PROFILES.join(", ")}`,
+      }),
+    );
+
+// --- Identity grammar ---
+
+/** A stable, source-derived identifier. It never carries a line number, wave,
+ *  agent, severity or verdict: those change between states of one finding. */
+export const SECURITY_FINGERPRINT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
+
+/** Canonical lowercase agent IDs. Lowercase prevents case-fold collisions; the
+ *  Windows device names are excluded because a scratch root may be created. */
+export const SECURITY_AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const WINDOWS_RESERVED_AGENT_ID = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
+
+const VISIBLE_CONTENT = /[^\p{White_Space}\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+const PATH_FORBIDDEN_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
+const WINDOWS_RESERVED_COMPONENT =
+  /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/iu;
+
+/** Valid UTF-16 with no lone surrogate: every later encoder assumes it. */
+export function hasValidUnicodeScalarValues(value: string): boolean {
+  let index = 0;
+  while (index < value.length) {
+    const first = value.charCodeAt(index++);
+    if (first >= 0xd800 && first <= 0xdbff) {
+      if (index >= value.length) return false;
+      const second = value.charCodeAt(index++);
+      if (second < 0xdc00 || second > 0xdfff) return false;
+    } else if (first >= 0xdc00 && first <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Prose that a reader can actually see: no zero-width-only strings. */
+export function hasVisibleProse(value: string): boolean {
+  return hasValidUnicodeScalarValues(value) && VISIBLE_CONTENT.test(value);
+}
+
+export function isVisibleText(value: unknown, maxLength: number = SECURITY_AUDIT_LIMITS.proseLength): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    value.trim() === value &&
+    hasVisibleProse(value)
+  );
+}
+
+export const isSecurityFingerprint = (value: unknown): value is string =>
+  typeof value === "string" && SECURITY_FINGERPRINT_PATTERN.test(value);
+
+export const isSecurityAgentId = (value: unknown): value is string =>
+  typeof value === "string" &&
+  SECURITY_AGENT_ID_PATTERN.test(value) &&
+  !WINDOWS_RESERVED_AGENT_ID.test(value);
+
+/**
+ * A repository-relative source path the engine may cite. Absolute, traversal,
+ * Windows-reserved and non-NFC-suspicious forms all fail: a record that cites
+ * a path outside the target is not source evidence.
+ */
+export function isSafeSourcePath(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    !hasValidUnicodeScalarValues(value) ||
+    value.trim() !== value ||
+    PATH_FORBIDDEN_CHARACTER.test(value) ||
+    value.includes("\\") ||
+    value.includes(":")
+  ) {
+    return false;
+  }
+  if (value.startsWith("/") || value.startsWith("~") || /^[A-Za-z]:/.test(value)) return false;
+  return value
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== ".." && !/[ .]$/u.test(segment) && !WINDOWS_RESERVED_COMPONENT.test(segment));
+}
+
+// --- Coverage identity ---
+
+/** The four semantic coordinates of a coverage unit. `lifecycle` is optional;
+ *  when present it must be present in both the unit and its canonical refs. */
+export type CoverageRefs = Readonly<{
+  surface: string;
+  boundary: string;
+  subsystem: string;
+  attack_class: string;
+  lifecycle?: string;
+}>;
+
+const REF_FIELDS = ["surface", "boundary", "subsystem", "attack_class"] as const;
+
+function isCanonicalRef(value: unknown): value is string {
+  return (
+    isVisibleText(value, SECURITY_AUDIT_LIMITS.referenceLength) &&
+    !PATH_FORBIDDEN_CHARACTER.test(value) &&
+    value.normalize("NFC") === value
+  );
+}
+
+/** RFC 3986 unreserved bytes stay literal; everything else is percent-encoded.
+ *  The encoding is injective over valid references, which is what makes a
+ *  canonical coverage ID a safe map key. */
+export function encodeCanonicalRef(value: string): string {
+  if (!isCanonicalRef(value)) throw new TypeError("invalid canonical reference");
+  let encoded = "";
+  for (const byte of Buffer.from(value, "utf8")) {
+    const unreserved =
+      (byte >= 0x41 && byte <= 0x5a) ||
+      (byte >= 0x61 && byte <= 0x7a) ||
+      (byte >= 0x30 && byte <= 0x39) ||
+      byte === 0x2d ||
+      byte === 0x2e ||
+      byte === 0x5f ||
+      byte === 0x7e;
+    encoded += unreserved ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return encoded;
+}
+
+/** The unit's identity: the encoded coordinates joined in a fixed field order. */
+export function canonicalCoverageId(refs: CoverageRefs): string {
+  const fields: readonly string[] =
+    refs.lifecycle === undefined ? REF_FIELDS : [...REF_FIELDS, "lifecycle"];
+  return fields
+    .map((field) => encodeCanonicalRef(refs[field as keyof CoverageRefs] as string))
+    .join("::");
+}
+
+export type CoverageRefError = Readonly<{
+  kind: "invalid-coverage-refs";
+  message: string;
+}>;
+
+export const parseCoverageRefs = (raw: unknown): DomainResult<CoverageRefs, CoverageRefError> => {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return failure({ kind: "invalid-coverage-refs" as const, message: "canonical_refs must be an object" });
+  }
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record).sort(compareStrings);
+  const expected = record.lifecycle === undefined ? [...REF_FIELDS] : [...REF_FIELDS, "lifecycle"];
+  if (keys.length !== expected.length || expected.some((field) => !(field in record))) {
+    return failure({
+      kind: "invalid-coverage-refs" as const,
+      message: `canonical_refs must hold exactly ${expected.join(", ")}`,
+    });
+  }
+  for (const field of expected) {
+    if (!isCanonicalRef(record[field])) {
+      return failure({ kind: "invalid-coverage-refs" as const, message: `canonical_refs.${field} is not a canonical reference` });
+    }
+  }
+  return record.lifecycle === undefined
+    ? success({
+        surface: record.surface as string,
+        boundary: record.boundary as string,
+        subsystem: record.subsystem as string,
+        attack_class: record.attack_class as string,
+      })
+    : success({
+        surface: record.surface as string,
+        boundary: record.boundary as string,
+        subsystem: record.subsystem as string,
+        attack_class: record.attack_class as string,
+        lifecycle: record.lifecycle as string,
+      });
+};
+
+/** The tuple that must be unique across a ledger: two units with different IDs
+ *  but the same semantics are one unit, and a run that assigns both double-counts
+ *  coverage. */
+export function coverageSemanticKey(refs: CoverageRefs): string {
+  return JSON.stringify([refs.surface, refs.boundary, refs.subsystem, refs.attack_class, refs.lifecycle ?? null]);
+}
+
+// --- Run metadata ---
+
+const bounded = (max: number) => z.string().min(1).max(max);
+const safePathSchema = bounded(4_096).refine(isSafeSourcePath, "expected a repository-relative source path");
+const digestSchema = z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/);
+
+export const securityScopeSchema = z
+  .strictObject({
+    paths: z.array(safePathSchema).min(1).max(SECURITY_AUDIT_LIMITS.units).readonly(),
+    /** `diff` scopes audit the difference between two refs, not a tree. */
+    kind: z.enum(["tree", "diff"]).readonly(),
+    baseRef: digestSchema.nullable(),
+    headRef: digestSchema.nullable(),
+  })
+  .readonly();
+export type SecurityScope = z.infer<typeof securityScopeSchema>;
+
+export const securityRunMetadataSchema = z
+  .strictObject({
+    schemaVersion: z.literal(1),
+    runId: bounded(192),
+    repo: bounded(512),
+    target: bounded(4_096),
+    profile: z.enum(SECURITY_PROFILES).readonly(),
+    scope: securityScopeSchema,
+    scopePaths: z.array(safePathSchema).max(SECURITY_AUDIT_LIMITS.units).readonly(),
+    sourceRef: z
+      .strictObject({
+        commit: z.string().regex(/^[0-9a-f]{40}$/),
+        worktreeDirty: z.boolean(),
+      })
+      .readonly(),
+    /** Maximum agent invocations across every phase; null means unset. */
+    budget: z.number().int().min(1).max(100_000).nullable(),
+    executionPolicy: z.literal("sandboxed-source-and-local-only"),
+    selectedCompanions: z.array(bounded(2_048)).max(SECURITY_AUDIT_LIMITS.companionBlocks).readonly(),
+    priorRuns: z.array(bounded(4_096)).max(SECURITY_AUDIT_LIMITS.collectionItems).readonly(),
+    runStatus: z.enum(["in_progress", "complete", "incomplete"]),
+    incompleteReason: z.enum(SECURITY_INCOMPLETE_REASONS).nullable(),
+  })
+  .readonly();
+export type SecurityRunMetadata = z.infer<typeof securityRunMetadataSchema>;
+
+export type RunMetadataError = Readonly<{
+  kind: "invalid-run-metadata";
+  issues: readonly string[];
+}>;
+
+export const parseSecurityRunMetadata = (raw: unknown): DomainResult<SecurityRunMetadata, RunMetadataError> => {
+  const parsed = securityRunMetadataSchema.safeParse(raw);
+  return parsed.success
+    ? success(parsed.data)
+    : failure({
+        kind: "invalid-run-metadata" as const,
+        issues: parsed.error.issues.map((issue) => `${issue.path.join(".") || "$"}: ${issue.message}`),
+      });
+};
+
+// --- Budget admission ---
+
+/** Reconnaissance calls every run reserves before hunting (upstream: parallel
+ *  product/authority/surface agents plus one synthesis pass). */
+const RECONNAISSANCE_CALLS = 4;
+
+export type WaveAdmission = Readonly<{
+  /** How many hunters this wave may launch. */
+  hunterAssignments: number;
+  /** Invocations left after the wave, its critic and the validation reserve. */
+  remaining: number;
+  /** Invocations the profile requires beyond the hunters. */
+  reserved: number;
+}>;
+
+export type BudgetRefusal = Readonly<{
+  kind: "budget-refusal";
+  reason: SecurityIncompleteReason;
+  required: number;
+  available: number;
+  message: string;
+}>;
+
+export type WaveAdmissionRequest = Readonly<{
+  profile: SecurityProfile;
+  /** Invocations the run may spend in total. */
+  budget: number;
+  /** Invocations already spent across every phase. */
+  spent: number;
+  /** Units this wave plans to hunt. */
+  plannedHunters: number;
+  /** Expected surviving candidates; null means "unknown" → 30% of the balance. */
+  expectedCandidates: number | null;
+}>;
+
+/**
+ * Reserve critics and validation BEFORE hunters (upstream's order, kept because
+ * spending hunters into the critic reserve is how a run loses its coverage
+ * critic and then claims coverage it never checked).
+ *
+ * `quick` reserves exactly one final post-wave critic, so a quick run's wave is
+ * the last one by construction.
+ */
+export function admitWave(
+  request: WaveAdmissionRequest,
+): DomainResult<WaveAdmission, BudgetRefusal> {
+  const { profile, budget, spent, plannedHunters, expectedCandidates } = request;
+  const finalCleanCritics = profile === "quick" ? 0 : 1;
+  const mandatoryCritics = 1 + finalCleanCritics;
+  const remaining = budget - spent;
+
+  const verifierCallsPerCandidate = profile === "deep" ? 2 : 1;
+  const balanceAfterCritics = Math.max(0, remaining - mandatoryCritics);
+  const validationReserve =
+    expectedCandidates === null
+      ? Math.max(1, Math.ceil(balanceAfterCritics * 0.3))
+      : Math.max(1, expectedCandidates * verifierCallsPerCandidate);
+
+  const minimum = RECONNAISSANCE_CALLS + mandatoryCritics + 1;
+  if (budget < minimum) {
+    return failure({
+      kind: "budget-refusal" as const,
+      reason: "budget_cannot_fund_reconnaissance_and_reserves" as const,
+      required: minimum,
+      available: budget,
+      message: `budget ${budget} cannot fund ${RECONNAISSANCE_CALLS} reconnaissance calls, ${mandatoryCritics} critics and one validation call`,
+    });
+  }
+
+  const reserved = mandatoryCritics + validationReserve;
+  if (remaining - reserved <= 0) {
+    return failure({
+      kind: "budget-refusal" as const,
+      reason: (plannedHunters > 0 ? "critic_budget_exhausted" : "budget_cannot_reserve_critics_and_validation") as SecurityIncompleteReason,
+      required: reserved + 1,
+      available: remaining,
+      message: `wave needs ${reserved} reserved invocations (critics + validation) and has ${remaining} left`,
+    });
+  }
+
+  const hunterAssignments = Math.min(plannedHunters, remaining - reserved);
+  if (plannedHunters > 0 && hunterAssignments === 0) {
+    return failure({
+      kind: "budget-refusal" as const,
+      reason: "critic_budget_exhausted" as const,
+      required: reserved + 1,
+      available: remaining,
+      message: `no hunter fits beside the ${reserved} reserved invocations`,
+    });
+  }
+
+  return success({
+    hunterAssignments,
+    remaining: remaining - hunterAssignments,
+    reserved,
+  });
+}
+
+// --- Prior-run carry rules ---
+
+/** Upstream's prior-status vocabulary, preserved verbatim so a vendored ledger
+ *  row can be read by either implementation. */
+export const PRIOR_STATUSES = [
+  "new",
+  "prior_confirmed_same_source",
+  "prior_confirmed_changed_source",
+  "prior_needs_validation",
+  "prior_deferred",
+  "prior_blocked",
+  "prior_out_of_scope",
+  "prior_covered_same_source",
+  "prior_covered_changed_source",
+  "prior_rejected_claim_changed",
+  "none",
+] as const;
+export type PriorStatus = (typeof PRIOR_STATUSES)[number];
+
+/** What a prior record was, and whether its relevant source is still current. */
+export type PriorRecordFacts = Readonly<{
+  verdict: "confirmed" | "needs_validation" | "rejected" | "covered" | "deferred" | "blocked" | "out_of_scope";
+  /** `true`/`false` when the current source was compared; `unknown` when it was not. */
+  sourceUnchanged: boolean | null;
+}>;
+
+/**
+ * The carry table. `unknown` is not `unchanged`: an unchecked source is current
+ * work, because "we did not look" has never meant "nothing changed".
+ */
+export function derivePriorStatus(prior: PriorRecordFacts | null): PriorStatus {
+  if (prior === null) return "none";
+  const unchanged = prior.sourceUnchanged === true;
+  switch (prior.verdict) {
+    case "confirmed":
+      return unchanged ? "prior_confirmed_same_source" : "prior_confirmed_changed_source";
+    case "covered":
+      return unchanged ? "prior_covered_same_source" : "prior_covered_changed_source";
+    case "needs_validation":
+      return "prior_needs_validation";
+    case "deferred":
+      return "prior_deferred";
+    case "blocked":
+      return "prior_blocked";
+    case "out_of_scope":
+      return "prior_out_of_scope";
+    case "rejected":
+      return "prior_rejected_claim_changed";
+  }
+}
+
+export type CarryAction =
+  /** Seed a planned unit, exclude the root cause from hunters, and re-verify it. */
+  | Readonly<{ kind: "carry-confirmed" }>
+  /** Current planned work: the prior confirmation is only valid for its own source. */
+  | Readonly<{ kind: "revalidate" }>
+  /** Suppress only the unchanged failed claim, never coverage of the unit. */
+  | Readonly<{ kind: "suppress-rejected-claim" }>
+  /** Current planned work with the prior record's state as context, not evidence. */
+  | Readonly<{ kind: "current-work" }>;
+
+export function carryAction(priorStatus: PriorStatus): CarryAction {
+  switch (priorStatus) {
+    case "prior_confirmed_same_source":
+      return { kind: "carry-confirmed" };
+    case "prior_confirmed_changed_source":
+    case "prior_covered_changed_source":
+    case "prior_needs_validation":
+      return { kind: "revalidate" };
+    case "prior_rejected_claim_changed":
+      return { kind: "suppress-rejected-claim" };
+    case "prior_covered_same_source":
+    case "prior_deferred":
+    case "prior_blocked":
+    case "prior_out_of_scope":
+    case "new":
+    case "none":
+      return { kind: "current-work" };
+  }
+}
