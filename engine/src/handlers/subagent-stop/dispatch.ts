@@ -34,6 +34,7 @@ import { PRODUCTION_STOP_CHECK_PORTS, type StopCheckShellPorts } from "./accepta
 import { epochChangedFiles, runStopChecks } from "./stop-checks";
 import { claudeEpochLedger } from "./update-task-status";
 import { publishStopCheckNote } from "../../stop-check-note-sidecar";
+import { contractStubStopNote } from "../../orchestration/contract-stub-materialization";
 import { readFileSync } from "node:fs";
 import { claudeFinalTurnHandedBack, parseClaudeTranscript } from "../../core/claude-transcript-projection";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
@@ -380,6 +381,11 @@ export const runDispatch = async (
   let stopCheckNote: string | undefined;
   if (category === "impl" && sidecarObservation.kind === "authority-observed") {
     const { sidecar } = sidecarObservation;
+    // A contract Task's stop first writes the stubs its contract's acceptance
+    // tests import (AD-9), so the stop checks below already see them. Total:
+    // what it cannot stub is a note, never a block.
+    const stubNote = await contractStubStopNote(manager, sidecar.authority.taskId);
+    if (stubNote !== null) process.stderr.write(`[loom] ${stubNote}\n`);
     const epoch = claudeEpochLedger(
       evidenceSnapshot.kind === "snapshot"
         ? { kind: "read", records: evidenceSnapshot.events }
@@ -395,14 +401,20 @@ export const runDispatch = async (
       changedFiles: epochChangedFiles(epoch, stopCheckPorts.pathExists),
       hookStartedAtMs,
     }, stopCheckPorts);
+    const afterStubNote = (message: string): string => (stubNote === null ? message : `${stubNote}\n${message}`);
     // A block keeps the agent working only if the harness can hold it open. An
     // agent that already delivered its SubagentHandback has ended: blocking it
     // would drop this stop's settlement and strand the Task's authority, so the
     // block becomes a note and the stop settles (the Wave Gate still judges).
+    const handedBackNote = outcome.kind === "block" && await stopFinality(input)
+      ? handedBackBlockNote(outcome.message)
+      : null;
+    if (outcome.kind === "block" && handedBackNote === null) {
+      return { kind: "block", message: afterStubNote(outcome.message) };
+    }
     const note = outcome.kind === "note"
-      ? outcome.message
-      : outcome.kind === "block" && await stopFinality(input) ? handedBackBlockNote(outcome.message) : null;
-    if (outcome.kind === "block" && note === null) return { kind: "block", message: outcome.message };
+      ? afterStubNote(outcome.message)
+      : handedBackNote !== null ? afterStubNote(handedBackNote) : stubNote;
     if (note !== null) {
       // The systemMessage reaches only the operator. The sidecar carries the
       // note to the orchestrating model (#121), and is written before

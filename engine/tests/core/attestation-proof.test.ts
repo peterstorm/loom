@@ -29,8 +29,10 @@ import {
   parseReservationId,
   settleImplementationAttempt,
 } from "../../src/core/implementation-completion";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const observed = (overrides: Partial<ObservedProofEvidence> = {}): ObservedProofEvidence => ({
+  contractConformance: CONFORMANCE_NOT_OWED,
   taskCompleted: true,
   testResult: { verdict: "trusted-pass" },
   filesModified: [],

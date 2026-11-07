@@ -17,6 +17,7 @@ import { judgeRedThenGreen } from "../../core/red-then-green";
 import type { LedgerObservation, RedThenGreenObservation } from "../../core/red-then-green-types";
 import { classifyTaskFiles } from "../../core/test-file-classification";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
+import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
 import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import {
   collectNewTestEvidence,
@@ -222,6 +223,8 @@ export function settleExactImplementation(
       parserPathLabel: facts.parserPathLabel,
       siblingOwnedPaths,
       authoritativeStatePath: ports.repository.authoritativeStatePath,
+      // The engine-written skeleton records (AD-4).
+      engineSkeletons: state.skeletons ?? [],
     });
   } catch (error) {
     return unavailable(
@@ -261,6 +264,12 @@ export function settleExactImplementation(
   }
   const redThenGreen = judgeAttemptRedThenGreen(task, duty, facts, ports.repository.root);
   if (redThenGreen.kind === "unavailable") return unavailable(state, facts, redThenGreen.reason, bytes);
+  // Conformance against the frozen contracts (AD-5): which files owe it is
+  // the observation's scope (INV-5); a read failure is infrastructure.
+  const conformance = observeContractConformance(ports.repository.root, state, task);
+  if (!conformance.ok) {
+    return unavailable(state, facts, `${facts.transport} contract conformance observation unavailable: ${conformance.error}`, bytes);
+  }
 
   return Object.freeze({
     application: settleObservedImplementation(
@@ -273,6 +282,7 @@ export function settleExactImplementation(
         testEvidence: facts.testEvidence,
         newTests: newTests.value,
         ...(redThenGreen.kind === "judged" ? { redThenGreen: redThenGreen.observation } : {}),
+        contractConformance: conformance.value,
       },
       facts.proofEvaluationPolicy,
       bytes,

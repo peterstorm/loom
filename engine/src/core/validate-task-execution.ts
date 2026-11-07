@@ -24,6 +24,8 @@ import {
   implementationAttemptContextMatchesAuthority,
   type ImplementationAttemptContext,
 } from "./implementation-retry";
+import { installSkeletonRecords } from "./skeleton/records";
+import type { PathSkeletonOutcome, SkeletonRecord } from "./skeleton/types";
 
 export interface ValidateTaskExecutionInput {
   readonly agentType: string;
@@ -345,16 +347,32 @@ type TaskExecutionBaselineBundle = Readonly<{
 
 export type TaskExecutionBaselines = ReadonlyMap<string, TaskExecutionBaselineBundle>;
 
+/**
+ * What skeleton materialization (AD-1) hands registration: the skeleton
+ * records it wrote, adopted or refreshed, and each registering Task's
+ * outcomes (FR-030). Both commit in the same locked update as the
+ * reservation. A Task with no entry records no outcomes (a graph populated
+ * before G2).
+ */
+export type TaskSkeletonRegistration = Readonly<{
+  records: readonly SkeletonRecord[];
+  outcomes: ReadonlyMap<string, readonly PathSkeletonOutcome[]>;
+}>;
+
+const NO_SKELETON_REGISTRATION: TaskSkeletonRegistration = Object.freeze({ records: Object.freeze([]), outcomes: new Map() });
+
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
   context: ImplementationAttemptContext;
   retryHistoryStart: number;
   retryLineagePredecessorReceiptId: ImplementationSettlementReceiptId | null;
   baselines: TaskExecutionBaselineBundle;
+  /** The Task's skeleton outcomes to record, or null to leave them as they are. */
+  skeletonOutcomes: readonly PathSkeletonOutcome[] | null;
 }>;
 
 export type TaskExecutionAuthorityBatch =
-  | Readonly<{ ok: true; plans: readonly TaskExecutionAuthorityPlan[] }>
+  | Readonly<{ ok: true; plans: readonly TaskExecutionAuthorityPlan[]; skeletonRecords: readonly SkeletonRecord[] }>
   | Readonly<{ ok: false; error: string }>;
 
 /** Mint one exact authority per bound Task while preserving binding order. */
@@ -366,6 +384,7 @@ export function createTaskExecutionAuthorityBatch(
   headSha: string,
   reservedAt: IsoInstant,
   baselines: TaskExecutionBaselines,
+  skeletons: TaskSkeletonRegistration = NO_SKELETON_REGISTRATION,
 ): TaskExecutionAuthorityBatch {
   if (taskIds.length !== reservationIds.length || taskIds.length !== inputs.length) {
     return { ok: false, error: "Implementation reservation identity count does not match bound Task count." };
@@ -405,9 +424,10 @@ export function createTaskExecutionAuthorityBatch(
       retryHistoryStart: admission.historyStart,
       retryLineagePredecessorReceiptId: admission.lineagePredecessorReceiptId,
       baselines: taskBaselines,
+      skeletonOutcomes: skeletons.outcomes.get(taskId) ?? null,
     }));
   }
-  return { ok: true, plans: Object.freeze(plans) };
+  return { ok: true, plans: Object.freeze(plans), skeletonRecords: skeletons.records };
 }
 
 export type ProvenStaleReservation =
@@ -517,12 +537,14 @@ function reclaimTaskAttempt(
   return task;
 }
 
-/** Install a prevalidated batch and retire only exact stale identities. */
+/** Install a prevalidated batch and retire only exact stale identities. The
+ *  batch's skeleton records and outcomes land in the same update. */
 export function applyTaskExecutionAuthorityBatch(
   state: TaskGraph,
   plans: readonly TaskExecutionAuthorityPlan[],
   stale: readonly ProvenStaleReservation[],
   reclaimedAt: IsoInstant,
+  skeletonRecords: readonly SkeletonRecord[] = [],
 ): TaskGraph {
   const staleTaskIds = exactStaleTaskIds(state, stale);
   const planByTask = new Map<string, TaskExecutionAuthorityPlan>(
@@ -553,6 +575,7 @@ export function applyTaskExecutionAuthorityBatch(
       implementation_retry_predecessor_receipt_id: plan.retryLineagePredecessorReceiptId ?? undefined,
       reserved_at: plan.authority.reservedAt,
       legacy_execution_reservation: undefined,
+      ...(plan.skeletonOutcomes === null ? {} : { skeleton_outcomes: plan.skeletonOutcomes }),
     };
   });
   const invalidatedWaves = new Set(
@@ -586,6 +609,7 @@ export function applyTaskExecutionAuthorityBatch(
     ...(specCheck === undefined && state.spec_check !== undefined ? { spec_check: undefined } : {}),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     wave_gates: waveGates,
+    ...(skeletonRecords.length === 0 ? {} : { skeletons: installSkeletonRecords(state.skeletons ?? [], skeletonRecords) }),
   };
 }
 

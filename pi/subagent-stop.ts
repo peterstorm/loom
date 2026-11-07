@@ -52,6 +52,7 @@ import {
   type StopCheckShellPorts,
 } from "../engine/src/handlers/subagent-stop/acceptance-stop-check";
 import { epochChangedFiles, runStopChecks, stopChecksReportLine } from "../engine/src/handlers/subagent-stop/stop-checks";
+import { contractStubStopNote, type ContractStubStore } from "../engine/src/orchestration/contract-stub-materialization";
 import type { LedgerObservation } from "../engine/src/core/red-then-green-types";
 import { renderStopCheckNotes, type StopCheckNote } from "../engine/src/core/stop-check-note";
 import {
@@ -196,6 +197,25 @@ export async function reportImplementationStopChecks(
   if (line === null) return null;
   notifyOperator(line);
   return Object.freeze({ taskId, message: line });
+}
+
+/**
+ * The contract stubs (AD-9), run before the report-only stop checks: when the
+ * result's Task is a contract Task, the stubs its contract's acceptance tests
+ * import are written and recorded. Total. What it could not stub is printed
+ * to the operator and returned as the note the parent model also gets, or
+ * null when there is nothing to say.
+ */
+export async function reportContractStubs(
+  store: ContractStubStore,
+  taskId: string | null,
+  notifyOperator: (line: string) => void = piStderrNote,
+): Promise<StopCheckNote | null> {
+  if (taskId === null) return null;
+  const message = await contractStubStopNote(store, taskId);
+  if (message === null) return null;
+  notifyOperator(message);
+  return Object.freeze({ taskId, message });
 }
 
 /** An operator line on stderr, the channel Pi always has. */
@@ -896,6 +916,8 @@ async function processPiResult(
     case "implementation": {
       // One read of the child's epoch, shared by the report-only stop checks (I7) and settlement (I6).
       const ledger = piImplementationLedger(batch.resultSessionId, batch.grantTokens.get(resultIndex) ?? null, agentType, fsSessionRegistry);
+      const stubNote = await reportContractStubs(mgr, reservedItem?.taskId ?? null, batch.notifyOperator);
+      if (stubNote !== null) stopCheckNotes.push(stubNote);
       const note = await reportImplementationStopChecks(
         mgr, reservedItem?.taskId ?? null, ledger, REPORT_ONLY_STOP_CHECK_PORTS, batch.notifyOperator,
       );

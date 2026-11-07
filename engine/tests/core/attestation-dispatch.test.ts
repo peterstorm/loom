@@ -138,6 +138,7 @@ describe("attestation dispatch emission", () => {
 
 import { createImplementationAttemptAuthority, createTaskCompletionSuiteAuthority, settleImplementationAttempt, parseIsoInstant, parseReservationId, type ImplementationAttemptSettlementReceipt } from "../../src/core/implementation-completion";
 import type { ImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
   const instant = parseIsoInstant("2026-09-19T00:00:00.000Z");
@@ -167,7 +168,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-09-19T00:01:00.000Z",
-    evidence: { taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] },
+    evidence: { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] },
     proofEvaluationPolicy: { untrustedPass: "reject" },
   }, {
     schemaVersion: 1,

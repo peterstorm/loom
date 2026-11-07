@@ -15,6 +15,8 @@ import {
   type RedThenGreenEra,
 } from "../../core/proof-obligations";
 import type { RedThenGreenObservation } from "../../core/red-then-green-types";
+import type { ContractConformance } from "../../core/skeleton/types";
+import { observeContractConformance } from "../../orchestration/contract-conformance-observation";
 import type { FrozenVerificationManifest } from "../../core/verification-manifest";
 import { attributedChangedArtifacts } from "../../core/artifact-baseline";
 import { artifactCovers } from "../../core/path-coverage";
@@ -267,14 +269,17 @@ function reconcileEra(task: Task, verificationManifest: FrozenVerificationManife
  * facts, and current byte delta. `verificationManifest` is the TaskGraph's
  * frozen manifest (`undefined` only for a TaskGraph frozen before manifests
  * existed); whether I6 is owed is the Task's `redThenGreenDuty` under it (see
- * `reconcileEra`). Both trailing parameters are required, so every caller
- * states its graph's era rather than defaulting into the legacy one. */
+ * `reconcileEra`). Both are required, so every caller states its graph's era
+ * rather than defaulting into the legacy one. `contractConformance` is the
+ * observation's verdict over the Task's current bytes (AD-5), required for
+ * the same reason: every caller decides it. */
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
   collectedNewTests: NewTestEvidence,
   allowLegacyPositiveMigration: boolean,
   verificationManifest: FrozenVerificationManifest | undefined,
+  contractConformance: ContractConformance,
 ): Task {
   if (task.status === "completed") return task;
   // The ADT arrives parsed; no legacy-pair re-coercion here.
@@ -296,6 +301,7 @@ export function reconcileTaskFromStoredEvidence(
       newTestsWritten,
       newTestEvidence,
       ...(redThenGreen === undefined ? {} : { redThenGreen }),
+      contractConformance,
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
@@ -335,7 +341,8 @@ export function reconcileTaskFromStoredEvidence(
 function failureSummary(task: Task): string {
   if (task.proof?.state !== "failed") return task.proof?.state ?? "missing";
   return task.proof.failures.map((failure) =>
-    failure.kind === "declared-artifact-not-changed" || failure.kind === "declared-artifact-drifted"
+    failure.kind === "declared-artifact-not-changed" || failure.kind === "declared-artifact-drifted" ||
+      failure.kind === "declared-artifact-contract-violated"
       ? `${failure.kind}:${failure.artifact}`
       : failure.kind
   ).join(", ");
@@ -480,12 +487,19 @@ const handler: HookHandler = async (_stdin, args) => {
             describeNewTestObservationError(collectedNewTests.error),
           );
         }
+        // Which files owe conformance is the observation's scope (INV-5); a
+        // read failure aborts the reconcile without changing state.
+        const conformance = observeContractConformance(root, state, sourceTask);
+        if (!conformance.ok) {
+          throw new Error(`cannot observe contract conformance for ${sourceTask.id}: ${conformance.error}`);
+        }
         return reconcileTaskFromStoredEvidence(
           sourceTask,
           proofArtifactsChanged,
           collectedNewTests.value,
           recoveredBaselineSha !== null && recoveredPaths.length > 0,
           state.verification_manifest,
+          conformance.value,
         );
       });
       const resolved: TaskGraph = {

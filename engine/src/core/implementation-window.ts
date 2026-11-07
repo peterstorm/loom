@@ -12,7 +12,10 @@
  *
  * Every policy decision of the window lives here: which outstanding Tasks hold
  * active implementation authority, which reservations are reclaimable, which
- * Tasks escalated or are dispatchable, and which one recovery follows. The
+ * Tasks escalated or are dispatchable, and which one recovery follows. A
+ * spawn owed while stage two leaves an export binding unresolved (the
+ * skeleton report's problems, AS-051) is replaced by its repair, because
+ * registration would refuse that spawn with the same problems. The
  * status projection (`loom-status.ts`) only renders the outcome. Pure: the
  * shell supplies the reservation-liveness observation.
  */
@@ -86,6 +89,7 @@ const contradiction = (message: string, taskId: string | null = null): Implement
 export function classifyImplementationWindow(
   graph: TaskGraph,
   observation: ImplementationReservationStatusObservation | undefined,
+  unresolvedSkeletonBindings: readonly string[] = [],
 ): ImplementationWindow {
   if (graph.current_wave === undefined) return notInWindow;
   const registration = graph.active_wave_gate;
@@ -205,6 +209,16 @@ export function classifyImplementationWindow(
       }),
       `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure. ` +
         "Fix the cause, then remediate each Task with the helper orchestration remediate command on its status reason",
+    );
+  }
+  const [firstUnresolved, ...moreUnresolved] = unresolvedSkeletonBindings;
+  if (dispatches.length > 0 && firstUnresolved !== undefined) {
+    const unresolved: NonEmpty<string> = Object.freeze([firstUnresolved, ...moreUnresolved]);
+    return window(
+      canonicalRecord({ kind: "repair-skeleton-bindings", wave, unresolved }),
+      `Wave ${wave} cannot spawn: registration refuses it while a frozen types file does not resolve an export binding ` +
+        `(${unresolved.join("; ")}). Repair the types file with a Contract Revision ` +
+        "(helper revise-contract), or re-plan the binding and re-populate the TaskGraph",
     );
   }
   if (dispatches.length > 0) {

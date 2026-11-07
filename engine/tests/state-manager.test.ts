@@ -12,6 +12,7 @@ import { capturedSpecCheck } from "../src/core/spec-check";
 import type { TaskId } from "../src/core/task-id";
 import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
 import { findingId } from "./fixtures/finding-id";
+import { CONFORMANCE_NOT_OWED } from "../src/core/skeleton/conformance-verdict";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -571,6 +572,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     const satisfied = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: [] },
       {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: [],
@@ -592,6 +594,7 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     const satisfied = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: [] },
       {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: [],

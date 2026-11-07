@@ -1032,6 +1032,62 @@ describe("populate-task-graph — Acceptance Contracts", () => {
       expect(task.verification_policy?.regression).toEqual({ kind: "waived", reason: "acceptance-red-window" });
     }
   });
+
+  /** The contract plan with a File Structure whose `**Export bindings:**`
+   *  list carries `lines`: the bytes the handler reads once, checks, and stamps from. */
+  function boundPlan(dir: string, ...lines: readonly string[]): string {
+    const planFile = join(dir, "plan.md");
+    writeFileSync(planFile, [
+      CONTRACT_PLAN,
+      "## File Structure",
+      "",
+      "### Payload (T2, Wave 2)",
+      "",
+      "```",
+      "src/payload-impl.ts — NEW",
+      "```",
+      "",
+      "**Export bindings:**",
+      ...lines,
+      "",
+    ].join("\n"));
+    return planFile;
+  }
+
+  it("stamps the plan's export bindings, parsed from the plan it checked, into the written graph", async () => {
+    const dir = tempDir();
+    const plan = boundPlan(dir, "- `src/payload-impl.ts` — CT-1: handlePayload: PayloadFn, parsePayload: ParsePayloadFn");
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir, reportingManifest());
+
+    const result = await populate(contractDecompose(plan), []);
+
+    expect(result.kind, result.kind === "error" ? result.message : "").toBe("passthrough");
+    // Loaded back through the production State File wire, which keeps the stamp.
+    const graph: TaskGraph = StateManager.fromPath(statePath)!.load();
+    expect(graph.export_bindings).toEqual([{
+      path: "src/payload-impl.ts",
+      contract: "CT-1",
+      exports: [
+        { name: "handlePayload", alias: "PayloadFn" },
+        { name: "parsePayload", alias: "ParsePayloadFn" },
+      ],
+    }]);
+  });
+
+  it("refuses a plan export binding no Task implements, writing nothing", async () => {
+    const dir = tempDir();
+    const plan = boundPlan(dir, "- `src/nowhere.ts` — CT-1: handlePayload: PayloadFn");
+    const statePath = writeState(dir, plan, [], { current_phase: "decompose" });
+    writeManifest(dir, reportingManifest());
+    const before = stateBytes(statePath);
+
+    const result = await populate(contractDecompose(plan), []);
+
+    expect(result.kind).toBe("error");
+    expect(result.kind === "error" ? result.message : "").toContain("src/nowhere.ts");
+    expect(stateBytes(statePath)).toBe(before);
+  });
 });
 
 describe("populate-task-graph — owned Invariants reach population", () => {

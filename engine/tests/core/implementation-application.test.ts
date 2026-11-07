@@ -17,9 +17,13 @@ import {
 import {
   TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,
+  parseContractViolatedFailureKind,
 } from "../../src/core/proof-obligations";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../src/core/spec-check";
+import type { ConformanceViolation, ContractConformance, SkeletonRecord } from "../../src/core/skeleton/types";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
+import { authorizeImplementationSpawn, deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { Task, TaskGraph } from "../../src/types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
 
@@ -63,6 +67,8 @@ function observedBytes(
     priorAttributedPaths: [],
     repositoryChangedPaths: [],
     siblingOwnedPaths: [],
+    engineSkeletons: [],
+    currentSkeletonDigests: new Map(),
     ...overrides,
   });
 }
@@ -112,8 +118,10 @@ function graph(task: Task): TaskGraph {
   };
 }
 
+
 const completedEvidence = {
   taskCompleted: true,
+  contractConformance: CONFORMANCE_NOT_OWED,
   newTests: parseNewTestEvidence(false, "verification_policy.new_tests waived: legacy-new-tests-required-false"),
 };
 
@@ -351,7 +359,7 @@ describe("shared evidence preservation", () => {
     const attempt = authority();
     const normalized = normalizeImplementationEvidence(
       pendingTask(attempt),
-      { taskCompleted: true },
+      { taskCompleted: true, contractConformance: CONFORMANCE_NOT_OWED },
       observedBytes(attempt),
     );
     expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
@@ -376,6 +384,7 @@ describe("shared evidence preservation", () => {
       });
       const normalized = normalizeImplementationEvidence(task, {
         taskCompleted: true,
+        contractConformance: CONFORMANCE_NOT_OWED,
         testResult: { verdict: "untrusted", passed: true, label: "fallback", provenance: "unverified" },
         testEvidence: "fallback",
       }, bytes);
@@ -457,6 +466,7 @@ describe("exact transition application", () => {
           testResult: { verdict: "trusted-fail" },
           testEvidence: "red",
           newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
+          contractConformance: CONFORMANCE_NOT_OWED,
         },
         TRUSTED_LEDGER_ONLY_POLICY,
         observedBytes(attempt),
@@ -667,7 +677,7 @@ describe("exact transition application", () => {
       })),
       attempt,
       "2026-08-24T00:03:50.000Z" as never,
-      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
+      { taskCompleted: true, testResult: { verdict: "trusted-fail" }, testEvidence: "red", newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN, contractConformance: CONFORMANCE_NOT_OWED },
       TRUSTED_LEDGER_ONLY_POLICY,
       observedBytes(attempt),
     ));
@@ -714,5 +724,211 @@ describe("exact transition application", () => {
         expect(result.transition.receipt.consumesSemanticAttempt).toBe(false);
       }
     }));
+  });
+});
+
+describe("engine skeleton bytes are no implementer write (FR-012)", () => {
+  const ENGINE = digest("e");
+  const record = (path: string): SkeletonRecord => ({
+    path,
+    contract: "CT-1",
+    language: "typescript",
+    origin: "spawn",
+    engineSha256: ENGINE,
+    typesSha256: digest("t"),
+    stale: null,
+  });
+  const engineAt = (...paths: readonly string[]) => paths.map(record);
+  const currentAt = (digestValue: string, ...paths: readonly string[]) => new Map(paths.map((path) => [path, digestValue] as const));
+  /** The engine wrote `src/a.ts` before the attempt baselines; the first Task
+   *  baseline still predates it. */
+  const skeletonBytes = (attempt: ImplementationAttemptAuthority, current: string | null, overrides: Partial<Parameters<typeof buildTaskLocalByteObservation>[0]> = {}) =>
+    observedBytes(attempt, {
+      attemptBaseline: baseline("src/a.ts", ENGINE),
+      currentAttemptScope: baseline("src/a.ts", current),
+      proofBaseline: baseline("src/a.ts", null),
+      currentProofScope: baseline("src/a.ts", current),
+      parserModifiedPaths: [],
+      engineSkeletons: engineAt("src/a.ts"),
+      currentSkeletonDigests: current === null ? new Map() : currentAt(current, "src/a.ts"),
+      ...overrides,
+    });
+
+  it("AS-015: an untouched engine skeleton never counts as changed and never enters the attempt-scope delta", () => {
+    const bytes = skeletonBytes(authority(), ENGINE);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
+    expect(bytes.cumulativeModifiedPaths).toEqual([]);
+    expect(bytes.attemptScopeChangedPaths).toEqual([]);
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+  });
+
+  it("AS-015: without the recorded engine digest the same bytes are the Task's own production", () => {
+    const bytes = skeletonBytes(authority(), ENGINE, { engineSkeletons: [] });
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+    expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
+  });
+
+  it("FR-012: implementing the skeleton is the implementer's write", () => {
+    const bytes = skeletonBytes(authority(), digest("f"), { parserModifiedPaths: ["src/a.ts"] });
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+    expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+  });
+
+  it("FR-012: deleting the skeleton is the implementer's write too", () => {
+    const bytes = skeletonBytes(authority(), null, { parserModifiedPaths: ["src/a.ts"], proofBaseline: baseline("src/a.ts", digest("a")) });
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+  });
+
+  it("FR-012: a repository-changed path still holding a recorded engine digest stays out of the out-of-scope set", () => {
+    const attempt = authority();
+    const stub = observedBytes(attempt, {
+      repositoryChangedPaths: ["src/stub.ts"],
+      engineSkeletons: engineAt("src/stub.ts"),
+      currentSkeletonDigests: currentAt(ENGINE, "src/stub.ts"),
+    });
+    expect(stub.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+    expect(stub.unresolvedRepositoryPaths).toEqual([]);
+
+    const edited = observedBytes(attempt, {
+      repositoryChangedPaths: ["src/stub.ts"],
+      engineSkeletons: engineAt("src/stub.ts"),
+      currentSkeletonDigests: currentAt(digest("f"), "src/stub.ts"),
+    });
+    expect(edited.suite.checks[0]?.outcome).toEqual({ kind: "out-of-scope-writes", paths: ["src/stub.ts"] });
+    expect(edited.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
+
+    const removed = observedBytes(attempt, {
+      repositoryChangedPaths: ["src/stub.ts"],
+      engineSkeletons: engineAt("src/stub.ts"),
+      currentSkeletonDigests: new Map(),
+    });
+    expect(removed.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
+
+    const unrecorded = observedBytes(attempt, {
+      repositoryChangedPaths: ["src/stub.ts"],
+      engineSkeletons: [],
+      currentSkeletonDigests: currentAt(ENGINE, "src/stub.ts"),
+    });
+    expect(unrecorded.unresolvedRepositoryPaths).toEqual(["src/stub.ts"]);
+  });
+
+  it("matches recorded engine paths through the plan-path rule", () => {
+    const bytes = skeletonBytes(authority(), ENGINE, {
+      engineSkeletons: engineAt("./src/a.ts", "./src/stub.ts"),
+      currentSkeletonDigests: currentAt(ENGINE, "./src/stub.ts", "./src/a.ts"),
+      repositoryChangedPaths: ["src/stub.ts"],
+    });
+    expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
+    expect(bytes.unresolvedRepositoryPaths).toEqual([]);
+  });
+});
+
+describe("contract conformance at settlement (AD-5, FR-021)", () => {
+  const UNIMPLEMENTED: ConformanceViolation = { subject: "priceOrder", reason: "still-unimplemented", remedy: null };
+  const RELISTED: ConformanceViolation = {
+    subject: "OrderState",
+    reason: "re-lists-frozen-variants",
+    remedy: "LegacyState re-lists the variants of the frozen union OrderState",
+  };
+  const violated = (violations: readonly [ConformanceViolation, ...ConformanceViolation[]]): ContractConformance =>
+    ({ kind: "judged", violations: new Map([["src/a.ts", violations]]) });
+  const retryTask = (attempt: ImplementationAttemptAuthority) =>
+    pendingTask(attempt, { implementation_retry_protocol: 2, implementation_retry_history_start: 0 });
+
+  it("FR-021: a violated contract refuses completion through declared-artifact-contract-violated, listing every violation", () => {
+    const attempt = authority(1, "contract-violated");
+    const result = expectApplied(settleObservedImplementation(
+      graph(retryTask(attempt)),
+      attempt,
+      "2026-08-24T00:05:00.000Z" as never,
+      { ...completedEvidence, contractConformance: violated([UNIMPLEMENTED, RELISTED]) },
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt),
+    ));
+    expect(result.transition.kind).toBe("retry-required");
+    const task = result.state.tasks[0]!;
+    expect(task.proof?.state === "failed" ? task.proof.failures : []).toEqual([
+      { kind: "declared-artifact-contract-violated", artifact: "src/a.ts", violations: [UNIMPLEMENTED, RELISTED] },
+    ]);
+    expect(task.failure_reason).toBe("retry-required: declared-artifact-contract-violated");
+    const [kind, ...rest] = task.implementation_attempt_history?.[0]?.failureKinds ?? [];
+    expect(rest).toEqual([]);
+    expect(parseContractViolatedFailureKind(kind ?? "")).toEqual({
+      ok: true,
+      value: { artifact: "src/a.ts", shown: [UNIMPLEMENTED, RELISTED], omitted: 0 },
+    });
+  });
+
+  it("FR-021: the semantic retry appendix lists every violation of the refused attempt", () => {
+    const attempt = authority(1, "contract-retry-appendix");
+    const result = expectApplied(settleObservedImplementation(
+      graph(retryTask(attempt)),
+      attempt,
+      "2026-08-24T00:05:01.000Z" as never,
+      { ...completedEvidence, contractConformance: violated([UNIMPLEMENTED, RELISTED]) },
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt),
+    ));
+    const retried = result.state.tasks[0]!;
+    const disposition = deriveImplementationRetryDisposition(retried);
+    expect(disposition.kind).toBe("retry");
+    if (disposition.kind !== "retry") return;
+    const [contextLine, ...violationLines] = disposition.promptAppendix.split("\n");
+    expect(contextLine?.startsWith("LOOM_IMPLEMENTATION_RETRY_CONTEXT: {")).toBe(true);
+    expect(violationLines).toEqual([
+      "Declared-artifact contract violations (declared-artifact-contract-violated) the previous attempt left; " +
+        "fix every one before completing:",
+      "src/a.ts:",
+      "  - priceOrder: still-unimplemented",
+      "  - OrderState: re-lists-frozen-variants — LegacyState re-lists the variants of the frozen union OrderState",
+    ]);
+    // The spawn gate admits the exact appendix and refuses one stripped of its violations.
+    expect(authorizeImplementationSpawn(retried, `Task ID: T1\n${disposition.promptAppendix}`))
+      .toMatchObject({ ok: true, kind: "retry" });
+    expect(authorizeImplementationSpawn(retried, `Task ID: T1\n${contextLine}`)).toMatchObject({ ok: false });
+  });
+
+  it("bounds an over-long violation list in its failure kind, naming how many it leaves out", () => {
+    const attempt = authority(1, "contract-violated-bounded");
+    const many = Array.from({ length: 400 }, (_, index): ConformanceViolation => ({
+      subject: `export${index}`,
+      reason: "deleted",
+      remedy: null,
+    }));
+    const result = expectApplied(settleObservedImplementation(
+      graph(retryTask(attempt)),
+      attempt,
+      "2026-08-24T00:05:02.000Z" as never,
+      { ...completedEvidence, contractConformance: violated(many as unknown as readonly [ConformanceViolation, ...ConformanceViolation[]]) },
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt),
+    ));
+    const [kind] = result.state.tasks[0]?.implementation_attempt_history?.[0]?.failureKinds ?? [];
+    expect(kind?.length).toBeLessThanOrEqual(4_096);
+    const decoded = parseContractViolatedFailureKind(kind ?? "");
+    if (!decoded.ok) throw new Error(decoded.errors.join("; "));
+    expect(decoded.value.shown[0]).toEqual({ subject: "export0", reason: "deleted", remedy: null });
+    expect(decoded.value.omitted).toBeGreaterThan(0);
+    expect(decoded.value.shown.length + decoded.value.omitted).toBe(400);
+    const disposition = deriveImplementationRetryDisposition(result.state.tasks[0]!);
+    expect(disposition.kind === "retry" ? disposition.promptAppendix : "")
+      .toContain(`  - and ${decoded.value.omitted} more violations not shown`);
+    // The stored Proof still carries every violation.
+    const proof = result.state.tasks[0]?.proof;
+    expect(proof?.state === "failed" ? proof.failures[0] : undefined).toMatchObject({ violations: many });
+  });
+
+  it("AS-037: a not-owed observation settles exactly as before", () => {
+    const attempt = authority(1, "contract-not-owed");
+    const result = expectApplied(settleObservedImplementation(
+      graph(retryTask(attempt)),
+      attempt,
+      "2026-08-24T00:05:03.000Z" as never,
+      completedEvidence,
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt),
+    ));
+    expect(result.transition.kind).toBe("implemented");
   });
 });

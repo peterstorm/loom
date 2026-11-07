@@ -7,6 +7,7 @@ import {
 } from "../../src/core/implementation-completion";
 import { TRUSTED_LEDGER_ONLY_POLICY, derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { labelledValue } from "./parse-result";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const authority = (semanticAttempt: 1 | 2, reservationId: string, second: number) =>
   labelledValue("implementation escalation", createImplementationAttemptAuthority({
@@ -40,6 +41,7 @@ const observation = (observedAt: string) => ({
   kind: "implementation-observed",
   observedAt,
   evidence: {
+    contractConformance: CONFORMANCE_NOT_OWED,
     taskCompleted: false,
     testResult: { verdict: "trusted-pass" },
     filesModified: [],

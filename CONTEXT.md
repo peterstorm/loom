@@ -482,8 +482,24 @@ A plan's `CT-N` declaration made executable: a declarations-only types file (or 
 _Avoid_: Contract (alone — collides with **Wire Contract** and the orchestration contract), spec test, golden test
 
 **Contract Task**:
-The one Task whose `file_list` holds every frozen path of an **Acceptance Contract**. It writes the types, the acceptance tests and compiling stubs, contributes to the covered Requirements but never claims them, and its Wave Gate must observe every acceptance testcase collected and failing (RED).
+The one Task whose `file_list` holds every frozen path of an **Acceptance Contract**. It writes the types and the acceptance tests, contributes to the covered Requirements but never claims them, and its Wave Gate must observe every acceptance testcase collected and failing (RED). It never writes a stub of a bound file: at its SubagentStop, before the stop checks, the engine writes the **Contract Stubs** from its not-yet-frozen types file, and a bound path is never in its `file_list`.
 _Avoid_: Test task, scaffolding task
+
+**Export Binding**:
+One line of a plan's `**Export bindings:**` list in `## File Structure` — `` - `path` — CT-n: name: Alias, … `` — tying each named export of one new implementation file to a function-type alias declared by that contract's frozen types file (in Java, a single-abstract-method interface nested in the holder). One contract per file. Parsed and refused (FR-002) by `core/skeleton/bindings.ts`, stamped into the TaskGraph at population (`export_bindings`), and resolved against the frozen types (stage two) at every spawn of its holder Task: a missing, non-function or generic alias blocks the spawn as `skeleton-bindings-unresolved`. Only consumer-facing signatures are bound; helpers and module structure stay the implementer's choice.
+_Avoid_: Interface block (the plan's `**Interface:**` prose is never read for signatures), export list, stub list
+
+**Skeleton**:
+An engine-written file at a not-yet-existing bound path: it imports exactly the bound aliases from the frozen types file and declares each bound export with its frozen type and a body throwing `unimplemented: <name>` (TypeScript `export const name: Alias`; Java a `public final class` of `public static final Alias name` lambdas). Written through the one no-clobber writer at its Task's spawn, before the attempt baselines, so its bytes are never the implementer's write; recorded with the digest the engine wrote (`skeletons`). Completion refuses a bound export that is deleted, renamed, retyped or still unimplemented (`declared-artifact-contract-violated`). A Contract Revision refreshes an untouched skeleton and flags a modified one stale. Every non-test `file_list` path has exactly one skeleton outcome (`core/skeleton/outcomes.ts`): skeleton written, no bound exports, contract has no types file, unsupported language, or exists, not skeletonized.
+_Avoid_: Stub (alone — a **Contract Stub** is the skeleton the contract Task's stop writes), scaffold, template
+
+**Contract Stub**:
+A **Skeleton** the engine writes at the **Contract Task**'s stop, for every bound file of its contract, so the acceptance tests compile and fail by assertion. Not a frozen path; in the Wave that owns its file it is a skeleton like any other (origin `contract-stub`).
+_Avoid_: Hand-written stub
+
+**Frozen ADT**:
+An algebraic data type declared in a frozen types file: a TypeScript discriminated union or branded type, or a Java sealed interface, record or permitted variant. Implementation files use it and never redeclare it: completion refuses a production file declaring a type named like it or one of its variants (`shadows frozen ADT`), or a local union or sealed hierarchy re-declaring two or more of its variants (`re-lists frozen variants`; the remedy is the frozen type or `Extract<…>`). Frozen ADTs are enforced, never skeleton targets.
+_Avoid_: Shared type (says nothing about the freeze), domain enum
 
 **Contract Entry Point**:
 The production file an **Acceptance Contract**'s tests reach the code through — a route, a handler, a CLI command — declared by the plan's optional `**Entry point:**`. Never a frozen path. Plan binding refuses a claimant of a covered Requirement that neither writes it nor depends, directly or transitively, on a Task that does, because its tests could not pass before it exists. The **Contract Task** never counts as its writer: what it lists there is at most a compiling stub. Plan-only: it is not persisted on the contract.

@@ -17,7 +17,6 @@ import type {
   CanonicalStatusFacts,
   EngineResumeAction,
   LoomStatus,
-  LoomStatusDocument,
   NextActionDecision,
   StatusReason,
   TaskGraph,
@@ -75,12 +74,40 @@ import {
   renderOwnerVerificationStatus,
   type OwnerVerificationStatusReport,
 } from "./owner-verification/status";
+import {
+  renderSkeletonStatus,
+  skeletonsUnobserved,
+  unresolvedSkeletonBindings,
+  type SkeletonStatusReport,
+} from "./skeleton/status";
 
-/** What status reads: the gate's own deps plus the one observation only the
- *  implementation-window projection consumes. Gate checks never see it. */
+/** What status reads: the gate's own deps plus the observations only status
+ *  consumes — reservation liveness for the implementation window, and the
+ *  skeleton report (AD-13), whose stage-two problems block the window's
+ *  spawn. Gate checks never see either. A status derived without a skeleton
+ *  report reports its skeletons `unobserved`. */
 export type StatusDeps = GateDeps & Readonly<{
   implementationReservations?: ImplementationReservationStatusObservation;
+  skeletons?: SkeletonStatusReport;
 }>;
+
+/**
+ * The document `helper orchestration status` emits, as `--json` serializes
+ * it and the human renderer reads it: the canonical `LoomStatus` with the
+ * owner-verification report (G5b AD-10) and the skeleton report (G2 AD-13,
+ * FR-040) beside it. Both are required: `deriveLoomStatusFromParsedGraph` is
+ * the only producer and always reports each (`not-observed`, `unobserved` or
+ * `not-applicable` when there is nothing to report), so no renderer handles
+ * an absent field. The routed `LoomStatus` stays a separate type. Declared
+ * here rather than in `types.ts`, whose importers the skeleton core includes.
+ */
+export type LoomStatusDocument = LoomStatus & Readonly<{
+  ownerVerification: OwnerVerificationStatusReport;
+  skeletons: SkeletonStatusReport;
+}>;
+
+const SKELETONS_NOT_OBSERVED: SkeletonStatusReport =
+  skeletonsUnobserved("status was derived without observing the skeleton paths");
 
 export type AdvisoryApprovalObservation =
   | Readonly<{ kind: "approved" }>
@@ -175,6 +202,13 @@ function waveImplementationAction(
     .with({ kind: "repair-wave-start-readiness" }, (repair) => canonicalRecord({
       kind: "wave-start-not-ready" as const,
       category: "wave-start-prerequisites-unmet" as const,
+      ...common,
+      retry: terminalRetry,
+      recovery: repair,
+    }))
+    .with({ kind: "repair-skeleton-bindings" }, (repair) => canonicalRecord({
+      kind: "skeleton-bindings-unresolved" as const,
+      category: "skeleton-bindings-unresolved" as const,
       ...common,
       retry: terminalRetry,
       recovery: repair,
@@ -486,6 +520,41 @@ function committedTerminalStatus(
   });
 }
 
+/** The reason kind naming the window's recovery. */
+const windowReasonKind = (recovery: WaveImplementationRecovery): StatusReason["kind"] =>
+  match(recovery)
+    .with({ kind: "repair-wave-start-readiness" }, () => "wave-start-not-ready" as const)
+    .with({ kind: "repair-skeleton-bindings" }, () => "skeleton-bindings-unresolved" as const)
+    .with(
+      {
+        kind: P.union(
+          "spawn-wave-implementation",
+          "await-wave-implementation",
+          "escalate-wave-implementation",
+          "start-wave-gate",
+          "start-successor-wave-gate",
+        ),
+      },
+      () => "wave-gate-not-started" as const,
+    )
+    .exhaustive();
+
+/**
+ * The named reason a spawn is owed while status could not observe the
+ * Wave's skeletons: nothing blocks on it (registration observes them again
+ * and refuses on what it cannot read), but the operator sees why status
+ * shows no outcome and no stage-two problem. Nothing for any other recovery,
+ * or a report that observed.
+ */
+function skeletonsUnobservedReason(recovery: WaveImplementationRecovery, skeletons: SkeletonStatusReport): readonly StatusReason[] {
+  if (recovery.kind !== "spawn-wave-implementation" || skeletons.kind !== "unobserved") return [];
+  return [statusReason(
+    "skeletons-unobserved",
+    `status could not observe Wave ${recovery.wave}'s skeleton paths (${skeletons.reason}); ` +
+      "registration observes them again and refuses the spawn on anything it cannot read",
+  )];
+}
+
 /**
  * The implementation window's status: an execute Wave without a live Wave
  * Gate. Routing it through the readiness path reported invalid authority and
@@ -498,7 +567,8 @@ function unstartedWaveStatus(
   graph: TaskGraph,
   deps: StatusDeps,
 ): LoomStatus | null {
-  const window = classifyImplementationWindow(graph, deps.implementationReservations);
+  const skeletons = deps.skeletons ?? SKELETONS_NOT_OBSERVED;
+  const window = classifyImplementationWindow(graph, deps.implementationReservations, unresolvedSkeletonBindings(skeletons));
   if (window.kind === "not-in-window") return null;
   if (window.kind === "contradiction") return deriveUnavailableLoomStatus([window.reason]);
   if (window.kind === "unavailable") return unavailableStatus(window.message);
@@ -514,7 +584,8 @@ function unstartedWaveStatus(
         `after fixing the cause, remediate it: ${remediateEscalationCommand(task)}`,
       task.taskId,
     )),
-    statusReason(recovery.kind === "repair-wave-start-readiness" ? "wave-start-not-ready" : "wave-gate-not-started", message),
+    statusReason(windowReasonKind(recovery), message),
+    ...skeletonsUnobservedReason(recovery, skeletons),
   ];
 
   return canonicalRecord({
@@ -682,7 +753,7 @@ export function withOwnerVerificationRemedies(status: LoomStatus): LoomStatus {
  * Anti-corruption adapter from the protected-state parser into the canonical
  * status document: the routed `LoomStatus`, its next action carrying the
  * owner-verification remedies its own readiness fact holds, and the
- * owner-verification report beside it.
+ * owner-verification and skeleton reports beside it.
  */
 export function deriveLoomStatusFromParsedGraph(
   parsed: Readonly<{ ok: true; value: TaskGraph }> | Readonly<{ ok: false; error: string }>,
@@ -691,7 +762,11 @@ export function deriveLoomStatusFromParsedGraph(
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatusDocument {
   const status = withOwnerVerificationRemedies(routeLoomStatus(parsed, deps, lifecycleProof, runDirectory));
-  return canonicalRecord({ ...status, ownerVerification: ownerVerificationReportOf(deps.currentWaveCompletionResult) });
+  return canonicalRecord({
+    ...status,
+    ownerVerification: ownerVerificationReportOf(deps.currentWaveCompletionResult),
+    skeletons: deps.skeletons ?? SKELETONS_NOT_OBSERVED,
+  });
 }
 
 /** Route a parsed graph to exactly one status branch. */
@@ -755,7 +830,7 @@ function projectCoverageDiagnostic(status: LoomStatus): readonly string[] {
 
 /** Versioned human renderer over the same values used by the JSON renderer. */
 export function renderLoomStatusHuman(document: LoomStatusDocument): string {
-  const { ownerVerification, ...status } = document;
+  const { ownerVerification, skeletons, ...status } = document;
   const fact = (name: keyof CanonicalStatusFacts): string => {
     const value = status.facts[name];
     return value.kind === "known"
@@ -778,6 +853,7 @@ export function renderLoomStatusHuman(document: LoomStatusDocument): string {
     ...categories.map(fact),
     ...projectCoverageDiagnostic(status),
     ...renderOwnerVerificationStatus(ownerVerification),
+    ...renderSkeletonStatus(skeletons),
     `- nextAction: ${status.next.action.kind}`,
     `- nextActionPayload: ${JSON.stringify(status.next.action)}`,
     "- reasons:",

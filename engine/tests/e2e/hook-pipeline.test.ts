@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import type { TaskGraph, Task, WaveGate } from "../../src/types";
 import { evaluateProofObligations } from "../../src/core/proof-obligations";
 import { pendingTaskProof } from "../fixtures/task-lifecycle";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 /**
  * E2E integration test: simulates full hook lifecycle with real filesystem.
@@ -74,6 +75,7 @@ function markImplemented(path: string, taskId: string, testsPassed: boolean) {
     tasks: s.tasks.map((t): Task => {
       if (t.id !== taskId || t.proof === undefined) return t;
       const proof = evaluateProofObligations(t.proof.obligations, {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: testsPassed ? { verdict: "trusted-pass" } : { verdict: "trusted-fail" },
         filesModified: [],

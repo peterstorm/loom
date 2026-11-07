@@ -75,7 +75,7 @@ Regression execution and new-test creation are separate obligations. Follow each
 
 {implementation_retry_context}
 
-When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
+When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When the previous attempt was refused for contract conformance, the appendix continues after its `LOOM_IMPLEMENTATION_RETRY_CONTEXT` line with a "Declared-artifact contract violations (declared-artifact-contract-violated)" section. It lists each violated file, then each violation's subject, reason (`deleted`, `renamed`, `retyped`, `still-unimplemented`, `shadows-frozen-adt` or `re-lists-frozen-variants`) and remedy. Fix every listed violation before completing. A line "and N more violations not shown" means the receipt held only the first violations of that file, so re-check the whole file against the Frozen Signatures section below. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
 
 ## Operator Note
 
@@ -124,6 +124,12 @@ The engine derives this section from the plan's `## Invariants`: a rule the plan
 {acceptance_contract}
 
 The engine derives this section from the plan's `## Contracts` and the TaskGraph's Acceptance Freeze. A contract's types file and acceptance tests are written once, by its contract Task, and observed failing at that Task's Wave Gate; from then on every Wave Gate proves their bytes unchanged and the testcases of every completed Requirement passing.
+
+## Frozen Signatures — BINDING
+
+{frozen_signatures}
+
+The engine derives this section from the TaskGraph's export-binding stamp, its skeleton records and the frozen types files on disk, through the same derivation `helper orchestration status` shows. A skeleton is yours to fill, never to re-sign: if a frozen signature is wrong, stop and report it, because only an operator Contract Revision changes a types file.
 
 ## Files to Create/Modify
 

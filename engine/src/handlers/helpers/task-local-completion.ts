@@ -7,7 +7,7 @@
  */
 
 import { lstatSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Task } from "../../types";
 import {
   buildTaskLocalByteObservation,
@@ -17,6 +17,9 @@ import {
   type TaskLocalByteObservation,
 } from "../../core/implementation-application";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
+import { sha256Bytes } from "../../core/digest";
+import type { SkeletonRecord } from "../../core/skeleton/types";
+import { readRunBytesNoFollow, resolveBaseDirectory } from "../../orchestration/no-follow-fs";
 import { captureDeclaredArtifactBaseline } from "../../utils/declared-artifact-snapshot";
 import { changedRepositoryArtifactsSince } from "../../utils/repository-change-baseline";
 import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
@@ -34,6 +37,11 @@ export type TaskLocalCompletionArgs = Readonly<{
   parserPathLabel: string;
   siblingOwnedPaths: readonly string[];
   authoritativeStatePath?: string;
+  /** Every skeleton the engine recorded writing (AD-4): bytes still equal to
+   *  a record's digest are subtracted from the Task's writes (FR-012).
+   *  `settleExactImplementation` always passes the graph's records; absent
+   *  reads as none recorded. */
+  engineSkeletons?: readonly SkeletonRecord[];
 }>;
 
 type RequiredTaskBaselines = Readonly<{
@@ -59,12 +67,26 @@ function requireTaskBaselines(task: Task): RequiredTaskBaselines {
   };
 }
 
-export type TaskLocalCompletionPorts = Readonly<{
-  observeHead: (repositoryRoot: string) => git.GitHeadObservation;
+/** The two no-follow reads that observe a recorded skeleton path's current
+ *  bytes. Errors propagate as thrown: `currentSkeletonDigests` alone decides
+ *  which mean "no regular file here" and which make the observation
+ *  unavailable. */
+export type SkeletonFilePort = Readonly<{
+  lstat: (absolute: string) => Readonly<{ isFile: () => boolean }>;
+  readNoFollow: (absolute: string) => Uint8Array;
 }>;
 
-const REAL_TASK_LOCAL_PORTS: TaskLocalCompletionPorts = Object.freeze({
+export type TaskLocalCompletionPorts = Readonly<{
+  observeHead: (repositoryRoot: string) => git.GitHeadObservation;
+  skeletonFiles: SkeletonFilePort;
+}>;
+
+export const REAL_TASK_LOCAL_PORTS: TaskLocalCompletionPorts = Object.freeze({
   observeHead: git.observeExactHead,
+  skeletonFiles: Object.freeze({
+    lstat: (absolute: string) => lstatSync(absolute),
+    readNoFollow: (absolute: string) => readRunBytesNoFollow(absolute),
+  }),
 });
 
 function authorityHead(
@@ -101,6 +123,32 @@ export function authoritativeStateRepositoryPath(
  *  Git-visible review or panel artifact is therefore ordinary unowned evidence. */
 export function isEngineOwnedRuntimePath(path: string, authoritativeStatePath: string | null): boolean {
   return authoritativeStatePath !== null && path === authoritativeStatePath;
+}
+
+/**
+ * The raw-bytes digest of each recorded skeleton path that holds a regular
+ * file now, keyed by the record's path, read without following any link. A
+ * missing path, or one holding no regular file, has no digest; any other
+ * failure to read throws, and the observation is then unavailable.
+ */
+function currentSkeletonDigests(
+  repositoryRoot: string,
+  records: readonly SkeletonRecord[],
+  files: SkeletonFilePort,
+): ReadonlyMap<string, string> {
+  if (records.length === 0) return new Map();
+  const realRoot = resolveBaseDirectory(repositoryRoot);
+  return new Map(records.flatMap(({ path }) => {
+    const absolute = join(realRoot, path);
+    try {
+      if (!files.lstat(absolute).isFile()) return [];
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return [];
+      throw error;
+    }
+    return [[path, sha256Bytes(files.readNoFollow(absolute))] as const];
+  }));
 }
 
 function observeAvailableTaskScope(
@@ -155,6 +203,8 @@ function observeAvailableTaskScope(
       priorAttributedPaths,
       repositoryChangedPaths,
       siblingOwnedPaths,
+      engineSkeletons: args.engineSkeletons ?? [],
+      currentSkeletonDigests: currentSkeletonDigests(args.repositoryRoot, args.engineSkeletons ?? [], ports.skeletonFiles),
     });
   } catch (error) {
     observationFailure = error;

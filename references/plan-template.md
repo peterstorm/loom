@@ -42,6 +42,21 @@ path/to/new/file.ts          — {purpose}
 path/to/new/file.test.ts     — tests
 ```
 
+**Export bindings:**
+- `path/to/new/file.ts` — CT-1: priceOrder: PriceOrderFn, parseOrder: ParseOrderFn
+
+Only when a contract (see `## Contracts`) declares a types file and this
+group creates a file that provides functions it declares. Delete the label if
+not. Column 0, outside the fence, directly under the group's fenced block; one
+line per file and one contract per file; each `name: Alias` names a
+non-generic function-type alias of that contract's types file (in Java, a
+single-abstract-method interface nested in its one top-level holder). The
+engine writes each bound file as a skeleton before its Task starts, writes the
+contract stubs itself at the contract Task's stop, and refuses completion
+while a bound export is deleted, renamed, retyped or still unimplemented. A
+bound path belongs to one non-contract Task that depends on the contract
+Task, never to the contract Task.
+
 ### {Component/Domain B}
 
 ```
@@ -150,9 +165,12 @@ is mutation-verified at the Wave Gate unless it declares a reasoned
 
 Only when the plan has a spec and a feature slice whose observable behavior a
 test can decide. Delete section if not. Each contract becomes one contract
-Task in an early Wave: it writes the declarations-only types file, the
-dedicated acceptance tests, and compiling stubs; its Wave Gate must observe
-every acceptance test FAIL. The Wave Gate then freezes those files, and every
+Task in an early Wave: it writes the declarations-only types file and the
+dedicated acceptance tests, and the engine writes the stubs those tests import
+from the `**Export bindings:**` in `## File Structure` when the contract Task
+stops; its Wave Gate must observe every acceptance test FAIL. Every algebraic
+data type the feature shares goes in the types file, where it is a frozen ADT:
+implementation files use it and never shadow or re-list it. The Wave Gate then freezes those files, and every
 Task that completes a covered Requirement depends on the contract Task and
 must turn the same tests green without changing them.
 

@@ -1,8 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import {
+  NO_EXPORT_BINDING_STAMP,
+  NO_SKELETON_OBSERVATION,
+  renderFrozenSignatures,
+  triageBriefMarker,
+  type FrozenSignaturesInput,
   NO_ACCEPTANCE_CONTRACT,
   NO_CODE_RULES,
   NO_INVARIANT_OWNERSHIP,
@@ -27,13 +32,17 @@ import { digest } from "../fixtures/acceptance-fixtures";
 import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
-import type { PlanInvariant, Task, WaveImplementationDispatch } from "../../src/types";
+import type { DomainResult } from "../../src/core/orchestration-contract";
+import type { UnresolvedSkeletonBinding } from "../../src/core/skeleton/status";
+import type { ExportBinding, FrozenSurface, Identifier, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
+import type { PlanInvariant, Task, TaskGraph, WaveImplementationDispatch } from "../../src/types";
 import { extractTaskId } from "../../src/utils/extract-task-id";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../src/state-manager";
 import { semanticAttemptReceipt } from "../fixtures/implementation-settlement";
-import { taskFixture } from "../fixtures/task-lifecycle";
-import { IMPLEMENTATION_BRIEF_TEMPLATE } from "../../src/orchestration/implementation-brief";
+import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { cleanupSkeletonRepos, PATHS, skeletonRepo, TS_CONTRACT, TS_TYPES_TEXT, type SkeletonRepo } from "../fixtures/skeleton-repo";
+import { IMPLEMENTATION_BRIEF_TEMPLATE, renderTaskImplementationBrief } from "../../src/orchestration/implementation-brief";
 import { admittedNote } from "../fixtures/operator-note";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { invariantId, planOwnership } from "../fixtures/owner-obligation";
@@ -380,8 +389,32 @@ describe("renderImplementationBrief", () => {
       expect(section).toContain("- Types file `engine/src/core/brief-contract.ts` — declarations only");
       expect(section).toContain("  - `engine/tests/acceptance/brief.acceptance.test.ts` — FR-001, AS-001");
       expect(section).toContain("Supported domain: `engine/tests/acceptance/brief.acceptance.test.ts`");
-      expect(section).toContain("Stub every function the acceptance tests import");
+      expect(section).toContain("The engine writes the stubs, not you");
+      expect(section).not.toContain("Stub every function the acceptance tests import");
       expect(section).toContain("every acceptance testcase is collected and fails");
+    });
+
+    it("FR-041, AS-045: tells the contract Task the engine writes the bound stubs at its stop, and it no longer does", () => {
+      const contractTask = task({
+        id: "T3", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: ["FR-001", "AS-001"],
+        file_list: ["engine/src/core/brief-contract.ts", "engine/tests/acceptance/brief.acceptance.test.ts"],
+      });
+      const section = render(contractTask, [CONTRACT], []);
+      expect(section).toMatch(/engine writes the stubs, not you/);
+      expect(section).toContain("when you stop, before the stop checks");
+      expect(section).toContain("`unimplemented: <name>`");
+      expect(section).toMatch(/Do not write a bound file/);
+    });
+
+    it("keeps the contract Task's own stub duty when its contract declares no types file: nothing is bound to it", () => {
+      const typeless: AcceptanceContract = { ...CONTRACT, types: { kind: "none", reason: "drives an existing entry point" } };
+      const contractTask = task({
+        id: "T3", wave: 1, depends_on: [], spec_anchors: [], spec_contributions: ["FR-001", "AS-001"],
+        file_list: ["engine/tests/acceptance/brief.acceptance.test.ts"],
+      });
+      const section = render(contractTask, [typeless], []);
+      expect(section).toContain("Stub every function the acceptance tests import");
+      expect(section).not.toContain("The engine writes the stubs");
     });
 
     it("tells a claimant which frozen testcases it turns green, and that frozen files are read-only", () => {
@@ -561,5 +594,267 @@ describe("the brief's Operator Note section (#119)", () => {
     expect(validateTemplateSubstitution(rendered.value.prompt, true)).toEqual({ kind: "allow" });
     expect(extractTaskId(rendered.value.prompt)).toBe("T5");
     expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true, kind: "initial" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frozen signatures (T14: FR-024, FR-040, AS-038..AS-041, AS-046..AS-048)
+// ---------------------------------------------------------------------------
+
+const frozenSection = (prompt: string): string =>
+  prompt.split("## Frozen Signatures — BINDING\n\n")[1]?.split("\n\nThe engine derives this section")[0] ?? "";
+
+const lineWith = (text: string, ...needles: readonly string[]): boolean =>
+  text.split("\n").some((line) => needles.every((needle) => line.includes(needle)));
+
+const paragraphWith = (text: string, ...needles: readonly (string | RegExp)[]): boolean =>
+  text.split(/\n[ \t]*\n/).some((paragraph) =>
+    needles.every((needle) => (typeof needle === "string" ? paragraph.includes(needle) : needle.test(paragraph))));
+
+describe("the brief's Frozen Signatures section", () => {
+  const TYPES = "src/order/order-contract.ts";
+  const JAVA_TYPES = "src/main/java/com/acme/OrderContract.java";
+  const typedContract = (id: string, path: string, anchor: string): AcceptanceContract => ({
+    ...FROZEN_CONTRACT,
+    id,
+    title: `${id} contract`,
+    contractTask: "T1",
+    types: { kind: "file", path },
+    acceptance: [{ path: `tests/${id}.acceptance.test.ts`, anchors: [anchor] }],
+    supportedDomain: null,
+    freeze: {
+      state: "frozen",
+      wave: 1,
+      paths: [{ path, sha256: digest("a") }, { path: `tests/${id}.acceptance.test.ts`, sha256: digest("b") }],
+      roster: [{ file: `tests/${id}.acceptance.test.ts`, name: `${anchor}: decides`, anchors: [anchor] }],
+    },
+  });
+  const TS_TYPED = typedContract("CT-1", TYPES, "FR-001");
+  const JAVA_TYPED = typedContract("CT-2", JAVA_TYPES, "AS-001");
+  const TYPELESS: AcceptanceContract = { ...typedContract("CT-3", "unused", "FR-002"), types: { kind: "none", reason: "an existing entry point" } };
+
+  const TS_SURFACE: FrozenSurface = {
+    language: "typescript",
+    path: TYPES,
+    aliases: [],
+    adts: [
+      { kind: "discriminated-union", name: "OrderState", discriminant: "status", tags: ["draft", "paid"], variants: [] },
+      { kind: "brand", name: "OrderId" },
+    ],
+  };
+  const JAVA_SURFACE: FrozenSurface = {
+    language: "java",
+    path: JAVA_TYPES,
+    package: "com.acme",
+    holder: "OrderContract",
+    aliases: [],
+    adts: [{ kind: "sealed-interface", name: "OrderState", variants: ["Draft", "Paid"] }, { kind: "record", name: "Order" }],
+  };
+
+  const name = (raw: string) => raw as Identifier;
+  const BINDINGS: readonly ExportBinding[] = [
+    { path: "src/order/pricing.ts", contract: "CT-1", exports: [{ name: name("priceOrder"), alias: name("PriceOrderFn") }, { name: name("parseOrder"), alias: name("ParseOrderFn") }] },
+    { path: "src/order/legacy.ts", contract: "CT-1", exports: [{ name: name("quoteOrder"), alias: name("PriceOrderFn") }] },
+    { path: "src/order/rates.py", contract: "CT-1", exports: [{ name: name("rate"), alias: name("PriceOrderFn") }] },
+    { path: "src/main/java/com/acme/Pricing.java", contract: "CT-2", exports: [{ name: name("priceOrder"), alias: name("PriceOrderFn") }] },
+  ];
+
+  const implementer = task({
+    id: "T5",
+    depends_on: ["T3"],
+    spec_anchors: ["FR-001"],
+    spec_contributions: [],
+    file_list: ["src/order/pricing.ts", "src/order/legacy.ts", "src/order/rates.py", "src/order/helpers.ts", "tests/order/pricing.test.ts"],
+  });
+  const javaImplementer = task({
+    id: "T6",
+    depends_on: ["T3"],
+    spec_anchors: ["AS-001"],
+    spec_contributions: [],
+    file_list: ["src/main/java/com/acme/Pricing.java", "src/main/java/com/acme/Discounts.java"],
+  });
+  const auditor = task({ id: "T7", depends_on: ["T3"], spec_anchors: ["FR-002"], spec_contributions: [], file_list: ["src/audit/audit-log.ts"] });
+  const attested = task({
+    id: "T8", depends_on: ["T3"], spec_anchors: ["FR-001"], spec_contributions: [], file_list: ["src/order/view.ts"],
+    verification_policy: { regression: { kind: "waived", reason: "documentation-only" }, new_tests: { kind: "waived", reason: "documentation-only" } },
+  });
+
+  const SKELETON_GRAPH = (skeletons: readonly SkeletonRecord[] = []): TaskGraph => {
+    const graph: TaskGraph = {
+      ...graphFixture([...ROSTER, implementer, javaImplementer, auditor, attested]),
+      current_wave: 2,
+      acceptance_contracts: [TS_TYPED, JAVA_TYPED, TYPELESS],
+      export_bindings: BINDINGS,
+      skeletons,
+    };
+    return graph;
+  };
+
+  const OBSERVATIONS: ReadonlyMap<string, PathObservation> = new Map([
+    ["src/order/legacy.ts", { kind: "present", sha256: digest("c"), canonicalSha256: null }],
+    ["src/order/view.ts", { kind: "present", sha256: digest("c"), canonicalSha256: null }],
+  ]);
+  const SURFACES: ReadonlyMap<string, DomainResult<FrozenSurface, string>> = new Map([
+    ["CT-1", { ok: true, value: TS_SURFACE }],
+    ["CT-2", { ok: true, value: JAVA_SURFACE }],
+  ]);
+
+  const frozenInput = (overrides: Partial<FrozenSignaturesInput> = {}): FrozenSignaturesInput => ({
+    graph: SKELETON_GRAPH(),
+    observations: OBSERVATIONS,
+    surfaces: SURFACES,
+    unresolved: [],
+    ...overrides,
+  });
+
+  /** The rendered brief's Frozen Signatures section; `frozen` null renders it with no observation. */
+  const brief = (value: Task, frozen: FrozenSignaturesInput | null = frozenInput()): string => {
+    const rendered = renderImplementationBrief(input(value, {
+      rules: RULES,
+      contracts: frozen === null ? [] : frozen.graph.acceptance_contracts ?? [],
+      ...(frozen === null ? {} : { frozenSignatures: frozen }),
+    }));
+    if (!rendered.ok) throw new Error(rendered.error.message);
+    return frozenSection(rendered.value.prompt);
+  };
+
+  it("AS-046: lists each bound export with its alias under its file, and says the signatures are frozen and the marker must go", () => {
+    const section = brief(implementer);
+    expect(lineWith(section, "`src/order/pricing.ts`", "skeleton written")).toBe(true);
+    expect(lineWith(section, "`priceOrder: PriceOrderFn`")).toBe(true);
+    expect(lineWith(section, "`parseOrder: ParseOrderFn`")).toBe(true);
+    expect(paragraphWith(section, "src/order/pricing.ts", "priceOrder", "PriceOrderFn")).toBe(true);
+    expect(paragraphWith(section, /signatures are frozen/, "`PriceOrderFn`", "`ParseOrderFn`")).toBe(true);
+    expect(paragraphWith(section, "`unimplemented: <name>`", /remove/i, /at completion/)).toBe(true);
+  });
+
+  it("FR-024: lists the bound exports of every owned file, whatever its outcome", () => {
+    const section = brief(implementer);
+    expect(section).toContain("- `src/order/legacy.ts` — exists, not skeletonized\n  - `quoteOrder: PriceOrderFn` (CT-1)");
+    expect(section).toContain("- `src/order/rates.py` — unsupported language, no skeleton\n  - `rate: PriceOrderFn` (CT-1)");
+  });
+
+  it("AS-047: names the frozen ADTs of each in-scope contract and says to import them, never re-declare or re-list them", () => {
+    const section = brief(implementer);
+    expect(paragraphWith(section, "**Frozen ADTs of CT-1**", "`OrderState` (discriminated union on `status`: `draft`, `paid`)", "`OrderId` (brand)", /import/i, /re-declare/, /re-list/)).toBe(true);
+    const java = brief(javaImplementer);
+    expect(paragraphWith(java, "**Frozen ADTs of CT-2**", "`OrderState` (sealed interface: `Draft`, `Paid`)", "`Order` (record)", /import/i, /re-declare/)).toBe(true);
+    expect(java).not.toContain("CT-1**");
+  });
+
+  it("AS-038: names a file with no bound exports \"no bound exports, no skeleton\"", () => {
+    expect(lineWith(brief(implementer), "`src/order/helpers.ts`", "no bound exports, no skeleton")).toBe(true);
+    expect(lineWith(brief(javaImplementer), "`src/main/java/com/acme/Discounts.java`", "no bound exports, no skeleton")).toBe(true);
+  });
+
+  it("AS-039: names a claimant's file of a Types-file-none contract \"contract has no types file, no skeletons\", with no frozen duty", () => {
+    const section = brief(auditor);
+    expect(lineWith(section, "`src/audit/audit-log.ts`", "contract has no types file, no skeletons")).toBe(true);
+    expect(section).not.toContain("Frozen ADTs");
+    expect(section).not.toMatch(/signatures are frozen/);
+  });
+
+  it("AS-040: names a bound file in an unsupported language \"unsupported language, no skeleton\"", () => {
+    expect(lineWith(brief(implementer), "`src/order/rates.py`", "unsupported language, no skeleton")).toBe(true);
+  });
+
+  it("AS-041: names an existing file_list path \"exists, not skeletonized\"", () => {
+    expect(lineWith(brief(implementer), "`src/order/legacy.ts`", "exists, not skeletonized")).toBe(true);
+  });
+
+  it("AS-048: states each fallback outcome on the line naming its file, and names no test file", () => {
+    const section = brief(implementer);
+    expect(lineWith(section, "`src/order/helpers.ts`", "no bound exports, no skeleton")).toBe(true);
+    expect(lineWith(section, "`src/order/legacy.ts`", "exists, not skeletonized")).toBe(true);
+    expect(lineWith(section, "`src/order/rates.py`", "unsupported language, no skeleton")).toBe(true);
+    expect(section).not.toContain("tests/order/pricing.test.ts");
+  });
+
+  it("AS-051: names every unresolved export binding, and that registration refuses the spawn until it is repaired", () => {
+    const missing: UnresolvedSkeletonBinding = {
+      problem: { kind: "missing-alias", alias: "ParseOrderFn", path: "src/order/pricing.ts", typesFile: TYPES },
+      message: `src/order/pricing.ts binds ParseOrderFn, but the frozen types file ${TYPES} declares no ParseOrderFn`,
+    };
+    const section = brief(implementer, frozenInput({ unresolved: [missing] }));
+    expect(paragraphWith(section, "**Unresolved export bindings.**", missing.message, /refuses/, /Contract Revision/)).toBe(true);
+    expect(brief(implementer)).not.toContain("Unresolved export bindings");
+  });
+
+  it("FR-040: flags a stale skeleton on the line naming its file", () => {
+    const stale: SkeletonRecord = {
+      path: "src/order/legacy.ts", contract: "CT-1", language: "typescript", origin: "spawn",
+      engineSha256: digest("e"), typesSha256: digest("f"), stale: { revision: 2 },
+    };
+    const section = brief(implementer, frozenInput({ graph: SKELETON_GRAPH([stale]) }));
+    expect(lineWith(section, "`src/order/legacy.ts`", "exists, not skeletonized", "stale against revised contract CT-1 (revision 2)")).toBe(true);
+  });
+
+  it("owes no frozen duty to a Task conformance does not judge, but still states its outcomes", () => {
+    const section = brief(attested);
+    expect(lineWith(section, "`src/order/view.ts`", "exists, not skeletonized")).toBe(true);
+    expect(section).not.toContain("Frozen ADTs");
+    expect(section).not.toMatch(/signatures are frozen/);
+  });
+
+  it("names a frozen types file it could not read instead of its ADTs", () => {
+    const section = brief(implementer, frozenInput({
+      surfaces: new Map([["CT-1", { ok: false, error: `the frozen types file ${TYPES} no longer matches its Acceptance Freeze stamp` }]]),
+    }));
+    expect(paragraphWith(section, "**Frozen ADTs of CT-1**", "could not be read", "no longer matches its Acceptance Freeze stamp")).toBe(true);
+  });
+
+  it("says so when the TaskGraph carries no export-binding stamp, or no observation was supplied", () => {
+    const { export_bindings: _dropped, ...unstamped } = SKELETON_GRAPH();
+    expect(brief(implementer, frozenInput({ graph: unstamped }))).toBe(NO_EXPORT_BINDING_STAMP);
+    expect(brief(implementer, null)).toBe(NO_SKELETON_OBSERVATION);
+  });
+
+  it("renders the section renderFrozenSignatures renders, and the brief stays admissible", () => {
+    const rendered = renderImplementationBrief(input(implementer, { contracts: [TS_TYPED, JAVA_TYPED, TYPELESS], frozenSignatures: frozenInput() }));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    expect(frozenSection(rendered.value.prompt)).toBe(renderFrozenSignatures(implementer, frozenInput()));
+    expect(validateTemplateSubstitution(rendered.value.prompt, true)).toEqual({ kind: "allow" });
+  });
+});
+
+describe("brief marker expansion over the skeleton repository (renderTaskImplementationBrief)", () => {
+  afterEach(cleanupSkeletonRepos);
+
+  const expand = (repo: SkeletonRepo, taskId: string) =>
+    triageBriefMarker(`LOOM_IMPLEMENTATION_BRIEF: ${taskId}`, (request) => renderTaskImplementationBrief(repo.statePath, LOOM_PACKAGE_ROOT, request));
+
+  it("AS-046, AS-047: the expanded brief carries the observed Frozen Signatures section", () => {
+    const repo = skeletonRepo();
+    const expanded = expand(repo, "T4");
+    expect(expanded.kind).toBe("expanded");
+    if (expanded.kind !== "expanded") return;
+    const section = frozenSection(expanded.brief.prompt);
+    expect(lineWith(section, `\`${PATHS.tsPricing}\``, "skeleton written")).toBe(true);
+    expect(lineWith(section, "`priceOrder: PriceOrderFn`")).toBe(true);
+    expect(lineWith(section, `\`${PATHS.tsLegacy}\``, "exists, not skeletonized")).toBe(true);
+    expect(paragraphWith(section, "**Frozen ADTs of CT-1**", "OrderState", "OrderId")).toBe(true);
+  });
+
+  it("AS-051: a frozen types file missing a bound alias is named in the expanded brief, with the binding file and types file", () => {
+    const repo = skeletonRepo({ tsTypesText: TS_TYPES_TEXT.replace("export type ParseOrderFn = (raw: string) => Order;\n", "") });
+    const expanded = expand(repo, "T4");
+    expect(expanded.kind).toBe("expanded");
+    if (expanded.kind !== "expanded") return;
+    const section = frozenSection(expanded.brief.prompt);
+    expect(paragraphWith(section, "**Unresolved export bindings.**", "ParseOrderFn", PATHS.tsPricing, TS_CONTRACT.types)).toBe(true);
+  });
+
+  it("refuses the brief when the plan's export bindings drifted from the TaskGraph stamp", () => {
+    const repo = skeletonRepo();
+    repo.rewriteState((raw) => ({
+      ...raw,
+      export_bindings: (raw.export_bindings as readonly Readonly<{ path: string }>[]).filter(({ path }) => path !== PATHS.tsQuotes),
+    }));
+    const expanded = expand(repo, "T4");
+    expect(expanded.kind).toBe("unrenderable");
+    if (expanded.kind !== "unrenderable") return;
+    expect(expanded.error).toContain("drifted from the TaskGraph stamp");
+    expect(expanded.error).toContain(PATHS.tsQuotes);
   });
 });

@@ -4,6 +4,13 @@
  * template, then delegates every decision to the pure renderer. Shared by the
  * `helper orchestration brief` CLI and the Pi extension's brief-marker
  * expansion, so both harnesses spawn byte-identical briefs.
+ *
+ * The brief's Frozen Signatures section reads the skeleton paths through
+ * `observeSkeletons` (`skeleton-observation.ts`), the observation
+ * `helper orchestration status` reads too, so the two observe a path the same
+ * way. A brief is refused while the plan's export bindings have drifted from
+ * the TaskGraph stamp, because its frozen duties would then come from
+ * bindings the plan no longer holds.
  */
 
 import { readFileSync } from "node:fs";
@@ -13,17 +20,45 @@ import {
   invariantOwnershipSourceOf,
   renderImplementationBrief,
   ruleDocumentsFor,
+  type FrozenSignaturesInput,
   type ImplementationBrief,
   type ImplementationBriefRequest,
   type RuleDocument,
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
+import { bindingStampAgreement } from "../core/skeleton/bindings";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
 import { taskOwnerDuty } from "../core/owner-verification/obligations";
-import { parsePlanModels } from "../core/parse-plan-models";
+import { parsePlanExportBindings, parsePlanModels } from "../core/parse-plan-models";
 import { StateManager } from "../state-manager";
-import type { PlanInvariant } from "../types";
+import type { PlanInvariant, Task, TaskGraph } from "../types";
+import { observeSkeletons } from "./skeleton-observation";
 import { observeSpecIndex } from "./spec-index-observation";
+
+/**
+ * Whether the recorded plan's export bindings still agree with the TaskGraph
+ * stamp (`bindingStampAgreement`). A graph with no stamp, or no recorded
+ * plan, has nothing to drift from; a plan that cannot be read refuses.
+ */
+function bindingStampDrift(graph: TaskGraph, planFile: string | null): DomainResult<null, string> {
+  if (graph.export_bindings === undefined || planFile === null) return { ok: true, value: null };
+  let text: string;
+  try {
+    text = readFileSync(planFile, "utf8");
+  } catch (error) {
+    return { ok: false, error: `cannot read the plan ${planFile} for its export bindings: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  return bindingStampAgreement(parsePlanExportBindings(text).bindings, graph.export_bindings);
+}
+
+/** The brief's Frozen Signatures observation of one Task, or why it cannot be made. */
+function frozenSignaturesOf(projectRoot: string, graph: TaskGraph, task: Task, planFile: string | null): DomainResult<FrozenSignaturesInput, string> {
+  const drift = bindingStampDrift(graph, planFile);
+  if (!drift.ok) return drift;
+  const observed = observeSkeletons(projectRoot, graph, [task], [task]);
+  if (!observed.ok) return { ok: false, error: `cannot observe its skeleton paths: ${observed.error}` };
+  return { ok: true, value: Object.freeze({ graph, ...observed.value }) };
+}
 
 /** The brief template, relative to the active Loom package root. */
 export const IMPLEMENTATION_BRIEF_TEMPLATE = join("commands", "templates", "impl-agent-context.md");
@@ -87,6 +122,8 @@ export function renderTaskImplementationBrief(
     // A stamped graph needs no plan read; a pre-feature one (plan AD-10: owed no owner duty) renders the plan's Invariants.
     const ownership = invariantOwnershipSourceOf(taskOwnerDuty(graph, task.file_list ?? []), () => planInvariants(planFile));
     if (!ownership.ok) return { ok: false, error: `Task ${taskId}: ${ownership.error}` };
+    const frozenSignatures = frozenSignaturesOf(projectRoot, graph, task, planFile);
+    if (!frozenSignatures.ok) return { ok: false, error: `Task ${taskId}: ${frozenSignatures.error}` };
     const rules = new Map<RuleDocument, string>(ruleDocumentsFor(task.file_list ?? []).map((name) =>
       [name, readFileSync(join(packageRoot, "rules", name), "utf8")] as const));
     const rendered = renderImplementationBrief({
@@ -102,6 +139,7 @@ export function renderTaskImplementationBrief(
       verificationManifest: graph.verification_manifest,
       repositoryRoot: projectRoot,
       operatorNotes: request.operatorNotes,
+      frozenSignatures: frozenSignatures.value,
     });
     return rendered.ok ? rendered : { ok: false, error: rendered.error.message };
   } catch (error) {

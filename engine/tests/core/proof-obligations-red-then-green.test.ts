@@ -52,6 +52,7 @@ import {
 import { parseVerificationPolicy, type VerificationPolicy } from "../../src/core/verification-policy";
 import { parseTaskGraph, taskUnionError } from "../../src/state-file-wire";
 import type { Task, TaskGraph } from "../../src/types";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 // --- Fixtures ---
 
@@ -90,6 +91,7 @@ const ALL_GAPS: readonly RedThenGreenGap[] = [
 ];
 
 const observed = (redThenGreen?: RedThenGreenObservation): ObservedProofEvidence => ({
+  contractConformance: CONFORMANCE_NOT_OWED,
   taskCompleted: true,
   testResult: { verdict: "trusted-pass" },
   filesModified: [TEST_FILE, IMPL_FILE],

@@ -406,10 +406,111 @@ them, and only then do other tasks write the code that turns them green.
    an audited revision, returns the current Wave's implemented claimants to
    revalidation, and retires the current Wave's review and suite authority.
 
+### Export bindings → skeletons, contract stubs and frozen ADTs (G2)
+
+A contract with a types file can also fix *where* its signatures are
+implemented. The plan's `## File Structure` binds each new implementation file
+to the exports it provides, typed by function-type aliases the types file
+declares:
+
+```markdown
+**Export bindings:**
+- `src/payload/submit.ts` — CT-1: submitPayload: SubmitPayloadFn
+- `src/main/java/com/acme/payload/Submit.java` — CT-3: submitPayload: SubmitPayloadFn
+```
+
+- **Grammar.** A column-0 `**Export bindings:**` label directly under a File
+  Structure group's fenced block, outside any fence, with
+  `` - `path` — CT-n: name: Alias, … `` items. Names and aliases are
+  identifiers that are no TypeScript or Java reserved word, and on a TypeScript
+  binding no name may equal an alias on its own line
+  (`name-collides-with-alias`: the TypeScript skeleton imports every alias and
+  declares every name in one scope; a Java binding may reuse an alias as a
+  name, since a Java field and a type never share a namespace). On a Java
+  binding no alias may equal the file's own class name
+  (`alias-collides-with-class`: the skeleton imports every alias, and
+  importing the name the file declares does not compile). The
+  label anywhere else is a `misplaced-label` stray.
+- **One contract per file.** A path on lines of two contracts is refused as
+  multi-contract; on two lines of one contract, as a duplicate.
+- **Plan validation** also refuses an unsafe or frozen path, an unknown
+  contract or one declaring `**Types file:** none`, a bound path on the
+  contract Task, a bound path no non-contract Task lists, a holder that does
+  not depend on the contract Task, and a bound path on a Task waiving
+  regression as `documentation-only` or `generated-artifact`.
+- **Population stamps** the bindings into the TaskGraph (`export_bindings`);
+  the brief refuses to render while the plan's bindings drift from the stamp.
+
+**What the engine does with them:**
+
+1. **Contract stubs at the contract Task's stop.** Before its stop checks, the
+   engine reads the contract Task's not-yet-frozen types file and writes a
+   stub at every bound file of the contract, so the acceptance tests compile
+   and fail by assertion. The contract Task never writes a stub, and a bound
+   path is never in its `file_list`. An unresolvable binding writes no stub and
+   is named in the stop output; the gate then sees an uncollected file, which
+   is no behavioral RED. Freeze semantics are unchanged: a stub is no frozen
+   path, and in its owning Wave it is a skeleton like any other.
+2. **Skeletons at spawn.** When a Task is admitted, the engine resolves its
+   bindings against the frozen types file (stage two: the bytes must equal the
+   freeze stamp, and each alias must be a declared, non-generic function type),
+   then writes a skeleton at each bound path that does not exist yet, before
+   the attempt baselines are captured — engine bytes are never the
+   implementer's write. A stage-two problem blocks the spawn
+   (`skeleton-bindings-unresolved` in status) with every problem named. When
+   status itself cannot read a skeleton path or types file it blocks nothing
+   and names the gap under the `skeletons-unobserved` reason; registration
+   reads them again and is the authority. An existing file is never
+   overwritten.
+3. **Canonical bytes.** TypeScript: a header comment, `import type` of exactly
+   the bound aliases (specifier style copied from the frozen acceptance tests),
+   and one `export const name: Alias = () => { throw new
+   Error("unimplemented: <name>"); };` per binding. Java: one `public final
+   class` named after the file, with a private constructor and one
+   `public static final Alias name = (p0, …) -> { throw new
+   UnsupportedOperationException("unimplemented: <name>"); };` per binding.
+   Deterministic, never formatted.
+4. **Completion conformance.** The `declared-artifact-changed` obligation fails
+   `declared-artifact-contract-violated` when a bound export is `deleted`,
+   `renamed`, `retyped` (no longer `export const name: Alias` / `static final
+   Alias name` with the alias imported from the types file) or `still
+   unimplemented` (the initializer still holds the exact marker string; any
+   other throw is fine). Engine-written bytes never count as "changed".
+5. **Contract Revision** refreshes every untouched skeleton to the revised
+   types and leaves a modified one on disk flagged stale.
+6. **Outcomes.** Every non-test `file_list` path gets exactly one outcome, in
+   both the brief and status: skeleton written, no bound exports, contract has
+   no types file, unsupported language, or exists, not skeletonized.
+
+**Java holder shape.** A Java contract's types file has exactly one top-level
+`public` interface or `final class` (the holder), and every functional
+interface, sealed interface and record of the contract is nested inside it. A
+bindable Java alias is a nested, non-generic interface with exactly one
+abstract, non-generic method; the skeleton imports it as
+`<package>.<Holder>.<Alias>`. Any other holder shape is refused at stage two
+with a named diagnostic. Java skeletons are written only under a
+`src/main/java/` root; other roots, Kotlin and Scala are reported
+"unsupported language, no skeleton".
+
+**Frozen ADTs.** Every TypeScript discriminated union or branded type, and every
+Java sealed interface, record or permitted variant, declared in a frozen types
+file is a frozen ADT. In a Task's production files of the types file's
+language, completion refuses a local type named like a frozen ADT or one of its
+variants (`shadows frozen ADT`), and a local union or sealed hierarchy
+re-declaring two or more of its variants (`re-lists frozen variants`). The
+remedy is the frozen type itself or a narrowing such as `Extract<FrozenUnion,
+…>`; a union of imported frozen variants is using them directly and passes. The
+checks are syntactic, never assignability. Test files, attested Tasks and
+Tasks waiving regression as `documentation-only` or `generated-artifact` owe
+nothing; a `**Types file:** none` contract has neither skeletons nor frozen ADTs.
+
+Skeletons freeze only consumer-facing signatures and ADTs, never helpers or
+module structure: those stay the implementer's choice (a refinement of ADR-0020).
+
 **Decompose** creates one contract task per `CT-N` (rule 12 of the decompose
 template); claimants depend on it and may waive new tests with
 `covered-by-acceptance-contract`. **The engine renders each Task's role** — the
-contract task's write-the-surface-and-stubs instructions, a claimant's frozen
+contract task's write-the-surface instructions (the engine writes its stubs), a claimant's frozen
 paths and the testcases it must turn green, a red-window task's note about
 pending failures — into its brief.
 

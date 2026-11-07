@@ -6,6 +6,7 @@ import {
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import type { Task } from "../../src/types";
 import { pendingTaskProof } from "../fixtures/task-lifecycle";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const task = (verification_policy: Task["verification_policy"]): Task => ({
   id: "T1",
@@ -38,6 +39,7 @@ describe("VerificationPolicy Wave Gate parity", () => {
       },
       declaredArtifacts: [],
     }, {
+      contractConformance: CONFORMANCE_NOT_OWED,
       taskCompleted: true,
       testResult: { verdict: "trusted-pass" },
       filesModified: [],
@@ -64,6 +66,7 @@ describe("VerificationPolicy Wave Gate parity", () => {
       },
       declaredArtifacts: [],
     }, {
+      contractConformance: CONFORMANCE_NOT_OWED,
       taskCompleted: true,
       filesModified: [],
       newTestsWritten: true,

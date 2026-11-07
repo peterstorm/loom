@@ -32,6 +32,7 @@ import { taskFixture, graphFixture } from "../fixtures/task-lifecycle";
 import { deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { TaskGraph } from "../../src/types";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const roots: string[] = [];
 const previousState = process.env.LOOM_STATE_PATH;
@@ -356,6 +357,7 @@ describe("modern implementation attempt registration", () => {
         kind: "implementation-observed",
         observedAt: "2026-01-01T00:01:00.000Z",
         evidence: {
+          contractConformance: CONFORMANCE_NOT_OWED,
           taskCompleted: false,
           testResult: { verdict: "trusted-pass" },
           filesModified: [],
@@ -480,6 +482,7 @@ describe("modern implementation attempt registration", () => {
     const proof = evaluateTaskProof(
       { newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
       {
+        contractConformance: CONFORMANCE_NOT_OWED,
         taskCompleted: true,
         testResult: { verdict: "trusted-pass" },
         filesModified: ["src/a.ts"],

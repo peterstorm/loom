@@ -43,6 +43,7 @@ import {
   observePhaseTransition,
 } from "../../src/handlers/subagent-stop/advance-phase";
 import { SPEC_ARTIFACT_DIR, parseSpecArtifactDirectory } from "../../src/core/phase-artifact-paths";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const AGENT = "code-reviewer";
 
@@ -222,7 +223,7 @@ describe("renderExactPiSettlement", () => {
     attemptGraph(authority),
     authority,
     observedAt.value,
-    { taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
+    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN },
     TRUSTED_LEDGER_ONLY_POLICY,
     buildTaskLocalByteObservation({
       authority,

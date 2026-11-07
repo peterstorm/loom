@@ -14,6 +14,7 @@ import { implementationEscalatedLineage } from "../fixtures/implementation-escal
 import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { activeWaveGateFixture, completedWaveGateFixture, graphFixture, taskFixture } from "../fixtures/task-lifecycle";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const abandoned = (supersededBy: string | null) => ({ kind: "terminal-abandoned", reason: "exhausted", supersededBy });
 const gate = (terminalOutcome: unknown) =>
@@ -68,7 +69,7 @@ describe("classifyImplementationWindow", () => {
       file_list: [],
       proof: evaluateTaskProof(
         { newTestsRequired: true, declaredArtifacts: [] },
-        { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
+        { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
       ),
       test_result: { verdict: "trusted-pass" },
       test_evidence: "1 passed",

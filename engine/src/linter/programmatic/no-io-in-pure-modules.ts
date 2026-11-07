@@ -220,6 +220,11 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // pure — worktrees, runner processes and file reads live in
   // orchestration/owner-mutation-workspace.ts and owner-verification-runner.ts.
   "engine/src/core/owner-verification/",
+  // G2 skeleton core (INV-2): bindings, surfaces, resolution, canonical bytes,
+  // outcomes and conformance are strings and graph data in, data out. Every
+  // repository read and write lives in the orchestration shells (the skeleton
+  // writer and the materialization/observation steps).
+  "engine/src/core/skeleton/",
   // The harness tool-call adapters both harnesses normalize through (INV-4, T6).
   "engine/src/core/harness-tool-call.ts",
   // The frozen CT-3 surface the shared minting rule and both adapters import.

@@ -29,6 +29,7 @@ import {
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import type { TaskProof } from "../../src/core/proof-obligations";
 import type { VerificationPolicy } from "../../src/core/verification-policy";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const ATTESTED_POLICY: VerificationPolicy = Object.freeze({
   regression: Object.freeze({ kind: "required" as const }),
@@ -80,7 +81,7 @@ const retryReceipt = (): ImplementationAttemptSettlementReceipt => {
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-09-19T00:02:00.000Z",
-    evidence: { taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] },
+    evidence: { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: false, testResult: { verdict: "trusted-pass" }, filesModified: [] },
     proofEvaluationPolicy: { untrustedPass: "reject" },
   }, {
     schemaVersion: 1,

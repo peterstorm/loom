@@ -46,6 +46,7 @@ import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../.
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph } from "../../../../src/state-manager";
 import type { TaskGraph } from "../../../../src/types";
+import { CONFORMANCE_NOT_OWED } from "../../../../src/core/skeleton/conformance-verdict";
 
 const successorSource = value(encodeByteSection(
   "standalone-frozen-source",
@@ -130,7 +131,7 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
-    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
+    { contractConformance: CONFORMANCE_NOT_OWED, taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
   );
   if (proof.state !== "satisfied") throw new Error("fixture requires actual satisfied proof construction");
   const graph: TaskGraph = {

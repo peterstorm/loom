@@ -28,6 +28,8 @@ import { captureDeclaredArtifactBaseline } from "../utils/declared-artifact-snap
 import { captureRepositoryChangeBaseline } from "../utils/repository-change-baseline";
 import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
+import { materializeTaskSkeletons } from "../orchestration/skeleton-materialization";
+import { renderLeftPreparedName } from "../core/skeleton/problems";
 
 type RepositoryChangeBaseline = ArtifactBaseline<"repository-change">;
 
@@ -120,6 +122,22 @@ export async function registerTaskExecutionBatch(
     };
   }
 
+  // Skeletons materialize before any baseline is captured (AD-1): the
+  // engine's bytes are part of every baseline this attempt starts from, so
+  // they are never attributed to the implementer. A stage-two problem, or a
+  // write the no-clobber writer refused, blocks the whole batch. A prepared
+  // name a write left behind blocks nothing: it is an operator note.
+  const skeletons = materializeTaskSkeletons(repository.root, state, taskIds);
+  if (!skeletons.ok) {
+    return {
+      kind: "block",
+      message: `BLOCKED: Cannot materialize the skeletons of ${taskIds.join(", ")}: ${skeletons.error.join("; ")}`,
+    };
+  }
+  for (const leftover of skeletons.value.leftovers) {
+    process.stderr.write(`[loom] skeleton note: ${renderLeftPreparedName(leftover)}\n`);
+  }
+
   const baselines = new Map<string, Readonly<{
     proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
     attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
@@ -185,6 +203,7 @@ export async function registerTaskExecutionBatch(
     repository.headSha,
     reservedAt,
     baselines,
+    skeletons.value,
   );
   if (!authorityBatch.ok) return { kind: "block", message: `BLOCKED: ${authorityBatch.error}` };
 
@@ -206,7 +225,7 @@ export async function registerTaskExecutionBatch(
       if (lockedPlansError !== null) throw new LockedRegistrationRefusal(lockedPlansError);
       const staleProofs = proveStaleReservations(current, lockedStale);
       return {
-        state: applyTaskExecutionAuthorityBatch(current, authorityBatch.plans, staleProofs, reservedAt),
+        state: applyTaskExecutionAuthorityBatch(current, authorityBatch.plans, staleProofs, reservedAt, authorityBatch.skeletonRecords),
         value: Object.freeze(authorityBatch.plans.map(({ authority }) => authority)),
       };
     });

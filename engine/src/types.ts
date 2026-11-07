@@ -29,10 +29,12 @@ import type { SettledFloor, SpecIndexObservation } from "./core/requirement-cove
 import type { ProofBoundaryObservation } from "./core/proof-boundary-observation";
 import type { AcceptanceContract, PlanContract } from "./core/acceptance-contract";
 import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/types";
-import type { OwnerVerificationStatusReport } from "./core/owner-verification/status";
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
 import type { InvariantId } from "./core/invariant-id";
 import type { TaskId } from "./core/task-id";
+// The G2 values (AD-4) are owned by their dependency-free leaf, which imports
+// nothing from this file, so the canonical Task and TaskGraph declare them.
+import type { ExportBinding, PathSkeletonOutcome, SkeletonRecord } from "./core/skeleton/persisted";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 // The sibling entry point is owned by its dependency-free leaf, which both
@@ -524,6 +526,11 @@ interface TaskCommonMetadataBase {
   readonly implementation_attestation?: true;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
+  /** The skeleton outcome registration recorded for each non-test file_list
+   * path (FR-030, AD-4): one per path, each path in file_list, and a
+   * `skeleton-written` outcome only with its `TaskGraph.skeletons` record.
+   * Absent until the Task's first registration; the State File wire proves it. */
+  readonly skeleton_outcomes?: readonly PathSkeletonOutcome[];
 }
 
 export type TaskCommonMetadata = Readonly<TaskCommonMetadataBase>;
@@ -836,6 +843,14 @@ export type StatusReasonKind =
   | "implementation-escalation-required"
   | "wave-gate-not-started"
   | "wave-start-not-ready"
+  /** A frozen types file no longer resolves an export binding of an
+   *  outstanding Task of the Wave (stage two, AS-051): registration refuses
+   *  the spawn until a Contract Revision or a re-planned binding repairs it. */
+  | "skeleton-bindings-unresolved"
+  /** Status could not observe the current Wave's skeleton paths while a spawn
+   *  is owed (AD-13): informational, never blocking, because registration
+   *  observes them again and refuses the spawn on anything it cannot read. */
+  | "skeletons-unobserved"
   | "run-complete"
   /** The final Wave's gate committed and every Task is completed: the
    *  orchestration is finished and `helper complete-orchestration` retires it. */
@@ -1091,6 +1106,15 @@ export type WaveImplementationRecovery =
       /** Every failed start prerequisite, in gate order — exactly the reasons
        * `start wave-gate` refuses with before claiming a Run Directory. */
       failures: OrchestrationNonEmpty<string>;
+    }>
+  /** Implementation is owed, but stage two refuses it: a frozen types file no
+   *  longer resolves an export binding (AS-051). Registration would refuse
+   *  the spawn with these same problems, so status owes their repair. */
+  | Readonly<{
+      kind: "repair-skeleton-bindings";
+      wave: number;
+      /** One line per stage-two problem, naming the alias, binding file and types file it has. */
+      unresolved: OrchestrationNonEmpty<string>;
     }>;
 
 /** An execute Wave holds no Wave Gate registration between entering the Wave
@@ -1107,7 +1131,22 @@ export type WaveImplementationDiagnostic =
         eligible: true;
         consumesSemanticAttempt: false;
       }>;
-      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" | "repair-wave-start-readiness" }>;
+      recovery: Exclude<
+        WaveImplementationRecovery,
+        { kind: "escalate-wave-implementation" | "repair-wave-start-readiness" | "repair-skeleton-bindings" }
+      >;
+    }>
+  | Readonly<{
+      kind: "skeleton-bindings-unresolved";
+      category: "skeleton-bindings-unresolved";
+      runId: OrchestrationRunId;
+      message: string;
+      retry: Readonly<{
+        kind: "advance-wave-lifecycle";
+        eligible: false;
+        consumesSemanticAttempt: false;
+      }>;
+      recovery: Extract<WaveImplementationRecovery, { kind: "repair-skeleton-bindings" }>;
     }>
   | Readonly<{
       kind: "wave-start-not-ready";
@@ -1154,15 +1193,10 @@ export type LoomStatus = Readonly<{
   next: NextActionDecision;
 }>;
 
-/**
- * The document `helper orchestration status` emits, as `--json` serializes
- * it and the human renderer reads it: the canonical `LoomStatus` with the
- * owner-verification report (G5b AD-10) beside it. `ownerVerification` is
- * required: `deriveLoomStatusFromParsedGraph` is the only producer and always
- * reports it (`not-observed` when there is nothing to report), so no renderer
- * handles an absent field. The routed `LoomStatus` stays a separate type.
- */
-export type LoomStatusDocument = LoomStatus & Readonly<{ ownerVerification: OwnerVerificationStatusReport }>;
+// `LoomStatusDocument` — the document `helper orchestration status` emits —
+// is declared beside its one producer in `core/loom-status.ts`, not here: its
+// `skeletons` report (G2 AD-13) is built from `core/skeleton/*`, which imports
+// this file, so naming it here would close an import cycle.
 
 export type WaveSpecCheckSlotAuthority = Readonly<{
   readonly slot_id: string;
@@ -1272,6 +1306,17 @@ export interface TaskGraph {
    * `core/owner-verification/obligations.ts` (INV-3).
    */
   readonly owner_obligations?: readonly OwnerObligation[];
+  /**
+   * The plan's export bindings, stamped at population (AD-4), in plan order.
+   * Absent only on a graph populated before G2, which owes no skeleton and no
+   * conformance check; `[]` is a G2 graph that binds nothing. Re-population
+   * replaces it.
+   */
+  readonly export_bindings?: readonly ExportBinding[];
+  /** The engine-written skeleton records (FR-031), sorted by path with no
+   * path twice, each a stamped binding's path under its contract. Absent
+   * until the engine writes its first skeleton. */
+  readonly skeletons?: readonly SkeletonRecord[];
   readonly updated_at?: string;
 }
 
@@ -1310,6 +1355,10 @@ export type BlockPrefix = "LC" | "INV" | "CT";
 /** All canonical model sections. */
 export type ModelSection = BlockSection | "Pipeline";
 
+/** Where a model label belongs: a model section, or `## File Structure` for
+ *  `**Export bindings:**` (AD-3). */
+export type LabelHome = ModelSection | "File Structure";
+
 /**
  * A near-miss or misplaced model marker. Each variant carries the context
  * needed to explain itself (`renderStray`); validation treats ANY stray as
@@ -1326,7 +1375,7 @@ export type Stray =
       readonly prefix: BlockPrefix;
     }
   | { readonly kind: "misplaced-heading"; readonly heading: string; readonly home: BlockSection }
-  | { readonly kind: "misplaced-label"; readonly label: string; readonly home: ModelSection };
+  | { readonly kind: "misplaced-label"; readonly label: string; readonly home: LabelHome };
 
 export interface PlanLifecycle {
   /** e.g. "LC-1" */

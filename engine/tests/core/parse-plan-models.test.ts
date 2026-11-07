@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parsePlanModels, hasModels, renderStray, type Stray } from "../../src/core/parse-plan-models";
+import { parsePlanModels, parsePlanExportBindings, hasModels, renderStray, type Stray } from "../../src/core/parse-plan-models";
 
 const FULL_PLAN = `# Plan: Order Processing
 
@@ -595,6 +595,68 @@ describe("renderStray — every variant renders its context", () => {
     for (const [stray, expected] of cases) {
       expect(renderStray(stray)).toContain(expected);
     }
+  });
+});
+
+describe("export bindings — the File Structure section", () => {
+  const FILE_STRUCTURE = `## File Structure
+
+### Pricing (T3, Wave 2)
+
+\`\`\`
+src/order/pricing.ts   — NEW pricing
+**Export bindings:**
+- \`src/quoted.ts\` — CT-1: quoted: QuotedFn
+\`\`\`
+
+**Export bindings:**
+- \`src/order/pricing.ts\` — CT-1: priceOrder: PriceOrderFn, parseOrder: ParseOrderFn
+- \`src/order/shipping.ts\` — CT-1: : ShipOrderFn
+`;
+
+  const PLAN = `# Plan\n\n${FILE_STRUCTURE}\n## Next section\n\n**Export bindings:**\n- \`src/late.ts\` — CT-1: late: LateFn\n`;
+
+  it("AS-001: records the bindings of '## File Structure' in plan order, with every grammar problem", () => {
+    expect(parsePlanExportBindings(PLAN)).toEqual({
+      bindings: [
+        { path: "src/order/pricing.ts", contract: "CT-1", exports: [{ name: "priceOrder", alias: "PriceOrderFn" }, { name: "parseOrder", alias: "ParseOrderFn" }] },
+      ],
+      problems: [
+        { kind: "malformed-entry", path: "src/order/shipping.ts", line: "- `src/order/shipping.ts` — CT-1: : ShipOrderFn", reason: "missing-name" },
+      ],
+    });
+  });
+
+  it("keeps export bindings off PlanModels, so a plan's models keep their pre-feature shape", () => {
+    const models = parsePlanModels(PLAN);
+    expect(Object.keys(models)).toEqual(["lifecycles", "pipeline", "invariants", "contracts", "strays"]);
+    // The label after File Structure ends is a misplaced-label stray, never a binding.
+    expect(models.strays).toEqual([{ kind: "misplaced-label", label: "Export bindings", home: "File Structure" }]);
+  });
+
+  it("flags an Export bindings label outside File Structure as a stray, never an opt-out", () => {
+    const plan = "# Plan\n\n## Contracts\n\n### CT-1: X\n\n**Export bindings:**\n- `src/a.ts` — CT-1: a: AFn\n";
+    expect(parsePlanExportBindings(plan)).toEqual({ bindings: [], problems: [] });
+    expect(parsePlanModels(plan).strays).toContainEqual({ kind: "misplaced-label", label: "Export bindings", home: "File Structure" });
+    expect(renderStray({ kind: "misplaced-label", label: "Export bindings", home: "File Structure" }))
+      .toBe("'**Export bindings:**' line found outside a '## File Structure' section — it binds nothing there");
+  });
+
+  it("a plan with no File Structure section declares no bindings and is not a model by itself", () => {
+    const plan = "# Plan\n\n## Summary\n\nNothing.\n";
+    expect(parsePlanExportBindings(plan)).toEqual({ bindings: [], problems: [] });
+    expect(hasModels(parsePlanModels(plan))).toBe(false);
+  });
+
+  it("a label inside an unterminated fence binds nothing, as every model label there is hidden", () => {
+    const plan = "## File Structure\n\n```\nsrc/a.ts\n\n**Export bindings:**\n- `src/a.ts` — CT-1: a: AFn\n";
+    expect(parsePlanExportBindings(plan)).toEqual({ bindings: [], problems: [] });
+  });
+
+  it("a File Structure with only well-formed bindings carries no stray", () => {
+    const plan = "## File Structure\n\n**Export bindings:**\n- `src/a.ts` — CT-1: a: AFn\n";
+    expect(parsePlanExportBindings(plan).problems).toEqual([]);
+    expect(parsePlanModels(plan).strays).toEqual([]);
   });
 });
 

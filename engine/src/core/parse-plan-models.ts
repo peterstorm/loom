@@ -21,6 +21,11 @@
  *                        point those tests drive, and the statement
  *                        consumers rely on; frozen once observed red
  *
+ * `## File Structure` may bind new implementation files to the exports they
+ * provide with `**Export bindings:**` lists (AD-3), read by
+ * `parsePlanExportBindings` apart from `PlanModels`; the label anywhere else
+ * is a `misplaced-label` stray.
+ *
  * The parser is total and pure: malformed declarations are represented, never
  * thrown. Malformed *field lines* become null fields; malformed or misplaced
  * *headings and labels* (near-miss section names, `### LC-A1:` typos, model
@@ -38,7 +43,7 @@ import { match } from "ts-pattern";
 import type {
   BlockSection,
   InvariantOwnership,
-  ModelSection,
+  LabelHome,
   MutationPolicy,
   OwnershipProblem,
   PlanInvariant,
@@ -58,6 +63,8 @@ import type {
 import { parseInvariantId } from "./invariant-id";
 import { isRepoRelativePlanPath, normalizePlanPath } from "./plan-path-match";
 import { COVERABLE_ANCHOR } from "./acceptance-contract";
+import { parseExportBindings } from "./skeleton/bindings";
+import type { ExportBindingsDeclaration } from "./skeleton/types";
 
 // The plan model data shapes live in types.ts (consumers that only need the
 // shapes need not import the grammar). Only the shapes importers take through
@@ -470,6 +477,7 @@ function collectStrays(
   pipeline: Section | null,
   invariants: Section | null,
   contracts: Section | null,
+  fileStructure: Section | null,
 ): Stray[] {
   const strays: Stray[] = [];
 
@@ -511,7 +519,7 @@ function collectStrays(
   }
 
   // Model field labels outside their sections.
-  const labelHomes: Array<{ label: string; s: Section | null; home: ModelSection }> = [
+  const labelHomes: Array<{ label: string; s: Section | null; home: LabelHome }> = [
     { label: "Machine file", s: lifecycles, home: "Lifecycles" },
     { label: "AuthoredDag", s: pipeline, home: "Pipeline" },
     { label: "Rule file", s: invariants, home: "Invariants" },
@@ -526,6 +534,7 @@ function collectStrays(
     { label: "Acceptance tests", s: contracts, home: "Contracts" },
     { label: "Supported domain", s: contracts, home: "Contracts" },
     { label: "Entry point", s: contracts, home: "Contracts" },
+    { label: "Export bindings", s: fileStructure, home: "File Structure" },
   ];
   for (const { label, s, home } of labelHomes) {
     for (const m of text.matchAll(new RegExp(`^\\*\\*${label}:\\*\\*[^\\n]*$`, "gim"))) {
@@ -603,8 +612,19 @@ export function parsePlanModels(markdown: string): PlanModels {
     ...emptySectionStray(lifecyclesSection, "Lifecycles"),
     ...emptySectionStray(invariantsSection, "Invariants"),
     ...emptySectionStray(contractsSection, "Contracts"),
-    ...collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection, contractsSection),
+    ...collectStrays(text, lifecyclesSection, pipelineSection, invariantsSection, contractsSection, section(text, "File Structure")),
   ];
 
   return { lifecycles, pipeline, invariants, contracts, strays };
+}
+
+/**
+ * The plan's `**Export bindings:**` (AD-3), read from `## File Structure`
+ * after the same fence stripping `parsePlanModels` applies, so a label quoted
+ * in a fence binds nothing. Kept off `PlanModels` so a plan without bindings
+ * parses to its pre-feature models; a label outside the section is a
+ * `misplaced-label` stray of `parsePlanModels`. Pure and total.
+ */
+export function parsePlanExportBindings(markdown: string): ExportBindingsDeclaration {
+  return parseExportBindings(section(stripFences(markdown).text, "File Structure")?.body ?? "");
 }

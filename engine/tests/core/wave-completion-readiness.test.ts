@@ -39,6 +39,7 @@ import {
   WaveWorkspaceObservation,
 } from "../../src/types";
 import { value } from "../fixtures/parse-result";
+import { CONFORMANCE_NOT_OWED } from "../../src/core/skeleton/conformance-verdict";
 
 const digest = (fill: string): ArtifactDigest => fill.repeat(64) as ArtifactDigest;
 const workspace = (fill: string): WaveWorkspaceObservation => ({
@@ -59,6 +60,7 @@ const registration: ActiveWaveGateRegistration = {
 const proof = evaluateTaskProof(
   { newTestsRequired: true, declaredArtifacts: [] },
   {
+    contractConformance: CONFORMANCE_NOT_OWED,
     taskCompleted: true,
     testResult: { verdict: "trusted-pass" },
     filesModified: [],

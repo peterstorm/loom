@@ -1,5 +1,10 @@
 import { canonicalStructuralEquals } from "./orchestration-contract";
 import type { RedThenGreenGap, RedThenGreenObservation, RunRef } from "./red-then-green-types";
+import {
+  isViolationReason,
+  type ConformanceViolation,
+  type ContractConformance,
+} from "./skeleton/conformance-verdict";
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import {
@@ -224,6 +229,14 @@ export interface ObservedProofEvidence {
    * `ledger-unavailable`.
    */
   readonly redThenGreen?: RedThenGreenObservation;
+  /**
+   * The completion conformance judgment (AD-5): `not-owed`, or every
+   * violation of the Task's in-scope files by artifact. Required: every
+   * settlement path decides it — the exact settlement and reconcile through
+   * `observeContractConformance`, the authority-free legacy stop as
+   * `not-owed` — so no path can skip the contract check by omission.
+   */
+  readonly contractConformance: ContractConformance;
 }
 
 /**
@@ -254,6 +267,7 @@ export type ProofFailure =
   | Readonly<{ kind: "red-then-green-unproven"; gap: RedThenGreenGap }>
   | Readonly<{ kind: "attempt-scope-drifted" }>
   | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-contract-violated"; artifact: string; violations: NonEmpty<ConformanceViolation> }>
   | Readonly<{ kind: "declared-artifact-drifted"; artifact: string }>;
 
 /** The base ProofFailure kinds whose minted `proof:` labels mark a retry
@@ -283,6 +297,83 @@ const ATTESTATION_DRIFT_FAILURE_KINDS = Object.freeze(
 
 export const isAttestationDriftFailureKind = (kind: string): kind is AttestationDriftFailureKind =>
   (ATTESTATION_DRIFT_FAILURE_KINDS as readonly string[]).includes(kind);
+
+type ContractViolatedFailure = Extract<ProofFailure, { kind: "declared-artifact-contract-violated" }>;
+
+/** The label every contract-violated receipt failure kind starts with; the
+ *  canonical JSON body of {@link ContractViolatedReceiptEntry} follows it. */
+export const CONTRACT_VIOLATED_FAILURE_KIND_PREFIX =
+  "proof:declared-artifact-contract-violated " as const satisfies `proof:${ContractViolatedFailure["kind"]} `;
+
+/**
+ * What a settlement receipt keeps of one contract-violated failure (FR-021):
+ * the artifact, the longest prefix of its violations that fits the receipt's
+ * failure-kind bound, and how many it leaves out. `shown.length + omitted` is
+ * the failure's violation count, at least one; the stored Proof keeps them all.
+ */
+export type ContractViolatedReceiptEntry = Readonly<{
+  artifact: string;
+  shown: readonly ConformanceViolation[];
+  omitted: number;
+}>;
+
+const encodeContractViolated = (artifact: string, shown: readonly ConformanceViolation[], omitted: number): string =>
+  `${CONTRACT_VIOLATED_FAILURE_KIND_PREFIX}${JSON.stringify({
+    artifact,
+    omitted,
+    violations: shown.map(({ subject, reason, remedy }) => ({ subject, reason, remedy })),
+  })}`;
+
+/**
+ * The receipt failure kind of one contract-violated failure, at most
+ * `maxLength` characters: every violation that fits, in judge order, and the
+ * count of the rest. Only an artifact path longer than the bound itself
+ * yields a kind cut short, which {@link parseContractViolatedFailureKind}
+ * then refuses rather than misreads.
+ */
+export function contractViolatedFailureKind(failure: ContractViolatedFailure, maxLength: number): string {
+  const total = failure.violations.length;
+  let shown = total;
+  let kind = encodeContractViolated(failure.artifact, failure.violations, 0);
+  while (shown > 0 && kind.length > maxLength) {
+    shown -= 1;
+    kind = encodeContractViolated(failure.artifact, failure.violations.slice(0, shown), total - shown);
+  }
+  return kind.slice(0, maxLength);
+}
+
+/** Parse a receipt failure kind minted by {@link contractViolatedFailureKind}. */
+export function parseContractViolatedFailureKind(kind: string): ProofParseResult<ContractViolatedReceiptEntry> {
+  const path = "contract-violated failure kind";
+  if (!kind.startsWith(CONTRACT_VIOLATED_FAILURE_KIND_PREFIX)) {
+    return fail([`${path} must start with ${CONTRACT_VIOLATED_FAILURE_KIND_PREFIX.trim()}`]);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(kind.slice(CONTRACT_VIOLATED_FAILURE_KIND_PREFIX.length));
+  } catch (cause) {
+    return fail([`${path} body is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`]);
+  }
+  if (!isRecord(raw)) return fail([`${path} body must be an object`]);
+  return parseExactRecordArm<ContractViolatedReceiptEntry>(raw, path, ["artifact", "omitted", "violations"], () => {
+    const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+    const omitted = raw.omitted;
+    const omittedValid = typeof omitted === "number" && Number.isSafeInteger(omitted) && omitted >= 0;
+    const shown = Array.isArray(raw.violations)
+      ? raw.violations.map((value: unknown, index) => parseConformanceViolation(value, `${path}.violations[${index}]`))
+      : null;
+    const errors = [
+      ...(artifact.ok ? [] : artifact.errors),
+      ...(omittedValid ? [] : [`${path}.omitted must be a non-negative integer`]),
+      ...(shown === null ? [`${path}.violations must be an array`] : shown.flatMap((result) => (result.ok ? [] : result.errors))),
+    ];
+    if (errors.length > 0 || !artifact.ok || !omittedValid || shown === null) return fail(errors);
+    const violations = Object.freeze(shown.flatMap((result) => (result.ok ? [result.value] : [])));
+    return violations.length + omitted === 0
+      ? fail([`${path} must account for at least one violation`])
+      : ok(Object.freeze({ artifact: artifact.value, shown: violations, omitted }));
+  });
+}
 
 /** Evidence remains explicit about where a pass came from. */
 export type ProofEvidence =
@@ -479,6 +570,46 @@ const evaluateRedThenGreen = (
         failure: Object.freeze({ kind: "red-then-green-unproven", gap: observation.gap }),
       });
 
+/** The violations the conformance judgment found in one artifact, or none. */
+const violationsOf = (conformance: ContractConformance, artifact: string): NonEmpty<ConformanceViolation> | undefined =>
+  conformance.kind === "judged" ? conformance.violations.get(artifact) : undefined;
+
+/**
+ * The `declared-artifact-changed` arm (AD-5): a contract violation is
+ * reported ahead of the changed test, so an untouched engine skeleton is
+ * refused as `still unimplemented` rather than as `not-changed`. Then the
+ * artifact is satisfied exactly when it changed (engine bytes were already
+ * subtracted from `filesModified`, FR-012).
+ */
+const evaluateDeclaredArtifactChanged = (
+  obligation: Extract<ProofObligation, { kind: "declared-artifact-changed" }>,
+  observed: ObservedProofEvidence,
+): EvaluatedProofResult => {
+  const violations = violationsOf(observed.contractConformance, obligation.artifact);
+  if (violations !== undefined) {
+    return Object.freeze({
+      state: "failed",
+      obligation,
+      failure: Object.freeze({
+        kind: "declared-artifact-contract-violated",
+        artifact: obligation.artifact,
+        violations: mapNonEmpty(violations, (violation) => Object.freeze({ ...violation })),
+      }),
+    });
+  }
+  return observed.filesModified.includes(obligation.artifact)
+    ? Object.freeze({
+        state: "satisfied",
+        obligation,
+        evidence: Object.freeze({ kind: "declared-artifact-changed", artifact: obligation.artifact }),
+      })
+    : Object.freeze({
+        state: "failed",
+        obligation,
+        failure: Object.freeze({ kind: "declared-artifact-not-changed", artifact: obligation.artifact }),
+      });
+};
+
 const evaluateOne = (
   obligation: ProofObligation,
   observed: ObservedProofEvidence,
@@ -529,17 +660,7 @@ const evaluateOne = (
             failure: Object.freeze({ kind: "attempt-scope-drifted" }),
           });
     case "declared-artifact-changed":
-      return observed.filesModified.includes(obligation.artifact)
-        ? Object.freeze({
-            state: "satisfied",
-            obligation,
-            evidence: Object.freeze({ kind: "declared-artifact-changed", artifact: obligation.artifact }),
-          })
-        : Object.freeze({
-            state: "failed",
-            obligation,
-            failure: Object.freeze({ kind: "declared-artifact-not-changed", artifact: obligation.artifact }),
-          });
+      return evaluateDeclaredArtifactChanged(obligation, observed);
     case "declared-artifact-attested":
       // The attested arm reads the same write observation as the changed arm,
       // inverted: a verify-only child leaves the declared bytes untouched, so
@@ -867,12 +988,65 @@ function parseRedThenGreenObservation(
   return fail([`${path}.kind must be shown or unproven`]);
 }
 
+function parseConformanceViolation(raw: unknown, path: string): ProofParseResult<ConformanceViolation> {
+  if (!isRecord(raw)) return fail([`${path} must be an object`]);
+  return parseExactRecordArm(raw, path, ["subject", "reason", "remedy"], () => {
+    const subject = parseNonEmptyString(raw.subject, `${path}.subject`);
+    const errors = [
+      ...(subject.ok ? [] : subject.errors),
+      ...(isViolationReason(raw.reason) ? [] : [`${path}.reason must be a conformance violation reason`]),
+      ...(raw.remedy === null || typeof raw.remedy === "string" ? [] : [`${path}.remedy must be a string or null`]),
+    ];
+    return errors.length > 0 || !subject.ok || !isViolationReason(raw.reason)
+      ? fail(errors)
+      : ok(Object.freeze({ subject: subject.value, reason: raw.reason, remedy: typeof raw.remedy === "string" ? raw.remedy : null }));
+  });
+}
+
+function parseViolations(raw: unknown, path: string): ProofParseResult<NonEmpty<ConformanceViolation>> {
+  if (!Array.isArray(raw) || raw.length === 0) return fail([`${path} must be a non-empty array`]);
+  const parsed = raw.map((value: unknown, index) => parseConformanceViolation(value, `${path}[${index}]`));
+  const errors = parsed.flatMap((result) => (result.ok ? [] : result.errors));
+  const [head, ...tail] = parsed.flatMap((result) => (result.ok ? [result.value] : []));
+  return errors.length > 0 || head === undefined ? fail(errors) : ok(nonEmpty(head, tail));
+}
+
+/** The in-memory observation the settlement shell decided: `not-owed`, or a
+ *  Map of every violated artifact to its non-empty violations. */
+function parseContractConformance(raw: unknown, path = "contractConformance"): ProofParseResult<ContractConformance> {
+  if (!isRecord(raw)) return fail([`${path} must be decided as not-owed or judged`]);
+  if (raw.kind === "not-owed") {
+    return parseExactRecordArm<ContractConformance>(raw, path, ["kind"], () => ok(Object.freeze({ kind: "not-owed" })));
+  }
+  if (raw.kind !== "judged") return fail([`${path}.kind must be not-owed or judged`]);
+  return parseExactRecordArm<ContractConformance>(raw, path, ["kind", "violations"], () => {
+    if (!(raw.violations instanceof Map)) return fail([`${path}.violations must be a Map of artifact to violations`]);
+    const entries = [...(raw.violations as ReadonlyMap<unknown, unknown>)].map(([artifact, violations], index) => {
+      const parsedArtifact = parseNonEmptyString(artifact, `${path}.violations[${index}].artifact`);
+      const parsedViolations = parseViolations(violations, `${path}.violations[${index}].violations`);
+      return parsedArtifact.ok && parsedViolations.ok
+        ? ok([parsedArtifact.value, parsedViolations.value] as const)
+        : fail<readonly [string, NonEmpty<ConformanceViolation>]>([
+            ...(parsedArtifact.ok ? [] : parsedArtifact.errors),
+            ...(parsedViolations.ok ? [] : parsedViolations.errors),
+          ]);
+    });
+    const errors = entries.flatMap((entry) => (entry.ok ? [] : entry.errors));
+    return errors.length > 0
+      ? fail(errors)
+      : ok(Object.freeze({
+          kind: "judged",
+          violations: new Map(entries.flatMap((entry) => (entry.ok ? [entry.value] : []))),
+        }));
+  });
+}
+
 export function parseObservedProofEvidence(raw: unknown): ProofParseResult<ObservedProofEvidence> {
   if (!isRecord(raw)) return fail(["observed proof evidence must be an object"]);
   const exact = parseExactRecordArm(
     raw,
     "observed proof evidence",
-    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen"],
+    ["taskCompleted", "testResult", "filesModified", "newTestsWritten", "newTestEvidence", "redThenGreen", "contractConformance"],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
@@ -885,6 +1059,10 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
   }
   const redThenGreen = raw.redThenGreen === undefined ? undefined : parseRedThenGreenObservation(raw.redThenGreen);
   if (redThenGreen !== undefined && !redThenGreen.ok) errors.push(...redThenGreen.errors);
+  // Required: an observation that has not decided conformance is refused,
+  // never read as judging nothing (AD-5).
+  const contractConformance = parseContractConformance(raw.contractConformance);
+  if (!contractConformance.ok) errors.push(...contractConformance.errors);
 
   if (typeof raw.taskCompleted !== "boolean") errors.push("taskCompleted must be a boolean");
   const files: string[] = [];
@@ -904,7 +1082,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     errors.push("newTestEvidence must be a string when present");
   }
 
-  if (errors.length > 0) return fail(errors);
+  if (errors.length > 0 || !contractConformance.ok) return fail(errors);
   return ok(Object.freeze({
     taskCompleted: raw.taskCompleted === true,
     ...(testResult === undefined ? {} : { testResult }),
@@ -912,6 +1090,7 @@ export function parseObservedProofEvidence(raw: unknown): ProofParseResult<Obser
     ...(typeof raw.newTestsWritten === "boolean" ? { newTestsWritten: raw.newTestsWritten } : {}),
     ...(typeof raw.newTestEvidence === "string" ? { newTestEvidence: raw.newTestEvidence } : {}),
     ...(redThenGreen?.ok ? { redThenGreen: redThenGreen.value } : {}),
+    contractConformance: contractConformance.value,
   }));
 }
 
@@ -955,6 +1134,14 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
         return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
       });
     }
+    case "declared-artifact-contract-violated":
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact", "violations"], () => {
+        const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+        const violations = parseViolations(raw.violations, `${path}.violations`);
+        return artifact.ok && violations.ok
+          ? ok(Object.freeze({ kind: "declared-artifact-contract-violated", artifact: artifact.value, violations: violations.value }))
+          : fail([...(artifact.ok ? [] : artifact.errors), ...(violations.ok ? [] : violations.errors)]);
+      });
     case "red-then-green-unproven":
       return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "gap"], () => {
         const gap = parseRedThenGreenGap(raw.gap, `${path}.gap`);
@@ -1041,7 +1228,8 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
       case "attempt-scope-attested":
         return result.failure.kind === "attempt-scope-drifted";
       case "declared-artifact-changed":
-        return result.failure.kind === "declared-artifact-not-changed"
+        return (result.failure.kind === "declared-artifact-not-changed" ||
+            result.failure.kind === "declared-artifact-contract-violated")
           && result.failure.artifact === result.obligation.artifact;
       case "declared-artifact-attested":
         return result.failure.kind === "declared-artifact-drifted"

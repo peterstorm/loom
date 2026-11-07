@@ -27,6 +27,7 @@ import {
   type TaskCompletionSuiteResult,
 } from "./implementation-completion";
 import { compareStrings } from "./ordering";
+import { samePlanPath } from "./plan-path-match";
 import {
   deriveProofObligations,
   evaluateTaskProof,
@@ -38,6 +39,9 @@ import {
 import type { RedThenGreenObservation } from "./red-then-green-types";
 import { invalidateTaskReview } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
+import { isUntouchedSkeleton } from "./skeleton/outcomes";
+import { CONFORMANCE_NOT_OWED, type ContractConformance } from "./skeleton/conformance-verdict";
+import type { SkeletonRecord } from "./skeleton/types";
 import type { FrozenTestFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { taskVerificationPolicy } from "./verification-policy";
@@ -79,6 +83,14 @@ export type TaskLocalObservationInput = Readonly<{
   priorAttributedPaths: readonly unknown[];
   repositoryChangedPaths: readonly unknown[];
   siblingOwnedPaths: readonly unknown[];
+  /** Every skeleton the engine recorded writing, with the digest of its
+   *  bytes (FR-012): bytes still equal to it are the engine's, never the
+   *  implementer's. The settlement shell always passes the graph's records;
+   *  absent reads as none recorded, which subtracts nothing. */
+  engineSkeletons?: readonly SkeletonRecord[];
+  /** The raw-bytes digest of each recorded skeleton path as it is now, keyed
+   *  by the record's path; a path holding no regular file has none. */
+  currentSkeletonDigests?: ReadonlyMap<string, string>;
 }>;
 
 function parsePaths(raw: readonly unknown[], path: string):
@@ -103,6 +115,7 @@ function compareExactBaselines(
 ): Readonly<{
   ok: true;
   baseline: readonly DeclaredArtifactBaseline[];
+  current: readonly DeclaredArtifactBaseline[];
   changed: readonly ReviewPath[];
 }> | Readonly<{ ok: false; errors: readonly string[] }> {
   // Both Task-local scopes (attempt and proof) are captured as declared-artifact
@@ -123,6 +136,7 @@ function compareExactBaselines(
     ? freeze({
         ok: true,
         baseline: parsedBaseline.value,
+        current: parsedCurrent.value,
         changed: frozenArray(compared.value as readonly ReviewPath[]),
       })
     : freeze({ ok: false, errors: frozenArray(compared.errors) });
@@ -132,6 +146,16 @@ function unavailableReason(errors: readonly string[]): string {
   const joined = errors.join("; ").trim();
   return (joined === "" ? "Task-local byte observation is unavailable" : joined).slice(0, 4_096);
 }
+
+/** The current declared-artifact digest of `path`, or null when it is missing. */
+const currentDigestOf = (scope: readonly DeclaredArtifactBaseline[], path: string): string | null => {
+  const snapshot = scope.find(({ artifact }) => artifact === path)?.snapshot;
+  return snapshot?.kind === "sha256" ? snapshot.digest : null;
+};
+
+/** The engine's record of the skeleton it wrote at `path`, if any. */
+const engineRecordOf = (records: readonly SkeletonRecord[], path: string): SkeletonRecord | undefined =>
+  records.find((recorded) => samePlanPath(recorded.path, path));
 
 /**
  * Build the one engine-owned Task suite from already-observed snapshots.
@@ -174,6 +198,21 @@ export function buildTaskLocalByteObservation(
     );
   }
 
+  // Engine-written skeleton bytes are subtracted (FR-012): a declared
+  // artifact still holding them never counts as the Task's production, and a
+  // repository path still holding them (another Task's contract stub) never
+  // counts as an out-of-scope write.
+  // Whether bytes are still the engine's is the one untouched-skeleton
+  // judgment (`isUntouchedSkeleton`, INV-4) against the engine's record: a
+  // path the engine never wrote, or a missing file, never is.
+  const engineSkeletons = input.engineSkeletons ?? [];
+  const currentSkeletons = input.currentSkeletonDigests ?? new Map<string, string>();
+  const proofChanged = frozenArray(proof.changed.filter((path) =>
+    !isUntouchedSkeleton(engineRecordOf(engineSkeletons, path), currentDigestOf(proof.current, path), null)));
+  const repositoryChanged = repositoryPaths.value.filter((path) => {
+    const record = engineRecordOf(engineSkeletons, path);
+    return !isUntouchedSkeleton(record, record === undefined ? null : currentSkeletons.get(record.path) ?? null, null);
+  });
   const allowed = attempt.baseline.map(({ artifact }) => artifact);
   const covered = (artifacts: readonly string[], path: string) =>
     artifacts.some((artifact) => artifactCovers(artifact, path));
@@ -181,7 +220,7 @@ export function buildTaskLocalByteObservation(
   // transcript path outside this Task's registered scope always fails. A
   // directory artifact covers every path below it.
   const rawOutside = parserPaths.value.filter((path) => !covered(allowed, path));
-  const unresolvedRepositoryPaths = frozenArray(repositoryPaths.value.filter((path) =>
+  const unresolvedRepositoryPaths = frozenArray(repositoryChanged.filter((path) =>
     !covered(allowed, path) && !covered(siblingPaths.value, path)
   ));
   const outside = frozenArray(
@@ -197,7 +236,7 @@ export function buildTaskLocalByteObservation(
   // bytes when their attribution was lost to an infrastructure-blocked
   // settlement, so a verify-only retry is not failed for work already done.
   const cumulative = frozenArray(
-    [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proof.changed])].sort(compareStrings),
+    [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proofChanged])].sort(compareStrings),
   );
   const suite = createTaskCompletionSuiteResult(
     input.authority,
@@ -211,7 +250,7 @@ export function buildTaskLocalByteObservation(
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
-    cumulativeProofArtifactChanges: proof.changed,
+    cumulativeProofArtifactChanges: proofChanged,
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
     unresolvedRepositoryPaths,
     invalidationBytesChanged: attempt.changed.length > 0 || unresolvedRepositoryPaths.length > 0,
@@ -352,6 +391,14 @@ export function applyCompletionInfrastructureFailure(
   );
 }
 
+/**
+ * The authority-free legacy Stop's conformance decision: `not-owed`. It reads
+ * no repository and can never mint completion (its observation is always
+ * `taskCompleted: false`, so its Proof always fails); the Task's conformance is
+ * judged by the exact settlement or the reconcile that can complete it.
+ */
+const LEGACY_STOP_CONFORMANCE: ContractConformance = CONFORMANCE_NOT_OWED;
+
 /** Apply one authority-free legacy Stop observation against locked state. */
 export function applyUntrustedStopResolution(
   state: TaskGraph,
@@ -393,6 +440,7 @@ export function applyUntrustedStopResolution(
       filesModified: proofArtifactsChanged,
       newTestsWritten: currentNewTests.written,
       newTestEvidence: currentNewTests.evidence,
+      contractConformance: LEGACY_STOP_CONFORMANCE,
     },
     proofPolicy,
   );
@@ -422,6 +470,10 @@ export type IncomingImplementationEvidence = Readonly<{
   /** The I6 judgment over the attempt epoch, present exactly when the Task
    *  owes `red-then-green` and the settlement shell judged its ledger. */
   redThenGreen?: RedThenGreenObservation;
+  /** The settlement shell's conformance decision (AD-5): `not-owed`, or the
+   *  judge's verdict over the Task's in-scope files. Required, so a settlement
+   *  path cannot skip the contract check by omitting it. */
+  contractConformance: ContractConformance;
 }>;
 
 /**
@@ -770,6 +822,7 @@ export function settleObservedImplementation(
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
       ...(incoming.redThenGreen === undefined ? {} : { redThenGreen: incoming.redThenGreen }),
+      contractConformance: incoming.contractConformance,
     },
     proofEvaluationPolicy,
   });
