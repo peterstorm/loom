@@ -10,13 +10,13 @@
  */
 
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { deriveLoomStatusFromParsedGraph } from "../../src/core/loom-status";
+import { deriveLoomStatusFromParsedGraph, type LoomStatusDocument } from "../../src/core/loom-status";
 import {
   renderOwnerVerificationStatus,
   type OwnerVerificationStatusReport,
 } from "../../src/core/owner-verification/status";
 import { renderStatus } from "../../src/handlers/helpers/orchestration";
-import type { LoomStatus, LoomStatusDocument, WaveCompletionResultObservation } from "../../src/types";
+import type { LoomStatus, WaveCompletionResultObservation } from "../../src/types";
 import {
   LEDGER,
   LEDGER_GRAPH,
@@ -58,7 +58,7 @@ describe("helper orchestration status: owner verification", () => {
     expectTypeOf<LoomStatusDocument["ownerVerification"]>().toEqualTypeOf<OwnerVerificationStatusReport>();
     expectTypeOf<ReturnType<typeof deriveLoomStatusFromParsedGraph>>().toEqualTypeOf<LoomStatusDocument>();
     expectTypeOf<LoomStatus>().not.toHaveProperty("ownerVerification");
-    const keys: readonly (keyof LoomStatusDocument)[] = ["schemaVersion", "facts", "next", "ownerVerification"];
+    const keys: readonly (keyof LoomStatusDocument)[] = ["schemaVersion", "facts", "next", "ownerVerification", "skeletons"];
     const { json } = statusOf({ kind: "absent" });
     expect(Object.keys(json).sort()).toEqual([...keys].sort());
   });
