@@ -40,7 +40,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
-import { conformanceScope, type SkeletonGraph } from "../../src/core/skeleton/scope";
+import { conformanceScope } from "../../src/core/skeleton/scope";
 import type { ExportBinding, Identifier, UnsupportedReason } from "../../src/core/skeleton/types";
 import type { Task, TaskGraph } from "../../src/types";
 import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
@@ -144,7 +144,7 @@ const bound = (path: string): ExportBinding => ({
   exports: [{ name: "priceOrder" as Identifier, alias: "PriceOrderFn" as Identifier }],
 });
 
-const graphBinding = (path: string): SkeletonGraph => ({
+const graphBinding = (path: string): TaskGraph => ({
   ...graphFixture([holder(path)]),
   acceptance_contracts: [frozenContract()],
   export_bindings: [bound(path)],
@@ -258,7 +258,7 @@ const stampedContract = (id: string, typesPath: string, typesText: string): Acce
 });
 
 /** The row's path bound to the contract of its own language (TypeScript for unsupported rows). */
-const materializationGraph = (row: Row): SkeletonGraph => ({
+const materializationGraph = (row: Row): TaskGraph => ({
   ...graphFixture([holder(row.path)]),
   acceptance_contracts: [stampedContract("CT-1", TYPES, TS_TYPES_TEXT), stampedContract("CT-2", JAVA_TYPES, JAVA_TYPES_TEXT)],
   export_bindings: [{ ...bound(row.path), contract: row.verdict === "java" ? "CT-2" : "CT-1" }],
@@ -339,7 +339,7 @@ function expectOwnersTarget(row: Row, bytes: string | null): void {
 }
 
 /** A State File store over one in-memory graph: the stub step's port, faked. */
-function storeOver(graph: SkeletonGraph) {
+function storeOver(graph: TaskGraph) {
   let current: TaskGraph = graph;
   return {
     load: () => current,
@@ -349,7 +349,7 @@ function storeOver(graph: SkeletonGraph) {
       current = produced.state;
       return produced.value;
     },
-    current: (): SkeletonGraph => current,
+    current: (): TaskGraph => current,
   };
 }
 
@@ -367,7 +367,7 @@ const CONTRACT_TASK: Task = taskFixture({
 });
 
 /** The contract Wave: both contracts await red, T1 is their contract Task, and the row's path is bound. */
-const contractWaveGraph = (row: Row): SkeletonGraph => {
+const contractWaveGraph = (row: Row): TaskGraph => {
   const graph = materializationGraph(row);
   return {
     ...graph,
@@ -398,7 +398,7 @@ describe("INV-6 sibling: materializeContractStubs agrees with the owner", () => 
 const OLD_SKELETON = "// the engine's bytes from before the revision\n";
 
 /** Wave 2 after a revision of the row's contract: an engine-written skeleton record at the row's path. */
-const revisionGraph = (row: Row): SkeletonGraph => ({
+const revisionGraph = (row: Row): TaskGraph => ({
   ...materializationGraph(row),
   skeletons: [{
     path: row.path,

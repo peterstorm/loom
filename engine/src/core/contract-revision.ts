@@ -39,7 +39,6 @@ import {
 } from "./acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "./orchestration-contract";
 import { normalizePlanPath } from "./plan-path-match";
-import type { SkeletonGraph } from "./skeleton/graph-view";
 import { renderSkeletonProblem, type SkeletonProblem } from "./skeleton/problems";
 import { installSkeletonRecords } from "./skeleton/records";
 import type { SkeletonRecord } from "./skeleton/types";
@@ -245,11 +244,10 @@ export function reviseAcceptanceContract(
   });
   // The current Wave's suite receipt and reviews judged the old bytes. The
   // transition reads no contract, so the revised one is written over its result.
-  const view: SkeletonGraph = graph;
-  const revisedGraph: SkeletonGraph = {
+  const revisedGraph: TaskGraph = {
     ...returnWaveTasksToRevalidation(reopenable.value, revalidatedIds),
     acceptance_contracts: contracts.map((entry) => entry.id === contract.id ? revisedContract : entry),
-    ...(skeletons.settlements.size > 0 ? { skeletons: revisedSkeletonRecords(view.skeletons ?? [], skeletons, revision.revision) } : {}),
+    ...(skeletons.settlements.size > 0 ? { skeletons: revisedSkeletonRecords(graph.skeletons ?? [], skeletons, revision.revision) } : {}),
   };
   return freeze({
     ok: true as const,

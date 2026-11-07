@@ -40,9 +40,10 @@ export type BoundExport = Readonly<{ name: Identifier; alias: Identifier }>;
 
 /** One `` - `path` — CT-n: name: Alias, … `` line: the exports a file
  *  provides, all typed by one contract's frozen types file, in plan order.
- *  `contract` is a `ContractId`'s text: the binding grammar mints it, but the
- *  field stays `string` because the State File wire and the frozen CT-1
- *  acceptance tests construct bindings from plain strings. */
+ *  `contract` is a `ContractId`'s text: the plan grammar and the State File
+ *  wire both mint it through `parseContractId`, but the field stays `string`
+ *  because the frozen CT-1 acceptance tests construct bindings from plain
+ *  strings. */
 export type ExportBinding = Readonly<{
   path: string;
   contract: string;

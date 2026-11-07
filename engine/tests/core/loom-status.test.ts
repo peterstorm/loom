@@ -23,7 +23,7 @@ import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { classifyImplementationWindow, type ImplementationReservationStatusObservation } from "../../src/core/implementation-window";
 import { deriveLoomStatusFromParsedGraph, renderLoomStatusHuman, renderLoomStatusJson } from "../../src/core/loom-status";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
-import { productionFiles, type SkeletonGraph } from "../../src/core/skeleton/graph-view";
+import { productionFiles } from "../../src/core/skeleton/graph-view";
 import {
   renderSkeletonStatus,
   skeletonReportScope,
@@ -115,7 +115,7 @@ const RECORDED_T4 = {
   skeleton_outcomes: [{ path: "src/quotes.ts", outcome: written }],
 };
 
-const GRAPH: SkeletonGraph = {
+const GRAPH: TaskGraph = {
   ...graphFixture([
     task("T1", 1, ["src/contract/types.ts", "tests/CT-1.acceptance.test.ts", "tests/CT-2.acceptance.test.ts"], [], "completed"),
     task("T2", 2, ["src/pricing.ts", "src/legacy.ts", "src/rates.py", "src/helper.ts", "tests/pricing.test.ts"]),
@@ -226,7 +226,7 @@ describe("skeletonStatusReport", () => {
   });
 
   it("AS-050: lists every stale skeleton record, whatever its Wave", () => {
-    const graph: SkeletonGraph = { ...GRAPH, skeletons: [record("src/elsewhere.ts", { revision: 2 }), ...(GRAPH.skeletons ?? [])] };
+    const graph: TaskGraph = { ...GRAPH, skeletons: [record("src/elsewhere.ts", { revision: 2 }), ...(GRAPH.skeletons ?? [])] };
     const report = skeletonStatusReport(graph, OBSERVATIONS, []);
     expect(report.kind === "reported" && report.stale).toEqual([
       { path: "src/elsewhere.ts", contract: "CT-1", stale: { revision: 2 } },
@@ -241,7 +241,7 @@ describe("skeletonStatusReport", () => {
   });
 
   it("AS-006: a stamp that binds nothing reports every new file as no bound exports", () => {
-    const graph: SkeletonGraph = { ...GRAPH, export_bindings: [], skeletons: [] };
+    const graph: TaskGraph = { ...GRAPH, export_bindings: [], skeletons: [] };
     const report = skeletonStatusReport(graph, OBSERVATIONS, []);
     expect(report.kind === "reported" && report.tasks.find(({ taskId }) => taskId === "T2")?.files).toEqual([
       { path: "src/pricing.ts", outcome: NO_BOUND, basis: "projected" },
@@ -260,7 +260,7 @@ describe("skeletonStatusReport", () => {
   });
 
   it("scopes the observation to the current Wave, and stage-two problems to its outstanding Tasks", () => {
-    const graph: SkeletonGraph = {
+    const graph: TaskGraph = {
       ...GRAPH,
       tasks: GRAPH.tasks.map((entry) => (entry.id === "T3" ? task("T3", 2, ["src/cli.ts"], ["FR-002"], "completed") : entry)),
     };

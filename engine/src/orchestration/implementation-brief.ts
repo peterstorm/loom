@@ -27,7 +27,6 @@ import {
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
 import { bindingStampAgreement } from "../core/skeleton/bindings";
-import type { SkeletonGraph } from "../core/skeleton/graph-view";
 import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
 import { taskOwnerDuty } from "../core/owner-verification/obligations";
 import { parsePlanExportBindings, parsePlanModels } from "../core/parse-plan-models";
@@ -41,7 +40,7 @@ import { observeSpecIndex } from "./spec-index-observation";
  * stamp (`bindingStampAgreement`). A graph with no stamp, or no recorded
  * plan, has nothing to drift from; a plan that cannot be read refuses.
  */
-function bindingStampDrift(graph: SkeletonGraph, planFile: string | null): DomainResult<null, string> {
+function bindingStampDrift(graph: TaskGraph, planFile: string | null): DomainResult<null, string> {
   if (graph.export_bindings === undefined || planFile === null) return { ok: true, value: null };
   let text: string;
   try {

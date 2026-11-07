@@ -32,13 +32,13 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
-import { conformanceScope, type ConformanceScope, type SkeletonGraph } from "../../src/core/skeleton/scope";
+import { conformanceScope, type ConformanceScope } from "../../src/core/skeleton/scope";
 import { renderFrozenSignatures } from "../../src/core/implementation-brief";
 import type { DomainResult } from "../../src/core/orchestration-contract";
 import type { ExportBinding, FrozenSurface, Identifier } from "../../src/core/skeleton/types";
 import { freezeVerificationManifest } from "../../src/core/verification-manifest";
 import type { StoredVerificationPolicy } from "../../src/core/verification-policy";
-import type { Task, TaskCommonMetadata } from "../../src/types";
+import type { Task, TaskCommonMetadata, TaskGraph } from "../../src/types";
 import { observeContractConformance } from "../../src/orchestration/contract-conformance-observation";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
@@ -127,7 +127,7 @@ const bound = (path: string, contractId: string): ExportBinding => ({
 
 const ALL_CONTRACTS = [TS_CONTRACT, JAVA_CONTRACT, TYPELESS, AWAITING, REVISED, UNSUPPORTED_TYPES];
 
-const graphOf = (tasks: readonly Task[], bindings: readonly ExportBinding[]): SkeletonGraph => ({
+const graphOf = (tasks: readonly Task[], bindings: readonly ExportBinding[]): TaskGraph => ({
   ...graphFixture([task("T1", [TS_TYPES, JAVA_TYPES, "tests/CT-1.acceptance.test.ts"]), ...tasks]),
   acceptance_contracts: ALL_CONTRACTS,
   export_bindings: bindings,
@@ -137,7 +137,7 @@ const scopeOf = (subject: Task, bindings: readonly ExportBinding[] = [], others:
   conformanceScope(graphOf([subject, ...others], bindings), subject);
 
 /** The same graph as populated before G2: no `export_bindings` stamp at all. */
-const preG2GraphOf = (tasks: readonly Task[]): SkeletonGraph => {
+const preG2GraphOf = (tasks: readonly Task[]): TaskGraph => {
   const { export_bindings: _stamp, ...unstamped } = graphOf(tasks, []);
   return unstamped;
 };
@@ -194,7 +194,7 @@ describe("INV-5 owner: the plan's named cases", () => {
     })));
     if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
     const subject = task("T2", ["src/main/java/com/acme/PricingTest.java", "src/order/pricing.test.ts"], ["FR-002", "FR-001"]);
-    const graph: SkeletonGraph = { ...graphOf([subject], []), verification_manifest: frozen.value };
+    const graph: TaskGraph = { ...graphOf([subject], []), verification_manifest: frozen.value };
     expect(conformanceScope(graph, subject)).toEqual({
       kind: "owed",
       contracts: [TS_CONTRACT, JAVA_CONTRACT],
@@ -369,7 +369,7 @@ const scopeJudgment = (scope: ConformanceScope): Judgment =>
   scope.kind === "not-owed" ? { kind: "not-owed" } : { kind: "judged", files: scope.files.map(({ path }) => path) };
 
 /** Through the observation: which files settlement judged, read off the violations every judged file carries. */
-function observedJudgment(graph: SkeletonGraph, subject: Task): Judgment {
+function observedJudgment(graph: TaskGraph, subject: Task): Judgment {
   const observed = observeContractConformance(repositoryFor(subject), graph, subject);
   if (!observed.ok) throw new Error(`observation failed: ${observed.error}`);
   return observed.value.kind === "not-owed" ? { kind: "not-owed" } : { kind: "judged", files: [...observed.value.violations.keys()] };
@@ -385,7 +385,7 @@ type MatrixCase = Readonly<{
   expected: Judgment;
 }>;
 
-const matrixGraph = ({ subject, bindings = [], others = [], stamped = true }: MatrixCase): SkeletonGraph =>
+const matrixGraph = ({ subject, bindings = [], others = [], stamped = true }: MatrixCase): TaskGraph =>
   stamped ? graphOf([subject, ...others], bindings) : preG2GraphOf([subject, ...others]);
 
 const MATRIX: readonly MatrixCase[] = [
@@ -498,7 +498,7 @@ describe("INV-5 sibling: the settlement observation judges exactly the owner's s
     })));
     if (!frozen.ok) throw new Error(frozen.error.errors.join("; "));
     const subject = task("T2", ["src/main/java/com/acme/PricingTest.java", "src/order/pricing.test.ts"], ["FR-002", "FR-001"]);
-    const graph: SkeletonGraph = { ...graphOf([subject], []), verification_manifest: frozen.value };
+    const graph: TaskGraph = { ...graphOf([subject], []), verification_manifest: frozen.value };
     expect(observedJudgment(graph, subject)).toEqual(scopeJudgment(conformanceScope(graph, subject)));
     expect(observedJudgment(graph, subject)).toEqual({ kind: "judged", files: ["src/order/pricing.test.ts"] });
   });
@@ -620,7 +620,7 @@ type BriefDuties = Readonly<{ contracts: readonly string[]; boundPaths: readonly
 
 /** What the brief lists as duties: the contracts whose frozen ADTs it names,
  *  and the files whose bound exports it lists. */
-function briefDuties(graph: SkeletonGraph, subject: Task): BriefDuties {
+function briefDuties(graph: TaskGraph, subject: Task): BriefDuties {
   const section = renderFrozenSignatures(subject, { graph, observations: new Map(), surfaces: SURFACES, unresolved: [] });
   const lines = section.split("\n");
   const contracts = [...section.matchAll(/\*\*Frozen ADTs of (CT-\d+)\*\*/g)].map((found) => found[1] ?? "");

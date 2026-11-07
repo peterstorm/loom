@@ -24,9 +24,9 @@
 import { match } from "ts-pattern";
 import { contractRole } from "../acceptance-contract";
 import { samePlanPath } from "../plan-path-match";
-import type { Task } from "../../types";
+import type { Task, TaskGraph } from "../../types";
 import { skeletonLanguageOf } from "./language";
-import { productionFiles, type SkeletonGraph } from "./graph-view";
+import { productionFiles } from "./graph-view";
 import type {
   PathObservation,
   PathSkeletonOutcome,
@@ -66,11 +66,11 @@ const NO_TYPES_FILE: SkeletonOutcome = Object.freeze({ kind: "contract-has-no-ty
 const ABSENT: PathObservation = Object.freeze({ kind: "absent" });
 
 /** Whether the Task claims a contract that freezes no types file. */
-const claimsTypelessContract = (graph: SkeletonGraph, task: Task): boolean =>
+const claimsTypelessContract = (graph: TaskGraph, task: Task): boolean =>
   (graph.acceptance_contracts ?? []).some((contract) =>
     contract.types.kind === "none" && contractRole(contract, task, graph.tasks).kind === "claimant");
 
-function outcomeOf(graph: SkeletonGraph, task: Task, path: string, observation: PathObservation): SkeletonOutcome {
+function outcomeOf(graph: TaskGraph, task: Task, path: string, observation: PathObservation): SkeletonOutcome {
   if (observation.kind === "present") {
     const record = (graph.skeletons ?? []).find((recorded) => samePlanPath(recorded.path, path));
     return isUntouchedSkeleton(record, observation.sha256, observation.canonicalSha256) ? written(record?.origin ?? "spawn") : EXISTS;
@@ -83,13 +83,12 @@ function outcomeOf(graph: SkeletonGraph, task: Task, path: string, observation: 
 }
 
 export const skeletonOutcomesOf: SkeletonOutcomesOfFn = (graph, taskId, observations) => {
-  const view: SkeletonGraph = graph;
-  const task = view.tasks.find(({ id }) => id === taskId);
+  const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return { ok: false, error: Object.freeze({ kind: "unknown-task", taskId }) };
   return {
     ok: true,
-    value: Object.freeze(productionFiles(view, task).map((path): PathSkeletonOutcome =>
-      Object.freeze({ path, outcome: outcomeOf(view, task, path, observations.get(path) ?? ABSENT) }))),
+    value: Object.freeze(productionFiles(graph, task).map((path): PathSkeletonOutcome =>
+      Object.freeze({ path, outcome: outcomeOf(graph, task, path, observations.get(path) ?? ABSENT) }))),
   };
 };
 

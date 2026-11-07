@@ -23,7 +23,6 @@
 import { NO_SKELETON_REVISION, skeletonRevisionOf, type SkeletonRevision, type SkeletonSettlement } from "../core/contract-revision";
 import type { DomainResult } from "../core/orchestration-contract";
 import { samePlanPath } from "../core/plan-path-match";
-import type { SkeletonGraph } from "../core/skeleton/graph-view";
 import type { SkeletonProblem } from "../core/skeleton/problems";
 import { planSkeletonRefresh, type RecordRefreshAction } from "../core/skeleton/refresh-plan";
 import type { TaskGraph } from "../types";
@@ -60,12 +59,11 @@ function settle(root: string, action: RecordRefreshAction, frozen: ReadonlySet<s
  * update does). Nothing for an unknown contract or one with no types file.
  */
 export function refreshRevisedSkeletons(root: string, graph: TaskGraph, contractId: string): DomainResult<SkeletonRevision, string> {
-  const view: SkeletonGraph = graph;
-  const found = (view.acceptance_contracts ?? []).find(({ id }) => id === contractId);
+  const found = (graph.acceptance_contracts ?? []).find(({ id }) => id === contractId);
   const contract = found === undefined ? null : typedContract(found);
   if (contract === null) return { ok: true, value: NO_SKELETON_REVISION };
-  const bindings = (view.export_bindings ?? []).filter((binding) => binding.contract === contractId);
-  const records = (view.skeletons ?? []).filter((record) => record.contract === contractId);
+  const bindings = (graph.export_bindings ?? []).filter((binding) => binding.contract === contractId);
+  const records = (graph.skeletons ?? []).filter((record) => record.contract === contractId);
   if (bindings.length === 0 && records.length === 0) return { ok: true, value: NO_SKELETON_REVISION };
   const canonical = canonicalContractSkeletons(root, contract, bindings);
   if (!canonical.ok) return canonical;

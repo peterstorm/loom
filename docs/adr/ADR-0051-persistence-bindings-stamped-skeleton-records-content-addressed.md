@@ -91,11 +91,15 @@ equal that digest or the canonical bytes for the current surface.**
   same contract. The bytes on disk outlive population, so dropping such a record would misreport an untouched
   skeleton.
 - **`task.skeleton_outcomes: readonly { path, outcome: SkeletonOutcome }[]`**, recorded at each registration
-  (FR-030) and parsed per Task against that Task's `file_list`.
+  (FR-030) and parsed per Task against that Task's `file_list`. Once the stamp and records are parsed, the
+  wire checks each outcome against them: `skeleton-written` has its record in `skeletons` (origins are not
+  compared, because a Contract Revision re-origins a refreshed record); `unsupported-language` is bound
+  and `skeletonLanguageOf` gives its path exactly that reason; `no-bound-exports` and
+  `contract-has-no-types-file` are unbound; and a graph with no `export_bindings` stamp records no outcome.
 
-`engine/src/types.ts` does not name these types on `TaskGraph`, because `core/skeleton/types` imports that
-file and naming them there would create an import cycle. They are typed on the `SkeletonGraph` view in
-`engine/src/core/skeleton/scope.ts`, which every TaskGraph satisfies, and the wire parser proves them at load.
+The canonical `TaskGraph` and `Task` in `engine/src/types.ts` declare all three fields. Their value types
+live in the leaf `engine/src/core/skeleton/persisted.ts`, which imports nothing from `types.ts`, so the
+declaration closes no import cycle; the wire parser proves them at load.
 
 ### Content-addressed recognition (INV-4)
 
@@ -150,5 +154,5 @@ idempotency are therefore one rule, not a journal plus a recovery path.
   `exists, not skeletonized`.
 - The wire parser gains cross-field checks between records and the stamp. A hand-edited State File that
   breaks them fails to load instead of degrading.
-- The `TaskGraph` type in `engine/src/types.ts` does not name the fields directly. The import cycle forces
-  readers through the `SkeletonGraph` view, which is one more indirection to learn.
+- The persisted skeleton value types must stay in the dependency-free leaf `core/skeleton/persisted.ts`:
+  moving one into a module that imports `types.ts` would reopen the cycle the canonical declaration avoids.

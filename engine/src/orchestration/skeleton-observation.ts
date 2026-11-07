@@ -13,7 +13,7 @@ import { contractRole } from "../core/acceptance-contract";
 import { sha256Bytes } from "../core/digest";
 import { isNonEmpty, type DomainResult } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
-import { productionFiles, type SkeletonGraph } from "../core/skeleton/graph-view";
+import { productionFiles } from "../core/skeleton/graph-view";
 import { renderResolutionProblem, renderSkeletonProblem, type SkeletonProblem } from "../core/skeleton/problems";
 import type { UnresolvedSkeletonBinding } from "../core/skeleton/status";
 import type { ExportBinding, FrozenSurface, PathObservation } from "../core/skeleton/types";
@@ -105,7 +105,7 @@ const NOTHING_OBSERVED: SkeletonObservation = Object.freeze({
 });
 
 /** The contracts whose frozen surface matters: those the resolving Tasks bind, then those any observed Task claims. */
-function relevantContractIds(graph: SkeletonGraph, observed: readonly Task[], heldContracts: readonly string[]): readonly string[] {
+function relevantContractIds(graph: TaskGraph, observed: readonly Task[], heldContracts: readonly string[]): readonly string[] {
   const claimed = (graph.acceptance_contracts ?? []).filter((contract) =>
     observed.some((task) => contractRole(contract, task, graph.tasks).kind === "claimant")).map(({ id }) => id);
   return [...new Set([...heldContracts, ...claimed])];
@@ -170,12 +170,11 @@ export function observeSkeletons(
   observed: readonly Task[],
   resolving: readonly Task[],
 ): DomainResult<SkeletonObservation, string> {
-  const view: SkeletonGraph = graph;
-  if (view.export_bindings === undefined) return { ok: true, value: NOTHING_OBSERVED };
-  const resolvingPaths = resolving.flatMap((task) => productionFiles(view, task));
-  const held = view.export_bindings.filter((binding) => resolvingPaths.some((path) => samePlanPath(path, binding.path)));
-  const contracts = relevantContractIds(view, observed, held.map(({ contract }) => contract)).flatMap((id) => {
-    const found = (view.acceptance_contracts ?? []).find((contract) => contract.id === id);
+  if (graph.export_bindings === undefined) return { ok: true, value: NOTHING_OBSERVED };
+  const resolvingPaths = resolving.flatMap((task) => productionFiles(graph, task));
+  const held = graph.export_bindings.filter((binding) => resolvingPaths.some((path) => samePlanPath(path, binding.path)));
+  const contracts = relevantContractIds(graph, observed, held.map(({ contract }) => contract)).flatMap((id) => {
+    const found = (graph.acceptance_contracts ?? []).find((contract) => contract.id === id);
     const typed = found === undefined ? null : typedContract(found);
     return typed === null || typed.freeze.state === "awaiting-red" ? [] : [typed];
   });
@@ -185,7 +184,7 @@ export function observeSkeletons(
   if (isNonEmpty(failed)) return { ok: false, error: failed.join("; ") };
   const observedContracts = read.flatMap((result) => (result.ok ? [result.value] : []));
   const canonical = new Map(observedContracts.flatMap(({ canonical: digests }) => digests));
-  const paths = observed.flatMap((task) => productionFiles(view, task));
+  const paths = observed.flatMap((task) => productionFiles(graph, task));
   const present = observeSkeletonPaths(root, paths, (path) => canonical.get(normalizePlanPath(path)) ?? null);
   if (!present.ok) return present;
   if (isNonEmpty(present.value.problems)) return { ok: false, error: present.value.problems.map(renderSkeletonProblem).join("; ") };

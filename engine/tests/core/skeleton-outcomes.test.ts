@@ -12,9 +12,9 @@ import { isTestFileBySuffixes, DEFAULT_TEST_FILE_SUFFIXES } from "../../src/core
 import { skeletonLanguageOf } from "../../src/core/skeleton/language";
 import { isUntouchedSkeleton, renderSkeletonOutcome } from "../../src/core/skeleton/outcomes";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import type { ExportBinding, Identifier, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
 import { freezeVerificationManifest, type FrozenVerificationManifest } from "../../src/core/verification-manifest";
+import type { TaskGraph } from "../../src/types";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
 
 const RENDERED = new Set([
@@ -50,7 +50,7 @@ const scenarioArb = fc.record({
 });
 
 type Scenario = Readonly<{
-  graph: SkeletonGraph;
+  graph: TaskGraph;
   files: readonly string[];
   bound: ReadonlySet<string>;
   records: ReadonlyMap<string, SkeletonRecord>;
@@ -142,7 +142,7 @@ describe("skeletonOutcomesOf: the frozen test-file classification decides test p
       id: "T2", description: "T2", agent: "code-implementer-agent", wave: 2, depends_on: [],
       file_list: ["src/main/java/a/PricingTest.java", "src/a.test.ts"], spec_anchors: [], spec_contributions: [], new_tests_required: false,
     });
-    const graph: SkeletonGraph = {
+    const graph: TaskGraph = {
       ...graphFixture([task]),
       verification_manifest: manifestWithSuffixes(["Test.java"]),
     };

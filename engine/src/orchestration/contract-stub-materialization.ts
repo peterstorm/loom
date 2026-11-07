@@ -34,7 +34,6 @@
 import { observeTaskGraphProjectBoundary } from "../config";
 import { contractRole } from "../core/acceptance-contract";
 import { canonicalStructuralEquals, type DomainResult } from "../core/orchestration-contract";
-import type { SkeletonGraph } from "../core/skeleton/graph-view";
 import { renderSkeletonProblem, type SkeletonProblem } from "../core/skeleton/problems";
 import { installSkeletonRecords } from "../core/skeleton/records";
 import { planSkeletonRefresh } from "../core/skeleton/refresh-plan";
@@ -70,14 +69,13 @@ const errorMessage = (error: unknown): string => (error instanceof Error ? error
 
 /** The typed contracts with bindings whose contract Task is `taskId`: the ones its stop stubs. */
 export function stubbedContracts(graph: TaskGraph, taskId: string): readonly TypedContract[] {
-  const view: SkeletonGraph = graph;
-  const task = view.tasks.find(({ id }) => id === taskId);
+  const task = graph.tasks.find(({ id }) => id === taskId);
   if (task === undefined) return Object.freeze([]);
-  const bindings = view.export_bindings ?? [];
-  return Object.freeze((view.acceptance_contracts ?? []).flatMap((contract) => {
+  const bindings = graph.export_bindings ?? [];
+  return Object.freeze((graph.acceptance_contracts ?? []).flatMap((contract) => {
     const typed = typedContract(contract);
     return typed !== null &&
-      contractRole(contract, task, view.tasks).kind === "contract-task" &&
+      contractRole(contract, task, graph.tasks).kind === "contract-task" &&
       bindings.some((binding) => binding.contract === contract.id)
       ? [typed]
       : [];
@@ -101,7 +99,7 @@ export function renderContractStubs(taskId: string, result: DomainResult<Contrac
 /** Read, generate, plan and write one contract's stubs. */
 function stubContract(
   root: string,
-  graph: SkeletonGraph,
+  graph: TaskGraph,
   contract: TypedContract,
   frozen: ReadonlySet<string>,
 ): DomainResult<ContractStubs, string> {
@@ -144,7 +142,7 @@ export async function materializeContractStubs(
   store: SkeletonRecordStore,
   taskId: string,
 ): Promise<DomainResult<ContractStubs, string>> {
-  let graph: SkeletonGraph;
+  let graph: TaskGraph;
   try {
     graph = store.load();
   } catch (error) {
@@ -162,11 +160,10 @@ export async function materializeContractStubs(
   const problems = stubbed.flatMap((result) => (result.ok ? result.value.problems : []));
   if (written.length > 0) {
     try {
-      await store.updateAndReturn((current) => {
-        const view: SkeletonGraph = current;
-        const next: SkeletonGraph = { ...current, skeletons: installSkeletonRecords(view.skeletons ?? [], written) };
-        return { state: next, value: null };
-      });
+      await store.updateAndReturn((current) => ({
+        state: { ...current, skeletons: installSkeletonRecords(current.skeletons ?? [], written) },
+        value: null,
+      }));
     } catch (error) {
       return { ok: false, error: `the stubs were written, but their records were not: ${errorMessage(error)}` };
     }

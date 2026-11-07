@@ -27,14 +27,13 @@ import type { DomainResult } from "../core/orchestration-contract";
 import { judgeConformance } from "../core/skeleton/conformance";
 import { skeletonLanguageOf } from "../core/skeleton/language";
 import { conformanceScope } from "../core/skeleton/scope";
+import { CONFORMANCE_NOT_OWED } from "../core/skeleton/conformance-verdict";
 import type { ConformanceFile, ContractConformance, ContractSurface, SkeletonTarget } from "../core/skeleton/types";
 import type { Task, TaskGraph } from "../types";
 import { observeFrozenSurface, typedContract } from "./frozen-surface-observation";
 import { resolveBaseDirectory } from "./no-follow-fs";
 import { readRepositoryLeafNoFollow } from "./repository-leaf";
 import { renderResolutionProblem } from "../core/skeleton/problems";
-
-const NOT_OWED: ContractConformance = Object.freeze({ kind: "not-owed" });
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -68,7 +67,7 @@ export function observeContractConformance(
   task: Task,
 ): DomainResult<ContractConformance, string> {
   const scope = conformanceScope(graph, task);
-  if (scope.kind === "not-owed") return { ok: true, value: NOT_OWED };
+  if (scope.kind === "not-owed") return { ok: true, value: CONFORMANCE_NOT_OWED };
   let realRoot: string;
   try {
     realRoot = resolveBaseDirectory(root);

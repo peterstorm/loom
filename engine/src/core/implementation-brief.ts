@@ -39,7 +39,6 @@ import { classifyTaskFiles } from "./test-file-classification";
 import type { FrozenVerificationManifest } from "./verification-manifest";
 import { samePlanPath } from "./plan-path-match";
 import { renderSkeletonOutcome } from "./skeleton/outcomes";
-import type { SkeletonGraph } from "./skeleton/graph-view";
 import { conformanceScope } from "./skeleton/scope";
 import { renderStaleSkeleton, staleSkeletons, taskSkeletonOutcomes, type UnresolvedSkeletonBinding } from "./skeleton/status";
 import type { ExportBinding, FrozenAdt, FrozenSurface, PathObservation } from "./skeleton/types";
@@ -555,8 +554,7 @@ const unresolvedBindingsParagraph = (unresolved: readonly UnresolvedSkeletonBind
 export function renderFrozenSignatures(task: Task, input: FrozenSignaturesInput | undefined): string {
   if (input === undefined) return NO_SKELETON_OBSERVATION;
   const { graph, observations, surfaces, unresolved } = input;
-  const view: SkeletonGraph = graph;
-  if (view.export_bindings === undefined) return NO_EXPORT_BINDING_STAMP;
+  if (graph.export_bindings === undefined) return NO_EXPORT_BINDING_STAMP;
   const outcomes = taskSkeletonOutcomes(graph, task.id, observations);
   if (!outcomes.ok) return TASK_NOT_OBSERVED;
   const files = outcomes.value;

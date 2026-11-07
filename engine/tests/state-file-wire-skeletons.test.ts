@@ -10,7 +10,10 @@
  *   path with no path twice: each names a bound path and its binding's
  *   contract, the path's own skeleton language, an origin, two lowercase
  *   SHA-256 digests and a stale flag.
- * - `tasks[].skeleton_outcomes` — one outcome ADT per distinct file_list path.
+ * - `tasks[].skeleton_outcomes` — one outcome ADT per distinct file_list path,
+ *   each agreeing with the stamp and the records: a `skeleton-written` path
+ *   has its record, an `unsupported-language` one is bound and unsupported
+ *   for exactly that reason, and an unbound outcome's path is unbound.
  *
  * A graph populated before G2 carries none of them and loads unchanged.
  */
@@ -129,7 +132,7 @@ const OUTCOMES = [
   { path: QUOTES, outcome: { kind: "exists-not-skeletonized" } },
   { path: HELPERS, outcome: { kind: "no-bound-exports" } },
   { path: RATES, outcome: { kind: "unsupported-language", reason: "other-extension" } },
-  { path: JAVA_PRICING, outcome: { kind: "contract-has-no-types-file" } },
+  { path: JAVA_PRICING, outcome: { kind: "skeleton-written", origin: "revision" } },
 ];
 
 /** The pre-G2 graph with the G2 fields added as raw JSON. */
@@ -227,6 +230,13 @@ describe("export_bindings refusals", () => {
     ["an export name bound twice", { bindings: withBinding(1, { exports: [{ name: "quote", alias: "PriceOrderFn" }, { name: "quote", alias: "ParseOrderFn" }] }) }, /export_bindings\[1\].*quote.*more than once/],
     ["an unstamped contract", { bindings: withBinding(0, { contract: "CT-9" }) }, /export_bindings\[0\].*CT-9/],
     ["a typeless contract", { bindings: withBinding(0, { contract: "CT-2" }) }, /export_bindings\[0\].*CT-2.*types file/],
+    ["a contract that is no contract id", { bindings: withBinding(0, { contract: "ct-1" }) }, /export_bindings\[0\]\.contract 'ct-1' is no contract id CT-<n> \(invalid-contract-id\)/],
+    [
+      "an export name that is also an alias of the binding",
+      { bindings: withBinding(0, { exports: [{ name: "priceOrder", alias: "PriceOrderFn" }, { name: "PriceOrderFn", alias: "ParseOrderFn" }] }) },
+      /export_bindings\[0\] binds the export name 'PriceOrderFn', which is also an alias of the binding \(name-collides-with-alias\)/,
+    ],
+    ["an export whose name is its own alias", { bindings: withBinding(1, { exports: [{ name: "PriceOrderFn", alias: "PriceOrderFn" }] }) }, /export_bindings\[1\].*'PriceOrderFn'.*name-collides-with-alias/],
   ])("refuses %s", (_label, fields, message) => {
     expect(refusal(g2Graph(fields))).toMatch(message);
   });
@@ -268,5 +278,74 @@ describe("tasks[].skeleton_outcomes refusals", () => {
     ["a path outside the Task's file_list", { outcomes: [...OUTCOMES, { path: "src/other.ts", outcome: { kind: "no-bound-exports" } }] }, /skeleton_outcomes\[5\].*src\/other\.ts.*file_list/],
   ])("refuses %s", (_label, fields, message) => {
     expect(refusal(g2Graph({ bindings: BINDINGS, skeletons: RECORDS, ...fields }))).toMatch(message);
+  });
+});
+
+describe("tasks[].skeleton_outcomes against the stamp and the records", () => {
+  it.each([
+    [
+      "a skeleton-written outcome with no record",
+      { bindings: BINDINGS, skeletons: [RECORDS[0], RECORDS[2]], outcomes: OUTCOMES },
+      /tasks\[2\] \("T2"\)\.skeleton_outcomes\[0\] records 'src\/order\/pricing\.ts' as skeleton-written, but skeletons holds no record of it/,
+    ],
+    [
+      "a skeleton-written outcome with no records at all",
+      { bindings: BINDINGS, outcomes: [OUTCOMES[0]] },
+      /skeleton_outcomes\[0\] records 'src\/order\/pricing\.ts' as skeleton-written, but skeletons holds no record of it/,
+    ],
+    [
+      "outcomes on a graph with no export_bindings stamp",
+      { outcomes: [{ path: HELPERS, outcome: { kind: "no-bound-exports" } }] },
+      /tasks\[2\] \("T2"\)\.skeleton_outcomes is recorded, but the TaskGraph has no export_bindings stamp/,
+    ],
+    [
+      "an unsupported-language outcome on an unbound path",
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: [{ path: HELPERS, outcome: { kind: "unsupported-language", reason: "other-extension" } }] },
+      /skeleton_outcomes\[0\] records 'src\/order\/helpers\.ts' as unsupported-language, but export_bindings does not bind it/,
+    ],
+    [
+      "an unsupported-language outcome on a supported path",
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: [{ path: PRICING, outcome: { kind: "unsupported-language", reason: "other-extension" } }] },
+      /skeleton_outcomes\[0\] records 'src\/order\/pricing\.ts' as unsupported-language, but the path is a typescript skeleton target/,
+    ],
+    [
+      "an unsupported-language outcome with another reason than the path's",
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: withOutcome(3, { kind: "unsupported-language", reason: "jvm-non-java" }) },
+      /skeleton_outcomes\[3\] records 'src\/order\/rates\.py' as unsupported-language \(jvm-non-java\), but the path is unsupported as other-extension/,
+    ],
+    [
+      "a no-bound-exports outcome on a bound path",
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: withOutcome(1, { kind: "no-bound-exports" }) },
+      /skeleton_outcomes\[1\] records 'src\/order\/quotes\.ts' as no-bound-exports, but export_bindings binds it to CT-1/,
+    ],
+    [
+      "a contract-has-no-types-file outcome on a bound path",
+      { bindings: BINDINGS, skeletons: RECORDS, outcomes: withOutcome(4, { kind: "contract-has-no-types-file" }) },
+      /skeleton_outcomes\[4\] records 'src\/main\/java\/com\/acme\/order\/Pricing\.java' as contract-has-no-types-file, but export_bindings binds it to CT-1/,
+    ],
+  ])("refuses %s", (_label, fields, message) => {
+    expect(refusal(g2Graph(fields))).toMatch(message);
+  });
+
+  it("loads a written outcome whose record a Contract Revision has since given another origin", () => {
+    const outcomes = withOutcome(0, { kind: "skeleton-written", origin: "contract-stub" });
+    const graph = loaded(g2Graph({ bindings: BINDINGS, skeletons: RECORDS, outcomes }));
+    expect(viaDisk(graph.tasks.find(({ id }) => id === "T2")?.skeleton_outcomes)).toEqual(outcomes);
+  });
+
+  it("loads an unbound path's contract-has-no-types-file outcome, and an exists-not-skeletonized one on any path", () => {
+    const outcomes = [
+      { path: PRICING, outcome: { kind: "exists-not-skeletonized" } },
+      { path: HELPERS, outcome: { kind: "contract-has-no-types-file" } },
+    ];
+    const graph = loaded(g2Graph({ bindings: BINDINGS, outcomes }));
+    expect(viaDisk(graph.tasks.find(({ id }) => id === "T2")?.skeleton_outcomes)).toEqual(outcomes);
+  });
+
+  it("refuses the first contradicting Task, naming its index and id", () => {
+    const base = g2Graph({ bindings: BINDINGS, skeletons: RECORDS, outcomes: OUTCOMES });
+    const tasks = (base.tasks as Record<string, unknown>[]).map((entry) =>
+      entry.id === "T1" ? { ...entry, skeleton_outcomes: [{ path: TYPES_FILE, outcome: { kind: "skeleton-written", origin: "spawn" } }] } : entry);
+    expect(refusal({ ...base, tasks })).toMatch(/tasks\[0\] \("T1"\)\.skeleton_outcomes\[0\] records 'src\/order\/order-contract\.ts' as skeleton-written/);
   });
 });

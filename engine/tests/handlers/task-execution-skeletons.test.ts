@@ -11,12 +11,12 @@ import { mkdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } f
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcceptanceContract } from "../../src/core/acceptance-contract";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import type { ExportBinding, Identifier } from "../../src/core/skeleton/types";
 import { registerTaskExecutionBatch } from "../../src/handlers/task-execution";
 import { createValidateTaskExecutionHandler } from "../../src/handlers/pre-tool-use/validate-task-execution";
 import { materializeTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
 import { StateManager } from "../../src/state-manager";
+import type { TaskGraph } from "../../src/types";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { contentDigest } from "../fixtures/acceptance-fixtures";
 import {
@@ -226,7 +226,7 @@ describe("NFR-001: a 20-file Wave", () => {
         { name: "parseOrder" as Identifier, alias: "ParseOrderFn" as Identifier },
       ],
     });
-    const graph: SkeletonGraph = {
+    const graph: TaskGraph = {
       ...graphFixture(taskIds.map((id) => taskFixture({
         id,
         description: id,

@@ -31,7 +31,7 @@
 
 import { isNonEmpty, type DomainResult, type NonEmpty } from "../core/orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../core/plan-path-match";
-import { productionFiles, type SkeletonGraph } from "../core/skeleton/graph-view";
+import { productionFiles } from "../core/skeleton/graph-view";
 import { presentSkeletonOf, skeletonOutcomesOf } from "../core/skeleton/outcomes";
 import { renderResolutionProblem, renderSkeletonProblem } from "../core/skeleton/problems";
 import type { SkeletonCandidate } from "../core/skeleton/records";
@@ -79,7 +79,6 @@ export function planTaskSkeletons(
   observations: ReadonlyMap<string, PathObservation>,
   candidates: ReadonlyMap<string, SkeletonCandidate>,
 ): DomainResult<TaskSkeletonPlan, NonEmpty<string>> {
-  const view: SkeletonGraph = graph;
   const derived = skeletonOutcomesOf(graph, taskId, observations);
   if (!derived.ok) return { ok: false, error: [`${derived.error.taskId} is not a Task of the TaskGraph; no skeleton can be planned for it`] };
   const outcomes = derived.value;
@@ -93,7 +92,7 @@ export function planTaskSkeletons(
         : { ok: true, value: [] };
     }
     if (observation.kind === "absent") return { ok: true, value: [{ kind: "create", candidate }] };
-    const record = (view.skeletons ?? []).find((recorded) => samePlanPath(recorded.path, path));
+    const record = (graph.skeletons ?? []).find((recorded) => samePlanPath(recorded.path, path));
     if (record === undefined) return { ok: true, value: [{ kind: "adopt", candidate }] };
     return presentSkeletonOf(record, observation.sha256, candidate.skeleton.sha256) === "engine-bytes"
       ? { ok: true, value: [{ kind: "refresh", candidate, expectedSha256: observation.sha256, origin: record.origin }] }
@@ -128,7 +127,7 @@ function byContract(bindings: readonly ExportBinding[]): readonly (readonly [str
 /** The canonical skeleton of every supported held binding of one contract. */
 function contractCandidates(
   root: string,
-  graph: SkeletonGraph,
+  graph: TaskGraph,
   contractId: string,
   bindings: readonly ExportBinding[],
 ): DomainResult<readonly SkeletonCandidate[], Problems> {
@@ -162,7 +161,7 @@ function contractCandidates(
 /** The canonical skeleton of every held binding, by normalized path. */
 function candidatesFor(
   root: string,
-  graph: SkeletonGraph,
+  graph: TaskGraph,
   held: readonly ExportBinding[],
 ): DomainResult<ReadonlyMap<string, SkeletonCandidate>, Problems> {
   const results = byContract(held).map(([contractId, bindings]) => contractCandidates(root, graph, contractId, bindings));
@@ -206,20 +205,19 @@ export function materializeTaskSkeletons(
   graph: TaskGraph,
   taskIds: readonly string[],
 ): DomainResult<TaskSkeletonRegistration, Problems> {
-  const view: SkeletonGraph = graph;
-  if (view.export_bindings === undefined) return { ok: true, value: NOTHING };
-  const tasks = view.tasks.filter(({ id }) => taskIds.includes(id));
-  const paths = tasks.flatMap((task) => productionFiles(view, task));
-  const held = view.export_bindings.filter((binding) => paths.some((path) => samePlanPath(path, binding.path)));
-  const candidates = candidatesFor(root, view, held);
+  if (graph.export_bindings === undefined) return { ok: true, value: NOTHING };
+  const tasks = graph.tasks.filter(({ id }) => taskIds.includes(id));
+  const paths = tasks.flatMap((task) => productionFiles(graph, task));
+  const held = graph.export_bindings.filter((binding) => paths.some((path) => samePlanPath(path, binding.path)));
+  const candidates = candidatesFor(root, graph, held);
   if (!candidates.ok) return candidates;
   const observations = observePaths(root, paths, candidates.value);
   if (!observations.ok) return observations;
-  const plans = tasks.map(({ id }) => planTaskSkeletons(view, id, observations.value, candidates.value));
+  const plans = tasks.map(({ id }) => planTaskSkeletons(graph, id, observations.value, candidates.value));
   const planProblems = plans.flatMap((plan) => (plan.ok ? [] : plan.error));
   if (isNonEmpty(planProblems)) return { ok: false, error: planProblems };
   const settled = plans.flatMap((plan) => (plan.ok ? [plan.value] : []));
-  const frozen = frozenSkeletonPaths(view);
+  const frozen = frozenSkeletonPaths(graph);
   const performed = settled.flatMap(({ actions }) => actions.map((action) => perform(root, action, frozen)));
   const writeProblems = performed.flatMap((result) => (result.ok ? [] : [result.error]));
   if (isNonEmpty(writeProblems)) return { ok: false, error: writeProblems };

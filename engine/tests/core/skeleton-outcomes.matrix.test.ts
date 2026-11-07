@@ -49,7 +49,6 @@ import { renderFrozenSignatures, TASK_NOT_OBSERVED } from "../../src/core/implem
 import { isUntouchedSkeleton, presentSkeletonOf, renderSkeletonOutcome, skeletonOutcomesOf } from "../../src/core/skeleton/outcomes";
 import type { SkeletonCandidate } from "../../src/core/skeleton/records";
 import { planSkeletonRefresh } from "../../src/core/skeleton/refresh-plan";
-import type { SkeletonGraph } from "../../src/core/skeleton/graph-view";
 import { renderSkeletonStatus, skeletonStatusReport } from "../../src/core/skeleton/status";
 import type {
   ExportBinding,
@@ -59,7 +58,7 @@ import type {
   SkeletonRecord,
 } from "../../src/core/skeleton/types";
 import { planTaskSkeletons } from "../../src/orchestration/skeleton-materialization";
-import type { Task } from "../../src/types";
+import type { Task, TaskGraph } from "../../src/types";
 import { digest } from "../fixtures/acceptance-fixtures";
 import { knownSkeletonOutcomes } from "../fixtures/known-skeleton-outcomes";
 import { graphFixture, taskFixture } from "../fixtures/task-lifecycle";
@@ -141,7 +140,7 @@ const T2_FILES = [
 const T3_FILES = ["src/cli.ts", "src/cli-bound.ts", "src/cli-present.ts", "tests/cli.test.ts"] as const;
 const T4_FILES = ["src/typed-helper.ts"] as const;
 
-const GRAPH: SkeletonGraph = {
+const GRAPH: TaskGraph = {
   ...graphFixture([
     task("T1", ["src/contract/types.ts", "tests/CT-1.acceptance.test.ts", "tests/CT-2.acceptance.test.ts"]),
     task("T2", T2_FILES),
@@ -227,7 +226,7 @@ describe("INV-4 owner: skeletonOutcomes precedence over one graph and observatio
 
   it("an unknown Task is unknown-task, distinguishable from a Task with no production files", () => {
     expect(skeletonOutcomesOf(GRAPH, "T9", OBSERVATIONS)).toEqual({ ok: false, error: { kind: "unknown-task", taskId: "T9" } });
-    const testsOnly: SkeletonGraph = { ...GRAPH, tasks: [...GRAPH.tasks, task("T5", ["tests/only.test.ts"])] };
+    const testsOnly: TaskGraph = { ...GRAPH, tasks: [...GRAPH.tasks, task("T5", ["tests/only.test.ts"])] };
     expect(skeletonOutcomesOf(testsOnly, "T5", OBSERVATIONS)).toEqual({ ok: true, value: [] });
   });
 
@@ -458,7 +457,7 @@ describe("INV-4 sibling: planSkeletonRefresh record-driven (the Contract Revisio
 });
 
 /** The matrix graph with Wave 2 current: the Wave its implementation Tasks run in. */
-const WAVE_2: SkeletonGraph = { ...GRAPH, current_wave: 2 };
+const WAVE_2: TaskGraph = { ...GRAPH, current_wave: 2 };
 const WAVE_2_TASKS = ["T1", "T2", "T3", "T4"] as const;
 
 describe("INV-4 sibling: skeletonStatusReport (helper orchestration status) agrees with the owner", () => {
@@ -485,7 +484,7 @@ describe("INV-4 sibling: skeletonStatusReport (helper orchestration status) agre
 
   it("shows a recorded outcome where registration recorded one, and the owner's projection everywhere else", () => {
     const recorded: SkeletonOutcome = written("contract-stub");
-    const graph: SkeletonGraph = {
+    const graph: TaskGraph = {
       ...WAVE_2,
       tasks: WAVE_2.tasks.map((entry) => (entry.id === "T4"
         ? { ...entry, skeleton_outcomes: [{ path: "src/typed-helper.ts", outcome: recorded }] }

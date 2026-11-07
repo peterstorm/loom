@@ -13,7 +13,6 @@ import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import populate, { resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import { StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
@@ -1065,7 +1064,7 @@ describe("populate-task-graph — Acceptance Contracts", () => {
 
     expect(result.kind, result.kind === "error" ? result.message : "").toBe("passthrough");
     // Loaded back through the production State File wire, which keeps the stamp.
-    const graph: SkeletonGraph = StateManager.fromPath(statePath)!.load();
+    const graph: TaskGraph = StateManager.fromPath(statePath)!.load();
     expect(graph.export_bindings).toEqual([{
       path: "src/payload-impl.ts",
       contract: "CT-1",

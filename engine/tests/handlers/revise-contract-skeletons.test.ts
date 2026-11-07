@@ -16,12 +16,12 @@ import {
   skeletonRevisionOf,
 } from "../../src/core/contract-revision";
 import { frozenPathsToObserve } from "../../src/core/acceptance-contract";
-import type { SkeletonGraph } from "../../src/core/skeleton/graph-view";
 import reviseContract from "../../src/handlers/helpers/revise-contract";
 import { observeFrozenDigests } from "../../src/orchestration/frozen-path-observation";
 import { refreshRevisedSkeletons } from "../../src/orchestration/skeleton-revision";
 import type { SkeletonRecord } from "../../src/core/skeleton/types";
 import { StateManager } from "../../src/state-manager";
+import type { TaskGraph } from "../../src/types";
 import { parseCanonicalRepositoryRoot } from "../../src/utils/workspace-digest";
 import {
   canonicalJavaSkeleton,
@@ -72,13 +72,13 @@ function seededRepo(untouched: readonly string[], modified: Readonly<Record<stri
   return repo;
 }
 
-const frozenObservations = (repo: SkeletonRepo, graph: SkeletonGraph) => {
+const frozenObservations = (repo: SkeletonRepo, graph: TaskGraph) => {
   const root = parseCanonicalRepositoryRoot(repo.root);
   if (!root.ok) throw new Error("fixture root is not canonical");
   return observeFrozenDigests(root.value, frozenPathsToObserve(graph.acceptance_contracts ?? []));
 };
 
-const graphOf = (repo: SkeletonRepo): SkeletonGraph => {
+const graphOf = (repo: SkeletonRepo): TaskGraph => {
   const manager = StateManager.fromPath(repo.statePath);
   if (manager === null) throw new Error("fixture State File missing");
   return manager.load();
@@ -312,7 +312,7 @@ describe("reviseAcceptanceContract commits the skeleton revision (pure)", () => 
 
     expect(revised.ok).toBe(true);
     if (!revised.ok) return;
-    const records = (revised.value.graph as SkeletonGraph).skeletons ?? [];
+    const records = revised.value.graph.skeletons ?? [];
     expect(records).toEqual([
       { ...seededRecord(PATHS.tsPricing, canonicalSkeletonOf(PATHS.tsPricing)), stale: { revision: 1 } },
       revisedRecord(PATHS.tsQuotes),
@@ -330,7 +330,7 @@ describe("reviseAcceptanceContract commits the skeleton revision (pure)", () => 
 
     const revised = reviseAcceptanceContract(graph, { contract: "CT-1", reason: "why" }, observations);
 
-    expect(revised.ok && (revised.value.graph as SkeletonGraph).skeletons).toEqual(graph.skeletons);
+    expect(revised.ok && revised.value.graph.skeletons).toEqual(graph.skeletons);
     expect(revised.ok && revised.value.staleSkeletons).toEqual([]);
     expect(revised.ok && revised.value.bindingProblems).toEqual([]);
   });

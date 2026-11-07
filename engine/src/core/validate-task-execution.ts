@@ -24,7 +24,6 @@ import {
   implementationAttemptContextMatchesAuthority,
   type ImplementationAttemptContext,
 } from "./implementation-retry";
-import type { SkeletonGraph } from "./skeleton/graph-view";
 import { installSkeletonRecords } from "./skeleton/records";
 import type { PathSkeletonOutcome, SkeletonRecord } from "./skeleton/types";
 
@@ -362,11 +361,6 @@ export type TaskSkeletonRegistration = Readonly<{
 
 const NO_SKELETON_REGISTRATION: TaskSkeletonRegistration = Object.freeze({ records: Object.freeze([]), outcomes: new Map() });
 
-/** A Task as registration writes it: `skeleton_outcomes` is the G2 field the
- *  State File wire proves (`ParsedTask`), named here because `Task` cannot
- *  name the outcome ADT without an import cycle. */
-type SkeletonOutcomeTask = Task & Readonly<{ skeleton_outcomes?: readonly PathSkeletonOutcome[] }>;
-
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
   context: ImplementationAttemptContext;
@@ -566,7 +560,7 @@ export function applyTaskExecutionAuthorityBatch(
     const task = reclaimTaskAttempt(original, stale, reclaimedAt, invalidatedTaskIds.has(original.id));
     const plan = planByTask.get(task.id);
     if (plan === undefined) return task;
-    const registered: SkeletonOutcomeTask = {
+    return {
       ...registerTaskExecutionBaseline(
         task,
         plan.authority.headSha,
@@ -583,7 +577,6 @@ export function applyTaskExecutionAuthorityBatch(
       legacy_execution_reservation: undefined,
       ...(plan.skeletonOutcomes === null ? {} : { skeleton_outcomes: plan.skeletonOutcomes }),
     };
-    return registered;
   });
   const invalidatedWaves = new Set(
     state.tasks.filter((task) => invalidatedTaskIds.has(task.id)).map((task) => task.wave),
@@ -606,8 +599,7 @@ export function applyTaskExecutionAuthorityBatch(
     };
     return reconcileWaveBlock({ ...gates, [key]: reopened }, tasks, specCheck, wave);
   }, state.wave_gates);
-  const view: SkeletonGraph = state;
-  const next: SkeletonGraph = {
+  return {
     ...state,
     executing_tasks: [...new Set([
       ...(state.executing_tasks ?? []).filter((taskId) => !staleTaskIds.has(taskId)),
@@ -617,9 +609,8 @@ export function applyTaskExecutionAuthorityBatch(
     ...(specCheck === undefined && state.spec_check !== undefined ? { spec_check: undefined } : {}),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     wave_gates: waveGates,
-    ...(skeletonRecords.length === 0 ? {} : { skeletons: installSkeletonRecords(view.skeletons ?? [], skeletonRecords) }),
+    ...(skeletonRecords.length === 0 ? {} : { skeletons: installSkeletonRecords(state.skeletons ?? [], skeletonRecords) }),
   };
-  return next;
 }
 
 /** Roll back only authorities that are still current; late replacements stand. */

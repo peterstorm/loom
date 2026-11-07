@@ -15,7 +15,6 @@ import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline"
 import { PHASES, type PlanContract, type TaskGraph } from "../../src/types";
 import { parseExportBindings } from "../../src/core/skeleton/bindings";
 import type { SkeletonRecord } from "../../src/core/skeleton/types";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import { parseTaskGraph } from "../../src/state-file-wire";
 
 const specSource = `# Feature: Population
@@ -625,7 +624,7 @@ describe("populateTaskGraph stamps the plan's export bindings (AD-4)", () => {
   it("FR-031: re-population keeps each engine-written record whose path stays bound to its contract, and drops the rest", () => {
     const first = populateTaskGraph(graph(), boundCommand());
     if (!first.ok) throw new Error(first.error.message);
-    const recorded: SkeletonGraph = {
+    const recorded: TaskGraph = {
       ...first.value.state,
       skeletons: [skeletonRecord("src/T2-extra.ts"), skeletonRecord("src/T2.ts"), skeletonRecord("src/T2.tsx", "CT-9")],
       tasks: first.value.state.tasks.map((entry) => entry.id === "T2"

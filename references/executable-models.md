@@ -422,8 +422,10 @@ declares:
 - **Grammar.** A column-0 `**Export bindings:**` label directly under a File
   Structure group's fenced block, outside any fence, with
   `` - `path` — CT-n: name: Alias, … `` items. Names and aliases are
-  identifiers that are no TypeScript or Java reserved word. The label anywhere
-  else is a `misplaced-label` stray.
+  identifiers that are no TypeScript or Java reserved word, and no name may
+  equal an alias on its own line (`name-collides-with-alias`: the TypeScript
+  skeleton imports every alias and declares every name in one scope). The
+  label anywhere else is a `misplaced-label` stray.
 - **One contract per file.** A path on lines of two contracts is refused as
   multi-contract; on two lines of one contract, as a duplicate.
 - **Plan validation** also refuses an unsafe or frozen path, an unknown
@@ -450,8 +452,11 @@ declares:
    then writes a skeleton at each bound path that does not exist yet, before
    the attempt baselines are captured — engine bytes are never the
    implementer's write. A stage-two problem blocks the spawn
-   (`skeleton-bindings-unresolved` in status) with every problem named. An
-   existing file is never overwritten.
+   (`skeleton-bindings-unresolved` in status) with every problem named. When
+   status itself cannot read a skeleton path or types file it blocks nothing
+   and names the gap under the `skeletons-unobserved` reason; registration
+   reads them again and is the authority. An existing file is never
+   overwritten.
 3. **Canonical bytes.** TypeScript: a header comment, `import type` of exactly
    the bound aliases (specifier style copied from the frozen acceptance tests),
    and one `export const name: Alias = () => { throw new

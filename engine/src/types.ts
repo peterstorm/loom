@@ -32,6 +32,9 @@ import type { MutationPolicy, OwnerObligation } from "./core/owner-verification/
 import type { SiblingEntryPoint } from "./core/sibling-entry-point";
 import type { InvariantId } from "./core/invariant-id";
 import type { TaskId } from "./core/task-id";
+// The G2 values (AD-4) are owned by their dependency-free leaf, which imports
+// nothing from this file, so the canonical Task and TaskGraph declare them.
+import type { ExportBinding, PathSkeletonOutcome, SkeletonRecord } from "./core/skeleton/persisted";
 export type { IssuedReviewPacketRegistration } from "./core/review-packet";
 export { PHASES, type Phase } from "./core/phases";
 // The sibling entry point is owned by its dependency-free leaf, which both
@@ -523,9 +526,11 @@ interface TaskCommonMetadataBase {
   readonly implementation_attestation?: true;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
-  // `skeleton_outcomes` (FR-030, AD-4) is typed on the State File wire's
-  // `ParsedTask`, not here: `core/skeleton/types` imports this file, so naming
-  // its outcome ADT here would close an import cycle.
+  /** The skeleton outcome registration recorded for each non-test file_list
+   * path (FR-030, AD-4): one per path, each path in file_list, and a
+   * `skeleton-written` outcome only with its `TaskGraph.skeletons` record.
+   * Absent until the Task's first registration; the State File wire proves it. */
+  readonly skeleton_outcomes?: readonly PathSkeletonOutcome[];
 }
 
 export type TaskCommonMetadata = Readonly<TaskCommonMetadataBase>;
@@ -1301,10 +1306,17 @@ export interface TaskGraph {
    * `core/owner-verification/obligations.ts` (INV-3).
    */
   readonly owner_obligations?: readonly OwnerObligation[];
-  // The G2 fields `export_bindings` and `skeletons` (AD-4, FR-031) are typed
-  // on `core/skeleton/scope`'s `SkeletonGraph` view, which every TaskGraph
-  // satisfies: `core/skeleton/types` imports this file, so naming its types
-  // here would close an import cycle. `state-file-wire` proves both at load.
+  /**
+   * The plan's export bindings, stamped at population (AD-4), in plan order.
+   * Absent only on a graph populated before G2, which owes no skeleton and no
+   * conformance check; `[]` is a G2 graph that binds nothing. Re-population
+   * replaces it.
+   */
+  readonly export_bindings?: readonly ExportBinding[];
+  /** The engine-written skeleton records (FR-031), sorted by path with no
+   * path twice, each a stamped binding's path under its contract. Absent
+   * until the engine writes its first skeleton. */
+  readonly skeletons?: readonly SkeletonRecord[];
   readonly updated_at?: string;
 }
 

@@ -28,13 +28,9 @@ import { isNonEmpty, type NonEmpty } from "../orchestration-contract";
 import { normalizePlanPath, samePlanPath } from "../plan-path-match";
 import { taskVerificationPolicy, type RegressionWaiverReason } from "../verification-policy";
 import type { Task, TaskGraph } from "../../types";
-import { productionFiles, type SkeletonGraph } from "./graph-view";
+import { productionFiles } from "./graph-view";
 import { skeletonLanguageOf } from "./language";
 import type { ExportBinding, SkeletonLanguage, SkeletonTarget } from "./types";
-
-// Re-exported for the callers that still import the graph view from here; it
-// lives in `./graph-view` so `outcomes.ts` never depends on this module.
-export { productionFiles, type SkeletonGraph } from "./graph-view";
 
 /** Why a Task owes no conformance check. */
 export type ConformanceNotOwedReason =
@@ -78,17 +74,16 @@ const frozenTypesContracts = (contracts: readonly AcceptanceContract[]): readonl
     contract.types.kind === "file" && contract.freeze.state !== "awaiting-red" ? [{ contract, typesPath: contract.types.path }] : []);
 
 export function conformanceScope(graph: TaskGraph, task: Task): ConformanceScope {
-  const view: SkeletonGraph = graph;
-  const stamp = view.export_bindings;
+  const stamp = graph.export_bindings;
   if (stamp === undefined) return notOwed("pre-g2-graph");
   const exempt = exemption(task);
   if (exempt !== null) return notOwed(exempt);
-  const contracts = view.acceptance_contracts ?? [];
+  const contracts = graph.acceptance_contracts ?? [];
   const frozen = new Set(contracts.flatMap((contract) => frozenPaths(contract)).map(normalizePlanPath));
   const candidates = productionFiles(graph, task).filter((path) => !frozen.has(normalizePlanPath(path)));
   const held = stamp.filter((binding) => candidates.some((path) => samePlanPath(path, binding.path)));
   const inScope = frozenTypesContracts(contracts).filter(({ contract }) =>
-    held.some((binding) => binding.contract === contract.id) || contractRole(contract, task, view.tasks).kind === "claimant");
+    held.some((binding) => binding.contract === contract.id) || contractRole(contract, task, graph.tasks).kind === "claimant");
   const scopedContracts = inScope.map(({ contract }) => contract);
   if (!isNonEmpty(scopedContracts)) return notOwed("no-frozen-contract");
   const bindings = Object.freeze(held.filter((binding) => scopedContracts.some(({ id }) => id === binding.contract)));

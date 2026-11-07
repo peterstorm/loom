@@ -23,9 +23,8 @@ import type { DomainResult } from "../orchestration-contract";
 import { samePlanPath } from "../plan-path-match";
 import type { Task, TaskGraph } from "../../types";
 import { renderSkeletonOutcome, skeletonOutcomesOf } from "./outcomes";
-import type { SkeletonGraph } from "./graph-view";
 import type { SkeletonProblem } from "./problems";
-import type { PathObservation, PathSkeletonOutcome, SkeletonOutcome, UnknownTask } from "./types";
+import type { PathObservation, SkeletonOutcome, UnknownTask } from "./types";
 
 /** Whether an outcome is the one registration recorded, or the one it would decide now. */
 export type SkeletonOutcomeBasis = "recorded" | "projected";
@@ -68,18 +67,14 @@ export type SkeletonReportScope =
       outstanding: readonly Task[];
     }>;
 
-/** A Task as registration writes it: `skeleton_outcomes` is the G2 field the State File wire proves. */
-type RecordedOutcomeTask = Task & Readonly<{ skeleton_outcomes?: readonly PathSkeletonOutcome[] }>;
-
 const notApplicable = (reason: string): Readonly<{ kind: "not-applicable"; reason: string }> =>
   Object.freeze({ kind: "not-applicable", reason });
 
 export const skeletonsUnobserved = (reason: string): SkeletonStatusReport => Object.freeze({ kind: "unobserved", reason });
 
 export function skeletonReportScope(graph: TaskGraph): SkeletonReportScope {
-  const view: SkeletonGraph = graph;
   if (graph.current_phase !== "execute" || graph.current_wave === undefined) return notApplicable("no execute Wave is current");
-  if (view.export_bindings === undefined) {
+  if (graph.export_bindings === undefined) {
     return notApplicable("the TaskGraph was populated before export bindings were stamped, so the engine writes no skeletons");
   }
   const wave = graph.current_wave;
@@ -105,8 +100,7 @@ export function taskSkeletonOutcomes(
 ): DomainResult<readonly FileSkeletonStatus[], UnknownTask> {
   const projected = skeletonOutcomesOf(graph, taskId, observations);
   if (!projected.ok) return projected;
-  const owner: RecordedOutcomeTask | undefined = graph.tasks.find(({ id }) => id === taskId);
-  const recorded = owner?.skeleton_outcomes ?? [];
+  const recorded = graph.tasks.find(({ id }) => id === taskId)?.skeleton_outcomes ?? [];
   return {
     ok: true,
     value: Object.freeze(projected.value.map(({ path, outcome }): FileSkeletonStatus => {
@@ -120,8 +114,7 @@ export function taskSkeletonOutcomes(
 
 /** Every stale skeleton record of the graph, in record order. */
 export function staleSkeletons(graph: TaskGraph): readonly StaleSkeleton[] {
-  const view: SkeletonGraph = graph;
-  return Object.freeze((view.skeletons ?? []).flatMap(({ path, contract, stale }) =>
+  return Object.freeze((graph.skeletons ?? []).flatMap(({ path, contract, stale }) =>
     stale === null ? [] : [Object.freeze({ path, contract, stale })]));
 }
 

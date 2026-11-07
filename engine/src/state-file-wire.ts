@@ -136,7 +136,7 @@ import {
   waveOwnerDuty,
   type OwnerCheckAuthority,
 } from "./core/owner-verification/obligations";
-import { parseIdentifier } from "./core/skeleton/bindings";
+import { parseContractId, parseIdentifier } from "./core/skeleton/bindings";
 import { skeletonLanguageOf } from "./core/skeleton/language";
 import type {
   BoundExport,
@@ -2499,8 +2499,11 @@ function parseExportBinding(raw: unknown, label: string, typedContracts: Readonl
   if (!fields.ok) return fields;
   const path = storedPath(fields.value.path, `${label}.path`);
   if (!path.ok) return path;
-  const contract = fields.value.contract;
-  if (typeof contract !== "string") return parseErr(`${label}.contract must be a string`);
+  const rawContract = fields.value.contract;
+  if (typeof rawContract !== "string") return parseErr(`${label}.contract must be a string`);
+  const contractId = parseContractId(rawContract);
+  if (!contractId.ok) return parseErr(`${label}.contract '${rawContract}' is no contract id CT-<n> (${contractId.error})`);
+  const contract = contractId.value;
   if (!typedContracts.has(contract)) {
     return parseErr(`${label} binds '${path.value}' to ${contract}, which is no stamped acceptance contract with a types file`);
   }
@@ -2515,6 +2518,13 @@ function parseExportBinding(raw: unknown, label: string, typedContracts: Readonl
     }
     exports.push(bound.value);
   }
+  // The plan grammar refuses this as `name-collides-with-alias`: a TypeScript
+  // skeleton would import the alias and declare the name in one scope.
+  const aliases = new Set<string>(exports.map(({ alias }) => alias));
+  const collision = exports.find(({ name }) => aliases.has(name));
+  if (collision !== undefined) {
+    return parseErr(`${label} binds the export name '${collision.name}', which is also an alias of the binding (name-collides-with-alias)`);
+  }
   const [first, ...rest] = exports;
   if (first === undefined) return parseErr(`${label}.exports must be a non-empty array`);
   const nonEmpty: NonEmpty<BoundExport> = [first, ...rest];
@@ -2526,8 +2536,9 @@ function parseExportBinding(raw: unknown, label: string, typedContracts: Readonl
 /**
  * The population stamp, in plan order. Absent stays absent: a graph populated
  * before G2 binds nothing. Present, `[]` included, each binding is an exact
- * record of a canonical path bound once, to a stamped contract that freezes a
- * types file, with distinct validated identifiers.
+ * record of a canonical path bound once, to a stamped contract (a parsed
+ * `ContractId`) that freezes a types file, with distinct validated
+ * identifiers and no export name that is also an alias of the binding.
  */
 function parseExportBindingsField(
   raw: unknown,
@@ -2656,6 +2667,8 @@ function parseSkeletonOutcome(raw: unknown, label: string): ParseResult<Skeleton
 /**
  * A Task's recorded skeleton outcomes (FR-030): one outcome ADT per path, each
  * path in the Task's own file_list. Absent stays absent: not yet registered.
+ * Each outcome is checked against the graph's stamp and records once both are
+ * parsed (`recordedOutcomesError`).
  */
 function parseSkeletonOutcomesField(
   raw: unknown,
@@ -2688,16 +2701,81 @@ type ParsedSkeletonFields = Readonly<{
   skeletons: readonly SkeletonRecord[] | undefined;
 }>;
 
-/** The graph's G2 fields, bound to its stamped contracts. */
+/**
+ * Why one recorded outcome contradicts the graph's stamp and records, or
+ * null. Registration derives every outcome from the stamp and records it
+ * commits in the same update, and nothing but re-population (which resets
+ * the outcomes) changes a binding or removes a record, so each outcome kind
+ * pins what the graph must hold for its path:
+ * - `skeleton-written` has its record in `skeletons` (whose origin a later
+ *   Contract Revision may change, so the origins are not compared);
+ * - `unsupported-language` is bound, and `skeletonLanguageOf` (INV-6) gives
+ *   the path exactly that reason;
+ * - `no-bound-exports` and `contract-has-no-types-file` are unbound.
+ */
+function recordedOutcomeConflict(
+  { path, outcome }: PathSkeletonOutcome,
+  fields: Readonly<{ exportBindings: readonly ExportBinding[]; skeletons: readonly SkeletonRecord[] }>,
+): string | null {
+  const binding = fields.exportBindings.find((candidate) => candidate.path === path);
+  switch (outcome.kind) {
+    case "skeleton-written":
+      return fields.skeletons.some((record) => record.path === path)
+        ? null
+        : `records '${path}' as skeleton-written, but skeletons holds no record of it`;
+    case "unsupported-language": {
+      if (binding === undefined) return `records '${path}' as unsupported-language, but export_bindings does not bind it`;
+      const target = skeletonLanguageOf(path);
+      if (target.kind === "supported") return `records '${path}' as unsupported-language, but the path is a ${target.language} skeleton target`;
+      return target.reason === outcome.reason
+        ? null
+        : `records '${path}' as unsupported-language (${outcome.reason}), but the path is unsupported as ${target.reason}`;
+    }
+    case "no-bound-exports":
+    case "contract-has-no-types-file":
+      return binding === undefined ? null : `records '${path}' as ${outcome.kind}, but export_bindings binds it to ${binding.contract}`;
+    case "exists-not-skeletonized":
+      return null;
+  }
+}
+
+/**
+ * Every Task's recorded skeleton outcomes against the graph's G2 fields: a
+ * graph with no `export_bindings` stamp was populated before G2 and records
+ * no outcome, and each outcome agrees with the stamp and records
+ * (`recordedOutcomeConflict`).
+ */
+function recordedOutcomesError(tasks: readonly Record<string, unknown>[], fields: ParsedSkeletonFields): string | null {
+  for (const [index, task] of tasks.entries()) {
+    const outcomes = task.skeleton_outcomes as readonly PathSkeletonOutcome[] | undefined;
+    if (outcomes === undefined) continue;
+    const label = `tasks[${index}] ("${String(task.id)}").skeleton_outcomes`;
+    if (fields.exportBindings === undefined) {
+      return `${label} is recorded, but the TaskGraph has no export_bindings stamp; a graph populated before G2 records no skeleton outcome`;
+    }
+    const stamped = { exportBindings: fields.exportBindings, skeletons: fields.skeletons ?? [] };
+    for (const [entry, recorded] of outcomes.entries()) {
+      const conflict = recordedOutcomeConflict(recorded, stamped);
+      if (conflict !== null) return `${label}[${entry}] ${conflict}`;
+    }
+  }
+  return null;
+}
+
+/** The graph's G2 fields, bound to its stamped contracts, and every Task's recorded outcomes checked against them. */
 function parseTaskGraphSkeletonFields(
   obj: Record<string, unknown>,
   contracts: readonly AcceptanceContract[] | undefined,
+  tasks: readonly unknown[],
 ): ParseResult<ParsedSkeletonFields> {
   const exportBindings = parseExportBindingsField(obj.export_bindings, contracts);
   if (!exportBindings.ok) return exportBindings;
   const skeletons = parseSkeletonsField(obj.skeletons, exportBindings.value);
   if (!skeletons.ok) return skeletons;
-  return parseOk({ exportBindings: exportBindings.value, skeletons: skeletons.value });
+  const fields: ParsedSkeletonFields = { exportBindings: exportBindings.value, skeletons: skeletons.value };
+  // parseTaskGraphTasks already proved each Task's outcomes against its own file_list.
+  const outcomesError = recordedOutcomesError(tasks as readonly Record<string, unknown>[], fields);
+  return outcomesError === null ? parseOk(fields) : parseErr(outcomesError);
 }
 
 type ParsedTaskGraphParts = Readonly<{
@@ -2716,20 +2794,12 @@ type ParsedTaskGraphParts = Readonly<{
   history: ParsedTaskGraphHistoryFields;
 }>;
 
-/** A loaded Task. `skeleton_outcomes` (FR-030, AD-4) is typed here rather
- *  than on `Task`: `core/skeleton/types` imports `types.ts`, so `Task` cannot
- *  name the outcome ADT without an import cycle. */
-export type ParsedTask = Task & Readonly<{
-  id: TaskId;
-  /** One outcome per path, each path in the Task's file_list; absent until its first registration. */
-  skeleton_outcomes?: readonly PathSkeletonOutcome[];
-}>;
-/** A loaded TaskGraph, carrying the G2 fields of `SkeletonGraph` as proven. */
+/** A loaded Task: its id is a parsed `TaskId`. */
+export type ParsedTask = Task & Readonly<{ id: TaskId }>;
+/** A loaded TaskGraph: every Task and execution reservation names a parsed `TaskId`. */
 export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Readonly<{
   tasks: readonly ParsedTask[];
   executing_tasks?: readonly TaskId[];
-  export_bindings?: readonly ExportBinding[];
-  skeletons?: readonly SkeletonRecord[];
 }>;
 
 function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
@@ -2905,9 +2975,9 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (!gating.ok) return parseErr(gating.error);
   const obligations = parseTaskGraphObligationFields(obj, contractShapes.value, tasks.value);
   if (!obligations.ok) return parseErr(obligations.error);
-  const skeletonFields = parseTaskGraphSkeletonFields(obj, obligations.value.acceptanceContracts);
+  const skeletonFields = parseTaskGraphSkeletonFields(obj, obligations.value.acceptanceContracts, tasks.value);
   if (!skeletonFields.ok) return parseErr(skeletonFields.error);
-  const authority =parseTaskGraphAuthorityFields(obj, verificationManifest.value, ownerStampedGraph(tasks.value, obligations.value));
+  const authority = parseTaskGraphAuthorityFields(obj, verificationManifest.value, ownerStampedGraph(tasks.value, obligations.value));
   if (!authority.ok) return parseErr(authority.error);
   const history = parseTaskGraphHistoryFields(
     obj,

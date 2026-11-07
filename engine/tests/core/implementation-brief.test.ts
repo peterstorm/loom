@@ -33,7 +33,6 @@ import type { SpecIndexAvailability } from "../../src/core/requirement-coverage"
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
 import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import type { DomainResult } from "../../src/core/orchestration-contract";
-import type { SkeletonGraph } from "../../src/core/skeleton/scope";
 import type { UnresolvedSkeletonBinding } from "../../src/core/skeleton/status";
 import type { ExportBinding, FrozenSurface, Identifier, PathObservation, SkeletonRecord } from "../../src/core/skeleton/types";
 import type { PlanInvariant, Task, TaskGraph, WaveImplementationDispatch } from "../../src/types";
@@ -681,7 +680,7 @@ describe("the brief's Frozen Signatures section", () => {
   });
 
   const SKELETON_GRAPH = (skeletons: readonly SkeletonRecord[] = []): TaskGraph => {
-    const graph: SkeletonGraph = {
+    const graph: TaskGraph = {
       ...graphFixture([...ROSTER, implementer, javaImplementer, auditor, attested]),
       current_wave: 2,
       acceptance_contracts: [TS_TYPED, JAVA_TYPED, TYPELESS],
@@ -805,7 +804,7 @@ describe("the brief's Frozen Signatures section", () => {
   });
 
   it("says so when the TaskGraph carries no export-binding stamp, or no observation was supplied", () => {
-    const { export_bindings: _dropped, ...unstamped } = SKELETON_GRAPH() as SkeletonGraph;
+    const { export_bindings: _dropped, ...unstamped } = SKELETON_GRAPH();
     expect(brief(implementer, frozenInput({ graph: unstamped }))).toBe(NO_EXPORT_BINDING_STAMP);
     expect(brief(implementer, null)).toBe(NO_SKELETON_OBSERVATION);
   });

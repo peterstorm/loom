@@ -6,7 +6,6 @@ import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import { renderBindingProblem, validateExportBindings } from "./skeleton/bindings";
 import type { BindingTaskView, ExportBinding, ExportBindingsDeclaration, SkeletonRecord } from "./skeleton/types";
-import type { SkeletonGraph } from "./skeleton/scope";
 import { derivePendingTaskProof, redThenGreenScope, taskRedThenGreenEra, type RedThenGreenEra } from "./proof-obligations";
 import {
   ACCEPTANCE_RED_WINDOW,
@@ -154,7 +153,7 @@ const POPULATABLE_PHASES: ReadonlySet<Phase> = new Set<Phase>(["decompose", "exe
 export type TaskGraphPopulationResult =
   | Readonly<{
       ok: true;
-      value: Readonly<{ state: SkeletonGraph; waves: readonly number[] }>;
+      value: Readonly<{ state: TaskGraph; waves: readonly number[] }>;
     }>
   | Readonly<{ ok: false; error: TaskGraphPopulationError }>;
 
@@ -416,9 +415,7 @@ export function populateTaskGraph(
   if (runnerRefusal !== null) return runnerRefusal;
   const exportBindings = exportBindingsStamp(command.exportBindings ?? NO_EXPORT_BINDINGS, command.contracts, command.tasks);
   if (!exportBindings.ok) return exportBindings.error;
-  // Every TaskGraph is a SkeletonGraph: the view only names the G2 fields it may carry.
-  const existingView: SkeletonGraph = existing;
-  const skeletons = carriedSkeletons(existingView.skeletons ?? [], exportBindings.value);
+  const skeletons = carriedSkeletons(existing.skeletons ?? [], exportBindings.value);
   const redWindow = redWindowTaskIds(contracts.value, command.tasks);
   const redThenGreen = redThenGreenScope(command.verificationManifest, contracts.value);
 
@@ -444,8 +441,8 @@ export function populateTaskGraph(
     export_bindings: _staleExportBindings,
     skeletons: _staleSkeletons,
     ...existingWithoutWaveAuthority
-  } = existingView;
-  const state: SkeletonGraph = Object.freeze({
+  } = existing;
+  const state: TaskGraph = Object.freeze({
     ...existingWithoutWaveAuthority,
     current_phase: "execute",
     phase_artifacts: { ...existing.phase_artifacts, decompose: "task_graph" },

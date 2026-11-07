@@ -126,8 +126,9 @@ structural typing.
 
 `conformanceScope(graph, task): ConformanceScope` returns either
 `{ kind: "not-owed"; reason }` or `{ kind: "owed"; contracts; bindings; files }`. The `not-owed`
-reasons form a closed set: `attested | documentation-only | generated-artifact | no-frozen-contract |
-no-file-in-scope`. Every caller uses this function, including `observeContractConformance`
+reasons form a closed set: `pre-g2-graph | attested | documentation-only | generated-artifact |
+no-frozen-contract | no-file-in-scope`. `pre-g2-graph` is a graph with no `export_bindings` stamp, populated
+before G2, whose frozen ADTs are not checked retroactively (AD-14). Every caller uses this function, including `observeContractConformance`
 (`engine/src/orchestration/contract-conformance-observation.ts`) and the brief's duty section.
 
 - **Exempt.** An attested Task, or one whose regression is waived as `documentation-only` or
